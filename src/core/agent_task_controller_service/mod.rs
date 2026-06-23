@@ -200,40 +200,181 @@ pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFr
         initialized,
         actions,
         controller: record,
+        resume_state: None,
     })
 }
 
 /// Initialize a controller from a repo-owned loop spec for immediate resume.
 ///
-/// Unlike plain `from-spec`, this fails closed when an existing controller was
-/// created from a different spec fingerprint. That keeps proof reruns from
-/// silently draining stale actions after a loop spec changed.
+/// Defaults to the guarded resolution, which fails closed when an existing
+/// controller was created from a different (or missing) spec fingerprint. That
+/// keeps proof reruns from silently draining stale actions after a loop spec
+/// changed (#6123).
 pub fn init_from_spec_for_resume(
     request: ControllerFromSpecRequest,
 ) -> Result<ControllerFromSpecReport> {
+    init_from_spec_for_resume_with_resolution(request, ControllerResumeStateResolution::default())
+}
+
+/// Initialize a controller for resume, applying an explicit stale-state resolution.
+///
+/// When the supplied spec fingerprint matches the persisted controller (or no
+/// controller exists yet) the run proceeds normally regardless of resolution.
+/// When the persisted fingerprint is missing or different, the resolution
+/// decides the outcome:
+///
+/// - [`ControllerResumeStateResolution::Guard`] refuses with a clear error.
+/// - [`ControllerResumeStateResolution::Replace`] discards the persisted record
+///   and re-initializes from the spec.
+/// - [`ControllerResumeStateResolution::Fork`] applies the spec under a derived
+///   `loop_id`, leaving the original controller untouched.
+/// - [`ControllerResumeStateResolution::ResumeExisting`] accepts the stale state
+///   and resumes the persisted controller as-is.
+pub fn init_from_spec_for_resume_with_resolution(
+    mut request: ControllerFromSpecRequest,
+    resolution: ControllerResumeStateResolution,
+) -> Result<ControllerFromSpecReport> {
     let spec_fingerprint = repo_loop_spec_fingerprint(&request.spec)?;
-    if let Some(record) = existing_controller(&request.spec.loop_id)? {
-        let previous = repo_loop_spec_fingerprint_from_metadata(&record);
-        if previous.as_deref() != Some(spec_fingerprint.as_str()) {
-            return Err(Error::validation_invalid_argument(
-                "spec_fingerprint",
-                format!(
-                    "agent-task controller from-spec --resume refuses to resume existing controller '{}' because the persisted spec fingerprint is missing or different; use a fresh loop_id or re-run from-spec without --resume to reconcile state explicitly",
-                    record.loop_id
-                ),
-                previous,
-                Some(vec![
-                    format!("current_spec_fingerprint={spec_fingerprint}"),
-                    format!(
-                        "controller_path={}",
-                        controller::controller_record_path(&record.loop_id)?.display()
-                    ),
-                ]),
-            ));
-        }
+    let requested_loop_id = request.spec.loop_id.clone();
+    let existing = existing_controller(&requested_loop_id)?;
+    let controller_path = controller::controller_record_path(&requested_loop_id)?
+        .display()
+        .to_string();
+
+    let Some(record) = existing else {
+        // No persisted state: this is a clean create regardless of resolution.
+        let mut report = init_from_spec(request)?;
+        report.resume_state = Some(ControllerResumeStateReport {
+            action: "creating",
+            resolution: resolution.keyword(),
+            loop_id: requested_loop_id.clone(),
+            requested_loop_id,
+            controller_path,
+            spec_fingerprint,
+            previous_spec_fingerprint: None,
+            existing_controller: false,
+            fingerprint_match: false,
+        });
+        return Ok(report);
+    };
+
+    let previous = repo_loop_spec_fingerprint_from_metadata(&record);
+    let fingerprint_match = previous.as_deref() == Some(spec_fingerprint.as_str());
+
+    if fingerprint_match {
+        // Persisted state is compatible: ordinary resume.
+        let mut report = init_from_spec(request)?;
+        report.resume_state = Some(ControllerResumeStateReport {
+            action: "resuming",
+            resolution: resolution.keyword(),
+            loop_id: requested_loop_id.clone(),
+            requested_loop_id,
+            controller_path,
+            spec_fingerprint,
+            previous_spec_fingerprint: previous,
+            existing_controller: true,
+            fingerprint_match: true,
+        });
+        return Ok(report);
     }
 
-    init_from_spec(request)
+    // Persisted state is stale/incompatible. Honor the operator's resolution.
+    match resolution {
+        ControllerResumeStateResolution::Guard => Err(Error::validation_invalid_argument(
+            "spec_fingerprint",
+            format!(
+                "agent-task controller from-spec --resume refuses to resume existing controller '{}' because the persisted spec fingerprint is missing or different; choose --replace, --fork, or --resume-existing, use a fresh loop_id, or re-run from-spec without --resume to reconcile state explicitly",
+                record.loop_id
+            ),
+            previous,
+            Some(vec![
+                format!("current_spec_fingerprint={spec_fingerprint}"),
+                format!("controller_path={controller_path}"),
+                "resolutions=--replace|--fork|--resume-existing".to_string(),
+            ]),
+        )),
+        ControllerResumeStateResolution::Replace => {
+            reset_controller_state(&record.loop_id)?;
+            let mut report = init_from_spec(request)?;
+            report.resume_state = Some(ControllerResumeStateReport {
+                action: "replacing",
+                resolution: resolution.keyword(),
+                loop_id: requested_loop_id.clone(),
+                requested_loop_id,
+                controller_path,
+                spec_fingerprint,
+                previous_spec_fingerprint: previous,
+                existing_controller: true,
+                fingerprint_match: false,
+            });
+            Ok(report)
+        }
+        ControllerResumeStateResolution::Fork => {
+            let fork_loop_id = derive_fork_loop_id(&requested_loop_id, &spec_fingerprint);
+            request.spec.loop_id = fork_loop_id.clone();
+            let fork_path = controller::controller_record_path(&fork_loop_id)?
+                .display()
+                .to_string();
+            let mut report = init_from_spec(request)?;
+            report.resume_state = Some(ControllerResumeStateReport {
+                action: "forking",
+                resolution: resolution.keyword(),
+                loop_id: fork_loop_id,
+                requested_loop_id,
+                controller_path: fork_path,
+                spec_fingerprint,
+                previous_spec_fingerprint: previous,
+                existing_controller: true,
+                fingerprint_match: false,
+            });
+            Ok(report)
+        }
+        ControllerResumeStateResolution::ResumeExisting => {
+            let mut report = init_from_spec(request)?;
+            report.resume_state = Some(ControllerResumeStateReport {
+                action: "resuming",
+                resolution: resolution.keyword(),
+                loop_id: requested_loop_id.clone(),
+                requested_loop_id,
+                controller_path,
+                spec_fingerprint,
+                previous_spec_fingerprint: previous,
+                existing_controller: true,
+                fingerprint_match: false,
+            });
+            Ok(report)
+        }
+    }
+}
+
+/// Derive a deterministic fork loop id from the requested id and spec fingerprint.
+///
+/// Using the fingerprint keeps reruns of the same changed spec collapsing onto a
+/// single fork instead of multiplying controllers, while still isolating the
+/// fork from the original loop id's stale state.
+fn derive_fork_loop_id(requested_loop_id: &str, spec_fingerprint: &str) -> String {
+    let short = spec_fingerprint
+        .strip_prefix("sha256:")
+        .unwrap_or(spec_fingerprint)
+        .chars()
+        .take(12)
+        .collect::<String>();
+    format!("{requested_loop_id}/fork-{short}")
+}
+
+/// Remove a persisted controller record (and its directory) so a replace
+/// resolution starts from a clean slate. Missing state is treated as success.
+fn reset_controller_state(loop_id: &str) -> Result<()> {
+    let record_path = controller::controller_record_path(loop_id)?;
+    let dir = record_path.parent().unwrap_or(&record_path);
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(dir.display().to_string()),
+        )),
+    }
 }
 
 /// Compile a declarative controller spec into a generic Homeboy plan without writing state.

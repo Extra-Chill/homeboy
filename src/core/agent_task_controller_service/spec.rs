@@ -16,6 +16,37 @@ pub struct ControllerFromSpecRequest {
     pub spec: AgentTaskRepoLoopSpec,
 }
 
+/// Operator-chosen strategy for handling an existing controller whose persisted
+/// spec fingerprint differs from the supplied spec on `from-spec --resume`.
+///
+/// This protects proof reruns from silently inheriting stale controller/loop
+/// state (see #6123). When the supplied spec matches the persisted fingerprint
+/// the resolution is irrelevant and the run resumes normally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ControllerResumeStateResolution {
+    /// No explicit override. Refuse to resume when persisted state is stale.
+    #[default]
+    Guard,
+    /// Discard the persisted controller record entirely and re-create it from the spec.
+    Replace,
+    /// Resume a copy under a derived `loop_id`, leaving the original untouched.
+    Fork,
+    /// Resume the persisted controller as-is, accepting the stale/mismatched state.
+    ResumeExisting,
+}
+
+impl ControllerResumeStateResolution {
+    /// CLI-facing keyword for operator-readable run evidence.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            ControllerResumeStateResolution::Guard => "guard",
+            ControllerResumeStateResolution::Replace => "replace",
+            ControllerResumeStateResolution::Fork => "fork",
+            ControllerResumeStateResolution::ResumeExisting => "resume-existing",
+        }
+    }
+}
+
 /// Request to compile a declarative controller spec without mutating controller state.
 #[derive(Debug, Clone)]
 pub struct ControllerPlanRequest {

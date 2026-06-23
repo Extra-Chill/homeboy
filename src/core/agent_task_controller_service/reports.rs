@@ -39,6 +39,39 @@ pub struct ControllerFromSpecReport {
     pub initialized: bool,
     pub actions: Vec<AgentTaskLoopPolicyActionRecord>,
     pub controller: AgentTaskLoopControllerRecord,
+    /// Stale-state resolution evidence for `from-spec --resume`. `None` for the
+    /// non-resume path, where stale-state guarding does not apply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_state: Option<ControllerResumeStateReport>,
+}
+
+/// Operator-facing record of how an existing controller's persisted state was
+/// reconciled with the supplied spec during `from-spec --resume`.
+///
+/// Spells out whether Homeboy is creating, resuming, replacing, or forking
+/// controller state so proof reruns never have to rely on loop-id folklore
+/// (#6123).
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerResumeStateReport {
+    /// One of `creating`, `resuming`, `replacing`, or `forking`.
+    pub action: &'static str,
+    /// Operator-selected resolution keyword (`guard`, `replace`, `fork`, `resume-existing`).
+    pub resolution: &'static str,
+    /// Loop id the controller state was actually applied to (differs for forks).
+    pub loop_id: String,
+    /// Loop id supplied by the spec before any fork derivation.
+    pub requested_loop_id: String,
+    /// Persisted controller record path that was inspected for stale state.
+    pub controller_path: String,
+    /// Spec fingerprint of the run being applied.
+    pub spec_fingerprint: String,
+    /// Persisted spec fingerprint found on the existing controller, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_spec_fingerprint: Option<String>,
+    /// True when an existing controller was found for the requested loop id.
+    pub existing_controller: bool,
+    /// True when the persisted fingerprint matched the supplied spec.
+    pub fingerprint_match: bool,
 }
 
 /// Typed report returned by `controller plan`.
