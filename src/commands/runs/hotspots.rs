@@ -8,6 +8,7 @@ use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
 
+use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use homeboy::core::Error;
 
@@ -163,7 +164,13 @@ fn is_fuzz_artifact(artifact: &ArtifactRecord) -> bool {
 }
 
 fn read_artifact_json(run: &RunRecord, artifact: &ArtifactRecord) -> Result<Value, String> {
-    if artifact.artifact_type != "file" {
+    let path = if artifact.artifact_type == "file" {
+        Path::new(&artifact.path).to_path_buf()
+    } else if artifact.artifact_type == "remote_file" {
+        runs_service::download_remote_artifact(artifact.clone(), None)
+            .map_err(|err| format!("remote artifact could not be downloaded: {err}"))?
+            .output_path
+    } else {
         return Err(if artifact.artifact_type == "metadata-only" {
             "artifact bytes are not available in this imported metadata-only bundle".to_string()
         } else {
@@ -172,10 +179,10 @@ fn read_artifact_json(run: &RunRecord, artifact: &ArtifactRecord) -> Result<Valu
                 artifact.artifact_type
             )
         });
-    }
-    let path = Path::new(&artifact.path);
+    };
+
     let file =
-        File::open(path).map_err(|_| "artifact file is missing or unreadable".to_string())?;
+        File::open(&path).map_err(|_| "artifact file is missing or unreadable".to_string())?;
     serde_json::from_reader::<_, Value>(file)
         .map_err(|_| format!("artifact file is not valid JSON for run `{}`", run.id))
 }
