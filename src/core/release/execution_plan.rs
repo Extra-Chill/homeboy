@@ -135,11 +135,16 @@ fn initial_release_state(
         None => format!("v{}", version_info.version),
     };
 
-    let tag = resolve_head_tag(&component.local_path, &expected_tag)?;
+    let (tag, version) = resolve_head_release(
+        &component.local_path,
+        &expected_tag,
+        monorepo.as_ref().map(|ctx| ctx.tag_prefix.as_str()),
+        component_id,
+    )?;
     let notes = read_current_release_notes(component)?;
 
     Ok(ReleaseState {
-        version: Some(version_info.version),
+        version: Some(version),
         tag: Some(tag),
         notes,
         artifacts: Vec::new(),
@@ -147,7 +152,12 @@ fn initial_release_state(
     })
 }
 
-fn resolve_head_tag(local_path: &str, expected_tag: &str) -> Result<String> {
+fn resolve_head_release(
+    local_path: &str,
+    expected_tag: &str,
+    tag_prefix: Option<&str>,
+    component_id: &str,
+) -> Result<(String, String)> {
     let output = git::execute_git_for_release(local_path, &["tag", "--points-at", "HEAD"])
         .map_err(|e| {
             Error::internal_io(
@@ -164,25 +174,118 @@ fn resolve_head_tag(local_path: &str, expected_tag: &str) -> Result<String> {
         .collect();
 
     if tags.iter().any(|tag| tag == expected_tag) {
-        return Ok(expected_tag.to_string());
+        return Ok((
+            expected_tag.to_string(),
+            git::extract_version_from_tag(expected_tag).unwrap_or_default(),
+        ));
+    }
+
+    if let Some((tag, version)) = tags
+        .iter()
+        .filter_map(|tag| release_tag_version(tag, tag_prefix).map(|version| (tag, version)))
+        .max_by(|(_, a), (_, b)| compare_versions(a, b))
+    {
+        return Ok((tag.to_string(), version));
+    }
+
+    let latest_local = latest_release_tag(local_path, tag_prefix).unwrap_or(None);
+    let latest_remote = latest_remote_release_tag(local_path, tag_prefix).unwrap_or(None);
+    let latest_known = latest_remote.as_ref().or(latest_local.as_ref());
+    let checkout_hint = latest_known.map(|tag| {
+        format!(
+            "Fetch tags and check out the release commit before retrying: `git fetch origin --tags && git checkout {}`; then run `homeboy release {} --head --no-github-release --apply` (add `--from-artifacts <artifact-dir>` when reusing existing artifacts).",
+            tag, component_id
+        )
+    });
+
+    let mut hints = vec![
+        "`--head` finalizes the release tag that points at the current checkout. Check out the tagged release commit, not the pre-release branch state.".to_string(),
+    ];
+    if let Some(hint) = checkout_hint {
+        hints.push(hint);
+    } else {
+        hints.push(
+            "Inspect local and remote refs: `git tag --points-at HEAD` and `git ls-remote --tags origin`.".to_string(),
+        );
     }
 
     Err(Error::validation_invalid_argument(
         "head",
         format!(
-            "--head requires tag '{}' to point at HEAD; found: {}",
+            "--head requires a release tag at HEAD. Expected '{}'; tags at HEAD: {}; latest local release tag: {}; latest origin release tag: {}",
             expected_tag,
             if tags.is_empty() {
                 "none".to_string()
             } else {
                 tags.join(", ")
-            }
+            },
+            latest_local.as_deref().unwrap_or("none"),
+            latest_remote.as_deref().unwrap_or("none"),
         ),
         Some(expected_tag.to_string()),
-        Some(vec![
-            "Check out the release tag or push the expected tag before running `homeboy release --head`.".to_string(),
-        ]),
+        Some(hints),
     ))
+}
+
+fn release_tag_version(tag: &str, tag_prefix: Option<&str>) -> Option<String> {
+    let tag = match tag_prefix {
+        Some(prefix) => tag.strip_prefix(&format!("{}-", prefix))?,
+        None => tag,
+    };
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    let mut parts = version.split('.');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let patch = parts.next()?;
+    if parts.next().is_some()
+        || [major, minor, patch]
+            .iter()
+            .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(version.to_string())
+}
+
+fn latest_release_tag(local_path: &str, tag_prefix: Option<&str>) -> Result<Option<String>> {
+    git::get_latest_tag_any_with_prefix(local_path, tag_prefix)
+}
+
+fn latest_remote_release_tag(local_path: &str, tag_prefix: Option<&str>) -> Result<Option<String>> {
+    let output = git::execute_git_for_release(local_path, &["ls-remote", "--tags", "origin"])
+        .map_err(|e| {
+            Error::internal_io(
+                format!("Failed to inspect remote release tags: {}", e),
+                Some("git ls-remote --tags origin".to_string()),
+            )
+        })?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once("refs/tags/"))
+        .map(|(_, tag)| tag.trim_end_matches("^{}"))
+        .filter_map(|tag| {
+            release_tag_version(tag, tag_prefix).map(|version| (tag.to_string(), version))
+        })
+        .max_by(|(_, a), (_, b)| compare_versions(a, b))
+        .map(|(tag, _)| tag))
+}
+
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    version_parts(a).cmp(&version_parts(b))
+}
+
+fn version_parts(version: &str) -> (u64, u64, u64) {
+    let mut parts = version.split('.').map(|part| part.parse().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
 }
 
 fn read_current_release_notes(component: &Component) -> Result<Option<String>> {
@@ -209,6 +312,7 @@ fn read_current_release_notes(component: &Component) -> Result<Option<String>> {
 mod tests {
     use super::{
         build_dry_run_preflight_plan, execute_plan_steps, initial_executable_preflight_ids,
+        resolve_head_release,
     };
     use crate::core::plan::PlanStepStatus;
     use crate::core::release::types::{ReleaseOptions, ReleaseStepStatus};
@@ -370,6 +474,53 @@ mod tests {
     }
 
     #[test]
+    fn head_release_uses_release_tag_pointing_at_head() {
+        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.11");
+        run_in(checkout.path(), &["git", "tag", "v0.11.11"]);
+
+        let (tag, version) = resolve_head_release(
+            checkout.path().to_str().expect("checkout path"),
+            "v0.11.10",
+            None,
+            "fixture",
+        )
+        .expect("release tag at HEAD should be used");
+
+        assert_eq!(tag, "v0.11.11");
+        assert_eq!(version, "0.11.11");
+    }
+
+    #[test]
+    fn head_release_reports_remote_partial_release_tag_when_head_has_none() {
+        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.11");
+
+        let err = resolve_head_release(
+            checkout.path().to_str().expect("checkout path"),
+            "v0.11.10",
+            None,
+            "fixture",
+        )
+        .expect_err("missing tag at HEAD should fail with recovery diagnostic");
+
+        assert!(err.message.contains("Expected 'v0.11.10'"));
+        assert!(err.message.contains("tags at HEAD: none"));
+        assert!(err.message.contains("latest origin release tag: v0.11.11"));
+        let tried = err
+            .details
+            .get("tried")
+            .and_then(serde_json::Value::as_array)
+            .expect("tried hints");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .unwrap_or_default()
+            .contains("git fetch origin --tags && git checkout v0.11.11")));
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .unwrap_or_default()
+            .contains("homeboy release fixture --head")));
+    }
+
+    #[test]
     fn test_execute_plan_steps() {
         let mut results = Vec::new();
 
@@ -424,16 +575,10 @@ mod tests {
         std::fs::write(
             checkout.path().join("homeboy.json"),
             r#"{
-                "id": "fixture-project",
-                "components": {
-                    "fixture": {
-                        "type": "wordpress-plugin",
-                        "path": ".",
-                        "version_targets": [
-                            {"file": "plugin.php", "pattern": "(?m)^Version:\\s*([0-9.]+)"}
-                        ]
-                    }
-                }
+                "id": "fixture",
+                "version_targets": [
+                    {"file": "plugin.php", "pattern": "(?m)^Version:\\s*([0-9.]+)"}
+                ]
             }"#,
         )
         .expect("write homeboy config");
