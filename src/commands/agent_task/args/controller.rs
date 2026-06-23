@@ -58,6 +58,18 @@ pub struct AgentTaskControllerFromSpecArgs {
     #[arg(long)]
     pub resume: bool,
 
+    /// On --resume, discard stale persisted controller state and re-create it from this spec.
+    #[arg(long, conflicts_with_all = ["fork", "resume_existing"])]
+    pub replace: bool,
+
+    /// On --resume, apply this spec under a derived fork loop id, leaving the original untouched.
+    #[arg(long, conflicts_with_all = ["replace", "resume_existing"])]
+    pub fork: bool,
+
+    /// On --resume, accept stale/mismatched persisted state and resume the existing controller as-is.
+    #[arg(long = "resume-existing", conflicts_with_all = ["replace", "fork"])]
+    pub resume_existing: bool,
+
     /// Compile and preflight generic controller prerequisites without writing state.
     #[arg(long)]
     pub doctor: bool,
@@ -104,6 +116,18 @@ pub struct AgentTaskControllerRunFromSpecArgs {
         value_name = "N"
     )]
     pub max_actions: u32,
+
+    /// Discard stale persisted controller state and re-create it from this spec before running.
+    #[arg(long, conflicts_with_all = ["fork", "resume_existing"])]
+    pub replace: bool,
+
+    /// Apply this spec under a derived fork loop id, leaving the original controller untouched.
+    #[arg(long, conflicts_with_all = ["replace", "resume_existing"])]
+    pub fork: bool,
+
+    /// Accept stale/mismatched persisted state and resume the existing controller as-is.
+    #[arg(long = "resume-existing", conflicts_with_all = ["replace", "fork"])]
+    pub resume_existing: bool,
 
     /// Executor backend to use for controller-spawned dispatch actions when the action omits one.
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]

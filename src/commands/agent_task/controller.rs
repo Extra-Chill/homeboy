@@ -3,6 +3,9 @@
 
 use serde_json::Value;
 
+use homeboy::core::agent_task_controller_service::{
+    init_from_spec_for_resume_with_resolution, ControllerResumeStateResolution,
+};
 use homeboy::core::agent_task_loop_definition::{
     materialize_repo_loop_spec, AgentTaskLoopPolicyResultMaterialization,
     AgentTaskLoopSpecMaterializationRequest,
@@ -313,10 +316,12 @@ where
         &args.policy_results,
         Some(&defaults),
     )?;
-    let from_spec =
-        agent_task_controller_service::init_from_spec_for_resume(ControllerFromSpecRequest {
+    let from_spec = init_from_spec_for_resume_with_resolution(
+        ControllerFromSpecRequest {
             spec: materialized.spec.clone(),
-        })?;
+        },
+        resume_state_resolution(args.replace, args.fork, args.resume_existing),
+    )?;
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
         defaults,
@@ -432,6 +437,25 @@ fn controller_plan(args: AgentTaskControllerPlanArgs) -> CmdResult<Value> {
     Ok((command_json_value(report)?, 0))
 }
 
+/// Translate the mutually exclusive `--replace`/`--fork`/`--resume-existing`
+/// flags into a controller stale-state resolution. Clap enforces exclusivity,
+/// so at most one is set; none selected falls back to the guarded default.
+fn resume_state_resolution(
+    replace: bool,
+    fork: bool,
+    resume_existing: bool,
+) -> ControllerResumeStateResolution {
+    if replace {
+        ControllerResumeStateResolution::Replace
+    } else if fork {
+        ControllerResumeStateResolution::Fork
+    } else if resume_existing {
+        ControllerResumeStateResolution::ResumeExisting
+    } else {
+        ControllerResumeStateResolution::Guard
+    }
+}
+
 pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> CmdResult<Value> {
     let raw = config::read_json_spec_to_string(&args.spec)?;
     let mut spec: AgentTaskRepoLoopSpec = serde_json::from_str(&raw).map_err(|error| {
@@ -449,9 +473,10 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
         return controller_from_spec_doctor(spec, &args);
     }
     let report = if args.resume {
-        agent_task_controller_service::init_from_spec_for_resume(ControllerFromSpecRequest {
-            spec,
-        })?
+        init_from_spec_for_resume_with_resolution(
+            ControllerFromSpecRequest { spec },
+            resume_state_resolution(args.replace, args.fork, args.resume_existing),
+        )?
     } else {
         agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?
     };

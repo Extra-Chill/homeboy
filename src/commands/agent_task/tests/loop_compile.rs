@@ -565,6 +565,9 @@ fn controller_from_spec_doctor_reports_missing_provider_before_resume() {
         }))
         .expect("spec json"),
         resume: false,
+        replace: false,
+        fork: false,
+        resume_existing: false,
         doctor: true,
         dispatch_backend: Some("missing-provider".to_string()),
         dispatch_selector: None,
@@ -605,6 +608,9 @@ fn controller_from_spec_doctor_accepts_fixture_provider() {
         }))
         .expect("spec json"),
         resume: false,
+        replace: false,
+        fork: false,
+        resume_existing: false,
         doctor: true,
         dispatch_backend: Some("fixture".to_string()),
         dispatch_selector: None,
