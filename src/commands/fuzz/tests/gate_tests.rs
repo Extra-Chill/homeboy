@@ -117,22 +117,22 @@ fn fuzz_gate_evaluation_accepts_metadata_artifact_refs() {
     let gates = evaluate_fuzz_gates(&campaign);
     let summary = fuzz_coverage_completeness(&campaign);
 
-    assert_eq!(gate_status(&gates), "failed");
+    assert_eq!(gate_status(&gates), "passed");
     assert!(gates.iter().any(|gate| {
         gate.gate_id == "has-case-evidence" && gate.status == "passed" && gate.observed == 1.0
     }));
-    assert!(!summary.has_summary);
-    assert_eq!(summary.target_coverage_ratio, 0.0);
-    assert_eq!(summary.operation_coverage_ratio, 0.0);
+    assert!(summary.has_summary);
+    assert_eq!(summary.target_coverage_ratio, 1.0);
+    assert_eq!(summary.operation_coverage_ratio, 1.0);
     assert!(gates.iter().any(|gate| {
         gate.gate_id == "target-coverage-complete"
-            && gate.status == "failed"
-            && gate.observed == 0.0
+            && gate.status == "passed"
+            && gate.observed == 1.0
     }));
     assert!(gates.iter().any(|gate| {
         gate.gate_id == "operation-coverage-complete"
-            && gate.status == "failed"
-            && gate.observed == 0.0
+            && gate.status == "passed"
+            && gate.observed == 1.0
     }));
 }
 

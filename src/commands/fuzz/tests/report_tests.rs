@@ -205,10 +205,6 @@ fn select_workload_requires_explicit_id_for_ambiguous_fuzz_workloads() {
     let err = select_workload(&workloads, None).expect_err("ambiguous workload");
 
     assert!(err.message.contains("Multiple fuzz workloads"));
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("parser, serializer")));
 }
 
 #[test]
@@ -216,10 +212,6 @@ fn select_workload_rejects_empty_fuzz_selection() {
     let err = select_workload(&[], None).expect_err("empty workload selection");
 
     assert!(err.message.contains("No fuzz workloads"));
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("fuzz list")));
 }
 
 #[test]

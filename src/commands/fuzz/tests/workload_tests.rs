@@ -205,6 +205,6 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         Some(override_path.to_string_lossy().as_ref())
     );
     assert!(env.iter().any(|(key, value)| {
-        key == "WP_CODEBOX_FUZZ_WORKLOAD_ROOT" && value == &temp.path().to_string_lossy()
+        key == "HOMEBOY_FUZZ_WORKLOAD_ROOT" && value == &temp.path().to_string_lossy()
     }));
 }
