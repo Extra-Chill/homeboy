@@ -43,7 +43,7 @@ pub(super) fn build_lab_secret_env_handoff_plan(
     let agent_task_secret_env = hydrate_agent_task_secret_env(args, &mut env_delta)?;
     let trace_secret_env = hydrate_trace_secret_env(args, &mut env_delta)?;
     let tunnel_secret_env = hydrate_tunnel_secret_env(args, &mut env_delta)?;
-    let mut secret_env_names = declared_agent_task_secret_env(args);
+    let mut secret_env_names = declared_agent_task_secret_env_for_handoff(args)?;
     secret_env_names.extend(declared_trace_secret_env(args));
     secret_env_names.extend(declared_tunnel_secret_env(args));
     secret_env_names.sort();
@@ -120,7 +120,7 @@ fn hydrate_agent_task_secret_env_with_providers(
     env: &mut HashMap<String, String>,
     providers: &[AgentTaskExecutorProvider],
 ) -> Result<serde_json::Value> {
-    let mut names = declared_agent_task_controller_secret_env_with_providers(args, providers);
+    let mut names = declared_agent_task_controller_secret_env_with_providers(args, providers)?;
     let mut runner_deferred_names =
         declared_agent_task_run_plan_secret_env_with_providers(args, providers);
     runner_deferred_names.sort();
@@ -141,6 +141,7 @@ fn hydrate_agent_task_secret_env_with_providers(
                 providers,
             )
         })
+        .transpose()?
         .unwrap_or_default();
     let controller_source_run_plan_names = runner_deferred_names
         .iter()
@@ -219,11 +220,21 @@ pub(super) fn hydrate_tunnel_secret_env(
 }
 
 pub(crate) fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
-    let mut names = declared_agent_task_controller_secret_env(args);
+    declared_agent_task_secret_env_for_handoff(args).unwrap_or_default()
+}
+
+fn declared_agent_task_secret_env_for_handoff(args: &[String]) -> Result<Vec<String>> {
+    if subcommand_index(args, "agent-task").is_none() {
+        return Ok(Vec::new());
+    }
+
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    let mut names =
+        declared_agent_task_controller_secret_env_with_providers(args, executor.providers())?;
     names.extend(declared_agent_task_run_plan_secret_env(args));
     names.sort();
     names.dedup();
-    names
+    Ok(names)
 }
 
 pub(super) fn preflight_agent_task_runner_secret_env(
@@ -297,12 +308,13 @@ fn declared_agent_task_controller_secret_env(args: &[String]) -> Vec<String> {
 
     let executor = ExtensionProviderAgentTaskExecutor::discover();
     declared_agent_task_controller_secret_env_with_providers(args, executor.providers())
+        .unwrap_or_default()
 }
 
 fn declared_agent_task_controller_secret_env_with_providers(
     args: &[String],
     providers: &[AgentTaskExecutorProvider],
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let mut names = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -319,59 +331,67 @@ fn declared_agent_task_controller_secret_env_with_providers(
         }
         if arg == "--provider-config" {
             if let Some(spec) = args.get(index + 1) {
-                names.extend(declared_provider_config_secret_env(spec));
+                names.extend(declared_provider_config_secret_env(spec)?);
             }
             index += 2;
             continue;
         }
         if let Some(spec) = arg.strip_prefix("--provider-config=") {
-            names.extend(declared_provider_config_secret_env(spec));
+            names.extend(declared_provider_config_secret_env(spec)?);
         }
         index += 1;
     }
-    if let Some(plan) = agent_task_dispatch_provider_plan_from_args(args) {
+    if let Some(plan) = agent_task_dispatch_provider_plan_from_args(args)? {
         names.extend(provider_runner_secret_env_for_plan_with_providers(
             &plan, providers,
         ));
     }
     names.sort();
     names.dedup();
-    names
+    Ok(names)
 }
 
 fn declared_agent_task_controller_secret_sources_with_providers(
     args: &[String],
     agent_task_index: usize,
     providers: &[AgentTaskExecutorProvider],
-) -> HashMap<String, crate::core::defaults::AgentTaskSecretSource> {
+) -> Result<HashMap<String, crate::core::defaults::AgentTaskSecretSource>> {
     if args.get(agent_task_index + 1).map(String::as_str) != Some("providers") {
-        if let Some(plan) = agent_task_dispatch_provider_plan_from_args(args) {
-            return provider_secret_sources_for_plan_with_providers(&plan, providers);
+        if let Some(plan) = agent_task_dispatch_provider_plan_from_args(args)? {
+            return Ok(provider_secret_sources_for_plan_with_providers(
+                &plan, providers,
+            ));
         }
-        return agent_task_run_plan_from_args(args)
+        return Ok(agent_task_run_plan_from_args(args)
             .map(|plan| provider_secret_sources_for_plan_with_providers(&plan, providers))
-            .unwrap_or_default();
+            .unwrap_or_default());
     }
 
-    provider_secret_sources_for_providers(providers)
+    Ok(provider_secret_sources_for_providers(providers))
 }
 
-fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Option<AgentTaskPlan> {
-    let agent_task_index = subcommand_index(args, "agent-task")?;
-    let command = args.get(agent_task_index + 1)?.as_str();
+fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Result<Option<AgentTaskPlan>> {
+    let Some(agent_task_index) = subcommand_index(args, "agent-task") else {
+        return Ok(None);
+    };
+    let Some(command) = args.get(agent_task_index + 1).map(String::as_str) else {
+        return Ok(None);
+    };
     if !matches!(command, "cook" | "dispatch" | "loop") {
-        return None;
+        return Ok(None);
     }
 
-    let backend = option_arg_after(args, agent_task_index + 2, "--backend")?;
+    let Some(backend) = option_arg_after(args, agent_task_index + 2, "--backend") else {
+        return Ok(None);
+    };
     let selector = option_arg_after(args, agent_task_index + 2, "--selector");
     let model = option_arg_after(args, agent_task_index + 2, "--model");
     let provider_config = option_arg_after(args, agent_task_index + 2, "--provider-config")
-        .and_then(|spec| config::read_json_spec_to_string(&spec).ok())
-        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .map(|spec| read_provider_config_value(&spec))
+        .transpose()?
         .unwrap_or(serde_json::Value::Null);
 
-    Some(AgentTaskPlan::new(
+    Ok(Some(AgentTaskPlan::new(
         "lab-agent-task-dispatch-secret-discovery".to_string(),
         vec![AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -398,7 +418,7 @@ fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Option<AgentT
             artifact_declarations: Vec::new(),
             metadata: serde_json::Value::Null,
         }],
-    ))
+    )))
 }
 
 fn option_arg_after(args: &[String], start: usize, flag: &str) -> Option<String> {
@@ -539,17 +559,37 @@ fn declared_secret_env_args(args: &[String]) -> Vec<String> {
     names
 }
 
-fn declared_provider_config_secret_env(spec: &str) -> Vec<String> {
-    let raw = match config::read_json_spec_to_string(spec) {
-        Ok(raw) => raw,
-        Err(_) => return Vec::new(),
-    };
-    let value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
-    };
+fn read_provider_config_value(spec: &str) -> Result<serde_json::Value> {
+    let raw = config::read_json_spec_to_string(spec).map_err(|error| {
+        provider_config_error(spec, format!("failed to read provider config: {error}"))
+    })?;
+
+    serde_json::from_str(&raw).map_err(|error| {
+        provider_config_error(
+            spec,
+            format!("failed to parse provider config JSON: {error}"),
+        )
+    })
+}
+
+fn provider_config_error(spec: &str, problem: String) -> Error {
+    Error::validation_invalid_argument(
+        "provider-config",
+        problem,
+        Some(spec.to_string()),
+        Some(vec![
+            "Pass --provider-config as inline JSON or @/path/to/provider-config.json.".to_string(),
+        ]),
+    )
+}
+
+fn declared_provider_config_secret_env(spec: &str) -> Result<Vec<String>> {
+    let value = read_provider_config_value(spec)?;
     let Some(config) = value.as_object() else {
-        return Vec::new();
+        return Err(provider_config_error(
+            spec,
+            "provider config must be a JSON object".to_string(),
+        ));
     };
 
     let mut names = Vec::new();
@@ -567,7 +607,7 @@ fn declared_provider_config_secret_env(spec: &str) -> Vec<String> {
             _ => {}
         }
     }
-    names
+    Ok(names)
 }
 
 fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
@@ -1014,6 +1054,81 @@ mod tests {
     }
 
     #[test]
+    fn hydrate_agent_task_secret_env_fails_missing_provider_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing_path = temp.path().join("missing-provider-config.json");
+        let mut env = HashMap::new();
+
+        let err = hydrate_agent_task_secret_env(
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "dispatch".to_string(),
+                "--provider-config".to_string(),
+                format!("@{}", missing_path.display()),
+            ],
+            &mut env,
+        )
+        .expect_err("missing provider config should fail secret discovery");
+
+        assert_eq!(err.details["field"].as_str(), Some("provider-config"));
+        assert_eq!(
+            err.details["id"].as_str(),
+            Some(format!("@{}", missing_path.display()).as_str())
+        );
+        assert!(err.message.contains("failed to read provider config"));
+    }
+
+    #[test]
+    fn hydrate_agent_task_secret_env_fails_invalid_provider_config_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("provider-config.json");
+        std::fs::write(&config_path, "{not-json").expect("write invalid config");
+        let mut env = HashMap::new();
+
+        let err = hydrate_agent_task_secret_env(
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "dispatch".to_string(),
+                "--provider-config".to_string(),
+                format!("@{}", config_path.display()),
+            ],
+            &mut env,
+        )
+        .expect_err("invalid provider config JSON should fail secret discovery");
+
+        assert_eq!(err.details["field"].as_str(), Some("provider-config"));
+        assert_eq!(
+            err.details["id"].as_str(),
+            Some(format!("@{}", config_path.display()).as_str())
+        );
+        assert!(err.message.contains("failed to parse provider config JSON"));
+    }
+
+    #[test]
+    fn hydrate_agent_task_secret_env_fails_non_object_provider_config() {
+        let mut env = HashMap::new();
+
+        let err = hydrate_agent_task_secret_env(
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "dispatch".to_string(),
+                "--provider-config".to_string(),
+                "[]".to_string(),
+            ],
+            &mut env,
+        )
+        .expect_err("non-object provider config should fail secret discovery");
+
+        assert_eq!(err.details["field"].as_str(), Some("provider-config"));
+        assert!(err
+            .message
+            .contains("provider config must be a JSON object"));
+    }
+
+    #[test]
     fn declared_agent_task_cook_provider_defaults_include_controller_sources() {
         let provider = fixture_provider_with_example_defaults();
         let args = vec![
@@ -1029,12 +1144,14 @@ mod tests {
         let names = declared_agent_task_controller_secret_env_with_providers(
             &args,
             std::slice::from_ref(&provider),
-        );
+        )
+        .expect("provider config should parse");
         let sources = declared_agent_task_controller_secret_sources_with_providers(
             &args,
             1,
             std::slice::from_ref(&provider),
-        );
+        )
+        .expect("provider config sources should parse");
 
         assert!(names.contains(&"EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()));
         let source = sources
@@ -1063,7 +1180,8 @@ mod tests {
             &args,
             1,
             std::slice::from_ref(&provider),
-        );
+        )
+        .expect("provider default sources should parse");
 
         assert!(sources.contains_key("EXAMPLE_PROVIDER_ACCESS_TOKEN"));
     }
