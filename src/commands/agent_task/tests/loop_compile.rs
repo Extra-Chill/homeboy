@@ -435,6 +435,95 @@ fn controller_materialize_runs_generator_manifest_and_records_evidence() {
 }
 
 #[test]
+fn controller_materialize_caps_generator_output_evidence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let manifest_path = temp.path().join("generator.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string(&json!({
+            "schema": "homeboy/agent-task-loop-spec-generator/v1",
+            "command": [
+                "/bin/sh",
+                "-c",
+                "printf 1234567890abcdef; cat > generated-loop.json <<'JSON'\n{\"loop_id\":\"generated-output-cap-loop\",\"workflows\":[{\"workflow_id\":\"brief\",\"prompt\":\"Draft.\"}]}\nJSON"
+            ],
+            "output_path": "generated-loop.json",
+            "max_stdout_bytes": 12,
+            "max_stderr_bytes": 12
+        }))
+        .expect("manifest json"),
+    )
+    .expect("write manifest");
+
+    let (value, status) =
+        super::support::controller_materialize(AgentTaskControllerMaterializeArgs {
+            spec: format!("@{}", manifest_path.display()),
+            inputs: None,
+            policy_results: Vec::new(),
+        })
+        .expect("materialize generated spec");
+
+    assert_eq!(status, 0);
+    assert_eq!(value["spec"]["loop_id"], "generated-output-cap-loop");
+    assert_eq!(
+        value["generator_evidence"]["status"]["stdout"],
+        "1234567890ab"
+    );
+    assert_eq!(
+        value["generator_evidence"]["status"]["stdout_truncated"],
+        true
+    );
+    assert_eq!(
+        value["generator_evidence"]["status"]["stdout_bytes_read"],
+        16
+    );
+    assert_eq!(
+        value["generator_evidence"]["status"]["max_stdout_bytes"],
+        12
+    );
+}
+
+#[test]
+fn controller_materialize_reports_generator_timeout_diagnostics() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let manifest_path = temp.path().join("generator.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string(&json!({
+            "schema": "homeboy/agent-task-loop-spec-generator/v1",
+            "command": ["/bin/sh", "-c", "sleep 2"],
+            "output_path": "generated-loop.json",
+            "timeout_seconds": 1
+        }))
+        .expect("manifest json"),
+    )
+    .expect("write manifest");
+
+    let error = super::support::controller_materialize(AgentTaskControllerMaterializeArgs {
+        spec: format!("@{}", manifest_path.display()),
+        inputs: None,
+        policy_results: Vec::new(),
+    })
+    .expect_err("timeout is rejected");
+
+    assert_eq!(error.details["field"], "spec.command");
+    assert!(error.message.contains("timed out after 1 seconds"));
+    assert_eq!(
+        error.details["diagnostics"][0]["class"],
+        "generator.timeout"
+    );
+    assert_eq!(
+        error.details["diagnostics"][0]["data"]["timeout_seconds"],
+        1
+    );
+    assert_eq!(error.details["diagnostics"][0]["data"]["timed_out"], true);
+    assert!(error.details["diagnostics"][0]["data"]["cwd"]
+        .as_str()
+        .expect("cwd")
+        .contains(temp.path().to_str().expect("temp path")));
+}
+
+#[test]
 fn controller_materialize_reports_missing_generated_spec_path() {
     let temp = tempfile::tempdir().expect("tempdir");
     let manifest_path = temp.path().join("generator.json");
