@@ -171,8 +171,8 @@ mod tests {
     };
     use super::replay::run_replay;
     use super::report::{
-        evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status, run_report, run_validate,
-        FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
+        evaluate_fuzz_gates, fuzz_coverage_completeness, fuzz_performance_hotspots, gate_status,
+        run_report, run_validate, FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
     };
     use super::types::{
         FuzzCommand, FuzzExecutionOutput, FuzzListOutput, FuzzOutput, FuzzReplayArgs,
@@ -837,6 +837,78 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_performance_hotspots_extracts_generic_metadata_metrics() {
+        let mut campaign = empty_fuzz_campaign();
+        campaign.metadata = serde_json::json!({
+            "duration_ms": 900,
+            "queries_count": 20,
+            "nested": {
+                "setup_elapsed": 30,
+                "rows_count": 3
+            },
+            "label": "ignored"
+        });
+        campaign.coverage_summary = Some(homeboy::core::fuzz::FuzzCoverageSummary {
+            schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+            declared_targets: 0,
+            executable_targets: 0,
+            proven_targets: 0,
+            declared_operations: 0,
+            executable_operations: 0,
+            proven_operations: 0,
+            skipped_targets: Vec::new(),
+            skipped_operations: Vec::new(),
+            surface_summaries: vec![homeboy::core::fuzz::FuzzCoverageGroupSummary {
+                id: "surface-a".to_string(),
+                kind: "api".to_string(),
+                label: None,
+                declared_targets: 0,
+                executable_targets: 0,
+                proven_targets: 0,
+                declared_operations: 0,
+                executable_operations: 0,
+                proven_operations: 0,
+                skipped_targets: Vec::new(),
+                skipped_operations: Vec::new(),
+                metadata: serde_json::json!({ "operation_ms": 125 }),
+                extra: std::collections::BTreeMap::new(),
+            }],
+            kind_summaries: Vec::new(),
+            artifact_ids: Vec::new(),
+            metadata: serde_json::json!({ "coverage_queries": 7 }),
+            extra: std::collections::BTreeMap::new(),
+        });
+        campaign.artifacts = vec![homeboy::core::fuzz::FuzzArtifact {
+            schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+            id: "profile".to_string(),
+            kind: "profile".to_string(),
+            artifact: None,
+            metadata: serde_json::json!({ "render_ms": 250 }),
+            extra: std::collections::BTreeMap::new(),
+        }];
+
+        let summary = fuzz_performance_hotspots(&campaign);
+
+        assert_eq!(summary.slowest_timing_metrics[0].subject_id, "campaign-1");
+        assert_eq!(summary.slowest_timing_metrics[0].metric, "duration_ms");
+        assert_eq!(summary.slowest_timing_metrics[0].value, 900.0);
+        assert!(summary.slowest_timing_metrics.iter().any(|point| {
+            point.subject_id == "artifact:profile" && point.metric == "render_ms"
+        }));
+        assert!(summary.slowest_timing_metrics.iter().any(|point| {
+            point.subject_id == "coverage_summary:surface-a" && point.metric == "operation_ms"
+        }));
+        assert!(summary
+            .hottest_metric_families
+            .iter()
+            .any(|family| family.family == "queries" && family.total == 20.0));
+        assert!(summary
+            .hottest_metric_families
+            .iter()
+            .any(|family| family.family == "coverage" && family.total == 7.0));
+    }
+
+    #[test]
     fn fuzz_workloads_include_rig_declared_paths() {
         let spec: RigSpec = serde_json::from_value(serde_json::json!({
             "id": "package-fuzz",
@@ -1392,6 +1464,14 @@ mod tests {
 
             assert_eq!(output.envelope_file, None);
             assert_eq!(output.envelope.id, "report-run-1");
+            assert!(output
+                .performance_hotspots
+                .slowest_timing_metrics
+                .is_empty());
+            assert!(output
+                .performance_hotspots
+                .hottest_metric_families
+                .is_empty());
             let store = ObservationStore::open_initialized().expect("store");
             let artifacts = store.list_artifacts("report-run-1").expect("artifacts");
             let envelope_artifact = artifacts

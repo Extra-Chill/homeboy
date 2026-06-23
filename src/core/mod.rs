@@ -94,6 +94,7 @@ pub mod lifecycle;
 pub mod observation;
 pub mod output;
 pub(crate) mod ownership;
+pub mod performance_hotspots;
 pub mod phase_timing;
 pub mod plan;
 pub mod preview_client;

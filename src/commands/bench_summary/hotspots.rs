@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use serde_json::Value;
 
 use crate::commands::summary_json::{string_value, value_at};
+use crate::core::performance_hotspots::{summarize_performance_hotspots, PerformanceMetricPoint};
 
 use super::format_metric;
 
@@ -18,34 +19,34 @@ pub(crate) fn bench_hotspot_lines(output: &Value) -> Vec<String> {
     }
 
     let mut lines = Vec::new();
-    let slowest = top_slowest_metrics(&metrics, 5);
-    let families = top_metric_families(&metrics, 5);
+    let summary = summarize_performance_hotspots(&performance_points(&metrics), 5, 5);
 
-    if slowest.is_empty() && families.is_empty() {
+    if summary.slowest_timing_metrics.is_empty() && summary.hottest_metric_families.is_empty() {
         return Vec::new();
     }
 
     lines.push("Hotspots:".to_string());
-    if !slowest.is_empty() {
+    if !summary.slowest_timing_metrics.is_empty() {
         lines.push("  Slowest timing metrics:".to_string());
-        for point in slowest {
+        for point in summary.slowest_timing_metrics {
+            let failure_context = failure_context_for_metric(&metrics, &point);
             lines.push(format!(
                 "    {} {}={}{}",
-                point.scenario_id,
+                point.subject_id,
                 point.metric,
                 format_metric(point.value),
-                point.failure_context.annotation()
+                failure_context.annotation()
             ));
         }
     }
-    if !families.is_empty() {
+    if !summary.hottest_metric_families.is_empty() {
         lines.push("  Hottest metric families:".to_string());
-        for family in families {
+        for family in summary.hottest_metric_families {
             lines.push(format!(
                 "    {} total={} metrics={}",
-                family.0,
-                format_metric(family.1),
-                family.2
+                family.family,
+                format_metric(family.total),
+                family.metric_count
             ));
         }
     }
@@ -180,47 +181,30 @@ fn collect_numeric_metric_points(
     }
 }
 
-fn top_slowest_metrics(points: &[BenchMetricPoint], limit: usize) -> Vec<BenchMetricPoint> {
-    let mut timing = points
+fn performance_points(points: &[BenchMetricPoint]) -> Vec<PerformanceMetricPoint> {
+    points
         .iter()
-        .filter(|point| is_timing_metric(&point.metric))
-        .cloned()
-        .collect::<Vec<_>>();
-    timing.sort_by(|a, b| {
-        b.value
-            .total_cmp(&a.value)
-            .then_with(|| a.scenario_id.cmp(&b.scenario_id))
-            .then_with(|| a.metric.cmp(&b.metric))
-    });
-    timing.truncate(limit);
-    timing
+        .map(|point| PerformanceMetricPoint {
+            subject_id: point.scenario_id.clone(),
+            metric: point.metric.clone(),
+            value: point.value,
+        })
+        .collect()
 }
 
-fn top_metric_families(points: &[BenchMetricPoint], limit: usize) -> Vec<(String, f64, usize)> {
-    let mut totals: BTreeMap<String, f64> = BTreeMap::new();
-    let mut metric_counts: HashMap<String, usize> = HashMap::new();
-    for point in points
+fn failure_context_for_metric<'a>(
+    points: &'a [BenchMetricPoint],
+    metric: &PerformanceMetricPoint,
+) -> &'a ScenarioFailureDetails {
+    points
         .iter()
-        .filter(|point| is_family_metric(&point.metric))
-    {
-        let family = metric_family(&point.metric);
-        *totals.entry(family.clone()).or_default() += point.value;
-        *metric_counts.entry(family).or_default() += 1;
-    }
-
-    let mut families = totals
-        .into_iter()
-        .map(|(family, total)| {
-            (
-                family.clone(),
-                total,
-                metric_counts.get(&family).copied().unwrap_or(0),
-            )
+        .find(|point| {
+            point.scenario_id == metric.subject_id
+                && point.metric == metric.metric
+                && point.value == metric.value
         })
-        .collect::<Vec<_>>();
-    families.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    families.truncate(limit);
-    families
+        .map(|point| &point.failure_context)
+        .unwrap_or_else(|| &points[0].failure_context)
 }
 
 fn bench_failure_context_lines(points: &[BenchMetricPoint]) -> Vec<String> {
@@ -380,49 +364,4 @@ fn collect_signature_value(value: &Value, context: &mut ScenarioFailureDetails) 
         }
         _ => {}
     }
-}
-
-fn is_timing_metric(metric: &str) -> bool {
-    metric == "duration"
-        || metric == "elapsed"
-        || metric.ends_with("_duration")
-        || metric.ends_with("_elapsed")
-        || metric.ends_with("_ms")
-        || metric.contains("_ms_")
-        || metric.ends_with(".ms")
-        || metric.contains(".ms_")
-}
-
-fn is_family_metric(metric: &str) -> bool {
-    let normalized = metric.to_ascii_lowercase();
-    normalized.contains("query")
-        || normalized.contains("queries")
-        || normalized.ends_with("_count")
-        || normalized.ends_with(".count")
-}
-
-fn metric_family(metric: &str) -> String {
-    if let Some((group, _)) = metric.split_once('.') {
-        return group.to_string();
-    }
-
-    for suffix in [
-        "_queries_per_item",
-        "_queries_per_run",
-        "_queries_per_sec",
-        "_query_count",
-        "_queries",
-        "_count",
-        "_ms_per_item",
-        "_ms_per_run",
-        "_ms",
-    ] {
-        if let Some(prefix) = metric.strip_suffix(suffix) {
-            if !prefix.is_empty() {
-                return prefix.to_string();
-            }
-        }
-    }
-
-    metric.to_string()
 }

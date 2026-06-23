@@ -8,6 +8,7 @@ use homeboy::core::fuzz::{
     FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzReplayMetadata, FuzzRequiredArtifact,
     FuzzResultEnvelope, FuzzTargetInventory,
 };
+use homeboy::core::performance_hotspots::PerformanceHotspotSummary;
 
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use crate::command_contract::{
@@ -293,6 +294,7 @@ pub struct FuzzValidateOutput {
     pub open_findings: usize,
     pub artifacts: usize,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
+    pub performance_hotspots: PerformanceHotspotSummary,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 
@@ -304,6 +306,7 @@ pub struct FuzzReportOutput {
     pub envelope_file: Option<String>,
     pub envelope: FuzzResultEnvelope,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
+    pub performance_hotspots: PerformanceHotspotSummary,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 
