@@ -135,14 +135,23 @@ const jsonWorkloadResult = buildWordPressFuzzRunnerResult({
 		target: { type: 'wordpress-plugin', slug: 'sample-plugin', component: 'sample-plugin' },
 		metadata: {
 			fixture: { component: 'sample-plugin', activation: 'sample-plugin/sample-plugin.php' },
-			homeboy_runtime_context: {
-				schema: 'homeboy/fuzz-workload-runtime-context/v1',
-				rig_id: 'sample-rig',
-				components: {
-					'sample-plugin': { path: '/runner/components/sample-plugin', branch: 'main' },
+				homeboy_runtime_context: {
+					schema: 'homeboy/fuzz-workload-runtime-context/v1',
+					rig_id: 'sample-rig',
+					components: {
+						'sample-plugin': {
+							path: '/runner/components/sample-plugin/plugins/sample-plugin',
+							branch: 'main',
+							extensions: {
+								wordpress: {
+									wp_codebox_source_root: '~/components/sample-plugin',
+									wp_codebox_source_subpath: 'plugins/sample-plugin',
+								},
+							},
+						},
+					},
 				},
 			},
-		},
 		workload: {
 			runner: 'wp-codebox',
 			type: 'json',
@@ -175,8 +184,10 @@ assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].artifacts[0].required,
 assert.equal(jsonWorkloadResult.wp_codebox_input.metadata.artifacts.expected[0].semantic_key, 'fuzz.suite_result');
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.extra_plugins, [{
 	slug: 'sample-plugin',
-	source: '/runner/components/sample-plugin',
-	path: '/runner/components/sample-plugin',
+	source: '/runner/components/sample-plugin/plugins/sample-plugin',
+	sourceRoot: '/runner/components/sample-plugin',
+	sourceSubpath: 'plugins/sample-plugin',
+	path: '/runner/components/sample-plugin/plugins/sample-plugin',
 	pluginFile: 'sample-plugin/sample-plugin.php',
 	loadAs: 'plugin',
 	activate: true,
@@ -184,8 +195,10 @@ assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.extra_plugin
 }]);
 assert.equal(
 	jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].source,
-	'/runner/components/sample-plugin'
+	'/runner/components/sample-plugin/plugins/sample-plugin'
 );
+assert.equal(jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].sourceRoot, '/runner/components/sample-plugin');
+assert.equal(jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceSubpath, 'plugins/sample-plugin');
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_mounts, [{ source: '/runner/workloads', target: '/runner/workloads', mode: 'readonly' }]);
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_env, { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: '/runner/workloads' });
 assert.ok(manifest.fuzz.env.includes('WP_CODEBOX_FUZZ_WORKLOAD_ROOT'));
