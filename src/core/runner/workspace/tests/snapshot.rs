@@ -306,6 +306,25 @@ fn snapshot_git_sync_materializes_dirty_source_as_synthetic_git_checkout() {
         assert!(git_output(remote, &["log", "-1", "--pretty=%B"])
             .unwrap()
             .contains(&output.snapshot_identity));
+
+        // The synthetic checkout identity must be surfaced as run evidence so a
+        // write-capable agent-task dispatch can trace the dirty controller-side
+        // worktree back to the synthetic commit carrying it into the runner
+        // workspace (#6136 acceptance criterion #2).
+        let synthetic_commit = output
+            .current_workspace
+            .synthetic_checkout_commit
+            .clone()
+            .expect("synthetic checkout commit recorded as run evidence");
+        assert_eq!(
+            synthetic_commit,
+            git_output(remote, &["rev-parse", "HEAD"]).unwrap(),
+            "recorded synthetic checkout commit must match the materialized workspace HEAD"
+        );
+        assert!(
+            output.current_workspace.source_commit.is_some(),
+            "snapshot-git evidence must also record the source commit"
+        );
     });
 }
 

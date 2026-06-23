@@ -106,6 +106,12 @@ pub struct RunnerWorkspaceCurrentSummary {
     pub source_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_dirty: Option<bool>,
+    /// Commit SHA of the synthetic git checkout created for a `snapshot-git`
+    /// sync, so write-capable agent-task dispatches can trace the dirty
+    /// controller-side worktree back to the synthetic commit that carries it
+    /// into the runner workspace. `None` for plain `snapshot`/`git` syncs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthetic_checkout_commit: Option<String>,
 }
 
 /// File + byte counts for a synced/snapshotted workspace tree.

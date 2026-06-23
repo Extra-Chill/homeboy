@@ -11,7 +11,7 @@ use super::super::{Runner, RunnerKind};
 use super::types::SnapshotStats;
 use super::util::{
     git_output, hex_prefix, owner_capture_shell, owner_restore_shell, parent_remote_path,
-    run_shell_command, ssh_args, ssh_client_for_runner, tar_exclude_args,
+    run_shell_capture, run_shell_command, ssh_args, ssh_client_for_runner, tar_exclude_args,
 };
 
 pub(crate) fn snapshot_identity(
@@ -203,9 +203,19 @@ pub(crate) fn materialize_snapshot_git(
     remote_path: &str,
     excludes: &[String],
     snapshot: &str,
-) -> Result<()> {
+) -> Result<SyntheticCheckoutIdentity> {
     materialize_snapshot(runner, local_path, remote_path, excludes)?;
     initialize_synthetic_git_checkout(runner, local_path, remote_path, snapshot)
+}
+
+/// Identity of the synthetic git checkout materialized for a `snapshot-git`
+/// sync. Surfaced as run evidence so write-capable agent-task dispatches can
+/// trace the dirty controller-side worktree back to the synthetic commit that
+/// carries the snapshot into the runner workspace.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SyntheticCheckoutIdentity {
+    /// Commit SHA of the synthetic checkout created in the runner workspace.
+    pub(crate) synthetic_commit: Option<String>,
 }
 
 fn initialize_synthetic_git_checkout(
@@ -213,7 +223,7 @@ fn initialize_synthetic_git_checkout(
     local_path: &Path,
     remote_path: &str,
     snapshot: &str,
-) -> Result<()> {
+) -> Result<SyntheticCheckoutIdentity> {
     let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"]).ok();
     let source_head = git_output(local_path, &["rev-parse", "HEAD"]).ok();
     let command = synthetic_git_checkout_command(
@@ -225,12 +235,12 @@ fn initialize_synthetic_git_checkout(
 
     match runner.kind {
         RunnerKind::Local => {
-            run_shell_command(&command, "initialize synthetic snapshot git checkout")
+            run_shell_command(&command, "initialize synthetic snapshot git checkout")?;
         }
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                run_shell_command(&command, "initialize synthetic snapshot git checkout")
+                run_shell_command(&command, "initialize synthetic snapshot git checkout")?;
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
                 let ssh_command = format!(
@@ -242,7 +252,46 @@ fn initialize_synthetic_git_checkout(
                 run_shell_command(
                     &ssh_command,
                     "initialize SSH synthetic snapshot git checkout",
-                )
+                )?;
+            }
+        }
+    }
+
+    // Read the synthetic commit back so the synced workspace can record the
+    // checkout identity as run evidence (acceptance criterion: run evidence
+    // records the source commit, dirty snapshot identity, and synthetic
+    // checkout identity). Best-effort: a read-back failure must not fail the
+    // sync, since the checkout itself already succeeded above. The source
+    // commit is recorded separately via the local worktree git state.
+    let synthetic_commit = synthetic_checkout_head(runner, remote_path);
+
+    Ok(SyntheticCheckoutIdentity { synthetic_commit })
+}
+
+/// Best-effort read of the synthetic checkout's HEAD commit SHA from the
+/// materialized runner workspace. Returns `None` when the runner is remote and
+/// unreachable, or the read otherwise fails — provenance is advisory evidence,
+/// not a correctness gate.
+fn synthetic_checkout_head(runner: &Runner, remote_path: &str) -> Option<String> {
+    match runner.kind {
+        RunnerKind::Local => git_output(Path::new(remote_path), &["rev-parse", "HEAD"]).ok(),
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner).ok()?;
+            if client.is_local {
+                git_output(Path::new(remote_path), &["rev-parse", "HEAD"]).ok()
+            } else {
+                let remote = format!("{}@{}", client.user, client.host);
+                let remote_command = format!(
+                    "git -C {remote_path} rev-parse HEAD",
+                    remote_path = shell::quote_arg(remote_path),
+                );
+                let ssh_command = format!(
+                    "ssh {ssh_args} {remote} {remote_command}",
+                    ssh_args = ssh_args(&client),
+                    remote = shell::quote_arg(&remote),
+                    remote_command = shell::quote_arg(&remote_command),
+                );
+                run_shell_capture(&ssh_command)
             }
         }
     }
