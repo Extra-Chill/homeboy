@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.73] - 2026-06-23
+
+### Fixed
+- Fix WP Codebox public CLI payload dispatch
+
 ## [3.12.72] - 2026-06-23
 
 ### Changed
