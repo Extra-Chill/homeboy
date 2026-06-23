@@ -390,6 +390,63 @@ only; they do not select a runtime, generate cases, or execute fuzzing.
 }
 ```
 
+### Live runtime surface discovery
+
+`wordpress-live-surface-discovery` is the generic live primitive for booted
+WordPress/Codebox runtimes. It uses public WordPress runtime APIs from a
+WP-CLI `eval-file` collector, then normalizes the result through
+`homeboy/wordpress-surface-discovery/v1` via
+`buildWordPressLiveSurfaceDiscoveryArtifact()` or
+`runWordPressLiveSurfaceDiscoveryWorkload()`.
+
+```bash
+wp eval-file wordpress/scripts/runtime/wordpress-live-surface-discovery.php > live-surfaces.raw.json
+```
+
+The raw collector covers REST routes, admin menu pages, database tables,
+frontend URLs, and registered blocks when those runtime surfaces are available.
+Unsupported surfaces are reported as structured rows in
+`metadata.unsupported_surfaces` on the normalized artifact instead of being
+silently omitted.
+
+```js
+const {
+  buildWordPressLiveSurfaceDiscoveryArtifact,
+} = require('homeboy-extension-wordpress/wordpress-live-surface-discovery');
+
+const discovery = buildWordPressLiveSurfaceDiscoveryArtifact(rawCollectorOutput);
+```
+
+```json
+{
+  "schema": "homeboy/wordpress-surface-discovery/v1",
+  "type": "wordpress-surface-discovery",
+  "id": "wordpress-live-surface-discovery",
+  "source": "wordpress-live-surface-discovery",
+  "surfaces": [
+    {
+      "id": "rest:/wp/v2/posts",
+      "type": "rest_route",
+      "label": "/wp/v2/posts",
+      "required": true,
+      "metadata": { "source": "rest", "value": "/wp/v2/posts" }
+    }
+  ],
+  "metadata": {
+    "collector_schema": "homeboy/wordpress-live-surface-discovery-raw/v1",
+    "unsupported_surfaces": [
+      {
+        "type": "db_table",
+        "label": "Database tables",
+        "supported": false,
+        "reason": "table_status_unavailable",
+        "message": "SHOW TABLE STATUS returned no rows."
+      }
+    ]
+  }
+}
+```
+
 ```json
 {
   "schema": "wordpress-fuzz-plan/v1",
