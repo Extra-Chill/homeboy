@@ -139,7 +139,7 @@ pub(super) fn provider_file_secret_source_provisions(
         let Some(source) = fallback_sources.get(name) else {
             continue;
         };
-        if source.source != "json-file" {
+        if source.source != "json-file" && source.source != "json-file-jwt-expiration" {
             continue;
         }
         let Some(path) = source
