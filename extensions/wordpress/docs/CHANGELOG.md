@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.67] - 2026-06-23
+
+### Changed
+- Add WordPress CRUD result contract
+- Add WordPress live surface discovery
+- Add generic REST request case artifacts
+
 ## [3.12.66] - 2026-06-23
 
 ### Changed
