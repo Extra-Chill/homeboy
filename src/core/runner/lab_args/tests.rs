@@ -894,6 +894,80 @@ fn inline_agent_task_prompt_files_rejects_missing_file() {
 }
 
 #[test]
+fn materialize_agent_task_specs_syncs_inline_and_file_plan_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let plan = serde_json::json!({
+        "schema": "homeboy/agent-task-plan/v1",
+        "tasks": [{ "task_id": "task-1", "instructions": "test" }]
+    })
+    .to_string();
+    let plan_file = temp.path().join("plan.json");
+    std::fs::write(&plan_file, &plan).expect("write plan");
+
+    for spec in [plan, format!("@{}", plan_file.display())] {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            spec,
+        ];
+        let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
+            assert_eq!(spec.filename, "agent-task-plan.json");
+            assert_eq!(spec.role, "agent_task_plan_remapped");
+            Ok(Some((
+                "@/remote/agent-task-plan.json".to_string(),
+                spec.role,
+            )))
+        })
+        .expect("materialize plan");
+
+        assert_eq!(out.argv[4], "@/remote/agent-task-plan.json");
+        assert_eq!(out.workspace_entries.len(), 1);
+        assert_eq!(
+            out.workspace_entries[0].step_id,
+            "lab.sync_remapped_agent_task_plan"
+        );
+        assert_eq!(out.workspace_entries[0].entry, "agent_task_plan_remapped");
+    }
+}
+
+#[test]
+fn materialize_agent_task_specs_syncs_inline_and_file_tasks_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tasks = serde_json::json!([{ "prompt": "Fix issue" }]).to_string();
+    let tasks_file = temp.path().join("tasks.json");
+    std::fs::write(&tasks_file, &tasks).expect("write tasks");
+
+    for spec in [tasks, format!("@{}", tasks_file.display())] {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--tasks".to_string(),
+            spec,
+        ];
+        let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
+            assert_eq!(spec.filename, "agent-task-tasks.json");
+            assert_eq!(spec.role, "agent_task_tasks_remapped");
+            Ok(Some((
+                "@/remote/agent-task-tasks.json".to_string(),
+                spec.role,
+            )))
+        })
+        .expect("materialize tasks");
+
+        assert_eq!(out.argv[4], "@/remote/agent-task-tasks.json");
+        assert_eq!(out.workspace_entries.len(), 1);
+        assert_eq!(
+            out.workspace_entries[0].step_id,
+            "lab.sync_remapped_agent_task_tasks"
+        );
+        assert_eq!(out.workspace_entries[0].entry, "agent_task_tasks_remapped");
+    }
+}
+
+#[test]
 fn remap_path_settings_rewrites_local_path_values() {
     let mappings = vec![LabPathRemap {
         local: "/Users/user/Developer/tool-runner".to_string(),

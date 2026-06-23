@@ -36,11 +36,10 @@ use super::super::execution::{
 };
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
-    inject_agent_task_default_provider_config_in_args, inline_agent_task_prompt_files_in_args,
-    lab_at_file_specs, lab_offload_source_path, remap_agent_task_plan_in_args,
-    remap_lab_at_file_args, remap_path_settings_in_args, remap_provider_config_in_args,
-    rewrite_lab_offload_args, rewrite_runner_resident_lab_offload_args, LabAtFileSpec,
-    LabPathRemap,
+    inject_agent_task_default_provider_config_in_args, lab_at_file_specs, lab_offload_source_path,
+    materialize_agent_task_specs_in_args, remap_lab_at_file_args, remap_path_settings_in_args,
+    remap_provider_config_in_args, rewrite_lab_offload_args,
+    rewrite_runner_resident_lab_offload_args, LabAtFileSpec, LabPathRemap,
 };
 use super::super::lab_capabilities::lab_runner_capability_contract;
 use super::super::lab_command::lab_offload_command_prefix;
@@ -76,9 +75,8 @@ use super::super::{
 use super::super::workload::{build_runner_workload, RunnerWorkloadBuildInput};
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
-    lab_pre_dispatch_failure_message, materialize_inline_agent_task_plan_arg,
-    materialize_inline_agent_task_tasks_arg, mirror_agent_task_run_plan_lifecycle,
-    parse_offloaded_agent_task_handoff_from_outputs,
+    lab_pre_dispatch_failure_message, mirror_agent_task_run_plan_lifecycle,
+    parse_offloaded_agent_task_handoff_from_outputs, sync_inline_agent_task_file,
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
@@ -1100,28 +1098,23 @@ fn prepare_lab_offload_workspace_stage(
         &remote_cwd,
     );
     let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps);
-    let remapped_args =
-        remap_agent_task_plan_in_args(&remapped_args, &path_remaps, Path::new(&synced.local_path))?;
-    let remapped_args =
-        inline_agent_task_prompt_files_in_args(&remapped_args, Path::new(&synced.local_path))?;
+    let agent_task_specs = materialize_agent_task_specs_in_args(
+        &remapped_args,
+        &path_remaps,
+        Path::new(&synced.local_path),
+        |spec| sync_inline_agent_task_file(runner_id, spec),
+    )?;
+    let remapped_args = agent_task_specs.argv;
+    for synced_entry in agent_task_specs.workspace_entries {
+        plan = record_synced_remapped_workspace_entry(
+            plan,
+            &mut workspace_mapping,
+            Some(synced_entry.entry),
+            synced_entry.step_id,
+        );
+    }
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
-    let (remapped_args, synced_remapped_tasks) =
-        materialize_inline_agent_task_tasks_arg(runner_id, &remapped_args)?;
-    plan = record_synced_remapped_workspace_entry(
-        plan,
-        &mut workspace_mapping,
-        synced_remapped_tasks,
-        "lab.sync_remapped_agent_task_tasks",
-    );
-    let (remapped_args, synced_remapped_plan) =
-        materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
-    plan = record_synced_remapped_workspace_entry(
-        plan,
-        &mut workspace_mapping,
-        synced_remapped_plan,
-        "lab.sync_remapped_agent_task_plan",
-    );
     let (remapped_args, agent_task_run_id) =
         ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())
             .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
