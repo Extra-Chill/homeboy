@@ -62,7 +62,7 @@ fn run_contract() -> FuzzContractOutput {
 }
 
 fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutput> {
-    let rig_context = load_rig(args.rig.as_deref())?;
+    let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
     let effective_id = resolve_component_id(
         &args.comp,
         rig_context.as_ref().map(|context| &context.spec),
@@ -92,7 +92,7 @@ fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutput> {
 }
 
 fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
-    let rig_context = load_rig(args.run.rig.as_deref())?;
+    let rig_context = load_rig(args.run.rig.as_deref(), &args.run.setting_args)?;
     let effective_id = resolve_component_id(
         &args.run.comp,
         rig_context.as_ref().map(|context| &context.spec),
