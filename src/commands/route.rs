@@ -816,6 +816,33 @@ mod tests {
     }
 
     #[test]
+    fn extension_refresh_requires_explicit_lab_runner_without_extension_parity() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "lab",
+            "extension",
+            "refresh",
+            "https://github.com/Extra-Chill/homeboy-extensions.git",
+            "--id",
+            "wordpress",
+            "--ref",
+            "6ff93f43",
+        ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "extension update");
+        assert!(command.portable);
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(command.unsupported_reason.is_none());
+        assert!(!command.routing_policy.requires_extension_parity);
+        assert!(command.required_extensions.is_empty());
+        assert!(!command.routing_policy.infer_source_path_tools);
+        assert!(cli.command.supports_lab_runner());
+    }
+
+    #[test]
     fn extension_update_routes_locally_without_explicit_lab_runner() {
         let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let normalized = vec![
