@@ -278,7 +278,7 @@ fn collect_standardized_hotspots(value: &Value, source: &str, points: &mut Vec<H
         }
         Value::Object(object) => {
             for (key, item) in object {
-                if key == "hotspots" {
+                if key == "hotspots" || key == "prior_observations" {
                     continue;
                 }
                 collect_standardized_hotspots(item, &format!("{source}.{key}"), points);
@@ -507,6 +507,18 @@ mod tests {
                             "metadata": {
                                 "observations": [
                                     {
+                                        "prior_observations": [
+                                            {
+                                                "payload": {
+                                                    "hotspots": {
+                                                        "schema": "homeboy/fuzz-hotspots/v1",
+                                                        "items": [
+                                                            { "name": "duplicate-prior", "count": 999 }
+                                                        ]
+                                                    }
+                                                }
+                                            }
+                                        ],
                                         "payload": {
                                             "hotspots": {
                                                 "schema": "homeboy/fuzz-hotspots/v1",
@@ -538,6 +550,7 @@ mod tests {
             Some("variation_create:added_post_meta")
         );
         assert_eq!(points[0].score, 750.0);
+        assert!(!points.iter().any(|point| point.key == "duplicate-prior"));
     }
 
     #[test]
