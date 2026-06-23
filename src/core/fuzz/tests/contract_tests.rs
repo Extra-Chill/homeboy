@@ -1,0 +1,118 @@
+use serde_json::json;
+
+use crate::core::fuzz::*;
+
+#[test]
+fn core_contract_lists_product_neutral_schema_ids() {
+    let contract = fuzz_core_contract();
+
+    assert_eq!(contract.schema, FUZZ_CORE_CONTRACT_SCHEMA);
+    assert_eq!(contract.version, FUZZ_CONTRACT_VERSION);
+    assert_eq!(contract.schemas.surface, FUZZ_SURFACE_SCHEMA);
+    assert_eq!(contract.schemas.target, FUZZ_TARGET_SCHEMA);
+    assert_eq!(contract.schemas.campaign, FUZZ_CAMPAIGN_SCHEMA);
+    assert_eq!(contract.schemas.case, FUZZ_CASE_SCHEMA);
+    assert_eq!(contract.schemas.case_log, FUZZ_CASE_LOG_SCHEMA);
+    assert_eq!(contract.schemas.replay, FUZZ_REPLAY_SCHEMA);
+    assert_eq!(
+        contract.schemas.coverage_summary,
+        FUZZ_COVERAGE_SUMMARY_SCHEMA
+    );
+    assert_eq!(
+        contract.schemas.target_inventory,
+        FUZZ_TARGET_INVENTORY_SCHEMA
+    );
+    assert_eq!(
+        contract.schemas.execution_request,
+        FUZZ_EXECUTION_REQUEST_SCHEMA
+    );
+    assert_eq!(
+        contract.schemas.result_envelope,
+        FUZZ_RESULT_ENVELOPE_SCHEMA
+    );
+    assert_eq!(
+        contract.schemas.required_artifact,
+        FUZZ_REQUIRED_ARTIFACT_SCHEMA
+    );
+    assert_eq!(contract.schemas.gate, FUZZ_GATE_SCHEMA);
+    assert_eq!(
+        contract.schemas.lifecycle_contract,
+        crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
+    );
+    assert!(contract
+        .safety_classes
+        .contains(&FuzzSafetyClass::IsolatedMutation));
+    assert!(contract
+        .operation_families
+        .contains(&FuzzOperationFamily::Read));
+    assert!(contract
+        .operation_families
+        .contains(&FuzzOperationFamily::PerformanceProbe));
+    assert!(contract.finding_statuses.contains(&FuzzFindingStatus::Open));
+    assert!(contract
+        .skip_reason_codes
+        .contains(&FUZZ_SKIP_REASON_AUTH_REQUIRED.to_string()));
+}
+
+#[test]
+fn core_contract_deserializes_without_operation_families() {
+    let contract: FuzzCoreContract = serde_json::from_value(json!({
+        "schema": FUZZ_CORE_CONTRACT_SCHEMA,
+        "version": FUZZ_CONTRACT_VERSION,
+        "schemas": {
+            "surface": FUZZ_SURFACE_SCHEMA,
+            "target": FUZZ_TARGET_SCHEMA,
+            "workload": FUZZ_WORKLOAD_SCHEMA,
+            "campaign": FUZZ_CAMPAIGN_SCHEMA,
+            "case": FUZZ_CASE_SCHEMA,
+            "case_log": FUZZ_CASE_LOG_SCHEMA,
+            "seed": FUZZ_SEED_SCHEMA,
+            "coverage": FUZZ_COVERAGE_SCHEMA,
+            "finding": FUZZ_FINDING_SCHEMA,
+            "artifact": FUZZ_ARTIFACT_SCHEMA,
+            "threshold": FUZZ_THRESHOLD_SCHEMA,
+            "provenance": FUZZ_PROVENANCE_SCHEMA,
+            "replay": FUZZ_REPLAY_SCHEMA,
+            "coverage_summary": FUZZ_COVERAGE_SUMMARY_SCHEMA,
+            "target_inventory": FUZZ_TARGET_INVENTORY_SCHEMA,
+            "execution_request": FUZZ_EXECUTION_REQUEST_SCHEMA,
+            "result_envelope": FUZZ_RESULT_ENVELOPE_SCHEMA,
+            "required_artifact": FUZZ_REQUIRED_ARTIFACT_SCHEMA,
+            "gate": FUZZ_GATE_SCHEMA
+        },
+        "safety_classes": ["read_only"],
+        "finding_statuses": ["open"]
+    }))
+    .expect("old contract payload");
+
+    assert!(contract
+        .operation_families
+        .contains(&FuzzOperationFamily::Read));
+    assert!(contract
+        .operation_families
+        .contains(&FuzzOperationFamily::BlockRender));
+}
+
+#[test]
+fn default_required_artifacts_and_gates_are_product_neutral() {
+    let artifacts = default_fuzz_required_artifacts();
+    let gates = default_fuzz_gates();
+
+    assert!(artifacts.iter().any(|artifact| {
+        artifact.schema == FUZZ_REQUIRED_ARTIFACT_SCHEMA && artifact.id == "result-envelope"
+    }));
+    assert!(artifacts.iter().any(|artifact| artifact.id == "case-log"));
+    assert!(artifacts
+        .iter()
+        .any(|artifact| artifact.id == "coverage-summary"));
+    assert!(gates
+        .iter()
+        .any(|gate| gate.schema == FUZZ_GATE_SCHEMA && gate.id == "no-open-findings"));
+    assert!(gates.iter().any(|gate| gate.id == "has-case-evidence"));
+    assert!(gates
+        .iter()
+        .any(|gate| gate.id == "target-coverage-complete"));
+    assert!(gates
+        .iter()
+        .any(|gate| gate.id == "operation-coverage-complete"));
+}
