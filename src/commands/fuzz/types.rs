@@ -115,6 +115,18 @@ pub struct FuzzRunArgs {
     #[arg(long = "inventory", value_name = "PATH")]
     pub(crate) inventory: Option<PathBuf>,
 
+    /// Fail the run unless the campaign links case-level execution evidence.
+    #[arg(long = "require-case-log")]
+    pub(crate) require_case_log: bool,
+
+    /// Fail the run unless the campaign includes or links a coverage summary.
+    #[arg(long = "require-coverage-summary")]
+    pub(crate) require_coverage_summary: bool,
+
+    /// Fail the run unless the campaign links a result-envelope artifact.
+    #[arg(long = "require-result-envelope")]
+    pub(crate) require_result_envelope: bool,
+
     /// Maximum runtime budget forwarded by future fuzz runners, e.g. 60s or 5m.
     #[arg(long, value_name = "DURATION")]
     pub(crate) max_duration: Option<String>,

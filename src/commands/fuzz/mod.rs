@@ -483,8 +483,8 @@ fn operation_family_name(family: FuzzOperationFamily) -> &'static str {
 mod tests {
     use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
     use super::execution::{
-        fuzz_campaign_contract, fuzz_evidence_followups, fuzz_run_outcome, fuzz_runner_env,
-        persist_fuzz_run_evidence, FuzzRunEvidenceInput,
+        fuzz_campaign_contract, fuzz_evidence_followups, fuzz_run_artifact_validation_error,
+        fuzz_run_outcome, fuzz_runner_env, persist_fuzz_run_evidence, FuzzRunEvidenceInput,
     };
     use super::replay::run_replay;
     use super::report::{
@@ -556,6 +556,9 @@ mod tests {
                 run_id: Some("proof-1".to_string()),
                 seed: None,
                 inventory: None,
+                require_case_log: false,
+                require_coverage_summary: false,
+                require_result_envelope: false,
                 max_duration: None,
                 args: Vec::new(),
             },
@@ -738,6 +741,9 @@ mod tests {
             "1234",
             "--inventory",
             "/tmp/fuzz-inventory.json",
+            "--require-case-log",
+            "--require-coverage-summary",
+            "--require-result-envelope",
             "--max-duration",
             "60s",
             "--",
@@ -756,6 +762,9 @@ mod tests {
                     run.inventory.as_deref(),
                     Some(Path::new("/tmp/fuzz-inventory.json"))
                 );
+                assert!(run.require_case_log);
+                assert!(run.require_coverage_summary);
+                assert!(run.require_result_envelope);
                 assert_eq!(run.max_duration.as_deref(), Some("60s"));
                 assert_eq!(run.args, vec!["--engine", "libfuzzer"]);
             }
@@ -1413,6 +1422,9 @@ mod tests {
             run_id: Some("proof-1".to_string()),
             seed: Some("1234".to_string()),
             inventory: Some(PathBuf::from("/tmp/fuzz-inventory.json")),
+            require_case_log: false,
+            require_coverage_summary: false,
+            require_result_envelope: false,
             max_duration: Some("60s".to_string()),
             args: vec![],
         };
@@ -1492,6 +1504,9 @@ mod tests {
             run_id: Some("proof-1".to_string()),
             seed: None,
             inventory: None,
+            require_case_log: false,
+            require_coverage_summary: false,
+            require_result_envelope: false,
             max_duration: None,
             args: vec![],
         };
@@ -1565,6 +1580,9 @@ mod tests {
                 run_id: Some("proof-1".to_string()),
                 seed: Some("1234".to_string()),
                 inventory: None,
+                require_case_log: false,
+                require_coverage_summary: false,
+                require_result_envelope: false,
                 max_duration: None,
                 args: vec![],
             };
@@ -1755,6 +1773,50 @@ mod tests {
         campaign
     }
 
+    #[test]
+    fn strict_fuzz_run_artifact_validation_reports_missing_campaign() {
+        let mut args = fuzz_run_args_with_run_id("strict-proof");
+        args.require_case_log = true;
+
+        let error = fuzz_run_artifact_validation_error(&args, None).expect("strict error");
+
+        assert!(error.contains("runner did not emit a fuzz campaign"));
+    }
+
+    #[test]
+    fn strict_fuzz_run_artifact_validation_reports_missing_required_artifacts() {
+        let mut args = fuzz_run_args_with_run_id("strict-proof");
+        args.require_case_log = true;
+        args.require_coverage_summary = true;
+        args.require_result_envelope = true;
+        let campaign = artifact_complete_fuzz_campaign();
+
+        let error = fuzz_run_artifact_validation_error(&args, Some(&campaign)).expect("strict error");
+
+        assert!(!error.contains("case log"));
+        assert!(!error.contains("coverage summary"));
+        assert!(error.contains("result envelope"));
+    }
+
+    #[test]
+    fn strict_fuzz_run_artifact_validation_passes_with_required_artifacts() {
+        let mut args = fuzz_run_args_with_run_id("strict-proof");
+        args.require_case_log = true;
+        args.require_coverage_summary = true;
+        args.require_result_envelope = true;
+        let mut campaign = artifact_complete_fuzz_campaign();
+        campaign.artifacts.push(homeboy::core::fuzz::FuzzArtifact {
+            schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+            id: "result-envelope".to_string(),
+            kind: "result_envelope".to_string(),
+            artifact: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        });
+
+        assert!(fuzz_run_artifact_validation_error(&args, Some(&campaign)).is_none());
+    }
+
     fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         FuzzRunArgs {
             comp: PositionalComponentArgs {
@@ -1771,6 +1833,9 @@ mod tests {
             run_id: Some(run_id.to_string()),
             seed: Some("1234".to_string()),
             inventory: None,
+            require_case_log: false,
+            require_coverage_summary: false,
+            require_result_envelope: false,
             max_duration: None,
             args: vec![],
         }
@@ -1815,6 +1880,9 @@ mod tests {
                 run_id: Some("proof-bad-results".to_string()),
                 seed: None,
                 inventory: None,
+                require_case_log: false,
+                require_coverage_summary: false,
+                require_result_envelope: false,
                 max_duration: None,
                 args: vec![],
             };
