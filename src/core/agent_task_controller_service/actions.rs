@@ -243,12 +243,16 @@ where
         AgentTaskLoopPolicyAction::FanOut {
             dedupe_key,
             entity_ids,
+            max_items,
+            fail_fast,
             request_template,
         } => execute_fan_out_action(
             record,
             action,
             dedupe_key,
             entity_ids,
+            *max_items,
+            *fail_fast,
             request_template,
             executor,
             dispatch,
@@ -638,6 +642,8 @@ pub(super) fn execute_fan_out_action<E, D>(
     action: &AgentTaskLoopPolicyActionRecord,
     dedupe_key: &str,
     entity_ids: &[String],
+    max_items: usize,
+    fail_fast: bool,
     request_template: &Value,
     executor: E,
     dispatch: &D,
@@ -648,14 +654,14 @@ where
 {
     if entity_ids.is_empty() {
         return Ok((
-            serde_json::json!({ "mode": "fan_out", "item_count": 0, "results": [] }),
+            serde_json::json!({ "mode": "fan_out", "item_count": 0, "total_item_count": 0, "max_items": max_items, "fail_fast": fail_fast, "concurrency": 1, "results": [] }),
             0,
         ));
     }
 
     let mut results = Vec::new();
     let mut exit_code = 0;
-    for entity_id in entity_ids {
+    for entity_id in entity_ids.iter().take(max_items) {
         let request = materialize_fan_out_request(request_template, entity_id);
         let child_dedupe_key = format!("{dedupe_key}:{entity_id}");
         let child_action = AgentTaskLoopPolicyActionRecord {
@@ -684,9 +690,13 @@ where
             exit_code = child_exit_code;
         }
         results.push(result);
+        if child_exit_code != 0 && fail_fast {
+            break;
+        }
     }
+    let item_count = results.len();
     Ok((
-        serde_json::json!({ "mode": "fan_out", "item_count": entity_ids.len(), "results": results }),
+        serde_json::json!({ "mode": "fan_out", "item_count": item_count, "total_item_count": entity_ids.len(), "max_items": max_items, "fail_fast": fail_fast, "concurrency": 1, "truncated": item_count < entity_ids.len(), "results": results }),
         exit_code,
     ))
 }
