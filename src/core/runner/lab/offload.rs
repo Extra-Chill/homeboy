@@ -1036,7 +1036,7 @@ fn prepare_lab_offload_workspace_stage(
         &offload_args,
         &remote_cwd,
     );
-    let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps);
+    let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps)?;
     let agent_task_specs = materialize_agent_task_specs_in_args(
         &remapped_args,
         &path_remaps,
