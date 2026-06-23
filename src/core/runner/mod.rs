@@ -70,7 +70,10 @@ pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::{
     normalize_runner_command_env, quote_runner_env_value, remote_shell_path_preamble,
 };
-pub use connection::{connect, connect_reverse, disconnect, status, statuses};
+pub use connection::{
+    connect, connect_reverse, disconnect, reverse_broker_artifact, reverse_broker_reconcile,
+    status, statuses,
+};
 pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
 pub use evidence::runner_artifact_store_token;
 pub use evidence::{

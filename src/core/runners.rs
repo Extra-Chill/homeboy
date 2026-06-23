@@ -26,8 +26,9 @@
 
 pub use super::runner::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path, broker_token_from_env,
-    capture_lab_offload_subprocess_metadata, connect, BrokerAuthGrant, BrokerAuthStore,
-    BrokerCredential, BrokerScope, MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
+    capture_lab_offload_subprocess_metadata, connect, reverse_broker_artifact,
+    reverse_broker_reconcile, BrokerAuthGrant, BrokerAuthStore, BrokerCredential, BrokerScope,
+    MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 pub use super::runner::{
     connect_reverse, disconnect, download_remote_artifact,

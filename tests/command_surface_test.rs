@@ -522,6 +522,22 @@ fn runner_job_logs_command_parses() {
 }
 
 #[test]
+fn runner_job_broker_wrapper_commands_parse() {
+    Cli::try_parse_from(["homeboy", "runner", "job", "reconcile", "homeboy-lab"])
+        .expect("runner job reconcile command should parse");
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "job",
+        "artifacts",
+        "homeboy-lab",
+        "00000000-0000-0000-0000-000000000000",
+        "report.txt",
+    ])
+    .expect("runner job artifacts command should parse");
+}
+
+#[test]
 fn runner_exec_raw_command_parses_before_trailing_command() {
     Cli::try_parse_from([
         "homeboy",

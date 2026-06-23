@@ -141,6 +141,7 @@ pub enum RunnerCommandOutput {
     Execution(RunnerExecOutput),
     Env(RunnerEnvOutput),
     Job(RunnerJobOutput),
+    BrokerJob(RunnerBrokerJobOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
     Broker(RunnerBrokerOutput),
@@ -188,6 +189,18 @@ pub struct RunnerJobOutput {
     pub job: Job,
     pub runner_job: homeboy::core::runners::RunnerJob,
     pub events: Vec<JobEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerBrokerJobOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    pub runner_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    pub response: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -592,6 +605,22 @@ enum RunnerJobCommand {
 
         /// Runner daemon job ID from runner exec/Lab output or error details
         job_id: String,
+    },
+    /// Reconcile expired reverse-runner broker claims
+    Reconcile {
+        /// Reverse-connected runner ID
+        runner_id: String,
+    },
+    /// Inspect broker-held reverse-runner artifact metadata
+    Artifacts {
+        /// Reverse-connected runner ID
+        runner_id: String,
+
+        /// Reverse broker job ID
+        job_id: String,
+
+        /// Artifact ID reported by the finished broker job
+        artifact_id: String,
     },
 }
 
@@ -1048,8 +1077,18 @@ fn map_env(result: CmdResult<RunnerEnvOutput>) -> CmdResult<RunnerCommandOutput>
     result.map(|(output, exit_code)| (RunnerCommandOutput::Env(output), exit_code))
 }
 
-fn map_job(result: CmdResult<RunnerJobOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::Job(output), exit_code))
+fn map_job(result: CmdResult<RunnerJobCommandOutput>) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| match output {
+        RunnerJobCommandOutput::Daemon(output) => (RunnerCommandOutput::Job(output), exit_code),
+        RunnerJobCommandOutput::Broker(output) => {
+            (RunnerCommandOutput::BrokerJob(output), exit_code)
+        }
+    })
+}
+
+enum RunnerJobCommandOutput {
+    Daemon(RunnerJobOutput),
+    Broker(RunnerBrokerJobOutput),
 }
 
 fn map_worker(result: CmdResult<ReverseRunnerWorkerOutput>) -> CmdResult<RunnerCommandOutput> {
@@ -1606,8 +1645,8 @@ fn reverse_runner_status_hints(
     ));
     if report.active_job_count > 0 {
         hints.push(format!(
-            "Cancel known reverse broker jobs with `homeboy runner job cancel {} <job-id>`; if a claim lease expires, reconcile broker state with POST /runner/jobs/reconcile instead of mutating the job store manually.",
-            report.runner_id
+            "Cancel known reverse broker jobs with `homeboy runner job cancel {} <job-id>`; if a claim lease expires, reconcile broker state with `homeboy runner job reconcile {}` instead of mutating the job store manually.",
+            report.runner_id, report.runner_id
         ));
     }
 }
@@ -1658,14 +1697,14 @@ fn runner_status_operator_commands(report: &RunnerStatusReport) -> Vec<RunnerOpe
     }
 
     if session.mode == RunnerTunnelMode::Reverse {
-        if let Some(broker_url) = session.broker_url.as_deref() {
+        if session.broker_url.is_some() {
             commands.push(RunnerOperatorCommand {
                 scope: "broker_reconcile",
                 runner_id: report.runner_id.clone(),
                 job_id: None,
                 command: format!(
-                    "curl -fsS -X POST {}/runner/jobs/reconcile",
-                    broker_url.trim_end_matches('/')
+                    "homeboy runner job reconcile {}",
+                    shell_arg(&report.runner_id)
                 ),
                 description:
                     "Fail expired reverse-runner claims through the broker-owned lifecycle path."
@@ -1677,9 +1716,9 @@ fn runner_status_operator_commands(report: &RunnerStatusReport) -> Vec<RunnerOpe
                     runner_id: report.runner_id.clone(),
                     job_id: Some(job.job_id.clone()),
                     command: format!(
-                        "curl -fsS {}/runner/jobs/{}/artifacts/<artifact-id>",
-                        broker_url.trim_end_matches('/'),
-                        job.job_id
+                        "homeboy runner job artifacts {} {} <artifact-id>",
+                        shell_arg(&report.runner_id),
+                        shell_arg(&job.job_id)
                     ),
                     description: "Inspect broker-held reverse-runner artifact metadata."
                         .to_string(),
@@ -2002,16 +2041,66 @@ fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
     ))
 }
 
-fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobOutput> {
+fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput> {
     match command {
         RunnerJobCommand::Logs {
             runner_id,
             job_id,
             follow,
             poll_ms,
-        } => job_logs(&runner_id, &job_id, follow, poll_ms),
-        RunnerJobCommand::Cancel { runner_id, job_id } => job_cancel(&runner_id, &job_id),
+        } => job_logs(&runner_id, &job_id, follow, poll_ms).map_job_daemon(),
+        RunnerJobCommand::Cancel { runner_id, job_id } => {
+            job_cancel(&runner_id, &job_id).map_job_daemon()
+        }
+        RunnerJobCommand::Reconcile { runner_id } => job_reconcile(&runner_id),
+        RunnerJobCommand::Artifacts {
+            runner_id,
+            job_id,
+            artifact_id,
+        } => job_artifacts(&runner_id, &job_id, &artifact_id),
     }
+}
+
+trait RunnerJobCommandResultExt {
+    fn map_job_daemon(self) -> CmdResult<RunnerJobCommandOutput>;
+}
+
+impl RunnerJobCommandResultExt for CmdResult<RunnerJobOutput> {
+    fn map_job_daemon(self) -> CmdResult<RunnerJobCommandOutput> {
+        self.map(|(output, exit_code)| (RunnerJobCommandOutput::Daemon(output), exit_code))
+    }
+}
+
+fn job_reconcile(runner_id: &str) -> CmdResult<RunnerJobCommandOutput> {
+    Ok((
+        RunnerJobCommandOutput::Broker(RunnerBrokerJobOutput {
+            variant: "job_reconcile",
+            command: "runner.job.reconcile",
+            runner_id: runner_id.to_string(),
+            job_id: None,
+            artifact_id: None,
+            response: runner::reverse_broker_reconcile(runner_id)?,
+        }),
+        0,
+    ))
+}
+
+fn job_artifacts(
+    runner_id: &str,
+    job_id: &str,
+    artifact_id: &str,
+) -> CmdResult<RunnerJobCommandOutput> {
+    Ok((
+        RunnerJobCommandOutput::Broker(RunnerBrokerJobOutput {
+            variant: "job_artifacts",
+            command: "runner.job.artifacts",
+            runner_id: runner_id.to_string(),
+            job_id: Some(job_id.to_string()),
+            artifact_id: Some(artifact_id.to_string()),
+            response: runner::reverse_broker_artifact(runner_id, job_id, artifact_id)?,
+        }),
+        0,
+    ))
 }
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
@@ -2322,11 +2411,11 @@ mod tests {
         assert!(serialized.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
         assert!(serialized.contains("homeboy runner job cancel homeboy-lab job-123"));
         assert!(serialized.contains("homeboy runs artifact get run-123 <artifact-id> -o <path>"));
-        assert!(serialized
-            .contains("curl -fsS -X POST https://broker.example.test/runner/jobs/reconcile"));
-        assert!(serialized.contains(
-            "curl -fsS https://broker.example.test/runner/jobs/job-123/artifacts/<artifact-id>"
-        ));
+        assert!(serialized.contains("homeboy runner job reconcile homeboy-lab"));
+        assert!(
+            serialized.contains("homeboy runner job artifacts homeboy-lab job-123 <artifact-id>")
+        );
+        assert!(!serialized.contains("curl -fsS"));
     }
 
     #[test]
