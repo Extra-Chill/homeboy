@@ -43,11 +43,7 @@ fn apply_fuzz_rig_setting_overrides(
         ))
     })?;
     for (key, raw) in &settings.setting {
-        apply_dotted_json_override(
-            &mut value,
-            key,
-            serde_json::Value::String(raw.clone()),
-        );
+        apply_dotted_json_override(&mut value, key, serde_json::Value::String(raw.clone()));
     }
     for (key, raw) in &settings.setting_json {
         apply_dotted_json_override(&mut value, key, raw.clone());
@@ -64,7 +60,10 @@ fn apply_fuzz_rig_setting_overrides(
 }
 
 fn apply_dotted_json_override(target: &mut serde_json::Value, key: &str, value: serde_json::Value) {
-    let parts = key.split('.').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    let parts = key
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
     if parts.is_empty() {
         return;
     }
@@ -210,9 +209,9 @@ mod tests {
                     "path": "/workspace/stale/plugins/package",
                     "branch": "main",
                     "extensions": {
-                        "wordpress": {
-                            "wp_codebox_source_root": "/workspace/stale",
-                            "wp_codebox_source_subpath": "plugins/package"
+                        "generic-runtime": {
+                            "source_root": "/workspace/stale",
+                            "source_subpath": "packages/component"
                         }
                     }
                 }
@@ -226,7 +225,7 @@ mod tests {
                     "/workspace/current/plugins/package".to_string(),
                 ),
                 (
-                    "components.package.extensions.wordpress.wp_codebox_source_root".to_string(),
+                    "components.package.extensions.generic-runtime.source_root".to_string(),
                     "/workspace/current".to_string(),
                 ),
             ],
@@ -241,8 +240,8 @@ mod tests {
             component
                 .extensions
                 .as_ref()
-                .and_then(|extensions| extensions.get("wordpress"))
-                .and_then(|extension| extension.settings.get("wp_codebox_source_root"))
+                .and_then(|extensions| extensions.get("generic-runtime"))
+                .and_then(|extension| extension.settings.get("source_root"))
                 .and_then(serde_json::Value::as_str),
             Some("/workspace/current")
         );

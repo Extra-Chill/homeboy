@@ -4,7 +4,8 @@ use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
-use homeboy::core::fuzz::{parse_fuzz_results_file, FuzzCampaign};
+use homeboy::core::fuzz::{parse_fuzz_results_file, FuzzCampaign, FuzzFindingStatus};
+use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 
@@ -202,8 +203,8 @@ pub(super) fn fuzz_run_outcome(
     results: Option<&FuzzCampaign>,
     results_error: Option<&str>,
 ) -> FuzzRunOutcome {
-    let nested_failed = results.is_some_and(fuzz_campaign_reports_failure);
-    let success = runner_success && !nested_failed && results_error.is_none();
+    let campaign_failed = results.is_some_and(fuzz_campaign_reports_failure);
+    let success = runner_success && !campaign_failed && results_error.is_none();
     FuzzRunOutcome {
         status: if success { "passed" } else { "failed" },
         success,
@@ -218,12 +219,19 @@ pub(super) fn fuzz_run_outcome(
 }
 
 fn fuzz_campaign_reports_failure(campaign: &FuzzCampaign) -> bool {
-    let nested_result_key = ["word", "press", "_fuzz_result"].concat();
     fuzz_metadata_reports_failure(&campaign.metadata)
-        || campaign
-            .metadata
-            .get(nested_result_key)
-            .is_some_and(fuzz_metadata_reports_failure)
+        || campaign.findings.iter().any(|finding| {
+            matches!(
+                finding.status,
+                FuzzFindingStatus::Open | FuzzFindingStatus::Confirmed
+            )
+        })
+        || campaign.lifecycle.as_ref().is_some_and(|lifecycle| {
+            lifecycle
+                .phases
+                .iter()
+                .any(|phase| phase.status == LifecyclePhaseStatus::Failed)
+        })
 }
 
 fn fuzz_metadata_reports_failure(value: &serde_json::Value) -> bool {
