@@ -1,0 +1,53 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+
+const {
+	WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA,
+	gateWordPressFuzzCaseForRuntimeCapabilities,
+	normalizeWordPressFuzzRuntimeCapabilities,
+	normalizeWordPressFuzzRuntimeCapability,
+	requiredCapabilitiesForWordPressFuzzCase,
+} = require('../lib/wordpress-fuzz-runtime-capabilities');
+
+assert.equal(normalizeWordPressFuzzRuntimeCapability('db-transaction'), 'transaction');
+assert.equal(normalizeWordPressFuzzRuntimeCapability('database_reset'), 'reset');
+assert.equal(normalizeWordPressFuzzRuntimeCapability('unknown'), '');
+
+const contract = normalizeWordPressFuzzRuntimeCapabilities({
+	capabilities: ['snapshots', 'rollback', 'reset-db', 'crud-execution'],
+	execution: { rest: true },
+	metadata: { runtime: 'fixture' },
+});
+assert.equal(contract.schema, WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA);
+assert.deepEqual(contract.capabilities, ['crud', 'reset', 'restore', 'snapshot']);
+assert.equal(contract.isolation.snapshot, true);
+assert.equal(contract.isolation.restore, true);
+assert.equal(contract.isolation.reset, true);
+assert.equal(contract.execution.crud, true);
+assert.equal(contract.execution.rest, true);
+assert.deepEqual(contract.metadata, { runtime: 'fixture' });
+
+assert.deepEqual(requiredCapabilitiesForWordPressFuzzCase('mutating_crud'), ['crud', 'snapshot', 'restore', 'reset']);
+
+const skipped = gateWordPressFuzzCaseForRuntimeCapabilities({
+	id: 'case-1',
+	skip_reasons: ['explicit-opt-in-required'],
+	metadata: { planned: true },
+}, { capabilities: ['crud'] }, { required_capabilities: ['crud', 'snapshot', 'restore', 'reset'] });
+assert.equal(skipped.executable, false);
+assert.deepEqual(skipped.required_capabilities, ['crud', 'reset', 'restore', 'snapshot']);
+assert.deepEqual(skipped.metadata.missing_capabilities, ['reset', 'restore', 'snapshot']);
+assert.deepEqual(skipped.skip_reasons, ['explicit-opt-in-required', 'missing-runtime-fuzz-capabilities']);
+
+const executable = gateWordPressFuzzCaseForRuntimeCapabilities({
+	id: 'case-2',
+	skip_reasons: [],
+	metadata: {},
+}, { capabilities: ['crud', 'snapshot', 'restore', 'reset'] }, { required_capabilities: ['crud', 'snapshot', 'restore', 'reset'] });
+assert.equal(executable.executable, true);
+assert.equal(executable.metadata.executable, true);
+assert.equal(executable.metadata.gated, false);
+assert.equal(executable.metadata.runtime_capability_gated, false);
+
+console.log('WordPress fuzz runtime capabilities smoke passed.');

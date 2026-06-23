@@ -4,39 +4,13 @@
  * Internal dependencies
  */
 const { isPlainObject } = require('./shared');
+const {
+	WORDPRESS_RUNTIME_SURFACE_ID_PREFIXES,
+	normalizeWordPressCoverageSurfaceType,
+} = require('./wordpress-surface-types');
 
 const STATUS_ORDER = ['discovered', 'exercised', 'skipped', 'failed'];
 const STATUS_PRIORITY = Object.fromEntries(STATUS_ORDER.map((status, index) => [status, index]));
-const SURFACE_TYPE_ALIASES = new Map([
-	['admin', 'admin_page'],
-	['admin-page', 'admin_page'],
-	['admin_page', 'admin_page'],
-	['ajax', 'ajax_action'],
-	['ajax-action', 'ajax_action'],
-	['ajax_action', 'ajax_action'],
-	['block', 'block'],
-	['block-type', 'block'],
-	['db', 'db_table'],
-	['db-table', 'db_table'],
-	['db_table', 'db_table'],
-	['database', 'db_table'],
-	['database-table', 'db_table'],
-	['frontend', 'frontend_url'],
-	['frontend-url', 'frontend_url'],
-	['frontend_url', 'frontend_url'],
-	['rest', 'rest_route'],
-	['rest-route', 'rest_route'],
-	['rest_route', 'rest_route'],
-]);
-
-const COVERAGE_ID_PREFIXES = {
-	admin_page: 'admin',
-	ajax_action: 'ajax',
-	block: 'block',
-	db_table: 'db',
-	frontend_url: 'frontend',
-	rest_route: 'rest',
-};
 
 function stringValue(value, fallback = '') {
 	const normalized = String(value ?? '').trim();
@@ -94,8 +68,7 @@ function normalizeFuzzCoverageItem(raw, defaults = {}) {
 }
 
 function normalizeCoverageSurfaceType(value, fallback = 'generic') {
-	const normalized = stringValue(value, fallback).toLowerCase().replace(/\s+/g, '-');
-	return SURFACE_TYPE_ALIASES.get(normalized) || normalized.replace(/-/g, '_');
+	return normalizeWordPressCoverageSurfaceType(stringValue(value, fallback)) || fallback;
 }
 
 function normalizeCoverageSurfaceValue(surface, type, index) {
@@ -122,7 +95,7 @@ function normalizeCoverageSurfaceId(surface, type, index) {
 	if (explicit && explicit.includes(':')) {
 		return explicit;
 	}
-	const prefix = COVERAGE_ID_PREFIXES[type] || type;
+	const prefix = WORDPRESS_RUNTIME_SURFACE_ID_PREFIXES[type] || type;
 	const value = explicit || normalizeCoverageSurfaceValue(surface, type, index);
 	return `${prefix}:${value}`;
 }

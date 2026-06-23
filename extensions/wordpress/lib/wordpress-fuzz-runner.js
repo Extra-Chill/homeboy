@@ -14,6 +14,7 @@ const {
 	normalizeWordPressFuzzPlan,
 } = require('./wordpress-fuzz-schemas');
 const { buildWpCodeboxFuzzPlanRecipe } = require('./wp-codebox-fuzz-plan');
+const { normalizeWordPressFuzzRuntimeCapabilities } = require('./wordpress-fuzz-runtime-capabilities');
 const {
 	normalizeWpCodeboxFuzzSuiteResult,
 	runWpCodeboxFuzzSuite,
@@ -57,8 +58,9 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 	const seed = env.seed || workload.seed || null;
 	const maxDuration = numericValue(env.maxDuration ?? workload.max_duration ?? workload.maxDuration);
 	const plan = normalizeRunnerPlan(workload.plan || workload.fuzz_plan || workload.fuzzPlan || workload);
+	const runtimeCapabilities = normalizeWordPressFuzzRuntimeCapabilities(workload.runtime_capabilities || workload.runtimeCapabilities || workload.runtime_profile?.fuzz_runtime_capabilities || workload.runtimeProfile?.fuzzRuntimeCapabilities || []);
 	const instructions = fuzzSuiteInstructions({ workload, workloadId, runId });
-	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions });
+	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities });
 	const runtimeRequirements = wpCodeboxRuntimeRequirementsFromWorkload(workload, { env });
 	const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
 		taskId: runId,
@@ -78,6 +80,7 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 		seed,
 		maxDuration,
 		plan,
+		runtimeCapabilities,
 		wpCodeboxInput,
 		runtimeRequirements,
 		taskRequest,
@@ -92,6 +95,7 @@ function buildWordPressFuzzRunnerSummary({
 	seed,
 	maxDuration,
 	plan,
+	runtimeCapabilities,
 	wpCodeboxInput,
 	runtimeRequirements,
 	taskRequest,
@@ -112,6 +116,7 @@ function buildWordPressFuzzRunnerSummary({
 		max_duration_seconds: maxDuration,
 		plan_id: plan.id,
 		wp_codebox_input: wpCodeboxInput,
+		wordpress_fuzz_runtime_capabilities: runtimeCapabilities,
 		wp_codebox_runtime_requirements: runtimeRequirements,
 		wp_codebox_task_request: taskRequest,
 		wp_codebox_plan_recipe: codeboxPlanRecipe,
@@ -162,7 +167,7 @@ function normalizeRunnerPlan(input) {
 	});
 }
 
-function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions }) {
+function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities }) {
 	const homeboyFuzzWorkload = workload.schema === 'homeboy/fuzz-workload/v1' ? workload : undefined;
 	return wpCodeboxFuzzSuiteInput({
 		id: runId,
@@ -184,7 +189,7 @@ function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDurat
 		coverage: workload.coverage || { wordpress_fuzz_coverage: true },
 		runtimeProfile: workload.runtime_profile || workload.runtimeProfile,
 		artifacts: workload.artifacts,
-		metadata: stripUndefined({ ...(workload.metadata || {}), runner: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA, workload: stripUndefined({ id: workloadId }) }),
+		metadata: stripUndefined({ ...(workload.metadata || {}), runner: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA, runtime_capabilities: runtimeCapabilities, workload: stripUndefined({ id: workloadId }) }),
 	});
 }
 

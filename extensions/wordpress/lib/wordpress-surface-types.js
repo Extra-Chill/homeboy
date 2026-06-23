@@ -71,6 +71,22 @@ const WORDPRESS_RUNTIME_SURFACE_TYPES = Object.freeze({
 
 const WORDPRESS_RUNTIME_SURFACE_TYPE_SET = new Set(Object.values(WORDPRESS_RUNTIME_SURFACE_TYPES));
 
+const WORDPRESS_COVERAGE_SURFACE_TYPES = Object.freeze({
+	...WORDPRESS_RUNTIME_SURFACE_TYPES,
+	capability: 'capability',
+	'cron-event': 'cron_event',
+	'db-query': 'db_query',
+	'external-http': 'external_http',
+	hook: 'hook',
+	media: 'media',
+	option: 'option',
+	'post-type': 'post_type',
+	role: 'role',
+	taxonomy: 'taxonomy',
+	user: 'user',
+	'wp-cli-command': 'wp_cli_command',
+});
+
 const WORDPRESS_SURFACE_COLLECTION_TYPE_BY_KEY = Object.freeze({
 	hooks: 'hook',
 	cron: 'cron-event',
@@ -120,9 +136,21 @@ const WORDPRESS_RUNTIME_SURFACE_ID_PREFIXES = Object.freeze({
 	admin_page: 'admin',
 	ajax_action: 'ajax',
 	block: 'block',
+	capability: 'capability',
+	cron_event: 'cron',
 	db_table: 'db',
+	db_query: 'db-query',
+	external_http: 'http',
 	frontend_url: 'frontend',
+	hook: 'hook',
+	media: 'media',
+	option: 'option',
+	post_type: 'post-type',
 	rest_route: 'rest',
+	role: 'role',
+	taxonomy: 'taxonomy',
+	user: 'user',
+	wp_cli_command: 'wp-cli',
 });
 
 function normalizeSurfaceTypeKey(value) {
@@ -151,6 +179,15 @@ function normalizeWordPressRuntimeSurfaceType(value) {
 	return WORDPRESS_RUNTIME_SURFACE_TYPE_SET.has(key) ? key : '';
 }
 
+function normalizeWordPressCoverageSurfaceType(value) {
+	const canonical = normalizeWordPressSurfaceType(value);
+	if (canonical) {
+		return WORDPRESS_COVERAGE_SURFACE_TYPES[canonical] || canonical.replace(/-/g, '_');
+	}
+	const key = normalizeSurfaceTypeKey(value);
+	return key ? key.replace(/-/g, '_') : '';
+}
+
 function wordpressSurfaceTypeFromCollectionKey(key) {
 	return WORDPRESS_SURFACE_COLLECTION_TYPE_BY_KEY[key];
 }
@@ -162,6 +199,7 @@ module.exports = {
 	WORDPRESS_SURFACE_COLLECTION_TYPE_BY_KEY,
 	WORDPRESS_SURFACE_TYPES,
 	isWordPressSurfaceType,
+	normalizeWordPressCoverageSurfaceType,
 	normalizeWordPressRuntimeSurfaceType,
 	normalizeWordPressSurfaceType,
 	wordpressSurfaceTypeFromCollectionKey,

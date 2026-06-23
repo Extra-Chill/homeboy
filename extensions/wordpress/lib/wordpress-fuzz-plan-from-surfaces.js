@@ -17,9 +17,13 @@ const {
 	WORDPRESS_SURFACE_COLLECTION_KEYS,
 	wordpressSurfaceTypeFromCollectionKey,
 } = require('./wordpress-surface-types');
+const {
+	gateWordPressFuzzCaseForRuntimeCapabilities,
+	requiredCapabilitiesForWordPressFuzzCase,
+} = require('./wordpress-fuzz-runtime-capabilities');
 
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-const DB_MUTATION_REQUIRED_CAPABILITIES = ['snapshot', 'transaction', 'reset'];
+const DB_MUTATION_REQUIRED_CAPABILITIES = requiredCapabilitiesForWordPressFuzzCase('db_mutation');
 
 function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 	const discovery = normalizeWordPressSurfaceDiscovery({
@@ -208,7 +212,7 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 	const operation = { ...operationForSurface(surface), method };
 	const skipReasons = safeMethod ? surfaceSkipReasons : reasonList([...surfaceSkipReasons, 'mutating_rest_method_requires_explicit_opt_in']);
 	const destructiveReasons = safeMethod ? surfaceDestructiveReasons : reasonList([...surfaceDestructiveReasons, 'rest_method_mutates_state']);
-	return {
+	const testCase = {
 		id: `${surface.id}-${method.toLowerCase()}-generic-fuzz`,
 		intent: 'request-rest-route',
 		operation_id: operationId,
@@ -225,6 +229,12 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 			gated: !safeMethod,
 		},
 	};
+	if (safeMethod) {
+		return testCase;
+	}
+	return gateWordPressFuzzCaseForRuntimeCapabilities(testCase, options.runtimeCapabilities || options.runtime_capabilities, {
+		required_capabilities: requiredCapabilitiesForWordPressFuzzCase('mutating_rest'),
+	});
 }
 
 function restMethodsForSurface(surface) {
@@ -271,7 +281,7 @@ function genericCaseForSurface(surface, options = {}) {
 function crudCaseForSurface(surface, resource, action, options = {}) {
 	const operation = crudOperationForSurface(surface, resource, action);
 	const gateReasons = mutatingCrudAction(action.action) && !allowsCrudMutation(surface, action.action) ? ['crud_mutation_requires_explicit_allow'] : [];
-	return {
+	const testCase = {
 		id: `${surface.id}-${action.intent}-crud-fuzz`,
 		intent: action.intent,
 		operation_id: operation.id,
@@ -284,6 +294,12 @@ function crudCaseForSurface(surface, resource, action, options = {}) {
 		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
 		metadata: { surface, crud: { resource_type: resource.type, intent: action.intent, action: action.action } },
 	};
+	if (!mutatingCrudAction(action.action) || gateReasons.length > 0) {
+		return testCase;
+	}
+	return gateWordPressFuzzCaseForRuntimeCapabilities(testCase, options.runtimeCapabilities || options.runtime_capabilities, {
+		required_capabilities: requiredCapabilitiesForWordPressFuzzCase('mutating_crud'),
+	});
 }
 
 function crudOperationForSurface(surface, resource, action) {
@@ -477,7 +493,7 @@ function dbMutationCasesFromSurface(surface, operationId, options = {}) {
 	const mutations = normalizeMutationMetadata(surface.mutations || surface.mutation || surface.mutation_metadata || surface.mutationMetadata);
 	return mutations.map((mutation, index) => {
 		const mutationId = mutation.id || mutation.name || mutation.operation || `mutation-${index + 1}`;
-		return {
+		return gateWordPressFuzzCaseForRuntimeCapabilities({
 			id: `${surface.id}-${safeIdPart(mutationId)}-gated-mutation`,
 			intent: surface.type === 'database-table' ? 'mutate-database-table' : 'mutate-database-query',
 			operation_id: `${operationId}:${safeIdPart(mutationId)}`,
@@ -487,12 +503,11 @@ function dbMutationCasesFromSurface(surface, operationId, options = {}) {
 				statement: mutation.statement || mutation.sql,
 			}),
 			seed: options.seed,
-			executable: false,
 			required_capabilities: DB_MUTATION_REQUIRED_CAPABILITIES,
-			skip_reasons: ['requires-runtime-db-safety-capabilities'],
+			skip_reasons: [],
 			destructive_reasons: ['db-mutation'],
-			metadata: { surface, mutation, gated: true },
-		};
+			metadata: { surface, mutation },
+		}, options.runtimeCapabilities || options.runtime_capabilities);
 	});
 }
 
@@ -552,7 +567,7 @@ function adminPageInteractionCase(surface, interaction, options = {}) {
 		skipReasons.push('requires_explicit_mutation_opt_in');
 	}
 
-	return {
+	const testCase = {
 		id: `${surface.id}-${interaction.kind}-${normalizeToken(operation.interaction_id)}-plan`,
 		intent: gated ? 'plan-admin-page-mutation' : 'exercise-admin-page-read-only-interaction',
 		operation_id: `${surface.id}:${interaction.kind}:${normalizeToken(operation.interaction_id)}`,
@@ -570,6 +585,12 @@ function adminPageInteractionCase(surface, interaction, options = {}) {
 			requires_explicit_opt_in: gated || undefined,
 		}),
 	};
+	if (!gated) {
+		return testCase;
+	}
+	return gateWordPressFuzzCaseForRuntimeCapabilities(testCase, options.runtimeCapabilities || options.runtime_capabilities, {
+		required_capabilities: requiredCapabilitiesForWordPressFuzzCase('admin_mutation'),
+	});
 }
 
 function adminPageInteractionSafety(interaction) {
