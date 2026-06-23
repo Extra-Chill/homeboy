@@ -73,6 +73,8 @@ const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be object
 const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 const WP_CODEBOX_OWNED_SUBSTRATE_SLUGS = new Set(['agents-api', 'data-machine', 'data-machine-code']);
+const WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY = 'wp-codebox/run-runtime-package';
+const LEGACY_RUNTIME_PACKAGE_ABILITIES = new Set(['agents/run-runtime-package', 'runtime-package/run']);
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -806,10 +808,48 @@ function genericAbilityRuntimeTask(request, config, inputs) {
     return null;
   }
   const input = runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared);
-  if (ability === 'agents/run-runtime-package') {
-    return { ability, input: agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs) };
+  const normalizedAbility = normalizeRuntimeTaskAbilityForCodebox(ability);
+  if (LEGACY_RUNTIME_PACKAGE_ABILITIES.has(ability) || normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
+    return { ability: normalizedAbility, input: runtimePackageTaskInputForCodebox(agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs)) };
   }
-  return { ability, input };
+  return { ability: normalizedAbility, input };
+}
+
+function normalizeRuntimeTaskAbilityForCodebox(ability) {
+  return LEGACY_RUNTIME_PACKAGE_ABILITIES.has(ability) ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : ability;
+}
+
+function runtimePackageTaskInputForCodebox(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return input;
+  }
+  const normalized = { ...input };
+  const packageDescriptor = normalized.runtime_package === undefined ? normalized.package : normalized.runtime_package;
+  const runtimePackage = runtimePackageIdentifier(packageDescriptor);
+  if (runtimePackage) {
+    normalized.runtime_package = runtimePackage;
+    if (!firstValue(normalized.agent, normalized.agent_slug)) {
+      normalized.agent = runtimePackage;
+    }
+  }
+  if (packageDescriptor && typeof packageDescriptor === 'object' && !Array.isArray(packageDescriptor)) {
+    normalized.metadata = {
+      ...(normalized.metadata && typeof normalized.metadata === 'object' && !Array.isArray(normalized.metadata) ? normalized.metadata : {}),
+      runtime_package_descriptor: packageDescriptor,
+    };
+  }
+  delete normalized.package;
+  return normalized;
+}
+
+function runtimePackageIdentifier(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return '';
+  }
+  return firstValue(value.slug, value.id, value.name, value.source, '');
 }
 
 function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs) {
@@ -1106,12 +1146,20 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
   if (!runtimeTask || typeof runtimeTask !== 'object' || Array.isArray(runtimeTask)) {
     return runtimeTask;
   }
-  if (!Array.isArray(defaults.agentBundles) || defaults.agentBundles.length === 0) {
-    return runtimeTask;
+  const normalizedRuntimeTask = {
+    ...runtimeTask,
+    ...(typeof runtimeTask.ability === 'string' ? { ability: normalizeRuntimeTaskAbilityForCodebox(runtimeTask.ability) } : {}),
+  };
+  if (normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
+    normalizedRuntimeTask.input = runtimePackageTaskInputForCodebox(normalizedRuntimeTask.input);
+  }
+  const applyExecutionDefaults = normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY || (Array.isArray(defaults.agentBundles) && defaults.agentBundles.length > 0);
+  if (!applyExecutionDefaults) {
+    return normalizedRuntimeTask;
   }
 
-  const input = runtimeTask.input && typeof runtimeTask.input === 'object' && !Array.isArray(runtimeTask.input)
-    ? runtimeTask.input
+  const input = normalizedRuntimeTask.input && typeof normalizedRuntimeTask.input === 'object' && !Array.isArray(normalizedRuntimeTask.input)
+    ? normalizedRuntimeTask.input
     : {};
   const defaultInput = Object.fromEntries(Object.entries({
     provider: defaults.provider,
@@ -1119,12 +1167,15 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
   }).filter(([, value]) => value !== '' && value !== undefined));
 
   if (Object.keys(defaultInput).length === 0) {
-    return runtimeTask;
+    return normalizedRuntimeTask;
   }
 
   return {
-    ...runtimeTask,
-    input: {
+    ...normalizedRuntimeTask,
+    input: normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY ? runtimePackageTaskInputForCodebox({
+      ...defaultInput,
+      ...input,
+    }) : {
       ...defaultInput,
       ...input,
     },
@@ -2686,14 +2737,32 @@ function codeboxRunSummary(result, options = {}) {
     return null;
   }
   try {
-    return enrichFailedCodeboxRunSummary(
+    return reconcileRunSummaryWithPublicEnvelope(enrichFailedCodeboxRunSummary(
       options.normalizeAgentTaskRunResult(result, { exitStatus: options.exitStatus ?? 0 }),
       result,
       options,
-    );
+    ), result, options);
   } catch {
     return null;
   }
+}
+
+function reconcileRunSummaryWithPublicEnvelope(runSummary, result = {}, options = {}) {
+  const publicEnvelope = codeboxPublicResultEnvelope(result, options);
+  if (!runSummary || typeof runSummary !== 'object' || Array.isArray(runSummary) || publicEnvelope?.success !== true || runSummary.status !== 'failed') {
+    return runSummary;
+  }
+  return {
+    ...runSummary,
+    status: 'succeeded',
+    success: true,
+    failure_classification: undefined,
+    metadata: {
+      ...(runSummary.metadata && typeof runSummary.metadata === 'object' && !Array.isArray(runSummary.metadata) ? runSummary.metadata : {}),
+      public_envelope_status: publicEnvelope.status,
+      public_envelope_success: true,
+    },
+  };
 }
 
 function enrichFailedCodeboxRunSummary(runSummary, result = {}, options = {}) {
@@ -3015,5 +3084,6 @@ module.exports = {
   providerContract,
   providerRuntimeInvocationContract,
   codeboxTaskRequestFromAgentTaskRequest,
+  reconcileRunSummaryWithPublicEnvelope,
   agentTaskOutcomeFromCodeboxResult,
 };
