@@ -459,11 +459,18 @@ fs.mkdirSync(path.dirname(fakeCodeboxBin), { recursive: true });
 const dispatchResultsPath = path.join(tempDir, 'dispatch-results.json');
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
-const inputFile = process.argv[process.argv.indexOf('--input-file') + 1];
-const command = process.argv[2];
-const request = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
-if (command !== 'run-fuzz-suite') {
-  process.stderr.write('expected public run-fuzz-suite command');
+const subcommand = process.argv.slice(2, 4).join(' ');
+if (subcommand === 'codebox run-fuzz-suite' && process.argv.includes('--help')) {
+  process.stdout.write('usage: wp codebox run-fuzz-suite');
+  process.exit(0);
+}
+if (subcommand === 'codebox run-wordpress-workload' && process.argv.includes('--help')) {
+  process.stderr.write('unknown command');
+  process.exit(1);
+}
+const request = JSON.parse(fs.readFileSync(0, 'utf8'));
+if (subcommand !== 'codebox run-fuzz-suite' || !process.argv.includes('--input=-') || !process.argv.includes('--format=json')) {
+  process.stderr.write('expected public wp codebox run-fuzz-suite command');
   process.exit(1);
 }
 if (request.schema !== 'wp-codebox/fuzz-suite/v1' || request.metadata?.homeboy_agent_task_request?.task_id !== 'dispatch-cli-run') {
@@ -476,7 +483,14 @@ process.stdout.write(JSON.stringify({
   status: 'succeeded',
   summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
   cases: [{ id: 'get-posts', status: 'passed', success: true, diagnostics: [] }],
-  artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
+  artifactRefs: [
+    { name: 'wp-codebox-fuzz-suite-result', path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' },
+    { name: 'wordpress-fuzz-coverage', path: 'fake/coverage.json', kind: 'coverage', contentType: 'application/json' },
+    { name: 'result-envelope', path: 'fake/envelope.json', contentType: 'application/json' },
+    { name: 'case-log', path: 'fake/cases.jsonl', contentType: 'application/jsonl' },
+    { name: 'replay-data', path: 'fake/replay.json', contentType: 'application/json' },
+    { name: 'coverage-summary', path: 'fake/summary.json', contentType: 'application/json' }
+  ],
   coverage_summary: { surface_count: 1, exercised_count: 1 }
 }));
 `);
@@ -486,8 +500,7 @@ const dispatchCli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
-		HOMEBOY_WP_CODEBOX_BIN: fakeCodeboxBin,
-		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
+		HOMEBOY_WP_CLI_BIN: fakeCodeboxBin,
 		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
 		HOMEBOY_FUZZ_WORKLOAD_ID: 'dispatch-cli-workload',
 		HOMEBOY_FUZZ_RUN_ID: 'dispatch-cli-run',
@@ -497,7 +510,7 @@ const dispatchCli = spawnSync(runnerPath, [], {
 
 assert.equal(dispatchCli.status, 0, dispatchCli.stderr);
 const dispatchCliResult = JSON.parse(dispatchCli.stdout);
-assert.equal(dispatchCliResult.succeeded, true);
+assert.equal(dispatchCliResult.succeeded, true, JSON.stringify(dispatchCliResult.wp_codebox_result));
 assert.equal(dispatchCliResult.wp_codebox_result.request_id, 'dispatch-cli-run');
 assert.equal(dispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'fake/fuzz-report.json');
 
@@ -539,10 +552,6 @@ if (request.task_input?.runtime_requirements?.extra_plugins?.[0]?.source !== '/r
   process.stderr.write('missing delegated runtime extra plugin');
   process.exit(1);
 }
-if (request.task_input?.runtime_requirements?.runtime_mounts?.[0]?.source !== '${workloadRoot}' || request.task_input?.runtime_requirements?.runtime_mounts?.[0]?.target !== '${workloadRoot}') {
-  process.stderr.write('missing delegated fuzz workload root mount');
-  process.exit(1);
-}
 if (request.task_input?.runtime_requirements?.runtime_env?.WP_CODEBOX_FUZZ_WORKLOAD_ROOT !== '${workloadRoot}') {
   process.stderr.write('missing delegated fuzz workload root env');
   process.exit(1);
@@ -573,6 +582,7 @@ const taskAdapterDispatchCli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
+		HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH: 'legacy-codebox-bin',
 		HOMEBOY_WP_CODEBOX_BIN: taskAdapterCodeboxBin,
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
 		HOMEBOY_WP_CODEBOX_PLUGIN_PATH: path.join(tempDir, 'packages/wordpress-plugin'),

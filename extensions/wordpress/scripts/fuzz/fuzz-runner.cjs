@@ -42,10 +42,14 @@ async function buildRunnerResult(env) {
 		return buildWordPressFuzzRunnerResult({ env });
 	}
 
-	return runWordPressFuzzRunnerResult({
-		env,
-		runRuntimeTask: runWpCodeboxAgentTask,
-	});
+	if (process.env.HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH === 'legacy-codebox-bin') {
+		return runWordPressFuzzRunnerResult({
+			env,
+			runRuntimeTask: runWpCodeboxAgentTask,
+		});
+	}
+
+	return runWordPressFuzzRunnerResult({ env });
 }
 
 async function runWpCodeboxAgentTask(request) {

@@ -36,6 +36,7 @@ function readWordPressFuzzRunnerEnv(env = process.env) {
 		maxDuration: env.HOMEBOY_FUZZ_MAX_DURATION,
 		resultsFile: env.HOMEBOY_FUZZ_RESULTS_FILE,
 		wpCodeboxFuzzWorkloadRoot: env.WP_CODEBOX_FUZZ_WORKLOAD_ROOT,
+		wpCliBin: env.HOMEBOY_WP_CLI_BIN || env.WP_CLI_BIN,
 	});
 }
 
@@ -134,10 +135,6 @@ async function resolveCodeboxResult(context, options = {}) {
 	}
 
 	const runner = options.runFuzzSuite || options.runFuzzRun || options.runRuntimeTask || options.runTask;
-	if (typeof runner !== 'function') {
-		return normalizeCodeboxResult(context.workload, { runId: context.runId });
-	}
-
 	return runWpCodeboxFuzzSuite({
 		...options,
 		taskId: context.runId,
@@ -146,7 +143,7 @@ async function resolveCodeboxResult(context, options = {}) {
 		runtimeId: context.workload.runtime_id || context.workload.runtimeId || 'wp-codebox',
 		runtimeRequirements: context.runtimeRequirements,
 		instructions: context.taskRequest.instructions,
-		runFuzzSuite: runner,
+		...(typeof runner === 'function' ? { runFuzzSuite: runner } : {}),
 	});
 }
 
@@ -281,7 +278,6 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 }
 
 function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension } = {}) {
-	const configured = nonEmptyString(wordpressExtension?.wp_codebox_source_root || wordpressExtension?.wpCodeboxSourceRoot);
 	const normalizedSubpath = nonEmptyString(sourceSubpath);
 	if (normalizedSubpath && source.endsWith(`/${normalizedSubpath}`)) {
 		return {
@@ -290,6 +286,7 @@ function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension } = {
 		};
 	}
 
+	const configured = nonEmptyString(wordpressExtension?.wp_codebox_source_root || wordpressExtension?.wpCodeboxSourceRoot);
 	if (configured && configured.startsWith('~/')) {
 		return {};
 	}

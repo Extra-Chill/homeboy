@@ -59,8 +59,16 @@ const manifest = normalizeWordPressFuzzCoverageManifest({
 		{ type: 'db', table: 'wp_posts' },
 		{ type: 'frontend', url: '/' },
 		{ type: 'block', name: 'core/paragraph' },
+		{ type: 'crud-resource', name: 'wp/v2/posts' },
 		{ type: 'hook', hook: 'init' },
+		{ type: 'capability', name: 'edit_posts' },
+		{ type: 'cron', hook: 'wp_version_check' },
+		{ type: 'media', name: 'attachment:sample-image' },
+		{ type: 'option', name: 'blogname' },
+		{ type: 'setting', name: 'permalink_structure' },
 		{ type: 'post-type', name: 'post' },
+		{ type: 'taxonomy', name: 'category' },
+		{ type: 'user', name: 'administrator' },
 		{ type: 'wp-cli', command: 'wp option list' },
 	],
 });
@@ -71,9 +79,17 @@ assert.deepEqual(manifest.surfaces.map((surface) => surface.id), [
 	'db:wp_posts',
 	'frontend:/',
 	'block:core/paragraph',
+	'crud:wp/v2/posts',
 	'hook:init',
+	'capability:edit_posts',
+	'cron:wp_version_check',
+	'media:attachment:sample-image',
+	'option:blogname',
+	'setting:permalink_structure',
 	'post-type:post',
-	'wp-cli:wp_cli_command-9',
+	'taxonomy:category',
+	'user:administrator',
+	'wp-cli:wp option list',
 ]);
 
 const manifestAggregate = aggregateWordPressFuzzCoverage({
@@ -84,7 +100,7 @@ const manifestAggregate = aggregateWordPressFuzzCoverage({
 	}],
 });
 assert.equal(manifestAggregate.coverage_manifest.schema, 'homeboy/wordpress-fuzz-coverage-manifest/v1');
-assert.equal(manifestAggregate.totals.discovered, 7);
+assert.equal(manifestAggregate.totals.discovered, 15);
 assert.equal(manifestAggregate.totals.exercised, 1);
 assert.equal(manifestAggregate.totals.failed, 1);
 assert.equal(manifestAggregate.coverage_gaps.some((item) => item.id === 'admin:tools.php'), true);

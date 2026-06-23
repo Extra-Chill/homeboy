@@ -25,6 +25,7 @@ const {
 	wpCodeboxWordPressWorkloadRunSchema,
 	normalizeWpCodeboxFuzzRunResult,
 	normalizeWpCodeboxFuzzSuiteResult,
+	detectWpCodeboxPublicFuzzCapabilities,
 	runWpCodeboxFuzzRun,
 	runWpCodeboxFuzzSuite,
 	wpCodeboxFuzzRunInput,
@@ -488,6 +489,53 @@ runWpCodeboxFuzzSuite({
 	return runWpCodeboxFuzzSuite({ taskId: 'suite-run-alias', runFuzzRun: async () => ({ status: 'passed' }) });
 }).then((summary) => {
 	assert.equal(summary.delegated_schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+	return runWpCodeboxFuzzSuite({
+		taskId: 'public-cli-suite-run',
+		input,
+		runPublicCli: ({ args, stdin }) => {
+			if (args.join(' ') === 'codebox run-fuzz-suite --help') {
+				return { status: 0, stdout: 'usage' };
+			}
+			if (args.join(' ') === 'codebox run-wordpress-workload --help') {
+				return { status: 1, stderr: 'unknown command' };
+			}
+			assert.equal(args.join(' '), 'codebox run-fuzz-suite --input=- --format=json');
+			assert.equal(JSON.parse(stdin).schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+			return {
+				status: 0,
+				stdout: JSON.stringify({
+					schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+					status: 'succeeded',
+					summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+					cases: [{ id: 'public-cli-case', status: 'passed' }],
+					artifactRefs: [
+						{ name: 'wp-codebox-fuzz-suite-result', path: 'result.json' },
+						{ name: 'wordpress-fuzz-coverage', path: 'coverage.json' },
+						{ name: 'result-envelope', path: 'envelope.json' },
+						{ name: 'case-log', path: 'cases.jsonl' },
+						{ name: 'replay-data', path: 'replay.json' },
+						{ name: 'coverage-summary', path: 'summary.json' },
+					],
+				}),
+			};
+		},
+	});
+}).then((summary) => {
+	assert.equal(summary.succeeded, true);
+	assert.equal(summary.artifacts.some((artifact) => artifact.name === 'case-log'), true);
+	assert.deepEqual(detectWpCodeboxPublicFuzzCapabilities({ publicCliCapabilities: { commands: { 'run-wordpress-workload': true } } }).commands, {
+		'run-fuzz-suite': false,
+		'run-wordpress-workload': true,
+	});
+	return runWpCodeboxFuzzSuite({
+		taskId: 'public-cli-unsupported-run',
+		input,
+		runPublicCli: () => ({ status: 1, stderr: 'unknown command' }),
+	});
+}).then((summary) => {
+	assert.equal(summary.succeeded, false);
+	assert.equal(summary.failures[0].code, 'wp_codebox_public_fuzz_cli_unsupported');
+	assert.equal(summary.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_artifacts_missing'), false);
 
 	console.log('wp-codebox fuzz-run smoke passed');
 }).catch((error) => {

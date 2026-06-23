@@ -80,6 +80,7 @@ function normalizeCoverageSurfaceValue(surface, type, index) {
 		|| surface.url
 		|| surface.action
 		|| surface.hook
+		|| surface.command
 		|| surface.table
 		|| surface.block
 		|| surface.name
