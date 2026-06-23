@@ -1828,6 +1828,10 @@ fn write_json<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
 }
 
+pub fn controller_record_path(loop_id: &str) -> Result<PathBuf> {
+    controller_path(loop_id)
+}
+
 fn controller_path(loop_id: &str) -> Result<PathBuf> {
     Ok(controllers_root()?
         .join(sanitize_loop_id(loop_id))

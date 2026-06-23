@@ -9,11 +9,13 @@ use super::super::{
 };
 use super::git::{git_snapshot, materialize_git, materialize_git_from_controller_bundle};
 use super::snapshot::{
-    effective_snapshot_excludes, local_snapshot_stats, materialize_snapshot, snapshot_identity,
+    effective_snapshot_excludes, local_snapshot_stats, materialize_snapshot,
+    materialize_snapshot_git, snapshot_identity,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    DEFAULT_EXCLUDES,
 };
 use super::util::{deterministic_remote_path, git_output, validate_absolute_path};
 
@@ -53,7 +55,7 @@ pub fn sync_workspace(
     let excludes = effective_snapshot_excludes(excludes, &includes);
 
     match options.mode {
-        RunnerWorkspaceSyncMode::Snapshot => {
+        RunnerWorkspaceSyncMode::Snapshot | RunnerWorkspaceSyncMode::SnapshotGit => {
             let snapshot = snapshot_identity(&local_path, &excludes, &includes)?;
             let remote_path = temp::unique_name(
                 &deterministic_remote_path(
@@ -65,19 +67,19 @@ pub fn sync_workspace(
                 "",
             );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
-            materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
+            if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
+                materialize_snapshot_git(&runner, &local_path, &remote_path, &excludes, &snapshot)?;
+            } else {
+                materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
+            }
             let validation_dependencies = sync_validation_dependency_workspaces(
                 &runner,
                 &local_path,
                 &remote_path,
                 &excludes,
             )?;
-            let current_workspace = current_workspace_summary(
-                &local_path,
-                &remote_path,
-                RunnerWorkspaceSyncMode::Snapshot,
-                true,
-            );
+            let current_workspace =
+                current_workspace_summary(&local_path, &remote_path, options.mode, true);
             let workspace_lease = workspace_lease(&runner.id, &current_workspace);
             Ok((
                 RunnerWorkspaceSyncOutput {
@@ -88,12 +90,16 @@ pub fn sync_workspace(
                     remote_path,
                     current_workspace,
                     workspace_lease,
-                    sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+                    sync_mode: options.mode,
                     snapshot_identity: snapshot,
                     counts: stats,
                     excludes,
                     includes,
-                    workspace_cleanliness: "snapshot_unique_workspace".to_string(),
+                    workspace_cleanliness: if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
+                        "snapshot_synthetic_git_unique_workspace".to_string()
+                    } else {
+                        "snapshot_unique_workspace".to_string()
+                    },
                     validation_dependencies,
                 },
                 0,

@@ -1,6 +1,7 @@
 //! Split from `agent_task_controller_service` god file (#5208). Structural move only.
 #![allow(unused_imports)]
 use super::*;
+use crate::core::component::{self, TargetSpec};
 use crate::core::plan::PlanStepDependencyKind;
 
 pub(super) const REPO_LOOP_SPEC_METADATA_KEY: &str = "repo_loop_spec";
@@ -647,13 +648,17 @@ pub(super) fn workflow_client_context(
         "artifact_dependencies": workflow_artifact_dependencies(spec, workflow),
         "artifact_graph_edges": workflow_artifact_graph_edges(spec, workflow),
         "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
+        "runtime_component_contracts": workflow_runtime_component_contracts(spec, workflow)?,
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
-        "inputs": workflow_context_inputs(workflow),
+        "inputs": workflow_context_inputs(spec, workflow),
     }))
 }
 
-fn workflow_context_inputs(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
+fn workflow_context_inputs(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Value {
     let mut inputs = match workflow.inputs.clone() {
         Value::Object(map) => map,
         Value::Null => serde_json::Map::new(),
@@ -664,7 +669,9 @@ fn workflow_context_inputs(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
         }
     };
 
-    if let Some(runtime_task) = runtime_task_from_workflow_execution(&workflow.runtime_execution) {
+    if let Some(runtime_task) =
+        runtime_task_from_workflow_execution(spec, &workflow.runtime_execution)
+    {
         inputs
             .entry("runtime_task".to_string())
             .or_insert(runtime_task);
@@ -683,7 +690,10 @@ fn workflow_context_inputs(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
     Value::Object(inputs)
 }
 
-fn runtime_task_from_workflow_execution(runtime_execution: &Value) -> Option<Value> {
+fn runtime_task_from_workflow_execution(
+    spec: &AgentTaskRepoLoopSpec,
+    runtime_execution: &Value,
+) -> Option<Value> {
     let execution = runtime_execution.as_object()?;
     let ability = execution.get("ability")?.as_str()?.trim();
     if ability.is_empty() {
@@ -692,13 +702,12 @@ fn runtime_task_from_workflow_execution(runtime_execution: &Value) -> Option<Val
 
     let mut runtime_task = serde_json::Map::new();
     runtime_task.insert("ability".to_string(), Value::String(ability.to_string()));
-    runtime_task.insert(
-        "input".to_string(),
-        execution
-            .get("input")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
-    );
+    let mut input = execution
+        .get("input")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    apply_runtime_task_dispatch_defaults(spec, &mut input);
+    runtime_task.insert("input".to_string(), input);
     if let Some(kind) = execution
         .get("kind")
         .and_then(Value::as_str)
@@ -707,6 +716,47 @@ fn runtime_task_from_workflow_execution(runtime_execution: &Value) -> Option<Val
         runtime_task.insert("kind".to_string(), Value::String(kind.to_string()));
     }
     Some(Value::Object(runtime_task))
+}
+
+fn apply_runtime_task_dispatch_defaults(spec: &AgentTaskRepoLoopSpec, input: &mut Value) {
+    let Some(input) = input.as_object_mut() else {
+        return;
+    };
+    let Some(defaults) = spec
+        .metadata
+        .get("dispatch_defaults")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+
+    if let Some(model) = defaults
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+    {
+        input
+            .entry("model".to_string())
+            .or_insert_with(|| Value::String(model.to_string()));
+    }
+
+    let Some(provider_config) = defaults
+        .get("provider_config")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+    else {
+        return;
+    };
+    let Some(provider_config) = provider_config.as_object() else {
+        return;
+    };
+    for key in ["provider", "model", "options"] {
+        if let Some(value) = provider_config.get(key).filter(|value| !value.is_null()) {
+            input
+                .entry(key.to_string())
+                .or_insert_with(|| value.clone());
+        }
+    }
 }
 
 pub(super) fn workflow_homeboy_plan(
@@ -802,10 +852,56 @@ pub(super) fn workflow_declaration_context(
         "artifact_dependencies": workflow_artifact_dependencies(spec, workflow),
         "artifact_graph_edges": workflow_artifact_graph_edges(spec, workflow),
         "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
+        "runtime_component_contracts": workflow_runtime_component_contracts(spec, workflow)?,
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
         "inputs": workflow.inputs,
     }))
+}
+
+fn workflow_runtime_component_contracts(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Result<Vec<Value>> {
+    let mut contracts = Vec::new();
+    for dependency in select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| {
+        &dependency.dependency_id
+    }) {
+        if !matches!(
+            dependency.kind.as_str(),
+            "component" | "runtime_component" | "component_contract"
+        ) {
+            continue;
+        }
+        let path = match dependency
+            .value
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(value) => value.to_string(),
+            None => match component::resolve_target(TargetSpec {
+                component_id: Some(&dependency.dependency_id),
+                path_override: None,
+                project: None,
+                capability: None,
+                allow_synthetic: false,
+                accept_bare_directory: false,
+                ..TargetSpec::default()
+            }) {
+                Ok(target) => target.source_path.display().to_string(),
+                Err(error) if dependency.required => return Err(error),
+                Err(_) => continue,
+            },
+        };
+        contracts.push(serde_json::json!({
+            "slug": dependency.dependency_id,
+            "path": path,
+            "required": dependency.required,
+            "source": "repo_loop_spec_dependency",
+            "dependency_kind": dependency.kind,
+        }));
+    }
+    Ok(contracts)
 }
 
 pub(super) fn workflow_required_capabilities(
