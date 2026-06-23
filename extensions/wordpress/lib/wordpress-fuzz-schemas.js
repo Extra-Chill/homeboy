@@ -32,6 +32,14 @@ const BUDGET_METRICS = [
 		valueAliases: ['query_count', 'queryCount'],
 	},
 	{
+		metric: 'query_time_ms',
+		budget: 'max_query_time_ms',
+		code: 'query_time_budget_exceeded',
+		label: 'query time',
+		budgetAliases: ['max_query_time_ms', 'maxQueryTimeMs', 'query_time_ms', 'queryTimeMs'],
+		valueAliases: ['query_time_ms', 'queryTimeMs', 'query_duration_ms', 'queryDurationMs'],
+	},
+	{
 		metric: 'memory_peak_bytes',
 		budget: 'max_memory_peak_bytes',
 		code: 'memory_peak_budget_exceeded',
@@ -46,6 +54,30 @@ const BUDGET_METRICS = [
 		label: 'browser resource count',
 		budgetAliases: ['max_browser_resource_count', 'maxBrowserResourceCount', 'max_resource_count', 'maxResourceCount', 'browser_resource_count', 'browserResourceCount', 'resource_count', 'resourceCount'],
 		valueAliases: ['browser_resource_count', 'browserResourceCount', 'resource_count', 'resourceCount', 'count'],
+	},
+	{
+		metric: 'browser_request_count',
+		budget: 'max_browser_request_count',
+		code: 'browser_request_count_budget_exceeded',
+		label: 'browser request count',
+		budgetAliases: ['max_browser_request_count', 'maxBrowserRequestCount', 'browser_request_count', 'browserRequestCount', 'request_count', 'requestCount'],
+		valueAliases: ['browser_request_count', 'browserRequestCount', 'request_count', 'requestCount'],
+	},
+	{
+		metric: 'browser_failed_request_count',
+		budget: 'max_browser_failed_request_count',
+		code: 'browser_failed_request_count_budget_exceeded',
+		label: 'browser failed request count',
+		budgetAliases: ['max_browser_failed_request_count', 'maxBrowserFailedRequestCount', 'max_failed_request_count', 'maxFailedRequestCount', 'browser_failed_request_count', 'browserFailedRequestCount', 'failed_request_count', 'failedRequestCount'],
+		valueAliases: ['browser_failed_request_count', 'browserFailedRequestCount', 'failed_request_count', 'failedRequestCount'],
+	},
+	{
+		metric: 'browser_network_idle_ms',
+		budget: 'max_browser_network_idle_ms',
+		code: 'browser_network_idle_budget_exceeded',
+		label: 'browser network idle time',
+		budgetAliases: ['max_browser_network_idle_ms', 'maxBrowserNetworkIdleMs', 'browser_network_idle_ms', 'browserNetworkIdleMs', 'network_idle_ms', 'networkIdleMs'],
+		valueAliases: ['browser_network_idle_ms', 'browserNetworkIdleMs', 'network_idle_ms', 'networkIdleMs'],
 	},
 ];
 
@@ -212,6 +244,8 @@ function normalizeFuzzCaseResult(result, index) {
 		duration_ms: Number.isFinite(result.duration_ms) ? result.duration_ms : result.durationMs || null,
 		budget,
 		performance_metrics: metrics,
+		performance_metric_reasons: normalizeMetricReasons(result, metrics),
+		performance_summaries: normalizeCasePerformanceSummaries(result),
 		findings,
 		diagnostics,
 		metadata: { ...(result.metadata || {}) },
@@ -289,9 +323,24 @@ function summarizePerformanceMetrics(cases) {
 	return {
 		request_duration_ms: sumNumbers(cases.map((result) => result.performance_metrics?.request_duration_ms)),
 		query_count: sumNumbers(cases.map((result) => result.performance_metrics?.query_count)),
+		query_time_ms: sumNumbers(cases.map((result) => result.performance_metrics?.query_time_ms)),
 		memory_peak_bytes: maxNumber(cases.map((result) => result.performance_metrics?.memory_peak_bytes)),
 		browser_resource_count: sumNumbers(cases.map((result) => result.performance_metrics?.browser_resource_count)),
+		browser_request_count: sumNumbers(cases.map((result) => result.performance_metrics?.browser_request_count)),
+		browser_failed_request_count: sumNumbers(cases.map((result) => result.performance_metrics?.browser_failed_request_count)),
+		browser_network_idle_ms: maxNumber(cases.map((result) => result.performance_metrics?.browser_network_idle_ms)),
 	};
+}
+
+function summarizePerformanceMetricReasons(cases) {
+	return BUDGET_METRICS.reduce((summary, metric) => {
+		const reasons = cases.map((result) => result.performance_metric_reasons?.[metric.metric]).filter(Boolean);
+		summary[metric.metric] = reasons.reduce((counts, reason) => {
+			counts[reason.status] = (counts[reason.status] || 0) + 1;
+			return counts;
+		}, { observed: 0, missing: 0, unsupported: 0 });
+		return summary;
+	}, {});
 }
 
 function countBudgetFindings(cases) {
@@ -321,16 +370,64 @@ function normalizeCasePerformanceMetrics(result) {
 		result.memory,
 		result.admin_browser || result.adminBrowser,
 		result.browser_metrics || result.browserMetrics,
+		result.network_metrics || result.networkMetrics,
 		(result.admin_browser || result.adminBrowser)?.resources,
+		(result.admin_browser || result.adminBrowser)?.browserMetrics,
+		(result.admin_browser || result.adminBrowser)?.networkMetrics,
 	];
 
-	return BUDGET_METRICS.reduce((metrics, metric) => {
+	const metrics = BUDGET_METRICS.reduce((normalizedMetrics, metric) => {
 		const value = firstNumberFromSources(sources, metric.valueAliases);
 		if (value !== null) {
-			metrics[metric.metric] = value;
+			normalizedMetrics[metric.metric] = value;
 		}
-		return metrics;
+		return normalizedMetrics;
 	}, {});
+	if (metrics.query_time_ms === undefined) {
+		const dbQueryDuration = firstNumber(result.db_query || result.dbQuery, ['duration_ms', 'durationMs']);
+		if (dbQueryDuration !== null) {
+			metrics.query_time_ms = dbQueryDuration;
+		}
+	}
+	return metrics;
+}
+
+function normalizeMetricReasons(result, metrics) {
+	const sources = metricSources(result);
+	return BUDGET_METRICS.reduce((reasons, metric) => {
+		if (Number.isFinite(metrics[metric.metric])) {
+			reasons[metric.metric] = { status: 'observed', reason: 'metric_available' };
+			return reasons;
+		}
+		const unsupported = firstPresentNonNumericFromSources(sources, metric.valueAliases);
+		if (unsupported !== null) {
+			reasons[metric.metric] = { status: 'unsupported', reason: 'metric_value_not_numeric', source_key: unsupported.key };
+			return reasons;
+		}
+		reasons[metric.metric] = { status: 'missing', reason: 'metric_not_provided' };
+		return reasons;
+	}, {});
+}
+
+function normalizeCasePerformanceSummaries(result) {
+	const querySources = [result.db_query || result.dbQuery, result.metrics, result.performance_metrics || result.performanceMetrics, result.metadata?.metrics];
+	const browser = result.admin_browser || result.adminBrowser || {};
+	const browserMetrics = result.browser_metrics || result.browserMetrics || browser.browserMetrics || {};
+	const networkMetrics = result.network_metrics || result.networkMetrics || browser.networkMetrics || {};
+	const summaries = {
+		top_queries: firstArrayFromSources(querySources, ['top_queries', 'topQueries', 'top_query_shapes', 'topQueryShapes']),
+		top_tables: firstArrayFromSources(querySources, ['top_tables', 'topTables', 'table_summaries', 'tableSummaries']),
+	};
+	const browserSummary = pickDefined({
+		resource_count: metricsNumber(browserMetrics.browser_resource_count ?? browserMetrics.browserResourceCount ?? browser.resources?.count ?? browser.resource_count ?? browser.resourceCount),
+		request_count: metricsNumber(browserMetrics.browser_request_count ?? browserMetrics.browserRequestCount ?? networkMetrics.request_count ?? networkMetrics.requestCount),
+		failed_request_count: metricsNumber(browserMetrics.browser_failed_request_count ?? browserMetrics.browserFailedRequestCount ?? browser.failed_request_count ?? browser.failedRequestCount ?? networkMetrics.failed_request_count ?? networkMetrics.failedRequestCount),
+		network_idle_ms: metricsNumber(browserMetrics.browser_network_idle_ms ?? browserMetrics.browserNetworkIdleMs ?? networkMetrics.network_idle_ms ?? networkMetrics.networkIdleMs),
+	});
+	if (Object.keys(browserSummary).length > 0) {
+		summaries.browser_network = browserSummary;
+	}
+	return summaries;
 }
 
 function normalizeBudgetFindings({ budget, metrics, subject }) {
@@ -384,6 +481,60 @@ function firstNumberFromSources(sources, keys) {
 		}
 	}
 	return null;
+}
+
+function metricSources(result) {
+	return [
+		result,
+		result.metrics,
+		result.performance_metrics || result.performanceMetrics,
+		result.metadata?.metrics,
+		result.db_query || result.dbQuery,
+		result.memory,
+		result.admin_browser || result.adminBrowser,
+		result.browser_metrics || result.browserMetrics,
+		result.network_metrics || result.networkMetrics,
+		(result.admin_browser || result.adminBrowser)?.resources,
+		(result.admin_browser || result.adminBrowser)?.browserMetrics,
+		(result.admin_browser || result.adminBrowser)?.networkMetrics,
+	];
+}
+
+function firstPresentNonNumericFromSources(sources, keys) {
+	for (const source of sources) {
+		if (!source || typeof source !== 'object' || Array.isArray(source)) {
+			continue;
+		}
+		for (const key of keys) {
+			if (source[key] !== undefined && source[key] !== null && source[key] !== '' && numberOrNull(source[key]) === null) {
+				return { key, value: source[key] };
+			}
+		}
+	}
+	return null;
+}
+
+function firstArrayFromSources(sources, keys) {
+	for (const source of sources) {
+		if (!source || typeof source !== 'object' || Array.isArray(source)) {
+			continue;
+		}
+		for (const key of keys) {
+			if (Array.isArray(source[key])) {
+				return source[key];
+			}
+		}
+	}
+	return [];
+}
+
+function metricsNumber(value) {
+	const number = numberOrNull(value);
+	return number === null ? undefined : number;
+}
+
+function pickDefined(input) {
+	return Object.fromEntries(Object.entries(input).filter((entry) => entry[1] !== undefined));
 }
 
 function firstNumber(source, keys) {
@@ -441,6 +592,7 @@ function normalizeWordPressFuzzResult(result) {
 		admin_browser_errors: summarizeNestedCases(cases, 'admin_browser'),
 		http_guardrail_outcomes: summarizeNestedCases(cases, 'http_guardrail'),
 		performance_metrics: performanceMetrics,
+		performance_metric_reasons: summarizePerformanceMetricReasons(cases),
 		budget_failure_count: countBudgetFindings(cases) + resultBudgetFindings.length,
 		...(result.summary || {}),
 	};
