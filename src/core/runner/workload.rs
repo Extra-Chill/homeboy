@@ -87,6 +87,20 @@ pub(crate) fn validate_runner_workload_dispatch(
     let Some(workload) = workload else {
         return Ok(());
     };
+    validate_runner_workload_dispatch_identity(workload, runner_id, cwd)?;
+    validate_runner_workload_mutation_policy(workload, capture_patch)?;
+    validate_runner_workload_required_secrets(workload, secret_env_names)?;
+    validate_runner_workload_required_capabilities(workload)?;
+    validate_runner_workload_command_present(command)?;
+    validate_runner_workload_command(workload, command)?;
+    Ok(())
+}
+
+fn validate_runner_workload_dispatch_identity(
+    workload: &RunnerWorkload,
+    runner_id: &str,
+    cwd: Option<&str>,
+) -> Result<()> {
     if workload.schema != RUNNER_WORKLOAD_SCHEMA {
         return Err(workload_error(
             "runner_workload.schema",
@@ -108,12 +122,26 @@ pub(crate) fn validate_runner_workload_dispatch(
             ));
         }
     }
+    Ok(())
+}
+
+fn validate_runner_workload_mutation_policy(
+    workload: &RunnerWorkload,
+    capture_patch: bool,
+) -> Result<()> {
     if workload.mutation_policy.capture_patch != capture_patch {
         return Err(workload_error(
             "runner_workload.mutation_policy.capture_patch",
             "runner workload mutation policy does not match dispatch capture_patch".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_runner_workload_required_secrets(
+    workload: &RunnerWorkload,
+    secret_env_names: &[String],
+) -> Result<()> {
     for category in &workload.required_secrets.categories {
         if !matches!(category.as_str(), "agent_task" | "trace" | "tunnel") {
             return Err(workload_error(
@@ -129,6 +157,10 @@ pub(crate) fn validate_runner_workload_dispatch(
                 .to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_runner_workload_required_capabilities(workload: &RunnerWorkload) -> Result<()> {
     for capability in &workload.required_capabilities {
         match capability.name.as_str() {
             "extension_parity" | "playwright" => {}
@@ -141,13 +173,16 @@ pub(crate) fn validate_runner_workload_dispatch(
             }
         }
     }
+    Ok(())
+}
+
+fn validate_runner_workload_command_present(command: &[String]) -> Result<()> {
     if command.is_empty() {
         return Err(workload_error(
             "runner_workload.command",
             "runner workload dispatch requires a command".to_string(),
         ));
     }
-    validate_runner_workload_command(workload, command)?;
     Ok(())
 }
 
