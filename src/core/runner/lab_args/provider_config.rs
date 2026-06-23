@@ -28,7 +28,7 @@ use super::path_remap::{remap_paths_in_value, LabPathRemap};
 pub(in crate::core::runner) fn remap_provider_config_in_args(
     args: &[String],
     mappings: &[LabPathRemap],
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let envelope = ExecutionEnvelope::from_args(args);
     // NOTE: do not early-return on empty mappings. A `--provider-config @file`
     // (or `-` stdin) spec must always be inlined to JSON before offload, because
@@ -47,7 +47,7 @@ pub(in crate::core::runner) fn remap_provider_config_in_args(
         )
     });
 
-    envelope.rewrite_provider_config_values(|spec| remap_provider_config_spec(spec, &ordered))
+    envelope.try_rewrite_provider_config_values(|spec| remap_provider_config_spec(spec, &ordered))
 }
 
 pub(in crate::core::runner) fn inject_agent_task_default_provider_config_in_args(
@@ -113,9 +113,10 @@ fn is_agent_task_dispatch_or_cook(args: &[String]) -> bool {
 /// mappings to apply; otherwise it is returned verbatim so behavior is never
 /// worse than passing the original argument through.
 ///
-/// If a `@file`/`-` spec cannot be read or parsed, the original spec is returned
-/// (the remote read will then surface the original, actionable error).
-fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
+/// If a `@file`/`-` spec cannot be read or parsed, Lab offload fails locally with
+/// an actionable validation error instead of forwarding a controller-local spec
+/// to the remote runner.
+fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> Result<String> {
     let needs_inlining = is_provider_config_file_spec(spec);
 
     // Even with no mappings, an inline-JSON spec may carry stale controller-local
@@ -124,20 +125,41 @@ fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> String 
     // verbatim and breaks remote recipe validation, so we cannot early-return
     // here just because there is nothing to remap.
     if !needs_inlining && mappings.is_empty() && !spec_has_provider_plugin_paths(spec) {
-        return spec.to_string();
+        return Ok(spec.to_string());
     }
 
     let raw = match read_json_spec_to_string(spec) {
         Ok(raw) => raw,
-        Err(_) => return spec.to_string(),
+        Err(err) if needs_inlining => {
+            return Err(Error::validation_invalid_argument(
+                "provider-config",
+                "failed to read Lab offload --provider-config @file/- input",
+                Some(err.to_string()),
+                None,
+            )
+            .with_hint(
+                "Lab offload reads --provider-config @file/- specs on the controller before dispatch; provide a readable JSON file or inline JSON.",
+            ));
+        }
+        Err(_) => return Ok(spec.to_string()),
     };
     let mut value: Value = match serde_json::from_str(&raw) {
         Ok(value) => value,
-        Err(_) => return spec.to_string(),
+        Err(err) if needs_inlining => {
+            return Err(Error::validation_invalid_json(
+                err,
+                Some("parse Lab offload --provider-config @file/- input".to_string()),
+                Some(raw),
+            )
+            .with_hint(
+                "Lab offload inlines --provider-config @file/- specs before dispatch; fix the JSON or pass valid inline JSON.",
+            ));
+        }
+        Err(_) => return Ok(spec.to_string()),
     };
     remap_paths_in_value(&mut value, mappings);
     prune_unresolved_provider_plugin_paths(&mut value, mappings);
-    serde_json::to_string(&value).unwrap_or_else(|_| spec.to_string())
+    Ok(serde_json::to_string(&value).unwrap_or_else(|_| spec.to_string()))
 }
 
 /// Cheap pre-check so a plain inline-JSON spec with no mappings is only fully

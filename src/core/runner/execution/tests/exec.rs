@@ -1,0 +1,534 @@
+use super::*;
+use serde_json::json;
+
+#[test]
+fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs_local() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let secret_file = temp.path().join("runner-secret");
+        std::fs::write(&secret_file, "dummy-runner-secret\n").expect("secret file");
+        crate::core::agent_task_secrets::set_config_secret(
+            "HOMEBOY_CONTROLLER_SECRET_TEST_KEY",
+            "dummy-controller-secret",
+        )
+        .expect("configure controller secret");
+
+        let mut controller_runner = ssh_runner();
+        controller_runner.workspace_root = Some(workspace.display().to_string());
+        controller_runner.secret_env.insert(
+            "CONTROLLER_API_KEY".to_string(),
+            RunnerSecretEnvRef {
+                env: None,
+                file: None,
+                secret: Some("HOMEBOY_CONTROLLER_SECRET_TEST_KEY".to_string()),
+            },
+        );
+        controller_runner.secret_env.insert(
+            "RUNNER_API_KEY".to_string(),
+            RunnerSecretEnvRef {
+                env: None,
+                file: Some(secret_file.display().to_string()),
+                secret: None,
+            },
+        );
+
+        let controller_plan = prepare_runner_process(RunnerProcessRequest {
+            runner_id: "lab".to_string(),
+            runner: Some(controller_runner),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec!["true".to_string()],
+            env: Default::default(),
+            secret_env_names: vec![
+                "CONTROLLER_API_KEY".to_string(),
+                "RUNNER_API_KEY".to_string(),
+            ],
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: Some(SourceSnapshot::existing_remote(
+                "lab",
+                &workspace.display().to_string(),
+                Some(&workspace.display().to_string()),
+            )),
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect("controller prep forwards configured secret refs for SSH runner");
+
+        assert_eq!(
+            controller_plan
+                .env
+                .get("CONTROLLER_API_KEY")
+                .map(String::as_str),
+            Some("dummy-controller-secret")
+        );
+        assert!(!controller_plan.env.contains_key("RUNNER_API_KEY"));
+
+        let mut daemon_runner = ssh_runner();
+        daemon_runner.workspace_root = Some(workspace.display().to_string());
+        daemon_runner.secret_env.insert(
+            "RUNNER_API_KEY".to_string(),
+            RunnerSecretEnvRef {
+                env: None,
+                file: Some(secret_file.display().to_string()),
+                secret: None,
+            },
+        );
+
+        let daemon_plan = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "lab".to_string(),
+            runner: Some(daemon_runner),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec![
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "compare".to_string(),
+                "demo".to_string(),
+                "scenario".to_string(),
+                "--secret-env=RUNNER_API_KEY".to_string(),
+            ],
+            env: Default::default(),
+            secret_env_names: vec!["RUNNER_API_KEY".to_string()],
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: Some(SourceSnapshot::existing_remote(
+                "lab",
+                &workspace.display().to_string(),
+                Some(&workspace.display().to_string()),
+            )),
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: true,
+        })
+        .expect("daemon prep resolves secret refs on runner side");
+
+        assert_eq!(
+            daemon_plan.env.get("RUNNER_API_KEY").map(String::as_str),
+            Some("dummy-runner-secret")
+        );
+    });
+}
+
+#[test]
+fn daemon_read_only_runner_exec_ignores_unrelated_missing_secret_env_refs() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let mut runner = ssh_runner();
+        runner.workspace_root = Some(workspace.display().to_string());
+        runner.secret_env.insert(
+            "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
+            RunnerSecretEnvRef {
+                env: Some("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()),
+                file: None,
+                secret: None,
+            },
+        );
+        std::env::remove_var("HOMEBOY_PREVIEW_TUNNEL_TOKEN");
+
+        let plan = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "lab".to_string(),
+            runner: Some(runner),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec![
+                "/bin/ps".to_string(),
+                "-eo".to_string(),
+                "pid,ppid,etime,stat,pcpu,pmem,cmd".to_string(),
+            ],
+            env: Default::default(),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: true,
+            source_snapshot: Some(SourceSnapshot::existing_remote(
+                "lab",
+                &workspace.display().to_string(),
+                Some(&workspace.display().to_string()),
+            )),
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: true,
+        })
+        .expect("read-only runner exec ignores unrelated optional secret refs");
+
+        assert!(!plan.env.contains_key("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
+    });
+}
+
+#[test]
+fn daemon_runner_exec_requires_declared_missing_secret_env_refs() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::env::remove_var("HOMEBOY_REQUIRED_SECRET_TEST_KEY");
+
+        let mut runner = ssh_runner();
+        runner.workspace_root = Some(workspace.display().to_string());
+        runner.secret_env.insert(
+            "HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string(),
+            RunnerSecretEnvRef {
+                env: Some("HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string()),
+                file: None,
+                secret: None,
+            },
+        );
+
+        let err = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "lab".to_string(),
+            runner: Some(runner),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec![
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "compare".to_string(),
+                "demo".to_string(),
+                "scenario".to_string(),
+                "--secret-env=HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string(),
+            ],
+            env: Default::default(),
+            secret_env_names: vec!["HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string()],
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: Some(SourceSnapshot::existing_remote(
+                "lab",
+                &workspace.display().to_string(),
+                Some(&workspace.display().to_string()),
+            )),
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: true,
+        })
+        .expect_err("declared missing command secret should fail validation");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert_eq!(err.details["field"], "secret_env");
+        assert!(err.message.contains("HOMEBOY_REQUIRED_SECRET_TEST_KEY"));
+    });
+}
+
+#[test]
+fn runner_exec_secret_env_names_include_tunnel_preview_client_token() {
+    let names = runner_exec_secret_env_names(
+        &[
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "preview-client".to_string(),
+            "start".to_string(),
+            "--ingress".to_string(),
+            "https://preview-broker.example.test".to_string(),
+            "--public-host".to_string(),
+            "preview.example.test".to_string(),
+            "--local-origin".to_string(),
+            "http://127.0.0.1:8888".to_string(),
+        ],
+        None,
+        &[],
+    );
+
+    assert_eq!(names, vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]);
+}
+
+#[test]
+fn test_exec_runs_local_runner_command() {
+    crate::test_support::with_isolated_home(|_| {
+        super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+            .expect("create local runner");
+
+        let (output, exit_code) = exec(
+            "lab-local",
+            RunnerExecOptions {
+                cwd: None,
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: Vec::new(),
+                runner_workload: None,
+                detach_after_handoff: false,
+            },
+        )
+        .expect("exec local runner");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.runner_id, "lab-local");
+        assert_eq!(output.mode, RunnerExecMode::Local);
+        assert_eq!(output.stdout, "ok");
+        let metrics = output.metrics.expect("local exec metrics");
+        assert!(metrics.duration_ms < 60_000);
+        if cfg!(target_os = "linux") {
+            assert_eq!(metrics.source, "linux_procfs_process_tree");
+            if metrics.sample_count > 0 {
+                assert!(metrics.peak_rss_bytes.is_some());
+                assert!(metrics.child_process_count_peak.is_some());
+            }
+        } else {
+            assert_eq!(metrics.source, "duration_only");
+            assert_eq!(metrics.sample_count, 0);
+        }
+        let source_snapshot = output.source_snapshot.expect("source snapshot");
+        assert_eq!(source_snapshot.runner_id, "lab-local");
+        assert_eq!(source_snapshot.sync_mode, "existing_remote");
+        assert!(source_snapshot.snapshot_hash.starts_with("sha256:"));
+        assert!(output.job_id.is_none());
+    });
+}
+
+#[test]
+fn test_exec_does_not_leak_ambient_process_env() {
+    crate::test_support::with_isolated_home(|_| {
+        let _guard = EnvVarGuard::set("HOMEBOY_TEST_AMBIENT_ONLY", "leaked");
+        super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+            .expect("create local runner");
+
+        let (output, exit_code) = exec(
+            "lab-local",
+            RunnerExecOptions {
+                cwd: None,
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "test -z \"${HOMEBOY_TEST_AMBIENT_ONLY+x}\" && printf isolated".to_string(),
+                ],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: Vec::new(),
+                runner_workload: None,
+                detach_after_handoff: false,
+            },
+        )
+        .expect("exec local runner");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.stdout, "isolated");
+    });
+}
+
+#[test]
+fn test_exec_preserves_explicit_request_env() {
+    crate::test_support::with_isolated_home(|_| {
+        super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+            .expect("create local runner");
+
+        let (output, exit_code) = exec(
+            "lab-local",
+            RunnerExecOptions {
+                cwd: None,
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf %s \"$HOMEBOY_TEST_EXPLICIT\"".to_string(),
+                ],
+                env: HashMap::from([("HOMEBOY_TEST_EXPLICIT".to_string(), "planned".to_string())]),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: Vec::new(),
+                runner_workload: None,
+                detach_after_handoff: false,
+            },
+        )
+        .expect("exec local runner");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.stdout, "planned");
+    });
+}
+
+#[test]
+fn test_exec_rejects_missing_required_local_runner_path() {
+    crate::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        super::super::super::create(
+            &format!(
+                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                workspace.path().display()
+            ),
+            false,
+        )
+        .expect("create local runner");
+        let missing = workspace.path().join("missing-worktree");
+
+        let err = exec(
+            "lab-local",
+            RunnerExecOptions {
+                cwd: None,
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf nope".to_string(),
+                ],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: vec![missing.display().to_string()],
+                runner_workload: None,
+                detach_after_handoff: false,
+            },
+        )
+        .expect_err("missing required path rejects before command");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert_eq!(err.details["field"], "require_path");
+        assert!(err.message.contains("required runner path"));
+        assert!(err.details["tried"].to_string().contains("_lab_workspaces"));
+    });
+}
+
+#[test]
+fn test_exec_reports_required_path_diagnostics() {
+    crate::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let required_path = workspace.path().join("project");
+        std::fs::create_dir(&required_path).expect("required path");
+        super::super::super::create(
+            &format!(
+                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                workspace.path().display()
+            ),
+            false,
+        )
+        .expect("create local runner");
+
+        let (output, exit_code) = exec(
+            "lab-local",
+            RunnerExecOptions {
+                cwd: None,
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: vec![required_path.display().to_string()],
+                runner_workload: None,
+                detach_after_handoff: false,
+            },
+        )
+        .expect("exec with required path");
+
+        assert_eq!(exit_code, 0);
+        let diagnostics = output.diagnostics.expect("diagnostics");
+        assert_eq!(
+            diagnostics.runner_workspace_root,
+            Some(workspace.path().display().to_string())
+        );
+        assert_eq!(
+            diagnostics.required_paths,
+            vec![required_path.display().to_string()]
+        );
+        assert!(diagnostics.source_snapshot_remote_path.is_some());
+        assert!(diagnostics
+            .hints
+            .iter()
+            .any(|hint| hint.contains("_lab_workspaces")));
+    });
+}
+
+#[test]
+fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
+    crate::test_support::with_isolated_home(|_| {
+        server::create(
+            r#"{"id":"lab-server","host":"192.168.86.63","user":"user"}"#,
+            false,
+        )
+        .expect("create server");
+
+        super::super::super::create(
+            r#"{"id":"lab-server","kind":"ssh","server_id":"lab-server","workspace_root":"/srv/homeboy"}"#,
+            false,
+        )
+        .expect("create ssh runner");
+
+        let err = exec(
+            "lab-server",
+            RunnerExecOptions {
+                cwd: Some("/srv/homeboy/project".to_string()),
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec!["homeboy".to_string(), "test".to_string()],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: Vec::new(),
+                runner_workload: None,
+                detach_after_handoff: false,
+            },
+        )
+        .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("connected to a daemon"));
+        let tried = err.details["tried"].as_array().expect("tried details");
+        assert!(tried.iter().any(|detail| detail
+            .as_str()
+            .is_some_and(|detail| detail.contains("job metadata"))));
+    });
+}
+
+#[test]
+fn test_diagnostic_ssh_mode_serializes_as_diagnostic_ssh() {
+    assert_eq!(
+        serde_json::to_value(RunnerExecMode::DiagnosticSsh).expect("mode json"),
+        json!("diagnostic_ssh")
+    );
+}
+
+#[test]
+fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
+    let mut options = RunnerExecOptions {
+        cwd: Some("/srv/homeboy/project".to_string()),
+        project_id: None,
+        allow_diagnostic_ssh: true,
+        command: vec!["homeboy".to_string(), "--version".to_string()],
+        env: Default::default(),
+        secret_env_names: Vec::new(),
+        capture_patch: false,
+        raw_exec: true,
+        source_snapshot: None,
+        capability_preflight: None,
+        required_extensions: Vec::new(),
+        require_paths: Vec::new(),
+        runner_workload: None,
+        detach_after_handoff: false,
+    };
+
+    assert!(should_force_diagnostic_ssh(&ssh_runner(), &options));
+    options.allow_diagnostic_ssh = false;
+    assert!(!should_force_diagnostic_ssh(&ssh_runner(), &options));
+}

@@ -5,7 +5,7 @@ use homeboy::core::component;
 use homeboy::core::deploy::{self, ReleaseStateStatus};
 use homeboy::core::release::{
     self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan,
-    ReleasePhase, ReleasePipelineOptions,
+    ReleasePackageResult, ReleasePhase, ReleasePipelineOptions,
 };
 use homeboy::core::scope::{self, Scope};
 
@@ -62,6 +62,15 @@ pub struct ReleaseArgs {
     /// Requires --head.
     #[arg(long, value_name = "DIR")]
     from_artifacts: Option<String>,
+
+    /// Regenerate only the release package for an existing tag at HEAD.
+    /// Writes copied artifacts and manifest under Homeboy's artifact root.
+    #[arg(long)]
+    package_only: bool,
+
+    /// Existing release tag to package with --package-only.
+    #[arg(long, value_name = "TAG")]
+    tag: Option<String>,
 
     /// Skip pre-release quality checks.
     ///
@@ -124,10 +133,18 @@ pub struct BatchReleaseOutput {
 }
 
 #[derive(Serialize)]
+#[serde(tag = "command", rename = "release.package")]
+pub struct ReleasePackageOutput {
+    pub variant: &'static str,
+    pub result: ReleasePackageResult,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum ReleaseCommandOutput {
     Single(ReleaseOutput),
     Batch(BatchReleaseOutput),
+    Package(ReleasePackageOutput),
 }
 
 impl ReleaseArgs {
@@ -158,6 +175,7 @@ impl ReleaseArgs {
             (self.recover, "--recover"),
             (self.retag, "--retag"),
             (self.head, "--head"),
+            (self.package_only, "--package-only"),
             (skip_checks, "bare --skip-checks"),
         ]
         .into_iter()
@@ -246,6 +264,8 @@ impl ReleaseArgs {
             retag: false,
             head,
             from_artifacts,
+            package_only: false,
+            tag: None,
             skip_checks: if skip_checks { Some(Vec::new()) } else { None },
             skip_build_validation: false,
             bump,
@@ -266,6 +286,10 @@ pub fn run(
     validate_apply_boundary(&execution)?;
     let component_ids = resolve_component_ids(&args, &args.components)?;
     let bump_override = args.bump.clone();
+
+    if args.package_only {
+        return run_package_only(args, &component_ids);
+    }
 
     // Single component: use the original single-release flow
     if component_ids.len() == 1 {
@@ -371,6 +395,84 @@ pub fn run(
             result: batch_result,
         }),
         exit_code,
+    ))
+}
+
+fn run_package_only(
+    args: ReleaseArgs,
+    component_ids: &[String],
+) -> CmdResult<ReleaseCommandOutput> {
+    if component_ids.len() != 1 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "components",
+            "--package-only supports exactly one component",
+            None,
+            Some(vec![
+                "Run package recovery once per component: homeboy release <component-id> --package-only --tag <tag> --apply".to_string(),
+            ]),
+        ));
+    }
+    if args.project.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "project",
+            "--package-only does not support --project",
+            args.project.clone(),
+            None,
+        ));
+    }
+    if args.recover || args.retag || args.head || args.deploy || args.skip_publish {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "package-only",
+            "--package-only cannot be combined with release execution modes such as --recover, --retag, --head, --deploy, or --skip-publish",
+            None,
+            None,
+        ));
+    }
+    if args.from_artifacts.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "from-artifacts",
+            "--from-artifacts is for --head publish recovery; --package-only regenerates artifacts instead",
+            args.from_artifacts.clone(),
+            None,
+        ));
+    }
+    if args.dry_run_args.dry_run {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "dry-run",
+            "--package-only writes release artifacts and does not support --dry-run",
+            None,
+            Some(vec![
+                "Use a temporary artifact root to inspect output: homeboy --artifact-root <dir> release <component-id> --package-only --tag <tag> --apply".to_string(),
+            ]),
+        ));
+    }
+    if args.bump.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "bump",
+            "--package-only packages an existing tag and cannot be combined with --bump",
+            args.bump.clone(),
+            None,
+        ));
+    }
+    let tag = args.tag.clone().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--tag <existing-release-tag>".to_string()
+        ])
+    })?;
+
+    let result = release::package_existing_tag(
+        &component_ids[0],
+        args.path.clone(),
+        &tag,
+        args.skip_build_validation,
+    )?;
+
+    Ok((
+        ReleaseCommandOutput::Package(ReleasePackageOutput {
+            variant: "package",
+            result,
+        }),
+        0,
     ))
 }
 
@@ -538,6 +640,8 @@ mod tests {
             retag: false,
             head: false,
             from_artifacts: None,
+            package_only: false,
+            tag: None,
             skip_checks: skip_checks
                 .map(|values| values.iter().map(|value| value.to_string()).collect()),
             skip_build_validation: false,
@@ -595,6 +699,55 @@ mod tests {
         assert!(err
             .message
             .contains("Real releases with --head require explicit --apply"));
+    }
+
+    #[test]
+    fn package_only_real_release_requires_apply() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.package_only = true;
+        args.tag = Some("v1.2.3".to_string());
+
+        let execution = args.execution_plan(false);
+        let err = validate_apply_boundary(&execution).expect_err("--package-only requires --apply");
+
+        assert!(err
+            .message
+            .contains("Real releases with --package-only require explicit --apply"));
+    }
+
+    #[test]
+    fn package_only_requires_tag() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.package_only = true;
+        args.apply = true;
+
+        let err = match run_package_only(args, &["fixture".to_string()]) {
+            Ok(_) => panic!("package-only requires an explicit tag"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code.as_str(), "validation.missing_argument");
+        assert_eq!(err.details["args"][0], "--tag <existing-release-tag>");
+    }
+
+    #[test]
+    fn package_only_rejects_publish_modes() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.package_only = true;
+        args.apply = true;
+        args.head = true;
+        args.tag = Some("v1.2.3".to_string());
+
+        let err = match run_package_only(args, &["fixture".to_string()]) {
+            Ok(_) => panic!("package-only is mutually exclusive with --head"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("--package-only cannot be combined"));
     }
 
     #[test]

@@ -198,6 +198,14 @@ pub fn command_probe_succeeds(mut command: Command) -> bool {
 }
 
 pub fn github_cli_env(host: &str, config: &GithubConfig) -> Vec<(String, String)> {
+    github_cli_env_with_inherited(host, config, |key| std::env::var(key).ok())
+}
+
+fn github_cli_env_with_inherited(
+    host: &str,
+    config: &GithubConfig,
+    inherited_env: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
     let mut env = Vec::new();
     if host != "github.com" {
         env.push(("GH_HOST".to_string(), host.to_string()));
@@ -206,10 +214,31 @@ pub fn github_cli_env(host: &str, config: &GithubConfig) -> Vec<(String, String)
     let host_config = config.hosts.get(host);
     if let Some(proxy) = host_config
         .and_then(|host_config| host_config.proxy.clone())
-        .or_else(|| inherited_enterprise_https_proxy(host))
+        .or_else(|| inherited_enterprise_https_proxy(host, &inherited_env))
         .filter(|proxy| !proxy.is_empty())
     {
         env.push(("HTTPS_PROXY".to_string(), proxy));
+    }
+
+    if host != "github.com" {
+        for key in [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            if env.iter().any(|(existing, _)| existing == key) {
+                continue;
+            }
+            if let Some(value) = inherited_env(key)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                env.push((key.to_string(), value));
+            }
+        }
     }
 
     let Some(host_config) = host_config else {
@@ -226,14 +255,16 @@ pub fn github_cli_env(host: &str, config: &GithubConfig) -> Vec<(String, String)
     env
 }
 
-fn inherited_enterprise_https_proxy(host: &str) -> Option<String> {
+fn inherited_enterprise_https_proxy(
+    host: &str,
+    inherited_env: &impl Fn(&str) -> Option<String>,
+) -> Option<String> {
     if host == "github.com" {
         return None;
     }
 
-    std::env::var("HTTPS_PROXY")
-        .or_else(|_| std::env::var("https_proxy"))
-        .ok()
+    inherited_env("HTTPS_PROXY")
+        .or_else(|| inherited_env("https_proxy"))
         .map(|proxy| proxy.trim().to_string())
         .filter(|proxy| !proxy.is_empty())
 }
@@ -244,7 +275,10 @@ mod tests {
 
     use crate::core::component::{GithubConfig, GithubHostConfig};
 
-    use super::{delete_branch_ref_api_args, github_cli_env, pr_merge_api_args, GhClient};
+    use super::{
+        delete_branch_ref_api_args, github_cli_env, github_cli_env_with_inherited,
+        pr_merge_api_args, GhClient,
+    };
 
     #[test]
     fn repo_arg_accepts_host_qualified_repo() {
@@ -277,12 +311,91 @@ mod tests {
 
     #[test]
     fn github_cli_env_sets_enterprise_host_without_implicit_proxy() {
-        let env = github_cli_env("github.enterprise.test", &GithubConfig::default());
+        let env = github_cli_env_with_inherited(
+            "github.enterprise.test",
+            &GithubConfig::default(),
+            |_| None,
+        );
 
         assert_eq!(
             env,
             vec![("GH_HOST".to_string(), "github.enterprise.test".to_string())]
         );
+    }
+
+    #[test]
+    fn github_cli_env_inherits_enterprise_proxy_context() {
+        let inherited = HashMap::from([
+            (
+                "HTTP_PROXY".to_string(),
+                "http://proxy.example.test:8080".to_string(),
+            ),
+            (
+                "ALL_PROXY".to_string(),
+                "socks5://127.0.0.1:8080".to_string(),
+            ),
+        ]);
+
+        let env = github_cli_env_with_inherited(
+            "github.enterprise.test",
+            &GithubConfig::default(),
+            |key| inherited.get(key).cloned(),
+        );
+
+        assert_eq!(
+            env,
+            vec![
+                ("GH_HOST".to_string(), "github.enterprise.test".to_string()),
+                (
+                    "HTTP_PROXY".to_string(),
+                    "http://proxy.example.test:8080".to_string()
+                ),
+                (
+                    "ALL_PROXY".to_string(),
+                    "socks5://127.0.0.1:8080".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn github_cli_env_keeps_configured_proxy_ahead_of_inherited_context() {
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            "github.enterprise.test".to_string(),
+            GithubHostConfig {
+                proxy: Some("https://configured-proxy.example.test:8443".to_string()),
+                env: HashMap::new(),
+            },
+        );
+        let config = GithubConfig { hosts };
+        let inherited = HashMap::from([
+            (
+                "HTTPS_PROXY".to_string(),
+                "https://inherited-proxy.example.test:9443".to_string(),
+            ),
+            (
+                "HTTP_PROXY".to_string(),
+                "http://proxy.example.test:8080".to_string(),
+            ),
+        ]);
+
+        let env = github_cli_env_with_inherited("github.enterprise.test", &config, |key| {
+            inherited.get(key).cloned()
+        });
+
+        assert!(env.contains(&(
+            "HTTPS_PROXY".to_string(),
+            "https://configured-proxy.example.test:8443".to_string()
+        )));
+        assert!(env.contains(&(
+            "HTTP_PROXY".to_string(),
+            "http://proxy.example.test:8080".to_string()
+        )));
+        assert!(!env.contains(&(
+            "HTTPS_PROXY".to_string(),
+            "https://inherited-proxy.example.test:9443".to_string()
+        )));
     }
 
     #[test]

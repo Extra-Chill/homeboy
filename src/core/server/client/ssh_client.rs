@@ -295,6 +295,66 @@ impl SshClient {
         self.execute_with_stdin(&remote_command, Some(local_path))
     }
 
+    pub fn download_file(&self, remote_path: &str, local_path: &str) -> CommandOutput {
+        if self.is_local {
+            return match std::fs::copy(remote_path, local_path) {
+                Ok(_) => CommandOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    success: true,
+                    exit_code: 0,
+                    child_resource: None,
+                },
+                Err(err) => CommandOutput {
+                    stdout: String::new(),
+                    stderr: format!(
+                        "failed to copy local file '{}' to '{}': {}",
+                        remote_path, local_path, err
+                    ),
+                    success: false,
+                    exit_code: -1,
+                    child_resource: None,
+                },
+            };
+        }
+
+        let local_file = match std::fs::File::create(local_path) {
+            Ok(file) => file,
+            Err(err) => {
+                return CommandOutput {
+                    stdout: String::new(),
+                    stderr: format!("failed to create download target '{}': {}", local_path, err),
+                    success: false,
+                    exit_code: -1,
+                    child_resource: None,
+                };
+            }
+        };
+        let remote_command = self.prepend_env(&format!("cat {}", shell::quote_path(remote_path)));
+        let args = self.build_ssh_args(Some(&remote_command), false);
+        let output = Command::new("ssh")
+            .args(&args)
+            .stdout(Stdio::from(local_file))
+            .stderr(Stdio::piped())
+            .output();
+        match output {
+            Ok(out) => CommandOutput {
+                stdout: String::new(),
+                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+                success: out.status.success(),
+                exit_code: out.status.code().unwrap_or(-1),
+                child_resource: None,
+            },
+            Err(err) => CommandOutput {
+                stdout: String::new(),
+                stderr: format!("SSH download error: {}", err),
+                success: false,
+                exit_code: -1,
+                child_resource: None,
+            },
+        }
+    }
+
     fn execute_with_stdin(&self, command: &str, stdin_file: Option<&str>) -> CommandOutput {
         self.execute_with_retry(command, stdin_file, 3)
     }

@@ -57,6 +57,7 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
     args: &[String],
     remote_path: &str,
     mappings: &[LabPathRemap],
+    remote_output_file: Option<&str>,
 ) -> Vec<String> {
     let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
     ordered.sort_by_key(|mapping| {
@@ -114,11 +115,25 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
         if arg == "--lab-only" || arg == "--no-local-execution" {
             continue;
         }
-        if arg == "--output" || arg == "--artifact-root" {
+        if arg == "--output" {
+            let _ = iter.next();
+            if let Some(path) = remote_output_file {
+                stripped.push(arg.clone());
+                stripped.push(path.to_string());
+            }
+            continue;
+        }
+        if arg.starts_with("--output=") {
+            if let Some(path) = remote_output_file {
+                stripped.push(format!("--output={path}"));
+            }
+            continue;
+        }
+        if arg == "--artifact-root" {
             let _ = iter.next();
             continue;
         }
-        if arg.starts_with("--output=") || arg.starts_with("--artifact-root=") {
+        if arg.starts_with("--artifact-root=") {
             continue;
         }
         stripped.push(remap_lab_offload_arg(arg, &ordered));
@@ -152,6 +167,7 @@ fn remap_lab_offload_arg(arg: &str, mappings: &[&LabPathRemap]) -> String {
 
 pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(
     args: &[String],
+    remote_output_file: Option<&str>,
 ) -> Vec<String> {
     // A runner-side `tunnel service expose` should not require a separate
     // server declaration for the selected runner: in that context the runner
@@ -186,11 +202,25 @@ pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(
         if arg == "--lab-only" || arg == "--no-local-execution" {
             continue;
         }
-        if arg == "--output" || arg == "--artifact-root" {
+        if arg == "--output" {
+            let _ = iter.next();
+            if let Some(path) = remote_output_file {
+                stripped.push(arg.clone());
+                stripped.push(path.to_string());
+            }
+            continue;
+        }
+        if arg.starts_with("--output=") {
+            if let Some(path) = remote_output_file {
+                stripped.push(format!("--output={path}"));
+            }
+            continue;
+        }
+        if arg == "--artifact-root" {
             let _ = iter.next();
             continue;
         }
-        if arg.starts_with("--output=") || arg.starts_with("--artifact-root=") {
+        if arg.starts_with("--artifact-root=") {
             continue;
         }
         if is_service_expose && arg == "--server" {

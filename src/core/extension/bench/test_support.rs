@@ -65,7 +65,3 @@ pub(crate) fn results_with_scenarios(
         metric_policy_presets: BTreeMap::new(),
     }
 }
-
-#[cfg(test)]
-#[path = "../../../../tests/core/extension/bench/test_support_test.rs"]
-mod test_support_test;

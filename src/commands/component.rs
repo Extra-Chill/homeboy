@@ -159,16 +159,6 @@ enum ComponentCommand {
         #[arg(long)]
         skip_dependencies: bool,
     },
-    /// Add a version target to a component
-    #[command(hide = true)]
-    AddVersionTarget {
-        /// Component ID
-        id: String,
-        /// Target file path relative to component root
-        file: String,
-        /// Regex pattern with capture group for version
-        pattern: String,
-    },
     /// Inspect and optionally repair stale standalone registry local_path data
     Reconcile {
         /// Component ID
@@ -374,17 +364,6 @@ pub fn run(
             path.as_deref(),
             source.as_deref(),
             skip_dependencies,
-        ),
-        ComponentCommand::AddVersionTarget { id, file, pattern } => Err(
-            homeboy::core::Error::validation_invalid_argument(
-                "component.add-version-target",
-                "`homeboy component add-version-target` is deprecated; use `homeboy component set --version-target`",
-                None,
-                Some(vec![format!(
-                    "Use: homeboy component set {} --version-target '{}::{}'",
-                    id, file, pattern
-                )]),
-            ),
         ),
         ComponentCommand::Reconcile { id, apply } => reconcile(&id, apply),
         ComponentCommand::Artifacts { id, path, apply } => {

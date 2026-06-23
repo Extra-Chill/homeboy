@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::bundle::{export_runs, import_runs, RunsExportArgs, RunsImportArgs};
+use super::dead_owned_run;
 
 struct XdgGuard(Option<String>);
 
@@ -188,23 +189,6 @@ fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> 
         .rig_id(rig_id)
         .metadata(metadata)
         .build()
-}
-
-fn dead_owned_run(id: &str) -> RunRecord {
-    RunRecord {
-        id: id.to_string(),
-        kind: "bench".to_string(),
-        component_id: Some("homeboy".to_string()),
-        started_at: "2026-05-02T16:46:46Z".to_string(),
-        finished_at: None,
-        status: "running".to_string(),
-        command: Some("homeboy bench".to_string()),
-        cwd: Some("/tmp/homeboy-fixture".to_string()),
-        homeboy_version: Some("test-version".to_string()),
-        git_sha: Some("abc123".to_string()),
-        rig_id: Some("studio".to_string()),
-        metadata_json: serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
-    }
 }
 
 fn read_bundle_test_json<T: for<'de> Deserialize<'de>>(path: &Path) -> T {

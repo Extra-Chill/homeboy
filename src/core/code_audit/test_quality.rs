@@ -679,7 +679,7 @@ fn test_evaluate_file_exists() {
     #[test]
     fn keeps_module_import_product_calls() {
         let findings = detect_vacuous_tests(
-            "tests/core/deps_test.rs",
+            "tests/deps_test.rs",
             r#"
 use homeboy::core::deps::{self, ComposerAction};
 

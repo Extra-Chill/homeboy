@@ -5,7 +5,7 @@
 //! rewrite helpers can consume the typed refs one path at a time while preserving
 //! the exact argv output they already produced.
 
-use super::path_remap::{rewrite_flag_value_args, try_rewrite_flag_value_args};
+use super::path_remap::try_rewrite_flag_value_args;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::core::runner) struct ExecutionEnvelope {
@@ -85,23 +85,24 @@ impl ExecutionEnvelope {
         }
     }
 
-    pub fn rewrite_provider_config_values(
+    pub fn try_rewrite_provider_config_values(
         &self,
-        mut rewrite: impl FnMut(&str) -> String,
-    ) -> Vec<String> {
-        rewrite_flag_value_args(&self.argv, |arg, iter, out| {
+        mut rewrite: impl FnMut(&str) -> crate::core::Result<String>,
+    ) -> crate::core::Result<Vec<String>> {
+        try_rewrite_flag_value_args(&self.argv, |arg, iter, out| {
             if arg == "--provider-config" {
                 out.push(arg.to_string());
                 if let Some(spec) = iter.next() {
-                    out.push(rewrite(spec));
+                    out.push(rewrite(spec)?);
                 }
-                return;
+                return Ok(());
             }
             if let Some(spec) = arg.strip_prefix("--provider-config=") {
-                out.push(format!("--provider-config={}", rewrite(spec)));
-                return;
+                out.push(format!("--provider-config={}", rewrite(spec)?));
+                return Ok(());
             }
             out.push(arg.to_string());
+            Ok(())
         })
     }
 

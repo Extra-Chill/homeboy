@@ -349,6 +349,26 @@ pub struct DistributionSnapshot {
     pub values: Vec<(String, usize, f64)>,
 }
 
+/// Shared test fixture: a run whose owner PID is unreachable, so it reads as
+/// dead/abandoned. Used by both `tests` and `bundle_import_tests`.
+#[cfg(test)]
+pub(super) fn dead_owned_run(id: &str) -> RunRecord {
+    RunRecord {
+        id: id.to_string(),
+        kind: "bench".to_string(),
+        component_id: Some("homeboy".to_string()),
+        started_at: "2026-05-02T16:46:46Z".to_string(),
+        finished_at: None,
+        status: "running".to_string(),
+        command: Some("homeboy bench".to_string()),
+        cwd: Some("/tmp/homeboy-fixture".to_string()),
+        homeboy_version: Some("test-version".to_string()),
+        git_sha: Some("abc123".to_string()),
+        rig_id: Some("studio".to_string()),
+        metadata_json: serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

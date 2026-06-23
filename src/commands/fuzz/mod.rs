@@ -164,10 +164,13 @@ mod tests {
         persist_fuzz_run_evidence, FuzzRunEvidenceInput,
     };
     use super::replay::run_replay;
-    use super::report::{evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status};
+    use super::report::{
+        evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status, run_report,
+        FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
+    };
     use super::types::{
-        FuzzCommand, FuzzExecutionOutput, FuzzListOutput, FuzzOutput, FuzzReplayArgs, FuzzRunArgs,
-        FuzzRunOutput, FuzzRunnerContract, FuzzWorkloadOutput,
+        FuzzCommand, FuzzExecutionOutput, FuzzListOutput, FuzzOutput, FuzzReplayArgs,
+        FuzzReportArgs, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzWorkloadOutput,
     };
     use super::workloads::{
         fuzz_workloads, resolve_component_id, rig_component_for_fuzz, select_workload,
@@ -178,7 +181,7 @@ mod tests {
     use homeboy::core::engine::run_dir::RunDir;
     use homeboy::core::extension::FuzzConfig;
     use homeboy::core::fuzz::{FuzzCampaign, FuzzCoverageSummary};
-    use homeboy::core::observation::ObservationStore;
+    use homeboy::core::observation::{ObservationStore, RunRecord};
     use homeboy::core::rig::RigSpec;
     use homeboy::test_support::with_isolated_home;
     use std::path::{Path, PathBuf};
@@ -376,7 +379,7 @@ mod tests {
 
         let gates = evaluate_fuzz_gates(&campaign);
 
-        assert_eq!(gate_status(&gates), "passed");
+        assert_eq!(gate_status(&gates), "failed");
         assert!(gates.iter().any(|gate| {
             gate.gate_id == "has-case-evidence" && gate.status == "passed" && gate.observed == 1.0
         }));
@@ -416,12 +419,91 @@ mod tests {
         let gates = evaluate_fuzz_gates(&campaign);
         let summary = fuzz_coverage_completeness(&campaign);
 
-        assert_eq!(gate_status(&gates), "passed");
+        assert_eq!(gate_status(&gates), "failed");
         assert!(gates.iter().any(|gate| {
             gate.gate_id == "has-case-evidence" && gate.status == "passed" && gate.observed == 1.0
         }));
+        assert!(!summary.has_summary);
+        assert_eq!(summary.target_coverage_ratio, 0.0);
+        assert_eq!(summary.operation_coverage_ratio, 0.0);
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "target-coverage-complete"
+                && gate.status == "failed"
+                && gate.observed == 0.0
+        }));
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "operation-coverage-complete"
+                && gate.status == "failed"
+                && gate.observed == 0.0
+        }));
+    }
+
+    #[test]
+    fn fuzz_gate_evaluation_accepts_zero_declared_coverage_summary() {
+        let campaign = FuzzCampaign {
+            schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            id: "campaign-1".to_string(),
+            title: None,
+            safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            cases: Vec::new(),
+            seeds: Vec::new(),
+            coverage: Vec::new(),
+            coverage_summary: Some(homeboy::core::fuzz::FuzzCoverageSummary {
+                schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+                declared_targets: 0,
+                executable_targets: 0,
+                proven_targets: 0,
+                declared_operations: 0,
+                executable_operations: 0,
+                proven_operations: 0,
+                skipped_targets: Vec::new(),
+                skipped_operations: Vec::new(),
+                surface_summaries: Vec::new(),
+                kind_summaries: Vec::new(),
+                artifact_ids: vec!["coverage-report".to_string()],
+                metadata: serde_json::Value::Null,
+                extra: std::collections::BTreeMap::new(),
+            }),
+            findings: Vec::new(),
+            artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
+                schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+                id: "case-log".to_string(),
+                kind: "case_log".to_string(),
+                artifact: None,
+                metadata: serde_json::Value::Null,
+                extra: std::collections::BTreeMap::new(),
+            }],
+            thresholds: Vec::new(),
+            lifecycle: None,
+            provenance: None,
+            replay: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        };
+
+        let gates = evaluate_fuzz_gates(&campaign);
+        let summary = fuzz_coverage_completeness(&campaign);
+
+        assert_eq!(gate_status(&gates), "passed");
+        assert!(summary.has_summary);
+        assert_eq!(summary.declared_targets, 0);
         assert_eq!(summary.target_coverage_ratio, 1.0);
+        assert_eq!(summary.declared_operations, 0);
         assert_eq!(summary.operation_coverage_ratio, 1.0);
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "target-coverage-complete"
+                && gate.status == "passed"
+                && gate.observed == 1.0
+        }));
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "operation-coverage-complete"
+                && gate.status == "passed"
+                && gate.observed == 1.0
+        }));
     }
 
     #[test]
@@ -983,6 +1065,48 @@ mod tests {
         }
     }
 
+    fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
+        FuzzRunArgs {
+            comp: PositionalComponentArgs {
+                component: Some("component-a".to_string()),
+                path: None,
+            },
+            rig: Some("package-fuzz".to_string()),
+            extension_override: ExtensionOverrideArgs { extensions: vec![] },
+            setting_args: SettingArgs {
+                setting: vec![],
+                setting_json: vec![],
+            },
+            workload_id: Some("parser".to_string()),
+            run_id: Some(run_id.to_string()),
+            seed: Some("1234".to_string()),
+            inventory: None,
+            max_duration: None,
+            args: vec![],
+        }
+    }
+
+    fn seed_fuzz_run(run_id: &str) {
+        let store = ObservationStore::open_initialized().expect("store");
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .upsert_imported_run(&RunRecord {
+                id: run_id.to_string(),
+                kind: "fuzz".to_string(),
+                component_id: Some("component-a".to_string()),
+                started_at: now.clone(),
+                finished_at: Some(now),
+                status: "pass".to_string(),
+                command: Some(format!("homeboy fuzz run component-a --run-id {run_id}")),
+                cwd: None,
+                homeboy_version: Some("test-version".to_string()),
+                git_sha: None,
+                rig_id: Some("package-fuzz".to_string()),
+                metadata_json: serde_json::json!({}),
+            })
+            .expect("seed fuzz run");
+    }
+
     #[test]
     fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
         with_isolated_home(|home| {
@@ -1051,6 +1175,95 @@ mod tests {
             assert!(std::path::Path::new(&artifacts[0].path).is_file());
             let raw = std::fs::read_to_string(&artifacts[0].path).expect("raw artifact");
             assert!(raw.contains("unsupported/fuzz-result/v1"));
+        });
+    }
+
+    #[test]
+    fn fuzz_report_persists_result_envelope_artifact_for_run_id() {
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("agent-readable-artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            seed_fuzz_run("report-run-1");
+            let results_path = home.path().join("fuzz-campaign.json");
+            std::fs::write(
+                &results_path,
+                serde_json::to_string(&empty_fuzz_campaign()).expect("serialize campaign"),
+            )
+            .expect("results file");
+
+            let output = run_report(FuzzReportArgs {
+                results_file: results_path,
+                run: fuzz_run_args_with_run_id("report-run-1"),
+                output_envelope: None,
+                envelope_id: None,
+            })
+            .expect("fuzz report");
+
+            assert_eq!(output.envelope_file, None);
+            assert_eq!(output.envelope.id, "report-run-1");
+            let store = ObservationStore::open_initialized().expect("store");
+            let artifacts = store.list_artifacts("report-run-1").expect("artifacts");
+            let envelope_artifact = artifacts
+                .iter()
+                .find(|artifact| artifact.kind == FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND)
+                .expect("fuzz result envelope artifact");
+            assert_eq!(envelope_artifact.artifact_type, "file");
+            assert_eq!(envelope_artifact.mime.as_deref(), Some("application/json"));
+            assert_eq!(
+                envelope_artifact.metadata_json["envelope_id"],
+                "report-run-1"
+            );
+            let persisted =
+                std::fs::read_to_string(&envelope_artifact.path).expect("artifact file");
+            assert!(persisted.contains(homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA));
+
+            let artifact_index =
+                homeboy::core::observation::evidence_report::evidence_artifact_index(&artifacts);
+            assert_eq!(artifact_index.count, 1);
+            assert_eq!(artifact_index.file_count, 1);
+            assert_eq!(
+                artifact_index.artifacts[0].kind,
+                FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND
+            );
+            assert!(artifact_index.artifacts[0].fetch_command.is_some());
+            homeboy::core::set_artifact_root_override(None);
+        });
+    }
+
+    #[test]
+    fn fuzz_report_records_existing_output_envelope_path_as_artifact() {
+        with_isolated_home(|home| {
+            seed_fuzz_run("report-run-output");
+            let results_path = home.path().join("fuzz-campaign.json");
+            let envelope_path = home.path().join("fuzz-envelope.json");
+            std::fs::write(
+                &results_path,
+                serde_json::to_string(&empty_fuzz_campaign()).expect("serialize campaign"),
+            )
+            .expect("results file");
+
+            run_report(FuzzReportArgs {
+                results_file: results_path,
+                run: fuzz_run_args_with_run_id("report-run-output"),
+                output_envelope: Some(envelope_path.clone()),
+                envelope_id: Some("custom-envelope".to_string()),
+            })
+            .expect("fuzz report");
+
+            assert!(envelope_path.is_file());
+            let store = ObservationStore::open_initialized().expect("store");
+            let artifacts = store
+                .list_artifacts("report-run-output")
+                .expect("artifacts");
+            let envelope_artifact = artifacts
+                .iter()
+                .find(|artifact| artifact.kind == FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND)
+                .expect("fuzz result envelope artifact");
+            assert_eq!(
+                envelope_artifact.metadata_json["envelope_id"],
+                "custom-envelope"
+            );
+            assert!(std::path::Path::new(&envelope_artifact.path).is_file());
         });
     }
 

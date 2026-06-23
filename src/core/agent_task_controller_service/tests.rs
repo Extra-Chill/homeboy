@@ -10,6 +10,7 @@ use crate::core::agent_task_loop_controller::{
     AgentTaskGateBundle, AgentTaskGateBundleCheck, AgentTaskGateBundleCheckKind,
     AgentTaskGateBundleStatus, AgentTaskLoopFindingPacket, AgentTaskLoopPolicyAction,
     AgentTaskLoopTerminalStatus, AgentTaskLoopWait, AgentTaskLoopWaitStatus,
+    DEFAULT_FAN_OUT_MAX_ITEMS,
 };
 use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
 use crate::test_support::with_isolated_home;
@@ -36,6 +37,11 @@ struct ArtifactDispatchHook {
 
 #[derive(Clone, Default)]
 struct TypedArtifactHandoffDispatchHook {
+    observed_requests: Arc<Mutex<Vec<Value>>>,
+}
+
+#[derive(Clone, Default)]
+struct CountingFailingDispatchHook {
     observed_requests: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -139,6 +145,29 @@ impl ControllerDispatchHook for TypedArtifactHandoffDispatchHook {
             }]);
         }
         Ok((result, 0))
+    }
+}
+
+impl ControllerDispatchHook for CountingFailingDispatchHook {
+    fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
+        self.observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request.clone());
+        let entity_id = request
+            .get("entity_id")
+            .and_then(Value::as_str)
+            .unwrap_or("workflow");
+        Ok((
+            json!({
+                "schema": "homeboy/test-generic-dispatch-result/v1",
+                "run_id": format!("generic-run-{}", entity_id.replace([':', '/', '#', ' '], "_")),
+                "diagnostics": [{
+                    "message": format!("synthetic failure for {entity_id}")
+                }]
+            }),
+            1,
+        ))
     }
 }
 
@@ -1231,6 +1260,8 @@ fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
             AgentTaskLoopPolicyAction::FanOut {
                 dedupe_key: "workflow:empty".to_string(),
                 entity_ids: Vec::new(),
+                max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
+                fail_fast: true,
                 request_template: json!({ "mode": "dispatch" }),
             },
             "no findings emitted",
@@ -1268,6 +1299,112 @@ fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
 }
 
 #[test]
+fn fan_out_stops_after_max_items() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-fanout-max-items".to_string(),
+            phase: "review".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+
+        record.record_action(
+            AgentTaskLoopPolicyAction::FanOut {
+                dedupe_key: "candidate:bounded-review".to_string(),
+                entity_ids: vec![
+                    "candidate:first".to_string(),
+                    "candidate:second".to_string(),
+                    "candidate:third".to_string(),
+                ],
+                max_items: 2,
+                fail_fast: true,
+                request_template: json!({ "mode": "dispatch" }),
+            },
+            "review bounded candidates",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let dispatch = CapturingDispatchHook::default();
+        let result = run_next(
+            "loop-service-fanout-max-items",
+            CapturingExecutor::default(),
+            &dispatch,
+        )
+        .expect("fan-out action executed");
+
+        assert_eq!(result.exit_code, 0);
+        let execution = result.value.execution.as_ref().expect("execution");
+        assert_eq!(execution["item_count"], json!(2));
+        assert_eq!(execution["total_item_count"], json!(3));
+        assert_eq!(execution["max_items"], json!(2));
+        assert_eq!(execution["fail_fast"], json!(true));
+        assert_eq!(execution["concurrency"], json!(1));
+        assert_eq!(execution["truncated"], json!(true));
+        assert_eq!(execution["results"].as_array().expect("results").len(), 2);
+        let observed = dispatch
+            .observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0]["entity_id"], json!("candidate:first"));
+        assert_eq!(observed[1]["entity_id"], json!("candidate:second"));
+    });
+}
+
+#[test]
+fn fan_out_fail_fast_stops_after_first_failure() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-fanout-fail-fast".to_string(),
+            phase: "review".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+
+        record.record_action(
+            AgentTaskLoopPolicyAction::FanOut {
+                dedupe_key: "candidate:fail-fast-review".to_string(),
+                entity_ids: vec![
+                    "candidate:first".to_string(),
+                    "candidate:second".to_string(),
+                ],
+                max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
+                fail_fast: true,
+                request_template: json!({ "mode": "dispatch" }),
+            },
+            "review candidates until failure",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let dispatch = CountingFailingDispatchHook::default();
+        let result = run_next(
+            "loop-service-fanout-fail-fast",
+            CapturingExecutor::default(),
+            &dispatch,
+        )
+        .expect("fan-out action executed");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status.as_deref(), Some("failed"));
+        let execution = result.value.execution.as_ref().expect("execution");
+        assert_eq!(execution["item_count"], json!(1));
+        assert_eq!(execution["total_item_count"], json!(2));
+        assert_eq!(execution["fail_fast"], json!(true));
+        assert_eq!(execution["concurrency"], json!(1));
+        assert_eq!(execution["truncated"], json!(true));
+        assert_eq!(execution["results"].as_array().expect("results").len(), 1);
+        let observed = dispatch
+            .observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0]["entity_id"], json!("candidate:first"));
+    });
+}
+
+#[test]
 fn fan_out_indexes_each_child_task_evidence_on_its_entity() {
     with_isolated_home(|_| {
         let mut record = init(ControllerInitRequest {
@@ -1283,6 +1420,8 @@ fn fan_out_indexes_each_child_task_evidence_on_its_entity() {
             AgentTaskLoopPolicyAction::FanOut {
                 dedupe_key: "candidate:review".to_string(),
                 entity_ids: vec![first.clone(), second.clone()],
+                max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
+                fail_fast: true,
                 request_template: json!({
                     "mode": "run_plan",
                     "plan": test_plan(),
@@ -1556,6 +1695,128 @@ fn resume_failed_action_result_includes_top_level_failure_summary() {
         assert_eq!(
             failed["execution"]["result"]["aggregate"]["outcomes"][0]["diagnostics"][0]["message"],
             failed["failure_summary"]["diagnostic"]
+        );
+    });
+}
+
+#[test]
+fn resume_with_options_stops_at_max_actions_with_pending_work_remaining() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-bounded-resume".to_string(),
+            phase: "repair".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+
+        for index in 0..3 {
+            record.record_action(
+                AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: format!("finding:{index}:repair"),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "run_plan",
+                        "run_id": format!("controller-service-bounded-{index}"),
+                        "plan": test_plan(),
+                    }),
+                },
+                "finding emitted",
+            );
+        }
+        controller::write_controller(&record).expect("controller written");
+
+        let result = resume_with_options(
+            "loop-service-bounded-resume",
+            CapturingExecutor::default(),
+            &NoopDispatchHook,
+            ControllerResumeOptions {
+                max_actions: 2,
+                stop_on_terminal: true,
+            },
+        )
+        .expect("controller resumed");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.value.claimed);
+        assert_eq!(result.value.stopped_reason, "max_actions_reached");
+        assert_eq!(result.value.results.len(), 2);
+
+        let loaded =
+            controller::load_controller("loop-service-bounded-resume").expect("controller loaded");
+        assert_eq!(
+            loaded.next_actions[0].status,
+            AgentTaskLoopActionStatus::Completed
+        );
+        assert_eq!(
+            loaded.next_actions[1].status,
+            AgentTaskLoopActionStatus::Completed
+        );
+        assert_eq!(
+            loaded.next_actions[2].status,
+            AgentTaskLoopActionStatus::Pending
+        );
+    });
+}
+
+#[test]
+fn resume_with_options_stops_after_terminal_state() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-terminal-resume".to_string(),
+            phase: "finalize".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        record.record_action(
+            AgentTaskLoopPolicyAction::Complete {
+                reason: Some("done".to_string()),
+            },
+            "complete loop",
+        );
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "finding:after-terminal".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "run_plan",
+                    "run_id": "controller-service-after-terminal",
+                    "plan": test_plan(),
+                }),
+            },
+            "should not run after terminal state",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let result = resume_with_options(
+            "loop-service-terminal-resume",
+            CapturingExecutor::default(),
+            &NoopDispatchHook,
+            ControllerResumeOptions {
+                max_actions: 10,
+                stop_on_terminal: true,
+            },
+        )
+        .expect("controller resumed");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.value.claimed);
+        assert_eq!(result.value.stopped_reason, "terminal_state");
+        assert_eq!(result.value.results.len(), 1);
+        assert_eq!(
+            result.value.controller.state,
+            AgentTaskLoopControllerState::Completed
+        );
+
+        let loaded =
+            controller::load_controller("loop-service-terminal-resume").expect("controller loaded");
+        assert_eq!(loaded.state, AgentTaskLoopControllerState::Completed);
+        assert_eq!(
+            loaded.next_actions[0].status,
+            AgentTaskLoopActionStatus::Completed
+        );
+        assert_eq!(
+            loaded.next_actions[1].status,
+            AgentTaskLoopActionStatus::Pending
         );
     });
 }
@@ -2054,6 +2315,58 @@ fn run_gates_executes_command_bundle_and_records_result() {
             AgentTaskGateBundleStatus::Passed
         );
     });
+}
+
+#[test]
+fn command_gate_check_runs_from_configured_cwd() {
+    let cwd = tempfile::tempdir().expect("cwd tempdir");
+    let cwd_path = cwd.path().to_string_lossy().into_owned();
+    std::fs::write(cwd.path().join("gate-marker"), "ok").expect("marker file");
+    let check = AgentTaskGateBundleCheck {
+        check_id: "pwd-command".to_string(),
+        kind: AgentTaskGateBundleCheckKind::Command,
+        input: json!({
+            "command": "test -f gate-marker && printf ok",
+            "cwd": cwd_path,
+        }),
+        retryable: false,
+    };
+
+    let result = run_command_gate_check(&check).expect("command gate executed");
+
+    assert_eq!(result.status, AgentTaskGateBundleStatus::Passed);
+    assert_eq!(result.details["stdout"].as_str(), Some("ok"));
+    assert_eq!(result.details["cwd"].as_str(), Some(cwd_path.as_str()));
+}
+
+#[test]
+fn command_gate_check_caps_stored_stdout_and_records_truncation() {
+    let check = AgentTaskGateBundleCheck {
+        check_id: "large-output-command".to_string(),
+        kind: AgentTaskGateBundleCheckKind::Command,
+        input: json!({
+            "command": "yes x | head -c 70000",
+            "timeout_seconds": 5,
+        }),
+        retryable: false,
+    };
+
+    let result = run_command_gate_check(&check).expect("command gate executed");
+
+    assert_eq!(result.status, AgentTaskGateBundleStatus::Passed);
+    assert_eq!(result.details["stdout_truncated"].as_bool(), Some(true));
+    assert_eq!(
+        result.details["stdout_stored_bytes"].as_u64(),
+        Some(64 * 1024)
+    );
+    assert_eq!(result.details["stdout_bytes"].as_u64(), Some(70000));
+    assert_eq!(
+        result.details["stdout"]
+            .as_str()
+            .expect("stdout stored")
+            .len(),
+        64 * 1024
+    );
 }
 
 #[test]

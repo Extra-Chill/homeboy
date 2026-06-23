@@ -37,6 +37,7 @@ pub struct LabRoutingRequest<'a> {
     pub timeout: Option<Duration>,
     pub active_run_id: Option<&'a str>,
     pub detach_after_handoff: bool,
+    pub output_file_requested: bool,
 }
 
 pub(crate) fn route_lab_offload(
@@ -56,6 +57,7 @@ pub(crate) fn route_lab_offload(
         capture_patch: request.capture_patch,
         mutation_flag: request.mutation_flag,
         detach_after_handoff: request.detach_after_handoff,
+        output_file_requested: request.output_file_requested,
     })
 }
 
@@ -140,6 +142,7 @@ pub struct LabRouteOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    pub output_file_content: Option<String>,
 }
 
 /// Typed outcome of routing a command through the Lab service.
@@ -208,6 +211,7 @@ pub fn dispatch_lab_offload(
             stdout,
             stderr,
             exit_code,
+            output_file_content,
             ..
         }) => {
             let retrieval = observer.finish(
@@ -227,6 +231,7 @@ pub fn dispatch_lab_offload(
                 stdout,
                 stderr,
                 exit_code,
+                output_file_content,
             }))
         }
     }
@@ -411,6 +416,7 @@ fn execute_lab_offload_with_timeout(
     let active_run_id = request.active_run_id.map(str::to_string);
     let mutation_flag = request.mutation_flag.map(str::to_string);
     let detach_after_handoff = request.detach_after_handoff;
+    let output_file_requested = request.output_file_requested;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = runners::execute_lab_offload(runners::LabOffloadRequest {
@@ -423,6 +429,7 @@ fn execute_lab_offload_with_timeout(
             capture_patch,
             mutation_flag: mutation_flag.as_deref(),
             detach_after_handoff,
+            output_file_requested,
         });
         let _ = tx.send(result);
     });
@@ -584,6 +591,7 @@ mod tests {
             timeout: None,
             active_run_id: None,
             detach_after_handoff: false,
+            output_file_requested: false,
         })
         .unwrap();
 
@@ -752,6 +760,7 @@ mod tests {
                 timeout: None,
                 active_run_id: None,
                 detach_after_handoff: false,
+                output_file_requested: false,
             },
             None,
             observer,

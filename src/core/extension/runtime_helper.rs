@@ -208,7 +208,3 @@ pub fn helper_path(name: &str) -> Result<PathBuf> {
 mod tests {
     include!("runtime_helper/tests.rs");
 }
-
-#[cfg(test)]
-#[path = "../../../tests/core/extension/runtime_helper_test.rs"]
-mod runtime_helper_test;

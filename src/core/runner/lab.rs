@@ -26,6 +26,7 @@
 mod agent_task_bridge;
 mod args_util;
 mod evidence;
+mod fallback;
 mod offload;
 mod provider_preflight;
 pub(super) mod secrets;

@@ -19,6 +19,68 @@ use super::path_remap::{
     order_mappings_by_specificity, remap_paths_in_value, try_rewrite_flag_value_args, LabPathRemap,
 };
 
+pub(in crate::core::runner) struct AgentTaskSpecMaterialization<T> {
+    pub(in crate::core::runner) argv: Vec<String>,
+    pub(in crate::core::runner) workspace_entries: Vec<AgentTaskSpecWorkspaceEntry<T>>,
+}
+
+pub(in crate::core::runner) struct AgentTaskSpecWorkspaceEntry<T> {
+    pub(in crate::core::runner) step_id: &'static str,
+    pub(in crate::core::runner) entry: T,
+}
+
+pub(in crate::core::runner) struct AgentTaskInlineJsonSpec<'a> {
+    pub(in crate::core::runner) spec: &'a str,
+    pub(in crate::core::runner) filename: &'static str,
+    pub(in crate::core::runner) role: &'static str,
+}
+
+pub(in crate::core::runner) fn materialize_agent_task_specs_in_args<T>(
+    args: &[String],
+    mappings: &[LabPathRemap],
+    source_path: &Path,
+    mut sync_inline_json: impl FnMut(AgentTaskInlineJsonSpec<'_>) -> Result<Option<(String, T)>>,
+) -> Result<AgentTaskSpecMaterialization<T>> {
+    let remapped_args = remap_agent_task_plan_in_args(args, mappings, source_path)?;
+    let remapped_args = inline_agent_task_prompt_files_in_args(&remapped_args, source_path)?;
+    let (argv, workspace_entries) =
+        materialize_inline_agent_task_json_specs_in_args(&remapped_args, |spec| {
+            sync_inline_json(spec)
+        })?;
+
+    Ok(AgentTaskSpecMaterialization {
+        argv,
+        workspace_entries,
+    })
+}
+
+pub(in crate::core::runner) fn materialize_inline_agent_task_json_specs_in_args<T>(
+    args: &[String],
+    mut sync_inline_json: impl FnMut(AgentTaskInlineJsonSpec<'_>) -> Result<Option<(String, T)>>,
+) -> Result<(Vec<String>, Vec<AgentTaskSpecWorkspaceEntry<T>>)> {
+    let (args, task_entry) = materialize_inline_json_option(
+        args,
+        agent_task_subcommand_is(args, &["dispatch", "cook"]),
+        "--tasks",
+        "agent-task-tasks.json",
+        "agent_task_tasks_remapped",
+        "lab.sync_remapped_agent_task_tasks",
+        |spec| sync_inline_json(spec),
+    )?;
+    let (args, plan_entry) = materialize_inline_json_option(
+        &args,
+        agent_task_subcommand_is(&args, &["run-plan"]),
+        "--plan",
+        "agent-task-plan.json",
+        "agent_task_plan_remapped",
+        "lab.sync_remapped_agent_task_plan",
+        |spec| sync_inline_json(spec),
+    )?;
+
+    let workspace_entries = task_entry.into_iter().chain(plan_entry).collect();
+    Ok((args, workspace_entries))
+}
+
 pub(in crate::core::runner) fn remap_agent_task_plan_in_args(
     args: &[String],
     mappings: &[LabPathRemap],
@@ -195,4 +257,97 @@ fn read_agent_task_text_spec_to_inline(
         Some(spec.to_string()),
         Some(tried),
     ))
+}
+
+fn agent_task_subcommand_is(args: &[String], subcommands: &[&str]) -> bool {
+    subcommand_index(args, "agent-task")
+        .and_then(|index| args.get(index + 1))
+        .is_some_and(|arg| subcommands.iter().any(|subcommand| arg == subcommand))
+}
+
+fn subcommand_index(args: &[String], command: &str) -> Option<usize> {
+    args.iter().position(|arg| arg == command)
+}
+
+/// Scans `args` for a single `--flag <json>` / `--flag=<json>` occurrence and,
+/// when `in_context` and the supplied `sync` closure produce a remapped spec,
+/// rewrites that argument to point at the synced workspace file. Parsing stops
+/// at the `--` passthrough boundary; this is argv materialization only and does
+/// not interpret anything past `--`.
+fn materialize_inline_json_option<T>(
+    args: &[String],
+    in_context: bool,
+    flag: &'static str,
+    filename: &'static str,
+    role: &'static str,
+    step_id: &'static str,
+    mut sync: impl FnMut(AgentTaskInlineJsonSpec<'_>) -> Result<Option<(String, T)>>,
+) -> Result<(Vec<String>, Option<AgentTaskSpecWorkspaceEntry<T>>)> {
+    if !in_context {
+        return Ok((args.to_vec(), None));
+    }
+
+    let flag_eq = format!("{flag}=");
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == flag {
+            out.push(arg.clone());
+            if let Some(spec) = iter.next() {
+                if let Some((remapped_spec, entry)) =
+                    sync_inline_json_spec(spec, filename, role, &mut sync)?
+                {
+                    out.push(remapped_spec);
+                    out.extend(iter.cloned());
+                    return Ok((out, Some(AgentTaskSpecWorkspaceEntry { step_id, entry })));
+                }
+                out.push(spec.clone());
+            }
+            continue;
+        }
+        if let Some(spec) = arg.strip_prefix(&flag_eq) {
+            if let Some((remapped_spec, entry)) =
+                sync_inline_json_spec(spec, filename, role, &mut sync)?
+            {
+                out.push(format!("{flag}={remapped_spec}"));
+                out.extend(iter.cloned());
+                return Ok((out, Some(AgentTaskSpecWorkspaceEntry { step_id, entry })));
+            }
+        }
+        out.push(arg.clone());
+    }
+
+    Ok((out, None))
+}
+
+fn sync_inline_json_spec<T>(
+    spec: &str,
+    filename: &'static str,
+    role: &'static str,
+    sync: &mut impl FnMut(AgentTaskInlineJsonSpec<'_>) -> Result<Option<(String, T)>>,
+) -> Result<Option<(String, T)>> {
+    if spec == "-" || spec.starts_with('@') || !looks_like_inline_json(spec) {
+        return Ok(None);
+    }
+    sync(AgentTaskInlineJsonSpec {
+        spec,
+        filename,
+        role,
+    })
+}
+
+fn looks_like_inline_json(spec: &str) -> bool {
+    let trimmed = spec.trim_start();
+    trimmed.starts_with('{') || trimmed.starts_with('[')
 }

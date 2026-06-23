@@ -1,6 +1,13 @@
 //! Split from `agent_task_controller_service` god file (#5208). Structural move only.
 #![allow(unused_imports)]
 use super::*;
+use std::io::{self, Read};
+use std::process::Stdio;
+use std::thread;
+use std::time::{Duration, Instant};
+
+const COMMAND_GATE_DEFAULT_TIMEOUT_SECONDS: u64 = 300;
+const COMMAND_GATE_OUTPUT_CAP_BYTES: usize = 64 * 1024;
 
 pub(super) fn execute_controller_action<E, D>(
     record: &mut AgentTaskLoopControllerRecord,
@@ -236,12 +243,16 @@ where
         AgentTaskLoopPolicyAction::FanOut {
             dedupe_key,
             entity_ids,
+            max_items,
+            fail_fast,
             request_template,
         } => execute_fan_out_action(
             record,
             action,
             dedupe_key,
             entity_ids,
+            *max_items,
+            *fail_fast,
             request_template,
             executor,
             dispatch,
@@ -631,6 +642,8 @@ pub(super) fn execute_fan_out_action<E, D>(
     action: &AgentTaskLoopPolicyActionRecord,
     dedupe_key: &str,
     entity_ids: &[String],
+    max_items: usize,
+    fail_fast: bool,
     request_template: &Value,
     executor: E,
     dispatch: &D,
@@ -641,14 +654,14 @@ where
 {
     if entity_ids.is_empty() {
         return Ok((
-            serde_json::json!({ "mode": "fan_out", "item_count": 0, "results": [] }),
+            serde_json::json!({ "mode": "fan_out", "item_count": 0, "total_item_count": 0, "max_items": max_items, "fail_fast": fail_fast, "concurrency": 1, "results": [] }),
             0,
         ));
     }
 
     let mut results = Vec::new();
     let mut exit_code = 0;
-    for entity_id in entity_ids {
+    for entity_id in entity_ids.iter().take(max_items) {
         let request = materialize_fan_out_request(request_template, entity_id);
         let child_dedupe_key = format!("{dedupe_key}:{entity_id}");
         let child_action = AgentTaskLoopPolicyActionRecord {
@@ -677,9 +690,13 @@ where
             exit_code = child_exit_code;
         }
         results.push(result);
+        if child_exit_code != 0 && fail_fast {
+            break;
+        }
     }
+    let item_count = results.len();
     Ok((
-        serde_json::json!({ "mode": "fan_out", "item_count": entity_ids.len(), "results": results }),
+        serde_json::json!({ "mode": "fan_out", "item_count": item_count, "total_item_count": entity_ids.len(), "max_items": max_items, "fail_fast": fail_fast, "concurrency": 1, "truncated": item_count < entity_ids.len(), "results": results }),
         exit_code,
     ))
 }
@@ -915,17 +932,59 @@ pub(super) fn run_command_gate_check(
                 None,
             )
         })?;
-    let output = Command::new("sh")
+    let cwd = check.input.get("cwd").and_then(Value::as_str);
+    let timeout_seconds = check
+        .input
+        .get("timeout_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(COMMAND_GATE_DEFAULT_TIMEOUT_SECONDS);
+
+    let mut child_command = Command::new("sh");
+    child_command
         .arg("-lc")
         .arg(command)
-        .output()
-        .map_err(|error| {
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        child_command.current_dir(cwd);
+    }
+
+    let mut child = child_command.spawn().map_err(|error| {
+        Error::internal_io(
+            format!("failed to execute gate command '{command}': {error}"),
+            None,
+        )
+    })?;
+    let stdout = child.stdout.take().map(read_capped_command_output);
+    let stderr = child.stderr.take().map(read_capped_command_output);
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut timed_out = false;
+    let exit_status = loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
             Error::internal_io(
-                format!("failed to execute gate command '{command}': {error}"),
+                format!("failed to poll gate command '{command}': {error}"),
                 None,
             )
-        })?;
-    let status = if output.status.success() {
+        })? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait().map_err(|error| {
+                Error::internal_io(
+                    format!("failed to reap timed out gate command '{command}': {error}"),
+                    None,
+                )
+            })?;
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let stdout = collect_capped_command_output(stdout, command, "stdout")?;
+    let stderr = collect_capped_command_output(stderr, command, "stderr")?;
+
+    let status = if !timed_out && exit_status.success() {
         AgentTaskGateBundleStatus::Passed
     } else {
         AgentTaskGateBundleStatus::Failed
@@ -934,15 +993,83 @@ pub(super) fn run_command_gate_check(
         check_id: check.check_id.clone(),
         status,
         retryable: check.retryable,
-        classification: None,
+        classification: timed_out.then(|| "command_timed_out".to_string()),
         evidence: Vec::new(),
         details: serde_json::json!({
             "command": command,
-            "exit_code": output.status.code(),
-            "stdout": String::from_utf8_lossy(&output.stdout),
-            "stderr": String::from_utf8_lossy(&output.stderr),
+            "cwd": cwd,
+            "timeout_seconds": timeout_seconds,
+            "timed_out": timed_out,
+            "exit_code": exit_status.code(),
+            "stdout": String::from_utf8_lossy(&stdout.bytes).into_owned(),
+            "stderr": String::from_utf8_lossy(&stderr.bytes).into_owned(),
+            "stdout_bytes": stdout.total_bytes,
+            "stderr_bytes": stderr.total_bytes,
+            "stdout_stored_bytes": stdout.bytes.len(),
+            "stderr_stored_bytes": stderr.bytes.len(),
+            "stdout_truncated": stdout.truncated,
+            "stderr_truncated": stderr.truncated,
         }),
     })
+}
+
+struct CappedCommandOutput {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+    truncated: bool,
+}
+
+fn read_capped_command_output<R>(
+    mut reader: R,
+) -> thread::JoinHandle<io::Result<CappedCommandOutput>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::with_capacity(COMMAND_GATE_OUTPUT_CAP_BYTES);
+        let mut total_bytes = 0usize;
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            total_bytes = total_bytes.saturating_add(read);
+            if bytes.len() < COMMAND_GATE_OUTPUT_CAP_BYTES {
+                let remaining = COMMAND_GATE_OUTPUT_CAP_BYTES - bytes.len();
+                bytes.extend_from_slice(&buffer[..read.min(remaining)]);
+            }
+        }
+        Ok(CappedCommandOutput {
+            bytes,
+            total_bytes,
+            truncated: total_bytes > COMMAND_GATE_OUTPUT_CAP_BYTES,
+        })
+    })
+}
+
+fn collect_capped_command_output(
+    handle: Option<thread::JoinHandle<io::Result<CappedCommandOutput>>>,
+    command: &str,
+    stream: &str,
+) -> Result<CappedCommandOutput> {
+    handle
+        .ok_or_else(|| {
+            Error::internal_io(format!("gate command '{command}' missing {stream}"), None)
+        })?
+        .join()
+        .map_err(|_| {
+            Error::internal_io(
+                format!("gate command '{command}' {stream} reader panicked"),
+                None,
+            )
+        })?
+        .map_err(|error| {
+            Error::internal_io(
+                format!("failed to read gate command '{command}' {stream}: {error}"),
+                None,
+            )
+        })
 }
 
 #[allow(clippy::too_many_arguments)]

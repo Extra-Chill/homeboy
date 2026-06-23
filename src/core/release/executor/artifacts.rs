@@ -51,6 +51,7 @@ pub(crate) fn run_artifact_inventory(
         })?;
         artifacts.push(ReleaseArtifact {
             path: canonical.display().to_string(),
+            durable_path: None,
             artifact_type: None,
             platform: None,
         });

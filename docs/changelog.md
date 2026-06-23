@@ -4,6 +4,57 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.255.11] - 2026-06-23
+
+### Changed
+- split github_release.rs god-file into modules
+- split run.rs god-file into modules
+- split git.rs god-file into modules
+
+### Fixed
+- restore runs and release test builds
+- forward offloaded output files
+
+## [0.255.10] - 2026-06-23
+
+### Changed
+- split runs.rs command god-file
+- remove deprecated version target command
+
+### Fixed
+- fail invalid provider config secret discovery
+- fix(agent-task): bound command gate execution
+- fix(agent-task): reject unknown task fields
+- validate workload secret handoff
+
+## [0.255.9] - 2026-06-23
+
+### Changed
+- Bound controller run-from-spec output
+- Add release package recovery command
+- remove low-signal helper coverage
+- Preserve release artifacts for repair hints
+- Expose fuzz sandbox descriptor
+
+### Fixed
+- keep recovered artifact durable path
+- preserve structured output for noisy offloads
+- flag map write mutation
+- fail missing coverage evidence
+- fix(agent-task): bound controller resume
+- fix(agent-task): reject invalid dispatch cwd
+- Fix release head tag recovery diagnostics
+- Fix GHE release gh environment
+
+## [0.255.8] - 2026-06-23
+
+### Changed
+- split observation.rs god-file into modules
+- split preview_ingress.rs god-file into modules
+
+### Fixed
+- fall back when generated notes are unavailable
+
 ## [0.255.7] - 2026-06-23
 
 ### Changed

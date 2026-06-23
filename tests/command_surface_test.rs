@@ -387,6 +387,7 @@ fn mutating_safety_manifest_entries_advertise_apply_or_are_allowlisted() {
                 && !entry.output.notes.contains("--dry-run")
                 && !entry.output.notes.contains("--check")
                 && !entry.dangerous_flags.iter().any(|flag| flag == "--apply")
+                && !entry.dangerous_flags.iter().any(|flag| flag == "--write")
                 && !explicit_no_apply_surface.contains(&entry.path.join(" "))
         })
         .map(|entry| entry.path.join(" "))
@@ -518,6 +519,22 @@ fn runner_job_logs_command_parses() {
         "--follow",
     ])
     .expect("runner job logs command should parse");
+}
+
+#[test]
+fn runner_job_broker_wrapper_commands_parse() {
+    Cli::try_parse_from(["homeboy", "runner", "job", "reconcile", "homeboy-lab"])
+        .expect("runner job reconcile command should parse");
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "job",
+        "artifacts",
+        "homeboy-lab",
+        "00000000-0000-0000-0000-000000000000",
+        "report.txt",
+    ])
+    .expect("runner job artifacts command should parse");
 }
 
 #[test]

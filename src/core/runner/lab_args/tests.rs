@@ -40,7 +40,7 @@ fn runner_resident_rewrite_preserves_runner_side_cwd() {
     ];
 
     assert_eq!(
-        rewrite_runner_resident_lab_offload_args(&args),
+        rewrite_runner_resident_lab_offload_args(&args, None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -80,7 +80,7 @@ fn runner_resident_rewrite_expose_drops_server_and_marks_runner_local() {
         "ssh-only".to_string(),
     ];
 
-    let rewritten = rewrite_runner_resident_lab_offload_args(&args);
+    let rewritten = rewrite_runner_resident_lab_offload_args(&args, None);
     assert_eq!(
         rewritten,
         vec![
@@ -117,7 +117,7 @@ fn runner_resident_rewrite_expose_handles_inline_server_value() {
         "127.0.0.1".to_string(),
     ];
 
-    let rewritten = rewrite_runner_resident_lab_offload_args(&args);
+    let rewritten = rewrite_runner_resident_lab_offload_args(&args, None);
     assert!(!rewritten.iter().any(|arg| arg.starts_with("--server")));
     assert!(rewritten.iter().any(|arg| arg == "--runner-local"));
 }
@@ -196,7 +196,7 @@ fn remap_inlines_and_rewrites_provider_config_local_paths() {
         "fix it".to_string(),
     ];
 
-    let out = remap_provider_config_in_args(&args, &mappings);
+    let out = remap_provider_config_in_args(&args, &mappings).expect("remap provider config");
     let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
     let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
 
@@ -251,7 +251,7 @@ fn remap_prunes_stale_unresolved_provider_plugin_path() {
         config,
     ];
 
-    let out = remap_provider_config_in_args(&args, &mappings);
+    let out = remap_provider_config_in_args(&args, &mappings).expect("remap provider config");
     let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
     let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
 
@@ -290,7 +290,7 @@ fn remap_prunes_all_provider_plugin_paths_when_no_mappings() {
         config,
     ];
 
-    let out = remap_provider_config_in_args(&args, &[]);
+    let out = remap_provider_config_in_args(&args, &[]).expect("remap provider config");
     let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
     let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
 
@@ -325,7 +325,7 @@ fn remap_preserves_relative_and_materialized_provider_plugin_paths() {
         config,
     ];
 
-    let out = remap_provider_config_in_args(&args, &[]);
+    let out = remap_provider_config_in_args(&args, &[]).expect("remap provider config");
     let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
     let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
 
@@ -403,7 +403,8 @@ fn injected_default_provider_config_is_remappable() {
                 local: "/Users/user/Developer/example-provider@oauth".to_string(),
                 remote: "/home/user/Developer/_lab_workspaces/example-provider@oauth".to_string(),
             }],
-        );
+        )
+        .expect("remap provider config");
         let cfg_idx = remapped
             .iter()
             .position(|arg| arg == "--provider-config")
@@ -455,7 +456,7 @@ fn remap_handles_provider_config_equals_form_and_no_mappings() {
         "cook".to_string(),
         "--provider-config={\"workspace_root\":\"/local/repo\"}".to_string(),
     ];
-    let out = remap_provider_config_in_args(&args, &mappings);
+    let out = remap_provider_config_in_args(&args, &mappings).expect("remap provider config");
     let val = out
         .iter()
         .find(|a| a.starts_with("--provider-config="))
@@ -464,7 +465,7 @@ fn remap_handles_provider_config_equals_form_and_no_mappings() {
     assert!(!val.contains("/local/repo"));
 
     // No mappings -> inline JSON spec untouched (nothing to remap, no @file).
-    let unchanged = remap_provider_config_in_args(&args, &[]);
+    let unchanged = remap_provider_config_in_args(&args, &[]).expect("remap provider config");
     assert_eq!(unchanged, args);
 }
 
@@ -493,7 +494,7 @@ fn remap_inlines_provider_config_at_file_without_mappings() {
     ];
 
     // No mappings on purpose: inlining must still happen.
-    let out = remap_provider_config_in_args(&args, &[]);
+    let out = remap_provider_config_in_args(&args, &[]).expect("remap provider config");
     let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
     let spec = &out[cfg_idx];
 
@@ -508,6 +509,54 @@ fn remap_inlines_provider_config_at_file_without_mappings() {
     // Unrelated args preserved.
     assert!(out.iter().any(|a| a == "--prompt"));
     assert!(out.iter().any(|a| a == "fix it"));
+}
+
+#[test]
+fn remap_provider_config_missing_at_file_fails_locally() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = temp.path().join("missing-provider-config.json");
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--provider-config".to_string(),
+        format!("@{}", missing.display()),
+    ];
+
+    let err = remap_provider_config_in_args(&args, &[]).expect_err("missing @file should fail");
+
+    assert!(err
+        .to_string()
+        .contains("Invalid argument 'provider-config'"));
+    assert!(
+        err.hints.iter().any(|hint| hint
+            .message
+            .contains("provide a readable JSON file or inline JSON")),
+        "missing actionable hint: {err:?}"
+    );
+}
+
+#[test]
+fn remap_provider_config_malformed_at_file_fails_locally() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = temp.path().join("malformed-provider-config.json");
+    std::fs::write(&cfg, r#"{"provider":"example-oauth""#).expect("write provider config");
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        format!("--provider-config=@{}", cfg.display()),
+    ];
+
+    let err = remap_provider_config_in_args(&args, &[]).expect_err("malformed @file should fail");
+
+    assert_eq!(err.to_string(), "Invalid JSON");
+    assert!(
+        err.hints.iter().any(|hint| hint
+            .message
+            .contains("fix the JSON or pass valid inline JSON")),
+        "missing actionable hint: {err:?}"
+    );
 }
 
 #[test]
@@ -533,7 +582,7 @@ fn remap_inlines_and_rewrites_provider_config_at_file_with_mappings() {
         format!("--provider-config=@{}", cfg.display()),
     ];
 
-    let out = remap_provider_config_in_args(&args, &mappings);
+    let out = remap_provider_config_in_args(&args, &mappings).expect("remap provider config");
     let val = out
         .iter()
         .find(|a| a.starts_with("--provider-config="))
@@ -559,7 +608,7 @@ fn remap_provider_config_inline_json_without_mappings_is_untouched() {
         "--provider-config".to_string(),
         r#"{"model":"claude-opus-4-8"}"#.to_string(),
     ];
-    let out = remap_provider_config_in_args(&args, &[]);
+    let out = remap_provider_config_in_args(&args, &[]).expect("remap provider config");
     assert_eq!(out, args);
 }
 
@@ -894,6 +943,80 @@ fn inline_agent_task_prompt_files_rejects_missing_file() {
 }
 
 #[test]
+fn materialize_agent_task_specs_syncs_inline_and_file_plan_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let plan = serde_json::json!({
+        "schema": "homeboy/agent-task-plan/v1",
+        "tasks": [{ "task_id": "task-1", "instructions": "test" }]
+    })
+    .to_string();
+    let plan_file = temp.path().join("plan.json");
+    std::fs::write(&plan_file, &plan).expect("write plan");
+
+    for spec in [plan, format!("@{}", plan_file.display())] {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            spec,
+        ];
+        let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
+            assert_eq!(spec.filename, "agent-task-plan.json");
+            assert_eq!(spec.role, "agent_task_plan_remapped");
+            Ok(Some((
+                "@/remote/agent-task-plan.json".to_string(),
+                spec.role,
+            )))
+        })
+        .expect("materialize plan");
+
+        assert_eq!(out.argv[4], "@/remote/agent-task-plan.json");
+        assert_eq!(out.workspace_entries.len(), 1);
+        assert_eq!(
+            out.workspace_entries[0].step_id,
+            "lab.sync_remapped_agent_task_plan"
+        );
+        assert_eq!(out.workspace_entries[0].entry, "agent_task_plan_remapped");
+    }
+}
+
+#[test]
+fn materialize_agent_task_specs_syncs_inline_and_file_tasks_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tasks = serde_json::json!([{ "prompt": "Fix issue" }]).to_string();
+    let tasks_file = temp.path().join("tasks.json");
+    std::fs::write(&tasks_file, &tasks).expect("write tasks");
+
+    for spec in [tasks, format!("@{}", tasks_file.display())] {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--tasks".to_string(),
+            spec,
+        ];
+        let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
+            assert_eq!(spec.filename, "agent-task-tasks.json");
+            assert_eq!(spec.role, "agent_task_tasks_remapped");
+            Ok(Some((
+                "@/remote/agent-task-tasks.json".to_string(),
+                spec.role,
+            )))
+        })
+        .expect("materialize tasks");
+
+        assert_eq!(out.argv[4], "@/remote/agent-task-tasks.json");
+        assert_eq!(out.workspace_entries.len(), 1);
+        assert_eq!(
+            out.workspace_entries[0].step_id,
+            "lab.sync_remapped_agent_task_tasks"
+        );
+        assert_eq!(out.workspace_entries[0].entry, "agent_task_tasks_remapped");
+    }
+}
+
+#[test]
 fn remap_path_settings_rewrites_local_path_values() {
     let mappings = vec![LabPathRemap {
         local: "/Users/user/Developer/tool-runner".to_string(),
@@ -955,7 +1078,7 @@ fn remap_does_not_match_sibling_path_prefixes() {
         "--provider-config".to_string(),
         serde_json::json!({ "p": "/a/bc/keep", "q": "/a/b/move" }).to_string(),
     ];
-    let out = remap_provider_config_in_args(&args, &mappings);
+    let out = remap_provider_config_in_args(&args, &mappings).expect("remap provider config");
     let idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
     let v: serde_json::Value = serde_json::from_str(&out[idx]).unwrap();
     assert_eq!(v["p"], "/a/bc/keep"); // sibling prefix untouched
@@ -976,7 +1099,7 @@ fn lab_args_rewrite_agent_task_dispatch_cwd() {
     ];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/home/user/Developer/wp-site-generator", &[]),
+        rewrite_lab_offload_args(&args, "/home/user/Developer/wp-site-generator", &[], None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -1003,7 +1126,7 @@ fn lab_args_rewrite_path_with_dependency_mapping() {
     }];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/runner/primary", &mappings),
+        rewrite_lab_offload_args(&args, "/runner/primary", &mappings, None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -1033,7 +1156,7 @@ fn lab_args_rewrite_path_prefers_more_specific_duplicate_local_mapping() {
     ];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/runner/primary", &mappings),
+        rewrite_lab_offload_args(&args, "/runner/primary", &mappings, None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -1061,7 +1184,12 @@ fn lab_args_rewrite_remaps_absolute_at_file_args() {
     }];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/home/user/_lab_workspaces/wp-site-generator", &mappings),
+        rewrite_lab_offload_args(
+            &args,
+            "/home/user/_lab_workspaces/wp-site-generator",
+            &mappings,
+            None,
+        ),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -1090,7 +1218,7 @@ fn lab_args_rewrite_remaps_standalone_absolute_file_args() {
     }];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/home/user/_lab_workspaces/project", &mappings),
+        rewrite_lab_offload_args(&args, "/home/user/_lab_workspaces/project", &mappings, None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
