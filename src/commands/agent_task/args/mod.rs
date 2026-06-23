@@ -62,7 +62,10 @@ pub struct AgentTaskFanoutInputArgs {
     #[arg(long = "backend", value_name = "BACKEND")]
     pub backend: Option<String>,
 
-    /// Default executor provider selector for cooks without one.
+    /// Default extension-provider selector for cooks without one: a Homeboy
+    /// executor provider id (e.g. `wordpress.codebox-agent-task-executor`), NOT
+    /// an AI runtime name (codex, opencode, claude-code). Set the AI runtime via
+    /// --provider-config. Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "selector",
         visible_alias = "provider-id",
@@ -481,7 +484,11 @@ pub struct AgentTaskLoopDefineArgs {
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]
     pub dispatch_backend: Option<String>,
 
-    /// Provider id to use for loop-spawned dispatch actions when the action omits one.
+    /// Extension-provider selector: the Homeboy executor provider id (e.g.
+    /// `wordpress.codebox-agent-task-executor`) that runs loop-spawned dispatch
+    /// actions when the action omits one. This is NOT a model or AI runtime name
+    /// (codex, opencode, claude-code) — pass those in --dispatch-provider-config.
+    /// Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "dispatch-selector",
         visible_alias = "dispatch-provider-id",
@@ -493,7 +500,10 @@ pub struct AgentTaskLoopDefineArgs {
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
 
-    /// Provider config JSON, @file, or - for loop-spawned dispatch actions when the action omits one.
+    /// Agent/model provider config (JSON, @file, or -): the nested AI
+    /// runtime/provider/model the selected executor uses for loop-spawned
+    /// dispatch actions when the action omits one. Put AI runtime names like
+    /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }
@@ -517,7 +527,11 @@ pub struct AgentTaskLoopResumeArgs {
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]
     pub dispatch_backend: Option<String>,
 
-    /// Provider id to use for loop-spawned dispatch actions when the action omits one.
+    /// Extension-provider selector: the Homeboy executor provider id (e.g.
+    /// `wordpress.codebox-agent-task-executor`) that runs loop-spawned dispatch
+    /// actions when the action omits one. This is NOT a model or AI runtime name
+    /// (codex, opencode, claude-code) — pass those in --dispatch-provider-config.
+    /// Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "dispatch-selector",
         visible_alias = "dispatch-provider-id",
@@ -529,7 +543,10 @@ pub struct AgentTaskLoopResumeArgs {
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
 
-    /// Provider config JSON, @file, or - for loop-spawned dispatch actions when the action omits one.
+    /// Agent/model provider config (JSON, @file, or -): the nested AI
+    /// runtime/provider/model the selected executor uses for loop-spawned
+    /// dispatch actions when the action omits one. Put AI runtime names like
+    /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }
