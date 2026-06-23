@@ -23,6 +23,7 @@ function runDeterministicLoop(options = {}) {
   const loopPolicy = normalizeLoopPolicy(options, { defaultMode: 'count', defaultMaxRevolutions: 1 });
   const maxIterations = loopPolicyMaxRevolutions(loopPolicy, {
     nonCountMaxRevolutions: options.maxSynchronousRevolutions || options.max_synchronous_revolutions,
+    requireNonCountMaxRevolutions: true,
   });
   const maxAttempts = positiveInteger(options.maxAttempts || options.max_attempts || options.retry?.max_attempts, 1);
   let state = clonePlainObject(options.state || options.initialState || options.initial_state || {});

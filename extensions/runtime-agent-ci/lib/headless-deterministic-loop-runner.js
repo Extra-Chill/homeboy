@@ -153,6 +153,7 @@ function runHeadlessPolicyLoop(options = {}) {
     mode: loopPolicy.mode,
     maxRevolutions: loopPolicy.max_revolutions,
     maxIterations: loopPolicy.max_iterations,
+    maxSynchronousRevolutions: loopPolicy.max_iterations,
     durationMs: loopPolicy.duration_ms,
     deadlineAt: loopPolicy.deadline_at,
     state: {
@@ -319,7 +320,8 @@ function normalizeLoopPolicy(plan) {
   const raw = optionalObject(plan.loop_policy || plan.loopPolicy);
   const primitive = normalizeSharedLoopPolicy({ ...plan, ...raw }, { defaultMode: 'count', defaultMaxRevolutions: 1 });
   const maxIterations = loopPolicyMaxRevolutions(primitive, {
-    nonCountMaxRevolutions: plan.max_synchronous_revolutions || plan.maxSynchronousRevolutions,
+    nonCountMaxRevolutions: raw.max_synchronous_revolutions || raw.maxSynchronousRevolutions || plan.max_synchronous_revolutions || plan.maxSynchronousRevolutions,
+    requireNonCountMaxRevolutions: true,
   });
   const enabled = Object.keys(raw).length > 0 || maxIterations > 1;
   return {

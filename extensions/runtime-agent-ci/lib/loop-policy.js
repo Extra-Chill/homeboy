@@ -52,7 +52,14 @@ function loopPolicyMaxRevolutions(policyInput, options = {}) {
   if ((options.nonCountMaxRevolutions ?? options.non_count_max_revolutions) === Number.POSITIVE_INFINITY) {
     return Number.POSITIVE_INFINITY;
   }
-  return positiveInteger(options.nonCountMaxRevolutions ?? options.non_count_max_revolutions, 1);
+  const maxRevolutions = positiveInteger(options.nonCountMaxRevolutions ?? options.non_count_max_revolutions, 0);
+  if (maxRevolutions > 0) {
+    return maxRevolutions;
+  }
+  if (options.requireNonCountMaxRevolutions || options.require_non_count_max_revolutions) {
+    throw new Error('Synchronous duration, deadline, and indefinite loop policies require max_synchronous_revolutions so they do not silently run once. Set max_synchronous_revolutions to a positive integer, or use a durable loop for unbounded execution.');
+  }
+  return 1;
 }
 
 function status(reason, context = {}) {

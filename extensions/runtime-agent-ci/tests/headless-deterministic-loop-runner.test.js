@@ -104,6 +104,54 @@ assert.equal(boundedFailure.tasks[0].loop_policy.status, 'failed');
 assert.equal(boundedFailure.tasks[0].loop_policy.stop_reason, 'max_revolutions_reached');
 assert.equal(boundedFailure.tasks[0].loop_policy.iteration_count, 2);
 
+assert.throws(
+  () => runHeadlessDeterministicLoop({
+    spec: {
+      ...baseSpec,
+      task_id: 'duration-missing-sync-cap',
+      workload_id: 'duration-missing-sync-cap',
+      loop_policy: {
+        mode: 'duration',
+        duration_ms: 60_000,
+        accepted_statuses: ['succeeded'],
+        continue_conditions: [{ outcome_status: 'failed' }],
+      },
+    },
+    runtime,
+    validate: false,
+    execute: ({ request }) => outcome(request, 'failed', 'Still failing.'),
+  }),
+  /require max_synchronous_revolutions/
+);
+
+let durationCalls = 0;
+const durationBounded = runHeadlessDeterministicLoop({
+  spec: {
+    ...baseSpec,
+    task_id: 'duration-explicit-sync-cap',
+    workload_id: 'duration-explicit-sync-cap',
+    loop_policy: {
+      mode: 'duration',
+      duration_ms: 60_000,
+      max_synchronous_revolutions: 2,
+      accepted_statuses: ['succeeded'],
+      continue_conditions: [{ outcome_status: 'failed' }],
+    },
+  },
+  runtime,
+  validate: false,
+  now: () => 1000,
+  execute: ({ request }) => {
+    durationCalls += 1;
+    return outcome(request, 'failed', 'Still failing.');
+  },
+});
+
+assert.equal(durationCalls, 2);
+assert.equal(durationBounded.status, 'failed');
+assert.equal(durationBounded.tasks[0].loop_policy.stop_reason, 'max_revolutions_reached');
+assert.equal(durationBounded.tasks[0].loop_policy.iteration_count, 2);
+
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-headless-loop-policy-'));
 try {
   const loopPolicyFile = path.join(tmpRoot, 'loop-policy.json');

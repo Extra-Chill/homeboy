@@ -34,6 +34,11 @@ const durationPolicy = normalizeLoopPolicy({ mode: 'duration', duration_ms: 5000
 assert.equal(evaluateLoopPolicy(durationPolicy, { started_at: 1000, now: 5999 }).reason, 'continue');
 assert.equal(evaluateLoopPolicy(durationPolicy, { started_at: 1000, now: 6000 }).reason, 'duration_elapsed');
 assert.equal(loopPolicyMaxRevolutions(durationPolicy), 1);
+assert.throws(
+  () => loopPolicyMaxRevolutions(durationPolicy, { requireNonCountMaxRevolutions: true }),
+  /require max_synchronous_revolutions/
+);
+assert.equal(loopPolicyMaxRevolutions(durationPolicy, { requireNonCountMaxRevolutions: true, nonCountMaxRevolutions: 3 }), 3);
 
 const deadlinePolicy = normalizeLoopPolicy({ mode: 'duration', deadline_at: 3000 });
 assert.equal(evaluateLoopPolicy(deadlinePolicy, { now: 2999 }).reason, 'continue');
@@ -42,10 +47,22 @@ assert.equal(evaluateLoopPolicy(deadlinePolicy, { now: 3000 }).reason, 'deadline
 const cancelledPolicy = normalizeLoopPolicy({ mode: 'indefinite', cancelled: true });
 assert.equal(evaluateLoopPolicy(cancelledPolicy, { now: 1000 }).reason, 'cancelled');
 
+assert.throws(
+  () => runDeterministicLoop({
+    mode: 'duration',
+    duration_ms: 60_000,
+    now: () => 1000,
+    execute: () => ({ status: 'succeeded' }),
+    stopCriteria: () => false,
+  }),
+  /require max_synchronous_revolutions/
+);
+
 let durationExecutions = 0;
 const durationSync = runDeterministicLoop({
   mode: 'duration',
   duration_ms: 60_000,
+  max_synchronous_revolutions: 2,
   now: () => 1000,
   execute: () => {
     durationExecutions += 1;
@@ -53,20 +70,17 @@ const durationSync = runDeterministicLoop({
   },
   stopCriteria: () => false,
 });
-assert.equal(durationExecutions, 1);
-assert.equal(durationSync.iterations.length, 1);
+assert.equal(durationExecutions, 2);
+assert.equal(durationSync.iterations.length, 2);
 
-let indefiniteExecutions = 0;
-const indefiniteSync = runDeterministicLoop({
-  mode: 'indefinite',
-  execute: () => {
-    indefiniteExecutions += 1;
-    return { status: 'succeeded' };
-  },
-  stopCriteria: () => false,
-});
-assert.equal(indefiniteExecutions, 1);
-assert.equal(indefiniteSync.iterations.length, 1);
+assert.throws(
+  () => runDeterministicLoop({
+    mode: 'indefinite',
+    execute: () => ({ status: 'succeeded' }),
+    stopCriteria: () => false,
+  }),
+  /require max_synchronous_revolutions/
+);
 
 let now = 1000;
 const submitted = [];
