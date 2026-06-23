@@ -87,16 +87,7 @@ pub(crate) fn run_github_release(
     // single API call — keeping the github.release step responsible for
     // the full Release lifecycle (entry + assets) instead of requiring a
     // separate publish.<target> step.
-    let artifact_paths: Vec<String> = state
-        .artifacts
-        .iter()
-        .filter(|artifact| {
-            std::fs::metadata(&artifact.path)
-                .map(|metadata| metadata.is_file())
-                .unwrap_or(false)
-        })
-        .map(|artifact| artifact.path.clone())
-        .collect();
+    let artifact_paths = github_release_artifact_paths(state);
     let has_artifacts = !artifact_paths.is_empty();
     // Single repair-command builder for every failure path. The persisted
     // exact-body file only exists after `persist_release_body` runs below, so
@@ -779,6 +770,28 @@ pub(super) fn github_release_repair_commands(
         persisted_notes_path,
         github_cli_env(github, config),
     )
+}
+
+pub(super) fn github_release_artifact_paths(state: &ReleaseState) -> Vec<String> {
+    state
+        .artifacts
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .durable_path
+                .as_deref()
+                .filter(|path| path_is_file(path))
+                .or_else(|| Some(artifact.path.as_str()))
+                .filter(|path| path_is_file(path))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn path_is_file(path: &str) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

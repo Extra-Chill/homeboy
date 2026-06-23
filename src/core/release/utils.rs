@@ -53,6 +53,7 @@ pub fn parse_release_artifacts(value: &serde_json::Value) -> Result<Vec<ReleaseA
         let artifact = match item {
             serde_json::Value::String(path) => ReleaseArtifact {
                 path,
+                durable_path: None,
                 artifact_type: None,
                 platform: None,
             },
@@ -73,6 +74,7 @@ pub fn parse_release_artifacts(value: &serde_json::Value) -> Result<Vec<ReleaseA
                     .map(|v| v.to_string());
                 ReleaseArtifact {
                     path,
+                    durable_path: None,
                     artifact_type,
                     platform,
                 }

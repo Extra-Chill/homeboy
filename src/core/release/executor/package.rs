@@ -6,6 +6,7 @@
 
 use crate::core::error::{Error, Result};
 use crate::core::extension::{self, ExtensionManifest};
+use std::path::{Path, PathBuf};
 
 use super::super::types::{ReleaseArtifact, ReleaseState, ReleaseStepResult};
 use super::super::utils::parse_release_artifacts;
@@ -56,7 +57,10 @@ pub(crate) fn run_package(
         let response = run_package_action_with_retry(&extension.id, &payload)
             .map_err(|err| package_provider_error(&extension.id, err))?;
 
+        let artifact_start = state.artifacts.len();
         store_artifacts_from_output(state, &response)
+            .map_err(|err| package_provider_error(&extension.id, err))?;
+        persist_package_artifacts(state, artifact_start, component_id, component_local_path)
             .map_err(|err| package_provider_error(&extension.id, err))?;
         responses.push(serde_json::json!({
             "extension": extension.id,
@@ -355,6 +359,81 @@ pub(super) fn store_artifacts_from_output(
     let artifacts: Vec<ReleaseArtifact> = parse_release_artifacts(&raw_artifacts)?;
     state.artifacts.extend(artifacts);
     Ok(())
+}
+
+fn persist_package_artifacts(
+    state: &mut ReleaseState,
+    artifact_start: usize,
+    component_id: &str,
+    component_local_path: &str,
+) -> Result<()> {
+    let artifact_root = crate::core::paths::artifact_root()?;
+    let version = state
+        .version
+        .as_deref()
+        .filter(|version| !version.trim().is_empty())
+        .unwrap_or("unversioned");
+    let durable_dir = artifact_root
+        .join("release")
+        .join(crate::core::paths::sanitize_path_segment(component_id))
+        .join(crate::core::paths::sanitize_path_segment(version));
+
+    for (offset, artifact) in state.artifacts[artifact_start..].iter_mut().enumerate() {
+        let source = resolve_release_artifact_path(&artifact.path, component_local_path);
+        if !source.is_file() {
+            continue;
+        }
+
+        if source.starts_with(&artifact_root) {
+            artifact.durable_path = Some(source.display().to_string());
+            continue;
+        }
+
+        std::fs::create_dir_all(&durable_dir).map_err(|e| {
+            Error::internal_io(
+                format!("Failed to create durable release artifact directory: {}", e),
+                Some(durable_dir.display().to_string()),
+            )
+        })?;
+
+        let file_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(safe_artifact_file_name)
+            .unwrap_or_else(|| "artifact".to_string());
+        let target = durable_dir.join(format!("{:02}-{}", artifact_start + offset + 1, file_name));
+        std::fs::copy(&source, &target).map_err(|e| {
+            Error::internal_io(
+                format!("Failed to persist release artifact: {}", e),
+                Some(format!("{} -> {}", source.display(), target.display())),
+            )
+        })?;
+        artifact.durable_path = Some(target.display().to_string());
+    }
+
+    Ok(())
+}
+
+fn resolve_release_artifact_path(path: &str, component_local_path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    Path::new(component_local_path).join(path)
+}
+
+fn safe_artifact_file_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Build an [`Error`] that surfaces *all* captured output from a failed

@@ -219,6 +219,7 @@ mod tests {
         std::fs::write(&artifact_path, "artifact").expect("artifact");
         let artifacts = vec![ReleaseArtifact {
             path: artifact_path.display().to_string(),
+            durable_path: None,
             artifact_type: None,
             platform: None,
         }];
