@@ -110,9 +110,22 @@ pub struct ReleaseArgs {
 
     /// Skip the GitHub Release creation step (the reviewer-facing release page
     /// with notes + assets on github.com). The tag is still created and pushed.
-    /// Use when CI or another pipeline already creates GitHub Releases.
+    ///
+    /// SHARP / MANUAL OVERRIDE. On a manual/local release of a GitHub component,
+    /// suppressing the reviewer-facing GitHub Release is almost never what you
+    /// want — humans expect the release page to exist. This flag is therefore
+    /// gated: pass --i-know-ci-creates-the-github-release to confirm you really
+    /// intend a tag-only release because CI (or another pipeline) owns GitHub
+    /// Release creation. Without that confirmation the release is refused.
     #[arg(long)]
     no_github_release: bool,
+
+    /// Confirm that --no-github-release is intentional on a manual/local release
+    /// because CI (or another pipeline) creates the GitHub Release. Required
+    /// whenever --no-github-release is used on a component that would otherwise
+    /// get a reviewer-facing GitHub Release.
+    #[arg(long)]
+    i_know_ci_creates_the_github_release: bool,
 
     /// Git identity for release commits and tags.
     /// Use "bot" for the default CI bot identity, or "Name <email>" for custom.
@@ -275,6 +288,7 @@ impl ReleaseArgs {
             force_lower_bump: false,
             skip_publish,
             no_github_release: false,
+            i_know_ci_creates_the_github_release: false,
             git_identity: None,
         }
     }
@@ -289,6 +303,8 @@ pub fn run(
     validate_apply_boundary(&execution)?;
     let component_ids = resolve_component_ids(&args, &args.components)?;
     let bump_override = args.bump.clone();
+
+    guard_no_github_release(&args, &component_ids)?;
 
     if args.package_only {
         return run_package_only(args, &component_ids);
@@ -479,6 +495,77 @@ fn run_package_only(
     ))
 }
 
+/// Guard `--no-github-release` as a sharp, manual override (issue #6137).
+///
+/// On a manual/local release of a GitHub component, suppressing the
+/// reviewer-facing GitHub Release is almost never intended — the flag is too
+/// easy to carry over from a tag-only / CI-publish mental model. So whenever
+/// `--no-github-release` is used on a component that would otherwise get a
+/// GitHub Release, require the explicit `--i-know-ci-creates-the-github-release`
+/// confirmation. The error spells out how to either confirm intent or run a
+/// normal release, and how to create the GitHub Release later if a tag-only
+/// release was already produced.
+///
+/// `--dry-run` is exempt: previewing a plan with `--no-github-release` should
+/// never be blocked, and the dry-run hints already explain the tag-only outcome.
+fn guard_no_github_release(
+    args: &ReleaseArgs,
+    component_ids: &[String],
+) -> homeboy::core::Result<()> {
+    if !args.no_github_release || args.i_know_ci_creates_the_github_release {
+        return Ok(());
+    }
+    if args.dry_run_args.dry_run {
+        return Ok(());
+    }
+
+    // Only gate components that would actually get a reviewer-facing GitHub
+    // Release; non-GitHub remotes never create one, so the flag is a no-op there.
+    let mut gated: Vec<&String> = Vec::new();
+    for id in component_ids {
+        match component::load(id) {
+            Ok(component) if release::github_release_expected(&component) => gated.push(id),
+            // Unresolved or non-GitHub components are not gated here — the
+            // downstream release flow reports load failures with full context.
+            _ => {}
+        }
+    }
+
+    if gated.is_empty() {
+        return Ok(());
+    }
+
+    let components = gated
+        .iter()
+        .map(|id| id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let example = gated.first().map(|id| id.as_str()).unwrap_or("<component>");
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "no-github-release",
+        format!(
+            "--no-github-release is a SHARP, manual override and would suppress the \
+             reviewer-facing GitHub Release for: {components}. On a manual/local release humans \
+             expect the GitHub Release page to exist, so this is gated. Confirm only if CI (or \
+             another pipeline) creates the GitHub Release."
+        ),
+        None,
+        Some(vec![
+            "If CI creates the GitHub Release, re-run with --i-know-ci-creates-the-github-release \
+             to confirm the tag-only intent."
+                .to_string(),
+            "If you actually want a normal release, drop --no-github-release so the GitHub Release \
+             is created."
+                .to_string(),
+            format!(
+                "If a tag-only release was already produced, create the GitHub Release later from \
+                 the existing tag (same notes Homeboy generated): homeboy release {example} --head"
+            ),
+        ]),
+    ))
+}
+
 fn validate_apply_boundary(execution: &ReleaseExecutionPlan) -> homeboy::core::Result<()> {
     if !execution.requires_apply {
         return Ok(());
@@ -652,6 +739,7 @@ mod tests {
             force_lower_bump: false,
             skip_publish: false,
             no_github_release: false,
+            i_know_ci_creates_the_github_release: false,
             git_identity: None,
         }
     }
@@ -795,6 +883,45 @@ mod tests {
 
         let execution = args.execution_plan(false);
         validate_apply_boundary(&execution).expect("--apply confirms risky release mode");
+    }
+
+    #[test]
+    fn no_github_release_guard_skips_when_flag_absent() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        // no_github_release stays false; guard is a no-op even for unknown ids.
+        guard_no_github_release(&args, &["fixture".to_string()])
+            .expect("guard is inert without --no-github-release");
+    }
+
+    #[test]
+    fn no_github_release_guard_passes_with_confirmation_flag() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.no_github_release = true;
+        args.i_know_ci_creates_the_github_release = true;
+        guard_no_github_release(&args, &["fixture".to_string()])
+            .expect("explicit confirmation satisfies the guard");
+    }
+
+    #[test]
+    fn no_github_release_guard_exempts_dry_run() {
+        let mut args = args(&["fixture"]);
+        // dry_run defaults to true via the helper.
+        args.no_github_release = true;
+        guard_no_github_release(&args, &["fixture".to_string()])
+            .expect("dry-run preview is never blocked by the guard");
+    }
+
+    #[test]
+    fn no_github_release_guard_ignores_unresolvable_components() {
+        let mut args = args(&["definitely-not-a-real-component-xyz"]);
+        args.dry_run_args.dry_run = false;
+        args.no_github_release = true;
+        // A component that cannot be loaded (or is non-GitHub) is not gated;
+        // the downstream release flow surfaces load failures with full context.
+        guard_no_github_release(&args, &["definitely-not-a-real-component-xyz".to_string()])
+            .expect("unresolvable components are not gated by the GitHub-release guard");
     }
 
     #[test]
