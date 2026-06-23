@@ -260,36 +260,65 @@ fn extract_hotspot_points(json: &Value) -> Vec<HotspotPoint> {
 }
 
 fn standardized_hotspots(json: &Value) -> Vec<HotspotPoint> {
-    [
-        &["hotspots"][..],
-        &["results", "hotspots"][..],
-        &["campaign", "hotspots"][..],
-        &["metadata", "hotspots"][..],
-        &["campaign", "metadata", "hotspots"][..],
-    ]
-    .into_iter()
-    .filter_map(|path| {
-        value_at(json, path)
-            .and_then(Value::as_array)
-            .map(|items| (path, items))
-    })
-    .flat_map(|(path, items)| {
-        items.iter().filter_map(move |item| {
-            let key = string_field(item, &["key", "id", "fingerprint"]).or_else(|| {
-                composite_key(
-                    item,
-                    &["surface_id", "target_id", "operation_id", "case_id"],
-                )
-            });
-            key.map(|key| HotspotPoint {
-                key,
-                label: string_field(item, &["label", "title", "name"]),
-                score: numeric_field(item, &["score", "weight", "count", "value"]).unwrap_or(1.0),
-                source: path.join("."),
-            })
+    let mut points = Vec::new();
+    collect_standardized_hotspots(json, "$", &mut points);
+    points
+}
+
+fn collect_standardized_hotspots(value: &Value, source: &str, points: &mut Vec<HotspotPoint>) {
+    if let Some(hotspots) = value.get("hotspots") {
+        collect_hotspot_items(hotspots, &format!("{source}.hotspots"), points);
+    }
+
+    match value {
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_standardized_hotspots(item, &format!("{source}[{index}]"), points);
+            }
+        }
+        Value::Object(object) => {
+            for (key, item) in object {
+                if key == "hotspots" {
+                    continue;
+                }
+                collect_standardized_hotspots(item, &format!("{source}.{key}"), points);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_hotspot_items(value: &Value, source: &str, points: &mut Vec<HotspotPoint>) {
+    let items = value
+        .as_array()
+        .or_else(|| value.get("items").and_then(Value::as_array));
+    let Some(items) = items else {
+        return;
+    };
+
+    points.extend(items.iter().filter_map(|item| {
+        let key = string_field(item, &["key", "id", "fingerprint", "name"]).or_else(|| {
+            composite_key(
+                item,
+                &[
+                    "category",
+                    "phase",
+                    "operation",
+                    "hook",
+                    "surface_id",
+                    "target_id",
+                    "operation_id",
+                    "case_id",
+                ],
+            )
+        });
+        key.map(|key| HotspotPoint {
+            key,
+            label: string_field(item, &["label", "title", "name"]),
+            score: numeric_field(item, &["score", "weight", "count", "value"]).unwrap_or(1.0),
+            source: source.to_string(),
         })
-    })
-    .collect()
+    }));
 }
 
 fn finding_hotspots(json: &Value) -> Vec<HotspotPoint> {
@@ -433,10 +462,13 @@ mod tests {
                 "run-a",
                 json!({
                     "schema": "https://schemas.homeboy.dev/fuzz/result-envelope.json",
-                    "hotspots": [
-                        { "id": "alpha", "label": "Alpha", "score": 2.5 },
-                        { "id": "beta", "score": 4.0 }
-                    ]
+                    "hotspots": {
+                        "schema": "homeboy/fuzz-hotspots/v1",
+                        "items": [
+                            { "id": "alpha", "label": "Alpha", "score": 2.5 },
+                            { "id": "beta", "score": 4.0 }
+                        ]
+                    }
                 }),
             ),
             artifact(
@@ -462,6 +494,50 @@ mod tests {
         assert_eq!(ranked[0].run_ids, vec!["run-a", "run-b"]);
         assert_eq!(ranked[1].key, "beta");
         assert_eq!(ranked[1].score, 4.0);
+    }
+
+    #[test]
+    fn standardized_hotspots_extract_nested_observation_payloads() {
+        let points = extract_hotspot_points(&json!({
+            "schema": "homeboy/fuzz-campaign/v1",
+            "metadata": {
+                "wordpress_fuzz_result": {
+                    "cases": [
+                        {
+                            "metadata": {
+                                "observations": [
+                                    {
+                                        "payload": {
+                                            "hotspots": {
+                                                "schema": "homeboy/fuzz-hotspots/v1",
+                                                "items": [
+                                                    {
+                                                        "name": "variation_create:added_post_meta",
+                                                        "category": "hook",
+                                                        "phase": "variation_create",
+                                                        "operation": "variation-batch-create",
+                                                        "hook": "added_post_meta",
+                                                        "count": 750
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].key, "variation_create:added_post_meta");
+        assert_eq!(
+            points[0].label.as_deref(),
+            Some("variation_create:added_post_meta")
+        );
+        assert_eq!(points[0].score, 750.0);
     }
 
     #[test]
