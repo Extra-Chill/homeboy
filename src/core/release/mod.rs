@@ -7,6 +7,7 @@ mod execution_plan;
 mod execution_projection;
 mod executor;
 mod orchestrator;
+mod package_recovery;
 mod pipeline;
 mod pipeline_capabilities;
 mod pipeline_summary;
@@ -24,6 +25,7 @@ pub mod version;
 mod workflow;
 mod workflow_recover;
 
+pub use package_recovery::{package_existing_tag, ReleasePackageResult};
 pub use pipeline::run;
 pub use planner::plan;
 pub use types::{

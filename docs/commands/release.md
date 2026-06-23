@@ -17,6 +17,8 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 - `--apply`: Confirm risky real release modes such as `--deploy`, `--recover`, `--retag`, `--head`, or bare `--skip-checks`
 - `--deploy`: Deploy this component to all projects that use it after release
 - `--recover`: Recover from an interrupted release
+- `--package-only`: Regenerate only the release package for an existing tag at the checked-out commit
+- `--tag <TAG>`: Existing release tag to use with `--package-only`
 - `--head`: Finish the release pipeline for the version commit and tag already checked out at HEAD
 - `--from-artifacts <DIR>`: With `--head`, attach/publish existing artifacts from a directory instead of running `release.package`
 - `--skip-checks`: Skip pre-release lint/test checks
@@ -31,6 +33,8 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 `homeboy release` executes component releases: detects or applies a version bump, finalizes generated changelog entries, commits, tags, pushes, and optionally publishes release artifacts. Use `--dry-run` to preview the release plan without making changes.
 
 `--head` is for CI jobs where another step already created the release commit and tag, but Homeboy should still own the rest of the release lifecycle. It keeps the safe preflight checks, skips changelog/version/git mutation steps, populates release state from the version and tag at HEAD, then runs `release.package` (unless `--from-artifacts` is provided), `github.release`, `release.publish`, cleanup, and post-release hooks through the normal pipeline.
+
+`--package-only --tag <TAG>` is for operator recovery when the release tag already exists but its package artifact needs to be regenerated. It requires the checked-out `HEAD` to match the existing tag, runs only the extension-owned `release.package` action, copies the produced files into Homeboy's artifact root under `release-packages/<component>/<tag>/`, writes `manifest.json`, and prints both paths. It does not create tags, push, create GitHub Releases, publish registries, deploy, or clean up the component build output.
 
 Risky real release modes require explicit `--apply`: `--deploy`, `--recover`, `--retag`, `--head`, and bare `--skip-checks`. Dry-run previews never require `--apply`, and granular skips such as `--skip-checks=lint` keep the normal release flow because other quality gates remain active.
 
@@ -47,6 +51,14 @@ homeboy release <component_id> --dry-run
 
 # 3. Execute the release
 homeboy release <component_id>
+```
+
+### Regenerate a package for an existing tag
+
+```sh
+# Check out the already-tagged commit, then rebuild just the release package.
+git checkout v1.2.3
+homeboy release <component_id> --package-only --tag v1.2.3 --apply
 ```
 
 ### Finish an already-tagged release
