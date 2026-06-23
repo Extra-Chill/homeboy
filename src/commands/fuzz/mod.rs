@@ -7,16 +7,17 @@ mod workloads;
 
 pub use types::{
     FuzzArgs, FuzzCampaignContract, FuzzContractOutput, FuzzCoverageCompletenessOutput,
-    FuzzCoverageSelectorSummaryOutput, FuzzExecutionOutput, FuzzGateEvaluation, FuzzListOutput,
-    FuzzOutput, FuzzPlanOutput, FuzzReplayEnv, FuzzReplayOutput, FuzzReportOutput, FuzzRunArgs,
-    FuzzRunOutput, FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
+    FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput, FuzzDiscoverSummary,
+    FuzzExecutionOutput, FuzzGateEvaluation, FuzzListOutput, FuzzOutput, FuzzPlanOutput,
+    FuzzReplayEnv, FuzzReplayOutput, FuzzReportOutput, FuzzRunArgs, FuzzRunOutput,
+    FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
 };
 
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::fuzz::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_core_contract, FuzzExecutionRequest,
-    FuzzOperation, FuzzOperationFamily, FuzzSafetyClass, FuzzTargetInventory,
-    FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    FuzzOperation, FuzzOperationFamily, FuzzProvenance, FuzzSafetyClass, FuzzTargetInventory,
+    FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_PROVENANCE_SCHEMA,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,9 +25,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{CmdResult, GlobalArgs};
 use compare::run_compare;
 use execution::{default_runner_contract, run_run};
+use homeboy::core::fuzz::{merge_fuzz_target_inventory, parse_fuzz_target_inventory_file};
 use replay::run_replay;
 use report::{run_report, run_validate};
-use types::{FuzzCommand, FuzzListArgs, FuzzPlanArgs, FuzzPlanStrategy};
+use types::{FuzzCommand, FuzzDiscoverArgs, FuzzListArgs, FuzzPlanArgs, FuzzPlanStrategy};
 use workloads::{
     build_target_inventory, fuzz_workloads, load_rig, resolve_component_id, resolve_fuzz_context,
     select_workload,
@@ -35,6 +37,9 @@ use workloads::{
 pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
     match args.command {
         Some(FuzzCommand::Contract) => Ok((FuzzOutput::Contract(run_contract()), 0)),
+        Some(FuzzCommand::Discover(discover_args)) => {
+            Ok((FuzzOutput::Discover(run_discover(discover_args)?), 0))
+        }
         Some(FuzzCommand::List(list_args)) => Ok((FuzzOutput::List(run_list(list_args)?), 0)),
         Some(FuzzCommand::Plan(plan_args)) => Ok((FuzzOutput::Plan(run_plan(plan_args)?), 0)),
         Some(FuzzCommand::Run(run_args)) => {
@@ -59,6 +64,62 @@ pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
             Ok((FuzzOutput::Run(output), exit))
         }
     }
+}
+
+fn run_discover(args: FuzzDiscoverArgs) -> homeboy::core::Result<FuzzDiscoverOutput> {
+    let mut inventory_files = Vec::new();
+    let mut merged: Option<FuzzTargetInventory> = None;
+
+    for path in &args.inventories {
+        let discovered = parse_fuzz_target_inventory_file(path)?;
+        inventory_files.push(path.display().to_string());
+        if let Some(base) = &mut merged {
+            merge_fuzz_target_inventory(base, discovered);
+        } else {
+            merged = Some(discovered);
+        }
+    }
+
+    let mut target_inventory = merged.ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "inventory",
+            "at least one --inventory artifact is required",
+            None,
+            None,
+        )
+    })?;
+    if let Some(id) = args.inventory_id.as_deref() {
+        target_inventory.id = id.trim().to_string();
+    }
+    target_inventory.provenance = Some(FuzzProvenance {
+        schema: FUZZ_PROVENANCE_SCHEMA.to_string(),
+        producer: "homeboy fuzz discover".to_string(),
+        producer_version: None,
+        invocation: Some("artifact-ingest".to_string()),
+        run_id: None,
+        source_ref: Some(args.source_label.clone()),
+        created_at: None,
+        metadata: json!({
+            "inventory_files": inventory_files.clone(),
+            "source_label": args.source_label.clone(),
+            "discovery_mode": "artifact"
+        }),
+        extra: BTreeMap::new(),
+    });
+
+    Ok(FuzzDiscoverOutput {
+        command: "fuzz.discover".to_string(),
+        status: "ok".to_string(),
+        source_label: args.source_label,
+        inventory_files,
+        summary: FuzzDiscoverSummary {
+            surfaces: target_inventory.surfaces.len(),
+            targets: target_inventory.targets.len(),
+            workloads: target_inventory.workloads.len(),
+            seeds: target_inventory.seeds.len(),
+        },
+        target_inventory,
+    })
 }
 
 fn run_contract() -> FuzzContractOutput {
@@ -492,8 +553,8 @@ mod tests {
         FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
     };
     use super::types::{
-        FuzzCommand, FuzzExecutionOutput, FuzzListOutput, FuzzOutput, FuzzPlanArgs,
-        FuzzPlanStrategy, FuzzReplayArgs, FuzzReportArgs, FuzzRunArgs, FuzzRunOutput,
+        FuzzCommand, FuzzDiscoverArgs, FuzzExecutionOutput, FuzzListOutput, FuzzOutput,
+        FuzzPlanArgs, FuzzPlanStrategy, FuzzReplayArgs, FuzzReportArgs, FuzzRunArgs, FuzzRunOutput,
         FuzzRunnerContract, FuzzValidateArgs, FuzzWorkloadOutput,
     };
     use super::workloads::{
@@ -608,6 +669,67 @@ mod tests {
             }
         }))
         .expect("inventory parses")
+    }
+
+    fn write_inventory(path: &Path, inventory: &FuzzTargetInventory) {
+        fs::write(
+            path,
+            serde_json::to_string(inventory).expect("serialize inventory"),
+        )
+        .expect("write inventory");
+    }
+
+    #[test]
+    fn fuzz_discover_merges_inventory_artifacts_with_provenance() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = temp.path().join("first.json");
+        let second = temp.path().join("second.json");
+        let mut second_inventory = planner_inventory();
+        second_inventory.id = "second-inventory".to_string();
+        second_inventory.targets[0].id = "api.orders".to_string();
+        second_inventory.workloads.clear();
+        second_inventory.seeds.clear();
+        write_inventory(&first, &planner_inventory());
+        write_inventory(&second, &second_inventory);
+
+        let output = super::run_discover(FuzzDiscoverArgs {
+            inventories: vec![first.clone(), second.clone()],
+            inventory_id: Some("merged-inventory".to_string()),
+            source_label: "unit-test".to_string(),
+        })
+        .expect("discover inventory");
+
+        assert_eq!(output.command, "fuzz.discover");
+        assert_eq!(output.status, "ok");
+        assert_eq!(output.target_inventory.id, "merged-inventory");
+        assert_eq!(output.summary.targets, 2);
+        assert_eq!(output.summary.workloads, 1);
+        assert_eq!(output.summary.seeds, 1);
+        assert_eq!(
+            output.inventory_files,
+            vec![first.display().to_string(), second.display().to_string()]
+        );
+        let provenance = output.target_inventory.provenance.expect("provenance");
+        assert_eq!(provenance.producer, "homeboy fuzz discover");
+        assert_eq!(provenance.source_ref.as_deref(), Some("unit-test"));
+        assert_eq!(
+            provenance.metadata["discovery_mode"],
+            serde_json::json!("artifact")
+        );
+    }
+
+    #[test]
+    fn fuzz_discover_requires_inventory_artifacts() {
+        let error = super::run_discover(FuzzDiscoverArgs {
+            inventories: Vec::new(),
+            inventory_id: None,
+            source_label: "artifact".to_string(),
+        })
+        .expect_err("empty discovery should fail");
+
+        assert!(error
+            .to_string()
+            .contains("at least one --inventory artifact is required"));
     }
 
     #[test]
