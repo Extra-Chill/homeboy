@@ -9,8 +9,10 @@ const assert = require('node:assert/strict');
  * Internal dependencies
  */
 const {
+	buildWordPressRestRequestCasesArtifact,
 	generateWordPressRestRequestCases,
 	generateWordPressRestRequestCasesForEntry,
+	normalizeWordPressRestRouteInventory,
 	normalizeWordPressRestRouteMatrix,
 } = require('../lib/rest-route-matrix');
 
@@ -48,6 +50,16 @@ const restIndex = {
 						id: { type: 'integer', required: true },
 						context: { type: 'string', enum: ['view', 'edit'], default: 'view' },
 					},
+				},
+			],
+		},
+		'/example/v1/search/(?P<term>[^/]+)': {
+			namespace: 'example/v1',
+			methods: ['GET'],
+			endpoints: [
+				{
+					methods: ['GET'],
+					args: {},
 				},
 			],
 		},
@@ -93,6 +105,7 @@ assert.deepEqual(safeDefaultCases.find((requestCase) => requestCase.method === '
 	method: 'HEAD',
 	path: '/example/v1/items/1',
 });
+assert.deepEqual(safeDefaultCases.find((requestCase) => requestCase.method === 'OPTIONS').expectedStatuses, [200, 204]);
 
 const plannedKinds = new Set(getCases[0].metadata.plannedCases.map((requestCase) => requestCase.kind));
 assert.equal(plannedKinds.has('invalid-enum'), true);
@@ -115,5 +128,27 @@ assert.equal(postCases.some((requestCase) => requestCase.metadata.plannedCases.s
 
 const limitedCases = generateWordPressRestRequestCases(restIndex, { methods: ['GET'], seed: 'alpha', maxCases: 3 });
 assert.deepEqual(limitedCases.map((requestCase) => requestCase.key), getCases.slice(0, 3).map((requestCase) => requestCase.key));
+
+const inventory = normalizeWordPressRestRouteInventory(restIndex, { generatedAt: '2026-01-01T00:00:00.000Z' });
+assert.equal(inventory.schema, 'homeboy/wordpress-rest-route-inventory/v1');
+assert.equal(inventory.totals.routes, 3);
+assert.equal(inventory.routes.some((route) => route.id === 'rest:post:example-v1-items'), true);
+
+const casesArtifact = buildWordPressRestRequestCasesArtifact(inventory, {
+	seed: 'alpha',
+	maxCases: 50,
+	generatedAt: '2026-01-01T00:00:00.000Z',
+});
+assert.equal(casesArtifact.schema, 'homeboy/wordpress-rest-request-cases/v1');
+assert.deepEqual(casesArtifact.filters.methods, ['GET', 'HEAD', 'OPTIONS']);
+assert.equal(casesArtifact.cases.some((requestCase) => requestCase.method === 'POST'), false);
+assert.equal(casesArtifact.skippedRoutes.some((route) => route.id === 'rest:post:example-v1-items' && route.type === 'unsafe_method'), true);
+assert.equal(casesArtifact.skippedRoutes.some((route) => route.id === 'rest:get:example-v1-search-term' && route.type === 'unsupported_parameterized_route'), true);
+assert.deepEqual(casesArtifact.routeGaps.map((gap) => gap.id), ['rest:get:example-v1-search-term']);
+assert.deepEqual(casesArtifact.cases[0].auth, { context: 'anonymous', role: null });
+
+const unsafeArtifact = buildWordPressRestRequestCasesArtifact(restIndex, { methods: ['POST'], seed: 'alpha', maxCases: 10 });
+assert.equal(unsafeArtifact.cases.length, 0);
+assert.equal(unsafeArtifact.skippedRoutes.some((route) => route.id === 'rest:post:example-v1-items' && route.type === 'unsafe_method'), true);
 
 console.log('REST request case generation smoke passed.');
