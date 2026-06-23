@@ -19,7 +19,7 @@ use super::workloads::{
 };
 
 pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
-    let rig_context = load_rig(args.rig.as_deref())?;
+    let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
     let effective_id = resolve_component_id(
         &args.comp,
         rig_context.as_ref().map(|context| &context.spec),
