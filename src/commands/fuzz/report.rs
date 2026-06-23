@@ -35,9 +35,7 @@ pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<Fuzz
 
 pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzReportOutput> {
     let campaign = parse_fuzz_results_file(&args.results_file)?;
-    let gates = evaluate_fuzz_gates(&campaign);
     let coverage_completeness = fuzz_coverage_completeness(&campaign);
-    let status = gate_status(&gates);
     let run_id = args.run.run_id.clone();
     let component = args.run.comp.id().unwrap_or("unknown").to_string();
     let request_id = args
@@ -52,11 +50,11 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
         .or_else(|| args.run.run_id.clone())
         .unwrap_or_else(|| campaign.id.clone());
     let metadata = fuzz_result_metadata(args.run.inventory.as_deref())?;
-    let envelope = FuzzResultEnvelope {
+    let mut envelope = FuzzResultEnvelope {
         schema: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
         version: FUZZ_CONTRACT_VERSION,
         id: envelope_id,
-        status: status.clone(),
+        status: "pending".to_string(),
         request: FuzzExecutionRequest {
             schema: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
             version: FUZZ_CONTRACT_VERSION,
@@ -81,6 +79,9 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
         metadata,
         extra: std::collections::BTreeMap::new(),
     };
+    let gates = evaluate_fuzz_result_envelope_gates(&envelope);
+    let status = gate_status(&gates);
+    envelope.status = status.clone();
 
     if let Some(path) = args.output_envelope.as_ref() {
         let json = fuzz_result_envelope_json(&envelope)?;
@@ -222,6 +223,123 @@ pub(super) fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvalua
             }
         })
         .collect()
+}
+
+pub(super) fn evaluate_fuzz_result_envelope_gates(
+    envelope: &FuzzResultEnvelope,
+) -> Vec<FuzzGateEvaluation> {
+    let mut gates = envelope
+        .campaign
+        .as_ref()
+        .map(evaluate_fuzz_gates)
+        .unwrap_or_default();
+
+    gates.extend(
+        envelope
+            .required_artifacts
+            .iter()
+            .filter(|artifact| artifact.required)
+            .map(|artifact| {
+                let observed = required_artifact_count(envelope, artifact.kind.as_str()) as f64;
+                FuzzGateEvaluation {
+                    gate_id: format!("has-required-artifact-{}", artifact.id),
+                    status: if observed >= 1.0 { "passed" } else { "failed" }.to_string(),
+                    metric: format!("required_artifact:{}", artifact.kind),
+                    observed,
+                    expected: 1.0,
+                }
+            }),
+    );
+
+    gates
+}
+
+fn required_artifact_count(envelope: &FuzzResultEnvelope, kind: &str) -> usize {
+    match kind {
+        "result_envelope" => 1,
+        "case_log" => envelope
+            .campaign
+            .as_ref()
+            .map(|campaign| case_evidence_artifact_count(campaign, &FuzzGateProfile::default()))
+            .unwrap_or(0),
+        "coverage_summary" => {
+            usize::from(
+                envelope
+                    .campaign
+                    .as_ref()
+                    .and_then(|campaign| campaign.coverage_summary.as_ref())
+                    .is_some(),
+            ) + artifact_ref_count(envelope, kind)
+        }
+        "replay_data" => replay_data_count(envelope) + artifact_ref_count(envelope, kind),
+        _ => artifact_ref_count(envelope, kind),
+    }
+}
+
+fn replay_data_count(envelope: &FuzzResultEnvelope) -> usize {
+    let Some(campaign) = envelope.campaign.as_ref() else {
+        return 0;
+    };
+
+    usize::from(campaign.replay.is_some())
+        + campaign
+            .cases
+            .iter()
+            .filter(|case| case.replay_id.is_some() || !case.input.is_null())
+            .count()
+        + campaign
+            .seeds
+            .iter()
+            .filter(|seed| seed.value.is_some() || seed.artifact.is_some())
+            .count()
+}
+
+fn artifact_ref_count(envelope: &FuzzResultEnvelope, kind: &str) -> usize {
+    let envelope_artifacts = envelope
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == kind)
+        .count();
+    let campaign_artifacts = envelope
+        .campaign
+        .as_ref()
+        .map(|campaign| {
+            campaign
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.kind == kind)
+                .count()
+                + metadata_artifact_kind_count(&campaign.metadata, kind)
+        })
+        .unwrap_or(0);
+
+    envelope_artifacts + campaign_artifacts + metadata_artifact_kind_count(&envelope.metadata, kind)
+}
+
+fn metadata_artifact_kind_count(metadata: &serde_json::Value, kind: &str) -> usize {
+    ["artifact_refs", "artifactRefs"]
+        .into_iter()
+        .map(|key| {
+            metadata
+                .get(key)
+                .and_then(|value| value.as_array())
+                .map(|artifacts| {
+                    artifacts
+                        .iter()
+                        .filter(|artifact| metadata_artifact_has_kind(artifact, kind))
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+fn metadata_artifact_has_kind(artifact: &serde_json::Value, kind: &str) -> bool {
+    artifact
+        .get("kind")
+        .or_else(|| artifact.get("role"))
+        .and_then(|value| value.as_str())
+        == Some(kind)
 }
 
 struct FuzzGateProfile {
