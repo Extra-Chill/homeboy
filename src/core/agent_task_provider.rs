@@ -46,7 +46,7 @@ mod tests;
 pub use catalog::*;
 pub(crate) use resolution::{
     resolve_provider_for_backend, role_aliases_for_executor, role_aliases_for_provider,
-    timeout_artifact_discovery_for_executor, ProviderResolution,
+    selector_runtime_provider_hint, timeout_artifact_discovery_for_executor, ProviderResolution,
 };
 pub(crate) use secrets::{
     provider_runner_secret_env_for_plan_with_providers,

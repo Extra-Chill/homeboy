@@ -25,7 +25,7 @@ pub(super) enum RunnerWorkspaceCommand {
         #[arg(long)]
         path: String,
 
-        /// Sync mode. snapshot streams source from the controller; git is only for public/runner-accessible remotes.
+        /// Sync mode. snapshot streams source from the controller; snapshot-git also initializes a synthetic git checkout; git is only for clean public/runner-accessible remotes.
         #[arg(long, value_enum, default_value_t = RunnerWorkspaceSyncModeArg::Snapshot)]
         mode: RunnerWorkspaceSyncModeArg,
 
@@ -48,6 +48,7 @@ pub(super) enum RunnerWorkspaceCommand {
 pub(super) enum RunnerWorkspaceSyncModeArg {
     #[default]
     Snapshot,
+    SnapshotGit,
     Git,
 }
 
@@ -71,6 +72,7 @@ impl From<RunnerWorkspaceSyncModeArg> for RunnerWorkspaceSyncMode {
     fn from(value: RunnerWorkspaceSyncModeArg) -> Self {
         match value {
             RunnerWorkspaceSyncModeArg::Snapshot => RunnerWorkspaceSyncMode::Snapshot,
+            RunnerWorkspaceSyncModeArg::SnapshotGit => RunnerWorkspaceSyncMode::SnapshotGit,
             RunnerWorkspaceSyncModeArg::Git => RunnerWorkspaceSyncMode::Git,
         }
     }

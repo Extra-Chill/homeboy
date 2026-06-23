@@ -40,6 +40,7 @@ pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
 pub enum RunnerWorkspaceSyncMode {
     #[default]
     Snapshot,
+    SnapshotGit,
     Git,
 }
 
@@ -47,6 +48,7 @@ impl RunnerWorkspaceSyncMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::Snapshot => "snapshot",
+            Self::SnapshotGit => "snapshot-git",
             Self::Git => "git",
         }
     }

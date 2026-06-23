@@ -87,6 +87,20 @@ pub(crate) enum ProviderResolution<'a> {
     SelectorMismatch { available_ids: Vec<String> },
 }
 
+pub(crate) fn selector_runtime_provider_hint(
+    backend: &str,
+    selector: Option<&str>,
+) -> Option<String> {
+    let selector = selector?.trim();
+    if !matches!(selector, "codex" | "opencode" | "claude-code") {
+        return None;
+    }
+
+    Some(format!(
+        "'{selector}' looks like a nested AI runtime provider, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend '{backend}'; pass the AI provider in --dispatch-provider-config instead."
+    ))
+}
+
 impl<'a> ProviderResolution<'a> {
     pub(crate) fn resolved(self) -> Option<&'a AgentTaskExecutorProvider> {
         match self {

@@ -8,6 +8,9 @@ use homeboy::core::fuzz::{
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
+use homeboy::core::performance_hotspots::{
+    summarize_performance_hotspots, PerformanceHotspotSummary, PerformanceMetricPoint,
+};
 
 pub(super) const FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND: &str = "fuzz_result_envelope";
 
@@ -24,6 +27,7 @@ pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<Fuzz
     }
     let gates = evaluate_fuzz_gates(&campaign);
     let coverage_completeness = fuzz_coverage_completeness(&campaign);
+    let performance_hotspots = fuzz_performance_hotspots(&campaign);
 
     Ok(FuzzValidateOutput {
         command: "fuzz.validate".to_string(),
@@ -39,6 +43,7 @@ pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<Fuzz
         open_findings: open_finding_count(&campaign),
         artifacts: campaign.artifacts.len(),
         coverage_completeness,
+        performance_hotspots,
         gates,
     })
 }
@@ -46,6 +51,7 @@ pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<Fuzz
 pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzReportOutput> {
     let campaign = parse_fuzz_results_file(&args.results_file)?;
     let coverage_completeness = fuzz_coverage_completeness(&campaign);
+    let performance_hotspots = fuzz_performance_hotspots(&campaign);
     let run_id = args.run.run_id.clone();
     let component = args.run.comp.id().unwrap_or("unknown").to_string();
     let request_id = args
@@ -114,6 +120,7 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
             .map(|path| path.to_string_lossy().to_string()),
         envelope,
         coverage_completeness,
+        performance_hotspots,
         gates,
     })
 }
@@ -523,6 +530,86 @@ pub(super) fn fuzz_coverage_completeness(
             kind_summaries: Vec::new(),
             artifact_ids: Vec::new(),
         },
+    }
+}
+
+pub(super) fn fuzz_performance_hotspots(campaign: &FuzzCampaign) -> PerformanceHotspotSummary {
+    let mut points = Vec::new();
+
+    collect_metadata_metric_points(&campaign.id, &campaign.metadata, &mut points);
+    collect_extra_metric_points(&campaign.id, &campaign.extra, &mut points);
+
+    if let Some(summary) = campaign.coverage_summary.as_ref() {
+        collect_metadata_metric_points("coverage_summary", &summary.metadata, &mut points);
+        collect_extra_metric_points("coverage_summary", &summary.extra, &mut points);
+
+        for group in summary
+            .surface_summaries
+            .iter()
+            .chain(summary.kind_summaries.iter())
+        {
+            let subject_id = format!("coverage_summary:{}", group.id);
+            collect_metadata_metric_points(&subject_id, &group.metadata, &mut points);
+            collect_extra_metric_points(&subject_id, &group.extra, &mut points);
+        }
+    }
+
+    for coverage in &campaign.coverage {
+        let subject_id = format!("coverage:{}", coverage.id);
+        collect_metadata_metric_points(&subject_id, &coverage.metadata, &mut points);
+        collect_extra_metric_points(&subject_id, &coverage.extra, &mut points);
+    }
+
+    for artifact in &campaign.artifacts {
+        let subject_id = format!("artifact:{}", artifact.id);
+        collect_metadata_metric_points(&subject_id, &artifact.metadata, &mut points);
+        collect_extra_metric_points(&subject_id, &artifact.extra, &mut points);
+    }
+
+    summarize_performance_hotspots(&points, 5, 5)
+}
+
+fn collect_metadata_metric_points(
+    subject_id: &str,
+    value: &serde_json::Value,
+    points: &mut Vec<PerformanceMetricPoint>,
+) {
+    collect_value_metric_points(subject_id, None, value, points);
+}
+
+fn collect_extra_metric_points(
+    subject_id: &str,
+    extra: &BTreeMap<String, serde_json::Value>,
+    points: &mut Vec<PerformanceMetricPoint>,
+) {
+    for (key, value) in extra {
+        collect_value_metric_points(subject_id, Some(key), value, points);
+    }
+}
+
+fn collect_value_metric_points(
+    subject_id: &str,
+    prefix: Option<&str>,
+    value: &serde_json::Value,
+    points: &mut Vec<PerformanceMetricPoint>,
+) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+
+    for (key, value) in object {
+        let metric = prefix
+            .map(|prefix| format!("{prefix}.{key}"))
+            .unwrap_or_else(|| key.clone());
+        if let Some(number) = value.as_f64().filter(|number| number.is_finite()) {
+            points.push(PerformanceMetricPoint {
+                subject_id: subject_id.to_string(),
+                metric,
+                value: number,
+            });
+        } else {
+            collect_value_metric_points(subject_id, Some(&metric), value, points);
+        }
     }
 }
 

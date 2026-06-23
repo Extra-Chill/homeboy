@@ -7,6 +7,7 @@ use crate::core::deploy::release_download::GitHubRepo;
 
 use super::{github_release_repair_commands, GitHubReleaseBody, GitHubReleaseRepairCommands};
 
+mod changelog_url_tests;
 mod notes_tests;
 mod repair_tests;
 mod result_builders;

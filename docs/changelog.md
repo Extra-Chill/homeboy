@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.259.0] - 2026-06-23
+
+### Added
+- aggregate fuzz hotspots
+- discover inventory artifacts
+
+### Changed
+- Use neutral runtime fixtures in controller support tests
+- Integrate WPSG loop runtime support
+
 ## [0.258.0] - 2026-06-23
 
 ### Added

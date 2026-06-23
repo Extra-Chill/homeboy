@@ -149,7 +149,7 @@ pub use super::agent_task_provider::{
 pub mod controller_service {
     pub use super::super::agent_task_controller_service::{
         apply_event, apply_spec_dispatch_defaults, apply_spec_dispatch_defaults_with_cwd,
-        controller_request_dispatch_command, init, init_from_spec, list,
+        controller_request_dispatch_command, init, init_from_spec, init_from_spec_for_resume, list,
         load_materialize_spec_source, mark_human_ready, optional_bool, optional_string,
         optional_string_array, optional_u32, optional_usize, plan_from_controller_request,
         plan_from_spec, resume, resume_with_options, run_action, run_next, status,

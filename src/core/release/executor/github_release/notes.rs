@@ -145,21 +145,42 @@ fn github_generated_notes(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub(super) fn github_changelog_url(
+pub(crate) fn github_changelog_url(
     component: &Component,
     github: &GitHubRepo,
     tag: &str,
 ) -> Option<String> {
     let changelog_path = changelog::resolve_changelog_path(component).ok()?;
     let local_path = std::path::Path::new(&component.local_path);
-    let relative = changelog_path
+    let component_relative = changelog_path
         .strip_prefix(local_path)
         .unwrap_or(&changelog_path)
         .to_string_lossy()
         .replace('\\', "/");
+
+    // The release URL is anchored at the repository root, but the changelog
+    // path above is relative to the component directory. For a component that
+    // lives in a monorepo subdirectory (e.g. `php-transformer`), prepend the
+    // component's path prefix so the link points at the real file
+    // (`php-transformer/CHANGELOG.md`) instead of a root-level `CHANGELOG.md`
+    // that does not exist (issue #6146).
+    let repo_relative =
+        match crate::core::git::MonorepoContext::detect(&component.local_path, &component.id) {
+            Some(ctx) => {
+                let prefix = ctx.path_prefix.replace('\\', "/");
+                let prefix = prefix.trim_matches('/');
+                if prefix.is_empty() {
+                    component_relative
+                } else {
+                    format!("{}/{}", prefix, component_relative)
+                }
+            }
+            None => component_relative,
+        };
+
     Some(format!(
         "https://{}/{}/{}/blob/{}/{}",
-        github.host, github.owner, github.repo, tag, relative
+        github.host, github.owner, github.repo, tag, repo_relative
     ))
 }
 

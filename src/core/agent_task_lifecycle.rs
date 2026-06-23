@@ -5,11 +5,12 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::core::agent_task::{
-    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutionHandle,
-    AgentTaskExecutionHandleKind, AgentTaskExecutor, AgentTaskFailureClassification,
-    AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
-    AgentTaskSourceRef, AgentTaskWorkflowEvidence, AgentTaskWorkspace, AgentTaskWorkspaceMode,
-    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskArtifact, AgentTaskComponentContract, AgentTaskDiagnostic, AgentTaskEvidenceRef,
+    AgentTaskExecutionHandle, AgentTaskExecutionHandleKind, AgentTaskExecutor,
+    AgentTaskFailureClassification, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
+    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
+    AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_provider::{role_aliases_for_provider, AgentTaskProviderRoleAliases};
 use crate::core::agent_task_scheduler::{
@@ -54,10 +55,45 @@ pub struct AgentTaskRunRecord {
     pub artifact_refs: Vec<AgentTaskArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_handles: Vec<AgentTaskRunProviderHandle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_executor_evidence: Option<AgentTaskLatestExecutorEvidence>,
     #[serde(default)]
     pub lifecycle: RunLifecycleRecord,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLatestExecutorEvidence {
+    pub task_id: String,
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub input_ref: AgentTaskEvidenceRef,
+    pub normalized_output_ref: AgentTaskEvidenceRef,
+    pub outcome_ref: AgentTaskEvidenceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_contracts: Vec<AgentTaskComponentContract>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_component_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub typed_artifact_expectations: Vec<String>,
+}
+
+impl AgentTaskLatestExecutorEvidence {
+    fn refs(&self) -> [AgentTaskEvidenceRef; 3] {
+        [
+            self.input_ref.clone(),
+            self.normalized_output_ref.clone(),
+            self.outcome_ref.clone(),
+        ]
+    }
 }
 
 impl AgentTaskRunRecord {
@@ -227,6 +263,7 @@ pub fn submit_plan(
         tasks: plan.tasks.iter().map(queued_task).collect(),
         artifact_refs: Vec::new(),
         provider_handles: Vec::new(),
+        latest_executor_evidence: None,
         lifecycle: lifecycle_for_submitted_plan(plan),
         metadata,
     };
@@ -953,14 +990,22 @@ fn apply_aggregate_to_record(
     record.tasks = tasks_for_aggregate(plan, aggregate);
     record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
     record.provider_handles = provider_handles_for_outcomes(&aggregate.outcomes);
+    record.latest_executor_evidence = latest_executor_evidence(&record.run_id, plan, aggregate);
     update_lifecycle_from_record(record, plan);
     let provider_run_ids: Vec<String> = record
         .provider_handles
         .iter()
         .map(|handle| handle.provider_run_id.clone())
         .collect();
+    let latest_executor_evidence_value = record
+        .latest_executor_evidence
+        .as_ref()
+        .map(|evidence| serde_json::to_value(evidence).unwrap_or(Value::Null));
     let metadata = record.ensure_metadata_object();
     metadata.insert("provider_run_ids".to_string(), json!(provider_run_ids));
+    if let Some(evidence) = latest_executor_evidence_value {
+        metadata.insert("latest_executor_evidence".to_string(), evidence);
+    }
 }
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -1018,7 +1063,7 @@ pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
 }
 
 pub fn run_record_exists(run_id: &str) -> Result<bool> {
-    store::record_exists(run_id)
+    store::record_exists(&sanitize_run_id(run_id))
 }
 
 pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -1119,13 +1164,14 @@ pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     let run_id = sanitize_run_id(run_id);
-    store::read_record(&run_id)?;
+    let record = store::read_record(&run_id)?;
     let aggregate = store::read_aggregate(&run_id).ok();
+    let latest_executor_evidence = record.latest_executor_evidence.as_ref();
     Ok(AgentTaskRunArtifacts {
         schema: schemas::RUN_ARTIFACTS.to_string(),
         run_id,
         artifacts: aggregate_artifacts(aggregate.as_ref()),
-        evidence_refs: aggregate_evidence_refs(aggregate.as_ref()),
+        evidence_refs: aggregate_evidence_refs(aggregate.as_ref(), latest_executor_evidence),
     })
 }
 
@@ -1184,16 +1230,107 @@ fn aggregate_artifacts(aggregate: Option<&AgentTaskAggregate>) -> Vec<AgentTaskA
         .unwrap_or_default()
 }
 
-fn aggregate_evidence_refs(aggregate: Option<&AgentTaskAggregate>) -> Vec<AgentTaskEvidenceRef> {
-    aggregate
+fn aggregate_evidence_refs(
+    aggregate: Option<&AgentTaskAggregate>,
+    latest_executor_evidence: Option<&AgentTaskLatestExecutorEvidence>,
+) -> Vec<AgentTaskEvidenceRef> {
+    let mut refs: Vec<AgentTaskEvidenceRef> = aggregate
         .map(|aggregate| {
             aggregate
                 .outcomes
                 .iter()
                 .flat_map(evidence_refs_for_outcome)
-                .collect()
+                .collect::<Vec<_>>()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    refs.extend(
+        latest_executor_evidence
+            .into_iter()
+            .flat_map(AgentTaskLatestExecutorEvidence::refs),
+    );
+    dedup_evidence_refs(&mut refs);
+    refs
+}
+
+fn latest_executor_evidence(
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    aggregate: &AgentTaskAggregate,
+) -> Option<AgentTaskLatestExecutorEvidence> {
+    let outcome = aggregate.outcomes.last()?;
+    let request = plan
+        .tasks
+        .iter()
+        .find(|task| task.task_id == outcome.task_id)?;
+    let task_id = outcome.task_id.clone();
+    let base = format!("homeboy://agent-task/run/{run_id}");
+    let component_contracts = if request.component_contracts.is_empty() {
+        plan.component_contracts.clone()
+    } else {
+        request.component_contracts.clone()
+    };
+
+    Some(AgentTaskLatestExecutorEvidence {
+        task_id: task_id.clone(),
+        backend: request.executor.backend.clone(),
+        selector: request.executor.selector.clone(),
+        model: request.executor.model.clone(),
+        input_ref: AgentTaskEvidenceRef {
+            kind: "executor-input".to_string(),
+            uri: format!("{base}/plan#task={task_id}"),
+            label: Some("Latest raw executor input".to_string()),
+        },
+        normalized_output_ref: AgentTaskEvidenceRef {
+            kind: "executor-normalized-output".to_string(),
+            uri: format!("{base}/aggregate#outcome={task_id}"),
+            label: Some("Latest normalized executor output".to_string()),
+        },
+        outcome_ref: AgentTaskEvidenceRef {
+            kind: "executor-outcome".to_string(),
+            uri: format!("{base}/artifacts#task={task_id}"),
+            label: Some("Latest executor outcome evidence".to_string()),
+        },
+        provider_run_id: first_non_empty_json_string_value([
+            outcome.metadata.get("provider_run_id"),
+            outcome.metadata.get("remote_run_id"),
+            outcome.metadata.pointer("/provider_handle/provider_run_id"),
+            outcome.outputs.pointer("/provider_run_result/run_id"),
+            outcome.outputs.pointer("/provider_run_result/id"),
+        ]),
+        runtime_component_paths: runtime_component_paths(request),
+        expected_artifacts: request.expected_artifacts.clone(),
+        typed_artifact_expectations: typed_artifact_expectations(request),
+        component_contracts,
+    })
+}
+
+fn runtime_component_paths(request: &AgentTaskRequest) -> Vec<String> {
+    let mut paths: Vec<String> = request
+        .component_contracts
+        .iter()
+        .filter_map(|contract| contract.path.clone())
+        .collect();
+    for pointer in [
+        "/runtime_component_paths",
+        "/runtime/component_paths",
+        "/runtime/components",
+        "/component_paths",
+    ] {
+        if let Some(values) = request.metadata.pointer(pointer).and_then(Value::as_array) {
+            paths.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn typed_artifact_expectations(request: &AgentTaskRequest) -> Vec<String> {
+    request
+        .artifact_declarations
+        .iter()
+        .map(|declaration| declaration.name.clone())
+        .collect()
 }
 
 fn evidence_refs_for_outcome(outcome: &AgentTaskOutcome) -> Vec<AgentTaskEvidenceRef> {
@@ -1349,12 +1486,29 @@ fn first_non_empty_uri<'a>(
         .find(|uri| !uri.is_empty())
 }
 
+fn first_non_empty_json_string_value<'a>(
+    values: impl IntoIterator<Item = Option<&'a Value>>,
+) -> Option<String> {
+    values.into_iter().flatten().find_map(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
 /// Drops exact-duplicate refs, keeping the first occurrence of each so status
 /// output is not noisy when an artifact surfaces through both `artifacts` and
 /// `evidence_refs` (or workflow evidence).
 fn dedup_preserve_order(refs: &mut Vec<AgentTaskArtifactRef>) {
     let mut seen = std::collections::HashSet::new();
     refs.retain(|item| seen.insert(item.clone()));
+}
+
+fn dedup_evidence_refs(refs: &mut Vec<AgentTaskEvidenceRef>) {
+    let mut seen = std::collections::HashSet::new();
+    refs.retain(|item| seen.insert((item.kind.clone(), item.uri.clone())));
 }
 
 fn provider_handles_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskRunProviderHandle> {
@@ -1655,10 +1809,10 @@ fn sanitize_run_id(run_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::agent_task::{
-        AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
-        AgentTaskRequest, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
-        AgentTaskWorkflowStepStatus, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
-        AGENT_TASK_WORKFLOW_SCHEMA,
+        AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkflowEvidence,
+        AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
+        AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
     };
     use crate::core::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -2249,6 +2403,90 @@ mod tests {
     }
 
     #[test]
+    fn completed_run_exposes_latest_executor_input_output_and_expectations() {
+        with_isolated_home(|_| {
+            let mut plan = test_plan();
+            let request = &mut plan.tasks[0];
+            request.executor.backend = "sandbox".to_string();
+            request.executor.model = Some("gpt-fixture".to_string());
+            request.component_contracts = vec![AgentTaskComponentContract {
+                slug: Some("runtime-engine".to_string()),
+                path: Some("/workspace/runtime-engine".to_string()),
+                load_as: Some("plugin".to_string()),
+                activate: Some(true),
+                extra: Default::default(),
+            }];
+            request.metadata = json!({
+                "runtime_component_paths": ["/runtime/components/sandbox-host"]
+            });
+            request.expected_artifacts = vec!["patch".to_string()];
+            request.artifact_declarations = vec![AgentTaskArtifactDeclaration {
+                name: "proof_bundle".to_string(),
+                artifact_type: Some("bundle".to_string()),
+                artifact_schema: None,
+                path: None,
+                required: true,
+                description: None,
+                metadata: Value::Null,
+            }];
+
+            let mut aggregate = succeeded_aggregate(&plan);
+            aggregate.outcomes[0].outputs = json!({
+                "provider_run_result": {
+                    "run_id": "provider-run-123",
+                    "status": "succeeded"
+                }
+            });
+
+            let record =
+                record_completed_run(&plan, &aggregate, Some("run-evidence")).expect("recorded");
+            let evidence = record
+                .latest_executor_evidence
+                .as_ref()
+                .expect("latest executor evidence");
+            let artifact_report = artifacts("run-evidence").expect("artifacts loaded");
+
+            assert_eq!(evidence.task_id, "task-a");
+            assert_eq!(evidence.backend, "sandbox");
+            assert_eq!(evidence.selector.as_deref(), Some("fixture"));
+            assert_eq!(evidence.model.as_deref(), Some("gpt-fixture"));
+            assert_eq!(
+                evidence.provider_run_id.as_deref(),
+                Some("provider-run-123")
+            );
+            assert_eq!(evidence.component_contracts.len(), 1);
+            assert_eq!(
+                evidence.runtime_component_paths,
+                vec![
+                    "/runtime/components/sandbox-host".to_string(),
+                    "/workspace/runtime-engine".to_string()
+                ]
+            );
+            assert_eq!(evidence.expected_artifacts, vec!["patch".to_string()]);
+            assert_eq!(
+                evidence.typed_artifact_expectations,
+                vec!["proof_bundle".to_string()]
+            );
+            assert_eq!(
+                record.metadata["latest_executor_evidence"]["input_ref"]["uri"],
+                "homeboy://agent-task/run/run-evidence/plan#task=task-a"
+            );
+            assert!(artifact_report
+                .evidence_refs
+                .iter()
+                .any(|evidence| evidence.kind == "executor-input"));
+            assert!(artifact_report
+                .evidence_refs
+                .iter()
+                .any(|evidence| evidence.kind == "executor-normalized-output"));
+            assert!(artifact_report
+                .evidence_refs
+                .iter()
+                .any(|evidence| evidence.kind == "executor-outcome"));
+        });
+    }
+
+    #[test]
     fn submitted_run_can_be_loaded_marked_running_and_completed() {
         with_isolated_home(|_| {
             let plan = test_plan();
@@ -2463,11 +2701,15 @@ mod tests {
             assert_eq!(durable_status.state, AgentTaskRunState::Failed);
             assert_eq!(durable_status.artifact_refs.len(), 1);
             assert_eq!(durable_status.artifact_refs[0].kind, "provider-transcript");
-            assert_eq!(durable_artifacts.evidence_refs.len(), 1);
+            assert_eq!(durable_artifacts.evidence_refs.len(), 4);
             assert_eq!(
                 durable_artifacts.evidence_refs[0].uri,
                 "provider://runs/provider-run-123/transcript"
             );
+            assert!(durable_artifacts
+                .evidence_refs
+                .iter()
+                .any(|evidence| evidence.kind == "executor-input"));
         });
     }
 

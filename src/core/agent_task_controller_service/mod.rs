@@ -203,6 +203,39 @@ pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFr
     })
 }
 
+/// Initialize a controller from a repo-owned loop spec for immediate resume.
+///
+/// Unlike plain `from-spec`, this fails closed when an existing controller was
+/// created from a different spec fingerprint. That keeps proof reruns from
+/// silently draining stale actions after a loop spec changed.
+pub fn init_from_spec_for_resume(
+    request: ControllerFromSpecRequest,
+) -> Result<ControllerFromSpecReport> {
+    let spec_fingerprint = repo_loop_spec_fingerprint(&request.spec)?;
+    if let Some(record) = existing_controller(&request.spec.loop_id)? {
+        let previous = repo_loop_spec_fingerprint_from_metadata(&record);
+        if previous.as_deref() != Some(spec_fingerprint.as_str()) {
+            return Err(Error::validation_invalid_argument(
+                "spec_fingerprint",
+                format!(
+                    "agent-task controller from-spec --resume refuses to resume existing controller '{}' because the persisted spec fingerprint is missing or different; use a fresh loop_id or re-run from-spec without --resume to reconcile state explicitly",
+                    record.loop_id
+                ),
+                previous,
+                Some(vec![
+                    format!("current_spec_fingerprint={spec_fingerprint}"),
+                    format!(
+                        "controller_path={}",
+                        controller::controller_record_path(&record.loop_id)?.display()
+                    ),
+                ]),
+            ));
+        }
+    }
+
+    init_from_spec(request)
+}
+
 /// Compile a declarative controller spec into a generic Homeboy plan without writing state.
 pub fn plan_from_spec(request: ControllerPlanRequest) -> Result<ControllerPlanReport> {
     let spec = request.spec;
