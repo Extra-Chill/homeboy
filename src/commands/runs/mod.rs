@@ -53,6 +53,7 @@ pub(crate) use common::RunSummary;
 pub(crate) use handlers::artifact_get;
 use handlers::require_run;
 pub(crate) use handlers::run_summary;
+pub(crate) use hotspots::fuzz_hotspot_lines;
 #[cfg(test)]
 pub(crate) use types::RunsArtifactGetArgs;
 use types::DEFAULT_LIMIT;

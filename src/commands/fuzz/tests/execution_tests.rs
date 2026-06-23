@@ -70,6 +70,38 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
 }
 
 #[test]
+fn fuzz_run_persistence_generates_run_id_when_omitted() {
+    with_isolated_home(|home| {
+        let mut args = fuzz_run_args_with_run_id("ignored");
+        args.run_id = None;
+        let results_path = home.path().join("fuzz-results.json");
+        std::fs::write(&results_path, "{}").expect("results file");
+
+        let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+            run_id: args.run_id.as_deref(),
+            component_id: "component-a",
+            rig_id: args.rig.as_deref(),
+            workload_id: args.workload_id.as_deref(),
+            workload_path: Some("/tmp/fuzz/parser.json"),
+            status: "passed",
+            exit_code: 0,
+            success: true,
+            args: &args,
+            results_path: &results_path,
+            results: None,
+            results_error: None,
+        })
+        .expect("persist fuzz run")
+        .expect("run record");
+
+        assert!(persisted.id.starts_with("fuzz-"));
+        let store = ObservationStore::open_initialized().expect("store");
+        assert!(store.get_run(&persisted.id).expect("get run").is_some());
+        assert_eq!(store.list_artifacts(&persisted.id).expect("artifacts").len(), 1);
+    });
+}
+
+#[test]
 fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
     let mut campaign = empty_fuzz_campaign();
     campaign.metadata = serde_json::json!({
