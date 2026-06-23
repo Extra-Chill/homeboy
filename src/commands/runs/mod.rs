@@ -24,6 +24,7 @@ mod evidence;
 mod findings;
 mod gh_actions;
 mod handlers;
+mod hotspots;
 mod latest;
 mod loop_sync;
 mod query;
@@ -50,11 +51,11 @@ pub use types::{RunsArgs, RunsOutput, WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER};
 pub(crate) use common::RunSummary;
 #[cfg(test)]
 pub(crate) use handlers::artifact_get;
-pub(crate) use handlers::run_summary;
 use handlers::require_run;
-use types::DEFAULT_LIMIT;
+pub(crate) use handlers::run_summary;
 #[cfg(test)]
 pub(crate) use types::RunsArtifactGetArgs;
+use types::DEFAULT_LIMIT;
 pub(crate) use types::{RunsListArgs, RunsListOutput};
 
 pub(crate) use bench::bench_compare_from_args;
@@ -64,8 +65,6 @@ pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistribution
 
 // Test-only re-exports consumed by sibling test modules (golden contract tests,
 // the `runs` test submodules) via `super::runs::*` / `super::*`.
-#[cfg(test)]
-pub(crate) use types::{RunDetail, RunsArtifactsOutput, RunsShowOutput};
 #[cfg(test)]
 use bundle::{export_runs, import_runs, RunsExportArgs, RunsImportArgs};
 #[cfg(test)]
@@ -82,3 +81,5 @@ pub(crate) use query::{
 pub(crate) use refs::{
     ArtifactRef as RunsRefsArtifactRef, RunRef as RunsRefsRunRef, RunsRefsFilters, RunsRefsOutput,
 };
+#[cfg(test)]
+pub(crate) use types::{RunDetail, RunsArtifactsOutput, RunsShowOutput};
