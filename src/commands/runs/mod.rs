@@ -48,10 +48,14 @@ pub use types::{RunsArgs, RunsOutput, WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER};
 // `use` (still reachable by descendant submodules) so the re-export never
 // widens their visibility.
 pub(crate) use common::RunSummary;
+#[cfg(test)]
+pub(crate) use handlers::artifact_get;
 pub(crate) use handlers::run_summary;
 use handlers::require_run;
 use types::DEFAULT_LIMIT;
-pub(crate) use types::{RunsArtifactGetArgs, RunsListArgs, RunsListOutput};
+#[cfg(test)]
+pub(crate) use types::RunsArtifactGetArgs;
+pub(crate) use types::{RunsListArgs, RunsListOutput};
 
 pub(crate) use bench::bench_compare_from_args;
 pub use bench::{bench_compare, BenchCompareOutput, RunsBenchCompareArgs};

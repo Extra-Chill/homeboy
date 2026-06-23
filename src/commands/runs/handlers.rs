@@ -168,7 +168,7 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
     }
 }
 
-pub(super) fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
+pub(crate) fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
 
