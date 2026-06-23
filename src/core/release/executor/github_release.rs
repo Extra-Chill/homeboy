@@ -211,7 +211,7 @@ pub(crate) fn run_github_release(
         return Ok(upload_success_result(&tag, &github, artifact_paths.len()));
     }
 
-    let notes_start_tag = github_generated_notes_start_tag(component, &tag)?;
+    let notes_start_tag = github_release_notes_start_tag(component, &tag);
     let changelog_url = github_changelog_url(component, &github, &tag);
 
     // Build the EXACT body Homeboy will post (issue #3508). This is the single
@@ -536,6 +536,21 @@ fn github_generated_notes_start_tag(component: &Component, tag: &str) -> Result<
     }
 
     Ok(previous)
+}
+
+fn github_release_notes_start_tag(component: &Component, tag: &str) -> Option<String> {
+    match github_generated_notes_start_tag(component, tag) {
+        Ok(notes_start_tag) => notes_start_tag,
+        Err(err) => {
+            log_status!(
+                "release",
+                "GitHub-generated release notes unavailable for {}: {}. Falling back to Homeboy release notes.",
+                tag,
+                err
+            );
+            None
+        }
+    }
 }
 
 /// Build the release body used when GitHub-generated notes are unavailable.
@@ -1048,8 +1063,9 @@ mod tests {
 
     use super::{
         create_failed_result, fallback_release_notes, github_cli_env,
-        github_generated_notes_start_tag, github_release_repair_commands, not_created_result,
-        upload_failed_result, GitHubReleaseBody,
+        github_generated_notes_start_tag, github_release_notes_start_tag,
+        github_release_repair_commands, not_created_result, upload_failed_result,
+        GitHubReleaseBody,
     };
 
     fn test_repo() -> GitHubRepo {
@@ -1509,6 +1525,38 @@ mod tests {
             .message
             .contains("not reachable from release tag v0.2.1"));
         assert!(err.message.contains("duplicate prior release ranges"));
+    }
+
+    #[test]
+    fn release_notes_start_tag_falls_back_when_prior_release_tag_is_off_branch() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "v0.1.0"]);
+        commit_file(
+            dir,
+            "feature.txt",
+            "first release work",
+            "feat: first release work",
+        );
+        run_git(dir, &["branch", "release-v0.2.0"]);
+        run_git(dir, &["checkout", "release-v0.2.0"]);
+        commit_file(dir, "VERSION", "0.2.0", "release: v0.2.0");
+        run_git(dir, &["tag", "v0.2.0"]);
+        run_git(dir, &["checkout", "main"]);
+        commit_file(
+            dir,
+            "fix.txt",
+            "second release work",
+            "fix: second release work",
+        );
+        run_git(dir, &["tag", "v0.2.1"]);
+
+        assert_eq!(
+            github_release_notes_start_tag(&component_for_repo(dir), "v0.2.1"),
+            None,
+            "release creation should fall back to Homeboy notes instead of failing before gh release create"
+        );
     }
 
     #[test]
