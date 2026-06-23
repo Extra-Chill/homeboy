@@ -2179,6 +2179,58 @@ fn run_gates_executes_command_bundle_and_records_result() {
 }
 
 #[test]
+fn command_gate_check_runs_from_configured_cwd() {
+    let cwd = tempfile::tempdir().expect("cwd tempdir");
+    let cwd_path = cwd.path().to_string_lossy().into_owned();
+    std::fs::write(cwd.path().join("gate-marker"), "ok").expect("marker file");
+    let check = AgentTaskGateBundleCheck {
+        check_id: "pwd-command".to_string(),
+        kind: AgentTaskGateBundleCheckKind::Command,
+        input: json!({
+            "command": "test -f gate-marker && printf ok",
+            "cwd": cwd_path,
+        }),
+        retryable: false,
+    };
+
+    let result = run_command_gate_check(&check).expect("command gate executed");
+
+    assert_eq!(result.status, AgentTaskGateBundleStatus::Passed);
+    assert_eq!(result.details["stdout"].as_str(), Some("ok"));
+    assert_eq!(result.details["cwd"].as_str(), Some(cwd_path.as_str()));
+}
+
+#[test]
+fn command_gate_check_caps_stored_stdout_and_records_truncation() {
+    let check = AgentTaskGateBundleCheck {
+        check_id: "large-output-command".to_string(),
+        kind: AgentTaskGateBundleCheckKind::Command,
+        input: json!({
+            "command": "yes x | head -c 70000",
+            "timeout_seconds": 5,
+        }),
+        retryable: false,
+    };
+
+    let result = run_command_gate_check(&check).expect("command gate executed");
+
+    assert_eq!(result.status, AgentTaskGateBundleStatus::Passed);
+    assert_eq!(result.details["stdout_truncated"].as_bool(), Some(true));
+    assert_eq!(
+        result.details["stdout_stored_bytes"].as_u64(),
+        Some(64 * 1024)
+    );
+    assert_eq!(result.details["stdout_bytes"].as_u64(), Some(70000));
+    assert_eq!(
+        result.details["stdout"]
+            .as_str()
+            .expect("stdout stored")
+            .len(),
+        64 * 1024
+    );
+}
+
+#[test]
 fn from_spec_resume_drives_generic_workflow_gates_completion_and_lineage() {
     with_isolated_home(|_| {
         let spec = AgentTaskRepoLoopSpec {
