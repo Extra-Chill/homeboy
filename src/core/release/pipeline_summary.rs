@@ -66,6 +66,13 @@ pub(super) fn build_summary(
         ));
     }
 
+    if has_skipped_github_release(results) {
+        next_actions.push(format!(
+            "Tag exists but no GitHub Release was created. Create it from the existing tag (same changelog notes Homeboy generated): homeboy release {} --head",
+            component_id
+        ));
+    }
+
     let success_summary = if matches!(status, ReleaseStepStatus::Success) {
         results.iter().filter_map(build_step_summary_line).collect()
     } else {
@@ -81,6 +88,38 @@ pub(super) fn build_summary(
         next_actions,
         success_summary,
     }
+}
+
+/// True when a tag was created/exists but the GitHub Release step was skipped,
+/// leaving the common partial state (tag pushed, no GitHub Release page). The
+/// `github.release` step reports `skipped: true` for this case (e.g.
+/// `--no-github-release`, or CI deferring release creation), so the summary can
+/// advertise the exact `--head` repair command to finish it later.
+fn has_skipped_github_release(results: &[ReleaseStepResult]) -> bool {
+    let tag_present = results.iter().any(|result| {
+        result.step_type == "git.tag"
+            && matches!(result.status, ReleaseStepStatus::Success)
+            && result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("tag"))
+                .and_then(|value| value.as_str())
+                .is_some()
+    });
+    if !tag_present {
+        return false;
+    }
+
+    results.iter().any(|result| {
+        result.step_type == "github.release"
+            && matches!(result.status, ReleaseStepStatus::Success)
+            && result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("skipped"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+    })
 }
 
 fn has_auth_required_publish_skip(results: &[ReleaseStepResult]) -> bool {
@@ -232,6 +271,87 @@ mod tests {
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.skipped, 1);
         assert_eq!(summary.next_actions.len(), 1);
+    }
+
+    fn step_with_data(
+        id: &str,
+        status: ReleaseStepStatus,
+        data: serde_json::Value,
+    ) -> ReleaseStepResult {
+        ReleaseStepResult {
+            id: id.to_string(),
+            step_type: id.to_string(),
+            status,
+            missing: Vec::new(),
+            warnings: Vec::new(),
+            hints: Vec::new(),
+            data: Some(data),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn summary_advertises_head_repair_when_github_release_skipped_but_tag_exists() {
+        let results = vec![
+            step("version", ReleaseStepStatus::Success),
+            step_with_data(
+                "git.tag",
+                ReleaseStepStatus::Success,
+                serde_json::json!({ "tag": "sample-plugin-v1.2.3" }),
+            ),
+            step_with_data(
+                "github.release",
+                ReleaseStepStatus::Success,
+                serde_json::json!({ "skipped": true }),
+            ),
+        ];
+        let status = derive_overall_status(&results);
+        let summary = build_summary("sample-plugin", &results, &status);
+
+        assert_eq!(status, ReleaseStepStatus::Success);
+        assert!(summary.next_actions.iter().any(|action| {
+            action.contains("no GitHub Release")
+                && action.contains("homeboy release sample-plugin --head")
+        }));
+    }
+
+    #[test]
+    fn summary_omits_head_repair_when_github_release_was_created() {
+        let results = vec![
+            step_with_data(
+                "git.tag",
+                ReleaseStepStatus::Success,
+                serde_json::json!({ "tag": "sample-plugin-v1.2.3" }),
+            ),
+            step_with_data(
+                "github.release",
+                ReleaseStepStatus::Success,
+                serde_json::json!({ "url": "https://example.com/release" }),
+            ),
+        ];
+        let status = derive_overall_status(&results);
+        let summary = build_summary("sample-plugin", &results, &status);
+
+        assert!(!summary
+            .next_actions
+            .iter()
+            .any(|action| action.contains("no GitHub Release")));
+    }
+
+    #[test]
+    fn summary_omits_head_repair_when_no_tag_exists() {
+        let results = vec![step_with_data(
+            "github.release",
+            ReleaseStepStatus::Success,
+            serde_json::json!({ "skipped": true }),
+        )];
+        let status = derive_overall_status(&results);
+        let summary = build_summary("sample-plugin", &results, &status);
+
+        assert!(!summary
+            .next_actions
+            .iter()
+            .any(|action| action.contains("no GitHub Release")));
     }
 
     #[test]
