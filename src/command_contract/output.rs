@@ -523,6 +523,31 @@ mod tests {
             .command
     }
 
+    fn lab_supported_registry_sample_argv(command_name: &str) -> Option<&'static [&'static str]> {
+        match command_name {
+            "agent-task" => Some(&["homeboy", "agent-task", "providers"]),
+            "test" => Some(&["homeboy", "test"]),
+            "bench" => Some(&["homeboy", "bench"]),
+            "fuzz" => Some(&["homeboy", "fuzz"]),
+            "trace" => Some(&["homeboy", "trace"]),
+            "lint" => Some(&["homeboy", "lint"]),
+            "review" => Some(&["homeboy", "review"]),
+            "audit" => Some(&["homeboy", "audit"]),
+            "refactor" => Some(&["homeboy", "refactor", "--all"]),
+            "rig" => Some(&["homeboy", "rig", "check", "example-rig"]),
+            "tunnel" => Some(&[
+                "homeboy",
+                "tunnel",
+                "service",
+                "start",
+                "example-service",
+                "--command",
+                "npm start",
+            ]),
+            _ => None,
+        }
+    }
+
     #[test]
     fn test_response_mode() {
         assert_eq!(
@@ -633,6 +658,38 @@ mod tests {
                     entry.name
                 );
             }
+        }
+    }
+
+    #[test]
+    fn command_registry_lab_metadata_matches_command_support_for_parseable_samples() {
+        for entry in COMMAND_REGISTRY.iter().filter(|entry| entry.lab_supported) {
+            let argv = lab_supported_registry_sample_argv(entry.name).unwrap_or_else(|| {
+                panic!(
+                    "Lab-supported registry command `{}` needs a representative parseable argv sample",
+                    entry.name
+                )
+            });
+            let command = parsed_command(argv);
+            let descriptor = command.descriptor(false);
+
+            assert_eq!(
+                command.top_level_name(),
+                entry.name,
+                "registry sample argv should parse to the matching top-level command"
+            );
+            assert_eq!(
+                descriptor.supports_lab_runner,
+                command.supports_lab_runner(),
+                "descriptor Lab support drifted from Commands::supports_lab_runner() for `{}`",
+                entry.name
+            );
+            assert_eq!(
+                entry.lab_supported,
+                command.supports_lab_runner(),
+                "registry Lab metadata drifted from Commands::supports_lab_runner() for `{}`",
+                entry.name
+            );
         }
     }
 
