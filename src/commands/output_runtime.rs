@@ -124,7 +124,7 @@ pub fn run_command(
     match super::raw_output::prepare_command_run(command, global, plan.stdout) {
         super::raw_output::CommandRunPreparation::Handled(exit_code) => exit_code,
         super::raw_output::CommandRunPreparation::Json(command) => {
-            let run = run_json(*command, global, plan.output_file);
+            let run = run_json(*command, global, plan.output_file, output_file);
             output_service.emit_run(run, plan.output_file)
         }
         super::raw_output::CommandRunPreparation::Raw(raw_run) => {
@@ -181,6 +181,7 @@ pub fn run_json(
     command: Commands,
     global: &GlobalArgs,
     mode: CommandOutputFileMode,
+    output_file: Option<&str>,
 ) -> JsonCommandRun {
     match (mode, command) {
         (CommandOutputFileMode::TraceJsonSummaryArtifact, Commands::Trace(args)) => {
@@ -194,7 +195,7 @@ pub fn run_json(
                 presentation: CommandPresentation::default(),
             }
         }
-        (_, command) => super::json_output::run_command_output(command, global),
+        (_, command) => super::json_output::run_command_output(command, global, output_file),
     }
 }
 
@@ -328,6 +329,45 @@ mod tests {
                 .as_ref()
                 .unwrap(),
             &json!({ "kind": "stdout" })
+        );
+    }
+
+    #[test]
+    fn generic_output_file_keeps_complete_large_payload_with_compact_presentation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("controller-result.json");
+        let large = "x".repeat(2 * 1024 * 1024);
+        let run = JsonCommandRun::from_stdout_result(
+            Ok(json!({
+                "schema": "homeboy/agent-task-loop-controller-run-from-spec-result/v1",
+                "loop_id": "large-loop",
+                "results": [{ "payload": large }]
+            })),
+            0,
+        )
+        .with_presentation(CommandPresentation {
+            stdout: Some("{\"success\":true,\"data\":{\"loop_id\":\"large-loop\"}}\n".to_string()),
+            stderr: None,
+        });
+
+        assert!(run.presentation.stdout.as_ref().expect("stdout").len() < 256);
+
+        write_output_file(
+            &run,
+            CommandOutputFileMode::GenericEnvelope,
+            Some(path.to_str().expect("utf8 path")),
+        );
+
+        let written = std::fs::read_to_string(path).expect("artifact written");
+        let json: Value = serde_json::from_str(&written).expect("valid json");
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["loop_id"], "large-loop");
+        assert_eq!(
+            json["data"]["results"][0]["payload"]
+                .as_str()
+                .unwrap()
+                .len(),
+            2 * 1024 * 1024
         );
     }
 
