@@ -262,9 +262,16 @@ fn validate_runner_workload_result_refs(workload: &RunnerWorkload) -> Result<()>
 
 fn dispatch_command_args(command: &[String]) -> &[String] {
     match command.first().map(String::as_str) {
-        Some("homeboy") => &command[1..],
+        Some(binary) if is_homeboy_binary(binary) => &command[1..],
         _ => command,
     }
+}
+
+fn is_homeboy_binary(binary: &str) -> bool {
+    std::path::Path::new(binary)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "homeboy")
 }
 
 fn dispatched_command_label(command_args: &[String], expected_label: &str) -> Option<String> {
@@ -690,6 +697,19 @@ mod tests {
             true,
         )
         .expect("matching short argv is valid");
+
+        validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &[
+                "/srv/homeboy/bin/homeboy".to_string(),
+                "trace".to_string(),
+            ],
+            &["HOMEBODY_TRACE_SECRET".to_string()],
+            true,
+        )
+        .expect("matching configured homeboy executable argv is valid");
     }
 
     #[test]
