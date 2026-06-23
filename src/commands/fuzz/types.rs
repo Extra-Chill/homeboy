@@ -137,6 +137,10 @@ pub(crate) struct FuzzValidateArgs {
     /// Fuzz campaign JSON file emitted by a runner.
     #[arg(value_name = "RESULTS_FILE")]
     pub(crate) results_file: PathBuf,
+
+    /// Canonical fuzz case log JSONL/JSON artifact to validate.
+    #[arg(long = "case-log", value_name = "PATH")]
+    pub(crate) case_logs: Vec<PathBuf>,
 }
 
 #[derive(Args, Clone)]
@@ -248,6 +252,8 @@ pub struct FuzzValidateOutput {
     pub status: String,
     pub results_file: String,
     pub campaign_id: String,
+    pub case_log_files: Vec<String>,
+    pub case_log_entries: usize,
     pub open_findings: usize,
     pub artifacts: usize,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,

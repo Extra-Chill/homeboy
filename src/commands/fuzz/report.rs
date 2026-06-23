@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use homeboy::core::fuzz::{
-    default_fuzz_gates, default_fuzz_required_artifacts, parse_fuzz_results_file,
-    parse_fuzz_target_inventory_file, FuzzCampaign, FuzzExecutionRequest, FuzzProvenance,
-    FuzzResultEnvelope, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    default_fuzz_gates, default_fuzz_required_artifacts, parse_fuzz_case_log_file,
+    parse_fuzz_results_file, parse_fuzz_target_inventory_file, FuzzCampaign, FuzzExecutionRequest,
+    FuzzProvenance, FuzzResultEnvelope, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
@@ -18,6 +18,10 @@ use super::types::{
 
 pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<FuzzValidateOutput> {
     let campaign = parse_fuzz_results_file(&args.results_file)?;
+    let mut case_log_entries = 0;
+    for path in &args.case_logs {
+        case_log_entries += parse_fuzz_case_log_file(path)?.len();
+    }
     let gates = evaluate_fuzz_gates(&campaign);
     let coverage_completeness = fuzz_coverage_completeness(&campaign);
 
@@ -26,6 +30,12 @@ pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<Fuzz
         status: gate_status(&gates),
         results_file: args.results_file.to_string_lossy().to_string(),
         campaign_id: campaign.id.clone(),
+        case_log_files: args
+            .case_logs
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
+        case_log_entries,
         open_findings: open_finding_count(&campaign),
         artifacts: campaign.artifacts.len(),
         coverage_completeness,
