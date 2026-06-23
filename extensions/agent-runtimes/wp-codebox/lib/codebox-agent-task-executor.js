@@ -170,6 +170,7 @@ function providerContract(options = {}) {
       cwd: 'git_checkout',
     },
     runner_readiness: runtimeRunnerReadiness(options),
+    runner_sources: runtimeRunnerSources(options),
     workspace_tools: runtimeWorkspaceTools(options),
     component_path_defaults: runtimeComponentPathDefaults(options),
     provider_metadata: runtimeExecutorManifest().provider_metadata,
@@ -303,6 +304,10 @@ function runtimeRunnerReadiness(options = {}) {
   return normalizeArray(options.runnerReadiness || options.runner_readiness || runtimeExecutorManifest().runner_readiness);
 }
 
+function runtimeRunnerSources(options = {}) {
+  return normalizeArray(options.runnerSources || options.runner_sources || runtimeExecutorManifest().runner_sources);
+}
+
 function runtimeSecretEnvRequirements() {
   return normalizeArray(runtimeExecutorManifest().secret_env_requirements);
 }
@@ -340,6 +345,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
     { provider, model, agentBundles }
   );
+  const abilityRequirements = runtimeAbilityRequirements(runtimeTask, request, config, inputs, runtimeOptions);
   const providerRuntimeInvocation = providerRuntimeInvocationFromConfig(config, inputs, runtimeOptions);
   const explicitSecretEnv = [
     ...(plannedSecretEnv.length > 0 ? plannedSecretEnv : normalizeArray(request.executor?.secret_env)),
@@ -383,6 +389,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
     runtime_task: runtimeTask,
+    ability_requirements: abilityRequirements,
     callback_data: firstDefined(inputs.callback_data, inputs.callbackData, config.callback_data, config.callbackData, runtimeOptions.callbackData),
     provider_runtime_invocation: providerRuntimeInvocation,
     ability_tools: firstDefined(inputs.ability_tools, inputs.abilityTools, config.ability_tools, config.abilityTools, runtimeOptions.abilityTools, []),
@@ -452,6 +459,21 @@ function expectedArtifactsForCodeboxTask(request, artifactDeclarations = []) {
     return Array.from(new Set(declarationNames));
   }
   return normalizeArray(request.expected_artifacts);
+}
+
+function runtimeAbilityRequirements(runtimeTask, request = {}, config = {}, inputs = {}, options = {}) {
+  return uniqueStrings([
+    runtimeTask?.ability,
+    runtimeTask?.runtime_task_ability,
+    ...normalizeArray(request.ability_requirements),
+    ...normalizeArray(request.abilityRequirements),
+    ...normalizeArray(inputs.ability_requirements),
+    ...normalizeArray(inputs.abilityRequirements),
+    ...normalizeArray(config.ability_requirements),
+    ...normalizeArray(config.abilityRequirements),
+    ...normalizeArray(options.abilityRequirements),
+    ...normalizeArray(options.ability_requirements),
+  ]);
 }
 
 function codeboxTaskArtifactDeclarations(artifactDeclarations = []) {

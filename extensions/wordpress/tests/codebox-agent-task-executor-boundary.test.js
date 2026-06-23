@@ -5,6 +5,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(__dirname, '..', '..', 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
+
 const {
   agentTaskOutcomeFromCodeboxResult,
   artifactResultEnvelopeFromCodeboxResult,
@@ -289,6 +291,7 @@ assert.deepEqual(taskInput.runtime_task, {
   ability: 'wordpress/site-health',
   input: { include_debug: false },
 });
+assert.deepEqual(taskInput.ability_requirements, ['wordpress/site-health']);
 assert.deepEqual(
   taskInput.allowed_tools.filter((tool) => tool.startsWith('wordpress.')),
   ['wordpress.read-post', 'wordpress.write-post']
@@ -339,8 +342,8 @@ const legacyShapedCodeboxResult = {
 };
 assert.equal(artifactResultEnvelopeFromCodeboxResult(legacyShapedCodeboxResult), null);
 assert.deepEqual(typedArtifactsFromCodeboxResult(legacyShapedCodeboxResult), {});
-assert.equal(artifactResultEnvelopeFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true }), null);
-assert.deepEqual(typedArtifactsFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true }), {});
+assert.equal(artifactResultEnvelopeFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true }).status, 'created');
+assert.deepEqual(typedArtifactsFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true })['legacy-review'].payload, { ok: true });
 
 const originalToolPolicyEnv = process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON;
 const originalToolRequestSchemaEnv = process.env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA;
