@@ -165,12 +165,13 @@ mod tests {
     };
     use super::replay::run_replay;
     use super::report::{
-        evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status, run_report,
+        evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status, run_report, run_validate,
         FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
     };
     use super::types::{
         FuzzCommand, FuzzExecutionOutput, FuzzListOutput, FuzzOutput, FuzzReplayArgs,
-        FuzzReportArgs, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzWorkloadOutput,
+        FuzzReportArgs, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzValidateArgs,
+        FuzzWorkloadOutput,
     };
     use super::workloads::{
         fuzz_workloads, resolve_component_id, rig_component_for_fuzz, select_workload,
@@ -254,6 +255,85 @@ mod tests {
             }
             _ => panic!("expected fuzz run command"),
         }
+    }
+
+    #[test]
+    fn fuzz_validate_accepts_case_log_artifact() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let results_file = dir.path().join("fuzz-results.json");
+        let case_log = dir.path().join("case-log.jsonl");
+        std::fs::write(
+            &results_file,
+            serde_json::json!({
+                "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+                "id": "campaign-1",
+                "safety_class": "read_only",
+                "coverage_summary": {
+                    "declared_targets": 0,
+                    "executable_targets": 0,
+                    "proven_targets": 0,
+                    "declared_operations": 0,
+                    "executable_operations": 0,
+                    "proven_operations": 0
+                },
+                "artifacts": [{
+                    "id": "case-log",
+                    "kind": "case_log"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write campaign");
+        std::fs::write(
+            &case_log,
+            r#"{"schema":"homeboy/fuzz-case-log/v1","case_id":"case-1","target_id":"target-1","operation_id":"operation-1","input_hash":"sha256:abc","status":"passed","duration_ms":5}"#,
+        )
+        .expect("write case log");
+
+        let output = run_validate(FuzzValidateArgs {
+            results_file,
+            case_logs: vec![case_log.clone()],
+        })
+        .expect("validate fuzz campaign and case log");
+
+        assert_eq!(output.status, "passed");
+        assert_eq!(output.case_log_entries, 1);
+        assert_eq!(
+            output.case_log_files,
+            vec![case_log.to_string_lossy().to_string()]
+        );
+    }
+
+    #[test]
+    fn fuzz_validate_rejects_invalid_case_log_artifact() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let results_file = dir.path().join("fuzz-results.json");
+        let case_log = dir.path().join("case-log.jsonl");
+        std::fs::write(
+            &results_file,
+            serde_json::json!({
+                "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+                "id": "campaign-1",
+                "safety_class": "read_only"
+            })
+            .to_string(),
+        )
+        .expect("write campaign");
+        std::fs::write(
+            &case_log,
+            r#"{"schema":"homeboy/fuzz-case-log/v1","case_id":"case-1","target_id":"target-1","operation_id":"operation-1","input_hash":"sha256:abc","status":"skipped","duration_ms":5}"#,
+        )
+        .expect("write invalid case log");
+
+        let err = match run_validate(FuzzValidateArgs {
+            results_file,
+            case_logs: vec![case_log],
+        }) {
+            Ok(_) => panic!("invalid case log should fail validation"),
+            Err(err) => err,
+        };
+
+        assert!(err.message.contains("skip_reason"));
     }
 
     #[test]

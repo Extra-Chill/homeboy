@@ -20,6 +20,7 @@ pub const FUZZ_TARGET_SCHEMA: &str = "homeboy/fuzz-target/v1";
 pub const FUZZ_WORKLOAD_SCHEMA: &str = "homeboy/fuzz-workload/v1";
 pub const FUZZ_CAMPAIGN_SCHEMA: &str = "homeboy/fuzz-campaign/v1";
 pub const FUZZ_CASE_SCHEMA: &str = "homeboy/fuzz-case/v1";
+pub const FUZZ_CASE_LOG_SCHEMA: &str = "homeboy/fuzz-case-log/v1";
 pub const FUZZ_SEED_SCHEMA: &str = "homeboy/fuzz-seed/v1";
 pub const FUZZ_COVERAGE_SCHEMA: &str = "homeboy/fuzz-coverage/v1";
 pub const FUZZ_FINDING_SCHEMA: &str = "homeboy/fuzz-finding/v1";
@@ -63,6 +64,8 @@ pub struct FuzzContractSchemas {
     pub workload: String,
     pub campaign: String,
     pub case: String,
+    #[serde(default = "fuzz_case_log_schema")]
+    pub case_log: String,
     pub seed: String,
     pub coverage: String,
     pub finding: String,
@@ -76,8 +79,11 @@ pub struct FuzzContractSchemas {
     pub result_envelope: String,
     pub required_artifact: String,
     pub gate: String,
+    #[serde(default = "lifecycle_contract_schema")]
     pub lifecycle_contract: String,
+    #[serde(default = "lifecycle_result_schema")]
     pub lifecycle_result: String,
+    #[serde(default = "lifecycle_snapshot_ref_schema")]
     pub lifecycle_snapshot_ref: String,
 }
 
@@ -364,6 +370,112 @@ pub struct FuzzCase {
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzCaseLogEntry {
+    #[serde(default = "fuzz_case_log_schema")]
+    pub schema: String,
+    #[serde(default = "fuzz_contract_version")]
+    pub version: u32,
+    pub case_id: String,
+    pub target_id: String,
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_family: Option<FuzzOperationFamily>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
+    pub input_hash: String,
+    pub status: FuzzCaseLogStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<FuzzCaseLogArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzCaseLogEntry {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_CASE_LOG_SCHEMA);
+        require_schema(&self.schema, FUZZ_CASE_LOG_SCHEMA, "fuzz case log")?;
+        if self.version != FUZZ_CONTRACT_VERSION {
+            return Err(format!(
+                "fuzz case log version must be {FUZZ_CONTRACT_VERSION}"
+            ));
+        }
+        self.case_id = required_trimmed("case_id", &self.case_id)?;
+        self.target_id = required_trimmed("target_id", &self.target_id)?;
+        self.operation_id = required_trimmed("operation_id", &self.operation_id)?;
+        self.seed = normalize_optional_string(self.seed.take());
+        self.input_hash = required_trimmed("input_hash", &self.input_hash)?;
+        self.started_at = normalize_optional_string(self.started_at.take());
+        self.finished_at = normalize_optional_string(self.finished_at.take());
+        self.failure_fingerprint = normalize_optional_string(self.failure_fingerprint.take());
+        self.skip_reason = normalize_optional_string(self.skip_reason.take());
+        self.failure_reason = normalize_optional_string(self.failure_reason.take());
+        for artifact in &mut self.artifact_refs {
+            artifact.normalize()?;
+        }
+        if self.duration_ms.is_none() && self.started_at.is_none() && self.finished_at.is_none() {
+            return Err("case log timing requires duration_ms or timestamps".to_string());
+        }
+        match self.status {
+            FuzzCaseLogStatus::Skipped if self.skip_reason.is_none() => {
+                Err("skipped case log entries require skip_reason".to_string())
+            }
+            FuzzCaseLogStatus::Failed | FuzzCaseLogStatus::Error
+                if self.failure_fingerprint.is_none() && self.failure_reason.is_none() =>
+            {
+                Err(
+                    "failed case log entries require failure_fingerprint or failure_reason"
+                        .to_string(),
+                )
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FuzzCaseLogStatus {
+    Passed,
+    Failed,
+    Skipped,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FuzzCaseLogArtifactRef {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
+impl FuzzCaseLogArtifactRef {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.id = required_trimmed("artifact_refs[].id", &self.id)?;
+        self.kind = required_trimmed("artifact_refs[].kind", &self.kind)?;
+        self.path = normalize_optional_string(self.path.take());
+        self.uri = normalize_optional_string(self.uri.take());
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -778,6 +890,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             workload: FUZZ_WORKLOAD_SCHEMA.to_string(),
             campaign: FUZZ_CAMPAIGN_SCHEMA.to_string(),
             case: FUZZ_CASE_SCHEMA.to_string(),
+            case_log: FUZZ_CASE_LOG_SCHEMA.to_string(),
             seed: FUZZ_SEED_SCHEMA.to_string(),
             coverage: FUZZ_COVERAGE_SCHEMA.to_string(),
             finding: FUZZ_FINDING_SCHEMA.to_string(),
@@ -853,6 +966,73 @@ pub fn parse_fuzz_results_file(path: &Path) -> Result<FuzzCampaign> {
         ));
     }
     Ok(campaign)
+}
+
+pub fn parse_fuzz_case_log_file(path: &Path) -> Result<Vec<FuzzCaseLogEntry>> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+    let entries = parse_fuzz_case_log_contents(&contents).map_err(|message| {
+        Error::validation_invalid_argument(
+            "case_log",
+            message,
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    Ok(entries)
+}
+
+pub fn parse_fuzz_case_log_contents(
+    contents: &str,
+) -> std::result::Result<Vec<FuzzCaseLogEntry>, String> {
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Err("case log must contain at least one entry".to_string());
+    }
+
+    let values = if trimmed.starts_with('[') {
+        serde_json::from_str::<Vec<Value>>(trimmed).map_err(|err| err.to_string())?
+    } else if trimmed.starts_with('{') {
+        match serde_json::from_str::<Value>(trimmed) {
+            Ok(value) => match value.get("entries").and_then(Value::as_array) {
+                Some(entries) => entries.clone(),
+                None => vec![value],
+            },
+            Err(_) if trimmed.lines().count() > 1 => parse_fuzz_case_log_jsonl(trimmed)?,
+            Err(error) => return Err(error.to_string()),
+        }
+    } else {
+        parse_fuzz_case_log_jsonl(trimmed)?
+    };
+
+    if values.is_empty() {
+        return Err("case log must contain at least one entry".to_string());
+    }
+
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut entry: FuzzCaseLogEntry = serde_json::from_value(value)
+                .map_err(|err| format!("case log entry {}: {err}", index + 1))?;
+            entry
+                .normalize()
+                .map_err(|err| format!("case log entry {}: {err}", index + 1))?;
+            Ok(entry)
+        })
+        .collect()
+}
+
+fn parse_fuzz_case_log_jsonl(contents: &str) -> std::result::Result<Vec<Value>, String> {
+    contents
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            serde_json::from_str::<Value>(line.trim())
+                .map_err(|err| format!("case log line {}: {err}", index + 1))
+        })
+        .collect()
 }
 
 pub fn parse_fuzz_target_inventory_file(path: &Path) -> Result<FuzzTargetInventory> {
@@ -1044,6 +1224,10 @@ fn fuzz_case_schema() -> String {
     FUZZ_CASE_SCHEMA.to_string()
 }
 
+fn fuzz_case_log_schema() -> String {
+    FUZZ_CASE_LOG_SCHEMA.to_string()
+}
+
 fn fuzz_seed_schema() -> String {
     FUZZ_SEED_SCHEMA.to_string()
 }
@@ -1094,6 +1278,18 @@ fn fuzz_required_artifact_schema() -> String {
 
 fn fuzz_gate_schema() -> String {
     FUZZ_GATE_SCHEMA.to_string()
+}
+
+fn lifecycle_contract_schema() -> String {
+    crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string()
+}
+
+fn lifecycle_result_schema() -> String {
+    crate::core::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string()
+}
+
+fn lifecycle_snapshot_ref_schema() -> String {
+    crate::core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA.to_string()
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
@@ -1155,6 +1351,7 @@ mod tests {
         assert_eq!(contract.schemas.target, FUZZ_TARGET_SCHEMA);
         assert_eq!(contract.schemas.campaign, FUZZ_CAMPAIGN_SCHEMA);
         assert_eq!(contract.schemas.case, FUZZ_CASE_SCHEMA);
+        assert_eq!(contract.schemas.case_log, FUZZ_CASE_LOG_SCHEMA);
         assert_eq!(contract.schemas.replay, FUZZ_REPLAY_SCHEMA);
         assert_eq!(
             contract.schemas.coverage_summary,
@@ -1207,6 +1404,7 @@ mod tests {
                 "workload": FUZZ_WORKLOAD_SCHEMA,
                 "campaign": FUZZ_CAMPAIGN_SCHEMA,
                 "case": FUZZ_CASE_SCHEMA,
+                "case_log": FUZZ_CASE_LOG_SCHEMA,
                 "seed": FUZZ_SEED_SCHEMA,
                 "coverage": FUZZ_COVERAGE_SCHEMA,
                 "finding": FUZZ_FINDING_SCHEMA,
@@ -1624,6 +1822,39 @@ mod tests {
             value["lifecycle"]["snapshot_refs"][0]["schema"],
             crate::core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA
         );
+    }
+
+    #[test]
+    fn parse_fuzz_case_log_contents_accepts_jsonl_entries() {
+        let entries = parse_fuzz_case_log_contents(
+            r#"{"schema":"homeboy/fuzz-case-log/v1","case_id":"case-1","target_id":"target-1","operation_id":"operation-1","operation_family":"read","seed":"seed-1","input_hash":"sha256:abc","status":"passed","duration_ms":12,"artifact_refs":[{"id":"artifact-1","kind":"stdout","path":"logs/case-1.txt"}]}
+{"schema":"homeboy/fuzz-case-log/v1","case_id":"case-2","target_id":"target-1","operation_id":"operation-1","input_hash":"sha256:def","status":"skipped","duration_ms":1,"skip_reason":"auth_required"}"#,
+        )
+        .expect("parse case log jsonl");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].schema, FUZZ_CASE_LOG_SCHEMA);
+        assert_eq!(entries[0].operation_family, Some(FuzzOperationFamily::Read));
+        assert_eq!(entries[0].artifact_refs[0].kind, "stdout");
+        assert_eq!(entries[1].status, FuzzCaseLogStatus::Skipped);
+        assert_eq!(entries[1].skip_reason.as_deref(), Some("auth_required"));
+    }
+
+    #[test]
+    fn parse_fuzz_case_log_contents_rejects_invalid_entries() {
+        let err = parse_fuzz_case_log_contents(
+            r#"[{"schema":"homeboy/fuzz-case-log/v1","case_id":"case-1","target_id":"target-1","operation_id":"operation-1","input_hash":"sha256:abc","status":"failed","duration_ms":4}]"#,
+        )
+        .expect_err("failed entry without reason should fail");
+
+        assert!(err.contains("failure_fingerprint or failure_reason"));
+
+        let err = parse_fuzz_case_log_contents(
+            r#"{"entries":[{"schema":"homeboy/fuzz-case-log/v1","case_id":"case-1","target_id":"target-1","operation_id":"operation-1","input_hash":"sha256:abc","status":"passed"}]}"#,
+        )
+        .expect_err("entry without timing should fail");
+
+        assert!(err.contains("duration_ms or timestamps"));
     }
 
     #[test]
