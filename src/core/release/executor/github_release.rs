@@ -132,6 +132,7 @@ pub(crate) fn run_github_release(
 
     if !gh_is_authenticated(&github, &component.github) {
         let repair = repair_commands(None, None);
+        let auth_error = gh_auth_failure_message(&github, &repair);
         log_status!(
             "release",
             "✗ `gh` is not authenticated — GitHub Release was NOT created"
@@ -142,7 +143,7 @@ pub(crate) fn run_github_release(
             &tag,
             &github,
             "gh-not-authenticated",
-            "`gh` is not authenticated; GitHub Release was not created.",
+            &auth_error,
             repair,
         ));
     }
@@ -979,24 +980,54 @@ fn gh_env_hint(github: &GitHubRepo, env: &[(String, String)]) -> Option<String> 
     }
 
     let mut hints = Vec::new();
-    let has_proxy = env
+    let proxy_keys = env
         .iter()
-        .any(|(key, value)| key.eq_ignore_ascii_case("HTTPS_PROXY") && !value.is_empty());
+        .filter(|(key, value)| is_proxy_env_key(key) && !value.is_empty())
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>();
     if github.host != "github.com" {
         hints.push(format!(
             "GitHub Enterprise host detected: repair commands include GH_HOST={}",
             github.host
         ));
     }
-    if has_proxy {
-        hints.push("Configured HTTPS_PROXY is included in repair commands.".to_string());
+    if !proxy_keys.is_empty() {
+        hints.push(format!(
+            "Proxy environment is included in repair commands: {}.",
+            proxy_keys.join(", ")
+        ));
     } else if github.host != "github.com" {
         hints.push(
-            "If this Enterprise host requires a proxy, prefix the commands with HTTPS_PROXY=<proxy-url>.".to_string(),
+            "If this Enterprise host requires a proxy, prefix the commands with the needed HTTPS_PROXY/HTTP_PROXY/ALL_PROXY value.".to_string(),
         );
     }
 
     Some(hints.join(" "))
+}
+
+fn is_proxy_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        "HTTPS_PROXY" | "https_proxy" | "HTTP_PROXY" | "http_proxy" | "ALL_PROXY" | "all_proxy"
+    )
+}
+
+fn gh_auth_failure_message(github: &GitHubRepo, repair: &GitHubReleaseRepairCommands) -> String {
+    if github.host == "github.com" {
+        return "`gh` is not authenticated; GitHub Release was not created.".to_string();
+    }
+
+    let proxy_context = repair
+        .env_hint
+        .as_deref()
+        .filter(|hint| hint.contains("Proxy environment is included"))
+        .map(|_| " with the inherited/configured proxy environment")
+        .unwrap_or("");
+
+    format!(
+        "`gh auth status --hostname {}` failed{}; GitHub Release was not created. Authenticate this host with `gh auth login --hostname {}`, or verify the proxy/keyring environment used by the printed repair commands.",
+        github.host, proxy_context, github.host
+    )
 }
 
 fn safe_filename(value: &str) -> String {
@@ -1062,7 +1093,7 @@ mod tests {
     use crate::core::release::types::{ReleaseState, ReleaseStepStatus};
 
     use super::{
-        create_failed_result, fallback_release_notes, github_cli_env,
+        create_failed_result, fallback_release_notes, gh_auth_failure_message, github_cli_env,
         github_generated_notes_start_tag, github_release_notes_start_tag,
         github_release_repair_commands, not_created_result, upload_failed_result,
         GitHubReleaseBody,
@@ -1446,7 +1477,77 @@ mod tests {
             .env_hint
             .as_deref()
             .unwrap_or_default()
-            .contains("Configured HTTPS_PROXY is included"));
+            .contains("Proxy environment is included"));
+    }
+
+    #[test]
+    fn repair_commands_include_configured_enterprise_proxy_env() {
+        let github = GitHubRepo {
+            host: "github.enterprise.test".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+        let config = GithubConfig {
+            hosts: HashMap::from([(
+                "github.enterprise.test".to_string(),
+                GithubHostConfig {
+                    proxy: None,
+                    env: HashMap::from([
+                        (
+                            "HTTP_PROXY".to_string(),
+                            "http://proxy.example.test:8080".to_string(),
+                        ),
+                        (
+                            "ALL_PROXY".to_string(),
+                            "socks5://127.0.0.1:8080".to_string(),
+                        ),
+                    ]),
+                },
+            )]),
+        };
+
+        let repair = github_release_repair_commands(
+            "v1.2.3",
+            &github,
+            &config,
+            &[],
+            None,
+            Some("build/v1.2.3-release-notes.md"),
+        );
+
+        assert!(repair.create_command.starts_with(
+            "GH_HOST=github.enterprise.test HTTP_PROXY=http://proxy.example.test:8080 ALL_PROXY=socks5://127.0.0.1:8080 gh release create v1.2.3"
+        ));
+        assert!(repair
+            .env_hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("HTTP_PROXY, ALL_PROXY"));
+    }
+
+    #[test]
+    fn enterprise_auth_failure_mentions_proxy_keyring_context() {
+        let github = GitHubRepo {
+            host: "github.enterprise.test".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+        let config = GithubConfig {
+            hosts: HashMap::from([(
+                "github.enterprise.test".to_string(),
+                GithubHostConfig {
+                    proxy: Some("https://proxy.example.test:8443".to_string()),
+                    env: HashMap::new(),
+                },
+            )]),
+        };
+        let repair = github_release_repair_commands("v1.2.3", &github, &config, &[], None, None);
+
+        let message = gh_auth_failure_message(&github, &repair);
+
+        assert!(message.contains("gh auth status --hostname github.enterprise.test"));
+        assert!(message.contains("Authenticate this host"));
+        assert!(message.contains("proxy/keyring environment"));
     }
 
     #[test]
