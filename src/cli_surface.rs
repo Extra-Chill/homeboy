@@ -585,6 +585,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes =
                 "recursive command safety, docs, output, and Lab metadata in the standard JSON envelope";
         }
+        ["docs", "map"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "default JSON output is non-mutating; pass --write to write markdown docs to disk";
+            metadata.dangerous_flags = vec!["--write"];
+        }
         ["deploy"] => {
             metadata.mutates = true;
             metadata.operator = true;
@@ -1171,6 +1177,7 @@ mod tests {
             ["db", "drop-table"].as_slice(),
             ["file", "write"].as_slice(),
             ["file", "delete"].as_slice(),
+            ["docs", "map"].as_slice(),
             ["runs", "reconcile"].as_slice(),
             ["runs", "import"].as_slice(),
             ["runs", "artifact", "cleanup-downloads"].as_slice(),
@@ -1224,6 +1231,10 @@ mod tests {
 
         let triage = manifest.find_path(&["triage"]).unwrap();
         assert_eq!(triage.dangerous_flags, vec!["--auto-merge"]);
+
+        let docs_map = manifest.find_path(&["docs", "map"]).unwrap();
+        assert!(docs_map.output.notes.contains("--write"));
+        assert_eq!(docs_map.dangerous_flags, vec!["--write"]);
 
         let fleet_exec = manifest.find_path(&["fleet", "exec"]).unwrap();
         assert_eq!(fleet_exec.dry_run.flag.as_deref(), Some("--check"));
