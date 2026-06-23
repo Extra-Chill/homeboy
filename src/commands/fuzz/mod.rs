@@ -1161,6 +1161,39 @@ mod tests {
         assert_eq!(outcome.exit_code, 1);
     }
 
+    #[test]
+    fn fuzz_run_outcome_fails_when_workload_reports_invariant_failure_count() {
+        let mut campaign = empty_fuzz_campaign();
+        campaign.metadata = serde_json::json!({
+            "wordpress_fuzz_result": {
+                "status": "passed",
+                "success": true,
+                "cases": [
+                    {
+                        "status": "passed",
+                        "metadata": {
+                            "observations": [
+                                {
+                                    "payload": {
+                                        "metrics": {
+                                            "side_effect_invariant_failure_count": 1
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+
+        let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
+
+        assert_eq!(outcome.status, "failed");
+        assert!(!outcome.success);
+        assert_eq!(outcome.exit_code, 1);
+    }
+
     fn empty_fuzz_campaign() -> FuzzCampaign {
         FuzzCampaign {
             schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
