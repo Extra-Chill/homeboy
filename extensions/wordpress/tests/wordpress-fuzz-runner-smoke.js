@@ -124,6 +124,7 @@ const jsonWorkloadResult = buildWordPressFuzzRunnerResult({
 		workloadPath: '/unused/in-unit-test.json',
 		workloadId: 'json-workload',
 		runId: 'json-workload-run',
+		wpCodeboxFuzzWorkloadRoot: '/runner/workloads',
 	},
 	workload: {
 		schema: 'homeboy/fuzz-workload/v1',
@@ -183,6 +184,8 @@ assert.equal(
 	jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].source,
 	'/runner/components/sample-plugin'
 );
+assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_mounts, [{ source: '/runner/workloads', target: '/runner/workloads', mode: 'readonly' }]);
+assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_env, { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: '/runner/workloads' });
 
 const genericPrimitiveResult = buildWordPressFuzzRunnerResult({
 	env: {
