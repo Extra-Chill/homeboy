@@ -93,6 +93,7 @@ pub(crate) fn validate_runner_workload_dispatch(
             format!("runner workload schema must be `{RUNNER_WORKLOAD_SCHEMA}`"),
         ));
     }
+    validate_runner_workload_result_refs(workload)?;
     if workload.assignment.runner_id.as_deref() != Some(runner_id) {
         return Err(workload_error(
             "runner_workload.assignment.runner_id",
@@ -183,6 +184,41 @@ fn validate_runner_workload_command(workload: &RunnerWorkload, command: &[String
                 "runner workload command family `{:?}` does not match dispatched command family `{:?}`",
                 workload.kind.command_family, dispatched_family
             ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_runner_workload_result_refs(workload: &RunnerWorkload) -> Result<()> {
+    if workload.result_refs.plan_id.trim().is_empty() {
+        return Err(workload_error(
+            "runner_workload.result_refs.plan_id",
+            "runner workload result refs require a plan_id".to_string(),
+        ));
+    }
+
+    if let Some(expected_plan_id) = workload.workload_id.strip_suffix(".runner_workload") {
+        if workload.result_refs.plan_id != expected_plan_id {
+            return Err(workload_error(
+                "runner_workload.result_refs.plan_id",
+                format!(
+                    "runner workload result refs plan_id `{}` does not match workload_id plan `{expected_plan_id}`",
+                    workload.result_refs.plan_id
+                ),
+            ));
+        }
+    }
+
+    if workload
+        .result_refs
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.id.trim().is_empty())
+    {
+        return Err(workload_error(
+            "runner_workload.result_refs.artifacts",
+            "runner workload result refs artifacts require non-empty ids".to_string(),
         ));
     }
 
@@ -369,6 +405,26 @@ mod tests {
         }
     }
 
+    fn workload() -> RunnerWorkload {
+        let plan = plan();
+        let command = command();
+        build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        })
+    }
+
     #[test]
     fn runner_core_builds_complete_workload_payload() {
         let plan = plan();
@@ -458,6 +514,74 @@ mod tests {
         )
         .expect_err("drifted runner id must fail");
         assert_eq!(err.details["field"], "runner_workload.assignment.runner_id");
+    }
+
+    #[test]
+    fn runner_workload_validation_rejects_blank_result_refs_plan_id() {
+        let mut workload = workload();
+        workload.result_refs.plan_id = " ".to_string();
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &["HOMEBODY_TRACE_SECRET".to_string()],
+            true,
+        )
+        .expect_err("blank result refs plan id must fail");
+        assert_eq!(err.details["field"], "runner_workload.result_refs.plan_id");
+    }
+
+    #[test]
+    fn runner_workload_validation_rejects_result_refs_plan_id_mismatched_to_workload_id() {
+        let mut workload = workload();
+        workload.result_refs.plan_id = "lab_offload.other".to_string();
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &["HOMEBODY_TRACE_SECRET".to_string()],
+            true,
+        )
+        .expect_err("mismatched result refs plan id must fail");
+        assert_eq!(err.details["field"], "runner_workload.result_refs.plan_id");
+    }
+
+    #[test]
+    fn runner_workload_validation_rejects_blank_result_refs_artifact_ids() {
+        let workload = runner_workload_with_result_refs(
+            workload(),
+            Some("job-1"),
+            Some("mirror-1"),
+            &[JobArtifactMetadata {
+                id: " ".to_string(),
+                name: Some("trace.zip".to_string()),
+                path: Some("/tmp/trace.zip".to_string()),
+                url: None,
+                mime: None,
+                size_bytes: Some(42),
+                sha256: None,
+                content_base64: None,
+                metadata: None,
+            }],
+        );
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &["HOMEBODY_TRACE_SECRET".to_string()],
+            true,
+        )
+        .expect_err("blank result refs artifact id must fail");
+        assert_eq!(
+            err.details["field"],
+            "runner_workload.result_refs.artifacts"
+        );
     }
 
     #[test]
