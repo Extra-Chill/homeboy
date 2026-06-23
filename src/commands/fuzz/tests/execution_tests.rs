@@ -263,6 +263,14 @@ fn fuzz_report_persists_result_envelope_artifact_for_run_id() {
 
         assert_eq!(output.envelope_file, None);
         assert_eq!(output.envelope.id, "report-run-1");
+        assert!(output
+            .performance_hotspots
+            .slowest_timing_metrics
+            .is_empty());
+        assert!(output
+            .performance_hotspots
+            .hottest_metric_families
+            .is_empty());
         let store = ObservationStore::open_initialized().expect("store");
         let artifacts = store.list_artifacts("report-run-1").expect("artifacts");
         let envelope_artifact = artifacts

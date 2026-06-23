@@ -5,6 +5,7 @@ use homeboy::core::fuzz::{
     FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzReplayMetadata, FuzzRequiredArtifact,
     FuzzResultEnvelope, FuzzTargetInventory,
 };
+use homeboy::core::performance_hotspots::PerformanceHotspotSummary;
 
 #[derive(Serialize)]
 #[serde(tag = "variant", rename_all = "snake_case")]
@@ -99,6 +100,7 @@ pub struct FuzzValidateOutput {
     pub open_findings: usize,
     pub artifacts: usize,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
+    pub performance_hotspots: PerformanceHotspotSummary,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 
@@ -110,6 +112,7 @@ pub struct FuzzReportOutput {
     pub envelope_file: Option<String>,
     pub envelope: FuzzResultEnvelope,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
+    pub performance_hotspots: PerformanceHotspotSummary,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 

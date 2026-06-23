@@ -112,6 +112,78 @@ fn fuzz_campaign_contract_surfaces_extension_metadata() {
 }
 
 #[test]
+fn fuzz_performance_hotspots_extracts_generic_metadata_metrics() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.metadata = serde_json::json!({
+        "duration_ms": 900,
+        "queries_count": 20,
+        "nested": {
+            "setup_elapsed": 30,
+            "rows_count": 3
+        },
+        "label": "ignored"
+    });
+    campaign.coverage_summary = Some(homeboy::core::fuzz::FuzzCoverageSummary {
+        schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+        declared_targets: 0,
+        executable_targets: 0,
+        proven_targets: 0,
+        declared_operations: 0,
+        executable_operations: 0,
+        proven_operations: 0,
+        skipped_targets: Vec::new(),
+        skipped_operations: Vec::new(),
+        surface_summaries: vec![homeboy::core::fuzz::FuzzCoverageGroupSummary {
+            id: "surface-a".to_string(),
+            kind: "api".to_string(),
+            label: None,
+            declared_targets: 0,
+            executable_targets: 0,
+            proven_targets: 0,
+            declared_operations: 0,
+            executable_operations: 0,
+            proven_operations: 0,
+            skipped_targets: Vec::new(),
+            skipped_operations: Vec::new(),
+            metadata: serde_json::json!({ "operation_ms": 125 }),
+            extra: std::collections::BTreeMap::new(),
+        }],
+        kind_summaries: Vec::new(),
+        artifact_ids: Vec::new(),
+        metadata: serde_json::json!({ "coverage_queries": 7 }),
+        extra: std::collections::BTreeMap::new(),
+    });
+    campaign.artifacts = vec![homeboy::core::fuzz::FuzzArtifact {
+        schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+        id: "profile".to_string(),
+        kind: "profile".to_string(),
+        artifact: None,
+        metadata: serde_json::json!({ "render_ms": 250 }),
+        extra: std::collections::BTreeMap::new(),
+    }];
+
+    let summary = fuzz_performance_hotspots(&campaign);
+
+    assert_eq!(summary.slowest_timing_metrics[0].subject_id, "campaign-1");
+    assert_eq!(summary.slowest_timing_metrics[0].metric, "duration_ms");
+    assert_eq!(summary.slowest_timing_metrics[0].value, 900.0);
+    assert!(summary.slowest_timing_metrics.iter().any(|point| {
+        point.subject_id == "artifact:profile" && point.metric == "render_ms"
+    }));
+    assert!(summary.slowest_timing_metrics.iter().any(|point| {
+        point.subject_id == "coverage_summary:surface-a" && point.metric == "operation_ms"
+    }));
+    assert!(summary
+        .hottest_metric_families
+        .iter()
+        .any(|family| family.family == "queries" && family.total == 20.0));
+    assert!(summary
+        .hottest_metric_families
+        .iter()
+        .any(|family| family.family == "coverage" && family.total == 7.0));
+}
+
+#[test]
 fn select_workload_requires_explicit_id_for_ambiguous_fuzz_workloads() {
     let workloads = vec![
         FuzzWorkloadOutput {
