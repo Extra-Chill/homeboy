@@ -244,7 +244,28 @@ fn fuzz_metadata_reports_failure(value: &serde_json::Value) -> bool {
         .get("case_counts")
         .is_some_and(|counts| json_u64(counts, "failed") > 0 || json_u64(counts, "errored") > 0);
 
-    status_failed || success_failed || case_failed
+    status_failed || success_failed || case_failed || metadata_failure_count_reports_failure(value)
+}
+
+fn metadata_failure_count_reports_failure(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            (is_failure_count_key(key) && json_numeric_value(value).is_some_and(|count| count > 0.0))
+                || metadata_failure_count_reports_failure(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(metadata_failure_count_reports_failure),
+        _ => false,
+    }
+}
+
+fn is_failure_count_key(key: &str) -> bool {
+    key == "failure_count" || key.ends_with("_failure_count")
+}
+
+fn json_numeric_value(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))
 }
 
 fn json_u64(value: &serde_json::Value, key: &str) -> u64 {
