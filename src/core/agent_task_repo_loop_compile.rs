@@ -263,7 +263,7 @@ fn repo_loop_workflow_request(
         .unwrap_or(Value::Null);
 
     let task_id = repo_loop_task_id(workflow, entity_id);
-    let inputs = repo_loop_workflow_inputs(workflow, entity_id);
+    let inputs = repo_loop_workflow_inputs(spec, workflow, entity_id);
     let component_contracts = repo_loop_workflow_component_contracts(&inputs)?;
 
     Ok(AgentTaskRequest {
@@ -332,6 +332,7 @@ fn sanitize_repo_loop_task_id_segment(value: &str) -> String {
 }
 
 fn repo_loop_workflow_inputs(
+    spec: &AgentTaskRepoLoopSpec,
     workflow: &AgentTaskRepoLoopSpecWorkflow,
     entity_id: Option<&str>,
 ) -> Value {
@@ -345,7 +346,9 @@ fn repo_loop_workflow_inputs(
         }
     };
 
-    if let Some(runtime_task) = runtime_task_from_workflow_execution(&workflow.runtime_execution) {
+    if let Some(runtime_task) =
+        runtime_task_from_workflow_execution(spec, &workflow.runtime_execution)
+    {
         inputs
             .entry("runtime_task".to_string())
             .or_insert(runtime_task);
@@ -370,7 +373,10 @@ fn repo_loop_workflow_inputs(
     Value::Object(inputs)
 }
 
-fn runtime_task_from_workflow_execution(runtime_execution: &Value) -> Option<Value> {
+fn runtime_task_from_workflow_execution(
+    spec: &AgentTaskRepoLoopSpec,
+    runtime_execution: &Value,
+) -> Option<Value> {
     let execution = runtime_execution.as_object()?;
     let ability = execution.get("ability")?.as_str()?.trim();
     if ability.is_empty() {
@@ -379,13 +385,12 @@ fn runtime_task_from_workflow_execution(runtime_execution: &Value) -> Option<Val
 
     let mut runtime_task = serde_json::Map::new();
     runtime_task.insert("ability".to_string(), Value::String(ability.to_string()));
-    runtime_task.insert(
-        "input".to_string(),
-        execution
-            .get("input")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
-    );
+    let mut input = execution
+        .get("input")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    apply_runtime_task_dispatch_defaults(spec, &mut input);
+    runtime_task.insert("input".to_string(), input);
     if let Some(kind) = execution
         .get("kind")
         .and_then(Value::as_str)
@@ -394,6 +399,54 @@ fn runtime_task_from_workflow_execution(runtime_execution: &Value) -> Option<Val
         runtime_task.insert("kind".to_string(), Value::String(kind.to_string()));
     }
     Some(Value::Object(runtime_task))
+}
+
+/// Propagate the runtime provider/model/options configuration from the spec's
+/// `dispatch_defaults` metadata into the generated `runtime_task.input` so that
+/// `from-spec` compilation preserves the CLI/provider runtime selection instead
+/// of silently dropping it (#6125). Existing keys on the input are preserved.
+fn apply_runtime_task_dispatch_defaults(spec: &AgentTaskRepoLoopSpec, input: &mut Value) {
+    let Some(input) = input.as_object_mut() else {
+        return;
+    };
+    let Some(defaults) = spec
+        .metadata
+        .get("dispatch_defaults")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+
+    if let Some(model) = defaults
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+    {
+        input
+            .entry("model".to_string())
+            .or_insert_with(|| Value::String(model.to_string()));
+    }
+
+    let Some(provider_config) = defaults
+        .get("provider_config")
+        .and_then(|value| match value {
+            Value::String(raw) => serde_json::from_str::<Value>(raw).ok(),
+            Value::Object(_) => Some(value.clone()),
+            _ => None,
+        })
+    else {
+        return;
+    };
+    let Some(provider_config) = provider_config.as_object() else {
+        return;
+    };
+    for key in ["provider", "model", "options"] {
+        if let Some(value) = provider_config.get(key).filter(|value| !value.is_null()) {
+            input
+                .entry(key.to_string())
+                .or_insert_with(|| value.clone());
+        }
+    }
 }
 
 fn repo_loop_workflow_component_contracts(
