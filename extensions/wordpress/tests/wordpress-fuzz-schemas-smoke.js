@@ -169,6 +169,76 @@ assert.deepEqual(failingBudgetResult.findings.map((finding) => finding.code), [
 assert.equal(failingBudgetResult.diagnostics[0].severity, 'failure');
 assert.equal(failingBudgetResult.summary.performance_metrics.query_count, 5);
 
+const performanceEvidenceResult = normalizeWordPressFuzzResult({
+	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
+	id: 'performance-evidence-result',
+	cases: [
+		{
+			id: 'profiled-rest-case',
+			status: 'passed',
+			durationMs: 120,
+			dbQuery: {
+				queryCount: 7,
+				durationMs: 18,
+				topQueryShapes: [{ shape: 'SELECT * FROM wp_posts WHERE ID = ?', count: 4 }],
+				topTables: [{ table: 'wp_posts', count: 5 }],
+			},
+			memory: { peakBytes: 4096 },
+			browserMetrics: {
+				browser_resource_count: 11,
+				browser_request_count: 9,
+				browser_failed_request_count: 1,
+				browser_network_idle_ms: 250,
+			},
+			budget: {
+				max_query_time_ms: 10,
+				max_browser_failed_request_count: 0,
+			},
+		},
+		{
+			id: 'missing-metrics-case',
+			status: 'passed',
+		},
+		{
+			id: 'unsupported-metric-case',
+			status: 'passed',
+			metrics: { queryCount: 'many' },
+		},
+	],
+});
+
+assert.equal(performanceEvidenceResult.status, 'failed');
+assert.equal(performanceEvidenceResult.cases[0].status, 'failed');
+assert.equal(performanceEvidenceResult.cases[0].performance_metrics.request_duration_ms, 120);
+assert.equal(performanceEvidenceResult.cases[0].performance_metrics.query_count, 7);
+assert.equal(performanceEvidenceResult.cases[0].performance_metrics.query_time_ms, 18);
+assert.equal(performanceEvidenceResult.cases[0].performance_metrics.memory_peak_bytes, 4096);
+assert.equal(performanceEvidenceResult.cases[0].performance_metrics.browser_request_count, 9);
+assert.equal(performanceEvidenceResult.cases[0].performance_metrics.browser_failed_request_count, 1);
+assert.equal(performanceEvidenceResult.cases[0].performance_metrics.browser_network_idle_ms, 250);
+assert.equal(performanceEvidenceResult.cases[0].performance_metric_reasons.query_time_ms.status, 'observed');
+assert.equal(performanceEvidenceResult.cases[1].performance_metric_reasons.query_count.reason, 'metric_not_provided');
+assert.equal(performanceEvidenceResult.cases[2].performance_metric_reasons.query_count.status, 'unsupported');
+assert.equal(performanceEvidenceResult.cases[2].performance_metric_reasons.query_count.source_key, 'queryCount');
+assert.deepEqual(performanceEvidenceResult.cases[0].performance_summaries.top_queries, [{ shape: 'SELECT * FROM wp_posts WHERE ID = ?', count: 4 }]);
+assert.deepEqual(performanceEvidenceResult.cases[0].performance_summaries.top_tables, [{ table: 'wp_posts', count: 5 }]);
+assert.equal(performanceEvidenceResult.cases[0].performance_summaries.browser_network.failed_request_count, 1);
+assert.equal(performanceEvidenceResult.summary.budget_failure_count, 2);
+assert.deepEqual(performanceEvidenceResult.findings.map((finding) => finding.code), [
+	'query_time_budget_exceeded',
+	'browser_failed_request_count_budget_exceeded',
+]);
+assert.equal(performanceEvidenceResult.summary.performance_metrics.request_duration_ms, 120);
+assert.equal(performanceEvidenceResult.summary.performance_metrics.query_count, 7);
+assert.equal(performanceEvidenceResult.summary.performance_metrics.query_time_ms, 18);
+assert.equal(performanceEvidenceResult.summary.performance_metrics.memory_peak_bytes, 4096);
+assert.equal(performanceEvidenceResult.summary.performance_metrics.browser_request_count, 9);
+assert.equal(performanceEvidenceResult.summary.performance_metrics.browser_failed_request_count, 1);
+assert.equal(performanceEvidenceResult.summary.performance_metrics.browser_network_idle_ms, 250);
+assert.equal(performanceEvidenceResult.summary.performance_metric_reasons.query_count.observed, 1);
+assert.equal(performanceEvidenceResult.summary.performance_metric_reasons.query_count.missing, 1);
+assert.equal(performanceEvidenceResult.summary.performance_metric_reasons.query_count.unsupported, 1);
+
 const errorStatusResult = normalizeWordPressFuzzResult({
 	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
 	status: 'error',

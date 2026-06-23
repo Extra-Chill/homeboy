@@ -63,7 +63,7 @@ const stoppedUnacceptedLoop = genericLoopRunner.runGenericDeterministicLoop({
   collectResult: ({ outcome }) => outcome,
   reconcile: ({ state }) => ({ ...state, accepted: false }),
 });
-assert.equal(stoppedUnacceptedLoop.iterations[0].stop.reason, 'max_iterations_reached');
+assert.equal(stoppedUnacceptedLoop.iterations[0].stop.reason, 'max_revolutions_reached');
 assert.equal(stoppedUnacceptedLoop.evidence_envelope.loop_run.iterations[0].accepted, false);
 
 const runtime = { id: 'fixture-runtime', executor: { backend: 'fixture', path: '/unused' } };
@@ -238,6 +238,84 @@ process.stdout.write(JSON.stringify({
   assert.equal(nodeRun.outcome.status, 'succeeded');
   assert.equal(nodeRun.outcome.metadata.runtime_invocation_result.command, process.execPath);
   assert.deepEqual(nodeRun.outcome.metadata.runtime_invocation_result.argv, [nodeExecutorPath]);
+
+  const noisyExecutorPath = path.join(tmpRoot, 'fake-noisy-executor.cjs');
+  const noisyArtifactsDir = path.join(tmpRoot, 'artifacts');
+  const lateSentinel = 'LATE_PROVIDER_STDERR_SENTINEL';
+  fs.writeFileSync(noisyExecutorPath, `'use strict';
+const request = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+process.stderr.write('provider stderr prefix\\n' + 'x'.repeat(20000) + '${lateSentinel}\\n');
+process.stdout.write(JSON.stringify({
+  schema: 'homeboy/agent-task-outcome/v1',
+  task_id: request.task_id,
+  status: 'succeeded',
+  summary: 'Noisy executor completed.',
+  metadata: {
+    results: { scenarios: [{ id: request.task_id, metrics: { generic_agent_task_executor_mean: 1 }, metadata: { job_status: 'completed', success_status: 'no_changes', completion_outcome: 'done', completion_outcome_satisfied: true } }] },
+  },
+}));
+`);
+  let capturedStderr = '';
+  const originalStderrWrite = process.stderr.write;
+  process.stderr.write = (chunk, encoding, callback) => {
+    capturedStderr += String(chunk);
+    if (typeof callback === 'function') {
+      callback();
+    }
+    return true;
+  };
+  let noisyRun;
+  try {
+    noisyRun = genericLoopRunner.runGenericAgentLoop({
+      runtime: {
+        id: 'manifest-noisy-runtime',
+        executor: {
+          backend: 'node-fixture',
+          invocation: {
+            command: process.execPath,
+            argv: [noisyExecutorPath],
+            cwd: tmpRoot,
+            stdin: 'request_json',
+            stdout: 'outcome_json',
+            stderr: 'inherit',
+          },
+        },
+      },
+      plan: { ...plan, workload_id: 'manifest-noisy', artifacts_path: noisyArtifactsDir },
+      validationPolicy: { success_completion_outcomes: ['done'] },
+      stderrMaxBytes: 256,
+    });
+  } finally {
+    process.stderr.write = originalStderrWrite;
+  }
+  assert.equal(noisyRun.outcome.status, 'succeeded');
+  assert.match(capturedStderr, /Runtime stderr artifact:/);
+  assert.doesNotMatch(capturedStderr, new RegExp(lateSentinel), 'large provider stderr must not be inherited wholesale');
+  const stderrArtifact = noisyRun.outcome.metadata.runtime_invocation_result.stderr_artifact;
+  assert.equal(stderrArtifact.kind, 'runtime-stderr');
+  assert.equal(fs.readFileSync(stderrArtifact.path, 'utf8').includes(lateSentinel), true, 'full provider stderr is preserved as an artifact');
+
+  const hugePayloadSentinel = 'WHOLESALE_RESULT_PAYLOAD_SENTINEL';
+  const stdoutSummary = genericLoopRunner.genericAgentLoopStdoutSummary({
+    outcome: {
+      schema: 'homeboy/agent-task-outcome/v1',
+      task_id: 'large-payload',
+      status: 'succeeded',
+      summary: 'Large payload outcome completed.',
+      metadata: {
+        provider_result: `${'y'.repeat(20000)}${hugePayloadSentinel}`,
+      },
+      artifacts: [{ name: 'provider-result', kind: 'json', path: '/tmp/provider-result.json', payload: `${'z'.repeat(20000)}${hugePayloadSentinel}` }],
+      evidence_refs: [{ kind: 'provider-result', uri: 'artifact://provider-result' }],
+    },
+    results: { scenarios: [{ id: 'large-payload' }] },
+    outcomeFile: '/tmp/outcome.json',
+    resultsFile: '/tmp/results.json',
+  });
+  const stdoutSummaryJson = JSON.stringify(stdoutSummary);
+  assert.doesNotMatch(stdoutSummaryJson, new RegExp(hugePayloadSentinel), 'stdout summary must not include full provider result or artifact payloads');
+  assert.equal(stdoutSummary.files.outcome, '/tmp/outcome.json');
+  assert.equal(stdoutSummary.artifact_refs[0].path, '/tmp/provider-result.json');
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 }

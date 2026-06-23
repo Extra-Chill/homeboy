@@ -6,6 +6,9 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
+process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= fixtureCodeboxCoreModule;
+
 const {
   agentTaskOutcomeFromCodeboxResult: rawAgentTaskOutcomeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
@@ -22,7 +25,6 @@ const {
   AGENT_TASK_REDACTED_METADATA_KEYS,
 } = require('../../runtime-agent-ci/lib/agent-task-provider-contract');
 
-const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
 const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
 const wpCodeboxRuntimeExecutor = path.join(wpCodeboxRuntimeRoot, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
 const codexSecretEnv = [
@@ -76,11 +78,15 @@ function secretEnvRequirementForProvider(contract, provider) {
 }
 
 function fixtureEnv(overrides = {}) {
-  const env = { ...process.env, ...overrides };
-  if (!Object.hasOwn(overrides, 'HOMEBOY_WP_CODEBOX_CORE_MODULE')) {
-    delete env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
-  }
-  return env;
+  return {
+    ...process.env,
+    HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCodeboxCoreModule,
+    ...overrides,
+  };
+}
+
+function diagnosticByClass(outcome, diagnosticClass) {
+  return (outcome.diagnostics || []).find((diagnostic) => diagnostic.class === diagnosticClass) || {};
 }
 
 function writeFixtureTaskRunner(root) {
@@ -499,6 +505,7 @@ assert.deepEqual(codeboxRequest.runtime_overlays, [{
 }]);
 assert.deepEqual(codeboxRequest.runtime_requirements, {
   schema: 'wp-codebox/runtime-profile/v1',
+  ability_requirements: ['agents/chat'],
   runtime_overlays: codeboxRequest.runtime_overlays,
   provider_plugins: [{ path: '/providers/openai' }],
   upstream_primitive_requirements: [{
@@ -510,6 +517,8 @@ assert.deepEqual(codeboxRequest.runtime_requirements, {
     adapter_behavior: 'declare_requirement_only',
     requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract.',
   }],
+  component_contracts: [],
+  extra_plugins: [],
 });
 const legacyOverlayNameRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
@@ -685,6 +694,7 @@ const runtimeTaskRequest = codeboxTaskRequestFromAgentTaskRequest({
 });
 assert.equal(runtimeTaskRequest.sandbox_tool_policy.tools[0].id, 'homeboy-canary/write-file');
 assert.equal(runtimeTaskRequest.runtime_task.ability, 'homeboy-canary/write-file');
+assert.deepEqual(runtimeTaskRequest.ability_requirements, ['homeboy-canary/write-file']);
 assert.deepEqual(runtimeTaskRequest.agent_bundles, [{ source: '/workspace/bundles/canary-agent', slug: 'canary-agent' }]);
 assert.equal(runtimeTaskRequest.structured_artifacts[0].name, 'concept_packet');
 assert.equal(runtimeTaskRequest.workspaces[0].target, '/workspace/codebox-canary');
@@ -814,6 +824,7 @@ assert.deepEqual(genericProviderRuntimeRequest.provider_plugin_paths, ['/provide
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlays, [{ kind: 'fixture-overlay', source: '/overlays/fixture' }]);
 assert.deepEqual(genericProviderRuntimeRequest.runtime_requirements, {
   schema: 'wp-codebox/runtime-profile/v1',
+  ability_requirements: ['agents/chat'],
   runtime_overlays: [{ kind: 'fixture-overlay', source: '/overlays/fixture' }],
   env: genericRuntimeEnv,
   provider_plugins: [{ path: '/providers/fixture-provider' }],
@@ -828,6 +839,8 @@ assert.deepEqual(genericProviderRuntimeRequest.runtime_requirements, {
     adapter_behavior: 'declare_requirement_only',
     requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract.',
   }],
+  component_contracts: [],
+  extra_plugins: [],
 });
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlay_profiles, ['fixture-profile']);
 assert.deepEqual(genericProviderRuntimeRequest.secret_env, ['FIXTURE_PROVIDER_SECRET']);
@@ -2712,7 +2725,7 @@ try {
   const missingModelOutcome = JSON.parse(missingModelResult.stdout);
   assert.equal(missingModelOutcome.status, 'failed');
   assert.equal(missingModelOutcome.failure_classification, 'provider');
-  assert.equal(missingModelOutcome.diagnostics[0].class, 'codebox.preflight.missing_model');
+  assert.equal(missingModelOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.missing_model'), true);
   assert.match(missingModelOutcome.summary, /--model/);
   assert.match(missingModelOutcome.summary, /provider-config\.model/);
   assert.equal(fs.existsSync(capture), false);
@@ -2901,8 +2914,8 @@ try {
   const missingCodexProviderPathOutcome = JSON.parse(missingCodexProviderPathResult.stdout);
   assert.equal(missingCodexProviderPathOutcome.status, 'failed');
   assert.equal(missingCodexProviderPathOutcome.failure_classification, 'provider');
-  assert.equal(missingCodexProviderPathOutcome.diagnostics[0].class, 'codebox.preflight.codex_provider_plugin_path');
-  assert.deepEqual(missingCodexProviderPathOutcome.diagnostics[0].data.provider_plugin_paths, []);
+  assert.equal(missingCodexProviderPathOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.codex_provider_plugin_path'), true);
+  assert.deepEqual(diagnosticByClass(missingCodexProviderPathOutcome, 'codebox.preflight.codex_provider_plugin_path').data.provider_plugin_paths, []);
   assert.match(missingCodexProviderPathOutcome.summary, /Codex-capable provider plugin checkout/);
 
   fs.rmSync(capture, { force: true });
@@ -2931,9 +2944,9 @@ try {
   const defaultedCodexMissingProviderPathOutcome = JSON.parse(defaultedCodexMissingProviderPathResult.stdout);
   assert.equal(defaultedCodexMissingProviderPathOutcome.status, 'failed');
   assert.equal(defaultedCodexMissingProviderPathOutcome.failure_classification, 'provider');
-  assert.equal(defaultedCodexMissingProviderPathOutcome.diagnostics[0].class, 'codebox.preflight.codex_provider_plugin_path');
-  assert.equal(defaultedCodexMissingProviderPathOutcome.diagnostics[0].data.provider, 'codex');
-  assert.deepEqual(defaultedCodexMissingProviderPathOutcome.diagnostics[0].data.provider_plugin_paths, []);
+  assert.equal(defaultedCodexMissingProviderPathOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.codex_provider_plugin_path'), true);
+  assert.equal(diagnosticByClass(defaultedCodexMissingProviderPathOutcome, 'codebox.preflight.codex_provider_plugin_path').data.provider, 'codex');
+  assert.deepEqual(diagnosticByClass(defaultedCodexMissingProviderPathOutcome, 'codebox.preflight.codex_provider_plugin_path').data.provider_plugin_paths, []);
 
   const wrongCodexProviderPathResult = spawnSync(process.execPath, [
     wpCodeboxRuntimeExecutor,
@@ -2958,8 +2971,8 @@ try {
   });
   assert.equal(wrongCodexProviderPathResult.status, 1, wrongCodexProviderPathResult.stderr || wrongCodexProviderPathResult.stdout);
   const wrongCodexProviderPathOutcome = JSON.parse(wrongCodexProviderPathResult.stdout);
-  assert.equal(wrongCodexProviderPathOutcome.diagnostics[0].class, 'codebox.preflight.codex_provider_plugin_path');
-  assert.equal(wrongCodexProviderPathOutcome.diagnostics[0].data.inspections[0].reason, 'opencode_provider_plugin');
+  assert.equal(wrongCodexProviderPathOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.codex_provider_plugin_path'), true);
+  assert.equal(diagnosticByClass(wrongCodexProviderPathOutcome, 'codebox.preflight.codex_provider_plugin_path').data.inspections[0].reason, 'opencode_provider_plugin');
 
   const releasedOpenAiProviderPath = path.join(root, 'ai-provider-for-openai');
   fs.mkdirSync(releasedOpenAiProviderPath, { recursive: true });
@@ -2987,7 +3000,7 @@ try {
   });
   assert.equal(releasedOpenAiProviderPathResult.status, 1, releasedOpenAiProviderPathResult.stderr || releasedOpenAiProviderPathResult.stdout);
   const releasedOpenAiProviderPathOutcome = JSON.parse(releasedOpenAiProviderPathResult.stdout);
-  assert.equal(releasedOpenAiProviderPathOutcome.diagnostics[0].data.inspections[0].reason, 'no_codex_marker_found');
+  assert.equal(diagnosticByClass(releasedOpenAiProviderPathOutcome, 'codebox.preflight.codex_provider_plugin_path').data.inspections[0].reason, 'no_codex_marker_found');
   assert.match(releasedOpenAiProviderPathOutcome.summary, /Released ai-provider-for-openai trunk registers openai, not codex/);
 
   const codexCapableProviderPath = path.join(root, 'ai-provider-for-openai-codex');
@@ -3204,8 +3217,8 @@ try {
   assert.equal(missingConfiguredBinaryResult.status, 1, missingConfiguredBinaryResult.stderr || missingConfiguredBinaryResult.stdout);
   const missingConfiguredBinaryOutcome = JSON.parse(missingConfiguredBinaryResult.stdout);
   assert.equal(missingConfiguredBinaryOutcome.status, 'failed');
-  assert.equal(missingConfiguredBinaryOutcome.diagnostics[0].class, 'wp-codebox.config.invalid_binary');
-  assert.equal(missingConfiguredBinaryOutcome.diagnostics[0].data.wp_codebox_bin, missingConfiguredBinary);
+  assert.equal(missingConfiguredBinaryOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.config.invalid_binary'), true);
+  assert.equal(diagnosticByClass(missingConfiguredBinaryOutcome, 'wp-codebox.config.invalid_binary').data.wp_codebox_bin, missingConfiguredBinary);
 
   const emptyJsonWpCodeboxResult = spawnSync(process.execPath, [
     wpCodeboxRuntimeExecutor,
@@ -3288,8 +3301,8 @@ try {
   const timeoutOutcome = JSON.parse(timeoutResult.stdout);
   assert.equal(timeoutOutcome.status, 'timeout');
   assert.equal(timeoutOutcome.failure_classification, 'timeout');
-  assert.equal(timeoutOutcome.diagnostics[0].class, 'codebox.timeout');
-  assert.equal(timeoutOutcome.diagnostics[0].data.timeout_ms, 1000);
+  assert.equal(timeoutOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.timeout'), true);
+  assert.equal(diagnosticByClass(timeoutOutcome, 'codebox.timeout').data.timeout_ms, 1000);
   assert.equal(timeoutOutcome.artifacts[0].path, artifactRoot);
   assert.equal(timeoutOutcome.metadata.codebox.evidence_path, path.join(artifactRoot, 'homeboy-codebox-task-runner.json'));
   assert.equal(timeoutOutcome.metadata.codebox.timeout_classification, 'provider_timeout');
@@ -3350,12 +3363,12 @@ try {
   const missingSecretOutcome = JSON.parse(missingSecretResult.stdout);
   assert.equal(missingSecretOutcome.status, 'failed');
   assert.equal(missingSecretOutcome.failure_classification, 'provider');
-  assert.equal(missingSecretOutcome.diagnostics[0].class, 'codebox.preflight.missing_secret_env');
-  assert.deepEqual(missingSecretOutcome.diagnostics[0].data.missing_env, [
+  assert.equal(missingSecretOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.missing_secret_env'), true);
+  assert.deepEqual(diagnosticByClass(missingSecretOutcome, 'codebox.preflight.missing_secret_env').data.missing_env, [
     'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
     'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
   ]);
-  assert.equal(missingSecretOutcome.diagnostics[0].data.phase, 'codebox.preflight');
+  assert.equal(diagnosticByClass(missingSecretOutcome, 'codebox.preflight.missing_secret_env').data.phase, 'codebox.preflight');
   assert.equal(missingSecretOutcome.metadata.codebox.missing_env[0], 'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN');
   assert(!JSON.stringify(missingSecretOutcome).includes('codex-access-token-value'));
 
@@ -3393,10 +3406,10 @@ try {
   const missingWorkspaceOutcome = JSON.parse(missingWorkspaceResult.stdout);
   assert.equal(missingWorkspaceOutcome.status, 'failed');
   assert.equal(missingWorkspaceOutcome.failure_classification, 'execution_failed');
-  assert.equal(missingWorkspaceOutcome.diagnostics[0].class, 'codebox.preflight.missing_workspace');
-  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.repo, 'a8c-intelligence');
-  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.workspace_required, true);
-  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.mounts_count, 0);
+  assert.equal(missingWorkspaceOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.missing_workspace'), true);
+  assert.equal(diagnosticByClass(missingWorkspaceOutcome, 'codebox.preflight.missing_workspace').data.repo, 'a8c-intelligence');
+  assert.equal(diagnosticByClass(missingWorkspaceOutcome, 'codebox.preflight.missing_workspace').data.workspace_required, true);
+  assert.equal(diagnosticByClass(missingWorkspaceOutcome, 'codebox.preflight.missing_workspace').data.mounts_count, 0);
   assert.equal(missingWorkspaceOutcome.metadata.codebox.missing_workspace, true);
 
   const claudeCodeBaseRequest = {
@@ -3425,8 +3438,8 @@ try {
   const claudeMissingValueOutcome = JSON.parse(claudeMissingValueResult.stdout);
   assert.equal(claudeMissingValueOutcome.status, 'failed');
   assert.equal(claudeMissingValueOutcome.failure_classification, 'provider');
-  assert.equal(claudeMissingValueOutcome.diagnostics[0].class, 'codebox.preflight.claude_code_auth');
-  assert.deepEqual(claudeMissingValueOutcome.diagnostics[0].data.missing_env, [claudeCodeRefreshTokenEnv]);
+  assert.equal(claudeMissingValueOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.claude_code_auth'), true);
+  assert.deepEqual(diagnosticByClass(claudeMissingValueOutcome, 'codebox.preflight.claude_code_auth').data.missing_env, [claudeCodeRefreshTokenEnv]);
   assert(!JSON.stringify(claudeMissingValueOutcome).includes('claude-refresh-token-value'));
 
   const claudeMissingMappingResult = spawnSync(process.execPath, [
@@ -3450,8 +3463,8 @@ try {
   const claudeMissingMappingOutcome = JSON.parse(claudeMissingMappingResult.stdout);
   assert.equal(claudeMissingMappingOutcome.status, 'failed');
   assert.equal(claudeMissingMappingOutcome.failure_classification, 'provider');
-  assert.equal(claudeMissingMappingOutcome.diagnostics[0].class, 'codebox.preflight.claude_code_auth');
-  assert.deepEqual(claudeMissingMappingOutcome.diagnostics[0].data.missing_env, [claudeCodeRefreshTokenEnv]);
+  assert.equal(claudeMissingMappingOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.claude_code_auth'), true);
+  assert.deepEqual(diagnosticByClass(claudeMissingMappingOutcome, 'codebox.preflight.claude_code_auth').data.missing_env, [claudeCodeRefreshTokenEnv]);
   assert(!JSON.stringify(claudeMissingMappingOutcome).includes('claude-access-token-value'));
   assert(!JSON.stringify(claudeMissingMappingOutcome).includes('claude-refresh-token-value'));
 } finally {

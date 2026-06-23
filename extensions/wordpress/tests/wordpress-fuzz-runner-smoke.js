@@ -94,6 +94,7 @@ assert.equal(result.wp_codebox_plan_recipe.fuzzSuite.cases[0].case_id, 'get-post
 assert.equal(result.coverage.schema, 'homeboy/wordpress-fuzz-coverage-aggregate/v1');
 assert.equal(result.coverage.totals.exercised, 1);
 assert.equal(result.homeboy_fuzz_campaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
+assert.equal(result.homeboy_fuzz_campaign.version, 1);
 assert.equal(result.homeboy_fuzz_campaign.id, 'run-from-env');
 assert.equal(result.homeboy_fuzz_campaign.safety_class, 'read_only');
 assert.equal(result.homeboy_fuzz_campaign.metadata.status, 'failed');
@@ -121,6 +122,32 @@ assert.equal(executedResult.status, 'succeeded');
 assert.equal(executedResult.succeeded, true);
 assert.equal(executedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'artifacts/replay.json');
 
+const mutatingPlanResult = buildWordPressFuzzRunnerResult({
+	env: {
+		workloadPath: '/unused/in-unit-test.json',
+		runId: 'mutating-plan-run',
+	},
+	workload: {
+		...workload,
+		plan: {
+			schema: 'wordpress-fuzz-plan/v1',
+			id: 'mutating-plan',
+			targets: [{
+				id: 'rest-posts-write',
+				surface_id: 'route:/wp/v2/posts',
+				cases: [{
+					id: 'create-post',
+					method: 'POST',
+					path: '/wp/v2/posts',
+					metadata: { safety: { level: 'mutating', mutates: true } },
+				}],
+			}],
+		},
+	},
+});
+
+assert.equal(mutatingPlanResult.homeboy_fuzz_campaign.safety_class, 'isolated_mutation');
+
 const jsonWorkloadResult = buildWordPressFuzzRunnerResult({
 	env: {
 		workloadPath: '/unused/in-unit-test.json',
@@ -135,14 +162,23 @@ const jsonWorkloadResult = buildWordPressFuzzRunnerResult({
 		target: { type: 'wordpress-plugin', slug: 'sample-plugin', component: 'sample-plugin' },
 		metadata: {
 			fixture: { component: 'sample-plugin', activation: 'sample-plugin/sample-plugin.php' },
-			homeboy_runtime_context: {
-				schema: 'homeboy/fuzz-workload-runtime-context/v1',
-				rig_id: 'sample-rig',
-				components: {
-					'sample-plugin': { path: '/runner/components/sample-plugin', branch: 'main' },
+				homeboy_runtime_context: {
+					schema: 'homeboy/fuzz-workload-runtime-context/v1',
+					rig_id: 'sample-rig',
+					components: {
+						'sample-plugin': {
+							path: '/runner/components/sample-plugin/plugins/sample-plugin',
+							branch: 'main',
+							extensions: {
+								wordpress: {
+									wp_codebox_source_root: '~/components/sample-plugin',
+									wp_codebox_source_subpath: 'plugins/sample-plugin',
+								},
+							},
+						},
+					},
 				},
 			},
-		},
 		workload: {
 			runner: 'wp-codebox',
 			type: 'json',
@@ -175,8 +211,10 @@ assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].artifacts[0].required,
 assert.equal(jsonWorkloadResult.wp_codebox_input.metadata.artifacts.expected[0].semantic_key, 'fuzz.suite_result');
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.extra_plugins, [{
 	slug: 'sample-plugin',
-	source: '/runner/components/sample-plugin',
-	path: '/runner/components/sample-plugin',
+	source: '/runner/components/sample-plugin/plugins/sample-plugin',
+	sourceRoot: '/runner/components/sample-plugin',
+	sourceSubpath: 'plugins/sample-plugin',
+	path: '/runner/components/sample-plugin/plugins/sample-plugin',
 	pluginFile: 'sample-plugin/sample-plugin.php',
 	loadAs: 'plugin',
 	activate: true,
@@ -184,11 +222,60 @@ assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.extra_plugin
 }]);
 assert.equal(
 	jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].source,
-	'/runner/components/sample-plugin'
+	'/runner/components/sample-plugin/plugins/sample-plugin'
 );
+assert.equal(jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].sourceRoot, '/runner/components/sample-plugin');
+assert.equal(jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceSubpath, 'plugins/sample-plugin');
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_mounts, [{ source: '/runner/workloads', target: '/runner/workloads', mode: 'readonly' }]);
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_env, { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: '/runner/workloads' });
 assert.ok(manifest.fuzz.env.includes('WP_CODEBOX_FUZZ_WORKLOAD_ROOT'));
+
+const remappedPluginRootResult = buildWordPressFuzzRunnerResult({
+	env: {
+		workloadPath: '/unused/in-unit-test.json',
+		workloadId: 'jetpack-performance-observation',
+		runId: 'jetpack-performance-observation-run',
+		wpCodeboxFuzzWorkloadRoot: '/runner/workloads',
+	},
+	workload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'jetpack-performance-observation',
+		label: 'Jetpack performance observation',
+		target: { type: 'wordpress-plugin', slug: 'jetpack', component: 'jetpack' },
+		metadata: {
+			fixture: { component: 'jetpack', activation: 'jetpack/jetpack.php' },
+			homeboy_runtime_context: {
+				schema: 'homeboy/fuzz-workload-runtime-context/v1',
+				rig_id: 'jetpack-api-route-inventory',
+				components: {
+					jetpack: {
+						path: '/home/chubes/Developer/_lab_workspaces/jetpack-1234',
+						extensions: {
+							wordpress: {
+								wp_codebox_source_root: '~/Developer/jetpack',
+								wp_codebox_source_subpath: 'projects/plugins/jetpack',
+							},
+						},
+					},
+				},
+			},
+		},
+		cases: [{
+			case_id: 'jetpack-performance-observation:default',
+			phases: {
+				setup: [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=jetpack/jetpack.php'] }],
+				action: [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/performance.workload.json'] }],
+			},
+		}],
+	},
+});
+const remappedPlugin = remappedPluginRootResult.wp_codebox_runtime_requirements.extra_plugins[0];
+assert.equal(remappedPlugin.source, '/home/chubes/Developer/_lab_workspaces/jetpack-1234');
+assert.equal(remappedPlugin.sourceRoot, undefined);
+assert.equal(remappedPlugin.sourceSubpath, undefined);
+assert.equal(remappedPlugin.pluginFile, 'jetpack/jetpack.php');
+assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourceRoot, undefined);
+assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourceSubpath, undefined);
 
 const genericPrimitiveResult = buildWordPressFuzzRunnerResult({
 	env: {
@@ -361,6 +448,7 @@ assert.equal(cliResult.succeeded, false);
 assert.equal(cliResult.wp_codebox_input.metadata.limits.max_duration_seconds, 15);
 const homeboyCampaign = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
 assert.equal(homeboyCampaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
+assert.equal(homeboyCampaign.version, 1);
 assert.equal(homeboyCampaign.id, 'cli-run');
 assert.equal(homeboyCampaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
 

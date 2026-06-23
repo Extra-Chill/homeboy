@@ -110,6 +110,15 @@ assert.equal(taskRequest.executor.config.runtime_task.ability, DEFAULT_FUZZ_SUIT
 assert.equal(taskRequest.executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.deepEqual(taskRequest.expected_artifacts, DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS);
 assert.deepEqual(taskRequest.artifact_declarations, DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS);
+assert.deepEqual(
+	taskRequest.artifact_declarations.filter((artifact) => ['result-envelope', 'case-log', 'replay-data', 'coverage-summary'].includes(artifact.name)).map((artifact) => [artifact.name, artifact.semantic_key, artifact.required]),
+	[
+		['result-envelope', 'fuzz.result.envelope', true],
+		['case-log', 'fuzz.case.log', true],
+		['replay-data', 'fuzz.replay.data', true],
+		['coverage-summary', 'fuzz.coverage.summary', true],
+	]
+);
 assert.deepEqual(DEFAULT_FUZZ_RUN_ARTIFACT_DECLARATIONS, DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS);
 assert.deepEqual(legacyWpCodeboxFuzzRunArtifactDeclarationsAlias(), DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS);
 assert.deepEqual(
@@ -214,6 +223,10 @@ const planWorkloadManifest = {
 					namespaces: ['sample/v1', 'sample/v2'],
 					artifact: 'route_inventory',
 				},
+				inputs: {
+					observation_surfaces: ['rest_generated_cases'],
+					budget_keys: ['max_rest_p95_duration_ms'],
+				},
 				metadata: { expected_artifact: 'route_inventory' },
 			}],
 		}],
@@ -241,6 +254,7 @@ assert.deepEqual(planWorkloadInput.cases[0].phases.action, [{
 assert.equal(JSON.stringify(planWorkloadInput).includes('/host-only/workload.php'), false);
 assert.equal(planWorkloadInput.cases[0].metadata.source_plan_case, true);
 assert.equal(planWorkloadInput.cases[0].metadata.target_id, 'sample-rest-routes');
+assert.deepEqual(planWorkloadInput.cases[0].inputs.budget_keys, ['max_rest_p95_duration_ms']);
 
 let invoked = false;
 runWpCodeboxFuzzSuite({
@@ -295,7 +309,7 @@ runWpCodeboxFuzzSuite({
 				},
 				artifacts: {
 					fuzz_report: { path: 'reports/fuzz-report.json', content_type: 'application/json' },
-					coverage: { path: 'reports/coverage.json', content_type: 'application/json', size_bytes: 123 },
+					coverage: { path: 'reports/coverage.json', content_type: 'application/json', size_bytes: 123, payload: { schema: 'wp-codebox/coverage-report/v1', covered: 1 } },
 					normalized_fuzz_result: { path: 'reports/wordpress-fuzz-result.json', content_type: 'application/json' },
 					fuzz_case: { path: 'cases/case-000.json', case_id: 'case-000' },
 					placeholder_case: { name: 'placeholder-only' },
@@ -337,6 +351,7 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.artifacts[7].semantic_key, 'fuzz.case.repro');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'coverage').semantic_key, 'fuzz.coverage');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'coverage').size_bytes, 123);
+	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'coverage').payload.schema, 'wp-codebox/coverage-report/v1');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'normalized_fuzz_result').semantic_key, 'fuzz.result.normalized');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'fuzz_case').semantic_key, 'fuzz.case');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'fuzz_case').case_id, 'case-000');
@@ -344,6 +359,23 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'case_artifact').semantic_key, 'fuzz.case.artifact');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'repro_case').semantic_key, 'fuzz.case.repro');
 	assert.equal(summary.artifacts.some((artifact) => artifact.name === 'placeholder-only'), false);
+	assert.deepEqual(normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			cases: [{ id: 'artifact-contract-case', status: 'passed' }],
+			artifactRefs: [
+				{ name: 'case-log', path: 'cases/case-log.jsonl' },
+				{ name: 'replay-data', path: 'replay/replay-data.json' },
+				{ name: 'coverage-summary', path: 'coverage/summary.json' },
+			],
+		},
+	}).artifacts.map((artifact) => [artifact.role, artifact.semantic_key]), [
+		['case_log', 'fuzz.case.log'],
+		['replay_data', 'fuzz.replay.data'],
+		['coverage_summary', 'fuzz.coverage.summary'],
+	]);
 
 	const normalized = normalizeWpCodeboxFuzzSuiteResult({ status: 'failed', failures: [{ message: 'boom' }] });
 	assert.equal(normalized.succeeded, false);

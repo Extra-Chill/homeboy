@@ -14,6 +14,7 @@ const path = require('node:path');
  */
 const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const {
+  genericAgentLoopStdoutSummary,
   runGenericAgentLoop,
   writeGenericAgentLoopArtifacts,
 } = require('../../../runtime-agent-ci');
@@ -69,7 +70,12 @@ try {
     outcomeFile: process.env.HOMEBOY_AGENT_TASK_OUTCOME_FILE || '',
     resultsFile: process.env.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE || '',
   });
-  process.stdout.write(`${JSON.stringify(result.outcome, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(genericAgentLoopStdoutSummary({
+    outcome: result.outcome,
+    results: result.results,
+    outcomeFile: process.env.HOMEBOY_AGENT_TASK_OUTCOME_FILE || '',
+    resultsFile: process.env.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE || '',
+  }), null, 2)}\n`);
   process.exitCode = result.outcome.status === 'succeeded' || result.outcome.status === 'no_op' ? 0 : 1;
 } catch (error) {
   console.error(error && error.message ? error.message : String(error));

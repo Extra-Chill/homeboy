@@ -59,6 +59,9 @@ const manifest = normalizeWordPressFuzzCoverageManifest({
 		{ type: 'db', table: 'wp_posts' },
 		{ type: 'frontend', url: '/' },
 		{ type: 'block', name: 'core/paragraph' },
+		{ type: 'hook', hook: 'init' },
+		{ type: 'post-type', name: 'post' },
+		{ type: 'wp-cli', command: 'wp option list' },
 	],
 });
 assert.deepEqual(manifest.surfaces.map((surface) => surface.id), [
@@ -68,6 +71,9 @@ assert.deepEqual(manifest.surfaces.map((surface) => surface.id), [
 	'db:wp_posts',
 	'frontend:/',
 	'block:core/paragraph',
+	'hook:init',
+	'post-type:post',
+	'wp-cli:wp_cli_command-9',
 ]);
 
 const manifestAggregate = aggregateWordPressFuzzCoverage({
@@ -78,7 +84,7 @@ const manifestAggregate = aggregateWordPressFuzzCoverage({
 	}],
 });
 assert.equal(manifestAggregate.coverage_manifest.schema, 'homeboy/wordpress-fuzz-coverage-manifest/v1');
-assert.equal(manifestAggregate.totals.discovered, 4);
+assert.equal(manifestAggregate.totals.discovered, 7);
 assert.equal(manifestAggregate.totals.exercised, 1);
 assert.equal(manifestAggregate.totals.failed, 1);
 assert.equal(manifestAggregate.coverage_gaps.some((item) => item.id === 'admin:tools.php'), true);

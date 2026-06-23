@@ -145,9 +145,9 @@ const runtimeAccessResult = {
     status: 'created',
     result: {
       outputs: {
-        preview_materialization: {
-          schema: 'homeboy/preview-materialization-evidence/v1',
-          url: 'https://preview.example.test/',
+        preview_access: {
+          schema: 'wp-codebox/preview-access/v1',
+          reviewer_url: 'https://reviewer.example.test/',
           public_url: 'https://public.example.test/',
           site: {
             url: 'https://site.example.test/',
@@ -165,8 +165,9 @@ const runtimeAccessResult = {
 const runtimeAccessArtifacts = typedArtifactsFromCodeboxResult(runtimeAccessResult);
 assert.equal(runtimeAccessArtifacts.runtime_access.artifact_schema, WP_CODEBOX_RUNTIME_ACCESS_SCHEMA);
 assert.equal(runtimeAccessArtifacts.runtime_access.payload.schema, WP_CODEBOX_RUNTIME_ACCESS_SCHEMA);
-assert.equal(runtimeAccessArtifacts.runtime_access.payload.preview_url, 'https://preview.example.test/');
+assert.equal(runtimeAccessArtifacts.runtime_access.payload.preview_url, 'https://reviewer.example.test/');
 assert.equal(runtimeAccessArtifacts.runtime_access.payload.public_url, 'https://public.example.test/');
+assert.equal(runtimeAccessArtifacts.runtime_access.payload.reviewer_url, 'https://reviewer.example.test/');
 assert.equal(runtimeAccessArtifacts.runtime_access.payload.site_url, 'https://site.example.test/');
 assert.equal(runtimeAccessArtifacts.runtime_access.payload.admin_url, 'https://site.example.test/wp-admin/');
 assert.deepEqual(runtimeAccessArtifacts.runtime_access.payload.lease, { id: 'lease-1' });
@@ -180,7 +181,8 @@ const normalizedOutcome = agentTaskOutcomeFromCodeboxResult({
   instructions: 'Report preview access.',
   executor: { backend: WP_CODEBOX_BACKEND },
 }, runtimeAccessResult);
-assert.equal(normalizedOutcome.outputs.typed_artifacts.runtime_access.payload.preview_url, 'https://preview.example.test/');
+assert.equal(normalizedOutcome.outputs.typed_artifacts.runtime_access.payload.preview_url, 'https://reviewer.example.test/');
+assert.equal(normalizedOutcome.outputs.typed_artifacts.runtime_access.payload.reviewer_url, 'https://reviewer.example.test/');
 assert.equal(
   normalizedOutcome.typed_artifacts.find((artifact) => artifact.name === 'runtime_access')?.artifact_schema,
   WP_CODEBOX_RUNTIME_ACCESS_SCHEMA

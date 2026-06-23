@@ -1158,6 +1158,18 @@ function uniqueComponentContracts(contracts) {
   });
 }
 
+function uniqueStrings(values) {
+  const seen = new Set();
+  return values.filter((value) => {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    if (!normalized || seen.has(normalized)) {
+      return false;
+    }
+    seen.add(normalized);
+    return true;
+  });
+}
+
 function runnerInput(request, artifacts) {
   assertProviderCredentialBoundaryNamesOnly(request);
   assertProviderCredentialBoundaryNamesOnly(request.recipe || {});
@@ -1343,6 +1355,7 @@ function stableTaskInput(input) {
     goal: input.parent_request?.goal || input.parent_request?.task?.prompt || input.parent_request?.task?.goal || '',
     target: input.parent_request?.target || input.parent_request?.task?.target || {},
     allowed_tools: allowedTools,
+    ability_requirements: abilityRequirements(input),
     expected_artifacts: input.parent_request?.expected_artifacts || input.parent_request?.task?.expected_artifacts || [],
     artifact_declarations: input.artifact_declarations || input.parent_request?.artifact_declarations || input.parent_request?.artifactDeclarations || input.parent_request?.task?.artifact_declarations || [],
     structured_artifacts: input.structured_artifacts || [],
@@ -1547,6 +1560,50 @@ function runtimeTask(input) {
     return agentBundleRuntimeTask(input, input.agent_bundle || {});
   }
   return undefined;
+}
+
+function abilityRequirements(input) {
+  return uniqueStrings([
+    runtimeTask(input)?.ability,
+    ...(Array.isArray(input.parent_request?.ability_requirements) ? input.parent_request.ability_requirements : []),
+    ...(Array.isArray(input.parent_request?.abilityRequirements) ? input.parent_request.abilityRequirements : []),
+    ...(Array.isArray(input.parent_request?.parent_request?.ability_requirements) ? input.parent_request.parent_request.ability_requirements : []),
+    ...(Array.isArray(input.parent_request?.parent_request?.abilityRequirements) ? input.parent_request.parent_request.abilityRequirements : []),
+  ]);
+}
+
+function validateRuntimeTaskAbilityContract(input) {
+  const task = runtimeTask(input);
+  if (!plainObject(task)) {
+    return null;
+  }
+  const ability = typeof task.ability === 'string' ? task.ability.trim() : '';
+  const declared = abilityRequirements(input);
+  if (!ability || declared.includes(ability)) {
+    return null;
+  }
+  const message = `WP Codebox runtime task ability "${ability}" is not declared in ability_requirements before sandbox dispatch.`;
+  return {
+    success: false,
+    status: 'failed',
+    failure_classification: 'provider',
+    summary: message,
+    diagnostics: [{
+      class: 'wp-codebox.preflight.runtime_task_ability_not_declared',
+      message,
+      data: {
+        phase: 'wp-codebox.preflight',
+        runtime_task_ability: ability,
+        ability_requirements: declared,
+        required_contract: 'wp-codebox/task-input/v1 ability_requirements must include runtime_task.ability',
+      },
+    }],
+    metadata: {
+      phase: 'wp-codebox.preflight',
+      runtime_task_ability: ability,
+      ability_requirements: declared,
+    },
+  };
 }
 
 function parentAgentTaskConfig(input) {
@@ -2203,6 +2260,11 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
 
   const callbackInput = injectHomeboyCallbackDataHelper(stableTaskInput(input), artifacts);
   const bridgedInput = injectHomeboyRuntimeToolBridge(callbackInput.input, artifacts);
+  const runtimeTaskAbilityPreflight = validateRuntimeTaskAbilityContract({ ...input, parent_request: bridgedInput.input });
+  if (runtimeTaskAbilityPreflight) {
+    process.stdout.write(`${JSON.stringify(runtimeTaskAbilityPreflight, null, 2)}\n`);
+    return 1;
+  }
   const bridgeServer = startHomeboyRuntimeToolBridge(bridgedInput.bridge);
   if (bridgeServer && bridgedInput.bridge?.plugin_dir) {
   }

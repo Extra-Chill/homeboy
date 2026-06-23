@@ -11,6 +11,9 @@ const {
 	wordpressRuntimeTaskRunnerSpec,
 } = require('../lib/wordpress-runtime-task-planner');
 const {
+	WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA,
+} = require('../lib/wordpress-generic-fuzz-primitives');
+const {
 	genericAgentTaskRequest,
 } = require('../../runtime-agent-ci/lib/generic-agent-task-plan');
 
@@ -119,6 +122,36 @@ assert.deepEqual(
 		}),
 	})
 );
+
+const crudRequest = wordpressRuntimeTaskRequest({
+	taskId: 'crud-runtime-task-smoke',
+	ability: 'wordpress/execute-crud-operation',
+	abilityInput: {
+		operation: {
+			action: 'create',
+			resource_type: 'post',
+			capability_context: { required: ['edit_posts'] },
+			rollback_policy: { strategy: 'delete-created' },
+		},
+	},
+	backend: 'codebox',
+	runtime: 'wp-codebox',
+});
+assert.deepEqual(crudRequest.inputs.ability_input.expected_result_contracts, [WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA]);
+assert.deepEqual(crudRequest.expected_artifacts, ['wordpress-crud-operation-result']);
+assert.deepEqual(crudRequest.metadata.expected_result_contracts, [WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA]);
+assert.deepEqual(crudRequest.executor.config.expected_result_contracts, [WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA]);
+assert.deepEqual(crudRequest.executor.config.runtime_task.input.expected_result_contracts, [WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA]);
+
+const explicitArtifactCrudRequest = wordpressRuntimeTaskRequest({
+	taskId: 'crud-runtime-task-explicit-artifact-smoke',
+	ability: 'wordpress/execute-crud-operation',
+	abilityInput: { operation: { action: 'delete', resource_type: 'post' } },
+	expectedArtifacts: ['runtime-log'],
+	backend: 'codebox',
+	runtime: 'wp-codebox',
+});
+assert.deepEqual(explicitArtifactCrudRequest.expected_artifacts, ['runtime-log', 'wordpress-crud-operation-result']);
 
 const script = path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wordpress-runtime-task-plan.cjs');
 const result = spawnSync(process.execPath, [

@@ -14,6 +14,7 @@ const {
 	normalizeWordPressFuzzPlan,
 } = require('./wordpress-fuzz-schemas');
 const { buildWpCodeboxFuzzPlanRecipe } = require('./wp-codebox-fuzz-plan');
+const { normalizeWordPressFuzzRuntimeCapabilities } = require('./wordpress-fuzz-runtime-capabilities');
 const {
 	normalizeWpCodeboxFuzzSuiteResult,
 	runWpCodeboxFuzzSuite,
@@ -24,6 +25,7 @@ const { aggregateWordPressFuzzCoverage } = require('./wordpress-fuzz-coverage-ag
 
 const WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA = 'homeboy/wordpress-fuzz-runner-result/v1';
 const HOMEBOY_FUZZ_CAMPAIGN_SCHEMA = 'homeboy/fuzz-campaign/v1';
+const HOMEBOY_FUZZ_CONTRACT_VERSION = 1;
 
 function readWordPressFuzzRunnerEnv(env = process.env) {
 	return stripUndefined({
@@ -57,8 +59,9 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 	const seed = env.seed || workload.seed || null;
 	const maxDuration = numericValue(env.maxDuration ?? workload.max_duration ?? workload.maxDuration);
 	const plan = normalizeRunnerPlan(workload.plan || workload.fuzz_plan || workload.fuzzPlan || workload);
+	const runtimeCapabilities = normalizeWordPressFuzzRuntimeCapabilities(workload.runtime_capabilities || workload.runtimeCapabilities || workload.runtime_profile?.fuzz_runtime_capabilities || workload.runtimeProfile?.fuzzRuntimeCapabilities || []);
 	const instructions = fuzzSuiteInstructions({ workload, workloadId, runId });
-	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions });
+	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities });
 	const runtimeRequirements = wpCodeboxRuntimeRequirementsFromWorkload(workload, { env });
 	const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
 		taskId: runId,
@@ -78,6 +81,7 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 		seed,
 		maxDuration,
 		plan,
+		runtimeCapabilities,
 		wpCodeboxInput,
 		runtimeRequirements,
 		taskRequest,
@@ -92,6 +96,7 @@ function buildWordPressFuzzRunnerSummary({
 	seed,
 	maxDuration,
 	plan,
+	runtimeCapabilities,
 	wpCodeboxInput,
 	runtimeRequirements,
 	taskRequest,
@@ -112,6 +117,7 @@ function buildWordPressFuzzRunnerSummary({
 		max_duration_seconds: maxDuration,
 		plan_id: plan.id,
 		wp_codebox_input: wpCodeboxInput,
+		wordpress_fuzz_runtime_capabilities: runtimeCapabilities,
 		wp_codebox_runtime_requirements: runtimeRequirements,
 		wp_codebox_task_request: taskRequest,
 		wp_codebox_plan_recipe: codeboxPlanRecipe,
@@ -162,7 +168,7 @@ function normalizeRunnerPlan(input) {
 	});
 }
 
-function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions }) {
+function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities }) {
 	const homeboyFuzzWorkload = workload.schema === 'homeboy/fuzz-workload/v1' ? workload : undefined;
 	return wpCodeboxFuzzSuiteInput({
 		id: runId,
@@ -184,7 +190,7 @@ function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDurat
 		coverage: workload.coverage || { wordpress_fuzz_coverage: true },
 		runtimeProfile: workload.runtime_profile || workload.runtimeProfile,
 		artifacts: workload.artifacts,
-		metadata: stripUndefined({ ...(workload.metadata || {}), runner: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA, workload: stripUndefined({ id: workloadId }) }),
+		metadata: stripUndefined({ ...(workload.metadata || {}), runner: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA, runtime_capabilities: runtimeCapabilities, workload: stripUndefined({ id: workloadId }) }),
 	});
 }
 
@@ -244,10 +250,16 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 		return undefined;
 	}
 	const slug = workload.target?.slug || componentId;
+	const component = objectOrUndefined(context.components?.[componentId]);
+	const wordpressExtension = objectOrUndefined(component?.extensions?.wordpress);
+	const sourceSubpath = nonEmptyString(wordpressExtension?.wp_codebox_source_subpath || wordpressExtension?.wpCodeboxSourceSubpath);
+	const sourceLayout = wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension });
 	return {
 		extraPlugin: stripUndefined({
 			slug,
 			source,
+			sourceRoot: sourceLayout.sourceRoot,
+			sourceSubpath: sourceLayout.sourceSubpath,
 			path: source,
 			pluginFile: activation,
 			loadAs: 'plugin',
@@ -260,10 +272,36 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 		componentContract: stripUndefined({
 			slug,
 			path: source,
+			sourceRoot: sourceLayout.sourceRoot,
+			sourceSubpath: sourceLayout.sourceSubpath,
 			pluginFile: activation,
 			loadAs: 'plugin',
 		}),
 	};
+}
+
+function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension } = {}) {
+	const configured = nonEmptyString(wordpressExtension?.wp_codebox_source_root || wordpressExtension?.wpCodeboxSourceRoot);
+	const normalizedSubpath = nonEmptyString(sourceSubpath);
+	if (normalizedSubpath && source.endsWith(`/${normalizedSubpath}`)) {
+		return {
+			sourceRoot: source.slice(0, -normalizedSubpath.length - 1),
+			sourceSubpath: normalizedSubpath,
+		};
+	}
+
+	if (configured && configured.startsWith('~/')) {
+		return {};
+	}
+
+	if (configured && !configured.startsWith('~/')) {
+		return {
+			sourceRoot: configured,
+			sourceSubpath: normalizedSubpath,
+		};
+	}
+
+	return {};
 }
 
 function nonEmptyString(value) {
@@ -330,9 +368,10 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 	const diagnostics = normalizeArray(codeboxResult?.failures || codeboxResult?.metadata?.diagnostics || codeboxResult?.diagnostics);
 	return stripUndefined({
 		schema: HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
+		version: HOMEBOY_FUZZ_CONTRACT_VERSION,
 		id: runId,
 		title: `WordPress fuzz campaign ${runId}`,
-		safety_class: 'read_only',
+		safety_class: deriveHomeboyFuzzSafetyClass(plan),
 		metadata: stripUndefined({
 			workload_id: workloadId,
 			plan_id: plan?.id,
@@ -344,6 +383,72 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 			wordpress_fuzz_result: codeboxResult?.wordpress_fuzz_result,
 		}),
 	});
+}
+
+function deriveHomeboyFuzzSafetyClass(plan = {}) {
+	return strongestFuzzSafetyClass(fuzzSafetyClassCandidates(plan));
+}
+
+function fuzzSafetyClassCandidates(plan = {}) {
+	const candidates = [fuzzSafetyCandidateFrom(plan), fuzzSafetyCandidateFrom(plan.metadata)];
+	for (const target of normalizeArray(plan.targets)) {
+		candidates.push(fuzzSafetyCandidateFrom(target), fuzzSafetyCandidateFrom(target.metadata));
+		for (const testCase of normalizeArray(target.cases)) {
+			candidates.push(fuzzSafetyCandidateFrom(testCase), fuzzSafetyCandidateFrom(testCase.metadata));
+		}
+	}
+	return candidates.filter(Boolean);
+}
+
+function fuzzSafetyCandidateFrom(source = {}) {
+	if (!source || typeof source !== 'object') {
+		return undefined;
+	}
+	const safety = objectOrUndefined(source.safety) || {};
+	const explicit = source.safety_class || source.safetyClass || safety.safety_class || safety.safetyClass || safety.class || safety.level || safety.mutation || source.mutation;
+	const explicitClass = normalizeHomeboyFuzzSafetyClass(explicit);
+	if (explicitClass) {
+		return explicitClass;
+	}
+	if (source.destructive === true || safety.destructive === true || safety.level === 'destructive') {
+		return 'destructive';
+	}
+	if (source.mutates === true || safety.mutates === true || normalizeArray(source.destructive_reasons || source.destructiveReasons || source.destructive_reason || source.destructiveReason).length > 0) {
+		return 'isolated_mutation';
+	}
+	return undefined;
+}
+
+function strongestFuzzSafetyClass(candidates = []) {
+	const rank = {
+		read_only: 0,
+		idempotent: 1,
+		isolated_mutation: 2,
+		destructive: 3,
+	};
+	return candidates.reduce((strongest, candidate) => (
+		rank[candidate] > rank[strongest] ? candidate : strongest
+	), 'read_only');
+}
+
+function normalizeHomeboyFuzzSafetyClass(value) {
+	const label = String(value || '').trim().toLowerCase().replace(/[\s.-]+/g, '_');
+	if (!label) {
+		return undefined;
+	}
+	if (['read_only', 'readonly', 'read', 'safe', 'non_mutating', 'none'].includes(label)) {
+		return 'read_only';
+	}
+	if (['idempotent', 'repeatable'].includes(label)) {
+		return 'idempotent';
+	}
+	if (['isolated_mutation', 'isolated', 'mutation', 'mutating', 'write', 'requires_isolated_editor_draft', 'requires_explicit_opt_in'].includes(label)) {
+		return 'isolated_mutation';
+	}
+	if (['destructive', 'delete', 'dangerous'].includes(label)) {
+		return 'destructive';
+	}
+	return undefined;
 }
 
 function writeHomeboyFuzzResultsFile(filePath, campaign) {

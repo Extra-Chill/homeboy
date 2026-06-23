@@ -6,6 +6,7 @@ const {
 	WORDPRESS_RUNTIME_SURFACE_ID_PREFIXES,
 	WORDPRESS_SURFACE_COLLECTION_KEYS,
 	WORDPRESS_SURFACE_TYPES,
+	normalizeWordPressCoverageSurfaceType,
 	normalizeWordPressRuntimeSurfaceType,
 	normalizeWordPressSurfaceType,
 	wordpressSurfaceTypeFromCollectionKey,
@@ -37,6 +38,10 @@ assert.equal(normalizeWordPressRuntimeSurfaceType('frontend-url'), 'frontend_url
 assert.equal(normalizeWordPressRuntimeSurfaceType('rest-route'), 'rest_route');
 assert.equal(normalizeWordPressRuntimeSurfaceType('ajax-action'), 'ajax_action');
 assert.equal(normalizeWordPressRuntimeSurfaceType('hook'), '');
+assert.equal(normalizeWordPressCoverageSurfaceType('hook'), 'hook');
+assert.equal(normalizeWordPressCoverageSurfaceType('cron-event'), 'cron_event');
+assert.equal(normalizeWordPressCoverageSurfaceType('post_type'), 'post_type');
+assert.equal(normalizeWordPressCoverageSurfaceType('wp-cli'), 'wp_cli_command');
 
 assert.equal(wordpressSurfaceTypeFromCollectionKey('databaseTables'), 'database-table');
 assert.equal(wordpressSurfaceTypeFromCollectionKey('db_queries'), 'db-query');

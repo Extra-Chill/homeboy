@@ -296,21 +296,33 @@ function firstFunction(...values) {
 }
 
 function uniqueObjectsByRuntimeIdentity(entries) {
-  const seen = new Set();
-  return normalizeArray(entries).filter((entry) => {
+  const seen = new Map();
+  const merged = [];
+  for (const entry of normalizeArray(entries)) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      return false;
+      continue;
     }
     const key = [entry.slug, entry.id, entry.path || entry.source || entry.target, entry.kind, entry.type].filter(Boolean).join(':');
     if (!key) {
-      return true;
+      merged.push(entry);
+      continue;
     }
-    if (seen.has(key)) {
-      return false;
+    const existingIndex = seen.get(key);
+    if (existingIndex !== undefined) {
+      merged[existingIndex] = cleanObject({
+        ...merged[existingIndex],
+        ...entry,
+        metadata: {
+          ...plainObject(merged[existingIndex].metadata),
+          ...plainObject(entry.metadata),
+        },
+      });
+      continue;
     }
-    seen.add(key);
-    return true;
-  });
+    seen.set(key, merged.length);
+    merged.push(entry);
+  }
+  return merged;
 }
 
 function withoutEmptyObjectValues(value) {

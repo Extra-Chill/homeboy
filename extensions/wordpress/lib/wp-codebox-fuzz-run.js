@@ -25,6 +25,10 @@ const DEFAULT_FUZZ_RUN_ABILITY = legacyWpCodeboxFuzzRunAbilityAlias();
 const DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS = [
 	'wp-codebox-fuzz-suite-result',
 	'wordpress-fuzz-coverage',
+	'result-envelope',
+	'case-log',
+	'replay-data',
+	'coverage-summary',
 ];
 const DEFAULT_FUZZ_RUN_EXPECTED_ARTIFACTS = legacyWpCodeboxFuzzRunExpectedArtifactsAlias();
 const DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS = [
@@ -57,6 +61,30 @@ const DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS = [
 		semantic_key: 'fuzz.case.repro',
 		required: false,
 	},
+	{
+		name: 'result-envelope',
+		semantic_key: 'fuzz.result.envelope',
+		content_type: 'application/json',
+		required: true,
+	},
+	{
+		name: 'case-log',
+		semantic_key: 'fuzz.case.log',
+		content_type: 'application/jsonl',
+		required: true,
+	},
+	{
+		name: 'replay-data',
+		semantic_key: 'fuzz.replay.data',
+		content_type: 'application/json',
+		required: true,
+	},
+	{
+		name: 'coverage-summary',
+		semantic_key: 'fuzz.coverage.summary',
+		content_type: 'application/json',
+		required: true,
+	},
 ];
 const DEFAULT_FUZZ_RUN_ARTIFACT_DECLARATIONS = legacyWpCodeboxFuzzRunArtifactDeclarationsAlias();
 const HOMEBOY_FUZZ_WORKLOAD_SCHEMA = 'homeboy/fuzz-workload/v1';
@@ -67,6 +95,10 @@ const FUZZ_ARTIFACT_SEMANTIC_KEYS = {
 	failing_case: 'fuzz.case.failing',
 	case_artifact: 'fuzz.case.artifact',
 	repro_case: 'fuzz.case.repro',
+	case_log: 'fuzz.case.log',
+	replay_data: 'fuzz.replay.data',
+	coverage_summary: 'fuzz.coverage.summary',
+	result_envelope: 'fuzz.result.envelope',
 	normalized_fuzz_result: 'fuzz.result.normalized',
 	coverage: 'fuzz.coverage',
 };
@@ -193,6 +225,7 @@ function homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry = {}, manifest = {}, i
 		target: { kind: 'runtime', id: command, entrypoint: command },
 		description: entry.description || manifest.label,
 		input: objectOrUndefined(entry.input),
+		inputs: objectOrUndefined(entry.inputs),
 		phases: homeboyFuzzWorkloadPlanCasePhases(entry, manifest, artifacts),
 		artifacts,
 		metadata: stripUndefined({
@@ -272,6 +305,7 @@ function homeboyFuzzWorkloadCaseToWpCodeboxCase(entry = {}, manifest = {}, index
 			entry: execute.entry || manifest.workload?.entry,
 			parameters: objectOrUndefined(execute.parameters),
 		}),
+		inputs: objectOrUndefined(entry.inputs),
 		phases: homeboyFuzzWorkloadCasePhases(entry, manifest, intent, artifacts),
 		artifacts,
 		metadata: stripUndefined({
@@ -294,17 +328,23 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 	const setup = typeof activation === 'string' && activation.trim() !== ''
 		? [{ command: 'wordpress.ensure-plugin-active', args: [`plugin=${activation}`] }]
 		: undefined;
-	const action = typeof genericCommand === 'string'
-		? [{ command: genericCommand, args: homeboyFuzzCommandArgs(objectOrUndefined(execute.parameters) || {}) }]
-		: typeof path === 'string' && path.trim() !== ''
-			? [{ command: 'wordpress.run-workload', args: [`path=${path}`] }]
-			: [];
+	const action = homeboyFuzzWorkloadCaseAction({ genericCommand, path, execute });
 	const collect = normalizeArray(intent.collect).length > 0 ? normalizeArray(intent.collect) : artifacts.map((artifact) => ({ artifact: artifact.name }));
 	const assert = collect
 		.map((item) => item?.artifact)
 		.filter(Boolean)
 		.map((artifact) => ({ command: 'wordpress.collect-workload-result', args: [`artifact=${artifact}`] }));
 	return stripUndefined({ setup, action, assert: assert.length > 0 ? assert : undefined });
+}
+
+function homeboyFuzzWorkloadCaseAction({ genericCommand, path, execute = {} } = {}) {
+	if (typeof genericCommand === 'string') {
+		return [{ command: genericCommand, args: homeboyFuzzCommandArgs(objectOrUndefined(execute.parameters) || {}) }];
+	}
+	if (typeof path === 'string' && path.trim() !== '') {
+		return [{ command: 'wordpress.run-workload', args: [`path=${path}`] }];
+	}
+	return [];
 }
 
 function homeboyFuzzWorkloadGenericPrimitiveCommand(manifest = {}) {
@@ -687,6 +727,9 @@ function normalizeFuzzArtifact(artifact) {
 		content_type: artifact.content_type || artifact.contentType || artifact.mime,
 		sha256,
 		size_bytes: numberOrUndefined(artifact.size_bytes ?? artifact.sizeBytes ?? artifact.bytes),
+		payload: objectOrUndefined(artifact.payload),
+		data: objectOrUndefined(artifact.data),
+		content: objectOrUndefined(artifact.content),
 		case_id: artifact.case_id || artifact.caseId,
 		status: artifact.status,
 		metadata: stripUndefined({
@@ -723,6 +766,18 @@ function normalizeFuzzArtifactRole(value) {
 	}
 	if (['normalized_fuzz_result', 'wordpress_fuzz_result', 'normalized_result'].includes(label)) {
 		return 'normalized_fuzz_result';
+	}
+	if (['result_envelope', 'fuzz_result_envelope'].includes(label)) {
+		return 'result_envelope';
+	}
+	if (['case_log', 'case_logs', 'fuzz_case_log'].includes(label)) {
+		return 'case_log';
+	}
+	if (['replay_data', 'replay_dataset', 'replay_inputs'].includes(label)) {
+		return 'replay_data';
+	}
+	if (['coverage_summary', 'fuzz_coverage_summary'].includes(label)) {
+		return 'coverage_summary';
 	}
 	if (['coverage', 'wordpress_fuzz_coverage', 'fuzz_coverage', 'coverage_artifact'].includes(label)) {
 		return 'coverage';

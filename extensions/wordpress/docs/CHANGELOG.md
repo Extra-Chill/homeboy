@@ -2,6 +2,48 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.68] - 2026-06-23
+
+### Changed
+- Add WordPress fuzz performance evidence
+
+## [3.12.67] - 2026-06-23
+
+### Changed
+- Add WordPress CRUD result contract
+- Add WordPress live surface discovery
+- Add generic REST request case artifacts
+
+## [3.12.66] - 2026-06-23
+
+### Changed
+- Merge duplicate Codebox runtime contracts
+
+## [3.12.65] - 2026-06-23
+
+### Fixed
+- derive fuzz campaign safety
+
+## [3.12.64] - 2026-06-23
+
+### Changed
+- Preserve fuzz inputs across Lab remaps
+
+## [3.12.63] - 2026-06-23
+
+### Changed
+- Gate WordPress fuzz on runtime capabilities
+
+## [3.12.62] - 2026-06-23
+
+### Changed
+- Validate Codebox runtime ability contract
+
+## [3.12.61] - 2026-06-23
+
+### Changed
+- Pass WP Codebox monorepo source paths to fuzz
+
 ## [3.12.60] - 2026-06-23
 
 ### Changed

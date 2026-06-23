@@ -101,7 +101,7 @@ async function createGenericFanoutReconcileResult(input = {}) {
 
   return executeFanoutReconcileRun({
     plan,
-    concurrency: plan.task_requests.length || 1,
+    concurrency: input.concurrency ?? config.concurrency,
     run_schema: config.result_schema || config.resultSchema || RESULT_SCHEMA,
     base_run: config.base_run || {},
     include_summary: config.include_summary !== false,
