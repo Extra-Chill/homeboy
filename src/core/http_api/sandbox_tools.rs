@@ -95,6 +95,35 @@ const SANDBOX_TOOLS: &[SandboxToolDescriptor] = &[
         ],
     },
     SandboxToolDescriptor {
+        id: "homeboy.fuzz",
+        command: "homeboy fuzz",
+        required_capability: "run:fuzz",
+        risk: "bounded_discovery_report",
+        runs_as_job: false,
+        allowed_arguments: &[
+            "subcommand",
+            "contract",
+            "list",
+            "plan",
+            "validate",
+            "report",
+            "replay",
+            "component",
+            "rig",
+            "extension",
+            "setting",
+            "workload",
+            "run_id",
+            "request_id",
+            "inventory",
+            "results_file",
+            "artifact",
+            "case_id",
+            "output_envelope",
+            "envelope_id",
+        ],
+    },
+    SandboxToolDescriptor {
         id: "homeboy.build",
         command: "homeboy build",
         required_capability: "run:build",
@@ -156,5 +185,27 @@ pub fn kind(id: &str) -> Result<JobReadyRunKind> {
             Some(id.to_string()),
             None,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get, kind};
+
+    #[test]
+    fn fuzz_descriptor_exposes_safe_non_job_subcommands() {
+        let tool = get("homeboy.fuzz").expect("fuzz descriptor");
+
+        assert_eq!(tool.required_capability, "run:fuzz");
+        assert_eq!(tool.risk, "bounded_discovery_report");
+        assert!(!tool.runs_as_job);
+        for expected in ["contract", "list", "plan", "validate", "report", "replay"] {
+            assert!(
+                tool.allowed_arguments.contains(&expected),
+                "missing fuzz argument {expected}"
+            );
+        }
+        assert!(!tool.allowed_arguments.contains(&"run"));
+        assert!(kind(tool.id).is_err());
     }
 }
