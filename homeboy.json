@@ -796,7 +796,6 @@
         "structural::src/core/refactor/rename/mod.rs::GodFile",
         "structural::src/core/release/plan_steps.rs::GodFile",
         "structural::src/core/runner/connection.rs::HighItemCount",
-        "structural::src/core/runner/evidence.rs::HighItemCount",
         "structural::src/core/runner/lab/agent_task_bridge.rs::HighItemCount",
         "structural::src/core/runner/lab/offload.rs::GodFile",
         "structural::src/core/runner/lab_args/tests.rs::HighItemCount",
