@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.61] - 2026-06-23
+
+### Changed
+- Pass WP Codebox monorepo source paths to fuzz
+
 ## [3.12.60] - 2026-06-23
 
 ### Changed
