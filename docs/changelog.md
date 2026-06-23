@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.255.9] - 2026-06-23
+
+### Changed
+- Bound controller run-from-spec output
+- Add release package recovery command
+- remove low-signal helper coverage
+- Preserve release artifacts for repair hints
+- Expose fuzz sandbox descriptor
+
+### Fixed
+- keep recovered artifact durable path
+- preserve structured output for noisy offloads
+- flag map write mutation
+- fail missing coverage evidence
+- fix(agent-task): bound controller resume
+- fix(agent-task): reject invalid dispatch cwd
+- Fix release head tag recovery diagnostics
+- Fix GHE release gh environment
+
 ## [0.255.8] - 2026-06-23
 
 ### Changed
