@@ -741,7 +741,6 @@
         "structural::src/commands/bench/tests.rs::HighItemCount",
         "structural::src/commands/fuzz.rs::GodFile",
         "structural::src/commands/fuzz.rs::HighItemCount",
-        "structural::src/commands/git.rs::GodFile",
         "structural::src/commands/observe.rs::HighItemCount",
         "structural::src/commands/report/browser_evidence_compare.rs::GodFile",
         "structural::src/commands/report/failure_digest.rs::HighItemCount",
