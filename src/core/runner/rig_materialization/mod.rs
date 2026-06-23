@@ -433,8 +433,9 @@ fn effective_remote_component_path(
         Some(subpath) => Path::new(&dependency.local_checkout_root).join(subpath),
         None => PathBuf::from(&dependency.local_checkout_root),
     };
-    if normalize_path_for_prefix(&declared_component_path)
-        == normalize_path_for_prefix(Path::new(primary_local_path))
+    if dependency.remote_checkout_root == primary_remote_path
+        && normalize_path_for_prefix(&declared_component_path)
+            == normalize_path_for_prefix(Path::new(primary_local_path))
     {
         return primary_remote_path.to_string();
     }
@@ -1212,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_component_subdir_override_uses_materialized_component_snapshot() {
+    fn primary_component_subdir_override_uses_materialized_dependency_root() {
         let dependency = RigComponentDependency {
             rig_id: "jetpack-api-route-inventory".to_string(),
             component_id: "jetpack".to_string(),
@@ -1220,6 +1221,31 @@ mod tests {
             declared_checkout_root: "~/Developer/jetpack".to_string(),
             remote_checkout_root: "/home/user/Developer/jetpack".to_string(),
             required_subpath: Some("projects/plugins/jetpack".to_string()),
+            remote_url: None,
+            pinned_ref: None,
+        };
+        let remote = effective_remote_component_path(
+            &dependency,
+            "/Users/user/Developer/jetpack/projects/plugins/jetpack",
+            "/home/user/Developer/_lab_workspaces/jetpack-source",
+        );
+
+        assert_eq!(
+            remote,
+            "/home/user/Developer/jetpack/projects/plugins/jetpack"
+        );
+    }
+
+    #[test]
+    fn primary_component_snapshot_override_uses_primary_when_no_dependency_root_is_materialized() {
+        let dependency = RigComponentDependency {
+            rig_id: "jetpack-api-route-inventory".to_string(),
+            component_id: "jetpack".to_string(),
+            local_checkout_root: "/Users/user/Developer/jetpack/projects/plugins/jetpack"
+                .to_string(),
+            declared_checkout_root: "~/Developer/jetpack/projects/plugins/jetpack".to_string(),
+            remote_checkout_root: "/home/user/Developer/_lab_workspaces/jetpack-source".to_string(),
+            required_subpath: None,
             remote_url: None,
             pinned_ref: None,
         };
