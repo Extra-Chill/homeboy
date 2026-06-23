@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.62] - 2026-06-23
+
+### Changed
+- Validate Codebox runtime ability contract
+
 ## [3.12.61] - 2026-06-23
 
 ### Changed
