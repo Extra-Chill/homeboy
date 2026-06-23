@@ -794,7 +794,6 @@
         "structural::src/core/preview_ingress.rs::GodFile",
         "structural::src/core/preview_ingress.rs::HighItemCount",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
-        "structural::src/core/release/executor/github_release.rs::GodFile",
         "structural::src/core/release/plan_steps.rs::GodFile",
         "structural::src/core/rig/pipeline.rs::GodFile",
         "structural::src/core/rig/pipeline.rs::HighItemCount",
