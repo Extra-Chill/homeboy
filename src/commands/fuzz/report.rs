@@ -131,22 +131,17 @@ pub(super) fn fuzz_provenance(run_id: Option<String>) -> FuzzProvenance {
 }
 
 pub(super) fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvaluation> {
+    let profile = FuzzGateProfile::default();
+    let metrics = FuzzGateMetrics::from_campaign(campaign, &profile);
+
     default_fuzz_gates()
         .into_iter()
         .map(|gate| {
             let observed = match gate.metric.as_str() {
-                "open_findings" => open_finding_count(campaign) as f64,
-                "case_log_artifacts" => case_evidence_artifact_count(campaign) as f64,
-                "target_coverage_ratio" => coverage_ratio(
-                    campaign.coverage_summary.as_ref(),
-                    |summary| summary.proven_targets,
-                    |summary| summary.declared_targets,
-                ),
-                "operation_coverage_ratio" => coverage_ratio(
-                    campaign.coverage_summary.as_ref(),
-                    |summary| summary.proven_operations,
-                    |summary| summary.declared_operations,
-                ),
+                "open_findings" => metrics.open_findings as f64,
+                "case_log_artifacts" => metrics.case_evidence_artifacts as f64,
+                "target_coverage_ratio" => metrics.target_coverage_ratio,
+                "operation_coverage_ratio" => metrics.operation_coverage_ratio,
                 _ => 0.0,
             };
             let passed = threshold_passes(observed, gate.operator, gate.value);
@@ -159,6 +154,53 @@ pub(super) fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvalua
             }
         })
         .collect()
+}
+
+struct FuzzGateProfile {
+    case_evidence_kinds: &'static [&'static str],
+    metadata_artifact_ref_keys: &'static [&'static str],
+}
+
+impl Default for FuzzGateProfile {
+    fn default() -> Self {
+        Self {
+            case_evidence_kinds: &[
+                "case_log",
+                "fuzz_report",
+                "fuzz_case",
+                "case_artifact",
+                "failing_case",
+                "repro_case",
+            ],
+            metadata_artifact_ref_keys: &["artifact_refs", "artifactRefs"],
+        }
+    }
+}
+
+struct FuzzGateMetrics {
+    open_findings: usize,
+    case_evidence_artifacts: usize,
+    target_coverage_ratio: f64,
+    operation_coverage_ratio: f64,
+}
+
+impl FuzzGateMetrics {
+    fn from_campaign(campaign: &FuzzCampaign, profile: &FuzzGateProfile) -> Self {
+        Self {
+            open_findings: open_finding_count(campaign),
+            case_evidence_artifacts: case_evidence_artifact_count(campaign, profile),
+            target_coverage_ratio: coverage_ratio(
+                campaign.coverage_summary.as_ref(),
+                |summary| summary.proven_targets,
+                |summary| summary.declared_targets,
+            ),
+            operation_coverage_ratio: coverage_ratio(
+                campaign.coverage_summary.as_ref(),
+                |summary| summary.proven_operations,
+                |summary| summary.declared_operations,
+            ),
+        }
+    }
 }
 
 fn coverage_ratio(
@@ -177,54 +219,52 @@ fn coverage_ratio(
     }
 }
 
-fn case_evidence_artifact_count(campaign: &FuzzCampaign) -> usize {
+fn case_evidence_artifact_count(campaign: &FuzzCampaign, profile: &FuzzGateProfile) -> usize {
     let campaign_artifacts = campaign
         .artifacts
         .iter()
         .filter(|artifact| {
-            matches!(
-                artifact.kind.as_str(),
-                "case_log"
-                    | "fuzz_report"
-                    | "fuzz_case"
-                    | "case_artifact"
-                    | "failing_case"
-                    | "repro_case"
-            )
+            profile
+                .case_evidence_kinds
+                .contains(&artifact.kind.as_str())
         })
         .count();
-    campaign_artifacts + metadata_case_evidence_artifact_count(&campaign.metadata)
+    campaign_artifacts + metadata_case_evidence_artifact_count(&campaign.metadata, profile)
 }
 
-fn metadata_case_evidence_artifact_count(metadata: &serde_json::Value) -> usize {
-    metadata_artifact_refs(metadata.get("artifact_refs"))
-        + metadata_artifact_refs(metadata.get("artifactRefs"))
-        + metadata_artifact_refs(metadata.pointer("/wordpress_fuzz_result/artifacts"))
-        + metadata_artifact_refs(metadata.pointer("/wordpressFuzzResult/artifacts"))
+fn metadata_case_evidence_artifact_count(
+    metadata: &serde_json::Value,
+    profile: &FuzzGateProfile,
+) -> usize {
+    profile
+        .metadata_artifact_ref_keys
+        .iter()
+        .map(|key| metadata_artifact_refs(metadata.get(*key), profile))
+        .sum()
 }
 
-fn metadata_artifact_refs(value: Option<&serde_json::Value>) -> usize {
+fn metadata_artifact_refs(value: Option<&serde_json::Value>, profile: &FuzzGateProfile) -> usize {
     value
         .and_then(|value| value.as_array())
         .map(|artifacts| {
             artifacts
                 .iter()
-                .filter(|artifact| metadata_artifact_has_case_evidence_kind(artifact))
+                .filter(|artifact| metadata_artifact_has_case_evidence_kind(artifact, profile))
                 .count()
         })
         .unwrap_or(0)
 }
 
-fn metadata_artifact_has_case_evidence_kind(artifact: &serde_json::Value) -> bool {
+fn metadata_artifact_has_case_evidence_kind(
+    artifact: &serde_json::Value,
+    profile: &FuzzGateProfile,
+) -> bool {
     let kind = artifact
         .get("kind")
         .or_else(|| artifact.get("role"))
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    matches!(
-        kind,
-        "case_log" | "fuzz_report" | "fuzz_case" | "case_artifact" | "failing_case" | "repro_case"
-    )
+    profile.case_evidence_kinds.contains(&kind)
 }
 
 pub(super) fn fuzz_coverage_completeness(

@@ -336,7 +336,7 @@ mod tests {
             findings: Vec::new(),
             artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
                 schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
-                id: "external-http-guardrail".to_string(),
+                id: "case-evidence-report".to_string(),
                 kind: "fuzz_report".to_string(),
                 artifact: None,
                 metadata: serde_json::Value::Null,
@@ -381,8 +381,8 @@ mod tests {
             replay: None,
             metadata: serde_json::json!({
                 "artifact_refs": [{
-                    "name": "external_http_guardrail",
-                    "path": "woocommerce-external-http-guardrail/external_http_guardrail.json",
+                    "name": "case_evidence_report",
+                    "path": "case-evidence/report.json",
                     "role": "fuzz_report"
                 }]
             }),
@@ -393,6 +393,9 @@ mod tests {
         let summary = fuzz_coverage_completeness(&campaign);
 
         assert_eq!(gate_status(&gates), "passed");
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "has-case-evidence" && gate.status == "passed" && gate.observed == 1.0
+        }));
         assert_eq!(summary.target_coverage_ratio, 1.0);
         assert_eq!(summary.operation_coverage_ratio, 1.0);
     }
