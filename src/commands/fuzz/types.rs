@@ -60,6 +60,8 @@ pub(crate) enum FuzzCommand {
     Validate(FuzzValidateArgs),
     /// Persist a result envelope from a fuzz campaign file
     Report(FuzzReportArgs),
+    /// Compare two persisted fuzz result envelopes
+    Compare(FuzzCompareArgs),
     /// Resolve replay metadata for persisted fuzz cases
     Replay(FuzzReplayArgs),
 }
@@ -162,6 +164,17 @@ pub(crate) struct FuzzReportArgs {
 }
 
 #[derive(Args, Clone)]
+pub(crate) struct FuzzCompareArgs {
+    /// Baseline fuzz result envelope JSON file.
+    #[arg(value_name = "BASELINE_ENVELOPE")]
+    pub(crate) baseline: PathBuf,
+
+    /// Candidate fuzz result envelope JSON file.
+    #[arg(value_name = "CANDIDATE_ENVELOPE")]
+    pub(crate) candidate: PathBuf,
+}
+
+#[derive(Args, Clone)]
 pub(crate) struct FuzzReplayArgs {
     /// Component ID used to resolve the extension replay_command.
     #[arg(long = "component", value_name = "ID")]
@@ -215,6 +228,7 @@ pub enum FuzzOutput {
     Run(FuzzRunOutput),
     Validate(FuzzValidateOutput),
     Report(FuzzReportOutput),
+    Compare(FuzzCompareOutput),
     Replay(FuzzReplayOutput),
 }
 
@@ -291,6 +305,68 @@ pub struct FuzzReportOutput {
     pub envelope: FuzzResultEnvelope,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
     pub gates: Vec<FuzzGateEvaluation>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCompareOutput {
+    pub schema: String,
+    pub command: String,
+    pub status: String,
+    pub baseline_file: String,
+    pub candidate_file: String,
+    pub baseline: FuzzCompareSnapshot,
+    pub candidate: FuzzCompareSnapshot,
+    pub deltas: FuzzCompareDeltas,
+    pub regressions: Vec<String>,
+    pub improvements: Vec<String>,
+    pub summary: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct FuzzCompareSnapshot {
+    pub envelope_id: String,
+    pub status: String,
+    pub campaign_id: Option<String>,
+    pub target_coverage_ratio: f64,
+    pub operation_coverage_ratio: f64,
+    pub declared_targets: u64,
+    pub proven_targets: u64,
+    pub declared_operations: u64,
+    pub proven_operations: u64,
+    pub case_count: usize,
+    pub case_status_counts: BTreeMap<String, usize>,
+    pub failure_rate: f64,
+    pub finding_severity_counts: BTreeMap<String, usize>,
+    pub critical_finding_keys: Vec<String>,
+    pub missing_required_artifacts: Vec<String>,
+    pub gate_status_counts: BTreeMap<String, usize>,
+    pub gate_statuses: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCompareDeltas {
+    pub target_coverage_ratio: f64,
+    pub operation_coverage_ratio: f64,
+    pub declared_targets: i64,
+    pub proven_targets: i64,
+    pub declared_operations: i64,
+    pub proven_operations: i64,
+    pub case_count: i64,
+    pub case_status_counts: BTreeMap<String, i64>,
+    pub failure_rate: f64,
+    pub finding_severity_counts: BTreeMap<String, i64>,
+    pub missing_required_artifacts: Vec<String>,
+    pub resolved_required_artifacts: Vec<String>,
+    pub new_critical_findings: Vec<String>,
+    pub resolved_critical_findings: Vec<String>,
+    pub gate_status_changes: Vec<FuzzGateStatusChange>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzGateStatusChange {
+    pub gate_id: String,
+    pub baseline: Option<String>,
+    pub candidate: Option<String>,
 }
 
 #[derive(Serialize)]

@@ -1035,6 +1035,33 @@ fn parse_fuzz_case_log_jsonl(contents: &str) -> std::result::Result<Vec<Value>, 
         .collect()
 }
 
+pub fn parse_fuzz_result_envelope_file(path: &Path) -> Result<FuzzResultEnvelope> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+    let envelope: FuzzResultEnvelope = serde_json::from_str(&contents).map_err(|err| {
+        Error::validation_invalid_json(
+            err,
+            Some(format!(
+                "parse fuzz result envelope file {}",
+                path.display()
+            )),
+            Some(contents),
+        )
+    })?;
+    if envelope.schema != FUZZ_RESULT_ENVELOPE_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "schema",
+            format!(
+                "fuzz result envelope schema must be {FUZZ_RESULT_ENVELOPE_SCHEMA}, got {}",
+                envelope.schema
+            ),
+            Some(envelope.schema),
+            None,
+        ));
+    }
+    Ok(envelope)
+}
+
 pub fn parse_fuzz_target_inventory_file(path: &Path) -> Result<FuzzTargetInventory> {
     let contents = std::fs::read_to_string(path)
         .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;

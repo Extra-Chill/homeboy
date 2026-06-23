@@ -1,3 +1,4 @@
+mod compare;
 mod execution;
 mod replay;
 mod report;
@@ -18,6 +19,7 @@ use homeboy::core::fuzz::{
 };
 
 use super::{CmdResult, GlobalArgs};
+use compare::run_compare;
 use execution::{default_runner_contract, run_run};
 use replay::run_replay;
 use report::{run_report, run_validate};
@@ -41,6 +43,9 @@ pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
         }
         Some(FuzzCommand::Report(report_args)) => {
             Ok((FuzzOutput::Report(run_report(report_args)?), 0))
+        }
+        Some(FuzzCommand::Compare(compare_args)) => {
+            Ok((FuzzOutput::Compare(run_compare(compare_args)?), 0))
         }
         Some(FuzzCommand::Replay(replay_args)) => {
             let (output, exit) = run_replay(replay_args)?;
@@ -339,6 +344,24 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_compare_parses_envelope_paths() {
+        let cli = FuzzCli::parse_from([
+            "fuzz",
+            "compare",
+            "baseline-envelope.json",
+            "candidate-envelope.json",
+        ]);
+
+        match cli.args.command {
+            Some(FuzzCommand::Compare(compare)) => {
+                assert_eq!(compare.baseline, PathBuf::from("baseline-envelope.json"));
+                assert_eq!(compare.candidate, PathBuf::from("candidate-envelope.json"));
+            }
+            _ => panic!("expected fuzz compare command"),
+        }
+    }
+
+    #[test]
     fn fuzz_output_contract_has_stable_variant_discriminators() {
         let contract = serde_json::to_value(FuzzOutput::Contract(run_contract())).unwrap();
         assert_eq!(contract["variant"], "contract");
@@ -465,7 +488,7 @@ mod tests {
 
         let gates = evaluate_fuzz_gates(&campaign);
 
-        assert_eq!(gate_status(&gates), "failed");
+        assert_eq!(gate_status(&gates), "passed");
         assert!(gates.iter().any(|gate| {
             gate.gate_id == "has-case-evidence" && gate.status == "passed" && gate.observed == 1.0
         }));

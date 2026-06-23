@@ -11,6 +11,7 @@ homeboy fuzz list [<component>] [--rig <id>]
 homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>]
 homeboy fuzz validate <results-file>
 homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--output-envelope <path>]
+homeboy fuzz compare <baseline-envelope> <candidate-envelope>
 homeboy fuzz replay [<artifact-or-case>] [--artifact <path>] [--case-id <id>] [--run-id <id>] [-- <runner-args>]
 ```
 
@@ -183,6 +184,20 @@ gates from `coverage_summary`: `target-coverage-complete` and
 `operation-coverage-complete` pass only when every declared target/operation is
 proven, or when the summary explicitly declares zero targets/operations. Missing
 `coverage_summary` fails those completeness gates.
+
+Use `homeboy fuzz compare` to compare a persisted baseline result envelope with a
+candidate envelope:
+
+```bash
+homeboy fuzz compare baseline-envelope.json candidate-envelope.json
+```
+
+The command emits a `homeboy/fuzz-compare/v1` JSON artifact with coverage, case
+status, finding severity, required artifact, and gate-status deltas. The compare
+status is `worse` when candidate coverage drops, failure rate increases, critical
+findings appear, required artifacts go missing, or a gate changes from passed to
+failed. It is `better` when only improvements are present, and `same` when no
+tracked deltas change.
 
 Fuzz workloads do not have a benchmark fallback. If `homeboy fuzz run` cannot
 execute the selected workload, fix the fuzz runner, rig declaration, or Lab
