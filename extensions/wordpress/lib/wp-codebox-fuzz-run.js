@@ -585,20 +585,38 @@ function legacyWpCodeboxFuzzRunArtifactDeclarationsAlias() {
 
 function normalizeWpCodeboxFuzzArtifacts(source = {}, result = {}) {
 	const artifacts = [];
-	appendArtifactCandidates(artifacts, source?.artifacts);
-	appendArtifactCandidates(artifacts, source?.artifactRefs || source?.artifact_refs);
-	appendArtifactCandidates(artifacts, result?.artifacts);
-	appendArtifactCandidates(artifacts, result?.artifactRefs || result?.artifact_refs);
-	appendNamedArtifact(artifacts, 'fuzz_report', source?.fuzz_report || source?.fuzzReport || source?.report || source?.summary_report || source?.summaryReport);
-	appendNamedArtifact(artifacts, 'coverage', source?.coverage_artifact || source?.coverageArtifact || source?.wordpress_fuzz_coverage || source?.wordpressFuzzCoverage);
-	appendNamedArtifact(artifacts, 'normalized_fuzz_result', source?.wordpress_fuzz_result_artifact || source?.wordpressFuzzResultArtifact || source?.normalized_fuzz_result || source?.normalizedFuzzResult);
-	appendArtifactCandidates(artifacts, source?.wordpress_fuzz_result?.artifacts || source?.wordpressFuzzResult?.artifacts);
-	appendArtifactCandidates(artifacts, source?.wordpress_fuzz_result?.artifactRefs || source?.wordpress_fuzz_result?.artifact_refs || source?.wordpressFuzzResult?.artifactRefs || source?.wordpressFuzzResult?.artifact_refs);
+	appendFuzzArtifactRefs(artifacts, fuzzArtifactRefsFromSource(source, result));
+	appendFuzzArtifactRefs(artifacts, fuzzArtifactRefsFromEmbeddedWordPressResult(source));
 	appendCaseArtifacts(artifacts, source?.cases || source?.fuzz_cases || source?.fuzzCases, 'fuzz_case');
 	appendCaseArtifacts(artifacts, source?.wordpress_fuzz_result?.cases || source?.wordpressFuzzResult?.cases, 'fuzz_case');
 	appendCaseArtifacts(artifacts, source?.failures || source?.errors || source?.failed_cases || source?.failedCases, 'failing_case');
 	appendCaseArtifacts(artifacts, source?.repro_cases || source?.reproCases || source?.reproductions, 'repro_case');
 	return dedupeArtifacts(artifacts.map(normalizeFuzzArtifact).filter(Boolean));
+}
+
+function fuzzArtifactRefsFromSource(source = {}, result = {}) {
+	return [
+		source?.artifacts,
+		source?.artifactRefs || source?.artifact_refs,
+		result?.artifacts,
+		result?.artifactRefs || result?.artifact_refs,
+		{ fuzz_report: source?.fuzz_report || source?.fuzzReport || source?.report || source?.summary_report || source?.summaryReport },
+		{ coverage: source?.coverage_artifact || source?.coverageArtifact || source?.wordpress_fuzz_coverage || source?.wordpressFuzzCoverage },
+		{ normalized_fuzz_result: source?.wordpress_fuzz_result_artifact || source?.wordpressFuzzResultArtifact || source?.normalized_fuzz_result || source?.normalizedFuzzResult },
+	];
+}
+
+function fuzzArtifactRefsFromEmbeddedWordPressResult(source = {}) {
+	return [
+		source?.wordpress_fuzz_result?.artifacts || source?.wordpressFuzzResult?.artifacts,
+		source?.wordpress_fuzz_result?.artifactRefs || source?.wordpress_fuzz_result?.artifact_refs || source?.wordpressFuzzResult?.artifactRefs || source?.wordpressFuzzResult?.artifact_refs,
+	];
+}
+
+function appendFuzzArtifactRefs(artifacts, refs = []) {
+	for (const ref of refs) {
+		appendArtifactCandidates(artifacts, ref);
+	}
 }
 
 function appendArtifactCandidates(artifacts, value) {
@@ -649,8 +667,9 @@ function normalizeFuzzArtifact(artifact) {
 	if (!objectOrUndefined(artifact)) {
 		return null;
 	}
-	const name = artifact.name || artifact.id || artifact.key || artifact.role || artifact.type || artifact.kind;
-	const role = normalizeFuzzArtifactRole(artifact.role || artifact.artifact_role || artifact.artifactRole || artifact.kind || artifact.type || name || artifact.path || artifact.url || artifact.file);
+	const identity = fuzzArtifactIdentity(artifact);
+	const name = identity.name;
+	const role = identity.role;
 	if (!role) {
 		return null;
 	}
@@ -674,6 +693,16 @@ function normalizeFuzzArtifact(artifact) {
 			...(objectOrUndefined(artifact.metadata) || {}),
 		}),
 	});
+}
+
+function fuzzArtifactIdentity(artifact = {}) {
+	const explicitRole = artifact.role || artifact.artifact_role || artifact.artifactRole;
+	const explicitKind = artifact.kind || artifact.type;
+	const name = artifact.name || artifact.id || artifact.key || explicitRole || explicitKind;
+	return {
+		name,
+		role: normalizeFuzzArtifactRole(explicitRole || explicitKind || name || artifact.path || artifact.url || artifact.file),
+	};
 }
 
 function hasConcreteArtifactReference(artifact) {

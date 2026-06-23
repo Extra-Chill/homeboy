@@ -206,9 +206,16 @@ function buildCodeboxPlanRecipe(workload) {
 }
 
 function wpCodeboxRuntimeRequirementsFromWorkload(workload = {}, options = {}) {
+	return buildWpCodeboxFuzzRuntimeRequirements({
+		workload,
+		env: options.env,
+	});
+}
+
+function buildWpCodeboxFuzzRuntimeRequirements({ workload = {}, env = {} } = {}) {
 	const context = objectOrUndefined(workload.metadata?.homeboy_runtime_context || workload.metadata?.homeboyRuntimeContext);
 	const components = objectOrUndefined(context?.components);
-	const workloadRoot = nonEmptyString(options.env?.wpCodeboxFuzzWorkloadRoot || options.env?.WP_CODEBOX_FUZZ_WORKLOAD_ROOT);
+	const workloadRoot = nonEmptyString(env?.wpCodeboxFuzzWorkloadRoot || env?.WP_CODEBOX_FUZZ_WORKLOAD_ROOT);
 	const componentId = workload.target?.component
 		|| workload.metadata?.fixture?.component
 		|| workload.metadata?.fixture?.plugin
@@ -219,9 +226,27 @@ function wpCodeboxRuntimeRequirementsFromWorkload(workload = {}, options = {}) {
 		return undefined;
 	}
 	const activation = workload.metadata?.fixture?.activation || firstCasePluginActivation(workload);
+	const pluginRequirement = buildWpCodeboxFuzzPluginRequirement({ workload, componentId, source, activation, context });
 	return {
-		extra_plugins: componentId && typeof source === 'string' && source.trim() !== '' ? [stripUndefined({
-			slug: workload.target?.slug || componentId,
+		extra_plugins: pluginRequirement ? [pluginRequirement.extraPlugin] : undefined,
+		component_contracts: pluginRequirement ? [pluginRequirement.componentContract] : undefined,
+		runtime_mounts: workloadRoot ? [{ source: workloadRoot, target: workloadRoot, mode: 'readonly' }] : undefined,
+		runtime_env: workloadRoot ? { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: workloadRoot } : undefined,
+		metadata: stripUndefined({
+			homeboy_runtime_context_schema: context?.schema,
+			rig_id: context?.rig_id,
+		}),
+	};
+}
+
+function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, source, activation, context = {} } = {}) {
+	if (!componentId || typeof source !== 'string' || source.trim() === '') {
+		return undefined;
+	}
+	const slug = workload.target?.slug || componentId;
+	return {
+		extraPlugin: stripUndefined({
+			slug,
 			source,
 			path: source,
 			pluginFile: activation,
@@ -231,18 +256,12 @@ function wpCodeboxRuntimeRequirementsFromWorkload(workload = {}, options = {}) {
 				component: componentId,
 				rig_id: context.rig_id,
 			}),
-		})] : undefined,
-		component_contracts: componentId && typeof source === 'string' && source.trim() !== '' ? [stripUndefined({
-			slug: workload.target?.slug || componentId,
+		}),
+		componentContract: stripUndefined({
+			slug,
 			path: source,
 			pluginFile: activation,
 			loadAs: 'plugin',
-		})] : undefined,
-		runtime_mounts: workloadRoot ? [{ source: workloadRoot, target: workloadRoot, mode: 'readonly' }] : undefined,
-		runtime_env: workloadRoot ? { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: workloadRoot } : undefined,
-		metadata: stripUndefined({
-			homeboy_runtime_context_schema: context?.schema,
-			rig_id: context?.rig_id,
 		}),
 	};
 }
