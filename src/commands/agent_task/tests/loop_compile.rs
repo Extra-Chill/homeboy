@@ -131,6 +131,10 @@ fn compile_loop_command_propagates_runtime_provider_model_options_into_runtime_t
             "metadata": {
                 "dispatch_defaults": {
                     "backend": "fixture",
+                    // Top-level `model` is intentionally distinct from the
+                    // provider_config `model` so the assertions below prove the
+                    // production precedence rule (top-level wins) rather than a
+                    // coincidence of identical fixture values.
                     "model": "gpt-cli",
                     "provider_config": json!({
                         "provider": "codex",
@@ -139,6 +143,90 @@ fn compile_loop_command_propagates_runtime_provider_model_options_into_runtime_t
                     })
                     .to_string()
                 }
+            },
+            "workflows": [
+                {
+                    "workflow_id": "store-idea",
+                    "prompt": "Generate a concept packet.",
+                    "runtime_execution": {
+                        "kind": "bundle",
+                        "ability": "runtime-package/run",
+                        "input": {
+                            "package": { "source": "bundles/store-idea-agent" }
+                        }
+                    }
+                },
+                {
+                    // Control workflow whose runtime_task.input already declares
+                    // its own provider/model. Production uses `or_insert`, so the
+                    // explicit values MUST survive untouched — proving the
+                    // propagation does not clobber caller-provided selection.
+                    "workflow_id": "explicit-selection",
+                    "prompt": "Run with an explicit provider.",
+                    "runtime_execution": {
+                        "kind": "bundle",
+                        "ability": "runtime-package/run",
+                        "input": {
+                            "package": { "source": "bundles/explicit-agent" },
+                            "provider": "anthropic",
+                            "model": "claude-explicit"
+                        }
+                    }
+                }
+            ]
+        }))
+        .expect("definition json"),
+    )
+    .expect("write definition");
+
+    let (value, status) = loop_definition::compile_loop(CompileLoopArgs {
+        definition: format!("@{}", definition_path.display()),
+    })
+    .expect("compile loop");
+
+    assert_eq!(status, 0);
+    let runtime_task = &value["tasks"][0]["inputs"]["runtime_task"];
+    assert_eq!(runtime_task["ability"], "runtime-package/run");
+    assert_eq!(
+        runtime_task["input"]["package"]["source"],
+        "bundles/store-idea-agent"
+    );
+    // CLI/provider runtime selection must be propagated into runtime_task.input.
+    assert_eq!(runtime_task["input"]["provider"], "codex");
+    // Precedence: the top-level `model` default is inserted before the
+    // provider_config block, so `gpt-cli` (top-level) wins over `gpt-config`
+    // (provider_config). This asserts the real ordering logic in
+    // `apply_runtime_task_dispatch_defaults`, not just presence of a value.
+    assert_eq!(runtime_task["input"]["model"], "gpt-cli");
+    assert_ne!(runtime_task["input"]["model"], "gpt-config");
+    assert_eq!(runtime_task["input"]["options"]["reasoning_effort"], "high");
+
+    // Control: a workflow that already declares its own provider/model keeps
+    // them — propagation is additive (`or_insert`), never overwriting.
+    let explicit = &value["tasks"][1]["inputs"]["runtime_task"];
+    assert_eq!(explicit["input"]["provider"], "anthropic");
+    assert_eq!(explicit["input"]["model"], "claude-explicit");
+    // Options were not declared on this workflow, so the dispatch default still
+    // fills them in.
+    assert_eq!(explicit["input"]["options"]["reasoning_effort"], "high");
+}
+
+#[test]
+fn compile_loop_command_omits_runtime_options_without_dispatch_defaults() {
+    // Negative control for the propagation behavior above: a spec with NO
+    // `dispatch_defaults` must NOT have provider/model/options synthesized onto
+    // the generated runtime_task.input. This proves the asserted values in the
+    // positive test originate from production propagation rather than from the
+    // bundle fixture or the runtime_execution block itself.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let definition_path = temp.path().join("repo-loop-no-runtime-opts.json");
+    std::fs::write(
+        &definition_path,
+        serde_json::to_string(&json!({
+            "schema": "wpsg/loop-spec/v1",
+            "loop_id": "wpsg/no-runtime-opts-loop",
+            "metadata": {
+                "dispatch_defaults": { "backend": "fixture" }
             },
             "workflows": [
                 {
@@ -170,10 +258,11 @@ fn compile_loop_command_propagates_runtime_provider_model_options_into_runtime_t
         runtime_task["input"]["package"]["source"],
         "bundles/store-idea-agent"
     );
-    // CLI/provider runtime selection must be preserved into runtime_task.input.
-    assert_eq!(runtime_task["input"]["provider"], "codex");
-    assert_eq!(runtime_task["input"]["model"], "gpt-cli");
-    assert_eq!(runtime_task["input"]["options"]["reasoning_effort"], "high");
+    // No provider/model/options metadata existed to propagate, so these keys
+    // must be absent on the generated input.
+    assert!(runtime_task["input"].get("provider").is_none());
+    assert!(runtime_task["input"].get("model").is_none());
+    assert!(runtime_task["input"].get("options").is_none());
 }
 
 #[test]
