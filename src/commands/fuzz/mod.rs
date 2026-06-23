@@ -542,7 +542,7 @@ mod tests {
         let summary = fuzz_coverage_completeness(&campaign);
 
         assert_eq!(gate_status(&gates), "failed");
-        assert_eq!(summary.has_summary, false);
+        assert!(!summary.has_summary);
         assert_eq!(summary.target_coverage_ratio, 0.0);
         assert_eq!(summary.operation_coverage_ratio, 0.0);
         assert!(gates.iter().any(|gate| {
@@ -1054,6 +1054,20 @@ mod tests {
         }
     }
 
+    fn artifact_complete_fuzz_campaign() -> FuzzCampaign {
+        let mut campaign = empty_fuzz_campaign();
+        campaign.coverage_summary = Some(zero_coverage_summary());
+        campaign.artifacts = vec![homeboy::core::fuzz::FuzzArtifact {
+            schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+            id: "case-log".to_string(),
+            kind: "case_log".to_string(),
+            artifact: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        }];
+        campaign
+    }
+
     fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         FuzzRunArgs {
             comp: PositionalComponentArgs {
@@ -1220,6 +1234,77 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_report_fails_required_artifact_gate_when_replay_data_is_missing() {
+        with_isolated_home(|home| {
+            let results_path = home.path().join("fuzz-campaign.json");
+            std::fs::write(
+                &results_path,
+                serde_json::to_string(&artifact_complete_fuzz_campaign())
+                    .expect("serialize campaign"),
+            )
+            .expect("results file");
+
+            let output = run_report(FuzzReportArgs {
+                results_file: results_path,
+                run: fuzz_run_args_with_run_id("report-run-missing-replay"),
+                output_envelope: None,
+                envelope_id: None,
+            })
+            .expect("fuzz report");
+
+            assert_eq!(output.status, "failed");
+            assert!(output.gates.iter().any(|gate| {
+                gate.gate_id == "has-required-artifact-replay-data"
+                    && gate.status == "failed"
+                    && gate.observed == 0.0
+            }));
+            assert!(output.gates.iter().any(|gate| {
+                gate.gate_id == "has-required-artifact-result-envelope" && gate.status == "passed"
+            }));
+            assert_eq!(output.envelope.status, output.status);
+        });
+    }
+
+    #[test]
+    fn fuzz_report_passes_required_artifact_gates_with_seed_replay_data() {
+        with_isolated_home(|home| {
+            let mut campaign = artifact_complete_fuzz_campaign();
+            campaign.seeds = vec![homeboy::core::fuzz::FuzzSeed {
+                schema: homeboy::core::fuzz::FUZZ_SEED_SCHEMA.to_string(),
+                id: "seed-1".to_string(),
+                kind: "literal".to_string(),
+                label: None,
+                value: Some("seed-value".to_string()),
+                artifact: None,
+                tags: Vec::new(),
+                metadata: serde_json::Value::Null,
+                extra: std::collections::BTreeMap::new(),
+            }];
+            let results_path = home.path().join("fuzz-campaign.json");
+            std::fs::write(
+                &results_path,
+                serde_json::to_string(&campaign).expect("serialize campaign"),
+            )
+            .expect("results file");
+
+            let output = run_report(FuzzReportArgs {
+                results_file: results_path,
+                run: fuzz_run_args_with_run_id("report-run-with-replay"),
+                output_envelope: None,
+                envelope_id: None,
+            })
+            .expect("fuzz report");
+
+            assert_eq!(output.status, "passed");
+            assert!(output.gates.iter().any(|gate| {
+                gate.gate_id == "has-required-artifact-replay-data"
+                    && gate.status == "passed"
+                    && gate.observed == 1.0
+            }));
+        });
+    }
+
+    #[test]
     fn fuzz_report_records_existing_output_envelope_path_as_artifact() {
         with_isolated_home(|home| {
             seed_fuzz_run("report-run-output");
@@ -1348,8 +1433,7 @@ mod tests {
             Some("replay-1")
         );
         assert!(output.env.iter().any(|env| {
-            env.name == "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE"
-                && env.value == path.to_string_lossy().to_string()
+            env.name == "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE" && env.value == path.to_string_lossy()
         }));
         assert!(output
             .env
