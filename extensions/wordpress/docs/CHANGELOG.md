@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.74] - 2026-06-23
+
+### Changed
+- Centralize WP Codebox result boundary
+
 ## [3.12.73] - 2026-06-23
 
 ### Fixed
