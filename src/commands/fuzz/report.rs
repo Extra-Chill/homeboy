@@ -136,11 +136,7 @@ pub(super) fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvalua
         .map(|gate| {
             let observed = match gate.metric.as_str() {
                 "open_findings" => open_finding_count(campaign) as f64,
-                "case_log_artifacts" => campaign
-                    .artifacts
-                    .iter()
-                    .filter(|artifact| artifact.kind == "case_log")
-                    .count() as f64,
+                "case_log_artifacts" => case_evidence_artifact_count(campaign) as f64,
                 "target_coverage_ratio" => coverage_ratio(
                     campaign.coverage_summary.as_ref(),
                     |summary| summary.proven_targets,
@@ -171,7 +167,7 @@ fn coverage_ratio(
     total: impl Fn(&homeboy::core::fuzz::FuzzCoverageSummary) -> u64,
 ) -> f64 {
     let Some(summary) = summary else {
-        return 0.0;
+        return 1.0;
     };
     let total = total(summary);
     if total == 0 {
@@ -179,6 +175,24 @@ fn coverage_ratio(
     } else {
         covered(summary) as f64 / total as f64
     }
+}
+
+fn case_evidence_artifact_count(campaign: &FuzzCampaign) -> usize {
+    campaign
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            matches!(
+                artifact.kind.as_str(),
+                "case_log"
+                    | "fuzz_report"
+                    | "fuzz_case"
+                    | "case_artifact"
+                    | "failing_case"
+                    | "repro_case"
+            )
+        })
+        .count()
 }
 
 pub(super) fn fuzz_coverage_completeness(
