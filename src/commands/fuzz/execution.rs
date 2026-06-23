@@ -6,7 +6,7 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use homeboy::core::fuzz::{parse_fuzz_results_file, FuzzCampaign};
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
-use homeboy::core::rig::{self, RigSpec};
+use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 
 use super::report::{evaluate_fuzz_gates, fuzz_coverage_completeness};
 use super::types::{
@@ -20,6 +20,18 @@ use super::workloads::{
 
 pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
     let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
+    if let Some(context) = rig_context.as_ref() {
+        let prepare_settings = fuzz_prepare_settings(&args);
+        if let Some(prepare) = rig::run_fuzz_prepare(&context.spec, &prepare_settings)? {
+            if !prepare.success {
+                return Err(homeboy::core::Error::rig_pipeline_failed(
+                    &context.spec.id,
+                    "fuzz_prepare",
+                    fuzz_prepare_failure_message(&prepare),
+                ));
+            }
+        }
+    }
     let effective_id = resolve_component_id(
         &args.comp,
         rig_context.as_ref().map(|context| &context.spec),
@@ -138,6 +150,44 @@ pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput
         },
         exit_code,
     ))
+}
+
+fn fuzz_prepare_settings(args: &FuzzRunArgs) -> Vec<(String, String)> {
+    args.setting_args
+        .setting
+        .iter()
+        .cloned()
+        .chain(
+            args.setting_args
+                .setting_json
+                .iter()
+                .map(|(key, value)| (key.clone(), value.to_string())),
+        )
+        .collect()
+}
+
+fn fuzz_prepare_failure_message(prepare: &FuzzPrepareReport) -> String {
+    let failed_steps = prepare
+        .pipeline
+        .steps
+        .iter()
+        .filter(|step| step.status == "fail")
+        .map(|step| match step.error.as_deref() {
+            Some(error) if !error.is_empty() => {
+                format!("{} `{}` failed: {}", step.kind, step.label, error)
+            }
+            _ => format!("{} `{}` failed", step.kind, step.label),
+        })
+        .collect::<Vec<_>>();
+
+    if failed_steps.is_empty() {
+        "rig fuzz preparation failed; refusing to run fuzz workload".to_string()
+    } else {
+        format!(
+            "rig fuzz preparation failed; refusing to run fuzz workload. Failed fuzz_prepare steps: {}",
+            failed_steps.join("; ")
+        )
+    }
 }
 
 pub(super) struct FuzzRunOutcome {

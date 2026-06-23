@@ -60,6 +60,14 @@ pub struct BenchPrepareReport {
     pub success: bool,
 }
 
+/// Report from a fuzz preparation pipeline.
+#[derive(Debug, Clone, Serialize)]
+pub struct FuzzPrepareReport {
+    pub rig_id: String,
+    pub pipeline: PipelineOutcome,
+    pub success: bool,
+}
+
 /// Report from `rig down`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DownReport {
@@ -270,6 +278,27 @@ pub fn run_bench_prepare(
 
     let outcome = run_pipeline_with_settings(rig, "bench_prepare", true, settings)?;
     Ok(Some(BenchPrepareReport {
+        rig_id: rig.id.clone(),
+        success: outcome.is_success(),
+        pipeline: outcome,
+    }))
+}
+
+/// Run rig-owned setup required before fuzz workloads.
+///
+/// Missing `fuzz_prepare` pipelines are a no-op so existing rigs keep their
+/// previous fuzz behavior. Declared steps fail fast because fuzz runs need the
+/// same prepared runtime dependencies as the workload they exercise.
+pub fn run_fuzz_prepare(
+    rig: &RigSpec,
+    settings: &[(String, String)],
+) -> Result<Option<FuzzPrepareReport>> {
+    if !rig.pipeline.contains_key("fuzz_prepare") {
+        return Ok(None);
+    }
+
+    let outcome = run_pipeline_with_settings(rig, "fuzz_prepare", true, settings)?;
+    Ok(Some(FuzzPrepareReport {
         rig_id: rig.id.clone(),
         success: outcome.is_success(),
         pipeline: outcome,
