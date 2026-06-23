@@ -385,10 +385,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
                 &dependency.rig_id,
                 &dependency.component_id,
             ),
-            remote_component_path(
-                &dependency.remote_checkout_root,
-                dependency.required_subpath.as_deref(),
-            ),
+            effective_remote_component_path(&dependency, primary_local_path, primary_remote_path),
         ));
 
         if !should_materialize_dependency(&dependency, primary_remote_path) {
@@ -425,6 +422,26 @@ fn remote_component_path(remote_checkout_root: &str, required_subpath: Option<&s
             .to_string(),
         None => remote_checkout_root.to_string(),
     }
+}
+
+fn effective_remote_component_path(
+    dependency: &RigComponentDependency,
+    primary_local_path: &str,
+    primary_remote_path: &str,
+) -> String {
+    let declared_component_path = match dependency.required_subpath.as_deref() {
+        Some(subpath) => Path::new(&dependency.local_checkout_root).join(subpath),
+        None => PathBuf::from(&dependency.local_checkout_root),
+    };
+    if normalize_path_for_prefix(&declared_component_path)
+        == normalize_path_for_prefix(Path::new(primary_local_path))
+    {
+        return primary_remote_path.to_string();
+    }
+    remote_component_path(
+        &dependency.remote_checkout_root,
+        dependency.required_subpath.as_deref(),
+    )
 }
 
 pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result<Option<PathBuf>> {
@@ -1192,6 +1209,30 @@ mod tests {
 
         assert_eq!(remote, "/home/user/Developer/studio@fix-many-sites-memory");
         assert!(!remote.contains('~'));
+    }
+
+    #[test]
+    fn primary_component_subdir_override_uses_materialized_component_snapshot() {
+        let dependency = RigComponentDependency {
+            rig_id: "jetpack-api-route-inventory".to_string(),
+            component_id: "jetpack".to_string(),
+            local_checkout_root: "/Users/user/Developer/jetpack".to_string(),
+            declared_checkout_root: "~/Developer/jetpack".to_string(),
+            remote_checkout_root: "/home/user/Developer/jetpack".to_string(),
+            required_subpath: Some("projects/plugins/jetpack".to_string()),
+            remote_url: None,
+            pinned_ref: None,
+        };
+        let remote = effective_remote_component_path(
+            &dependency,
+            "/Users/user/Developer/jetpack/projects/plugins/jetpack",
+            "/home/user/Developer/_lab_workspaces/jetpack-source",
+        );
+
+        assert_eq!(
+            remote,
+            "/home/user/Developer/_lab_workspaces/jetpack-source"
+        );
     }
 
     #[test]
