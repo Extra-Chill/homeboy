@@ -148,6 +148,21 @@ impl AgentTaskRunRecord {
             .filter(|value| !value.trim().is_empty())
     }
 
+    fn runner_id(&self) -> Option<&str> {
+        self.metadata
+            .get("runner_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    /// A run is runner-backed when its durable record carries a runner id or
+    /// runner job id. For these, the recorded owner pid lives on the *runner*
+    /// host, not this controller, so local pid signalling cannot reach the
+    /// provider process tree.
+    fn is_runner_backed(&self) -> bool {
+        self.runner_id().is_some() || self.runner_job_id().is_some()
+    }
+
     fn ensure_metadata_object(&mut self) -> &mut serde_json::Map<String, Value> {
         if !self.metadata.is_object() {
             self.metadata = json!({});
@@ -388,15 +403,14 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         ));
     }
 
-    let live_cancellation = if record.state == AgentTaskRunState::Running {
-        match record.owner_pid() {
-            Some(owner_pid) if record.owner_process_is_running() => {
-                Some(crate::core::process::terminate_process_tree(owner_pid)?)
-            }
-            _ => None,
-        }
+    // Classify how live cancellation can be performed for this run BEFORE we
+    // mutate the durable record, so we can record either a real termination or
+    // deterministic operator recovery instructions (acceptance: never force
+    // manual process spelunking; always surface pids + safe commands).
+    let cancellation = if record.state == AgentTaskRunState::Running {
+        classify_live_cancellation(&record)?
     } else {
-        None
+        LiveCancellationOutcome::NotRunning
     };
 
     let cancelled_at = now_timestamp();
@@ -417,17 +431,36 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         "cancel_reason".to_string(),
         json!(reason.unwrap_or("cancel requested")),
     );
-    if let Some(cancellation) = live_cancellation {
-        metadata.insert(
-            "live_cancellation".to_string(),
-            json!({
-                "owner_pid": cancellation.owner_pid,
-                "descendant_pids": cancellation.descendant_pids,
-                "signalled_pids": cancellation.signalled_pids,
-                "signal": cancellation.signal,
-                "recovery_commands": cancellation.recovery_commands,
-            }),
-        );
+    metadata.remove("live_cancellation");
+    metadata.remove("live_cancellation_unsupported");
+    match cancellation {
+        LiveCancellationOutcome::Terminated(termination) => {
+            metadata.insert(
+                "live_cancellation".to_string(),
+                json!({
+                    "owner_pid": termination.owner_pid,
+                    "descendant_pids": termination.descendant_pids,
+                    "signalled_pids": termination.signalled_pids,
+                    "signal": termination.signal,
+                    "killed_pids": termination.killed_pids,
+                    "surviving_pids": termination.surviving_pids,
+                    "recovery_commands": termination.recovery_commands,
+                }),
+            );
+        }
+        LiveCancellationOutcome::Unsupported(unsupported) => {
+            metadata.insert(
+                "live_cancellation_unsupported".to_string(),
+                json!({
+                    "reason": unsupported.reason,
+                    "owner_pid": unsupported.owner_pid,
+                    "runner_id": unsupported.runner_id,
+                    "runner_job_id": unsupported.runner_job_id,
+                    "recovery_commands": unsupported.recovery_commands,
+                }),
+            );
+        }
+        LiveCancellationOutcome::NotRunning => {}
     }
     if was_stale_running {
         metadata.insert("cancelled_stale_running".to_string(), json!(true));
@@ -437,6 +470,94 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
 
     store::write_record(&record)?;
     Ok(record)
+}
+
+/// Outcome of attempting live cancellation of a running run's provider process
+/// tree. Either Homeboy signalled the tree itself, it can only hand the operator
+/// deterministic recovery commands (runner-side / non-Unix host), or the run was
+/// not actually running.
+enum LiveCancellationOutcome {
+    Terminated(crate::core::process::ProcessTreeTermination),
+    Unsupported(UnsupportedLiveCancellation),
+    NotRunning,
+}
+
+/// Recovery payload surfaced when Homeboy cannot itself signal the provider
+/// process tree (the owner pid lives on a runner host, or no live process is
+/// reachable). Carries the recorded identifiers plus copy-pasteable commands so
+/// the operator never has to spelunk for child pids.
+struct UnsupportedLiveCancellation {
+    reason: String,
+    owner_pid: Option<u32>,
+    runner_id: Option<String>,
+    runner_job_id: Option<String>,
+    recovery_commands: Vec<String>,
+}
+
+fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancellationOutcome> {
+    let owner_pid = record.owner_pid();
+
+    // Local, live owner process: terminate its tree directly (SIGTERM then
+    // SIGKILL escalation handled inside terminate_process_tree).
+    if let Some(pid) = owner_pid {
+        if record.owner_process_is_running() {
+            let termination = crate::core::process::terminate_process_tree(pid)?;
+            return Ok(LiveCancellationOutcome::Terminated(termination));
+        }
+    }
+
+    // Runner-backed run whose provider process tree lives on a different host:
+    // we cannot signal it from this controller. Emit deterministic recovery
+    // commands keyed on the recorded runner + pid instead of failing.
+    if record.is_runner_backed() {
+        let runner_id = record.runner_id().map(str::to_string);
+        let runner_job_id = record.runner_job_id().map(str::to_string);
+        let mut recovery_commands = Vec::new();
+        if let Some(runner) = runner_id.as_deref() {
+            if let Some(job) = runner_job_id.as_deref() {
+                recovery_commands.push(format!(
+                    "homeboy runner exec {runner} -- homeboy agent-task cancel {} # cancel on the owning runner",
+                    record.run_id
+                ));
+                let _ = job;
+            }
+        }
+        if let Some(pid) = owner_pid {
+            recovery_commands.extend(crate::core::process::process_tree_recovery_commands(pid));
+        }
+        let reason = if owner_pid.is_some() {
+            "provider process tree runs on the owning runner host; signal it there"
+        } else {
+            "runner-backed run has no controller-local owner pid to signal"
+        }
+        .to_string();
+        return Ok(LiveCancellationOutcome::Unsupported(
+            UnsupportedLiveCancellation {
+                reason,
+                owner_pid,
+                runner_id,
+                runner_job_id,
+                recovery_commands,
+            },
+        ));
+    }
+
+    // No reachable live process (stale running record, or no recorded pid): the
+    // record is being reclaimed. If a pid was recorded, still hand back recovery
+    // commands so a now-orphaned tree can be cleaned up by hand.
+    if let Some(pid) = owner_pid {
+        return Ok(LiveCancellationOutcome::Unsupported(
+            UnsupportedLiveCancellation {
+                reason: "recorded owner pid is not running on this host".to_string(),
+                owner_pid: Some(pid),
+                runner_id: None,
+                runner_job_id: None,
+                recovery_commands: crate::core::process::process_tree_recovery_commands(pid),
+            },
+        ));
+    }
+
+    Ok(LiveCancellationOutcome::NotRunning)
 }
 
 pub fn record_run_aggregate(
@@ -2920,6 +3041,46 @@ mod tests {
                 cancelled.metadata["live_cancellation"]["signal"],
                 json!("SIGTERM")
             );
+        });
+    }
+
+    #[test]
+    fn cancel_run_emits_recovery_commands_for_runner_backed_run() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-cancel-runner")).expect("submitted");
+            let mut record = store::read_record("run-cancel-runner").expect("record");
+            record.state = AgentTaskRunState::Running;
+            record.tasks[0].state = AgentTaskState::Running;
+            // Runner-backed: owner pid lives on the runner host (not running
+            // here), so live cancellation must hand back recovery commands.
+            record.metadata = json!({
+                "runner_pid": u32::MAX,
+                "runner_id": "lab-a",
+                "runner_job_id": "job-123",
+            });
+            store::write_record(&record).expect("stored runner record");
+
+            let cancelled = cancel_run("run-cancel-runner", None).expect("runner run cancelled");
+
+            assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+            assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+            let unsupported = &cancelled.metadata["live_cancellation_unsupported"];
+            assert!(unsupported.is_object());
+            assert_eq!(unsupported["runner_id"], json!("lab-a"));
+            assert_eq!(unsupported["runner_job_id"], json!("job-123"));
+            let commands = unsupported["recovery_commands"]
+                .as_array()
+                .expect("recovery commands array");
+            assert!(!commands.is_empty());
+            // The first recovery command should route cancellation to the
+            // owning runner so the operator can act deterministically.
+            assert!(commands[0]
+                .as_str()
+                .expect("command string")
+                .contains("homeboy runner exec lab-a"));
+            // No real local process was signalled.
+            assert!(cancelled.metadata.get("live_cancellation").is_none());
         });
     }
 

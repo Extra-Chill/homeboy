@@ -125,7 +125,42 @@ pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
 
 pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
     let record = agent_task_service::cancel(&args.run_id, args.reason.as_deref())?;
-    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
+    surface_cancellation_recovery(&mut value);
+    Ok((value, 0))
+}
+
+/// Hoist live-cancellation recovery details to the top level of the cancel
+/// response so an operator sees the exact safe commands + process identifiers
+/// without digging through `metadata` (#5680 acceptance: never force manual
+/// process spelunking).
+fn surface_cancellation_recovery(value: &mut Value) {
+    let metadata = value.get("metadata").cloned().unwrap_or(Value::Null);
+
+    if let Some(live) = metadata.get("live_cancellation").cloned() {
+        value["live_cancellation"] = live;
+    }
+
+    if let Some(unsupported) = metadata.get("live_cancellation_unsupported").cloned() {
+        let recovery_commands = unsupported
+            .get("recovery_commands")
+            .cloned()
+            .unwrap_or(Value::Array(Vec::new()));
+        let reason = unsupported
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("live cancellation is not available for this provider on this host");
+        value["live_cancellation_unsupported"] = unsupported.clone();
+        value["recovery"] = json!({
+            "message": format!(
+                "Live cancellation could not signal the provider process tree directly: {reason}. Run the commands below to terminate it safely.",
+            ),
+            "owner_pid": unsupported.get("owner_pid").cloned().unwrap_or(Value::Null),
+            "runner_id": unsupported.get("runner_id").cloned().unwrap_or(Value::Null),
+            "runner_job_id": unsupported.get("runner_job_id").cloned().unwrap_or(Value::Null),
+            "recovery_commands": recovery_commands,
+        });
+    }
 }
 
 fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::core::Result<()> {
