@@ -32,6 +32,72 @@ pub(super) fn github_release_applies(component: &Component) -> bool {
         .is_some()
 }
 
+/// Emit plain-language operator hints that separate "package/publish"
+/// (registry/package publishing) from "GitHub Release" (the reviewer-facing
+/// release page on github.com), so the interaction between `--skip-publish`
+/// and `--no-github-release` is unambiguous in the dry-run plan and summary.
+///
+/// This is messaging only — it never changes which steps run. The actual step
+/// inclusion is decided independently by `skip_publish` / `skip_github_release`
+/// checks elsewhere in this module (issue #6139).
+pub(super) fn push_publish_vs_github_release_hints(
+    component: &Component,
+    options: &ReleaseOptions,
+    publish_targets: &[String],
+    hints: &mut Vec<String>,
+) {
+    let skip_publish = options.pipeline.skip_publish;
+    let skip_github_release = options.skip_github_release;
+    let github_release_will_run = !skip_github_release && github_release_applies(component);
+    let has_publish_targets = !publish_targets.is_empty();
+
+    // Spell out package/publish handling in plain operator language.
+    if skip_publish {
+        if has_publish_targets {
+            hints.push(
+                "--skip-publish: skipping registry/package publishing only (no publish to \
+                 configured targets). The version bump, tag, and push still run."
+                    .to_string(),
+            );
+        } else {
+            hints.push(
+                "--skip-publish: registry/package publishing is skipped (no publish targets \
+                 configured anyway). The version bump, tag, and push still run."
+                    .to_string(),
+            );
+        }
+    }
+
+    // Spell out the GitHub Release outcome separately, and make the
+    // skip-publish-without-no-github-release case explicit (the exact footgun
+    // from issue #6139: a GitHub Release is STILL created).
+    if github_release_will_run {
+        if skip_publish {
+            hints.push(
+                "Note: --skip-publish does NOT skip the GitHub Release — a GitHub Release \
+                 (reviewer-facing release page) WILL still be created for this tag. Add \
+                 --no-github-release if you want a tag only."
+                    .to_string(),
+            );
+        }
+    } else if skip_github_release {
+        if skip_publish {
+            hints.push(
+                "--skip-publish + --no-github-release: outcome is tag-only — no package/registry \
+                 publish and no GitHub Release page. The tag is pushed but no reviewer-facing \
+                 release will exist."
+                    .to_string(),
+            );
+        } else {
+            hints.push(
+                "--no-github-release: no GitHub Release (reviewer-facing release page) will be \
+                 created. The tag is still pushed."
+                    .to_string(),
+            );
+        }
+    }
+}
+
 fn ready_step(
     id: &str,
     step_type: &str,
@@ -230,10 +296,12 @@ pub(super) fn build_release_steps(
     options: &ReleaseOptions,
     monorepo: Option<&git::MonorepoContext>,
     warnings: &mut Vec<String>,
-    _hints: &mut Vec<String>,
+    hints: &mut Vec<String>,
 ) -> Result<Vec<PlanStep>> {
     let mut steps = Vec::new();
     let publish_targets = get_publish_targets(extensions);
+
+    push_publish_vs_github_release_hints(component, options, &publish_targets, hints);
 
     add_release_extension_diagnostics(component, extensions, &publish_targets, options, warnings);
 
@@ -387,7 +455,10 @@ pub(super) fn build_release_steps(
             ));
         }
     } else if options.pipeline.skip_publish && !publish_targets.is_empty() {
-        log_status!("release", "Skipping publish/package steps (--skip-publish)");
+        log_status!(
+            "release",
+            "Skipping registry/package publishing (--skip-publish); GitHub Release is unaffected"
+        );
     }
 
     let post_release_hooks = crate::core::engine::hooks::resolve_hooks(
@@ -480,7 +551,10 @@ fn build_head_release_steps(
     }
 
     if options.pipeline.skip_publish && !publish_targets.is_empty() {
-        log_status!("release", "Skipping publish/package steps (--skip-publish)");
+        log_status!(
+            "release",
+            "Skipping registry/package publishing (--skip-publish); GitHub Release is unaffected"
+        );
     }
 
     if !options.skip_github_release && github_release_applies(component) {
@@ -1466,6 +1540,103 @@ mod tests {
 
         assert!(github_release_applies(&github_component));
         assert!(!github_release_applies(&non_github_component));
+    }
+
+    fn github_fixture_component() -> Component {
+        let mut component = fixture_component();
+        component.remote_url = Some("https://github.com/Extra-Chill/homeboy.git".to_string());
+        component
+    }
+
+    fn options_with_flags(skip_publish: bool, skip_github_release: bool) -> ReleaseOptions {
+        ReleaseOptions {
+            pipeline: ReleasePipelineOptions {
+                skip_publish,
+                ..Default::default()
+            },
+            skip_github_release,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn skip_publish_alone_warns_github_release_still_created() {
+        let component = github_fixture_component();
+        let options = options_with_flags(true, false);
+        let mut hints = Vec::new();
+
+        super::push_publish_vs_github_release_hints(
+            &component,
+            &options,
+            &["crates-io".to_string()],
+            &mut hints,
+        );
+
+        assert!(
+            hints.iter().any(|hint| hint.contains("--skip-publish")
+                && hint.contains("registry/package publishing")),
+            "should clarify --skip-publish is registry/package only: {hints:?}"
+        );
+        assert!(
+            hints.iter().any(|hint| {
+                hint.contains("does NOT skip the GitHub Release")
+                    && hint.contains("WILL still be created")
+            }),
+            "should explicitly state a GitHub Release will still be created: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn skip_publish_and_no_github_release_states_tag_only() {
+        let component = github_fixture_component();
+        let options = options_with_flags(true, true);
+        let mut hints = Vec::new();
+
+        super::push_publish_vs_github_release_hints(&component, &options, &[], &mut hints);
+
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("tag-only") && hint.contains("no GitHub Release")),
+            "both flags together must state tag-only / no release page: {hints:?}"
+        );
+        assert!(
+            !hints
+                .iter()
+                .any(|hint| hint.contains("WILL still be created")),
+            "must not claim a GitHub Release will be created when --no-github-release is set: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn no_github_release_alone_states_no_release_page() {
+        let component = github_fixture_component();
+        let options = options_with_flags(false, true);
+        let mut hints = Vec::new();
+
+        super::push_publish_vs_github_release_hints(&component, &options, &[], &mut hints);
+
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("--no-github-release")
+                    && hint.contains("no GitHub Release")),
+            "should state no GitHub Release page will be created: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn default_flags_emit_no_terminology_hints() {
+        let component = github_fixture_component();
+        let options = options_with_flags(false, false);
+        let mut hints = Vec::new();
+
+        super::push_publish_vs_github_release_hints(&component, &options, &[], &mut hints);
+
+        assert!(
+            hints.is_empty(),
+            "no clarification hints expected on a default release: {hints:?}"
+        );
     }
 
     fn fixture_component() -> Component {
