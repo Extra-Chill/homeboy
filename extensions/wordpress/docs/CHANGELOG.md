@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.69] - 2026-06-23
+
+### Changed
+- Align Codebox runtime package substrate
+- Lift runtime package provider options
+- Align Codebox runtime package tasks
+
 ## [3.12.68] - 2026-06-23
 
 ### Changed
