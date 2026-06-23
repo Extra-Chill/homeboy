@@ -79,6 +79,23 @@ use spec_compile::{
 };
 pub use spec_source::{load_materialize_spec_source, MaterializeSpecSource};
 
+const DEFAULT_CONTROLLER_RESUME_MAX_ACTIONS: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControllerResumeOptions {
+    pub max_actions: usize,
+    pub stop_on_terminal: bool,
+}
+
+impl Default for ControllerResumeOptions {
+    fn default() -> Self {
+        Self {
+            max_actions: DEFAULT_CONTROLLER_RESUME_MAX_ACTIONS,
+            stop_on_terminal: true,
+        }
+    }
+}
+
 /// Create a new durable controller record.
 pub fn init(request: ControllerInitRequest) -> Result<AgentTaskLoopControllerRecord> {
     controller::create_controller(&request.loop_id, &request.phase, &request.config_version)
@@ -340,7 +357,7 @@ where
     execute_controller_action(&mut record, action_id, executor, dispatch)
 }
 
-/// Drain pending controller actions until none remain or one fails.
+/// Drain pending controller actions until the default finite limit, idle, terminal state, or failure.
 pub fn resume<E, D>(
     loop_id: &str,
     executor: E,
@@ -350,15 +367,48 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
+    resume_with_options(
+        loop_id,
+        executor,
+        dispatch,
+        ControllerResumeOptions::default(),
+    )
+}
+
+/// Drain pending controller actions until the supplied finite options stop execution.
+pub fn resume_with_options<E, D>(
+    loop_id: &str,
+    executor: E,
+    dispatch: &D,
+    options: ControllerResumeOptions,
+) -> Result<AgentTaskRunResult<ControllerResumeReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    D: ControllerDispatchHook,
+{
     let mut results = Vec::new();
-    loop {
+    while results.len() < options.max_actions {
         let record = controller::controller_status(loop_id)?;
+        if options.stop_on_terminal && controller_state_is_terminal(record.state) {
+            return Ok(AgentTaskRunResult {
+                value: ControllerResumeReport {
+                    schema: RESUME_RESULT_SCHEMA,
+                    loop_id: record.loop_id.clone(),
+                    claimed: false,
+                    stopped_reason: "terminal_state".to_string(),
+                    results,
+                    controller: record,
+                },
+                exit_code: 0,
+            });
+        }
         let Some(action_id) = first_pending_action_id(&record) else {
             return Ok(AgentTaskRunResult {
                 value: ControllerResumeReport {
                     schema: RESUME_RESULT_SCHEMA,
                     loop_id: record.loop_id.clone(),
                     claimed: false,
+                    stopped_reason: "idle".to_string(),
                     results,
                     controller: record,
                 },
@@ -376,13 +426,53 @@ where
                     schema: RESUME_RESULT_SCHEMA,
                     loop_id: record.loop_id.clone(),
                     claimed: true,
+                    stopped_reason: "action_failed".to_string(),
                     results,
                     controller: record,
                 },
                 exit_code: action_result.exit_code,
             });
         }
+        if options.stop_on_terminal
+            && controller_state_is_terminal(action_result.value.controller.state)
+        {
+            let record = controller::controller_status(loop_id)?;
+            return Ok(AgentTaskRunResult {
+                value: ControllerResumeReport {
+                    schema: RESUME_RESULT_SCHEMA,
+                    loop_id: record.loop_id.clone(),
+                    claimed: true,
+                    stopped_reason: "terminal_state".to_string(),
+                    results,
+                    controller: record,
+                },
+                exit_code: 0,
+            });
+        }
     }
+    let record = controller::controller_status(loop_id)?;
+    Ok(AgentTaskRunResult {
+        value: ControllerResumeReport {
+            schema: RESUME_RESULT_SCHEMA,
+            loop_id: record.loop_id.clone(),
+            claimed: !results.is_empty(),
+            stopped_reason: "max_actions_reached".to_string(),
+            results,
+            controller: record,
+        },
+        exit_code: 0,
+    })
+}
+
+fn controller_state_is_terminal(state: AgentTaskLoopControllerState) -> bool {
+    matches!(
+        state,
+        AgentTaskLoopControllerState::HumanReady
+            | AgentTaskLoopControllerState::Completed
+            | AgentTaskLoopControllerState::Abandoned
+            | AgentTaskLoopControllerState::Escalated
+            | AgentTaskLoopControllerState::Failed
+    )
 }
 
 #[cfg(test)]
