@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.257.0] - 2026-06-23
+
+### Added
+- compare result envelopes
+- execute replay commands
+- validate canonical case logs
+
+### Fixed
+- fail workload invariant counters
+- use generic campaign failure status
+
 ## [0.256.4] - 2026-06-23
 
 ### Fixed
