@@ -7,6 +7,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+const manifest = require('../wordpress.json');
+
 process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(
 	__dirname,
 	'..',
@@ -186,6 +188,7 @@ assert.equal(
 );
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_mounts, [{ source: '/runner/workloads', target: '/runner/workloads', mode: 'readonly' }]);
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_env, { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: '/runner/workloads' });
+assert.ok(manifest.fuzz.env.includes('WP_CODEBOX_FUZZ_WORKLOAD_ROOT'));
 
 const genericPrimitiveResult = buildWordPressFuzzRunnerResult({
 	env: {
