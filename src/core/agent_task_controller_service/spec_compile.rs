@@ -551,6 +551,8 @@ pub(super) fn compile_loop_spec_workflow(
         Ok(AgentTaskLoopPolicyAction::FanOut {
             dedupe_key,
             entity_ids: workflow.entity_ids.clone(),
+            max_items: crate::core::agent_task_loop_controller::DEFAULT_FAN_OUT_MAX_ITEMS,
+            fail_fast: true,
             request_template: request,
         })
     }

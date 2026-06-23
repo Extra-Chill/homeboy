@@ -10,6 +10,7 @@ use crate::core::agent_task_loop_controller::{
     AgentTaskGateBundle, AgentTaskGateBundleCheck, AgentTaskGateBundleCheckKind,
     AgentTaskGateBundleStatus, AgentTaskLoopFindingPacket, AgentTaskLoopPolicyAction,
     AgentTaskLoopTerminalStatus, AgentTaskLoopWait, AgentTaskLoopWaitStatus,
+    DEFAULT_FAN_OUT_MAX_ITEMS,
 };
 use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
 use crate::test_support::with_isolated_home;
@@ -36,6 +37,11 @@ struct ArtifactDispatchHook {
 
 #[derive(Clone, Default)]
 struct TypedArtifactHandoffDispatchHook {
+    observed_requests: Arc<Mutex<Vec<Value>>>,
+}
+
+#[derive(Clone, Default)]
+struct CountingFailingDispatchHook {
     observed_requests: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -139,6 +145,29 @@ impl ControllerDispatchHook for TypedArtifactHandoffDispatchHook {
             }]);
         }
         Ok((result, 0))
+    }
+}
+
+impl ControllerDispatchHook for CountingFailingDispatchHook {
+    fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
+        self.observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request.clone());
+        let entity_id = request
+            .get("entity_id")
+            .and_then(Value::as_str)
+            .unwrap_or("workflow");
+        Ok((
+            json!({
+                "schema": "homeboy/test-generic-dispatch-result/v1",
+                "run_id": format!("generic-run-{}", entity_id.replace([':', '/', '#', ' '], "_")),
+                "diagnostics": [{
+                    "message": format!("synthetic failure for {entity_id}")
+                }]
+            }),
+            1,
+        ))
     }
 }
 
@@ -1231,6 +1260,8 @@ fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
             AgentTaskLoopPolicyAction::FanOut {
                 dedupe_key: "workflow:empty".to_string(),
                 entity_ids: Vec::new(),
+                max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
+                fail_fast: true,
                 request_template: json!({ "mode": "dispatch" }),
             },
             "no findings emitted",
@@ -1268,6 +1299,112 @@ fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
 }
 
 #[test]
+fn fan_out_stops_after_max_items() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-fanout-max-items".to_string(),
+            phase: "review".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+
+        record.record_action(
+            AgentTaskLoopPolicyAction::FanOut {
+                dedupe_key: "candidate:bounded-review".to_string(),
+                entity_ids: vec![
+                    "candidate:first".to_string(),
+                    "candidate:second".to_string(),
+                    "candidate:third".to_string(),
+                ],
+                max_items: 2,
+                fail_fast: true,
+                request_template: json!({ "mode": "dispatch" }),
+            },
+            "review bounded candidates",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let dispatch = CapturingDispatchHook::default();
+        let result = run_next(
+            "loop-service-fanout-max-items",
+            CapturingExecutor::default(),
+            &dispatch,
+        )
+        .expect("fan-out action executed");
+
+        assert_eq!(result.exit_code, 0);
+        let execution = result.value.execution.as_ref().expect("execution");
+        assert_eq!(execution["item_count"], json!(2));
+        assert_eq!(execution["total_item_count"], json!(3));
+        assert_eq!(execution["max_items"], json!(2));
+        assert_eq!(execution["fail_fast"], json!(true));
+        assert_eq!(execution["concurrency"], json!(1));
+        assert_eq!(execution["truncated"], json!(true));
+        assert_eq!(execution["results"].as_array().expect("results").len(), 2);
+        let observed = dispatch
+            .observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0]["entity_id"], json!("candidate:first"));
+        assert_eq!(observed[1]["entity_id"], json!("candidate:second"));
+    });
+}
+
+#[test]
+fn fan_out_fail_fast_stops_after_first_failure() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-fanout-fail-fast".to_string(),
+            phase: "review".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+
+        record.record_action(
+            AgentTaskLoopPolicyAction::FanOut {
+                dedupe_key: "candidate:fail-fast-review".to_string(),
+                entity_ids: vec![
+                    "candidate:first".to_string(),
+                    "candidate:second".to_string(),
+                ],
+                max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
+                fail_fast: true,
+                request_template: json!({ "mode": "dispatch" }),
+            },
+            "review candidates until failure",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let dispatch = CountingFailingDispatchHook::default();
+        let result = run_next(
+            "loop-service-fanout-fail-fast",
+            CapturingExecutor::default(),
+            &dispatch,
+        )
+        .expect("fan-out action executed");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status.as_deref(), Some("failed"));
+        let execution = result.value.execution.as_ref().expect("execution");
+        assert_eq!(execution["item_count"], json!(1));
+        assert_eq!(execution["total_item_count"], json!(2));
+        assert_eq!(execution["fail_fast"], json!(true));
+        assert_eq!(execution["concurrency"], json!(1));
+        assert_eq!(execution["truncated"], json!(true));
+        assert_eq!(execution["results"].as_array().expect("results").len(), 1);
+        let observed = dispatch
+            .observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0]["entity_id"], json!("candidate:first"));
+    });
+}
+
+#[test]
 fn fan_out_indexes_each_child_task_evidence_on_its_entity() {
     with_isolated_home(|_| {
         let mut record = init(ControllerInitRequest {
@@ -1283,6 +1420,8 @@ fn fan_out_indexes_each_child_task_evidence_on_its_entity() {
             AgentTaskLoopPolicyAction::FanOut {
                 dedupe_key: "candidate:review".to_string(),
                 entity_ids: vec![first.clone(), second.clone()],
+                max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
+                fail_fast: true,
                 request_template: json!({
                     "mode": "run_plan",
                     "plan": test_plan(),

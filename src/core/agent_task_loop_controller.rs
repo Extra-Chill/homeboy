@@ -222,6 +222,13 @@ pub enum AgentTaskLoopPolicyAction {
         dedupe_key: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         entity_ids: Vec<String>,
+        #[serde(
+            default = "default_fan_out_max_items",
+            skip_serializing_if = "is_default_fan_out_max_items"
+        )]
+        max_items: usize,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        fail_fast: bool,
         #[serde(default, skip_serializing_if = "Value::is_null")]
         request_template: Value,
     },
@@ -2242,6 +2249,24 @@ fn default_controller_phase() -> String {
     "init".to_string()
 }
 
+pub const DEFAULT_FAN_OUT_MAX_ITEMS: usize = 50;
+
+fn default_fan_out_max_items() -> usize {
+    DEFAULT_FAN_OUT_MAX_ITEMS
+}
+
+fn is_default_fan_out_max_items(value: &usize) -> bool {
+    *value == DEFAULT_FAN_OUT_MAX_ITEMS
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn default_config_version() -> String {
     "v1".to_string()
 }
@@ -2893,6 +2918,8 @@ mod tests {
                 actions: vec![AgentTaskLoopPolicyAction::FanOut {
                     dedupe_key: "validation:run-1:actionable-findings".to_string(),
                     entity_ids: vec!["finding:a".to_string()],
+                    max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
+                    fail_fast: true,
                     request_template: json!({ "kind": "repair" }),
                 }],
             }],
@@ -3009,6 +3036,8 @@ mod tests {
         let action = AgentTaskLoopPolicyAction::FanOut {
             dedupe_key: "fanout:lab".to_string(),
             entity_ids: vec!["finding:1".to_string()],
+            max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
+            fail_fast: true,
             request_template: json!({
                 "task": "repair",
                 "runner": "homeboy-lab",
