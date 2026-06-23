@@ -264,7 +264,7 @@ pub(super) fn evaluate_fuzz_result_envelope_gates(
     gates
 }
 
-fn required_artifact_count(envelope: &FuzzResultEnvelope, kind: &str) -> usize {
+pub(super) fn required_artifact_count(envelope: &FuzzResultEnvelope, kind: &str) -> usize {
     match kind {
         "result_envelope" => 1,
         "case_log" => envelope
