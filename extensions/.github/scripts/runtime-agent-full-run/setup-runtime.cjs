@@ -6,18 +6,51 @@ const path = require('node:path');
 const { normalizeProviderPlugin, run } = require('./lib/common.cjs');
 const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
-try {
+function main() {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const runtime = resolveRuntimeProvider(process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || DEFAULT_RUNTIME_ID, { workspace });
-  run('composer', ['install', '--no-interaction', '--no-progress', '--prefer-dist'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
-  run('npm', ['install'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
+  if (requiresWordPressDependencies(runtime, process.env)) {
+    run('composer', ['install', '--no-interaction', '--no-progress', '--prefer-dist'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
+    run('npm', ['install'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
+  }
   for (const command of [...runtime.setupCommands, ...runtime.buildCommands]) {
     run(command.command, command.args, { cwd: path.join(workspace, command.cwd) });
   }
-  installCheckedOutPhpDependencies(workspace);
+  if (requiresWordPressDependencies(runtime, process.env)) {
+    installCheckedOutPhpDependencies(workspace);
+  }
+}
+
+try {
+  if (require.main === module) {
+    main();
+  }
 } catch (error) {
   process.stderr.write(`${error.message}\n`);
   process.exit(1);
+}
+
+function requiresWordPressDependencies(runtime, env = process.env) {
+  if (runtime?.manifest?.ci_materialization?.requires_wordpress_dependencies === true) {
+    return true;
+  }
+  const runtimeProfileId = env.PROFILE || env.RUNTIME_PROFILE || '';
+  if (!runtimeProfileId) {
+    return false;
+  }
+  let profiles;
+  try {
+    profiles = env.RUNTIME_PROFILES ? JSON.parse(env.RUNTIME_PROFILES) : {};
+  } catch {
+    return false;
+  }
+  const profile = profiles && typeof profiles === 'object' && !Array.isArray(profiles) ? profiles[runtimeProfileId] : null;
+  return Boolean(
+    profile &&
+    typeof profile === 'object' &&
+    !Array.isArray(profile) &&
+    (profile.requires_wordpress_dependencies === true || profile.wordpress_dependencies === true)
+  );
 }
 
 function installCheckedOutPhpDependencies(workspace) {
@@ -47,3 +80,9 @@ function installCheckedOutPhpDependencies(workspace) {
     run('composer', ['install', '--no-interaction', '--no-progress', '--prefer-dist'], { cwd: providerPluginDir });
   }
 }
+
+module.exports = {
+  installCheckedOutPhpDependencies,
+  main,
+  requiresWordPressDependencies,
+};

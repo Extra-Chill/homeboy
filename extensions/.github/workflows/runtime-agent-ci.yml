@@ -17,7 +17,7 @@ on:
         description: Runtime provider identifier. Prefer runtime for new callers.
         required: false
         type: string
-        default: wp-codebox
+        default: ''
       provider:
         description: Model/provider identifier forwarded to the runtime.
         required: false
@@ -63,12 +63,12 @@ on:
         type: string
         default: '{}'
       workload:
-        description: JSON Codebox workload DTO forwarded to the runtime config.
+        description: JSON workload DTO forwarded to the runtime config.
         required: false
         type: string
         default: '{}'
       tool_policy:
-        description: JSON Codebox sandbox tool-policy DTO forwarded to the runtime config.
+        description: JSON runtime tool-policy DTO forwarded to the runtime config.
         required: false
         type: string
         default: '{}'
@@ -98,7 +98,7 @@ on:
         type: string
         default: '[]'
       artifact_declarations:
-        description: JSON array of Codebox artifact declaration DTOs.
+        description: JSON array of runtime artifact declaration DTOs.
         required: false
         type: string
         default: '[]'
@@ -167,7 +167,7 @@ jobs:
           }
 
           const runtimeTask = parseJson('RUNTIME_TASK', {});
-          const runtimeProvider = normalizeRuntimeId(process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || 'wp-codebox');
+          const runtimeProvider = normalizeRuntimeId(process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND);
           const runtimeProfile = process.env.PROFILE || process.env.RUNTIME_PROFILE;
           if (!runtimeProfile) {
             throw new Error('profile or runtime_profile is required.');

@@ -4,7 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { runGenericAgentLoop, writeGenericAgentLoopArtifacts } = require('../lib/generic-agent-loop-runner');
-const { resolveRuntimeProvider } = require('../lib/runtime-provider-resolver.cjs');
+const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../lib/runtime-provider-resolver.cjs');
 
 try {
   const configPath = process.argv[2] || process.env.HOMEBOY_RUNTIME_AGENT_CONFIG_PATH || '';
@@ -13,7 +13,7 @@ try {
   }
   const plan = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   const repoRoot = path.resolve(__dirname, '..', '..');
-  const runtime = resolveRuntimeProvider(plan.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || 'wp-codebox', {
+  const runtime = resolveRuntimeProvider(plan.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || DEFAULT_RUNTIME_ID, {
     repoRoot,
     workspace: plan.component_path || process.cwd(),
     executor: plan.executor || {},

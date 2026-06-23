@@ -12,7 +12,7 @@ const {
   genericAgentTaskRunnerSpec,
   normalizeRuntimeExecutionDescriptor,
 } = require('./generic-agent-task-plan');
-const { normalizeRuntimeId } = require('./runtime-provider-resolver.cjs');
+const { normalizeRuntimeId, resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
 const {
   expandAgentTaskCapabilityBundles,
   expandAgentTaskToolPresets,
@@ -83,10 +83,11 @@ function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
 
 function runtimeBackendForRuntime(runtime) {
   const normalizedRuntime = normalizeRuntimeId(runtime);
-  if (normalizedRuntime === 'wp-codebox') {
-    return 'codebox';
+  try {
+    return resolveRuntimeProvider(normalizedRuntime).executor.backend || normalizedRuntime;
+  } catch {
+    return normalizedRuntime;
   }
-  return normalizedRuntime;
 }
 
 function runtimeAgentCiTaskExecutorConfig(options = {}) {

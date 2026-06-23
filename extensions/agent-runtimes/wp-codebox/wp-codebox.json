@@ -30,6 +30,7 @@
     }
   },
   "ci_materialization": {
+    "requires_wordpress_dependencies": true,
     "checkout": {
       "repo": "Automattic/wp-codebox",
       "target": ".ci/wp-codebox",

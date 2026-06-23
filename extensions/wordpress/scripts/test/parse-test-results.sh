@@ -41,8 +41,34 @@ fi
 ADAPTERS_HELPER="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-${SCRIPT_DIR}/../lib/test-result-adapters.sh}"
 # shellcheck source=../lib/test-result-adapters.sh
 source "$ADAPTERS_HELPER"
+WP_CODEBOX_ADAPTERS_HELPER="${HOMEBOY_WP_CODEBOX_TEST_RESULT_ADAPTERS:-${SCRIPT_DIR}/../../../agent-runtimes/wp-codebox/scripts/lib/test-result-adapters.sh}"
+if [ -f "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
+    # shellcheck source=/dev/null
+    source "$WP_CODEBOX_ADAPTERS_HELPER"
+fi
+
+homeboy_wordpress_parse_with_adapters() {
+    local output_file="$1"
+    shift || true
+    local generic_adapters=()
+
+    for adapter in "$@"; do
+        if [ "$adapter" = "wp-codebox-json" ]; then
+            if type homeboy_parse_wp_codebox_test_results >/dev/null 2>&1 && homeboy_parse_wp_codebox_test_results "$output_file"; then
+                return 0
+            fi
+            continue
+        fi
+        generic_adapters+=("$adapter")
+    done
+
+    if [ "${#generic_adapters[@]}" -gt 0 ]; then
+        homeboy_parse_test_results_with_adapters "$output_file" "${generic_adapters[@]}"
+    fi
+}
+
 if [ "$#" -gt 0 ]; then
-    homeboy_parse_test_results_with_adapters "$OUTPUT_FILE" "$@"
+    homeboy_wordpress_parse_with_adapters "$OUTPUT_FILE" "$@"
 else
-    homeboy_parse_test_results_with_adapters "$OUTPUT_FILE" wp-codebox-json host-smoke phpunit phpunit-testdox
+    homeboy_wordpress_parse_with_adapters "$OUTPUT_FILE" wp-codebox-json host-smoke phpunit phpunit-testdox
 fi

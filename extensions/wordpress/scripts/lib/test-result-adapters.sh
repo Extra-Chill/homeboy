@@ -15,7 +15,6 @@ homeboy_parse_test_results_with_adapters() {
 
     local parsed
     parsed=$(python3 - "$output_file" "$@" <<'PY'
-import json
 import re
 import sys
 
@@ -42,38 +41,6 @@ def count_after(label, line):
 def count_before(label, line):
     match = re.search(rf"(\d+)\s+{re.escape(label)}", line)
     return int(match.group(1)) if match else 0
-
-
-def parse_wp_codebox_json():
-    if '"schema"' not in text or '"wp-codebox/test-results/v1"' not in text:
-        return False
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return False
-    if not isinstance(data, dict) or data.get("schema") != "wp-codebox/test-results/v1":
-        return False
-
-    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
-    total = int(summary.get("total") or 0)
-    passed = int(summary.get("passed") or 0)
-    failed = int(summary.get("failed") or 0)
-    skipped = int(summary.get("skipped") or 0)
-    unknown = int(summary.get("unknown") or 0)
-
-    if total == 0 and isinstance(data.get("suites"), list):
-        for suite in data["suites"]:
-            if not isinstance(suite, dict):
-                continue
-            total += int(suite.get("tests") or suite.get("total") or 0)
-            passed += int(suite.get("passed") or 0)
-            failed += int(suite.get("failed") or 0)
-            skipped += int(suite.get("skipped") or 0)
-            unknown += int(suite.get("unknown") or 0)
-
-    partial = "wp-codebox-unknown" if data.get("status") == "unknown" or unknown > 0 else ""
-    emit(total, passed, failed, skipped, partial)
-    return True
 
 
 def parse_phpunit():
@@ -143,7 +110,6 @@ def parse_cargo_test():
 
 
 adapter_functions = {
-    "wp-codebox-json": parse_wp_codebox_json,
     "host-smoke": parse_host_smoke,
     "phpunit": parse_phpunit,
     "phpunit-testdox": parse_phpunit_testdox,
