@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.255.8] - 2026-06-23
+
+### Changed
+- split observation.rs god-file into modules
+- split preview_ingress.rs god-file into modules
+
+### Fixed
+- fall back when generated notes are unavailable
+
 ## [0.255.7] - 2026-06-23
 
 ### Changed
