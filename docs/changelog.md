@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.256.2] - 2026-06-23
+
+### Changed
+- split pipeline.rs god-file into modules
+- split workspace.rs god-file into modules
+- split doctor.rs god-file into modules
+
 ## [0.256.1] - 2026-06-23
 
 ### Changed
