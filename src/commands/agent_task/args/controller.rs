@@ -78,7 +78,11 @@ pub struct AgentTaskControllerFromSpecArgs {
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]
     pub dispatch_backend: Option<String>,
 
-    /// Provider id to use for controller-spawned dispatch actions when the action omits one.
+    /// Extension-provider selector: the Homeboy executor provider id (e.g.
+    /// `wordpress.codebox-agent-task-executor`) that runs controller-spawned
+    /// dispatch actions when the action omits one. This is NOT a model or AI
+    /// runtime name (codex, opencode, claude-code) — pass those in
+    /// --dispatch-provider-config. Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "dispatch-selector",
         visible_alias = "dispatch-provider-id",
@@ -90,7 +94,10 @@ pub struct AgentTaskControllerFromSpecArgs {
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
 
-    /// Provider config JSON, @file, or - to use for controller-spawned dispatch actions when the action omits one.
+    /// Agent/model provider config (JSON, @file, or -): the nested AI
+    /// runtime/provider/model the selected executor uses for controller-spawned
+    /// dispatch actions when the action omits one. Put AI runtime names like
+    /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }
@@ -133,7 +140,11 @@ pub struct AgentTaskControllerRunFromSpecArgs {
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]
     pub dispatch_backend: Option<String>,
 
-    /// Provider id to use for controller-spawned dispatch actions when the action omits one.
+    /// Extension-provider selector: the Homeboy executor provider id (e.g.
+    /// `wordpress.codebox-agent-task-executor`) that runs controller-spawned
+    /// dispatch actions when the action omits one. This is NOT a model or AI
+    /// runtime name (codex, opencode, claude-code) — pass those in
+    /// --dispatch-provider-config. Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "dispatch-selector",
         visible_alias = "dispatch-provider-id",
@@ -145,7 +156,10 @@ pub struct AgentTaskControllerRunFromSpecArgs {
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
 
-    /// Provider config JSON, @file, or - to use for controller-spawned dispatch actions when the action omits one.
+    /// Agent/model provider config (JSON, @file, or -): the nested AI
+    /// runtime/provider/model the selected executor uses for controller-spawned
+    /// dispatch actions when the action omits one. Put AI runtime names like
+    /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }
@@ -220,7 +234,11 @@ pub struct AgentTaskControllerRunNextArgs {
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]
     pub dispatch_backend: Option<String>,
 
-    /// Provider id to use for controller-spawned dispatch actions when the action omits one.
+    /// Extension-provider selector: the Homeboy executor provider id (e.g.
+    /// `wordpress.codebox-agent-task-executor`) that runs controller-spawned
+    /// dispatch actions when the action omits one. This is NOT a model or AI
+    /// runtime name (codex, opencode, claude-code) — pass those in
+    /// --dispatch-provider-config. Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "dispatch-selector",
         visible_alias = "dispatch-provider-id",
@@ -232,7 +250,10 @@ pub struct AgentTaskControllerRunNextArgs {
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
 
-    /// Provider config JSON, @file, or - to use for controller-spawned dispatch actions when the action omits one.
+    /// Agent/model provider config (JSON, @file, or -): the nested AI
+    /// runtime/provider/model the selected executor uses for controller-spawned
+    /// dispatch actions when the action omits one. Put AI runtime names like
+    /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }
@@ -250,7 +271,11 @@ pub struct AgentTaskControllerRunArgs {
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]
     pub dispatch_backend: Option<String>,
 
-    /// Provider id to use for controller-spawned dispatch actions when the action omits one.
+    /// Extension-provider selector: the Homeboy executor provider id (e.g.
+    /// `wordpress.codebox-agent-task-executor`) that runs controller-spawned
+    /// dispatch actions when the action omits one. This is NOT a model or AI
+    /// runtime name (codex, opencode, claude-code) — pass those in
+    /// --dispatch-provider-config. Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "dispatch-selector",
         visible_alias = "dispatch-provider-id",
@@ -262,7 +287,10 @@ pub struct AgentTaskControllerRunArgs {
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
 
-    /// Provider config JSON, @file, or - to use for controller-spawned dispatch actions when the action omits one.
+    /// Agent/model provider config (JSON, @file, or -): the nested AI
+    /// runtime/provider/model the selected executor uses for controller-spawned
+    /// dispatch actions when the action omits one. Put AI runtime names like
+    /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }

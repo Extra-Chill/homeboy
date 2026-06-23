@@ -11,7 +11,7 @@ use homeboy::core::agent_tasks::promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use homeboy::core::agent_tasks::provider::{
-    AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
+    AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskAggregate, AgentTaskAggregateReport, AgentTaskRequest};
@@ -333,6 +333,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
                 "refreshed": args.refresh,
                 "version": catalog_version,
             },
+            "dispatch_config_layers": dispatch_config_layers(providers),
             "capability_contract": homeboy::core::agent_tasks::provider::provider_capability_contract(),
             "providers": providers,
             "readiness_validation": {
@@ -345,6 +346,66 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
         }),
         0,
     ))
+}
+
+/// Operator-facing explanation of the two distinct dispatch configuration
+/// layers, surfaced in `agent-task providers` so a new operator can tell the
+/// extension-provider selector apart from the nested AI runtime provider config
+/// without reading runtime internals (#6122).
+///
+/// The confusion this prevents: `--dispatch-selector codex` fails because
+/// `codex` is an AI runtime, not a Homeboy executor provider id. The correct
+/// selector is an executor provider id (e.g. `wordpress.codebox-agent-task-executor`),
+/// while `codex` belongs in `--dispatch-provider-config` as the nested provider.
+fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
+    let selectable_ids: Vec<String> = providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect();
+
+    // Surface a worked example using a real registered executor provider id
+    // when one is available, so the operator can copy a known-good selector
+    // instead of guessing. Prefer a codebox-style provider (the case the
+    // issue called out) but fall back to the first provider, then to a
+    // documented literal when no providers are registered here.
+    let example_selector = providers
+        .iter()
+        .find(|provider| {
+            provider.id.contains("codebox")
+                || provider
+                    .extension_id
+                    .as_deref()
+                    .is_some_and(|id| id.contains("codebox"))
+        })
+        .or_else(|| providers.first())
+        .map(|provider| provider.id.clone())
+        .unwrap_or_else(|| "wordpress.codebox-agent-task-executor".to_string());
+
+    serde_json::json!({
+        "summary": "Dispatch configuration has two independent layers that are easy to confuse: the extension-provider selector picks which Homeboy executor runs the task, while the nested provider config picks which AI runtime/model that executor drives. Pass an executor provider id to --dispatch-selector, and pass the AI runtime (codex, opencode, claude-code, ...) inside --dispatch-provider-config — never the other way around.",
+        "layers": [
+            {
+                "layer": "extension_provider_selector",
+                "flags": ["--dispatch-selector", "--dispatch-provider-id", "--selector", "--provider-id"],
+                "selects": "Which Homeboy extension executor provider handles the task.",
+                "value_is": "A registered executor provider id (see the `providers[].id` values below), NOT a model or AI provider family.",
+                "registered_provider_ids": selectable_ids,
+            },
+            {
+                "layer": "agent_model_provider_config",
+                "flags": ["--dispatch-provider-config", "--provider-config", "--dispatch-model", "--model"],
+                "selects": "Which AI runtime/provider/model the selected executor uses (e.g. codex, opencode, claude-code).",
+                "value_is": "Nested provider config JSON (and/or a model override), passed to the executor — this is where an AI runtime name like `codex` belongs.",
+            }
+        ],
+        "common_mistake": "Passing an AI runtime name (codex, opencode, claude-code) to --dispatch-selector. That selects the executor, not the model, so it fails with 'no extension agent-task provider ... matched selector'. Put the AI runtime in --dispatch-provider-config instead.",
+        "example": {
+            "description": "Run a task with a Codebox-style executor (selector) driving the Codex AI runtime (nested provider config).",
+            "command": format!(
+                "homeboy agent-task cook --dispatch-selector {example_selector} --dispatch-provider-config '{{\"provider\":\"codex\"}}' --prompt @task.md"
+            ),
+        }
+    })
 }
 
 pub(crate) fn default_protected_branches() -> Vec<String> {
@@ -670,6 +731,64 @@ mod tests {
             .as_str()
             .expect("finalize command")
             .contains("--path /Users/user/Developer/homeboy@fix-runtime"));
+    }
+
+    #[test]
+    fn dispatch_config_layers_distinguish_selector_from_provider_config() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "wordpress.codebox-agent-task-executor",
+            "backend": "wordpress",
+            "extension_id": "wordpress.codebox",
+        }))
+        .expect("provider fixture");
+
+        let layers = dispatch_config_layers(std::slice::from_ref(&provider));
+
+        // The two layers are named and kept distinct.
+        let layer_names: Vec<&str> = layers["layers"]
+            .as_array()
+            .expect("layers array")
+            .iter()
+            .map(|layer| layer["layer"].as_str().expect("layer name"))
+            .collect();
+        assert_eq!(
+            layer_names,
+            vec!["extension_provider_selector", "agent_model_provider_config"]
+        );
+
+        // The selector layer surfaces the real registered provider id, not a model.
+        assert_eq!(
+            layers["layers"][0]["registered_provider_ids"],
+            serde_json::json!(["wordpress.codebox-agent-task-executor"])
+        );
+
+        // The worked example uses the discovered codebox selector and puts the
+        // AI runtime in the nested provider config.
+        let command = layers["example"]["command"]
+            .as_str()
+            .expect("example command");
+        assert!(command.contains("--dispatch-selector wordpress.codebox-agent-task-executor"));
+        assert!(command.contains("--dispatch-provider-config"));
+        assert!(command.contains("codex"));
+
+        // The common-mistake note calls out the codex-as-selector trap.
+        assert!(layers["common_mistake"]
+            .as_str()
+            .expect("common mistake")
+            .contains("codex"));
+    }
+
+    #[test]
+    fn dispatch_config_layers_falls_back_to_documented_selector_without_providers() {
+        let layers = dispatch_config_layers(&[]);
+        let command = layers["example"]["command"]
+            .as_str()
+            .expect("example command");
+        assert!(command.contains("--dispatch-selector wordpress.codebox-agent-task-executor"));
+        assert_eq!(
+            layers["layers"][0]["registered_provider_ids"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
