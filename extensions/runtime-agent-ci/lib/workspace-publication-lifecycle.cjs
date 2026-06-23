@@ -8,7 +8,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { evaluateGatePlan, evaluateGateResults } = require('./gate-plan-evaluator');
+const { loopGateSummary, withLoopGateResult } = require('./loop-lifecycle.cjs');
 
 function plainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
@@ -113,15 +113,7 @@ function hasCommandChecks(config, key) {
 }
 
 function withLifecycleGateResult(id, result) {
-  const enabled = result.enabled !== false;
-  return {
-    ...result,
-    gate_result: evaluateGatePlan({
-      id,
-      enabled,
-      pass_when: [{ field: 'success', op: 'truthy', reason: id, message: result.error || `${id} failed` }],
-    }, { success: !enabled || result.success !== false }),
-  };
+  return withLoopGateResult(id, result);
 }
 
 function git(workspace, args, options = {}) {
@@ -979,7 +971,7 @@ function runDeterministicWorkspaceLifecycle(config, results, scenario, workspace
     verification_side_effect_files: verificationSideEffectFiles,
   };
   let publication = { opened: false };
-  let gateSummary = evaluateGateResults([
+  let gateSummary = loopGateSummary([
     verification.gate_result,
     drift.gate_result,
     sideEffectPolicy.gate_result,
@@ -1018,7 +1010,7 @@ function runDeterministicWorkspaceLifecycle(config, results, scenario, workspace
     }
   }
 
-  gateSummary = evaluateGateResults([
+  gateSummary = loopGateSummary([
     verification.gate_result,
     drift.gate_result,
     sideEffectPolicy.gate_result,

@@ -13,6 +13,7 @@
     "./gate-plan-evaluator": "./lib/gate-plan-evaluator.js",
     "./loop-policy": "./lib/loop-policy.js",
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js",
+    "./loop-lifecycle": "./lib/loop-lifecycle.cjs",
     "./workspace-publication-lifecycle": "./lib/workspace-publication-lifecycle.cjs"
   },
   "bin": {
@@ -24,7 +25,8 @@
     "test:generic-fanout-reconcile-boundary": "node ../tests/generic-fanout-reconcile-boundary.test.mjs",
     "test:workspace-publication-lifecycle": "node tests/workspace-publication-lifecycle.test.js",
     "test:agent-task-outcome-normalizer": "node tests/agent-task-outcome-normalizer.test.js",
-    "test:gate-plan-evaluator": "node tests/gate-plan-evaluator.test.js"
+    "test:gate-plan-evaluator": "node tests/gate-plan-evaluator.test.js",
+    "test:loop-lifecycle": "node tests/loop-lifecycle.test.js"
   },
   "engines": {
     "node": ">=18.12.0"

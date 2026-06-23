@@ -50,7 +50,21 @@ assert.equal(genericLoop.iterations[0].stop.stop, false);
 assert.equal(genericLoop.iterations[1].stop.reason, 'reconcile_criteria_satisfied');
 assert.equal(genericLoop.evidence_envelope.schema, 'homeboy/generic-deterministic-loop-evidence/v1');
 assert.equal(genericLoop.evidence_envelope.iteration_count, 2);
+assert.equal(genericLoop.evidence_envelope.loop_run.iterations[0].accepted, false);
+assert.equal(genericLoop.evidence_envelope.loop_run.iterations[1].accepted, true);
 assert.equal(genericLoop.evidence.length, 2);
+
+const stoppedUnacceptedLoop = genericLoopRunner.runGenericDeterministicLoop({
+  loopId: 'generic-max-iterations-loop',
+  maxIterations: 1,
+  state: { accepted: false },
+  buildTask: ({ iteration }) => ({ iteration }),
+  executeTask: () => ({ status: 'succeeded' }),
+  collectResult: ({ outcome }) => outcome,
+  reconcile: ({ state }) => ({ ...state, accepted: false }),
+});
+assert.equal(stoppedUnacceptedLoop.iterations[0].stop.reason, 'max_iterations_reached');
+assert.equal(stoppedUnacceptedLoop.evidence_envelope.loop_run.iterations[0].accepted, false);
 
 const runtime = { id: 'fixture-runtime', executor: { backend: 'fixture', path: '/unused' } };
 const plan = {
