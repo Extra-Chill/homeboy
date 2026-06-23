@@ -662,7 +662,10 @@ fn workflow_context_inputs(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
         }
     };
 
-    if let Some(runtime_task) = runtime_task_from_workflow_execution(&workflow.runtime_execution) {
+    if let Some(mut runtime_task) =
+        runtime_task_from_workflow_execution(&workflow.runtime_execution)
+    {
+        apply_runtime_config_to_runtime_task(&mut runtime_task, inputs.get("runtime_config"));
         inputs
             .entry("runtime_task".to_string())
             .or_insert(runtime_task);
@@ -705,6 +708,39 @@ fn runtime_task_from_workflow_execution(runtime_execution: &Value) -> Option<Val
         runtime_task.insert("kind".to_string(), Value::String(kind.to_string()));
     }
     Some(Value::Object(runtime_task))
+}
+
+fn apply_runtime_config_to_runtime_task(runtime_task: &mut Value, runtime_config: Option<&Value>) {
+    let Some(runtime_config) = runtime_config.and_then(Value::as_object) else {
+        return;
+    };
+    let Some(runtime_task) = runtime_task.as_object_mut() else {
+        return;
+    };
+    let input = runtime_task
+        .entry("input".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(input) = input.as_object_mut() else {
+        return;
+    };
+    let options = input
+        .entry("options".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(options) = options.as_object_mut() else {
+        return;
+    };
+
+    for key in ["provider", "model"] {
+        if let Some(value) = runtime_config
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            options
+                .entry(key.to_string())
+                .or_insert_with(|| Value::String(value.to_string()));
+        }
+    }
 }
 
 pub(super) fn workflow_homeboy_plan(

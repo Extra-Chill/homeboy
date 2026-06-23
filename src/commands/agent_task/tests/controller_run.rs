@@ -297,6 +297,8 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
                     serde_json::to_string(&json!({
                         "inputs": {
                             "runtime_config": {
+                                "provider": "codex",
+                                "model": "gpt-5.5",
                                 "component_contracts": [{
                                     "slug": "agents-api",
                                     "path": "runtime/agents-api",
@@ -335,6 +337,14 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
         assert_eq!(
             observed.inputs["runtime_task"]["input"]["package"]["source"],
             "bundles/store-idea-agent"
+        );
+        assert_eq!(
+            observed.inputs["runtime_task"]["input"]["options"]["provider"],
+            "codex"
+        );
+        assert_eq!(
+            observed.inputs["runtime_task"]["input"]["options"]["model"],
+            "gpt-5.5"
         );
         assert_eq!(observed.component_contracts.len(), 1);
         assert_eq!(
