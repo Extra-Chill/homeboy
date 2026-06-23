@@ -73,6 +73,9 @@ const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be object
 const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 const WP_CODEBOX_OWNED_SUBSTRATE_SLUGS = new Set(['agents-api', 'data-machine', 'data-machine-code']);
+const WP_CODEBOX_RUNTIME_PACKAGE_SUBSTRATE_SLUGS = ['agents-api', 'data-machine', 'data-machine-code'];
+const WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY = 'wp-codebox/run-runtime-package';
+const LEGACY_RUNTIME_PACKAGE_ABILITIES = new Set(['agents/run-runtime-package', 'runtime-package/run']);
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -327,24 +330,36 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs, runtimeOptions);
   const runtimeRequirementsForMounts = firstObject(config.runtime_requirements, config.runtimeRequirements) || {};
   const mounts = agentBundleMounts(agentBundle, config.runtime_mounts || config.mounts || runtimeRequirementsForMounts.runtime_mounts || runtimeRequirementsForMounts.mounts || defaults.mounts || runtimeOptions.mounts || []);
-  let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
-  let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, runtimeOptions.agentBundles, []);
+  const provider = config.provider || runtimeOptions.provider || defaults.provider || '';
+  const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
+  const runtimeTask = runtimeTaskWithExecutionDefaults(
+    inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
+    { provider, model, agentBundles }
+  );
+  const preserveCodeboxOwnedSubstrate = runtimeTask?.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY;
+  let componentContracts = componentContractsFromAgentTaskRequest(request, config, {
+    ...runtimeOptions,
+    preserveCodeboxOwnedSubstrate,
+  });
+  if (preserveCodeboxOwnedSubstrate) {
+    componentContracts = codeboxRuntimeComponentContracts({
+      componentContracts: [
+        ...defaultCodeboxOwnedSubstrateComponentContracts(runtimeOptions.settings),
+        ...componentContracts,
+      ],
+    });
+  }
+  let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, runtimeOptions.structuredArtifacts, []);
   const artifactDeclarations = codeboxTaskArtifactDeclarations(artifactDeclarationsFromAgentTaskRequest(request, config, inputs, runtimeOptions));
   const homeboyToolPolicy = homeboyAgentToolPolicy();
   const allowedTools = allowedToolsFromAgentTaskRequest(request, config, inputs, runtimeOptions, defaults);
   const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, runtimeOptions, defaults, allowedTools, homeboyToolPolicy);
   const sandboxAllowedTools = allowedToolsForHomeboyToolPolicy(allowedTools, homeboyToolPolicy);
-  const provider = config.provider || runtimeOptions.provider || defaults.provider || '';
-  const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
   const homeboySecretEnvPlan = homeboyAgentTaskSecretEnvPlan();
   const plannedSecretEnv = secretEnvNamesFromPlan(homeboySecretEnvPlan);
   const agent = firstValue(config.agent, runtimeOptions.agent, '');
-  const runtimeTask = runtimeTaskWithExecutionDefaults(
-    inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
-    { provider, model, agentBundles }
-  );
   const abilityRequirements = runtimeAbilityRequirements(runtimeTask, request, config, inputs, runtimeOptions);
   const providerRuntimeInvocation = providerRuntimeInvocationFromConfig(config, inputs, runtimeOptions);
   const explicitSecretEnv = [
@@ -357,15 +372,20 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
   const runtimeOverlays = runtimeOverlaysFromConfig(config, runtimeOptions, defaults);
   const runtimeRequirements = codeboxRuntimeRequirementsWithoutCodeboxOwnedSubstrate(
-    codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, runtimeOverlays)
+    codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, runtimeOverlays),
+    { preserveCodeboxOwnedSubstrate }
   );
   componentContracts = codeboxRuntimeComponentContracts({
     componentContracts: [
       ...componentContracts,
       ...normalizeArray(runtimeRequirements.component_contracts),
     ],
-  }).filter((contract) => !isCodeboxOwnedSubstrateContract(contract));
+  }).filter((contract) => preserveCodeboxOwnedSubstrate || !isCodeboxOwnedSubstrateContract(contract));
+  if (preserveCodeboxOwnedSubstrate) {
+    assertRuntimePackageSubstratePreflight(componentContracts, runtimeTask);
+  }
   components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
+  const runtimeTaskAbilityNormalization = runtimeTaskAbilityNormalizationEvidence(runtimeTask);
   const context = {
     ...(inputs.context || {}),
     agent_task_id: request.task_id,
@@ -389,6 +409,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
     runtime_task: runtimeTask,
+    ...(runtimeTaskAbilityNormalization ? { runtime_task_ability_normalization: runtimeTaskAbilityNormalization } : {}),
     ability_requirements: abilityRequirements,
     callback_data: firstDefined(inputs.callback_data, inputs.callbackData, config.callback_data, config.callbackData, runtimeOptions.callbackData),
     provider_runtime_invocation: providerRuntimeInvocation,
@@ -656,6 +677,14 @@ class RuntimeOverlayConfigError extends Error {
   }
 }
 
+class RuntimePackageSubstratePreflightError extends Error {
+  constructor(diagnostics) {
+    super(diagnostics[0]?.message || 'WP Codebox runtime-package substrate preflight failed.');
+    this.name = 'RuntimePackageSubstratePreflightError';
+    this.diagnostics = diagnostics;
+  }
+}
+
 function runtimeOverlaysFromConfig(config, options = {}, defaults = {}) {
   return validateRuntimeOverlays(firstDefined(
     config.runtime_overlays,
@@ -710,7 +739,7 @@ function componentContractsFromAgentTaskRequest(request, config, options = {}) {
       ...normalizeArray(config.component_contracts),
       ...normalizeArray(options.componentContracts),
     ],
-  }).filter((contract) => !isCodeboxOwnedSubstrateContract(contract));
+  }).filter((contract) => options.preserveCodeboxOwnedSubstrate || !isCodeboxOwnedSubstrateContract(contract));
 }
 
 function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, defaults = {}, componentContracts = [], runtimeOverlays = []) {
@@ -828,10 +857,59 @@ function genericAbilityRuntimeTask(request, config, inputs) {
     return null;
   }
   const input = runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared);
-  if (ability === 'agents/run-runtime-package') {
-    return { ability, input: agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs) };
+  const normalizedAbility = normalizeRuntimeTaskAbilityForCodebox(ability);
+  const abilityNormalization = runtimeTaskAbilityNormalization({ requestedAbility: ability, normalizedAbility });
+  if (LEGACY_RUNTIME_PACKAGE_ABILITIES.has(ability) || normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
+    return {
+      ability: normalizedAbility,
+      ...(abilityNormalization ? { ability_normalization: abilityNormalization } : {}),
+      input: runtimePackageTaskInputForCodebox(agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs)),
+    };
   }
-  return { ability, input };
+  return { ability: normalizedAbility, ...(abilityNormalization ? { ability_normalization: abilityNormalization } : {}), input };
+}
+
+function normalizeRuntimeTaskAbilityForCodebox(ability) {
+  return LEGACY_RUNTIME_PACKAGE_ABILITIES.has(ability) ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : ability;
+}
+
+function runtimePackageTaskInputForCodebox(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return input;
+  }
+  const normalized = { ...input };
+  const options = normalized.options && typeof normalized.options === 'object' && !Array.isArray(normalized.options) ? normalized.options : {};
+  for (const key of ['provider', 'model']) {
+    if (!firstValue(normalized[key]) && firstValue(options[key])) {
+      normalized[key] = options[key];
+    }
+  }
+  const packageDescriptor = normalized.runtime_package === undefined ? normalized.package : normalized.runtime_package;
+  const runtimePackage = runtimePackageIdentifier(packageDescriptor);
+  if (runtimePackage) {
+    normalized.runtime_package = runtimePackage;
+    if (!firstValue(normalized.agent, normalized.agent_slug)) {
+      normalized.agent = runtimePackage;
+    }
+  }
+  if (packageDescriptor && typeof packageDescriptor === 'object' && !Array.isArray(packageDescriptor)) {
+    normalized.metadata = {
+      ...(normalized.metadata && typeof normalized.metadata === 'object' && !Array.isArray(normalized.metadata) ? normalized.metadata : {}),
+      runtime_package_descriptor: packageDescriptor,
+    };
+  }
+  delete normalized.package;
+  return normalized;
+}
+
+function runtimePackageIdentifier(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return '';
+  }
+  return firstValue(value.slug, value.id, value.name, value.source, '');
 }
 
 function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs) {
@@ -1128,12 +1206,26 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
   if (!runtimeTask || typeof runtimeTask !== 'object' || Array.isArray(runtimeTask)) {
     return runtimeTask;
   }
-  if (!Array.isArray(defaults.agentBundles) || defaults.agentBundles.length === 0) {
-    return runtimeTask;
+  const requestedAbility = runtimeTask.ability;
+  const normalizedAbility = typeof requestedAbility === 'string' ? normalizeRuntimeTaskAbilityForCodebox(requestedAbility) : requestedAbility;
+  const normalizedRuntimeTask = {
+    ...runtimeTask,
+    ...(typeof requestedAbility === 'string' ? { ability: normalizedAbility } : {}),
+  };
+  const abilityNormalization = runtimeTask.ability_normalization || runtimeTaskAbilityNormalization({ requestedAbility, normalizedAbility });
+  if (abilityNormalization) {
+    normalizedRuntimeTask.ability_normalization = abilityNormalization;
+  }
+  if (normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
+    normalizedRuntimeTask.input = runtimePackageTaskInputForCodebox(normalizedRuntimeTask.input);
+  }
+  const applyExecutionDefaults = normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY || (Array.isArray(defaults.agentBundles) && defaults.agentBundles.length > 0);
+  if (!applyExecutionDefaults) {
+    return normalizedRuntimeTask;
   }
 
-  const input = runtimeTask.input && typeof runtimeTask.input === 'object' && !Array.isArray(runtimeTask.input)
-    ? runtimeTask.input
+  const input = normalizedRuntimeTask.input && typeof normalizedRuntimeTask.input === 'object' && !Array.isArray(normalizedRuntimeTask.input)
+    ? normalizedRuntimeTask.input
     : {};
   const defaultInput = Object.fromEntries(Object.entries({
     provider: defaults.provider,
@@ -1141,16 +1233,103 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
   }).filter(([, value]) => value !== '' && value !== undefined));
 
   if (Object.keys(defaultInput).length === 0) {
-    return runtimeTask;
+    return normalizedRuntimeTask;
   }
 
   return {
-    ...runtimeTask,
-    input: {
+    ...normalizedRuntimeTask,
+    input: normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY ? runtimePackageTaskInputForCodebox({
+      ...defaultInput,
+      ...input,
+    }) : {
       ...defaultInput,
       ...input,
     },
   };
+}
+
+function runtimeTaskAbilityNormalization({ requestedAbility, normalizedAbility }) {
+  if (typeof normalizedAbility !== 'string') {
+    return null;
+  }
+  if (requestedAbility === normalizedAbility && normalizedAbility !== WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
+    return null;
+  }
+  const runtimePackage = normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY;
+  return {
+    schema: 'wp-codebox/runtime-task-ability-normalization/v1',
+    requested_ability: requestedAbility || normalizedAbility,
+    normalized_codebox_ability: normalizedAbility,
+    bridge_ability: runtimePackage ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : normalizedAbility,
+    runtime_ability: normalizedAbility,
+    owning_components: runtimePackage ? ['wp-codebox', ...WP_CODEBOX_RUNTIME_PACKAGE_SUBSTRATE_SLUGS] : ['wp-codebox'],
+  };
+}
+
+function runtimeTaskAbilityNormalizationEvidence(runtimeTask = {}) {
+  const normalization = runtimeTask?.ability_normalization;
+  if (!normalization || typeof normalization !== 'object' || Array.isArray(normalization)) {
+    return null;
+  }
+  return normalization;
+}
+
+function assertRuntimePackageSubstratePreflight(componentContracts = [], runtimeTask = {}) {
+  const diagnostics = runtimePackageSubstratePreflightDiagnostics(componentContracts, runtimeTask);
+  if (diagnostics.length > 0) {
+    throw new RuntimePackageSubstratePreflightError(diagnostics);
+  }
+}
+
+function runtimePackageSubstratePreflightDiagnostics(componentContracts = [], runtimeTask = {}) {
+  const contractsBySlug = new Map(normalizeArray(componentContracts).flatMap((contract) => {
+    const slug = typeof contract?.slug === 'string' ? contract.slug.trim() : '';
+    return slug ? [[slug, contract]] : [];
+  }));
+  return WP_CODEBOX_RUNTIME_PACKAGE_SUBSTRATE_SLUGS.flatMap((slug) => {
+    const contract = contractsBySlug.get(slug);
+    if (!contract) {
+      return [runtimePackageSubstrateDiagnostic(slug, 'missing_contract', runtimeTask)];
+    }
+    if (!firstValue(contract.path, contract.source, contract.target)) {
+      return [runtimePackageSubstrateDiagnostic(slug, 'missing_path', runtimeTask)];
+    }
+    return [];
+  });
+}
+
+function runtimePackageSubstrateDiagnostic(slug, reason, runtimeTask = {}) {
+  const settingKeys = runtimePackageSubstrateSettingKeys(slug);
+  const envKeys = runtimePackageSubstrateEnvKeys(slug);
+  return {
+    class: 'codebox.preflight.runtime_package_substrate',
+    message: `WP Codebox runtime-package tasks require the ${slug} substrate component contract with a path before dispatch. Provide executor.config.component_contracts or configure ${settingKeys.join('/')} / ${envKeys.join('/')} for Codebox-owned substrate discovery.`,
+    data: {
+      component: slug,
+      reason,
+      requested_ability: runtimeTask?.ability_normalization?.requested_ability || runtimeTask?.ability,
+      normalized_codebox_ability: runtimeTask?.ability || WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY,
+      required_components: WP_CODEBOX_RUNTIME_PACKAGE_SUBSTRATE_SLUGS,
+      settings_keys: settingKeys,
+      env_keys: envKeys,
+    },
+  };
+}
+
+function runtimePackageSubstrateSettingKeys(slug) {
+  return {
+    'agents-api': ['wp_codebox_agents_api_path', 'agents_api_path'],
+    'data-machine': ['wp_codebox_data_machine_path', 'data_machine_path'],
+    'data-machine-code': ['wp_codebox_data_machine_code_path', 'data_machine_code_path'],
+  }[slug] || [];
+}
+
+function runtimePackageSubstrateEnvKeys(slug) {
+  return {
+    'agents-api': ['WP_CODEBOX_AGENTS_API_PATH', 'HOMEBOY_WP_CODEBOX_AGENTS_API_PATH'],
+    'data-machine': ['WP_CODEBOX_DATA_MACHINE_PATH', 'HOMEBOY_WP_CODEBOX_DATA_MACHINE_PATH'],
+    'data-machine-code': ['WP_CODEBOX_DATA_MACHINE_CODE_PATH', 'HOMEBOY_WP_CODEBOX_DATA_MACHINE_CODE_PATH'],
+  }[slug] || [];
 }
 
 function runtimeComponentPaths(config, options = {}) {
@@ -1321,14 +1500,52 @@ function isCodeboxOwnedSubstrateContract(contract) {
   return WP_CODEBOX_OWNED_SUBSTRATE_SLUGS.has(slug);
 }
 
-function codeboxRuntimeRequirementsWithoutCodeboxOwnedSubstrate(runtimeRequirements = {}) {
+function codeboxRuntimeRequirementsWithoutCodeboxOwnedSubstrate(runtimeRequirements = {}, options = {}) {
   if (!runtimeRequirements || typeof runtimeRequirements !== 'object' || Array.isArray(runtimeRequirements)) {
+    return runtimeRequirements;
+  }
+  if (options.preserveCodeboxOwnedSubstrate) {
     return runtimeRequirements;
   }
   return {
     ...runtimeRequirements,
     component_contracts: normalizeArray(runtimeRequirements.component_contracts).filter((contract) => !isCodeboxOwnedSubstrateContract(contract)),
     extra_plugins: normalizeArray(runtimeRequirements.extra_plugins).filter((contract) => !isCodeboxOwnedSubstrateContract(contract)),
+  };
+}
+
+function defaultCodeboxOwnedSubstrateComponentContracts(settings = {}) {
+  return [
+    codeboxOwnedSubstrateComponentContract('agents-api', firstExistingPath(
+      settings.wp_codebox_agents_api_path,
+      settings.agents_api_path,
+      process.env.WP_CODEBOX_AGENTS_API_PATH,
+      process.env.HOMEBOY_WP_CODEBOX_AGENTS_API_PATH,
+    )),
+    codeboxOwnedSubstrateComponentContract('data-machine', firstExistingPath(
+      settings.wp_codebox_data_machine_path,
+      settings.data_machine_path,
+      process.env.WP_CODEBOX_DATA_MACHINE_PATH,
+      process.env.HOMEBOY_WP_CODEBOX_DATA_MACHINE_PATH,
+    )),
+    codeboxOwnedSubstrateComponentContract('data-machine-code', firstExistingPath(
+      settings.wp_codebox_data_machine_code_path,
+      settings.data_machine_code_path,
+      process.env.WP_CODEBOX_DATA_MACHINE_CODE_PATH,
+      process.env.HOMEBOY_WP_CODEBOX_DATA_MACHINE_CODE_PATH,
+    )),
+  ].filter(Boolean);
+}
+
+function codeboxOwnedSubstrateComponentContract(slug, componentPath) {
+  if (!componentPath) {
+    return null;
+  }
+  return {
+    slug,
+    path: componentPath,
+    loadAs: 'plugin',
+    activate: true,
   };
 }
 
@@ -2708,14 +2925,32 @@ function codeboxRunSummary(result, options = {}) {
     return null;
   }
   try {
-    return enrichFailedCodeboxRunSummary(
+    return reconcileRunSummaryWithPublicEnvelope(enrichFailedCodeboxRunSummary(
       options.normalizeAgentTaskRunResult(result, { exitStatus: options.exitStatus ?? 0 }),
       result,
       options,
-    );
+    ), result, options);
   } catch {
     return null;
   }
+}
+
+function reconcileRunSummaryWithPublicEnvelope(runSummary, result = {}, options = {}) {
+  const publicEnvelope = codeboxPublicResultEnvelope(result, options);
+  if (!runSummary || typeof runSummary !== 'object' || Array.isArray(runSummary) || publicEnvelope?.success !== true || runSummary.status !== 'failed') {
+    return runSummary;
+  }
+  return {
+    ...runSummary,
+    status: 'succeeded',
+    success: true,
+    failure_classification: undefined,
+    metadata: {
+      ...(runSummary.metadata && typeof runSummary.metadata === 'object' && !Array.isArray(runSummary.metadata) ? runSummary.metadata : {}),
+      public_envelope_status: publicEnvelope.status,
+      public_envelope_success: true,
+    },
+  };
 }
 
 function enrichFailedCodeboxRunSummary(runSummary, result = {}, options = {}) {
@@ -3037,5 +3272,6 @@ module.exports = {
   providerContract,
   providerRuntimeInvocationContract,
   codeboxTaskRequestFromAgentTaskRequest,
+  reconcileRunSummaryWithPublicEnvelope,
   agentTaskOutcomeFromCodeboxResult,
 };
