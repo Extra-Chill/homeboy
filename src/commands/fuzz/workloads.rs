@@ -17,11 +17,75 @@ use super::types::FuzzWorkloadOutput;
 
 pub(super) type FuzzRigContext = rig::RigSourceContext;
 
-pub(super) fn load_rig(rig_id: Option<&str>) -> homeboy::core::Result<Option<FuzzRigContext>> {
+pub(super) fn load_rig(
+    rig_id: Option<&str>,
+    settings: &SettingArgs,
+) -> homeboy::core::Result<Option<FuzzRigContext>> {
     let Some(rig_id) = rig_id else {
         return Ok(None);
     };
-    Ok(Some(rig::RigSourceContext::load(rig_id)?))
+    let mut context = rig::RigSourceContext::load(rig_id)?;
+    apply_fuzz_rig_setting_overrides(&mut context.spec, settings)?;
+    Ok(Some(context))
+}
+
+fn apply_fuzz_rig_setting_overrides(
+    spec: &mut RigSpec,
+    settings: &SettingArgs,
+) -> homeboy::core::Result<()> {
+    if settings.setting.is_empty() && settings.setting_json.is_empty() {
+        return Ok(());
+    }
+
+    let mut value = serde_json::to_value(&*spec).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "failed to encode fuzz rig spec for setting overrides: {error}"
+        ))
+    })?;
+    for (key, raw) in &settings.setting {
+        apply_dotted_json_override(
+            &mut value,
+            key,
+            serde_json::Value::String(raw.clone()),
+        );
+    }
+    for (key, raw) in &settings.setting_json {
+        apply_dotted_json_override(&mut value, key, raw.clone());
+    }
+    *spec = serde_json::from_value(value).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "setting",
+            format!("fuzz rig setting overrides produced an invalid rig spec: {error}"),
+            None,
+            None,
+        )
+    })?;
+    Ok(())
+}
+
+fn apply_dotted_json_override(target: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+    let parts = key.split('.').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    if parts.is_empty() {
+        return;
+    }
+    let mut current = target;
+    for part in &parts[..parts.len() - 1] {
+        if !current.is_object() {
+            *current = serde_json::Value::Object(serde_json::Map::new());
+        }
+        current = current
+            .as_object_mut()
+            .expect("current setting target is object")
+            .entry((*part).to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    }
+    if !current.is_object() {
+        *current = serde_json::Value::Object(serde_json::Map::new());
+    }
+    current
+        .as_object_mut()
+        .expect("setting target is object")
+        .insert(parts[parts.len() - 1].to_string(), value);
 }
 
 pub(super) fn resolve_component_id(
@@ -130,6 +194,58 @@ fn expand_rig_setting_value(spec: &RigSpec, value: &mut serde_json::Value) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuzz_rig_setting_overrides_update_component_extension_context() {
+        let mut spec: RigSpec = serde_json::from_value(serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": "/workspace/stale/plugins/package",
+                    "branch": "main",
+                    "extensions": {
+                        "wordpress": {
+                            "wp_codebox_source_root": "/workspace/stale",
+                            "wp_codebox_source_subpath": "plugins/package"
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("parse rig spec");
+        let settings = SettingArgs {
+            setting: vec![
+                (
+                    "components.package.path".to_string(),
+                    "/workspace/current/plugins/package".to_string(),
+                ),
+                (
+                    "components.package.extensions.wordpress.wp_codebox_source_root".to_string(),
+                    "/workspace/current".to_string(),
+                ),
+            ],
+            setting_json: vec![],
+        };
+
+        apply_fuzz_rig_setting_overrides(&mut spec, &settings).expect("apply overrides");
+
+        let component = spec.components.get("package").expect("component");
+        assert_eq!(component.path, "/workspace/current/plugins/package");
+        assert_eq!(
+            component
+                .extensions
+                .as_ref()
+                .and_then(|extensions| extensions.get("wordpress"))
+                .and_then(|extension| extension.settings.get("wp_codebox_source_root"))
+                .and_then(serde_json::Value::as_str),
+            Some("/workspace/current")
+        );
     }
 }
 
