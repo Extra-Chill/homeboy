@@ -8,6 +8,10 @@ const {
   runGenericDeterministicLoop,
   writeGenericAgentLoopArtifacts,
 } = require('./generic-agent-loop-runner');
+const {
+  loopPolicyMaxRevolutions,
+  normalizeLoopPolicy: normalizeSharedLoopPolicy,
+} = require('./loop-policy');
 const { resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
 
 function runHeadlessDeterministicLoop(options = {}) {
@@ -146,7 +150,11 @@ function runHeadlessPolicyLoop(options = {}) {
 
   const loop = runGenericDeterministicLoop({
     loopId: `${baseRequest.task_id}-headless-policy`,
+    mode: loopPolicy.mode,
+    maxRevolutions: loopPolicy.max_revolutions,
     maxIterations: loopPolicy.max_iterations,
+    durationMs: loopPolicy.duration_ms,
+    deadlineAt: loopPolicy.deadline_at,
     state: {
       request: baseRequest,
       plan: basePlan,
@@ -241,7 +249,7 @@ function runHeadlessPolicyLoop(options = {}) {
         return { stop: true, reason: stopReason };
       }
       if (context.iteration >= loopPolicy.max_iterations) {
-        stopReason = 'max_iterations_reached';
+        stopReason = 'max_revolutions_reached';
         return { stop: true, reason: stopReason };
       }
       return { stop: false };
@@ -261,8 +269,10 @@ function runHeadlessPolicyLoop(options = {}) {
   const policyStatus = {
     schema: 'homeboy/headless-loop-policy-status/v1',
     status: latestAccepted ? 'succeeded' : 'failed',
-    stop_reason: stopReason || 'unknown',
+    stop_reason: stopReason || loop.iterations.at(-1)?.stop?.reason || 'unknown',
     max_iterations: loopPolicy.max_iterations,
+    max_revolutions: loopPolicy.max_revolutions,
+    mode: loopPolicy.mode,
     iteration_count: iterationRecords.length,
     accepted: latestAccepted,
     iterations: iterationRecords,
@@ -307,11 +317,18 @@ function policyIterationOutcome(task, candidate, validation) {
 
 function normalizeLoopPolicy(plan) {
   const raw = optionalObject(plan.loop_policy || plan.loopPolicy);
-  const maxIterations = positiveInteger(raw.max_iterations || raw.maxIterations || plan.max_iterations || plan.maxIterations);
+  const primitive = normalizeSharedLoopPolicy({ ...plan, ...raw }, { defaultMode: 'count', defaultMaxRevolutions: 1 });
+  const maxIterations = loopPolicyMaxRevolutions(primitive, {
+    nonCountMaxRevolutions: plan.max_synchronous_revolutions || plan.maxSynchronousRevolutions,
+  });
   const enabled = Object.keys(raw).length > 0 || maxIterations > 1;
   return {
     enabled,
+    mode: primitive.mode,
     max_iterations: maxIterations || 1,
+    max_revolutions: primitive.max_revolutions,
+    duration_ms: primitive.duration_ms,
+    deadline_at: primitive.deadline_at,
     accepted_statuses: normalizeArray(raw.accepted_statuses || raw.acceptedStatuses).length > 0
       ? normalizeArray(raw.accepted_statuses || raw.acceptedStatuses)
       : ['accepted', 'succeeded', 'passed', 'no_op'],

@@ -101,7 +101,7 @@ const boundedFailure = runHeadlessDeterministicLoop({
 assert.equal(boundedCalls, 2);
 assert.equal(boundedFailure.status, 'failed');
 assert.equal(boundedFailure.tasks[0].loop_policy.status, 'failed');
-assert.equal(boundedFailure.tasks[0].loop_policy.stop_reason, 'max_iterations_reached');
+assert.equal(boundedFailure.tasks[0].loop_policy.stop_reason, 'max_revolutions_reached');
 assert.equal(boundedFailure.tasks[0].loop_policy.iteration_count, 2);
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-headless-loop-policy-'));

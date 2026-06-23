@@ -11,6 +11,7 @@
     "./bounded-production-loop-runner": "./lib/bounded-production-loop-runner.js",
     "./fanout-reconcile-runner": "./lib/fanout-reconcile-runner.js",
     "./gate-plan-evaluator": "./lib/gate-plan-evaluator.js",
+    "./loop-policy": "./lib/loop-policy.js",
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js",
     "./workspace-publication-lifecycle": "./lib/workspace-publication-lifecycle.cjs"
   },

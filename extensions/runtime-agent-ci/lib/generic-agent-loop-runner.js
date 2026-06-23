@@ -6,6 +6,12 @@ const { spawnSync } = require('node:child_process');
 const { runDeterministicLoop } = require('./deterministic-loop-runner');
 const { runBoundedProductionLoop } = require('./bounded-production-loop-runner');
 const { validateControllerLoopProof } = require('./controller-loop-proof-validator');
+const {
+  CONTINUE,
+  evaluateLoopPolicy,
+  loopPolicyMaxRevolutions,
+  normalizeLoopPolicy,
+} = require('./loop-policy');
 const { runtimeAgentCiTaskExecutorConfig } = require('./runtime-agent-ci-plan');
 const { evaluateGatePlan } = require('./gate-plan-evaluator');
 
@@ -110,7 +116,10 @@ function runGenericDeterministicLoop(options = {}) {
   const reconcile = options.reconcile || defaultGenericReconcile;
   const shouldContinue = options.shouldContinue || options.should_continue || defaultShouldContinue;
   const stopPolicy = options.stopPolicy || options.stop_policy || defaultStopPolicy;
-  const maxIterations = positiveInteger(options.maxIterations || options.max_iterations) || 1;
+  const loopPolicy = normalizeLoopPolicy(options, { defaultMode: 'count', defaultMaxRevolutions: 1 });
+  const maxIterations = loopPolicyMaxRevolutions(loopPolicy, {
+    nonCountMaxRevolutions: options.maxSynchronousRevolutions || options.max_synchronous_revolutions,
+  });
   const initialState = optionalObject(options.state || options.initialState || options.initial_state);
   const tasks = [];
   const results = [];
@@ -197,6 +206,8 @@ function runGenericDeterministicLoop(options = {}) {
       results,
       evidence,
       maxIterations,
+      loopPolicy,
+      now: options.now,
     }),
   });
   const finalOutcome = results[results.length - 1] || null;
@@ -208,6 +219,7 @@ function runGenericDeterministicLoop(options = {}) {
     tasks,
     results,
     evidence,
+    loop_policy: loopPolicy,
     evidence_envelope: {
       schema: 'homeboy/generic-deterministic-loop-evidence/v1',
       loop_id: loopId,
@@ -238,6 +250,17 @@ function evaluateGenericLoopGateDecision(options = {}) {
   }, { stop_requested: isPlainObject(stop) ? stop.stop : Boolean(stop) });
   if (stopGate.action === 'stop') {
     return { stop: true, reason: stopGate.reason, data: { gate_result: stopGate } };
+  }
+
+  const policyStatus = evaluateLoopPolicy(options.loopPolicy, {
+    completed_revolutions: gateContext.iteration,
+    started_at: options.context.started_at || options.context.startedAt,
+    now: options.now,
+    cancelled: options.context.cancelled,
+    cancellation_signal: options.context.cancellation_signal || options.context.cancellationSignal,
+  });
+  if (policyStatus.reason !== CONTINUE) {
+    return { stop: true, reason: policyStatus.reason, data: { loop_policy_status: policyStatus } };
   }
 
   const continueDecision = options.shouldContinue(gateContext);
@@ -367,7 +390,7 @@ function defaultShouldContinue() {
 
 function defaultStopPolicy({ iteration, maxIterations }) {
   return iteration >= maxIterations
-    ? { stop: true, reason: 'max_iterations_reached' }
+    ? { stop: true, reason: 'max_revolutions_reached' }
     : { stop: false };
 }
 

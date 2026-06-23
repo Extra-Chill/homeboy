@@ -91,4 +91,33 @@ assert.deepEqual(retrySubmissions, [
   { token: 'retry-1-2', retryAfterMs: 250 },
 ]);
 
+now = 5000;
+const durationLoop = createDurableDeterministicLoop({
+  mode: 'duration',
+  durationMs: 500,
+  now: () => now,
+  submitIteration: () => ({ token: 'duration-1' }),
+  pollIteration: () => ({ status: 'completed', outcome: { status: 'succeeded' } }),
+});
+let durationState = durationLoop.submitIteration({});
+assert.equal(durationState.started_at, 5000);
+now = 5600;
+durationState = durationLoop.pollIteration(durationState);
+assert.equal(durationState.done, true);
+assert.equal(durationState.stop_reason, 'duration_elapsed');
+
+now = 7000;
+const deadlineLoop = createDurableDeterministicLoop({
+  mode: 'duration',
+  deadlineAt: 7000,
+  now: () => now,
+  submitIteration: () => ({ token: 'deadline-1' }),
+  pollIteration: () => ({ status: 'completed', outcome: { status: 'succeeded' } }),
+});
+const deadlineState = deadlineLoop.submitIteration({});
+assert.equal(deadlineState.started_at, 7000);
+assert.equal(deadlineState.done, true);
+assert.equal(deadlineState.stop_reason, 'deadline_reached');
+assert.equal(deadlineState.current, null);
+
 process.stdout.write('Durable deterministic loop resume and polling checks passed\n');
