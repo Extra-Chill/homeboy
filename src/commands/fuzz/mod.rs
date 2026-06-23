@@ -359,6 +359,45 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_gate_evaluation_accepts_metadata_artifact_refs() {
+        let campaign = FuzzCampaign {
+            schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            id: "campaign-1".to_string(),
+            title: None,
+            safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            cases: Vec::new(),
+            seeds: Vec::new(),
+            coverage: Vec::new(),
+            coverage_summary: None,
+            findings: Vec::new(),
+            artifacts: Vec::new(),
+            thresholds: Vec::new(),
+            lifecycle: None,
+            provenance: None,
+            replay: None,
+            metadata: serde_json::json!({
+                "artifact_refs": [{
+                    "name": "external_http_guardrail",
+                    "path": "woocommerce-external-http-guardrail/external_http_guardrail.json",
+                    "role": "fuzz_report"
+                }]
+            }),
+            extra: std::collections::BTreeMap::new(),
+        };
+
+        let gates = evaluate_fuzz_gates(&campaign);
+        let summary = fuzz_coverage_completeness(&campaign);
+
+        assert_eq!(gate_status(&gates), "passed");
+        assert_eq!(summary.target_coverage_ratio, 1.0);
+        assert_eq!(summary.operation_coverage_ratio, 1.0);
+    }
+
+    #[test]
     fn fuzz_gate_evaluation_requires_complete_target_and_operation_coverage() {
         let mut campaign = FuzzCampaign {
             schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
