@@ -726,6 +726,27 @@ assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.input.model, 'gpt-5.5')
 assert.deepEqual(explicitLegacyRuntimeTaskInput.runtime_task.input.metadata.runtime_package_descriptor, { slug: 'example-agent' });
 assert.equal(Object.hasOwn(explicitLegacyRuntimeTaskInput.runtime_task.input, 'package'), false);
 
+const runtimeConfigOptionsRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'runtime-config-options-runtime-task-1',
+  executor: { backend: 'codebox', config: {} },
+  instructions: 'Run an explicit legacy runtime task with controller runtime-config options.',
+  inputs: {
+    runtime_task: {
+      kind: 'bundle',
+      ability: 'runtime-package/run',
+      input: {
+        package: { slug: 'example-agent' },
+        options: { provider: 'codex', model: 'gpt-5.5' },
+      },
+    },
+  },
+});
+assert.equal(runtimeConfigOptionsRuntimeTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.equal(runtimeConfigOptionsRuntimeTaskInput.runtime_task.input.provider, 'codex');
+assert.equal(runtimeConfigOptionsRuntimeTaskInput.runtime_task.input.model, 'gpt-5.5');
+assert.deepEqual(runtimeConfigOptionsRuntimeTaskInput.runtime_task.input.options, { provider: 'codex', model: 'gpt-5.5' });
+
 const providerAndControllerArtifactsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'provider-and-controller-artifacts-task-1',

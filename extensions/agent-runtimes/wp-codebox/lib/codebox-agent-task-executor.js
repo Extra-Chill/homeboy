@@ -824,6 +824,12 @@ function runtimePackageTaskInputForCodebox(input) {
     return input;
   }
   const normalized = { ...input };
+  const options = normalized.options && typeof normalized.options === 'object' && !Array.isArray(normalized.options) ? normalized.options : {};
+  for (const key of ['provider', 'model']) {
+    if (!firstValue(normalized[key]) && firstValue(options[key])) {
+      normalized[key] = options[key];
+    }
+  }
   const packageDescriptor = normalized.runtime_package === undefined ? normalized.package : normalized.runtime_package;
   const runtimePackage = runtimePackageIdentifier(packageDescriptor);
   if (runtimePackage) {
