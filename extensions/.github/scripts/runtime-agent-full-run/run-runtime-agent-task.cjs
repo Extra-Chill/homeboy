@@ -18,6 +18,7 @@ const {
   runGenericAgentLoop,
   writeGenericAgentLoopArtifacts,
 } = require('../../../runtime-agent-ci');
+const { resolveControllerLoopProofPolicy } = require('./lib/proof-profile.cjs');
 
 const SCRIPT_DIR = __dirname;
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '..', '..', '..');
@@ -37,16 +38,7 @@ function readJson(filePath) {
 try {
   const configPath = readConfigPath();
   const config = readJson(configPath);
-  const controllerLoopProofPolicy = {
-    ...optionalObject(config.controller_loop_proof),
-    ...optionalObject(config.controller_loop_proof_policy),
-  };
-  if (!Object.prototype.hasOwnProperty.call(controllerLoopProofPolicy, 'preview_required')) {
-    controllerLoopProofPolicy.preview_required = true;
-  }
-  if (!Object.prototype.hasOwnProperty.call(controllerLoopProofPolicy, 'publication_required')) {
-    controllerLoopProofPolicy.publication_required = config.success_requires_pr !== false;
-  }
+  const controllerLoopProofPolicy = resolveControllerLoopProofPolicy(config);
   const runtime = resolveRuntimeProvider(config.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || DEFAULT_RUNTIME_ID, { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd(), executor: config.executor || {} });
   const result = runGenericAgentLoop({
     plan: config,
@@ -80,8 +72,4 @@ try {
 } catch (error) {
   console.error(error && error.message ? error.message : String(error));
   process.exitCode = 1;
-}
-
-function optionalObject(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }

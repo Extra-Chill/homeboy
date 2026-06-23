@@ -217,6 +217,7 @@ jobs:
 - `runtime_mounts` adds selected-runtime mounts. It must be a JSON array.
 - `runtime_overlays` forwards runtime overlay entries to the Codebox runtime profile payload. It must be a JSON array; WP Codebox owns field-level overlay schema validation.
 - `workload_run_before`, `workload_run_after`, and `required_abilities` must be JSON arrays.
+- `proof_profile` controls controller-loop proof evidence. `artifact_only` is the generic default and does not require preview or PR/publication evidence, `cook_to_pr` requires durable preview plus pull-request evidence, and `none` declares no extra proof requirements. Explicit `controller_loop_proof` / `controller_loop_proof_policy` config still overrides profile fields.
 - `workload_run_after` runs post-agent verifier hooks in the same WordPress scenario, so consumers can assert the agent left WordPress in a valid state.
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
 - `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. `tool_recorders` remains a legacy alias for callers that also need forced parameters.

@@ -143,6 +143,7 @@ function buildConfig(env) {
     workload_run_after: parseJsonInput('workload_run_after', env.WORKLOAD_RUN_AFTER || '[]', 'array', []),
     required_abilities: parseJsonInput('required_abilities', env.REQUIRED_ABILITIES || '[]', 'array', []),
     success_requires_pr: env.SUCCESS_REQUIRES_PR !== 'false',
+    proof_profile: env.PROOF_PROFILE || 'artifact_only',
     success_completion_outcomes: parseJsonInput('success_completion_outcomes', env.SUCCESS_COMPLETION_OUTCOMES || '[]', 'array', []),
     provider: env.PROVIDER || '',
     model: env.MODEL || '',

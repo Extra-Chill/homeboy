@@ -138,6 +138,10 @@ name: Runtime Agent Full Run (reusable)
       success_requires_pr:
         type: boolean
         default: true
+      proof_profile:
+        description: Controller-loop proof profile: artifact_only, cook_to_pr, or none.
+        type: string
+        default: artifact_only
       success_completion_outcomes:
         description: JSON array of completion outcome names that may satisfy success without a PR.
         type: string
@@ -517,6 +521,7 @@ jobs:
           REQUIRED_ABILITIES: ${{ inputs.required_abilities }}
           ABILITY_REQUIREMENTS: ${{ inputs.ability_requirements }}
           SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
+          PROOF_PROFILE: ${{ inputs.proof_profile }}
           SUCCESS_COMPLETION_OUTCOMES: ${{ inputs.success_completion_outcomes }}
           MAX_TURNS: ${{ inputs.max_turns }}
           STEP_BUDGET: ${{ inputs.step_budget }}
