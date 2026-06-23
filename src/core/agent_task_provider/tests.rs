@@ -713,6 +713,31 @@ fn provider_selection_reports_exact_backend_selector_mismatch() {
 }
 
 #[test]
+fn provider_readiness_selector_mismatch_explains_runtime_provider_confusion() {
+    let (_, mut provider) = request("task-a", "node provider.js".to_string());
+    provider.id = "example.sandbox-agent-task-executor".to_string();
+    provider.backend = "sandbox".to_string();
+
+    let error = validate_provider_runner_readiness_for_backend_with_providers(
+        &[provider],
+        "sandbox",
+        Some("codex"),
+    )
+    .expect_err("selector mismatch should fail before runner readiness");
+
+    assert_eq!(error.details["field"], "selector");
+    let suggestions = error.details["tried"]
+        .as_array()
+        .expect("tried suggestions");
+    assert!(suggestions.iter().any(|value| value
+        .as_str()
+        .is_some_and(|suggestion| suggestion.contains("nested AI runtime provider"))));
+    assert!(suggestions.iter().any(|value| value
+        .as_str()
+        .is_some_and(|suggestion| suggestion.contains("example.sandbox-agent-task-executor"))));
+}
+
+#[test]
 fn provider_selection_matches_unique_extension_alias() {
     let (_, mut provider) = request("task-a", "node provider.js".to_string());
     provider.id = "extension-a.provider".to_string();
@@ -1936,7 +1961,7 @@ fn scheduler_reports_missing_extension_provider() {
 fn scheduler_reports_provider_selector_mismatch() {
     let (mut request, mut provider) = request("task-selector-mismatch", "unused".to_string());
     request.executor.backend = "synthetic-runtime".to_string();
-    request.executor.selector = Some("fast".to_string());
+    request.executor.selector = Some("codex".to_string());
     provider.id = "example.synthetic-agent-task-executor".to_string();
     provider.backend = "synthetic-runtime".to_string();
     let scheduler =
@@ -1954,6 +1979,13 @@ fn scheduler_reports_provider_selector_mismatch() {
     assert_eq!(
         aggregate.outcomes[0].diagnostics[0].data["available_provider_ids"],
         json!(["example.synthetic-agent-task-executor"])
+    );
+    assert!(aggregate.outcomes[0].diagnostics[0]
+        .message
+        .contains("nested AI runtime provider"));
+    assert_eq!(
+        aggregate.outcomes[0].diagnostics[0].data["hint"],
+        "'codex' looks like a nested AI runtime provider, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend 'synthetic-runtime'; pass the AI provider in --dispatch-provider-config instead."
     );
 }
 

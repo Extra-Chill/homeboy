@@ -312,8 +312,15 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
                 max_actions: 1,
                 dispatch_backend: Some("fixture".to_string()),
                 dispatch_selector: None,
-                dispatch_model: None,
-                dispatch_provider_config: None,
+                dispatch_model: Some("gpt-cli".to_string()),
+                dispatch_provider_config: Some(
+                    json!({
+                        "provider": "codex",
+                        "model": "gpt-config",
+                        "options": { "reasoning_effort": "high" }
+                    })
+                    .to_string(),
+                ),
             },
             CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
@@ -335,6 +342,15 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
         assert_eq!(
             observed.inputs["runtime_task"]["input"]["package"]["source"],
             "bundles/store-idea-agent"
+        );
+        assert_eq!(
+            observed.inputs["runtime_task"]["input"]["provider"],
+            "codex"
+        );
+        assert_eq!(observed.inputs["runtime_task"]["input"]["model"], "gpt-cli");
+        assert_eq!(
+            observed.inputs["runtime_task"]["input"]["options"]["reasoning_effort"],
+            "high"
         );
         assert_eq!(observed.component_contracts.len(), 1);
         assert_eq!(

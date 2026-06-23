@@ -101,12 +101,15 @@ pub struct ReleaseArgs {
     #[arg(long)]
     force_lower_bump: bool,
 
-    /// Skip publish/package steps (version bump + tag + push only).
-    /// Use when CI handles publishing after the tag is pushed.
+    /// Skip registry/package publishing only (version bump + tag + push).
+    /// This does NOT skip GitHub Release creation — a GitHub Release is still
+    /// created unless you ALSO pass --no-github-release. Use when CI handles
+    /// registry/package publishing after the tag is pushed.
     #[arg(long)]
     skip_publish: bool,
 
-    /// Skip the GitHub Release creation step (tag + notes on github.com).
+    /// Skip the GitHub Release creation step (the reviewer-facing release page
+    /// with notes + assets on github.com). The tag is still created and pushed.
     /// Use when CI or another pipeline already creates GitHub Releases.
     #[arg(long)]
     no_github_release: bool,

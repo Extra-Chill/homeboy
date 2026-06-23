@@ -25,6 +25,7 @@ use super::evidence::RunsEvidenceOutput;
 use super::findings;
 use super::findings::{RunsFindingOutput, RunsFindingsOutput};
 use super::gh_actions::GhActionsImportOutput;
+use super::hotspots::{RunsHotspotsArgs, RunsHotspotsOutput};
 use super::latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
 use super::loop_sync::{RunsLoopSyncArgs, RunsLoopSyncOutput};
 use super::query::{RunsQueryArgs, RunsQueryOutput};
@@ -63,6 +64,8 @@ pub(super) enum RunsCommand {
     Compare(RunsCompareArgs),
     /// Compare two persisted benchmark runs by exact run id
     BenchCompare(RunsBenchCompareArgs),
+    /// Aggregate hotspot rankings across persisted fuzz run artifacts
+    Hotspots(RunsHotspotsArgs),
     /// Mark orphaned running observation records stale
     Reconcile(RunsReconcileArgs),
     /// Show one persisted observation run
@@ -150,6 +153,7 @@ pub enum RunsOutput {
     Finding(RunsFindingOutput),
     LatestFinding(RunsLatestFindingOutput),
     BenchCompare(BenchCompareOutput),
+    Hotspots(RunsHotspotsOutput),
     Reconcile(RunsReconcileOutput),
     Export(RunsExportOutput),
     Import(RunsImportOutput),

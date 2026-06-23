@@ -86,16 +86,31 @@ fn provider_resolution_failure_outcome(
             AgentTaskOutcomeStatus::Failed,
             AgentTaskFailureClassification::CapabilityMissing,
             "agent_task.provider_selector_mismatch",
-            format!(
-                "no extension agent-task provider for backend '{}' matched selector '{}'",
-                request.executor.backend,
-                request.executor.selector.as_deref().unwrap_or("")
+            selector_mismatch_message(
+                &request.executor.backend,
+                request.executor.selector.as_deref(),
             ),
             json!({
                 "backend": request.executor.backend,
                 "selector": request.executor.selector,
                 "available_provider_ids": available_ids,
+                "hint": selector_runtime_provider_hint(
+                    &request.executor.backend,
+                    request.executor.selector.as_deref(),
+                ),
             }),
         ),
+    }
+}
+
+fn selector_mismatch_message(backend: &str, selector: Option<&str>) -> String {
+    let base = format!(
+        "no extension agent-task provider for backend '{}' matched selector '{}'",
+        backend,
+        selector.unwrap_or("")
+    );
+    match selector_runtime_provider_hint(backend, selector) {
+        Some(hint) => format!("{base}; {hint}"),
+        None => base,
     }
 }
