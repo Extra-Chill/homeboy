@@ -120,6 +120,63 @@ fn compile_loop_command_emits_plan_from_repo_loop_spec() {
 }
 
 #[test]
+fn compile_loop_command_propagates_runtime_provider_model_options_into_runtime_task_input() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let definition_path = temp.path().join("repo-loop-runtime-opts.json");
+    std::fs::write(
+        &definition_path,
+        serde_json::to_string(&json!({
+            "schema": "wpsg/loop-spec/v1",
+            "loop_id": "wpsg/runtime-opts-loop",
+            "metadata": {
+                "dispatch_defaults": {
+                    "backend": "fixture",
+                    "model": "gpt-cli",
+                    "provider_config": json!({
+                        "provider": "codex",
+                        "model": "gpt-config",
+                        "options": { "reasoning_effort": "high" }
+                    })
+                    .to_string()
+                }
+            },
+            "workflows": [
+                {
+                    "workflow_id": "store-idea",
+                    "prompt": "Generate a concept packet.",
+                    "runtime_execution": {
+                        "kind": "bundle",
+                        "ability": "runtime-package/run",
+                        "input": {
+                            "package": { "source": "bundles/store-idea-agent" }
+                        }
+                    }
+                }
+            ]
+        }))
+        .expect("definition json"),
+    )
+    .expect("write definition");
+
+    let (value, status) = loop_definition::compile_loop(CompileLoopArgs {
+        definition: format!("@{}", definition_path.display()),
+    })
+    .expect("compile loop");
+
+    assert_eq!(status, 0);
+    let runtime_task = &value["tasks"][0]["inputs"]["runtime_task"];
+    assert_eq!(runtime_task["ability"], "runtime-package/run");
+    assert_eq!(
+        runtime_task["input"]["package"]["source"],
+        "bundles/store-idea-agent"
+    );
+    // CLI/provider runtime selection must be preserved into runtime_task.input.
+    assert_eq!(runtime_task["input"]["provider"], "codex");
+    assert_eq!(runtime_task["input"]["model"], "gpt-cli");
+    assert_eq!(runtime_task["input"]["options"]["reasoning_effort"], "high");
+}
+
+#[test]
 fn compile_loop_command_rejects_controller_only_sections() {
     let error = loop_definition::compile_loop(CompileLoopArgs {
         definition: serde_json::to_string(&json!({
