@@ -4,6 +4,27 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.256.0] - 2026-06-23
+
+### Added
+- add job broker wrappers
+
+### Changed
+- extract offload fallback helpers
+- split runner.rs god-file into modules
+- split execution.rs god-file into modules
+- split run.rs god-file into modules
+- centralize agent-task spec materialization
+
+### Fixed
+- fail invalid provider config specs locally
+- fix(agent-task): reject empty dispatch task prompts
+- reject workload command drift
+- require explicit lab registry metadata
+- fix(agent-task): bound controller fanout
+- persist result envelopes with runs
+- fix(agent-task): bound spec generator execution
+
 ## [0.255.11] - 2026-06-23
 
 ### Changed
