@@ -187,7 +187,7 @@ fn validate_runner_workload_command_present(command: &[String]) -> Result<()> {
 }
 
 fn validate_runner_workload_command(workload: &RunnerWorkload, command: &[String]) -> Result<()> {
-    let command_args = dispatch_command_args(command);
+    let command_args = dispatch_workload_command_args(command);
     if command_args.is_empty() {
         return Err(workload_error(
             "runner_workload.command",
@@ -260,11 +260,20 @@ fn validate_runner_workload_result_refs(workload: &RunnerWorkload) -> Result<()>
     Ok(())
 }
 
-fn dispatch_command_args(command: &[String]) -> &[String] {
-    match command.first().map(String::as_str) {
+fn dispatch_workload_command_args(command: &[String]) -> &[String] {
+    let args = match command.first().map(String::as_str) {
         Some(binary) if is_homeboy_binary(binary) => &command[1..],
         _ => command,
+    };
+    strip_leading_dispatch_flags(args)
+}
+
+fn strip_leading_dispatch_flags(args: &[String]) -> &[String] {
+    let mut index = 0;
+    while matches!(args.get(index).map(String::as_str), Some("--force-hot")) {
+        index += 1;
     }
+    &args[index..]
 }
 
 fn is_homeboy_binary(binary: &str) -> bool {
@@ -710,6 +719,20 @@ mod tests {
             true,
         )
         .expect("matching configured homeboy executable argv is valid");
+
+        validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &[
+                "/srv/homeboy/bin/homeboy".to_string(),
+                "--force-hot".to_string(),
+                "trace".to_string(),
+            ],
+            &["HOMEBODY_TRACE_SECRET".to_string()],
+            true,
+        )
+        .expect("matching runner-injected homeboy argv is valid");
     }
 
     #[test]
