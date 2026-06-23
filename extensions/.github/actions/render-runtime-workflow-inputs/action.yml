@@ -15,6 +15,18 @@ inputs:
     description: JSON generic runtime tool profile.
     required: false
     default: '{}'
+  runtime_mounts:
+    description: JSON array of selected-runtime mounts.
+    required: false
+    default: '[]'
+  runtime_state_mounts:
+    description: JSON array of selected-runtime state mounts.
+    required: false
+    default: '[]'
+  runtime_config_mounts:
+    description: JSON array of selected-runtime config mounts.
+    required: false
+    default: '[]'
 outputs:
   runtime:
     description: Rendered runtime id.
@@ -38,4 +50,7 @@ runs:
         RUNTIME_PROFILE: ${{ inputs.runtime_profile }}
         RUNTIME_PROFILES: ${{ inputs.runtime_profiles }}
         TOOL_PROFILE: ${{ inputs.tool_profile }}
+        RUNTIME_MOUNTS: ${{ inputs.runtime_mounts }}
+        RUNTIME_STATE_MOUNTS: ${{ inputs.runtime_state_mounts }}
+        RUNTIME_CONFIG_MOUNTS: ${{ inputs.runtime_config_mounts }}
       run: node "$GITHUB_ACTION_PATH/../../scripts/runtime-agent-full-run/render-runtime-workflow-inputs.cjs"

@@ -12,7 +12,7 @@ function renderRuntimeWorkflowInputs(options = {}) {
 	const runtime = options.runtimeProviderConfig || options.runtime_provider_config || resolveRuntimeProvider(runtimeId, options);
 	const profileSelection = normalizeRuntimeProfileSelection(options.runtimeProfile || options.runtime_profile || options.profile);
 	const runtimeProfiles = plainObject(options.runtimeProfiles || options.runtime_profiles);
-	const selectedProfile = selectedRuntimeProfile(profileSelection, runtimeProfiles);
+	const selectedProfile = selectedRuntimeProfile(profileSelection, runtimeProfiles, runtimeRequirementFields(options));
 	const toolProfile = plainObject(options.toolProfile || options.tool_profile || options.sandboxToolPolicy || options.sandbox_tool_policy || options.toolPolicy || options.tool_policy);
 	const adapter = runtimeWorkflowInputAdapter(runtime, options);
 	const rendered = adapter({
@@ -83,12 +83,20 @@ function normalizeRuntimeProfileSelection(value) {
 	throw new Error('runtime_profile is required.');
 }
 
-function selectedRuntimeProfile(selection, runtimeProfiles) {
+function selectedRuntimeProfile(selection, runtimeProfiles, requirementFields = {}) {
 	const profile = selection.profile || runtimeProfiles[selection.id] || {};
 	if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
 		throw new Error(`runtime profile ${selection.id} must be an object.`);
 	}
-	return { ...profile, id: profile.id || selection.id };
+	return { ...profile, ...requirementFields, id: profile.id || selection.id };
+}
+
+function runtimeRequirementFields(options = {}) {
+	return stripUndefined({
+		runtime_mounts: options.runtimeMounts || options.runtime_mounts || options.mounts,
+		runtime_state_mounts: options.runtimeStateMounts || options.runtime_state_mounts,
+		runtime_config_mounts: options.runtimeConfigMounts || options.runtime_config_mounts,
+	});
 }
 
 function plainObject(value) {

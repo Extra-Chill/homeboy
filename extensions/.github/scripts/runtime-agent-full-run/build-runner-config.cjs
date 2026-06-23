@@ -76,6 +76,7 @@ function buildConfig(env) {
   );
   const runtimeComponents = parseJsonInput('runtime_components', env.RUNTIME_COMPONENTS || '{}', 'object', {});
   const runtimeOverlays = normalizePathSources(parseJsonInput('runtime_overlays', env.RUNTIME_OVERLAYS || '[]', 'array', []), workspace);
+  const runtimeMounts = normalizePathSources(parseJsonInput('runtime_mounts', env.RUNTIME_MOUNTS || '[]', 'array', []), workspace);
   const componentContracts = parseJsonInput('component_contracts', env.COMPONENT_CONTRACTS || '[]', 'array', []);
   const runtimeEnv = parseJsonInput('runtime_env', env.RUNTIME_ENV || '{}', 'object', {});
   const runtimeConfig = parseJsonInput('runtime_config', env.RUNTIME_CONFIG || '{}', 'object', {});
@@ -88,6 +89,7 @@ function buildConfig(env) {
     tool_profile: toolProfile,
     componentContracts,
     runtimeOverlays,
+    runtimeMounts,
     runtimeEnv,
     providerPluginPaths,
   });
@@ -132,7 +134,7 @@ function buildConfig(env) {
     ...runtimeProjection.runtime_fields,
     execution_kind: env.EXECUTION_KIND || (runtimeTask ? 'runtime_task' : 'runtime_execution'),
     runtime_mounts: [
-      ...normalizePathSources(parseJsonInput('runtime_mounts', env.RUNTIME_MOUNTS || '[]', 'array', []), workspace),
+      ...runtimeMounts,
       ...runnerWorkspaceMounts,
     ],
     wp_config_defines: runtimeProjection.wp_config_defines,

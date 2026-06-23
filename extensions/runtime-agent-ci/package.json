@@ -14,12 +14,14 @@
     "./loop-policy": "./lib/loop-policy.js",
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js",
     "./agent-task-to-review-runner": "./lib/agent-task-to-review-runner.js",
+    "./runtime-workflow-inputs": "./lib/runtime-workflow-inputs.cjs",
     "./loop-lifecycle": "./lib/loop-lifecycle.cjs",
     "./workspace-publication-lifecycle": "./lib/workspace-publication-lifecycle.cjs"
   },
   "bin": {
     "homeboy-controller-loop-proof-validate": "./scripts/homeboy-controller-loop-proof-validate.cjs",
-    "homeboy-generic-fanout-reconcile": "./scripts/homeboy-generic-fanout-reconcile.cjs"
+    "homeboy-generic-fanout-reconcile": "./scripts/homeboy-generic-fanout-reconcile.cjs",
+    "homeboy-render-runtime-workflow-inputs": "./scripts/render-runtime-workflow-inputs.cjs"
   },
   "scripts": {
     "test:controller-loop-proof-validator": "node ../tests/controller-loop-proof-validator.test.mjs",

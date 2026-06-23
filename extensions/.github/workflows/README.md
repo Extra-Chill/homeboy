@@ -117,10 +117,13 @@ workflow generated and used a Homeboy GitHub App installation token, or
 `github_token_fallback` when it used the repository-scoped GitHub Actions token.
 
 Callers that compose workflow inputs before invoking `runtime-agent-full-run.yml`
-can use `.github/actions/render-runtime-workflow-inputs`. The action accepts only
-`runtime`, `runtime_profile`, `runtime_profiles`, and `tool_profile`, then emits
-selected-runtime workflow input JSON without exposing WP Codebox ability names,
-CLI paths, schemas, or mount targets to the downstream workflow.
+can use the `homeboy-runtime-agent-ci/runtime-workflow-inputs` package export,
+the `homeboy-render-runtime-workflow-inputs` CLI, or
+`.github/actions/render-runtime-workflow-inputs`. These surfaces accept
+`runtime`, `runtime_profile` as either an id or JSON object, `runtime_profiles`,
+`tool_profile`, and runtime mount arrays, then emit selected-runtime workflow
+input JSON without exposing WP Codebox ability names, CLI paths, or schemas to
+the downstream workflow.
 
 ## GitHub auth modes
 

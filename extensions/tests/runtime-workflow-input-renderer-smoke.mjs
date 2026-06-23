@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packageRequire = createRequire(path.join(rootDir, 'runtime-agent-ci', 'package.json'));
 process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(rootDir, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const {
 	renderRuntimeWorkflowInputs,
-} = require(path.join(rootDir, 'runtime-agent-ci', 'lib', 'runtime-workflow-inputs.cjs'));
+} = packageRequire('homeboy-runtime-agent-ci/runtime-workflow-inputs');
 
 const rendered = renderRuntimeWorkflowInputs({
 	runtime: 'codebox',
@@ -67,5 +69,46 @@ assert.deepEqual(defaultRendered.workflow_inputs, {
 	},
 });
 assert.deepEqual(defaultRendered.runtime_requirements, { id: 'example-profile', custom: true });
+
+const runtimeMounts = [{ source: '/host/workload', target: '/runtime/workload', mode: 'readonly' }];
+const objectProfileRendered = renderRuntimeWorkflowInputs({
+	runtime: 'codebox',
+	runtime_profile: {
+		id: 'object-profile',
+		plugins: [{ slug: 'object-provider', source: '.ci/object-provider', activate: true }],
+	},
+	runtime_mounts: runtimeMounts,
+});
+assert.equal(objectProfileRendered.runtime_profile, 'object-profile');
+assert.deepEqual(objectProfileRendered.runtime_requirements.runtime_mounts, runtimeMounts);
+assert.deepEqual(objectProfileRendered.workflow_inputs.runtime_profiles['object-profile'].runtime_mounts, runtimeMounts);
+
+const cliResult = spawnSync(process.execPath, [
+	path.join(rootDir, 'runtime-agent-ci', 'scripts', 'render-runtime-workflow-inputs.cjs'),
+	'--runtime', 'codebox',
+	'--runtime-profile', JSON.stringify({ id: 'cli-profile', custom: true }),
+	'--runtime-mounts', JSON.stringify(runtimeMounts),
+], { encoding: 'utf8' });
+assert.equal(cliResult.status, 0, cliResult.stderr);
+const cliRendered = JSON.parse(cliResult.stdout);
+assert.equal(cliRendered.runtime_id, 'wp-codebox');
+assert.equal(cliRendered.runtime_profile, 'cli-profile');
+assert.deepEqual(cliRendered.runtime_requirements.runtime_mounts, runtimeMounts);
+
+const actionScriptResult = spawnSync(process.execPath, [
+	path.join(rootDir, '.github', 'scripts', 'runtime-agent-full-run', 'render-runtime-workflow-inputs.cjs'),
+], {
+	encoding: 'utf8',
+	env: {
+		...process.env,
+		RUNTIME: 'codebox',
+		RUNTIME_PROFILE: 'action-profile',
+		RUNTIME_MOUNTS: JSON.stringify(runtimeMounts),
+	},
+});
+assert.equal(actionScriptResult.status, 0, actionScriptResult.stderr);
+const actionScriptRendered = JSON.parse(actionScriptResult.stdout);
+assert.equal(actionScriptRendered.runtime_profile, 'action-profile');
+assert.deepEqual(actionScriptRendered.runtime_requirements.runtime_mounts, runtimeMounts);
 
 console.log('runtime workflow input renderer smoke passed');
