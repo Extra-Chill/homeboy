@@ -4,6 +4,9 @@
  * External dependencies
  */
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 /**
  * Internal dependencies
@@ -538,10 +541,14 @@ function runWpCodeboxPublicCliHelp(command, options = {}) {
 }
 
 async function runWpCodeboxPublicCli(command, input, options = {}) {
-	return runWpCodeboxPublicCliCommand(['codebox', command, '--input=-', '--format=json'], {
-		...options,
-		stdin: `${JSON.stringify(input)}\n`,
-	});
+	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-'));
+	const inputFile = path.join(tempDir, 'input.json');
+	try {
+		fs.writeFileSync(inputFile, `${JSON.stringify(input)}\n`, 'utf8');
+		return runWpCodeboxPublicCliCommand(['codebox', command, '--input-file', inputFile, '--format=json'], options);
+	} finally {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	}
 }
 
 function runWpCodeboxPublicCliCommand(args, options = {}) {

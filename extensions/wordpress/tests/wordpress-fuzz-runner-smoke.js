@@ -468,8 +468,9 @@ if (subcommand === 'codebox run-wordpress-workload' && process.argv.includes('--
   process.stderr.write('unknown command');
   process.exit(1);
 }
-const request = JSON.parse(fs.readFileSync(0, 'utf8'));
-if (subcommand !== 'codebox run-fuzz-suite' || !process.argv.includes('--input=-') || !process.argv.includes('--format=json')) {
+const inputFileIndex = process.argv.indexOf('--input-file');
+const request = inputFileIndex === -1 ? undefined : JSON.parse(fs.readFileSync(process.argv[inputFileIndex + 1], 'utf8'));
+if (subcommand !== 'codebox run-fuzz-suite' || inputFileIndex === -1 || process.argv.includes('--input=-') || !process.argv.includes('--format=json')) {
   process.stderr.write('expected public wp codebox run-fuzz-suite command');
   process.exit(1);
 }

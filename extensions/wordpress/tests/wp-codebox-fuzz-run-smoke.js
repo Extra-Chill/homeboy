@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 
 const {
 	DEFAULT_FUZZ_RUN_ABILITY,
@@ -499,8 +500,12 @@ runWpCodeboxFuzzSuite({
 			if (args.join(' ') === 'codebox run-wordpress-workload --help') {
 				return { status: 1, stderr: 'unknown command' };
 			}
-			assert.equal(args.join(' '), 'codebox run-fuzz-suite --input=- --format=json');
-			assert.equal(JSON.parse(stdin).schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+			assert.equal(args[0], 'codebox');
+			assert.equal(args[1], 'run-fuzz-suite');
+			assert.equal(args[2], '--input-file');
+			assert.equal(args[4], '--format=json');
+			assert.equal(stdin, undefined);
+			assert.equal(JSON.parse(fs.readFileSync(args[3], 'utf8')).schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 			return {
 				status: 0,
 				stdout: JSON.stringify({
