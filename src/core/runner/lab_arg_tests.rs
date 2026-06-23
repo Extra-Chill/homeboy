@@ -23,7 +23,7 @@ fn rewrites_lab_offload_path_and_strips_runner_and_output_flags() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[], None),
         args(&[
             "homeboy",
             "--force-hot",
@@ -31,6 +31,44 @@ fn rewrites_lab_offload_path_and_strips_runner_and_output_flags() {
             "--path",
             "/home/user/Developer/project",
             "--json-summary",
+        ])
+    );
+}
+
+#[test]
+fn maps_command_output_path_to_runner_output_path() {
+    let input = args(&[
+        "homeboy",
+        "--runner",
+        "homeboy-lab",
+        "agent-task",
+        "controller",
+        "run-from-spec",
+        "loop.json",
+        "--max-actions",
+        "1",
+        "--output",
+        "/tmp/local-result.json",
+    ]);
+
+    assert_eq!(
+        rewrite_lab_offload_args(
+            &input,
+            "/home/user/Developer/project",
+            &[],
+            Some("/home/user/Developer/project/homeboy-lab-structured-output.json"),
+        ),
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "agent-task",
+            "controller",
+            "run-from-spec",
+            "loop.json",
+            "--max-actions",
+            "1",
+            "--output",
+            "/home/user/Developer/project/homeboy-lab-structured-output.json",
         ])
     );
 }
@@ -51,7 +89,7 @@ fn strips_controller_artifact_root_from_lab_offload_command() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[], None),
         args(&[
             "homeboy",
             "--force-hot",
@@ -78,7 +116,7 @@ fn strips_controller_artifact_root_from_runner_resident_command() {
     ]);
 
     assert_eq!(
-        rewrite_runner_resident_lab_offload_args(&input),
+        rewrite_runner_resident_lab_offload_args(&input, None),
         args(&[
             "homeboy",
             "--force-hot",
@@ -102,7 +140,7 @@ fn leaves_passthrough_path_args_untouched() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[], None),
         args(&[
             "homeboy",
             "--force-hot",
@@ -130,7 +168,7 @@ fn strips_internal_passthrough_sentinel_from_lab_offload_command() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/user/Developer/sample-plugin@fix", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/sample-plugin@fix", &[], None),
         args(&[
             "homeboy",
             "--force-hot",
@@ -157,7 +195,7 @@ fn rewrite_lab_offload_args_does_not_duplicate_force_hot() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[], None),
         args(&[
             "homeboy",
             "--force-hot",

@@ -1056,4 +1056,35 @@ mod tests {
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("without --runner"));
     }
+
+    #[test]
+    fn wrapper_global_runner_preserves_trailing_output_request() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "controller",
+                "run-from-spec",
+                "loop.json",
+                "--max-actions",
+                "1",
+                "--output",
+                "/tmp/controller-result.json",
+            ])
+            .expect("parse wrapper-style lab offload command");
+
+        assert_eq!(
+            matches
+                .try_get_one::<std::path::PathBuf>("output")
+                .expect("output arg")
+                .map(|path| path.to_string_lossy().to_string())
+                .as_deref(),
+            Some("/tmp/controller-result.json")
+        );
+
+        let cli = Cli::from_arg_matches(&matches).expect("typed cli");
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+    }
 }
