@@ -96,6 +96,8 @@ pub struct CommandRegistryEntry {
     pub lab_notes: &'static str,
 }
 
+const DEFAULT_LAB_UNSUPPORTED_NOTES: &str = "not declared as Lab-routable in the command registry";
+
 impl CommandRegistryEntry {
     pub fn docs_path(&self) -> Option<String> {
         self.docs_slug
@@ -113,17 +115,18 @@ const fn command_registry_entry(
         docs_slug: Some(name),
         output_notes: "standard CLI output contract",
         lab_supported: false,
-        lab_notes: "not declared as Lab-routable in the command registry",
+        lab_notes: DEFAULT_LAB_UNSUPPORTED_NOTES,
     }
 }
 
 const fn lab_command_registry_entry(
     name: &'static str,
     json_family: CommandJsonFamily,
+    lab_notes: &'static str,
 ) -> CommandRegistryEntry {
     CommandRegistryEntry {
         lab_supported: true,
-        lab_notes: "portable Lab offload may be available for resource-heavy workflows",
+        lab_notes,
         ..command_registry_entry(name, json_family)
     }
 }
@@ -137,16 +140,40 @@ const fn manifest_command_registry_entry() -> CommandRegistryEntry {
 }
 
 pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
-    command_registry_entry("agent-task", CommandJsonFamily::Workspace),
+    lab_command_registry_entry(
+        "agent-task",
+        CommandJsonFamily::Workspace,
+        "Lab runner routing covers portable, explicit-runner, and runner-resident agent-task workflows",
+    ),
     command_registry_entry("project", CommandJsonFamily::Workspace),
     command_registry_entry("ssh", CommandJsonFamily::Ops),
     command_registry_entry("server", CommandJsonFamily::Ops),
-    lab_command_registry_entry("test", CommandJsonFamily::Quality),
-    lab_command_registry_entry("bench", CommandJsonFamily::Quality),
-    lab_command_registry_entry("fuzz", CommandJsonFamily::Quality),
-    lab_command_registry_entry("trace", CommandJsonFamily::Quality),
+    lab_command_registry_entry(
+        "test",
+        CommandJsonFamily::Quality,
+        "portable Lab offload is available for test runs",
+    ),
+    lab_command_registry_entry(
+        "bench",
+        CommandJsonFamily::Quality,
+        "portable Lab offload is available for benchmark runs",
+    ),
+    lab_command_registry_entry(
+        "fuzz",
+        CommandJsonFamily::Quality,
+        "portable Lab offload is available for fuzz runs",
+    ),
+    lab_command_registry_entry(
+        "trace",
+        CommandJsonFamily::Quality,
+        "portable Lab offload is available for trace runs",
+    ),
     command_registry_entry("observe", CommandJsonFamily::Quality),
-    lab_command_registry_entry("lint", CommandJsonFamily::Quality),
+    lab_command_registry_entry(
+        "lint",
+        CommandJsonFamily::Quality,
+        "portable Lab offload is available for changed-scope lint runs",
+    ),
     command_registry_entry("db", CommandJsonFamily::Ops),
     command_registry_entry("deps", CommandJsonFamily::Ops),
     command_registry_entry("ci", CommandJsonFamily::Ops),
@@ -172,16 +199,36 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("changes", CommandJsonFamily::Workspace),
     command_registry_entry("release", CommandJsonFamily::Workspace),
     command_registry_entry("report", CommandJsonFamily::Workspace),
-    lab_command_registry_entry("review", CommandJsonFamily::Quality),
-    lab_command_registry_entry("audit", CommandJsonFamily::Quality),
+    lab_command_registry_entry(
+        "review",
+        CommandJsonFamily::Quality,
+        "portable Lab offload is available for release-gate review runs",
+    ),
+    lab_command_registry_entry(
+        "audit",
+        CommandJsonFamily::Quality,
+        "portable Lab offload is available for audit source runs",
+    ),
     command_registry_entry("audit-baseline", CommandJsonFamily::Quality),
-    command_registry_entry("refactor", CommandJsonFamily::Workspace),
+    lab_command_registry_entry(
+        "refactor",
+        CommandJsonFamily::Workspace,
+        "portable Lab offload is available for refactor source runs",
+    ),
     command_registry_entry("refs", CommandJsonFamily::Workspace),
-    command_registry_entry("rig", CommandJsonFamily::Workspace),
+    lab_command_registry_entry(
+        "rig",
+        CommandJsonFamily::Workspace,
+        "portable Lab offload is available for rig check workflows",
+    ),
     command_registry_entry("runner", CommandJsonFamily::Workspace),
     command_registry_entry("runtime", CommandJsonFamily::Workspace),
     command_registry_entry("worktree", CommandJsonFamily::Workspace),
-    command_registry_entry("tunnel", CommandJsonFamily::Workspace),
+    lab_command_registry_entry(
+        "tunnel",
+        CommandJsonFamily::Workspace,
+        "Lab runner routing covers tunnel preview and service workflows",
+    ),
     command_registry_entry("runs", CommandJsonFamily::Workspace),
     command_registry_entry("self", CommandJsonFamily::Ops),
     command_registry_entry("stack", CommandJsonFamily::Workspace),
@@ -563,6 +610,50 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(registry_names, parser_names);
+    }
+
+    #[test]
+    fn command_registry_lab_metadata_is_explicit() {
+        for entry in COMMAND_REGISTRY {
+            if entry.lab_supported {
+                assert_ne!(
+                    entry.lab_notes, DEFAULT_LAB_UNSUPPORTED_NOTES,
+                    "Lab-supported command `{}` should not use the default non-Lab note",
+                    entry.name
+                );
+                assert!(
+                    !entry.lab_notes.trim().is_empty(),
+                    "Lab-supported command `{}` should explain Lab support",
+                    entry.name
+                );
+            } else {
+                assert_eq!(
+                    entry.lab_notes, DEFAULT_LAB_UNSUPPORTED_NOTES,
+                    "non-Lab command `{}` should use the explicit default non-supported note",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_registry_docs_path_is_present_for_commands_with_docs() {
+        for entry in COMMAND_REGISTRY {
+            if let Some(slug) = entry.docs_slug {
+                assert_eq!(
+                    entry.docs_path().as_deref(),
+                    Some(format!("docs/commands/{slug}.md").as_str()),
+                    "registered command `{}` docs path drifted from docs slug",
+                    entry.name
+                );
+            } else {
+                assert!(
+                    entry.docs_path().is_none(),
+                    "registered command `{}` should not expose docs path without docs slug",
+                    entry.name
+                );
+            }
+        }
     }
 
     #[test]
