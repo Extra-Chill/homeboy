@@ -50,6 +50,8 @@ impl FuzzArgs {
 pub(crate) enum FuzzCommand {
     /// Print the product-neutral fuzz schema contract
     Contract,
+    /// Normalize and merge discovered fuzz target inventory artifacts
+    Discover(FuzzDiscoverArgs),
     /// List declared fuzz workloads without executing them
     List(FuzzListArgs),
     /// Build a fuzz execution request without executing it
@@ -64,6 +66,25 @@ pub(crate) enum FuzzCommand {
     Compare(FuzzCompareArgs),
     /// Resolve replay metadata for persisted fuzz cases
     Replay(FuzzReplayArgs),
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct FuzzDiscoverArgs {
+    /// Existing fuzz target inventory artifact to ingest.
+    #[arg(long = "inventory", value_name = "PATH", required = true)]
+    pub(crate) inventories: Vec<PathBuf>,
+
+    /// Stable id for the merged inventory artifact.
+    #[arg(long = "inventory-id", value_name = "ID")]
+    pub(crate) inventory_id: Option<String>,
+
+    /// Human-readable source label recorded in merged provenance.
+    #[arg(
+        long = "source-label",
+        value_name = "LABEL",
+        default_value = "artifact"
+    )]
+    pub(crate) source_label: String,
 }
 
 #[derive(Args, Clone)]
@@ -262,6 +283,7 @@ pub(crate) struct FuzzReplayArgs {
 #[serde(tag = "variant", rename_all = "snake_case")]
 pub enum FuzzOutput {
     Contract(FuzzContractOutput),
+    Discover(FuzzDiscoverOutput),
     List(FuzzListOutput),
     Plan(FuzzPlanOutput),
     Run(FuzzRunOutput),
@@ -277,6 +299,24 @@ pub struct FuzzContractOutput {
     pub contract: homeboy::core::fuzz::FuzzCoreContract,
     pub required_artifacts: Vec<FuzzRequiredArtifact>,
     pub gates: Vec<FuzzGate>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuzzDiscoverOutput {
+    pub command: String,
+    pub status: String,
+    pub source_label: String,
+    pub inventory_files: Vec<String>,
+    pub target_inventory: FuzzTargetInventory,
+    pub summary: FuzzDiscoverSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuzzDiscoverSummary {
+    pub surfaces: usize,
+    pub targets: usize,
+    pub workloads: usize,
+    pub seeds: usize,
 }
 
 #[derive(Serialize)]
