@@ -2407,17 +2407,17 @@ mod tests {
         with_isolated_home(|_| {
             let mut plan = test_plan();
             let request = &mut plan.tasks[0];
-            request.executor.backend = "codebox".to_string();
+            request.executor.backend = "sandbox".to_string();
             request.executor.model = Some("gpt-fixture".to_string());
             request.component_contracts = vec![AgentTaskComponentContract {
-                slug: Some("wp-site-generator".to_string()),
-                path: Some("/workspace/wp-site-generator".to_string()),
+                slug: Some("runtime-engine".to_string()),
+                path: Some("/workspace/runtime-engine".to_string()),
                 load_as: Some("plugin".to_string()),
                 activate: Some(true),
                 extra: Default::default(),
             }];
             request.metadata = json!({
-                "runtime_component_paths": ["/runtime/plugins/wp-codebox"]
+                "runtime_component_paths": ["/runtime/components/sandbox-host"]
             });
             request.expected_artifacts = vec!["patch".to_string()];
             request.artifact_declarations = vec![AgentTaskArtifactDeclaration {
@@ -2447,7 +2447,7 @@ mod tests {
             let artifact_report = artifacts("run-evidence").expect("artifacts loaded");
 
             assert_eq!(evidence.task_id, "task-a");
-            assert_eq!(evidence.backend, "codebox");
+            assert_eq!(evidence.backend, "sandbox");
             assert_eq!(evidence.selector.as_deref(), Some("fixture"));
             assert_eq!(evidence.model.as_deref(), Some("gpt-fixture"));
             assert_eq!(
@@ -2458,8 +2458,8 @@ mod tests {
             assert_eq!(
                 evidence.runtime_component_paths,
                 vec![
-                    "/runtime/plugins/wp-codebox".to_string(),
-                    "/workspace/wp-site-generator".to_string()
+                    "/runtime/components/sandbox-host".to_string(),
+                    "/workspace/runtime-engine".to_string()
                 ]
             );
             assert_eq!(evidence.expected_artifacts, vec!["patch".to_string()]);

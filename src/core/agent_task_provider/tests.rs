@@ -715,12 +715,12 @@ fn provider_selection_reports_exact_backend_selector_mismatch() {
 #[test]
 fn provider_readiness_selector_mismatch_explains_runtime_provider_confusion() {
     let (_, mut provider) = request("task-a", "node provider.js".to_string());
-    provider.id = "wordpress.codebox-agent-task-executor".to_string();
-    provider.backend = "codebox".to_string();
+    provider.id = "example.sandbox-agent-task-executor".to_string();
+    provider.backend = "sandbox".to_string();
 
     let error = validate_provider_runner_readiness_for_backend_with_providers(
         &[provider],
-        "codebox",
+        "sandbox",
         Some("codex"),
     )
     .expect_err("selector mismatch should fail before runner readiness");
@@ -734,7 +734,7 @@ fn provider_readiness_selector_mismatch_explains_runtime_provider_confusion() {
         .is_some_and(|suggestion| suggestion.contains("nested AI runtime provider"))));
     assert!(suggestions.iter().any(|value| value
         .as_str()
-        .is_some_and(|suggestion| suggestion.contains("wordpress.codebox-agent-task-executor"))));
+        .is_some_and(|suggestion| suggestion.contains("example.sandbox-agent-task-executor"))));
 }
 
 #[test]
