@@ -560,6 +560,43 @@ fn remap_provider_config_malformed_at_file_fails_locally() {
 }
 
 #[test]
+fn remap_provider_config_stdin_spec_fails_locally_without_reading_stdin() {
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--provider-config".to_string(),
+        "-".to_string(),
+    ];
+
+    let err = remap_provider_config_in_args(&args, &[]).expect_err("stdin spec should fail");
+
+    assert!(err
+        .to_string()
+        .contains("Invalid argument 'provider-config'"));
+    assert!(
+        err.hints.iter().any(|hint| hint
+            .message
+            .contains("write stdin to a JSON file and pass --provider-config @path")),
+        "missing actionable hint: {err:?}"
+    );
+}
+
+#[test]
+fn remap_provider_config_stdin_spec_equals_form_fails_locally_without_reading_stdin() {
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--provider-config=-".to_string(),
+    ];
+
+    let err = remap_provider_config_in_args(&args, &[]).expect_err("stdin spec should fail");
+
+    assert!(err.to_string().contains("--provider-config -"));
+}
+
+#[test]
 fn remap_inlines_and_rewrites_provider_config_at_file_with_mappings() {
     // #3770: a `--provider-config @file` is inlined AND its controller-local
     // paths are remapped to the synced remote workspace in one pass.
