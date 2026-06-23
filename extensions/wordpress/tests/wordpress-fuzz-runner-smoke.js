@@ -203,6 +203,53 @@ assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_moun
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_env, { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: '/runner/workloads' });
 assert.ok(manifest.fuzz.env.includes('WP_CODEBOX_FUZZ_WORKLOAD_ROOT'));
 
+const remappedPluginRootResult = buildWordPressFuzzRunnerResult({
+	env: {
+		workloadPath: '/unused/in-unit-test.json',
+		workloadId: 'jetpack-performance-observation',
+		runId: 'jetpack-performance-observation-run',
+		wpCodeboxFuzzWorkloadRoot: '/runner/workloads',
+	},
+	workload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'jetpack-performance-observation',
+		label: 'Jetpack performance observation',
+		target: { type: 'wordpress-plugin', slug: 'jetpack', component: 'jetpack' },
+		metadata: {
+			fixture: { component: 'jetpack', activation: 'jetpack/jetpack.php' },
+			homeboy_runtime_context: {
+				schema: 'homeboy/fuzz-workload-runtime-context/v1',
+				rig_id: 'jetpack-api-route-inventory',
+				components: {
+					jetpack: {
+						path: '/home/chubes/Developer/_lab_workspaces/jetpack-1234',
+						extensions: {
+							wordpress: {
+								wp_codebox_source_root: '~/Developer/jetpack',
+								wp_codebox_source_subpath: 'projects/plugins/jetpack',
+							},
+						},
+					},
+				},
+			},
+		},
+		cases: [{
+			case_id: 'jetpack-performance-observation:default',
+			phases: {
+				setup: [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=jetpack/jetpack.php'] }],
+				action: [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/performance.workload.json'] }],
+			},
+		}],
+	},
+});
+const remappedPlugin = remappedPluginRootResult.wp_codebox_runtime_requirements.extra_plugins[0];
+assert.equal(remappedPlugin.source, '/home/chubes/Developer/_lab_workspaces/jetpack-1234');
+assert.equal(remappedPlugin.sourceRoot, undefined);
+assert.equal(remappedPlugin.sourceSubpath, undefined);
+assert.equal(remappedPlugin.pluginFile, 'jetpack/jetpack.php');
+assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourceRoot, undefined);
+assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourceSubpath, undefined);
+
 const genericPrimitiveResult = buildWordPressFuzzRunnerResult({
 	env: {
 		workloadPath: '/unused/in-unit-test.json',

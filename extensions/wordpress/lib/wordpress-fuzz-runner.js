@@ -252,13 +252,13 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 	const component = objectOrUndefined(context.components?.[componentId]);
 	const wordpressExtension = objectOrUndefined(component?.extensions?.wordpress);
 	const sourceSubpath = nonEmptyString(wordpressExtension?.wp_codebox_source_subpath || wordpressExtension?.wpCodeboxSourceSubpath);
-	const sourceRoot = wpCodeboxSourceRoot({ source, sourceSubpath, wordpressExtension });
+	const sourceLayout = wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension });
 	return {
 		extraPlugin: stripUndefined({
 			slug,
 			source,
-			sourceRoot,
-			sourceSubpath,
+			sourceRoot: sourceLayout.sourceRoot,
+			sourceSubpath: sourceLayout.sourceSubpath,
 			path: source,
 			pluginFile: activation,
 			loadAs: 'plugin',
@@ -271,23 +271,36 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 		componentContract: stripUndefined({
 			slug,
 			path: source,
-			sourceRoot,
-			sourceSubpath,
+			sourceRoot: sourceLayout.sourceRoot,
+			sourceSubpath: sourceLayout.sourceSubpath,
 			pluginFile: activation,
 			loadAs: 'plugin',
 		}),
 	};
 }
 
-function wpCodeboxSourceRoot({ source, sourceSubpath, wordpressExtension } = {}) {
+function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension } = {}) {
 	const configured = nonEmptyString(wordpressExtension?.wp_codebox_source_root || wordpressExtension?.wpCodeboxSourceRoot);
+	const normalizedSubpath = nonEmptyString(sourceSubpath);
+	if (normalizedSubpath && source.endsWith(`/${normalizedSubpath}`)) {
+		return {
+			sourceRoot: source.slice(0, -normalizedSubpath.length - 1),
+			sourceSubpath: normalizedSubpath,
+		};
+	}
+
+	if (configured && configured.startsWith('~/')) {
+		return {};
+	}
+
 	if (configured && !configured.startsWith('~/')) {
-		return configured;
+		return {
+			sourceRoot: configured,
+			sourceSubpath: normalizedSubpath,
+		};
 	}
-	if (!sourceSubpath || !source.endsWith(`/${sourceSubpath}`)) {
-		return configured;
-	}
-	return source.slice(0, -sourceSubpath.length - 1);
+
+	return {};
 }
 
 function nonEmptyString(value) {
