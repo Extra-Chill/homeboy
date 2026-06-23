@@ -586,6 +586,25 @@ pub fn get_commits_since_tag_for_path(
     Ok(parse_commit_records(&stdout))
 }
 
+/// List the commits reachable from `tip` but not from `base` (the `base..tip`
+/// range), newest first.
+///
+/// Used by the release push recovery to surface exactly which commits/PRs landed
+/// on the remote branch during the release window (issue #6141). Merge commits
+/// are kept so squash-merged PR commits are visible to operators.
+pub fn get_commits_in_range(path: &str, base: &str, tip: &str) -> Result<Vec<CommitInfo>> {
+    let range = format!("{}..{}", base, tip);
+    let format_str = format!("--format=%h{}%s{}%b{}", FIELD_SEP, FIELD_SEP, RECORD_SEP);
+    let stdout = command::run_in(
+        path,
+        "git",
+        &["log", range.as_str(), format_str.as_str()],
+        "git log",
+    )?;
+
+    Ok(parse_commit_records(&stdout))
+}
+
 /// Counts of commits categorized by type.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CommitCounts {

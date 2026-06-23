@@ -10,6 +10,96 @@ use crate::core::error::{Error, Result};
 use super::super::types::ReleaseStepResult;
 use super::{step_failed, step_success};
 
+/// Outcome of recovering a release push from an advanced remote branch.
+///
+/// Carries the final push output plus the newly-included commit range that
+/// landed on the remote during the release window. The range is surfaced both as
+/// a prominent operator warning and in structured step output so downstream
+/// summaries can state exactly what changed since the dry-run plan (issue #6141).
+struct AdvancedRemoteRecovery {
+    push: crate::core::git::GitOutput,
+    advance: ConcurrentAdvance,
+}
+
+impl AdvancedRemoteRecovery {
+    /// Recovery that did not actually rebase over an advance (already reconciled
+    /// or a spurious rejection): there is no newly-included range to report.
+    fn without_advance(push: crate::core::git::GitOutput) -> Self {
+        Self {
+            push,
+            advance: ConcurrentAdvance::default(),
+        }
+    }
+}
+
+/// Describes the commits that landed on the remote branch between the reviewed
+/// dry-run/preflight plan and the final tag/notes creation (issue #6141).
+#[derive(Default)]
+struct ConcurrentAdvance {
+    /// The pre-rebase release HEAD — the tip the dry-run plan was built against.
+    base: String,
+    /// The advanced remote head the release commit was rebased onto.
+    remote_head: String,
+    /// Commits newly included by the advance (`base..remote_head`), newest first.
+    commits: Vec<crate::core::git::CommitInfo>,
+}
+
+impl ConcurrentAdvance {
+    fn short(rev: &str) -> &str {
+        &rev[..rev.len().min(8)]
+    }
+
+    /// True when no actual advance was recorded (e.g. an already-reconciled retry
+    /// or a spurious non-fast-forward rejection) — nothing new was auto-included.
+    fn is_noop(&self) -> bool {
+        self.base.is_empty() && self.remote_head.is_empty()
+    }
+
+    /// Structured representation for the step `data` payload so downstream
+    /// summaries can report exactly which commits/PRs were auto-included.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "base": self.base,
+            "remote_head": self.remote_head,
+            "range": format!("{}..{}", Self::short(&self.base), Self::short(&self.remote_head)),
+            "count": self.commits.len(),
+            "commits": self.commits
+                .iter()
+                .map(|c| serde_json::json!({ "hash": c.hash, "subject": c.subject }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// Emit a prominent warning listing the newly-included commits so an operator
+    /// reviewing the release sees that the published contents differ from the
+    /// reviewed dry-run plan (issue #6141).
+    fn warn(&self, branch: &str) {
+        log_status!(
+            "release",
+            "⚠ CONCURRENT MAIN ADVANCE: remote '{}' advanced during the release. \
+             The final published release content CHANGED since the dry-run/preflight plan.",
+            branch
+        );
+        log_status!(
+            "release",
+            "⚠ Auto-included {} commit(s) ({}..{}) not present in the reviewed dry-run plan:",
+            self.commits.len(),
+            Self::short(&self.base),
+            Self::short(&self.remote_head)
+        );
+        if self.commits.is_empty() {
+            log_status!(
+                "release",
+                "⚠   (remote advanced but no new commits were resolved in the recovered range)"
+            );
+        } else {
+            for commit in &self.commits {
+                log_status!("release", "⚠   {} {}", commit.hash, commit.subject);
+            }
+        }
+    }
+}
+
 pub(crate) fn run_git_push(
     component: &Component,
     component_id: &str,
@@ -42,25 +132,31 @@ pub(crate) fn run_git_push(
     if is_non_fast_forward_rejection(&output.stderr) {
         match recover_advanced_remote_push(component, component_id, &branch, release_tag) {
             Ok(Some(recovered)) => {
-                let recovered_data = serde_json::to_value(&recovered).map_err(|e| {
+                let AdvancedRemoteRecovery { push, advance } = recovered;
+                let recovered_data = serde_json::to_value(&push).map_err(|e| {
                     Error::internal_json(e.to_string(), Some("git push output".to_string()))
                 })?;
+                // Make the race loud: the reviewed dry-run plan no longer matches
+                // the published release contents (issue #6141). Skip the warning
+                // for no-op recoveries (already reconciled / spurious rejection).
+                if !advance.is_noop() {
+                    advance.warn(&branch);
+                }
                 log_status!(
                     "release",
                     "Remote {} advanced during release — rebased the release commit onto the new head and re-pushed.",
                     branch
                 );
-                return Ok(step_success(
-                    "git.push",
-                    "git.push",
-                    Some(serde_json::json!({
-                        "success": true,
-                        "recovered": "advanced-remote-rebased",
-                        "branch": branch,
-                        "push": recovered_data,
-                    })),
-                    Vec::new(),
-                ));
+                let mut data = serde_json::json!({
+                    "success": true,
+                    "recovered": "advanced-remote-rebased",
+                    "branch": branch,
+                    "push": recovered_data,
+                });
+                if !advance.is_noop() {
+                    data["concurrent_advance"] = advance.to_json();
+                }
+                return Ok(step_success("git.push", "git.push", Some(data), Vec::new()));
             }
             Ok(None) => {
                 // Recovery was not safe to perform automatically; fall through
@@ -141,7 +237,7 @@ fn recover_advanced_remote_push(
     component_id: &str,
     branch: &str,
     release_tag: Option<&str>,
-) -> Result<Option<crate::core::git::GitOutput>> {
+) -> Result<Option<AdvancedRemoteRecovery>> {
     let path = &component.local_path;
     crate::core::git::fetch_origin(path)?;
 
@@ -154,7 +250,8 @@ fn recover_advanced_remote_push(
 
     // Already reconciled (e.g. a retry after a manual fix): nothing to do.
     if remote_commit == head_commit {
-        return git_push_release_branch(component, component_id, branch).map(Some);
+        return git_push_release_branch(component, component_id, branch)
+            .map(|push| Some(AdvancedRemoteRecovery::without_advance(push)));
     }
 
     // Only rebase when the remote head is NOT already contained in HEAD — if it
@@ -163,8 +260,15 @@ fn recover_advanced_remote_push(
     if crate::core::git::is_ancestor(path, &remote_commit, &head_commit)? {
         // Remote head is an ancestor of HEAD; the rejection was spurious or
         // already resolved. Re-push directly.
-        return git_push_release_branch(component, component_id, branch).map(Some);
+        return git_push_release_branch(component, component_id, branch)
+            .map(|push| Some(AdvancedRemoteRecovery::without_advance(push)));
     }
+
+    // Capture the commits that landed on the remote between the pre-rebase
+    // release HEAD (what the dry-run plan was reviewed against) and the advanced
+    // remote head. These are auto-included in the final release after the rebase,
+    // so surface them prominently and in structured output (issue #6141).
+    let advance = resolve_concurrent_advance(path, &head_commit, &remote_commit);
 
     log_status!(
         "release",
@@ -202,7 +306,24 @@ fn recover_advanced_remote_push(
         retag_rebased_release(component, component_id, branch, tag_name)?;
     }
 
-    git_push_release_branch(component, component_id, branch).map(Some)
+    git_push_release_branch(component, component_id, branch)
+        .map(|push| Some(AdvancedRemoteRecovery { push, advance }))
+}
+
+/// Resolve the commits that landed on the remote between the pre-rebase release
+/// HEAD and the advanced remote head (`base..remote_head`).
+///
+/// Best-effort: a git failure listing the range must never block the recovery —
+/// the advance still gets reported (with an empty commit list) so the operator
+/// at least sees the base/head SHAs that changed (issue #6141).
+fn resolve_concurrent_advance(path: &str, base: &str, remote_head: &str) -> ConcurrentAdvance {
+    let commits =
+        crate::core::git::get_commits_in_range(path, base, remote_head).unwrap_or_default();
+    ConcurrentAdvance {
+        base: base.to_string(),
+        remote_head: remote_head.to_string(),
+        commits,
+    }
 }
 
 /// Re-point the release tag at the post-rebase HEAD (the release commit that is
@@ -534,6 +655,41 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.get("recovered").and_then(serde_json::Value::as_str)),
             Some("advanced-remote-rebased")
+        );
+
+        // Issue #6141: the recovery must surface the newly-included commit range
+        // (the commit that landed on the remote during the release window) in
+        // structured output so downstream summaries can report what changed.
+        let advance = result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("concurrent_advance"))
+            .expect("concurrent_advance must be present after an advanced-remote recovery");
+        assert_eq!(
+            advance.get("count").and_then(serde_json::Value::as_u64),
+            Some(1),
+            "exactly one commit ('remote advance') was auto-included: {:?}",
+            advance
+        );
+        let commits = advance
+            .get("commits")
+            .and_then(serde_json::Value::as_array)
+            .expect("commits array");
+        assert!(
+            commits
+                .iter()
+                .any(|c| c.get("subject").and_then(serde_json::Value::as_str)
+                    == Some("remote advance")),
+            "newly-included range must list the 'remote advance' commit: {:?}",
+            commits
+        );
+        assert!(
+            advance
+                .get("range")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|r| r.contains("..")),
+            "advance must expose a base..head range: {:?}",
+            advance
         );
 
         // The remote main now contains BOTH the remote advance and the release
