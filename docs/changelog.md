@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.255.10] - 2026-06-23
+
+### Changed
+- split runs.rs command god-file
+- remove deprecated version target command
+
+### Fixed
+- fail invalid provider config secret discovery
+- fix(agent-task): bound command gate execution
+- fix(agent-task): reject unknown task fields
+- validate workload secret handoff
+
 ## [0.255.9] - 2026-06-23
 
 ### Changed
