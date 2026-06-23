@@ -557,8 +557,8 @@ fn fuzz_expansion_rig_spec(rig_context: &FuzzRigContext) -> RigSpec {
         return spec;
     };
     let package_root = package_root.to_string_lossy();
-    for component in spec.components.values_mut() {
-        component.path = component.path.replace("${package.root}", &package_root);
+    for (component_id, component) in spec.components.iter_mut() {
+        component.path = expanded_fuzz_component_path(rig_context, component_id, &component.path);
         if let Some(checkout_root) = component.checkout_root.as_mut() {
             *checkout_root = checkout_root.replace("${package.root}", &package_root);
         }
@@ -587,7 +587,11 @@ fn inject_fuzz_runtime_context(value: &mut serde_json::Value, rig_context: &Fuzz
             if let Some(component_object) = component_value.as_object_mut() {
                 component_object.insert(
                     "path".to_string(),
-                    serde_json::Value::String(expand_fuzz_rig_string(rig_context, &component.path)),
+                    serde_json::Value::String(expanded_fuzz_component_path(
+                        rig_context,
+                        id,
+                        &component.path,
+                    )),
                 );
             }
             (id.clone(), component_value)
@@ -603,6 +607,24 @@ fn inject_fuzz_runtime_context(value: &mut serde_json::Value, rig_context: &Fuzz
             "components": components,
         }),
     );
+}
+
+fn expanded_fuzz_component_path(
+    rig_context: &FuzzRigContext,
+    component_id: &str,
+    fallback: &str,
+) -> String {
+    let env_name = crate::core::rig::expand::rig_component_path_override_env_name(
+        &rig_context.spec.id,
+        component_id,
+    );
+    if let Ok(value) = std::env::var(env_name) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return shellexpand::tilde(trimmed).to_string();
+        }
+    }
+    expand_fuzz_rig_string(rig_context, fallback)
 }
 
 fn sanitize_workload_file_segment(value: &str) -> String {

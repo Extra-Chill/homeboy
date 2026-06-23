@@ -104,6 +104,33 @@ fn strips_controller_artifact_root_from_lab_offload_command() {
 }
 
 #[test]
+fn strips_lab_only_flags_from_lab_offload_command() {
+    let input = args(&[
+        "homeboy",
+        "fuzz",
+        "run",
+        "jetpack",
+        "--rig",
+        "jetpack-api-route-inventory",
+        "--lab-only",
+        "--no-local-execution",
+    ]);
+
+    assert_eq!(
+        rewrite_lab_offload_args(&input, "/home/user/Developer/jetpack", &[], None),
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "fuzz",
+            "run",
+            "jetpack",
+            "--rig",
+            "jetpack-api-route-inventory",
+        ])
+    );
+}
+
+#[test]
 fn strips_controller_artifact_root_from_runner_resident_command() {
     let input = args(&[
         "homeboy",
