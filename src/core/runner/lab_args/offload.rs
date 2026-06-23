@@ -111,6 +111,9 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
         if arg.starts_with("--runner=") {
             continue;
         }
+        if arg == "--lab-only" || arg == "--no-local-execution" {
+            continue;
+        }
         if arg == "--output" || arg == "--artifact-root" {
             let _ = iter.next();
             continue;
@@ -178,6 +181,9 @@ pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(
             continue;
         }
         if arg.starts_with("--runner=") {
+            continue;
+        }
+        if arg == "--lab-only" || arg == "--no-local-execution" {
             continue;
         }
         if arg == "--output" || arg == "--artifact-root" {
