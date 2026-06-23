@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.255.11] - 2026-06-23
+
+### Changed
+- split github_release.rs god-file into modules
+- split run.rs god-file into modules
+- split git.rs god-file into modules
+
+### Fixed
+- restore runs and release test builds
+- forward offloaded output files
+
 ## [0.255.10] - 2026-06-23
 
 ### Changed
