@@ -1206,7 +1206,7 @@ function runnerInput(request, artifacts) {
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
     runtime_component_paths: runtimeComponentPaths,
-    component_contracts: uniqueComponentContracts(requestComponentContracts(request).map(remapRuntimeComponentContract).filter((contract) => !isCodeboxOwnedSubstrateContract(contract))),
+    component_contracts: componentContracts(request),
     homeboy_path: argValue('--homeboy') || request.homeboy_path || request.homeboy || '',
     homeboy_extensions_path: argValue('--homeboy-extensions') || request.homeboy_extensions_path || request.homeboy_extensions || path.resolve(__dirname, '..', '..'),
     wp_version: request.wordpress_runtime_version || request.wordpress_version || request.wp_codebox_wordpress_version || request.wp_version || request.wp || undefined,
@@ -1257,12 +1257,16 @@ function componentContracts(input) {
     ...requestComponentContracts(input.parent_request).map(remapRuntimeComponentContract),
     ...requestComponentContracts(input.parent_request?.parent_request).map(remapRuntimeComponentContract),
     ...runtimeContracts,
-  ].filter((contract) => !isCodeboxOwnedSubstrateContract(contract)));
+  ].filter((contract) => !isImplicitCodeboxOwnedSubstrateContract(contract)));
 }
 
 function isCodeboxOwnedSubstrateContract(contract) {
   const slug = typeof contract?.slug === 'string' ? contract.slug.trim() : '';
   return WP_CODEBOX_OWNED_SUBSTRATE_SLUGS.has(slug);
+}
+
+function isImplicitCodeboxOwnedSubstrateContract(contract) {
+  return isCodeboxOwnedSubstrateContract(contract) && contract?.metadata?.source !== 'runtime_requirements.component_contracts';
 }
 
 function requestComponentContracts(request) {
@@ -1271,7 +1275,13 @@ function requestComponentContracts(request) {
   }
   return uniqueComponentContracts([
     ...(Array.isArray(request.component_contracts) ? request.component_contracts : []),
-    ...(Array.isArray(request.runtime_requirements?.component_contracts) ? request.runtime_requirements.component_contracts : []),
+    ...(Array.isArray(request.runtime_requirements?.component_contracts) ? request.runtime_requirements.component_contracts.map((contract) => ({
+      ...contract,
+      metadata: {
+        ...(contract.metadata && typeof contract.metadata === 'object' && !Array.isArray(contract.metadata) ? contract.metadata : {}),
+        source: 'runtime_requirements.component_contracts',
+      },
+    })) : []),
     ...(Array.isArray(request.runtime_requirements?.extra_plugins) ? request.runtime_requirements.extra_plugins : []),
     ...runtimeRequirementDependencyContracts(request.runtime_requirements),
   ]);
@@ -1704,7 +1714,16 @@ function normalizeAgentTaskRun(input, result) {
           outputs: plainObject(agentResult.outputs) ? agentResult.outputs : result.outputs,
         },
       }
-    : result.artifact_result;
+    : {
+        schema: 'wp-codebox/artifact-result-envelope/v1',
+        status: success ? 'created' : 'failed',
+        success,
+        result: {
+          status: success ? 'succeeded' : 'failed',
+          success,
+          outputs: plainObject(agentResult.outputs) ? agentResult.outputs : (plainObject(result.outputs) ? result.outputs : {}),
+        },
+      };
 
   return {
     ...result,

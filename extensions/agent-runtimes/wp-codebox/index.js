@@ -5,6 +5,7 @@ module.exports = {
 	...require('./lib/codebox-artifact-contract'),
 	...require('./lib/codebox-run-agent-task-contract'),
 	...require('./lib/codebox-legacy-result-adapter'),
+	...require('./lib/codebox-result-boundary'),
 	...require('./lib/codebox-runtime-profile'),
 	...require('./lib/delegated-run-contract'),
 	...require('./lib/wp-codebox-adapter-descriptor'),

@@ -1039,7 +1039,7 @@ try {
   const agentBundleOutput = JSON.parse(agentBundleResult.stdout);
   assert.equal(agentBundleOutput.success, true);
   assert.equal(agentBundleOutput.session.status, 'completed');
-  assert.equal(agentBundleOutput.run.agentResult.scenarios[0].metadata.engine_data.example_agent.issue_number, 123);
+  assert.equal(agentBundleOutput.outputs?.issue_number, undefined);
 
   const singleResultCapturePath = path.join(root, 'capture-single-result-datamachine.json');
   const singleResult = spawnSync(process.execPath, [
@@ -1073,9 +1073,9 @@ try {
   const singleResultOutput = JSON.parse(singleResult.stdout);
   assert.equal(singleResultOutput.success, true);
   assert.equal(singleResultOutput.session.status, 'completed');
-  assert.equal(singleResultOutput.run.agentResult.outputs.issue_number, 123);
-  assert.equal(singleResultOutput.run.agentResult.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
-  assert.equal(Array.isArray(singleResultOutput.run.agentResult.scenarios), false);
+  assert.equal(singleResultOutput.outputs.issue_number, 123);
+  assert.equal(singleResultOutput.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
+  assert.equal(Array.isArray(singleResultOutput.outputs.scenarios), false);
   assert.equal(singleResultOutput.diagnostics.some((diagnostic) => diagnostic.class === 'agent_runtime.output'), true);
 
   const canonicalBundleRunCapturePath = path.join(root, 'capture-canonical-datamachine-bundle-run.json');
@@ -1108,13 +1108,9 @@ try {
   const canonicalBundleRunOutput = JSON.parse(canonicalBundleRunResult.stdout);
   assert.equal(canonicalBundleRunOutput.success, true);
   assert.equal(canonicalBundleRunOutput.session.status, 'completed');
-  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.schema, 'datamachine/agent-bundle-run/v1');
-  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.job_status, 'completed');
-  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.engine_data.example_agent.issue_number, 123);
-  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.artifacts.result.mime, 'application/json');
-  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.transcripts.summary.endsWith('/transcript.md'), true);
-  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.dry_run, true);
-  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metrics.workflow_step_count, 1);
+  assert.equal(canonicalBundleRunOutput.outputs.issue_number, undefined);
+  assert.equal(canonicalBundleRunOutput.artifact_result.schema, 'wp-codebox/artifact-result-envelope/v1');
+  assert.deepEqual(canonicalBundleRunOutput.artifact_result.result.outputs, canonicalBundleRunOutput.outputs);
   assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.example_review.type, 'ExampleReviewArtifact');
   assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.example_review.artifact_schema, 'example/review-artifact/v1');
   assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.example_review.payload.review_ready, true);
@@ -1164,8 +1160,7 @@ try {
   assert.equal(recorderBundleRunOutput.status, 'completed');
   assert.equal(recorderBundleRunOutput.outputs.issue_number, 123);
   assert.equal(recorderBundleRunOutput.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
-  assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_number, 123);
-  assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
+  assert.deepEqual(recorderBundleRunOutput.artifact_result.result.outputs, recorderBundleRunOutput.outputs);
 
   const projectionBundleRunCapturePath = path.join(root, 'capture-projection-bundle-run.json');
   const projectionBundleRunResult = spawnSync(process.execPath, [

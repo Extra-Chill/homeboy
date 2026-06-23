@@ -29,7 +29,6 @@ const {
 const {
   artifactResultEnvelopeFromCodeboxResult,
   artifactNameFromDeclaration,
-  normalizeCodeboxPublicResultEnvelope,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome: normalizeCodeboxArtifactOutcomeContract,
   normalizeTypedArtifactEntry: normalizeCodeboxTypedArtifactEntry,
@@ -37,6 +36,11 @@ const {
   typedArtifactsFromCodeboxResult,
   typedArtifactFileRefs: codeboxTypedArtifactFileRefs,
 } = require('./codebox-artifact-contract');
+const {
+  codeboxPublicResultEnvelope,
+  privateCodeboxRuntimeResultShapeNames,
+  publicEnvelopeBoundaryDiagnostic,
+} = require('./codebox-result-boundary');
 const {
   codeboxRuntimeComponentContracts,
   codeboxRuntimeProfilePayload,
@@ -1497,6 +1501,9 @@ function defaultRuntimeRequirements() {
 
 function isCodeboxOwnedSubstrateContract(contract) {
   const slug = typeof contract?.slug === 'string' ? contract.slug.trim() : '';
+  if (contract?.pluginFile || contract?.plugin_file) {
+    return false;
+  }
   return WP_CODEBOX_OWNED_SUBSTRATE_SLUGS.has(slug);
 }
 
@@ -2311,48 +2318,6 @@ function normalizeStatus(result, exitStatus = 0) {
   return (publicEnvelope?.success ?? result?.success) === true ? 'succeeded' : 'failed';
 }
 
-function codeboxPublicResultEnvelope(result, options = {}) {
-  return options.publicResultEnvelope || options.public_result_envelope || normalizeCodeboxPublicResultEnvelope(result, options);
-}
-
-function privateCodeboxRuntimeResultShapeNames(result = {}) {
-  const names = [];
-  if (result?.run?.agentResult) {
-    names.push('run.agentResult');
-  }
-  if (result?.agentResult) {
-    names.push('agentResult');
-  }
-  if (result?.agent_result) {
-    names.push('agent_result');
-  }
-  if (result?.metadata?.agent_runtime) {
-    names.push('metadata.agent_runtime');
-  }
-  if (result?.engine_data || result?.metadata?.engine_data) {
-    names.push('engine_data');
-  }
-  return names;
-}
-
-function publicEnvelopeBoundaryDiagnostic(result, options = {}) {
-  if (codeboxPublicResultEnvelope(result, options)) {
-    return null;
-  }
-  const privateShapes = privateCodeboxRuntimeResultShapeNames(result);
-  if (privateShapes.length === 0) {
-    return null;
-  }
-  return {
-    class: 'codebox.public_result_envelope_missing',
-    message: 'WP Codebox result used private runtime fields without the canonical public artifact result envelope.',
-    data: {
-      required_schema: 'wp-codebox/artifact-result-envelope/v1',
-      private_shapes: privateShapes,
-    },
-  };
-}
-
 function agentRuntimeResultCandidates(result) {
   const publicEnvelope = codeboxPublicResultEnvelope(result);
   return [
@@ -2674,51 +2639,8 @@ function replyTextFromResult(result) {
     publicEnvelope.outputs?.reply,
     publicEnvelope.outputs?.text,
     publicEnvelope.outputs?.content,
-    replyTextFromResultExecutions(result),
-    replyTextFromTranscriptArtifact(result),
   ];
   return candidates.find((candidate) => typeof candidate === 'string' && candidate.trim() !== '') || '';
-}
-
-function replyTextFromResultExecutions(result) {
-  const executions = [
-    ...(Array.isArray(result?.executions) ? result.executions : []),
-    ...(Array.isArray(result?.run?.executions) ? result.run.executions : []),
-  ];
-  for (const execution of [...executions].reverse()) {
-    const reply = replyTextFromExecutionStdout(execution?.stdout || '');
-    if (reply) {
-      return reply;
-    }
-  }
-  return '';
-}
-
-function replyTextFromExecutionStdout(stdout) {
-  const wrapper = parseJsonObject(stdout || '');
-  const output = parseJsonObject(wrapper?.output || '') || parseJsonObject(stdout || '');
-  const reply = output?.agent_runtime?.result?.reply || output?.result?.reply || output?.reply;
-  return typeof reply === 'string' && reply.trim() !== '' ? reply : '';
-}
-
-function replyTextFromTranscriptArtifact(result) {
-  const transcriptRef = firstTranscriptArtifactRefFromResult(result);
-  if (!transcriptRef?.path) {
-    return '';
-  }
-  try {
-    const transcript = JSON.parse(fs.readFileSync(transcriptRef.path, 'utf8'));
-    const executions = Array.isArray(transcript.executions) ? transcript.executions : [];
-    for (const execution of [...executions].reverse()) {
-      const reply = replyTextFromExecutionStdout(execution?.stdout || '');
-      if (reply) {
-        return reply;
-      }
-    }
-  } catch {
-    return '';
-  }
-  return '';
 }
 
 function replyTypedArtifactsFromResult(request, result, existingTypedArtifacts = {}) {

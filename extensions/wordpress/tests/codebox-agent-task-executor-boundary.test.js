@@ -16,6 +16,7 @@ const {
   normalizeCodeboxPublicResultEnvelope,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
+  publicEnvelopeBoundaryDiagnostic,
   providerContract,
   providerRuntimeInvocationContract,
   reconcileRunSummaryWithPublicEnvelope,
@@ -151,6 +152,7 @@ assert.equal(privateRuntimeShapeOutcome.status, 'failed');
 assert.equal(privateRuntimeShapeOutcome.failure_classification, 'execution_failed');
 assert.equal(privateRuntimeShapeOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.public_result_envelope_missing'), true);
 assert.equal(privateRuntimeShapeOutcome.outputs.reply, undefined);
+assert.deepEqual(publicEnvelopeBoundaryDiagnostic({ run: { agentResult: { reply: 'private' } } }).data.private_shapes, ['run.agentResult']);
 const publicRuntimeShapeOutcome = agentTaskOutcomeFromCodeboxResult(privateRuntimeShapeRequest, {
   success: true,
   run: {
@@ -169,6 +171,21 @@ const publicRuntimeShapeOutcome = agentTaskOutcomeFromCodeboxResult(privateRunti
 assert.equal(publicRuntimeShapeOutcome.status, 'succeeded');
 assert.equal(publicRuntimeShapeOutcome.outputs.reply, 'Public reply');
 assert.equal(publicRuntimeShapeOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.public_result_envelope_missing'), false);
+const privateReplyWithPublicEnvelopeOutcome = agentTaskOutcomeFromCodeboxResult(privateRuntimeShapeRequest, {
+  success: true,
+  run: {
+    agentResult: {
+      reply: 'Private reply must not leak into outputs.',
+    },
+  },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: { outputs: {} },
+  },
+});
+assert.equal(privateReplyWithPublicEnvelopeOutcome.status, 'succeeded');
+assert.equal(privateReplyWithPublicEnvelopeOutcome.outputs.reply, undefined);
 const reconciledRunSummary = reconcileRunSummaryWithPublicEnvelope({
   status: 'failed',
   success: false,
@@ -912,6 +929,31 @@ assert.deepEqual(
   ['codebox.required_typed_artifacts_invalid']
 );
 assert.match(placeholderArtifactOutcome.summary, /invalid required typed artifacts: concept_packet/);
+
+const missingTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'missing-typed-artifact-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  artifact_declarations: [{
+    name: 'concept_packet',
+    artifact_schema: 'wp-site-generator/ConceptPacket/v1',
+    required: true,
+  }],
+}, {
+  success: true,
+  status: 'completed',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: { outputs: {} },
+  },
+});
+assert.equal(missingTypedArtifactOutcome.status, 'failed');
+assert.equal(missingTypedArtifactOutcome.failure_classification, 'execution_failed');
+assert.deepEqual(
+  missingTypedArtifactOutcome.diagnostics.map((diagnostic) => diagnostic.class),
+  ['codebox.required_typed_artifacts_missing']
+);
 
 const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
