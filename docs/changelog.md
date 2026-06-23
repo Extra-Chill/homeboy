@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.256.1] - 2026-06-23
+
+### Changed
+- split workload dispatch validation
+- cover lab registry contract consistency
+
+### Fixed
+- gate reports on required artifacts
+- validate workload result refs
+- reject provider config stdin offload
+- Fix fuzz Lab sandbox path handling
+
 ## [0.256.0] - 2026-06-23
 
 ### Added
