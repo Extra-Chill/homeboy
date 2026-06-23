@@ -193,6 +193,7 @@ fn copy_release_artifacts(
         })?;
         copied.push(ReleaseArtifact {
             path: destination.display().to_string(),
+            durable_path: Some(destination.display().to_string()),
             artifact_type: artifact.artifact_type.clone(),
             platform: artifact.platform.clone(),
         });
@@ -232,6 +233,7 @@ mod tests {
             &artifact_dir,
             &[ReleaseArtifact {
                 path: "build/plugin.zip".to_string(),
+                durable_path: None,
                 artifact_type: Some("archive".to_string()),
                 platform: None,
             }],
