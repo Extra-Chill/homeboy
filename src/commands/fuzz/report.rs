@@ -209,7 +209,7 @@ fn coverage_ratio(
     total: impl Fn(&homeboy::core::fuzz::FuzzCoverageSummary) -> u64,
 ) -> f64 {
     let Some(summary) = summary else {
-        return 1.0;
+        return 0.0;
     };
     let total = total(summary);
     if total == 0 {
@@ -315,11 +315,11 @@ pub(super) fn fuzz_coverage_completeness(
             declared_targets: 0,
             executable_targets: 0,
             proven_targets: 0,
-            target_coverage_ratio: 1.0,
+            target_coverage_ratio: 0.0,
             declared_operations: 0,
             executable_operations: 0,
             proven_operations: 0,
-            operation_coverage_ratio: 1.0,
+            operation_coverage_ratio: 0.0,
             skipped_targets: 0,
             skipped_operations: 0,
             skipped_reason_counts: BTreeMap::new(),

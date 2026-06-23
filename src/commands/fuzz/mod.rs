@@ -177,7 +177,7 @@ mod tests {
     use clap::Parser;
     use homeboy::core::engine::run_dir::RunDir;
     use homeboy::core::extension::FuzzConfig;
-    use homeboy::core::fuzz::FuzzCampaign;
+    use homeboy::core::fuzz::{FuzzCampaign, FuzzCoverageSummary};
     use homeboy::core::observation::ObservationStore;
     use homeboy::core::rig::RigSpec;
     use homeboy::test_support::with_isolated_home;
@@ -187,6 +187,25 @@ mod tests {
     struct FuzzCli {
         #[command(flatten)]
         args: FuzzArgs,
+    }
+
+    fn zero_coverage_summary() -> FuzzCoverageSummary {
+        FuzzCoverageSummary {
+            schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+            declared_targets: 0,
+            executable_targets: 0,
+            proven_targets: 0,
+            declared_operations: 0,
+            executable_operations: 0,
+            proven_operations: 0,
+            skipped_targets: Vec::new(),
+            skipped_operations: Vec::new(),
+            surface_summaries: Vec::new(),
+            kind_summaries: Vec::new(),
+            artifact_ids: Vec::new(),
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        }
     }
 
     #[test]
@@ -313,8 +332,13 @@ mod tests {
         }));
         assert!(gates.iter().any(|gate| {
             gate.gate_id == "target-coverage-complete"
-                && gate.status == "passed"
-                && gate.observed == 1.0
+                && gate.status == "failed"
+                && gate.observed == 0.0
+        }));
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "operation-coverage-complete"
+                && gate.status == "failed"
+                && gate.observed == 0.0
         }));
     }
 
@@ -332,7 +356,7 @@ mod tests {
             cases: Vec::new(),
             seeds: Vec::new(),
             coverage: Vec::new(),
-            coverage_summary: None,
+            coverage_summary: Some(zero_coverage_summary()),
             findings: Vec::new(),
             artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
                 schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
@@ -372,7 +396,7 @@ mod tests {
             cases: Vec::new(),
             seeds: Vec::new(),
             coverage: Vec::new(),
-            coverage_summary: None,
+            coverage_summary: Some(zero_coverage_summary()),
             findings: Vec::new(),
             artifacts: Vec::new(),
             thresholds: Vec::new(),
@@ -398,6 +422,57 @@ mod tests {
         }));
         assert_eq!(summary.target_coverage_ratio, 1.0);
         assert_eq!(summary.operation_coverage_ratio, 1.0);
+    }
+
+    #[test]
+    fn fuzz_coverage_completeness_fails_closed_without_summary() {
+        let campaign = FuzzCampaign {
+            schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            id: "campaign-1".to_string(),
+            title: None,
+            safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            cases: Vec::new(),
+            seeds: Vec::new(),
+            coverage: Vec::new(),
+            coverage_summary: None,
+            findings: Vec::new(),
+            artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
+                schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+                id: "case-log".to_string(),
+                kind: "case_log".to_string(),
+                artifact: None,
+                metadata: serde_json::Value::Null,
+                extra: std::collections::BTreeMap::new(),
+            }],
+            thresholds: Vec::new(),
+            lifecycle: None,
+            provenance: None,
+            replay: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        };
+
+        let gates = evaluate_fuzz_gates(&campaign);
+        let summary = fuzz_coverage_completeness(&campaign);
+
+        assert_eq!(gate_status(&gates), "failed");
+        assert_eq!(summary.has_summary, false);
+        assert_eq!(summary.target_coverage_ratio, 0.0);
+        assert_eq!(summary.operation_coverage_ratio, 0.0);
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "target-coverage-complete"
+                && gate.status == "failed"
+                && gate.observed == 0.0
+        }));
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "operation-coverage-complete"
+                && gate.status == "failed"
+                && gate.observed == 0.0
+        }));
     }
 
     #[test]

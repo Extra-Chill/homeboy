@@ -578,6 +578,24 @@ fn sandbox_tools_declare_capabilities_and_allowed_arguments() {
             && tool["required_capability"] == "run:review"
             && tool["risk"] == "bounded_local_run"
     }));
+    let fuzz = tools
+        .iter()
+        .find(|tool| tool["id"] == "homeboy.fuzz")
+        .expect("fuzz tool descriptor");
+    assert_eq!(fuzz["required_capability"], "run:fuzz");
+    assert_eq!(fuzz["risk"], "bounded_discovery_report");
+    assert_eq!(fuzz["runs_as_job"], false);
+    let fuzz_args = fuzz["allowed_arguments"].as_array().expect("fuzz args");
+    for expected in ["contract", "list", "plan", "validate", "report", "replay"] {
+        assert!(
+            fuzz_args.iter().any(|arg| arg == expected),
+            "missing fuzz arg {expected}"
+        );
+    }
+    assert!(
+        !fuzz_args.iter().any(|arg| arg == "run"),
+        "fuzz run is not exposed until the sandbox has a job-ready fuzz contract"
+    );
     assert!(tools.iter().all(|tool| {
         !tool["required_capability"]
             .as_str()
@@ -635,6 +653,17 @@ fn sandbox_tool_run_rejects_unallowlisted_tool_and_arguments() {
     )
     .expect_err("review report output is rejected");
     assert!(mutating.to_string().contains("JSON output"));
+
+    let fuzz_run = http_api::handle_with_jobs(
+        HttpApiRequest {
+            method: HttpMethod::Post,
+            path: "/tools/homeboy.fuzz/run".to_string(),
+            body: Some(serde_json::json!({ "subcommand": "run" })),
+        },
+        &JobStore::default(),
+    )
+    .expect_err("fuzz run is not job-ready");
+    assert!(fuzz_run.to_string().contains("not executable"));
 }
 
 #[test]
