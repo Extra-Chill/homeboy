@@ -143,6 +143,7 @@ assert.deepEqual(
   'Do not carry hardcoded WP Codebox fallback contract constants; consume the public Codebox runtime contract manifest instead.'
 );
 assert.doesNotMatch(runtimeContractSource, /homeboy-extensions-fallback/);
+assert.doesNotMatch(runtimeContractSource, /\.cache\/homeboy\/wp-codebox|setupCacheCoreModuleCandidates|HOMEBOY_WP_CODEBOX_INSTALL_DIR/);
 
 assert.throws(
   () => validateCanonicalRuntimeContractManifest({
@@ -182,20 +183,11 @@ assert.throws(
   /canonical runtime contract manifest is unavailable/
 );
 
-const installRoot = path.join(tempRoot, 'wp-codebox-install');
-const focusedContractsPath = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'contracts.js');
-const legacyIndexPath = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js');
-fs.mkdirSync(path.dirname(focusedContractsPath), { recursive: true });
-fs.writeFileSync(focusedContractsPath, 'export function runtimeContractManifest() { return {}; }\n');
-fs.writeFileSync(legacyIndexPath, 'export function runtimeContractManifest() { return {}; }\n');
 delete process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
-const contractCandidates = coreModuleCandidates({ wpCodeboxInstallDir: installRoot });
+const contractCandidates = coreModuleCandidates({ wpCodeboxInstallDir: path.join(tempRoot, 'wp-codebox-install') });
 assert.equal(contractCandidates[0], '@automattic/wp-codebox-core/contracts');
 assert.equal(contractCandidates[1], 'wp-codebox-workspace/contracts');
-assert.equal(contractCandidates[2], '@automattic/wp-codebox-core');
-assert.equal(contractCandidates[3], 'wp-codebox-workspace/core');
-assert.match(contractCandidates[4], /dist\/contracts\.js$/);
-assert.match(contractCandidates[5], /dist\/index\.js$/);
+assert.equal(contractCandidates.length, 2);
 
 const mismatchedModule = path.join(tempRoot, 'mismatched-runtime-core.mjs');
 fs.writeFileSync(mismatchedModule, `

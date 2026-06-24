@@ -689,6 +689,12 @@ activated by request/config selectors. Codex-backed requests declare the require
 readiness before dispatch while keeping provider and runtime semantics in the
 extension and WP Codebox.
 
+Homeboy forwards those secret environment variable names only. It does not call
+provider OAuth endpoints, read local provider auth files, or persist rotated
+provider credentials. If a token is stale and the provider requires refresh,
+WP Codebox or the provider plugin needs to expose a public refresh primitive;
+without that primitive the preflight fails before sandbox launch.
+
 Provider stacks stay generic at the Homeboy boundary. Executor config, options,
 or `HOMEBOY_SETTINGS_JSON` may provide `runtime_env`, `runtime_state_mounts`,
 and `runtime_config_mounts`. The executor forwards those values unchanged to the

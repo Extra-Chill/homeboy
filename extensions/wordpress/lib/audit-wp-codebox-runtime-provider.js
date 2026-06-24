@@ -37,10 +37,8 @@ const WP_CODEBOX_ARTIFACTS_MODULE_OPTIONS = {
   packageCandidates: [
     '@automattic/wp-codebox-core/artifacts',
     'wp-codebox-workspace/artifacts',
-    // Compatibility fallback for WP Codebox builds before focused package entrypoints.
-    '@automattic/wp-codebox-core',
   ],
-  packageDistEntries: ['artifacts.js', 'index.js'],
+  packageDistEntries: ['artifacts.js'],
 };
 
 function sha256(value) {

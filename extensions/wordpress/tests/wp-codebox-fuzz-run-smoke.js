@@ -496,18 +496,17 @@ runWpCodeboxFuzzSuite({
 		taskId: 'public-cli-suite-run',
 		input,
 		runPublicCli: ({ args, stdin }) => {
-			if (args.join(' ') === 'codebox run-fuzz-suite --help') {
+			if (args.join(' ') === 'run-fuzz-suite --help') {
 				return { status: 0, stdout: 'usage' };
 			}
-			if (args.join(' ') === 'codebox run-wordpress-workload --help') {
+			if (args.join(' ') === 'run-wordpress-workload --help') {
 				return { status: 1, stderr: 'unknown command' };
 			}
-			assert.equal(args[0], 'codebox');
-			assert.equal(args[1], 'run-fuzz-suite');
-			assert.equal(args[2], '--input-file');
-			assert.equal(args[4], '--format=json');
+			assert.equal(args[0], 'run-fuzz-suite');
+			assert.equal(args[1], '--input-file');
+			assert.equal(args[3], '--format=json');
 			assert.equal(stdin, undefined);
-			assert.equal(JSON.parse(fs.readFileSync(args[3], 'utf8')).schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+			assert.equal(JSON.parse(fs.readFileSync(args[2], 'utf8')).schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 			return {
 				status: 0,
 				stdout: JSON.stringify({

@@ -67,18 +67,10 @@ try {
 			wp_codebox_chat_handler_plugin_paths: [chatHandlerDir],
 		},
 	});
-	const chatHandlerContract = chatHandlerTaskInput.runtime_requirements.component_contracts.find(
-		(contract) => contract.slug === path.basename(chatHandlerDir)
-	);
-	assert.equal(chatHandlerContract.path, chatHandlerDir);
-	assert.equal(chatHandlerContract.loadAs, 'plugin');
-	assert.equal(chatHandlerContract.activate, true);
-	assert.deepEqual(chatHandlerContract.metadata.registers, ['wp_agent_chat_handler']);
-	assert.deepEqual(chatHandlerTaskInput.runtime_requirements.ability_requirements, ['agents/chat']);
-	assert.equal(
-		chatHandlerTaskInput.component_contracts.some((contract) => contract.slug === path.basename(chatHandlerDir)),
-		true
-	);
+	assert.deepEqual(chatHandlerTaskInput.provider_plugin_paths, [providerDir]);
+	assert.equal(chatHandlerTaskInput.runtime_requirements.component_contracts, undefined);
+	assert.equal(chatHandlerTaskInput.runtime_requirements.ability_requirements, undefined);
+	assert.equal(chatHandlerTaskInput.component_contracts.some((contract) => contract.slug === path.basename(chatHandlerDir)), false);
 	assert.deepEqual(providerCredentialSecretEnvNames({ secret_env: ['OPENAI_API_KEY'] }, { recipe: { secret_env: ['GITHUB_TOKEN'] } }), [
 		'OPENAI_API_KEY',
 		'GITHUB_TOKEN',

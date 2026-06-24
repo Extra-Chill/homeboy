@@ -58,6 +58,7 @@ process.stdout.write(JSON.stringify({
 		encoding: 'utf8',
 		env: {
 			...process.env,
+			HOMEBOY_WP_CODEBOX_CORE_MODULE: path.join(rootDir, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs'),
 			HOMEBOY_CAPTURE_TASK_INPUT: capturePath,
 		},
 	});
@@ -90,6 +91,7 @@ process.stdout.write(JSON.stringify({
 		encoding: 'utf8',
 		env: {
 			...process.env,
+			HOMEBOY_WP_CODEBOX_CORE_MODULE: path.join(rootDir, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs'),
 			HOMEBOY_CAPTURE_TASK_INPUT: runtimeRequirementsCapturePath,
 		},
 	});

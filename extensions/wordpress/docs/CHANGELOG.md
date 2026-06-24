@@ -2,6 +2,23 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.3] - 2026-06-24
+
+### Changed
+- Tighten Codebox public adapter boundary
+
+## [3.13.2] - 2026-06-24
+
+### Changed
+- Remove legacy Codebox result adapters
+- Use public Codebox adapter boundaries
+
+## [3.13.1] - 2026-06-24
+
+### Fixed
+- Fix public fuzz CLI invocation shape
+- Fix public fuzz Codebox binary selection
+
 ## [3.13.0] - 2026-06-24
 
 ### Added

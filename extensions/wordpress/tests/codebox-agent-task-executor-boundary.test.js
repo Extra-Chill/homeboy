@@ -37,13 +37,6 @@ const claudeCodeSecretEnv = [
   'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
   'AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT',
 ];
-const runtimePackageSubstrateOptions = {
-  settings: {
-    wp_codebox_agents_api_path: workspaceRoot,
-    wp_codebox_data_machine_path: workspaceRoot,
-    wp_codebox_data_machine_code_path: workspaceRoot,
-  },
-};
 const legacyRuntimePackageAbilityAlias = (alias) => ({
   schema: 'wp-codebox/deprecated-compatibility-alias/v1',
   alias,
@@ -675,7 +668,7 @@ const controllerClientContextArtifactsTaskInput = codeboxTaskRequestFromAgentTas
       input: { package: { slug: 'website-idea-agent', source: 'bundles/website-idea-agent' } },
     },
   },
-}, runtimePackageSubstrateOptions);
+});
 
 assert.deepEqual(controllerClientContextArtifactsTaskInput.artifact_declarations, [{
   schema: 'wp-codebox/artifact-declaration/v1',
@@ -690,7 +683,7 @@ assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.ability_
   normalized_codebox_ability: 'wp-codebox/run-runtime-package',
   bridge_ability: 'wp-codebox/run-runtime-package',
   runtime_ability: 'wp-codebox/run-runtime-package',
-  owning_components: ['wp-codebox', 'agents-api', 'data-machine', 'data-machine-code'],
+  owning_components: ['wp-codebox'],
   deprecated_compatibility_alias: legacyRuntimePackageAbilityAlias('agents/run-runtime-package'),
 });
 assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task_ability_normalization, controllerClientContextArtifactsTaskInput.runtime_task.ability_normalization);
@@ -714,7 +707,7 @@ const legacyRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
       input: { package: { slug: 'example-agent', source: 'bundles/example-agent' } },
     },
   },
-}, runtimePackageSubstrateOptions);
+});
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
 assert.deepEqual(
   legacyRuntimePackageTaskInput.runtime_task.ability_normalization.deprecated_compatibility_alias,
@@ -727,7 +720,7 @@ assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.model, 'gpt-5.5');
 assert.deepEqual(legacyRuntimePackageTaskInput.runtime_task.input.metadata.runtime_package_descriptor, { slug: 'example-agent', source: 'bundles/example-agent' });
 assert.equal(Object.hasOwn(legacyRuntimePackageTaskInput.runtime_task.input, 'package'), false);
 
-const runtimePackageSubstrateTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+const explicitRuntimePackageComponentTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'runtime-package-substrate-task-1',
   executor: {
@@ -741,7 +734,7 @@ const runtimePackageSubstrateTaskInput = codeboxTaskRequestFromAgentTaskRequest(
       ],
     },
   },
-  instructions: 'Run a runtime-package task with Codebox-owned substrate components.',
+  instructions: 'Run a runtime-package task with caller-supplied component contracts.',
   inputs: {
     ability_request: {
       name: 'runtime-package/run',
@@ -760,31 +753,26 @@ const runtimePackageSubstrateTaskInput = codeboxTaskRequestFromAgentTaskRequest(
     },
   },
 });
-assert.equal(runtimePackageSubstrateTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
-assert.deepEqual(runtimePackageSubstrateTaskInput.component_contracts.map((contract) => contract.slug), ['agents-api', 'data-machine', 'data-machine-code']);
-assert.equal(runtimePackageSubstrateTaskInput.runtime_component_paths.agents_api, '/components/agents-api');
-assert.equal(runtimePackageSubstrateTaskInput.runtime_component_paths.agent_runtime, '/components/data-machine');
-assert.equal(runtimePackageSubstrateTaskInput.runtime_component_paths.data_machine_code, '/components/data-machine-code');
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.deepEqual(explicitRuntimePackageComponentTaskInput.component_contracts.map((contract) => contract.slug), ['agents-api', 'data-machine', 'data-machine-code']);
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.agents_api, '/components/agents-api');
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.agent_runtime, '/components/data-machine');
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.data_machine_code, '/components/data-machine-code');
 
-assert.throws(() => codeboxTaskRequestFromAgentTaskRequest({
+const runtimePackageWithoutSubstrateTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'runtime-package-missing-substrate-task-1',
   executor: { backend: 'codebox', config: { provider: 'codex' } },
-  instructions: 'Fail before dispatch when runtime-package substrate contracts are missing.',
+  instructions: 'Run a runtime-package task through the public Codebox ability without HBE substrate construction.',
   inputs: {
     ability_request: {
       name: 'runtime-package/run',
       input: { package: { slug: 'example-agent' } },
     },
   },
-}), (error) => {
-  assert.equal(error.name, 'RuntimePackageSubstratePreflightError');
-  assert.equal(error.diagnostics.length, 3);
-  assert.equal(error.diagnostics[0].class, 'codebox.preflight.runtime_package_substrate');
-  assert.match(error.diagnostics[0].message, /agents-api substrate component contract/);
-  assert.deepEqual(error.diagnostics[0].data.required_components, ['agents-api', 'data-machine', 'data-machine-code']);
-  return true;
 });
+assert.equal(runtimePackageWithoutSubstrateTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.deepEqual(runtimePackageWithoutSubstrateTaskInput.component_contracts, []);
 
 const previousAgentsApiPath = process.env.WP_CODEBOX_AGENTS_API_PATH;
 const previousDataMachinePath = process.env.WP_CODEBOX_DATA_MACHINE_PATH;
@@ -807,8 +795,7 @@ const runtimePackageEnvSubstrateTaskInput = codeboxTaskRequestFromAgentTaskReque
 restoreEnv('WP_CODEBOX_AGENTS_API_PATH', previousAgentsApiPath);
 restoreEnv('WP_CODEBOX_DATA_MACHINE_PATH', previousDataMachinePath);
 restoreEnv('WP_CODEBOX_DATA_MACHINE_CODE_PATH', previousDataMachineCodePath);
-assert.deepEqual(runtimePackageEnvSubstrateTaskInput.component_contracts.map((contract) => contract.slug), ['agents-api', 'data-machine', 'data-machine-code']);
-assert.equal(runtimePackageEnvSubstrateTaskInput.component_contracts.every((contract) => contract.path === workspaceRoot), true);
+assert.deepEqual(runtimePackageEnvSubstrateTaskInput.component_contracts, []);
 
 const explicitLegacyRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -822,7 +809,7 @@ const explicitLegacyRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
       input: { package: { slug: 'example-agent' } },
     },
   },
-}, runtimePackageSubstrateOptions);
+});
 assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
 assert.deepEqual(
   explicitLegacyRuntimeTaskInput.runtime_task.ability_normalization.deprecated_compatibility_alias,
@@ -850,7 +837,7 @@ const runtimeConfigOptionsRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequ
       },
     },
   },
-}, runtimePackageSubstrateOptions);
+});
 assert.equal(runtimeConfigOptionsRuntimeTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
 assert.equal(runtimeConfigOptionsRuntimeTaskInput.runtime_task.input.provider, 'codex');
 assert.equal(runtimeConfigOptionsRuntimeTaskInput.runtime_task.input.model, 'gpt-5.5');
@@ -877,7 +864,7 @@ const providerAndControllerArtifactsTaskInput = codeboxTaskRequestFromAgentTaskR
   inputs: {
     ability_request: { name: 'agents/run-runtime-package' },
   },
-}, runtimePackageSubstrateOptions);
+});
 assert.deepEqual(providerAndControllerArtifactsTaskInput.artifact_declarations.map((declaration) => declaration.name), ['concept_packet']);
 assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
 assert.equal(

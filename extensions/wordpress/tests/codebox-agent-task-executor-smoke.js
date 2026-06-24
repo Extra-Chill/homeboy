@@ -481,7 +481,6 @@ assert.deepEqual(codeboxRequest.runtime_overlays, [{
 }]);
 assert.deepEqual(codeboxRequest.runtime_requirements, {
   schema: 'wp-codebox/runtime-profile/v1',
-  ability_requirements: ['agents/chat'],
   runtime_overlays: codeboxRequest.runtime_overlays,
   provider_plugins: [{ path: '/providers/openai' }],
   upstream_primitive_requirements: [{
@@ -493,8 +492,6 @@ assert.deepEqual(codeboxRequest.runtime_requirements, {
     adapter_behavior: 'declare_requirement_only',
     requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract.',
   }],
-  component_contracts: [],
-  extra_plugins: [],
 });
 const legacyOverlayNameRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
@@ -800,7 +797,6 @@ assert.deepEqual(genericProviderRuntimeRequest.provider_plugin_paths, ['/provide
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlays, [{ kind: 'fixture-overlay', source: '/overlays/fixture' }]);
 assert.deepEqual(genericProviderRuntimeRequest.runtime_requirements, {
   schema: 'wp-codebox/runtime-profile/v1',
-  ability_requirements: ['agents/chat'],
   runtime_overlays: [{ kind: 'fixture-overlay', source: '/overlays/fixture' }],
   env: genericRuntimeEnv,
   provider_plugins: [{ path: '/providers/fixture-provider' }],
@@ -815,8 +811,6 @@ assert.deepEqual(genericProviderRuntimeRequest.runtime_requirements, {
     adapter_behavior: 'declare_requirement_only',
     requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract.',
   }],
-  component_contracts: [],
-  extra_plugins: [],
 });
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlay_profiles, ['fixture-profile']);
 assert.deepEqual(genericProviderRuntimeRequest.secret_env, ['FIXTURE_PROVIDER_SECRET']);
@@ -1148,8 +1142,8 @@ try {
     agentRuntime: runtimePath,
     settings: {},
   });
-  assert.equal(bundledAgentsApiRequest.runtime_requirements.component_contracts.some((contract) => contract.slug === 'agents-api'), false);
-  assert.deepEqual(bundledAgentsApiRequest.runtime_requirements.ability_requirements, ['agents/chat']);
+  assert.equal((bundledAgentsApiRequest.runtime_requirements.component_contracts || []).some((contract) => contract.slug === 'agents-api'), false);
+  assert.equal(bundledAgentsApiRequest.runtime_requirements.ability_requirements, undefined);
   assert.equal(bundledAgentsApiRequest.component_contracts.some((contract) => contract.slug === 'agents-api'), false);
 
   const chatHandlerRequest = codeboxTaskRequestFromAgentTaskRequest({
@@ -1168,9 +1162,9 @@ try {
       wp_codebox_chat_handler_plugin_paths: [dataMachinePath],
     },
   });
-  assert.deepEqual(chatHandlerRequest.runtime_requirements.component_contracts.map((contract) => contract.slug), []);
+  assert.deepEqual((chatHandlerRequest.runtime_requirements.component_contracts || []).map((contract) => contract.slug), []);
   assert.deepEqual(chatHandlerRequest.component_contracts.map((contract) => contract.slug), []);
-  assert.deepEqual(chatHandlerRequest.runtime_requirements.ability_requirements, ['agents/chat']);
+  assert.equal(chatHandlerRequest.runtime_requirements.ability_requirements, undefined);
 
   const configuredDefaultProviderRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
