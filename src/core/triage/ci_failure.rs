@@ -328,9 +328,16 @@ pub(super) fn extract_failure_snippets(log: &str, context_lines: usize) -> Vec<C
         }
         let start = index.saturating_sub(context_lines / 2);
         let end = (index + (context_lines / 2) + 1).min(lines.len());
+        // Skip only failure lines already captured by the previous snippet's
+        // covered range. `line_end` is the exclusive end index, so the previous
+        // snippet covers 0-based line indices `[line_start - 1, line_end)`.
+        // Comparing the failure-line `index` (rather than the widened snippet
+        // `start`) against that range lets a distinct failure line just past the
+        // previous window open its own concise snippet instead of being swallowed
+        // by overlap of the surrounding context lines.
         if snippets
             .last()
-            .is_some_and(|snippet: &CiFailureSnippet| start < snippet.line_end)
+            .is_some_and(|snippet: &CiFailureSnippet| index < snippet.line_end)
         {
             continue;
         }

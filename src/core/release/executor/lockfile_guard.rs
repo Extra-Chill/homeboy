@@ -459,14 +459,24 @@ fn local_file_dependency_error(offenders: &[LocalFileDependency]) -> Error {
         ));
     }
 
+    let hints = vec![
+        "Use a published package version for releaseable dependencies.".to_string(),
+        "If this is an intentional workspace release, configure the dependency through the workspace release path instead of a checkout-external file: path.".to_string(),
+    ];
+
+    // Surface the remediation guidance in the message body too (not just hints)
+    // so callers that only inspect the error message still see how to resolve a
+    // checkout-external file: dependency.
+    lines.push(String::new());
+    for hint in &hints {
+        lines.push(format!("  - {hint}"));
+    }
+
     Error::validation_invalid_argument(
         "release.preflight.local_file_dependencies",
         lines.join("\n"),
         None,
-        Some(vec![
-            "Use a published package version for releaseable dependencies.".to_string(),
-            "If this is an intentional workspace release, configure the dependency through the workspace release path instead of a checkout-external file: path.".to_string(),
-        ]),
+        Some(hints),
     )
 }
 
