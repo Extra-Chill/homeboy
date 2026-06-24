@@ -37,9 +37,12 @@ mod fixtures;
 mod outcome_normalization;
 mod resolution;
 mod runner_readiness;
+mod runtime_types;
+mod secret_types;
 mod secrets;
 mod staging_reconciliation;
 mod types;
+mod workspace_types;
 
 #[cfg(test)]
 mod tests;
@@ -49,6 +52,8 @@ pub(crate) use resolution::{
     resolve_provider_for_backend, role_aliases_for_executor, role_aliases_for_provider,
     selector_runtime_provider_hint, timeout_artifact_discovery_for_executor, ProviderResolution,
 };
+pub use runtime_types::*;
+pub use secret_types::*;
 pub(crate) use secrets::{
     provider_runner_secret_env_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers,
@@ -59,6 +64,8 @@ pub use staging_reconciliation::{
 };
 pub(crate) use types::wildcard_match;
 pub use types::*;
+use types::{default_metadata, is_empty_metadata};
+pub use workspace_types::*;
 
 #[cfg(test)]
 use catalog::{

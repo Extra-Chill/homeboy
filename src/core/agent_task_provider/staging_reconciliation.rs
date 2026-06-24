@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::core::agent_task::AgentTaskComponentContract;
 use crate::core::{Error, Result};
 
-use super::types::{AgentTaskRuntimeReconciledPackage, AgentTaskRuntimeStagingContract};
+use super::runtime_types::{AgentTaskRuntimeReconciledPackage, AgentTaskRuntimeStagingContract};
 
 /// A single detected conflict: a staged plugin vendors a package the runtime
 /// owns. Carries enough provenance to name the owner, the package, and the
