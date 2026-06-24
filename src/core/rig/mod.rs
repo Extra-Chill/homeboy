@@ -92,6 +92,7 @@ pub use workloads::{
 
 use crate::core::error::{Error, Result};
 use crate::core::paths;
+use discovery::discover_rigs_for_install;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -326,10 +327,13 @@ pub fn load_local_source(source: &str, id: Option<&str>) -> Result<RigSpec> {
         ));
     }
 
-    let mut rigs = discover_rigs(&path)?;
+    let mut rigs = if id.is_some() {
+        discover_rigs_for_install(&path, id, false)?
+    } else {
+        discover_rigs(&path)?
+    };
     if let Some(id) = id {
         let id = crate::core::extension::slugify_id(id)?;
-        rigs.retain(|rig| rig.id == id);
         if rigs.is_empty() {
             return Err(Error::validation_invalid_argument(
                 "id",
