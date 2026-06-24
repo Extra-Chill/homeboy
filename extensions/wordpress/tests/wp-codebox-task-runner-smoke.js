@@ -16,6 +16,14 @@ const wpCodeboxTaskRunner = path.join(
   'agent',
   'homeboy-wp-codebox-task-runner.cjs'
 );
+process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(
+  __dirname,
+  '..',
+  '..',
+  'tests',
+  'fixtures',
+  'wp-codebox-core-runtime-contract.cjs'
+);
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -195,11 +203,6 @@ const agentResult = isRuntimeTask
 fs.writeFileSync(out, JSON.stringify({
   argv: process.argv.slice(2),
   input,
-  codex_env: {
-    access_refreshed: process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN === 'fresh-access-token-value',
-    refresh_refreshed: process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN === 'fresh-refresh-token-value',
-    expires_refreshed: Number(process.env.AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT || 0) > Math.floor(Date.now() / 1000),
-  },
 }, null, 2));
 const execution = { recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(agentResult) }) };
 const executions = [execution];
@@ -725,23 +728,13 @@ try {
       AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '1',
       AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'account-id-value',
       AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
-      HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL: codexOAuthServer.url,
     },
   });
-  assert.equal(codexResult.status, 0, codexResult.stderr || codexResult.stdout);
-  const codexCapture = readJson(codexCapturePath);
-  const codexInput = codexCapture.input;
-  assert.deepEqual(codexInput.secret_env, codexSecretEnv);
-  assert.equal(codexInput.provider, 'codex');
-  assert.equal(codexInput.model, 'gpt-5.5');
-  assert.equal(codexInput.provider_plugin_paths[0], '/components/ai-provider-for-openai');
-  assert.deepEqual(codexCapture.codex_env, {
-    access_refreshed: true,
-    refresh_refreshed: true,
-    expires_refreshed: true,
-  });
-  assert(!JSON.stringify(codexInput).includes('access-token-value'));
-  assert(!JSON.stringify(codexInput).includes('refresh-token-value'));
+  assert.equal(codexResult.status, 1, codexResult.stderr || codexResult.stdout);
+  assert.match(codexResult.stderr, /Codebox\/provider-owned public credential refresh primitive/);
+  assert(!codexResult.stderr.includes('access-token-value'));
+  assert(!codexResult.stderr.includes('refresh-token-value'));
+  assert(!fs.existsSync(codexCapturePath));
 
   const expiredCodexCapturePath = path.join(root, 'capture-expired-codex.json');
   const expiredCodexResult = spawnSync(process.execPath, [
@@ -795,12 +788,11 @@ try {
       AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '1',
       AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'stale-account-id-value',
       AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
-      HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL: codexOAuthServer.url,
     },
   });
   assert.equal(staleCodexResult.status, 1, staleCodexResult.stderr || staleCodexResult.stdout);
   assert.match(staleCodexResult.stderr, /Codex provider auth preflight failed/);
-  assert.match(staleCodexResult.stderr, /OAuth refresh returned HTTP 401/);
+  assert.match(staleCodexResult.stderr, /Codebox\/provider-owned public credential refresh primitive/);
   assert.match(staleCodexResult.stderr, /Refresh Codex OAuth credentials/);
   assert(!staleCodexResult.stderr.includes('stale-access-token-value'));
   assert(!staleCodexResult.stderr.includes('stale-refresh-token-value'));
@@ -872,7 +864,7 @@ try {
   const preparedLabRuntime = path.join(labRuntimeArtifacts, 'prepared-plugins', 'example-runtime');
   assert.equal(labRuntimeInput.runtime_component_paths.agent_runtime, preparedLabRuntime);
   assert.equal(labRuntimeInput.extra_plugins.some((plugin) => plugin.slug === 'agents-api'), false);
-  assert.equal((labRuntimeInput.component_contracts || []).some((contract) => contract.slug === 'agents-api'), false);
+  assert.equal((labRuntimeInput.component_contracts || []).some((contract) => contract.slug === 'agents-api'), true);
   assert.equal(fs.existsSync(path.join(preparedLabRuntime, 'example-runtime.php')), true);
 
   const runtimeComponentSource = path.join(root, 'runtime-components', 'example-runtime-tools');

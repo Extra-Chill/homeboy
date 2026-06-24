@@ -174,9 +174,14 @@ WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,
 `themes`, `overlays`, `runtime_overlays`, `env`, and `provider_plugins`.
 Homeboy Extensions forwards those shapes as Codebox-owned runtime profile data
-through the current public runtime profile contract. Data Machine ability
-selection, Homeboy task schemas, and caller-owned artifact declarations are
-prepared by Homeboy Extensions before WP Codebox runs the task.
+through the current public runtime profile contract. Sandbox tool selection and
+other substrate details remain WP Codebox-owned; Homeboy task schemas and
+caller-owned artifact declarations are prepared by Homeboy Extensions before WP
+Codebox runs the task.
+
+Codebox contract discovery is limited to public package exports or an explicit
+`HOMEBOY_WP_CODEBOX_CORE_MODULE` supplied by the runner. Homeboy Extensions does
+not probe WP Codebox cache/source package layouts for private files.
 
 Homeboy Extensions consumes a Codebox-owned `wp-codebox/parent-tool-bridge/v1`
 when the runtime profile exposes one. When it is missing, the adapter declares
