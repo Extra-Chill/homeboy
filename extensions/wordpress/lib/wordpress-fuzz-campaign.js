@@ -39,6 +39,9 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 		...(objectOrUndefined(options.plan) || {}),
 		...(objectOrUndefined(input.plan_options || input.planOptions) || {}),
 	};
+	if (input.mutation_mode || input.mutationMode || options.mutation_mode || options.mutationMode) {
+		planOptions.mutation_mode = input.mutation_mode || input.mutationMode || options.mutation_mode || options.mutationMode;
+	}
 	const plan = buildWordPressFuzzPlanFromSurfaces(discovery, planOptions);
 	const coverageManifest = buildWordPressRuntimeSurfaceCoverageManifest(discovery);
 	const workload = buildWordPressFuzzCampaignWorkload({

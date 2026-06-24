@@ -60,8 +60,8 @@ if (command === 'run-fuzz-suite' && process.argv.includes('--help')) {
 	process.exit(0);
 }
 if (command === 'run-wordpress-workload' && process.argv.includes('--help')) {
-	process.stderr.write('unknown command');
-	process.exit(1);
+	process.stdout.write('usage: wp-codebox run-wordpress-workload');
+	process.exit(0);
 }
 if (command !== 'run-fuzz-suite' || inputFileIndex < 0 || !process.argv.includes('--format=json')) {
 	process.stderr.write('expected public run-fuzz-suite --input-file <file> --format=json invocation');

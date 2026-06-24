@@ -3,8 +3,11 @@
 const assert = require('node:assert/strict');
 
 const {
+	WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA,
 	WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA,
+	gateWordPressFuzzCaseForMutationPolicy,
 	gateWordPressFuzzCaseForRuntimeCapabilities,
+	normalizeWordPressFuzzMutationMode,
 	normalizeWordPressFuzzRuntimeCapabilities,
 	normalizeWordPressFuzzRuntimeCapability,
 	requiredCapabilitiesForWordPressFuzzCase,
@@ -13,6 +16,8 @@ const {
 assert.equal(normalizeWordPressFuzzRuntimeCapability('db-transaction'), 'transaction');
 assert.equal(normalizeWordPressFuzzRuntimeCapability('database_reset'), 'reset');
 assert.equal(normalizeWordPressFuzzRuntimeCapability('unknown'), '');
+assert.equal(normalizeWordPressFuzzMutationMode('destructive_deny'), 'destructive-deny');
+assert.equal(normalizeWordPressFuzzMutationMode('read-only'), 'read_only');
 
 const contract = normalizeWordPressFuzzRuntimeCapabilities({
 	capabilities: ['snapshots', 'rollback', 'reset-db', 'crud-execution'],
@@ -49,5 +54,29 @@ assert.equal(executable.executable, true);
 assert.equal(executable.metadata.executable, true);
 assert.equal(executable.metadata.gated, false);
 assert.equal(executable.metadata.runtime_capability_gated, false);
+
+const policyDenied = gateWordPressFuzzCaseForMutationPolicy({
+	id: 'case-3',
+	destructive_reasons: ['rest_method_mutates_state'],
+	metadata: { planned: true },
+}, { mutation_mode: 'read_only' });
+assert.equal(policyDenied.executable, false);
+assert.equal(policyDenied.metadata.mutation_policy.schema, WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA);
+assert.equal(policyDenied.metadata.mutation_policy.mode, 'read_only');
+assert.deepEqual(policyDenied.skip_reasons, ['mutation-policy-read-only']);
+
+const capabilityAndPolicyDenied = gateWordPressFuzzCaseForRuntimeCapabilities({
+	id: 'case-4',
+	destructive_reasons: ['db-mutation'],
+	metadata: {},
+}, { capabilities: ['database', 'snapshot', 'transaction', 'reset'] }, {
+	required_capabilities: ['database', 'snapshot', 'transaction', 'reset'],
+	mutation_mode: 'destructive-deny',
+	mutates: true,
+});
+assert.equal(capabilityAndPolicyDenied.executable, false);
+assert.equal(capabilityAndPolicyDenied.metadata.runtime_capability_gated, undefined);
+assert.equal(capabilityAndPolicyDenied.metadata.mutation_policy_gated, true);
+assert.deepEqual(capabilityAndPolicyDenied.skip_reasons, ['mutation-policy-destructive-deny']);
 
 console.log('WordPress fuzz runtime capabilities smoke passed.');

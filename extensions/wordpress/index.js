@@ -43,6 +43,7 @@ module.exports = {
 	...require('./lib/wp-codebox-fuzz-run'),
 	...require('./lib/wordpress-workload-profile'),
 	...require('./lib/wordpress-fuzz-manifest'),
+	...require('./lib/wordpress-fuzz-command-manifest'),
 	...require('./lib/wordpress-fuzz-runtime-capabilities'),
 	...require('./lib/wordpress-surface-types'),
 	...require('./lib/wordpress-hook-surface-discovery'),

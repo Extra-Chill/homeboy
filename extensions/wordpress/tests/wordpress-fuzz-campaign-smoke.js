@@ -77,4 +77,15 @@ assert.equal(aggregate.coverage.schema, 'homeboy/wordpress-fuzz-coverage-aggrega
 assert.equal(aggregate.performance.schema, 'homeboy/wordpress-performance-observation/v1');
 assert.equal(aggregate.gaps.schema, WORDPRESS_FUZZ_PLAN_RESULT_GAP_REPORT_SCHEMA);
 
+const readOnlyCampaign = compileWordPressFuzzCampaign({
+	id: 'read-only-campaign',
+	mutation_mode: 'read_only',
+	surfaces: [
+		{ id: 'rest:campaign', type: 'rest_route', route: '/wp/v2/posts', method: 'GET' },
+	],
+}, {
+	plan: { runtimeCapabilities: { capabilities: ['crud', 'snapshot', 'restore', 'reset'] } },
+});
+assert.equal(readOnlyCampaign.plan.metadata.mutation_mode, 'read_only');
+
 console.log('wordpress fuzz campaign smoke passed');

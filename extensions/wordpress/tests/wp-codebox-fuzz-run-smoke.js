@@ -11,8 +11,10 @@ const {
 	DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA,
 	ARTIFACT_POSTPROCESS_COMMAND,
 	WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
+	WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
+	buildWordPressFuzzCommandManifest,
 	wpCodeboxFuzzSuiteAbility,
 	wpCodeboxFuzzSuiteSchema,
 	wpCodeboxWordPressWorkloadRunAbility,
@@ -20,6 +22,7 @@ const {
 	wpCodeboxWordPressWorkloadRunSchema,
 	normalizeWpCodeboxFuzzSuiteResult,
 	detectWpCodeboxPublicFuzzCapabilities,
+	preflightWpCodeboxFuzzCapabilityContract,
 	runWpCodeboxFuzzSuite,
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
@@ -129,6 +132,37 @@ assert.deepEqual(
 );
 assert(!JSON.stringify(taskRequest).includes('woocommerce'), 'fuzz suite helper must stay product-agnostic');
 assert.equal(wpCodeboxFuzzSuiteTaskRequest({ taskId: 'suite-task' }).executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+
+const preflightMissingCommand = preflightWpCodeboxFuzzCapabilityContract({
+	request: taskRequest,
+	runtimeContractManifest: manifest,
+	publicCliCapabilities: { commands: { 'run-wordpress-workload': true } },
+});
+assert.equal(preflightMissingCommand.schema, WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA);
+assert.equal(preflightMissingCommand.ok, false);
+assert.deepEqual(preflightMissingCommand.missing_contracts.map((contract) => contract.command).filter(Boolean), ['run-fuzz-suite']);
+assert.equal(preflightMissingCommand.diagnostics[0].code, 'wp_codebox_fuzz_missing_public_cli_command');
+assert.equal(preflightMissingCommand.command_manifest.schema, 'homeboy/wordpress-fuzz-command-manifest/v1');
+assert.deepEqual(preflightMissingCommand.command_manifest.case_intents['request-rest-route'].commands, ['run-wordpress-workload']);
+
+const commandManifest = buildWordPressFuzzCommandManifest();
+assert.deepEqual(commandManifest.wp_codebox.public_commands, ['run-fuzz-suite', 'run-wordpress-workload']);
+assert.equal(commandManifest.wp_codebox.abilities.runWorkload, DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY);
+
+const preflightMissingAbility = preflightWpCodeboxFuzzCapabilityContract({
+	request: taskRequest,
+	runtimeContractManifest: { schema: manifest.schema, abilities: { wordpressRuntime: { runFuzzSuite: DEFAULT_FUZZ_SUITE_ABILITY } } },
+	publicCliCapabilities: { commands: { 'run-fuzz-suite': true, 'run-wordpress-workload': true } },
+});
+assert.equal(preflightMissingAbility.ok, false);
+assert.equal(preflightMissingAbility.missing_contracts.some((contract) => contract.ability === DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY), true);
+
+const preflightPassed = preflightWpCodeboxFuzzCapabilityContract({
+	request: taskRequest,
+	runtimeContractManifest: manifest,
+	publicCliCapabilities: { commands: { 'run-fuzz-suite': true, 'run-wordpress-workload': true } },
+});
+assert.equal(preflightPassed.ok, true);
 
 const jsonWorkloadManifest = {
 	schema: 'homeboy/fuzz-workload/v1',
@@ -500,7 +534,7 @@ runWpCodeboxFuzzSuite({
 				return { status: 0, stdout: 'usage' };
 			}
 			if (args.join(' ') === 'run-wordpress-workload --help') {
-				return { status: 1, stderr: 'unknown command' };
+				return { status: 0, stdout: 'usage' };
 			}
 			assert.equal(args[0], 'run-fuzz-suite');
 			assert.equal(args[1], '--input-file');
@@ -540,7 +574,7 @@ runWpCodeboxFuzzSuite({
 	});
 }).then((summary) => {
 	assert.equal(summary.succeeded, false);
-	assert.equal(summary.failures[0].code, 'wp_codebox_public_fuzz_cli_unsupported');
+	assert.equal(summary.failures[0].code, 'wp_codebox_fuzz_missing_public_cli_command');
 	assert.equal(summary.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_artifacts_missing'), false);
 
 	console.log('wp-codebox fuzz-run smoke passed');

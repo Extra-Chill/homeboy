@@ -41,6 +41,7 @@
     "./wp-codebox-artifacts": "./lib/wp-codebox-artifacts.js",
     "./wordpress-workload-profile": "./lib/wordpress-workload-profile.js",
     "./wordpress-fuzz-manifest": "./lib/wordpress-fuzz-manifest.js",
+    "./wordpress-fuzz-command-manifest": "./lib/wordpress-fuzz-command-manifest.js",
     "./wordpress-surface-types": "./lib/wordpress-surface-types.js",
     "./wordpress-fuzz-schemas": "./lib/wordpress-fuzz-schemas.js",
     "./wordpress-generic-fuzz-primitives": "./lib/wordpress-generic-fuzz-primitives.js",
