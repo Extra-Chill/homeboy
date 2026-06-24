@@ -1496,7 +1496,15 @@ mod tests {
             let manifest_entry = manifest
                 .find_path(&[entry.name])
                 .unwrap_or_else(|| panic!("manifest missing registered command `{}`", entry.name));
-            let output_notes_overridden_for_safety = matches!(entry.name, "release" | "upgrade");
+            // The manifest deliberately replaces the registry's generic output
+            // note with a safety-specific note for any command it classifies as
+            // mutating, operator-only, or guarded by dangerous flags. Those
+            // divergences are intentional, so only assert exact equality for
+            // commands without a safety classification (which still catches
+            // accidental drift on the common path).
+            let output_notes_overridden_for_safety = manifest_entry.mutates
+                || manifest_entry.operator
+                || !manifest_entry.dangerous_flags.is_empty();
 
             assert_eq!(
                 manifest_entry.docs.path,

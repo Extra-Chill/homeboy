@@ -113,6 +113,13 @@ pub struct ProcessTreeTermination {
 const SIGTERM_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 #[cfg(unix)]
 const SIGTERM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+/// How long to wait after SIGKILL for the kernel to actually tear the targets
+/// down before we declare them "surviving". `kill(2)` only queues the signal,
+/// so a pid can still read as running for a brief moment after the call
+/// returns; polling here keeps `surviving_pids` to genuinely unkillable
+/// processes instead of ones merely mid-teardown.
+#[cfg(unix)]
+const SIGKILL_REAP_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 
 pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> {
     if owner_pid > i32::MAX as u32 {
@@ -147,13 +154,11 @@ pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> 
             killed_pids = survivors_after_term;
         }
 
-        // Anything still alive after SIGKILL is genuinely unkillable from here
-        // (uninterruptible sleep, different owner, ...). Surface it for recovery.
-        let surviving_pids: Vec<u32> = targets
-            .iter()
-            .copied()
-            .filter(|pid| pid_is_running(*pid))
-            .collect();
+        // `kill(2)` only queues SIGKILL, so a just-killed pid can still read as
+        // running for a moment after the call returns. Poll briefly for the
+        // tree to actually exit before snapshotting survivors so we don't
+        // misreport processes that are merely mid-teardown.
+        let surviving_pids = wait_for_exit(&targets, SIGKILL_REAP_GRACE);
 
         let signal = if killed_pids.is_empty() {
             "SIGTERM"
