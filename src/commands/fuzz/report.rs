@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use homeboy::core::fuzz::{
-    default_fuzz_gates, default_fuzz_required_artifacts, parse_fuzz_case_log_file,
+    default_fuzz_gates, fuzz_gate_profile_contract, parse_fuzz_case_log_file,
     parse_fuzz_results_file, parse_fuzz_target_inventory_file, FuzzCampaign, FuzzExecutionRequest,
     FuzzProvenance, FuzzResultEnvelope, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA,
@@ -16,7 +16,7 @@ pub(super) const FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND: &str = "fuzz_result_envelop
 
 use super::types::{
     FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput, FuzzGateEvaluation,
-    FuzzReportArgs, FuzzReportGateProfile, FuzzReportOutput, FuzzValidateArgs, FuzzValidateOutput,
+    FuzzReportArgs, FuzzReportOutput, FuzzValidateArgs, FuzzValidateOutput,
 };
 
 pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<FuzzValidateOutput> {
@@ -65,7 +65,7 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
         .clone()
         .or_else(|| args.run.run_id.clone())
         .unwrap_or_else(|| campaign.id.clone());
-    let (required_artifacts, gates) = report_gate_contract(args.gate_profile);
+    let (required_artifacts, gates) = report_gate_contract(args.run.gate_profile);
     let metadata = fuzz_result_metadata(args.run.inventory.as_deref())?;
     let mut envelope = FuzzResultEnvelope {
         schema: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
@@ -127,15 +127,12 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
 }
 
 fn report_gate_contract(
-    profile: FuzzReportGateProfile,
+    profile: super::types::FuzzGateProfileArg,
 ) -> (
     Vec<homeboy::core::fuzz::FuzzRequiredArtifact>,
     Vec<homeboy::core::fuzz::FuzzGate>,
 ) {
-    match profile {
-        FuzzReportGateProfile::Measurement => (Vec::new(), Vec::new()),
-        FuzzReportGateProfile::Default => (default_fuzz_required_artifacts(), default_fuzz_gates()),
-    }
+    fuzz_gate_profile_contract(profile.as_core())
 }
 
 pub(super) fn persist_fuzz_result_envelope(
@@ -230,7 +227,7 @@ pub(super) fn fuzz_provenance(run_id: Option<String>) -> FuzzProvenance {
 }
 
 pub(super) fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvaluation> {
-    let profile = FuzzGateProfile::default();
+    let profile = FuzzGateEvaluationProfile::default();
     let metrics = FuzzGateMetrics::from_campaign(campaign, &profile);
 
     default_fuzz_gates()
@@ -258,10 +255,9 @@ pub(super) fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvalua
 pub(super) fn evaluate_fuzz_result_envelope_gates(
     envelope: &FuzzResultEnvelope,
 ) -> Vec<FuzzGateEvaluation> {
-    let metrics = envelope
-        .campaign
-        .as_ref()
-        .map(|campaign| FuzzGateMetrics::from_campaign(campaign, &FuzzGateProfile::default()));
+    let metrics = envelope.campaign.as_ref().map(|campaign| {
+        FuzzGateMetrics::from_campaign(campaign, &FuzzGateEvaluationProfile::default())
+    });
     let mut gates = envelope
         .gates
         .iter()
@@ -317,7 +313,9 @@ pub(super) fn required_artifact_count(envelope: &FuzzResultEnvelope, kind: &str)
         "case_log" => envelope
             .campaign
             .as_ref()
-            .map(|campaign| case_evidence_artifact_count(campaign, &FuzzGateProfile::default()))
+            .map(|campaign| {
+                case_evidence_artifact_count(campaign, &FuzzGateEvaluationProfile::default())
+            })
             .unwrap_or(0),
         "coverage_summary" => {
             usize::from(
@@ -399,12 +397,12 @@ fn metadata_artifact_has_kind(artifact: &serde_json::Value, kind: &str) -> bool 
         == Some(kind)
 }
 
-struct FuzzGateProfile {
+struct FuzzGateEvaluationProfile {
     case_evidence_kinds: &'static [&'static str],
     metadata_artifact_ref_keys: &'static [&'static str],
 }
 
-impl Default for FuzzGateProfile {
+impl Default for FuzzGateEvaluationProfile {
     fn default() -> Self {
         Self {
             case_evidence_kinds: &[
@@ -428,7 +426,7 @@ struct FuzzGateMetrics {
 }
 
 impl FuzzGateMetrics {
-    fn from_campaign(campaign: &FuzzCampaign, profile: &FuzzGateProfile) -> Self {
+    fn from_campaign(campaign: &FuzzCampaign, profile: &FuzzGateEvaluationProfile) -> Self {
         Self {
             open_findings: open_finding_count(campaign),
             case_evidence_artifacts: case_evidence_artifact_count(campaign, profile),
@@ -462,7 +460,10 @@ fn coverage_ratio(
     }
 }
 
-fn case_evidence_artifact_count(campaign: &FuzzCampaign, profile: &FuzzGateProfile) -> usize {
+fn case_evidence_artifact_count(
+    campaign: &FuzzCampaign,
+    profile: &FuzzGateEvaluationProfile,
+) -> usize {
     let campaign_artifacts = campaign
         .artifacts
         .iter()
@@ -477,7 +478,7 @@ fn case_evidence_artifact_count(campaign: &FuzzCampaign, profile: &FuzzGateProfi
 
 fn metadata_case_evidence_artifact_count(
     metadata: &serde_json::Value,
-    profile: &FuzzGateProfile,
+    profile: &FuzzGateEvaluationProfile,
 ) -> usize {
     profile
         .metadata_artifact_ref_keys
@@ -486,7 +487,10 @@ fn metadata_case_evidence_artifact_count(
         .sum()
 }
 
-fn metadata_artifact_refs(value: Option<&serde_json::Value>, profile: &FuzzGateProfile) -> usize {
+fn metadata_artifact_refs(
+    value: Option<&serde_json::Value>,
+    profile: &FuzzGateEvaluationProfile,
+) -> usize {
     value
         .and_then(|value| value.as_array())
         .map(|artifacts| {
@@ -500,7 +504,7 @@ fn metadata_artifact_refs(value: Option<&serde_json::Value>, profile: &FuzzGateP
 
 fn metadata_artifact_has_case_evidence_kind(
     artifact: &serde_json::Value,
-    profile: &FuzzGateProfile,
+    profile: &FuzzGateEvaluationProfile,
 ) -> bool {
     let kind = artifact
         .get("kind")

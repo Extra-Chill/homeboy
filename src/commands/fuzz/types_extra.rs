@@ -65,6 +65,13 @@ pub struct FuzzContractOutput {
     pub contract: homeboy::core::fuzz::FuzzCoreContract,
     pub required_artifacts: Vec<FuzzRequiredArtifact>,
     pub gates: Vec<FuzzGate>,
+    pub gate_profiles: BTreeMap<String, FuzzContractGateProfileOutput>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzContractGateProfileOutput {
+    pub required_artifacts: Vec<FuzzRequiredArtifact>,
+    pub gates: Vec<FuzzGate>,
 }
 
 #[derive(Debug, Serialize)]

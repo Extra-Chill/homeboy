@@ -2,9 +2,8 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::core::fuzz::{
-    default_fuzz_gates, default_fuzz_required_artifacts, FuzzExecutionRequest, FuzzOperation,
-    FuzzOperationFamily, FuzzSafetyClass, FuzzTargetInventory, FUZZ_CONTRACT_VERSION,
-    FUZZ_EXECUTION_REQUEST_SCHEMA,
+    fuzz_gate_profile_contract, FuzzExecutionRequest, FuzzOperation, FuzzOperationFamily,
+    FuzzSafetyClass, FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
 };
 
 use super::execution::default_runner_contract;
@@ -38,8 +37,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
     let workload_id = selected_workload
         .map(|workload| workload.id.clone())
         .or_else(|| args.run.workload_id.clone());
-    let required_artifacts = default_fuzz_required_artifacts();
-    let gates = default_fuzz_gates();
+    let (required_artifacts, gates) = fuzz_gate_profile_contract(args.run.gate_profile.as_core());
     let request_id = args
         .request_id
         .clone()
@@ -236,11 +234,15 @@ pub(super) fn plan_inventory_selection(
         })
         .collect::<Vec<_>>();
 
+    let (profile_artifacts, profile_gates) =
+        fuzz_gate_profile_contract(args.run.gate_profile.as_core());
+
     Ok(json!({
         "planner": {
             "strategy": args.strategy.as_str(),
             "operation_filters": args.operations,
             "operation_family_filters": args.operation_families,
+            "gate_profile": args.run.gate_profile.as_str(),
         },
         "selection": {
             "target_ids": selected_target_ids.into_iter().collect::<Vec<_>>(),
@@ -258,7 +260,8 @@ pub(super) fn plan_inventory_selection(
             "required": isolation_required,
             "requirements": if isolation_required { vec!["isolated_mutation"] } else { Vec::<&str>::new() },
         },
-        "required_artifact_ids": default_fuzz_required_artifacts().into_iter().map(|artifact| artifact.id).collect::<Vec<_>>(),
+        "required_artifact_ids": profile_artifacts.into_iter().map(|artifact| artifact.id).collect::<Vec<_>>(),
+        "gate_ids": profile_gates.into_iter().map(|gate| gate.id).collect::<Vec<_>>(),
         "provenance": inventory.provenance,
         "skipped": {
             "targets": skipped_targets,

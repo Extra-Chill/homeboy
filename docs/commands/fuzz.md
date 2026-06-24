@@ -5,12 +5,12 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ## Synopsis
 
 ```bash
-homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
-homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
+homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
+homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
-homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>]
+homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>]
 homeboy fuzz validate <results-file>
-homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--output-envelope <path>]
+homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--output-envelope <path>]
 homeboy fuzz compare <baseline-envelope> <candidate-envelope> [--hotspot-policy <advisory|blocking|off>]
 homeboy fuzz replay [<artifact-or-case>] [--artifact <path>] [--case-id <id>] [--run-id <id>] [-- <runner-args>]
 ```
@@ -70,8 +70,26 @@ reference those files from the campaign `artifacts` list or `metadata.artifact_r
 Homeboy core owns the path contract; extensions own artifact meaning and any
 runner/offload upload implementation beyond the persisted fuzz result envelope.
 
-Strict proof runs can require the runner to emit key fuzz artifacts directly from
-`homeboy fuzz run`:
+Runners that collect action, query, resource, timing, or counter measurements can
+emit a `homeboy/fuzz-observation-set/v1` artifact. Each observation includes a
+generic `family`, optional `case_id` / `target_id` / `operation_id`, `phase`,
+`subject`, `metric`, numeric `value`, `unit`, optional `fingerprint`, and
+`sample_count`. Product-specific details stay in observation `metadata` or
+flattened extras while Homeboy gets a stable stream for relative hotspot and
+coverage analysis.
+
+Fuzz runs are measurement-first by default. `--gate-profile measurement` records
+the campaign, artifacts, coverage, observations, and hotspots without requiring
+default threshold gates. Use stricter profiles when a workflow is ready to turn
+evidence into a pass/fail contract:
+
+- `measurement`: no required artifacts or gates.
+- `evidence`: requires replayable result/case/replay evidence and no open findings.
+- `coverage-complete`: requires coverage summary and complete target/operation coverage.
+- `strict`: requires evidence and complete coverage gates.
+
+Strict proof runs can also require the runner to emit key fuzz artifacts directly
+from `homeboy fuzz run`:
 
 ```bash
 homeboy fuzz run --rig <rig-id> --workload <workload-id> \
@@ -102,8 +120,8 @@ fields on the inventory items.
 `homeboy/fuzz-execution-request/v1` request in the command output. The request
 metadata includes the planner strategy, selected target ids, selected operation
 families, selected operation ids, seed/corpus refs, effective budgets, isolation
-requirements, required artifact ids, inventory provenance, and skipped target or
-operation reasons. The planner is product-neutral: it uses inventory-declared
+requirements, selected gate profile, required artifact ids, gate ids, inventory
+provenance, and skipped target or operation reasons. The planner is product-neutral: it uses inventory-declared
 operation families and safety classes, not product-specific target names.
 
 Selection strategies are intentionally small. `all` selects supported
