@@ -14,6 +14,8 @@ const {
 const CONFIG_SCHEMA = 'homeboy/generic-fanout-reconcile-config/v1';
 const RESULT_SCHEMA = 'homeboy/generic-fanout-reconcile-result/v1';
 const FINDING_PACKET_CONFIG_SCHEMA = 'homeboy/generic-finding-packet-fanout-config/v1';
+const GENERIC_FANOUT_RECONCILE_RECONCILIATION_SCHEMA = 'homeboy/generic-fanout-reconcile-reconciliation/v1';
+const GENERIC_FANOUT_RECONCILE_SUCCESS_STATUSES = ['completed', 'success', 'passed'];
 
 function createGenericFanoutReconcilePlan(input = {}) {
   const config = normalizeConfig(input.config || input);
@@ -292,7 +294,7 @@ function reconcileRecords({ groups = [], task_requests = [], records = [], outco
   const successCount = records.filter((record) => isRecordSuccessful(record, config)).length;
   const failedRecords = records.filter((record) => !isRecordSuccessful(record, config));
   return {
-    schema: config.reconciliation_schema || config.reconciliationSchema || 'homeboy/generic-fanout-reconcile-reconciliation/v1',
+    schema: config.reconciliation_schema || config.reconciliationSchema || GENERIC_FANOUT_RECONCILE_RECONCILIATION_SCHEMA,
     group_count: groups.length,
     task_count: task_requests.length,
     record_count: records.length,
@@ -304,7 +306,7 @@ function reconcileRecords({ groups = [], task_requests = [], records = [], outco
 }
 
 function isRecordSuccessful(record, config = {}) {
-  const successStatuses = Array.isArray(config.success_statuses) ? config.success_statuses : ['completed', 'success', 'passed'];
+  const successStatuses = Array.isArray(config.success_statuses) ? config.success_statuses : GENERIC_FANOUT_RECONCILE_SUCCESS_STATUSES;
   if (record.success === true) {
     return true;
   }
@@ -405,6 +407,11 @@ function text(value) {
 module.exports = {
   CONFIG_SCHEMA,
   FINDING_PACKET_CONFIG_SCHEMA,
+  GENERIC_FANOUT_RECONCILE_CONFIG_SCHEMA: CONFIG_SCHEMA,
+  GENERIC_FANOUT_RECONCILE_RECONCILIATION_SCHEMA,
+  GENERIC_FANOUT_RECONCILE_RESULT_SCHEMA: RESULT_SCHEMA,
+  GENERIC_FANOUT_RECONCILE_SUCCESS_STATUSES,
+  GENERIC_FINDING_PACKET_FANOUT_CONFIG_SCHEMA: FINDING_PACKET_CONFIG_SCHEMA,
   RESULT_SCHEMA,
   createFindingPacketFanoutPlan,
   createFindingPacketReconcileInput,

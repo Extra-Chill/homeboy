@@ -17,6 +17,8 @@ assert.equal(typeof runtimeAgentCi.createGenericFanoutReconcilePlan, 'function')
 assert.equal(typeof runtimeAgentCi.createGenericFanoutReconcileResult, 'function');
 assert.equal(typeof runtimeAgentCi.validateControllerLoopProof, 'function');
 assert.equal(typeof runtimeAgentCi.createFanoutReconcilePlan, 'function');
+assert.equal(runtimeAgentCi.GENERIC_FANOUT_RECONCILE_CONFIG_SCHEMA, 'homeboy/generic-fanout-reconcile-config/v1');
+assert.equal(runtimeAgentCi.FANOUT_RECONCILE_PLAN_SCHEMA, 'homeboy/fanout-reconcile-plan/v1');
 assert.equal(runtimeAgentCi.createGenericFanoutReconcilePlan, genericWorkflow.createGenericFanoutReconcilePlan);
 assert.equal(runtimeAgentCi.createFanoutReconcilePlan, runner.createFanoutReconcilePlan);
 

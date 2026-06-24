@@ -154,6 +154,44 @@ copying schema strings or selector paths into each backend. Domain policy, such
 as project-specific defaults, belongs in the caller/runtime package and not in
 the generic adapter.
 
+## Host Orchestration Contract
+
+The published Homeboy core fixture is
+`agent-runtimes/fixtures/homeboy-agent-task-core-contract.json`. It is the
+cross-repo handoff contract for durable host orchestration and runtime package
+execution. Homeboy core owns durable queueing, fanout, progress, retries,
+artifacts, and promotion. Runtime packages own the executor command and backend
+translation behind the provider manifest.
+
+Generic fanout/reconcile schemas are part of that fixture:
+
+- `homeboy/generic-fanout-reconcile-config/v1`
+- `homeboy/fanout-reconcile-plan/v1`
+- `homeboy/fanout-reconcile-run/v1`
+- `homeboy/generic-fanout-reconcile-result/v1`
+- `homeboy/generic-fanout-reconcile-reconciliation/v1`
+- `homeboy/generic-finding-packet-fanout-config/v1`
+
+When a host fanout lane executes agent-task providers, record status is the host
+orchestration status and outcome status remains the provider terminal status.
+The canonical bridge is:
+
+| Agent-task outcome status | Fanout record status |
+| --- | --- |
+| `succeeded` | `completed` |
+| `no_op` | `completed` |
+| `unable_to_remediate` | `failed` |
+| `provider_error` | `failed` |
+| `timeout` | `failed` |
+| `failed` | `failed` |
+| `follow_up_issue` | `failed` |
+| `cancelled` | `failed` |
+
+Fanout runners may also emit `missing_record` for a planned task with no returned
+execution record. The run status vocabulary is `incomplete`, `completed`, and
+`failed`. Backend-native statuses should be preserved inside provider outcome
+metadata or diagnostics, not promoted into host orchestration status fields.
+
 ## Secret Requirements
 
 Runtime manifests should declare secret inputs by name, never by value:
