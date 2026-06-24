@@ -24,6 +24,18 @@ pub(super) const LAB_EXTRA_WORKSPACES_JSON_ENV: &str =
     concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES_JSON");
 pub(super) const LAB_WORKSPACE_MAPPING_SCHEMA: &str = concat!("home", "boy/workspace-map/v1");
 
+/// Config channel for declared runtime overlays. A runtime overlay is a
+/// first-class, ecosystem-agnostic contract for materializing a built runtime
+/// (e.g. a packaged CLI) on the remote Lab runner without syncing its entire
+/// dependency tree: an extra workspace/artifact directory to sync PLUS an
+/// optional opaque dependency-install step (a command + working dir, supplied
+/// as data) that Homeboy runs on the runner AFTER the sync and BEFORE the hot
+/// command. The install command is opaque data — core only forwards it to the
+/// runner and never assumes any package manager, language, or tooling.
+pub(super) const LAB_RUNTIME_OVERLAYS_JSON_ENV: &str =
+    concat!("HOME", "BOY_LAB_RUNTIME_OVERLAYS_JSON");
+pub(super) const LAB_RUNTIME_OVERLAY_SCHEMA: &str = concat!("home", "boy/lab-runtime-overlay/v1");
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(super) struct LabWorkspaceMappingEntry {
     role: String,
@@ -51,6 +63,68 @@ pub(super) struct ExtraLabWorkspace {
     pub(super) path: PathBuf,
     pub(super) snapshot_includes: Vec<String>,
     pub(super) bootstrap_node_dependencies: bool,
+}
+
+/// An opaque dependency-install step declared by a runtime overlay. The
+/// `command` is an argv vector supplied as data by the extension/config; core
+/// runs it on the remote runner verbatim and never inspects or hardcodes any
+/// ecosystem tooling. `workdir` selects which synced directory the install runs
+/// in: `None` runs in the overlay's own synced remote path, while a relative
+/// value resolves against that remote path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(super) struct RuntimeOverlayInstallStep {
+    pub(super) command: Vec<String>,
+    #[serde(default)]
+    pub(super) workdir: Option<String>,
+}
+
+/// Raw, untrusted runtime-overlay declaration as supplied by config/env. Parsed
+/// into a validated [`RuntimeOverlay`] by [`parse_runtime_overlays`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(super) struct RuntimeOverlaySpec {
+    /// Controller-local directory holding the built runtime artifact to sync.
+    pub(super) path: String,
+    /// Logical role label for the synced workspace mapping entry.
+    #[serde(default)]
+    pub(super) role: Option<String>,
+    /// Relative subpaths included when snapshotting the artifact directory.
+    #[serde(default)]
+    pub(super) snapshot_includes: Vec<String>,
+    /// Optional opaque dependency-install step run on the runner after sync.
+    #[serde(default)]
+    pub(super) install: Option<RuntimeOverlayInstallStep>,
+    /// Optional environment variable name to surface the overlay's resolved
+    /// remote path to the hot command (e.g. so a CLI command env entry points at
+    /// the real remote runtime directory). The name is opaque config data.
+    #[serde(default)]
+    pub(super) expose_remote_path_env: Option<String>,
+}
+
+/// A validated runtime overlay: an extra workspace to sync plus an optional
+/// opaque install step and an optional env var that surfaces the resolved
+/// remote path to the hot command. Kept ecosystem-agnostic — every behavioral
+/// value here originates from config/extension data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RuntimeOverlay {
+    pub(super) workspace: ExtraLabWorkspace,
+    pub(super) install: Option<RuntimeOverlayInstallStep>,
+    pub(super) expose_remote_path_env: Option<String>,
+}
+
+/// A runtime overlay that has been synced to the runner and (if declared) had
+/// its opaque install step executed. Records the resolved remote path and the
+/// env var surfacing it, so callers can fold the overlay into the command env
+/// and offload metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct SyncedRuntimeOverlay {
+    pub(super) role: String,
+    pub(super) local_path: String,
+    pub(super) remote_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) install_workdir: Option<String>,
+    pub(super) install_ran: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) expose_remote_path_env: Option<String>,
 }
 
 pub(super) fn sync_extra_lab_workspaces(
@@ -221,6 +295,242 @@ pub(super) fn lab_extra_workspaces(source_path: &Path) -> Result<Vec<ExtraLabWor
     let mut workspaces = accepted_extra_lab_workspaces()?;
     workspaces.extend(discovered_validation_dependency_workspaces(source_path)?);
     Ok(workspaces)
+}
+
+/// Read the declared runtime overlays for this Lab offload from the config/env
+/// channel. Returns an empty list when no overlays are declared, leaving the
+/// existing single-checkout / no-overlay offload behavior unchanged.
+pub(super) fn lab_runtime_overlays() -> Result<Vec<RuntimeOverlay>> {
+    let raw = match std::env::var(LAB_RUNTIME_OVERLAYS_JSON_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => raw,
+        _ => return Ok(Vec::new()),
+    };
+    let specs: Vec<RuntimeOverlaySpec> = serde_json::from_str(&raw).map_err(|err| {
+        Error::validation_invalid_argument(
+            LAB_RUNTIME_OVERLAYS_JSON_ENV,
+            format!(
+                "{LAB_RUNTIME_OVERLAYS_JSON_ENV} must be a JSON array of runtime-overlay objects: {err}"
+            ),
+            Some(raw.clone()),
+            Some(vec![
+                "Each overlay is `{\"path\": <artifact dir>, \"install\": {\"command\": [..], \"workdir\": <relative>}, \"expose_remote_path_env\": <ENV>}`. install and expose_remote_path_env are optional.".to_string(),
+            ]),
+        )
+    })?;
+    parse_runtime_overlays(specs)
+}
+
+/// Validate raw runtime-overlay specs into [`RuntimeOverlay`] values. The
+/// artifact directory must exist; the install command (when present) must be a
+/// non-empty argv. Pure and side-effect-free apart from canonicalizing the
+/// artifact path, so it is unit-testable without a runner.
+pub(super) fn parse_runtime_overlays(
+    specs: Vec<RuntimeOverlaySpec>,
+) -> Result<Vec<RuntimeOverlay>> {
+    let mut overlays = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let role = spec
+            .role
+            .filter(|role| !role.trim().is_empty())
+            .unwrap_or_else(|| "runtime_overlay".to_string());
+        let path = canonical_existing_dir(&spec.path, "runtime_overlay.path")?;
+        if let Some(install) = spec.install.as_ref() {
+            if install.command.iter().all(|arg| arg.trim().is_empty()) {
+                return Err(Error::validation_invalid_argument(
+                    "runtime_overlay.install.command",
+                    "A runtime-overlay install step must declare a non-empty command argv."
+                        .to_string(),
+                    Some(spec.path.clone()),
+                    Some(vec![
+                        "Provide the install command as an argv array, e.g. `\"command\": [\"<tool>\", \"install\"]`.".to_string(),
+                    ]),
+                ));
+            }
+        }
+        let expose_remote_path_env = spec
+            .expose_remote_path_env
+            .filter(|name| !name.trim().is_empty());
+        overlays.push(RuntimeOverlay {
+            workspace: ExtraLabWorkspace {
+                role,
+                path,
+                snapshot_includes: spec.snapshot_includes,
+                bootstrap_node_dependencies: false,
+            },
+            install: spec.install,
+            expose_remote_path_env,
+        });
+    }
+    Ok(overlays)
+}
+
+/// Resolve the remote working directory for an overlay install step. `None`
+/// runs in the overlay's own synced remote path; a relative value resolves
+/// against that remote path. Absolute values are honored verbatim so an overlay
+/// can install into a sibling materialized directory. Kept pure for testing.
+pub(super) fn runtime_overlay_install_workdir(remote_path: &str, workdir: Option<&str>) -> String {
+    match workdir.map(str::trim).filter(|value| !value.is_empty()) {
+        None => remote_path.to_string(),
+        Some(value) if Path::new(value).is_absolute() => value.to_string(),
+        Some(value) => Path::new(remote_path).join(value).display().to_string(),
+    }
+}
+
+/// Sync each declared runtime overlay to the runner and, when an overlay
+/// declares an opaque install step, run it on the runner AFTER the sync and
+/// BEFORE the hot command. Overlays are processed in declaration order so a
+/// later overlay can depend on an earlier one's materialized output. Returns
+/// the synced overlays (with resolved remote paths) and folds their workspace
+/// mapping entries into `workspace_mapping`. An empty overlay list is a no-op,
+/// keeping non-overlay offload unchanged.
+pub(super) fn sync_lab_runtime_overlays(
+    runner_id: &str,
+    primary_local_path: &str,
+    overlays: Vec<RuntimeOverlay>,
+    workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
+) -> Result<Vec<SyncedRuntimeOverlay>> {
+    if overlays.is_empty() {
+        return Ok(Vec::new());
+    }
+    let primary = canonical_existing_dir(primary_local_path, "path")?;
+    let mut seen = HashSet::from([primary]);
+    let mut synced_overlays = Vec::new();
+
+    for overlay in overlays {
+        let local_path = canonical_existing_dir(
+            &overlay.workspace.path.display().to_string(),
+            "runtime_overlay",
+        )?;
+        let already_synced = !seen.insert(local_path.clone());
+        let synced = sync_workspace(
+            runner_id,
+            RunnerWorkspaceSyncOptions {
+                path: local_path.display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: overlay.workspace.snapshot_includes.clone(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        )?
+        .0;
+        let entry = workspace_mapping_entry(&overlay.workspace.role, &synced);
+        if !already_synced {
+            workspace_mapping.push(entry);
+        }
+
+        let mut install_workdir = None;
+        let mut install_ran = false;
+        if let Some(install) = overlay.install.as_ref() {
+            let workdir =
+                runtime_overlay_install_workdir(&synced.remote_path, install.workdir.as_deref());
+            run_runtime_overlay_install_step(runner_id, &synced.local_path, &workdir, install)?;
+            install_workdir = Some(workdir);
+            install_ran = true;
+        }
+
+        synced_overlays.push(SyncedRuntimeOverlay {
+            role: overlay.workspace.role.clone(),
+            local_path: synced.local_path.clone(),
+            remote_path: synced.remote_path.clone(),
+            install_workdir,
+            install_ran,
+            expose_remote_path_env: overlay.expose_remote_path_env.clone(),
+        });
+    }
+
+    Ok(synced_overlays)
+}
+
+/// Run a runtime overlay's opaque install command on the remote runner. The
+/// command argv is forwarded verbatim — core asserts only that no
+/// controller-local workspace path survived un-translated into the argv before
+/// dispatch, then executes it with the resolved remote workdir as cwd. No
+/// ecosystem tooling is assumed; the command is data supplied by config.
+fn run_runtime_overlay_install_step(
+    runner_id: &str,
+    local_path: &str,
+    remote_workdir: &str,
+    install: &RuntimeOverlayInstallStep,
+) -> Result<()> {
+    let command: Vec<String> = install
+        .command
+        .iter()
+        .map(|arg| arg.trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect();
+
+    super::lab_workspaces_deps::preflight_runtime_overlay_install_argv(
+        runner_id,
+        &command,
+        Path::new(local_path),
+        remote_workdir,
+    )?;
+
+    let (output, exit_code) = super::exec(
+        runner_id,
+        super::RunnerExecOptions {
+            cwd: Some(remote_workdir.to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command,
+            env: std::collections::HashMap::new(),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: true,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+            runner_workload: None,
+            detach_after_handoff: false,
+        },
+    )?;
+    if exit_code == 0 {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "runtime_overlay.install",
+        format!(
+            "Lab offload runtime-overlay install step failed (exit {exit_code}) in remote workdir `{remote_workdir}`"
+        ),
+        Some(remote_workdir.to_string()),
+        Some(vec![
+            format!("install stderr: {}", output.stderr.trim()),
+            "Verify the overlay install command succeeds on the runner, or package the runtime as a self-contained artifact so no install step is required.".to_string(),
+        ]),
+    ))
+}
+
+/// Build the env-var deltas that surface synced runtime-overlay remote paths to
+/// the hot command. Only overlays that declared `expose_remote_path_env`
+/// contribute an entry; the result is empty otherwise. Pure for testing.
+pub(super) fn runtime_overlay_env_overrides(
+    synced_overlays: &[SyncedRuntimeOverlay],
+) -> Vec<(String, String)> {
+    synced_overlays
+        .iter()
+        .filter_map(|overlay| {
+            overlay
+                .expose_remote_path_env
+                .as_ref()
+                .map(|name| (name.clone(), overlay.remote_path.clone()))
+        })
+        .collect()
+}
+
+/// Metadata block describing the synced runtime overlays for offload evidence.
+pub(super) fn lab_runtime_overlay_metadata(
+    synced_overlays: &[SyncedRuntimeOverlay],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": LAB_RUNTIME_OVERLAY_SCHEMA,
+        "count": synced_overlays.len(),
+        "overlays": synced_overlays,
+    })
 }
 
 /// Discover controller-local directories referenced by a `--provider-config` in
@@ -1260,5 +1570,189 @@ mod validation_dependency_mapping_tests {
             "validation_dependency_sibling"
         );
         assert_eq!(value["dependency_freshness"]["id"], "shared-runtime");
+    }
+}
+
+#[cfg(test)]
+mod runtime_overlay_tests {
+    use super::{
+        lab_runtime_overlay_metadata, parse_runtime_overlays, runtime_overlay_env_overrides,
+        runtime_overlay_install_workdir, sync_lab_runtime_overlays, LabWorkspaceMappingEntry,
+        RuntimeOverlayInstallStep, RuntimeOverlaySpec, SyncedRuntimeOverlay,
+        LAB_RUNTIME_OVERLAY_SCHEMA,
+    };
+
+    fn synced(role: &str, remote: &str, env: Option<&str>) -> SyncedRuntimeOverlay {
+        SyncedRuntimeOverlay {
+            role: role.to_string(),
+            local_path: format!("/local/{role}"),
+            remote_path: remote.to_string(),
+            install_workdir: None,
+            install_ran: false,
+            expose_remote_path_env: env.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn parses_artifact_only_overlay_without_install_step() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec = RuntimeOverlaySpec {
+            path: dir.path().display().to_string(),
+            role: None,
+            snapshot_includes: vec!["cli".to_string()],
+            install: None,
+            expose_remote_path_env: None,
+        };
+
+        let overlays = parse_runtime_overlays(vec![spec]).expect("parse overlays");
+
+        assert_eq!(overlays.len(), 1);
+        let overlay = &overlays[0];
+        // Default role is applied and the artifact path is canonicalized to the
+        // existing directory; no install step and no env surfacing requested.
+        assert_eq!(overlay.workspace.role, "runtime_overlay");
+        assert_eq!(overlay.workspace.snapshot_includes, vec!["cli".to_string()]);
+        assert!(overlay.install.is_none());
+        assert!(overlay.expose_remote_path_env.is_none());
+        assert!(!overlay.workspace.bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn parses_overlay_with_opaque_install_step_and_env_surfacing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec = RuntimeOverlaySpec {
+            path: dir.path().display().to_string(),
+            role: Some("cli-runtime".to_string()),
+            snapshot_includes: Vec::new(),
+            install: Some(RuntimeOverlayInstallStep {
+                // Opaque, ecosystem-agnostic placeholder argv supplied as data.
+                command: vec!["install-tool".to_string(), "deps".to_string()],
+                workdir: Some("cli".to_string()),
+            }),
+            expose_remote_path_env: Some("RUNTIME_CLI_DIR".to_string()),
+        };
+
+        let overlays = parse_runtime_overlays(vec![spec]).expect("parse overlays");
+
+        let overlay = &overlays[0];
+        assert_eq!(overlay.workspace.role, "cli-runtime");
+        let install = overlay.install.as_ref().expect("install step");
+        assert_eq!(install.command, vec!["install-tool", "deps"]);
+        assert_eq!(install.workdir.as_deref(), Some("cli"));
+        assert_eq!(
+            overlay.expose_remote_path_env.as_deref(),
+            Some("RUNTIME_CLI_DIR")
+        );
+    }
+
+    #[test]
+    fn rejects_install_step_with_empty_command_argv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec = RuntimeOverlaySpec {
+            path: dir.path().display().to_string(),
+            role: None,
+            snapshot_includes: Vec::new(),
+            install: Some(RuntimeOverlayInstallStep {
+                command: vec!["   ".to_string()],
+                workdir: None,
+            }),
+            expose_remote_path_env: None,
+        };
+
+        let err = parse_runtime_overlays(vec![spec]).expect_err("empty command rejected");
+        assert!(err.message.contains("non-empty command argv"));
+    }
+
+    #[test]
+    fn rejects_overlay_with_missing_artifact_directory() {
+        let spec = RuntimeOverlaySpec {
+            path: "/definitely/not/a/real/overlay/dir".to_string(),
+            role: None,
+            snapshot_includes: Vec::new(),
+            install: None,
+            expose_remote_path_env: None,
+        };
+
+        assert!(parse_runtime_overlays(vec![spec]).is_err());
+    }
+
+    #[test]
+    fn install_workdir_defaults_to_overlay_remote_path() {
+        assert_eq!(
+            runtime_overlay_install_workdir("/srv/_lab/overlay", None),
+            "/srv/_lab/overlay"
+        );
+        assert_eq!(
+            runtime_overlay_install_workdir("/srv/_lab/overlay", Some("  ")),
+            "/srv/_lab/overlay"
+        );
+    }
+
+    #[test]
+    fn install_workdir_resolves_relative_against_remote_and_honors_absolute() {
+        assert_eq!(
+            runtime_overlay_install_workdir("/srv/_lab/overlay", Some("cli")),
+            "/srv/_lab/overlay/cli"
+        );
+        assert_eq!(
+            runtime_overlay_install_workdir("/srv/_lab/overlay", Some("/srv/_lab/sibling")),
+            "/srv/_lab/sibling"
+        );
+    }
+
+    #[test]
+    fn env_overrides_only_surface_overlays_that_declared_an_env_var() {
+        let overlays = vec![
+            synced("cli", "/srv/_lab/cli", Some("RUNTIME_CLI_DIR")),
+            synced("data", "/srv/_lab/data", None),
+        ];
+
+        let overrides = runtime_overlay_env_overrides(&overlays);
+
+        assert_eq!(
+            overrides,
+            vec![("RUNTIME_CLI_DIR".to_string(), "/srv/_lab/cli".to_string())]
+        );
+    }
+
+    #[test]
+    fn env_overrides_empty_when_no_overlays() {
+        assert!(runtime_overlay_env_overrides(&[]).is_empty());
+    }
+
+    #[test]
+    fn metadata_records_schema_count_and_overlays() {
+        let overlays = vec![synced("cli", "/srv/_lab/cli", Some("RUNTIME_CLI_DIR"))];
+
+        let value = lab_runtime_overlay_metadata(&overlays);
+
+        assert_eq!(value["schema"], LAB_RUNTIME_OVERLAY_SCHEMA);
+        assert_eq!(value["count"], 1);
+        assert_eq!(value["overlays"][0]["role"], "cli");
+        assert_eq!(value["overlays"][0]["remote_path"], "/srv/_lab/cli");
+        assert_eq!(
+            value["overlays"][0]["expose_remote_path_env"],
+            "RUNTIME_CLI_DIR"
+        );
+    }
+
+    #[test]
+    fn empty_overlay_list_is_a_no_op_and_leaves_mapping_unchanged() {
+        // Components WITHOUT overlays must not sync anything or mutate the
+        // workspace mapping — sync_lab_runtime_overlays short-circuits before
+        // touching the runner, so this is safe to call without one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut mapping: Vec<LabWorkspaceMappingEntry> = Vec::new();
+
+        let synced = sync_lab_runtime_overlays(
+            "unused-runner",
+            &dir.path().display().to_string(),
+            Vec::new(),
+            &mut mapping,
+        )
+        .expect("no-op overlay sync");
+
+        assert!(synced.is_empty());
+        assert!(mapping.is_empty());
     }
 }

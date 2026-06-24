@@ -77,9 +77,11 @@ use super::super::lab_selection::{
 };
 use super::super::lab_workspaces::{
     agent_task_plan_extra_workspaces, agent_task_provider_runtime_component_extra_workspaces,
-    lab_extra_workspaces, lab_workspace_mapping_metadata, path_setting_extra_workspaces,
+    lab_extra_workspaces, lab_runtime_overlay_metadata, lab_runtime_overlays,
+    lab_workspace_mapping_metadata, path_setting_extra_workspaces,
     preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
-    rig_component_path_env_extra_workspaces, sync_extra_lab_workspaces,
+    rig_component_path_env_extra_workspaces, runtime_overlay_env_overrides,
+    sync_extra_lab_workspaces, sync_lab_runtime_overlays,
     workspace_mapping_entries_for_git_dependency, workspace_mapping_entry,
     workspace_mapping_entry_for_validation_dependency, LabWorkspaceMappingEntry,
 };
