@@ -106,6 +106,35 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
     .0;
     let remote_cwd = synced.remote_path.clone();
     let mut workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
+    // The primary workspace sync materializes each declared dependency checkout
+    // alongside the primary remote path (as a sibling) and reports them as
+    // `validation_dependencies`. Fold those into the offload workspace mapping so
+    // their controller-local -> remote path pairs propagate into the remote
+    // command's path remaps. Without this the dependency graph exists on the
+    // runner but the offloaded command still carries controller-local dependency
+    // paths, so a remote dependency resolver cannot find the materialized
+    // checkouts (#3292). Components with no declared dependencies produce an
+    // empty list here, leaving the single-checkout offload path unchanged.
+    for dependency in &synced.validation_dependencies {
+        workspace_mapping.push(workspace_mapping_entry_for_validation_dependency(
+            dependency,
+        ));
+    }
+    if !synced.validation_dependencies.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready(
+                "lab.materialize_dependency_graph",
+                "lab.materialize_dependency_graph",
+            )
+            .inputs(
+                PlanValues::new()
+                    .json("count", synced.validation_dependencies.len())
+                    .json("dependencies", &synced.validation_dependencies),
+            )
+            .build(),
+        );
+    }
     plan = with_step(
         plan,
         PlanStep::ready("lab.sync_workspace", "lab.sync_workspace")

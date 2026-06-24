@@ -15,8 +15,8 @@ use super::lab_workspaces_deps::{
     provider_config_source_cli_files,
 };
 use super::{
-    sync_workspace, RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    sync_workspace, RunnerGitDependencyMaterializationOutput, RunnerValidationDependencySyncOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 pub(super) const LAB_EXTRA_WORKSPACES_ENV: &str = concat!("HOME", "BOY_LAB_EXTRA_WORKSPACES");
@@ -108,6 +108,31 @@ pub(super) fn workspace_mapping_entry(
         sync_mode: synced.sync_mode.label().to_string(),
         snapshot_identity: synced.snapshot_identity.clone(),
         dependency_freshness: None,
+    }
+}
+
+/// Build a workspace-mapping entry for a declared dependency checkout that the
+/// primary workspace sync already materialized on the runner (as a sibling of
+/// the primary remote path). Folding these into the offload workspace mapping
+/// propagates their local->remote path pairs into the remote command's path
+/// remaps, so an extension dependency resolver running on the runner receives
+/// usable remote paths instead of controller-local ones. Kept generic: the
+/// dependency graph is an opaque id->path mapping with no ecosystem semantics.
+pub(super) fn workspace_mapping_entry_for_validation_dependency(
+    dependency: &RunnerValidationDependencySyncOutput,
+) -> LabWorkspaceMappingEntry {
+    LabWorkspaceMappingEntry {
+        role: dependency.role.clone(),
+        local_path: dependency.local_path.clone(),
+        remote_path: dependency.remote_path.clone(),
+        sync_mode: RunnerWorkspaceSyncMode::Snapshot.label().to_string(),
+        snapshot_identity: dependency.id.clone(),
+        dependency_freshness: Some(serde_json::json!({
+            "id": dependency.id.as_str(),
+            "local_path": dependency.local_path.as_str(),
+            "evidence_path": dependency.evidence_path.as_str(),
+            "source_provenance": "validation_dependency_sibling",
+        })),
     }
 }
 
@@ -1193,5 +1218,47 @@ mod provider_config_candidate_paths_tests {
         assert_eq!(err.details["field"], "provider_config");
         assert!(err.message.contains("@example/provider-core"));
         assert!(err.message.contains("index.js"));
+    }
+}
+
+#[cfg(test)]
+mod validation_dependency_mapping_tests {
+    use super::workspace_mapping_entry_for_validation_dependency;
+    use crate::core::runner::RunnerValidationDependencySyncOutput;
+
+    fn dependency_output() -> RunnerValidationDependencySyncOutput {
+        RunnerValidationDependencySyncOutput {
+            id: "shared-runtime".to_string(),
+            role: "validation_dependency".to_string(),
+            local_path: "/Users/dev/Developer/shared-runtime".to_string(),
+            remote_path: "/srv/_lab_workspaces/shared-runtime".to_string(),
+            evidence_path: "/srv/_lab_workspaces/shared-runtime/.homeboy/lab-source-evidence.json"
+                .to_string(),
+        }
+    }
+
+    #[test]
+    fn maps_dependency_local_path_to_materialized_remote_path() {
+        let entry = workspace_mapping_entry_for_validation_dependency(&dependency_output());
+
+        // The controller-local checkout path must remap to the runner-side
+        // materialized path so remote dependency resolvers receive usable paths
+        // instead of controller-local ones (#3292).
+        assert_eq!(entry.local_path(), "/Users/dev/Developer/shared-runtime");
+        assert_eq!(entry.remote_path(), "/srv/_lab_workspaces/shared-runtime");
+    }
+
+    #[test]
+    fn preserves_dependency_role_and_identity_metadata() {
+        let entry = workspace_mapping_entry_for_validation_dependency(&dependency_output());
+
+        let value = serde_json::to_value(&entry).expect("serialize mapping entry");
+        assert_eq!(value["role"], "validation_dependency");
+        assert_eq!(value["snapshot_identity"], "shared-runtime");
+        assert_eq!(
+            value["dependency_freshness"]["source_provenance"],
+            "validation_dependency_sibling"
+        );
+        assert_eq!(value["dependency_freshness"]["id"], "shared-runtime");
     }
 }

@@ -81,7 +81,7 @@ use super::super::lab_workspaces::{
     preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
     rig_component_path_env_extra_workspaces, sync_extra_lab_workspaces,
     workspace_mapping_entries_for_git_dependency, workspace_mapping_entry,
-    LabWorkspaceMappingEntry,
+    workspace_mapping_entry_for_validation_dependency, LabWorkspaceMappingEntry,
 };
 use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
