@@ -55,9 +55,17 @@ const fs = require('node:fs');
 
 const command = process.argv[2];
 const inputFileIndex = process.argv.indexOf('--input-file');
-if (command !== 'run-fuzz-suite' || inputFileIndex < 0 || !process.argv.includes('--json')) {
-  process.stderr.write('expected public run-fuzz-suite --input-file <file> --json invocation');
-  process.exit(1);
+if (command === 'run-fuzz-suite' && process.argv.includes('--help')) {
+	process.stdout.write('usage: wp-codebox run-fuzz-suite');
+	process.exit(0);
+}
+if (command === 'run-wordpress-workload' && process.argv.includes('--help')) {
+	process.stderr.write('unknown command');
+	process.exit(1);
+}
+if (command !== 'run-fuzz-suite' || inputFileIndex < 0 || !process.argv.includes('--format=json')) {
+	process.stderr.write('expected public run-fuzz-suite --input-file <file> --format=json invocation');
+	process.exit(1);
 }
 
 const request = JSON.parse(fs.readFileSync(process.argv[inputFileIndex + 1], 'utf8'));

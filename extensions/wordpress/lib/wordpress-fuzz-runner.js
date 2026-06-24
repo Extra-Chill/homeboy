@@ -37,6 +37,7 @@ function readWordPressFuzzRunnerEnv(env = process.env) {
 		maxDuration: env.HOMEBOY_FUZZ_MAX_DURATION,
 		resultsFile: env.HOMEBOY_FUZZ_RESULTS_FILE,
 		wpCodeboxFuzzWorkloadRoot: env.WP_CODEBOX_FUZZ_WORKLOAD_ROOT,
+		wpCodeboxBin: env.HOMEBOY_WP_CODEBOX_BIN || env.WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN,
 		wpCliBin: env.HOMEBOY_WP_CLI_BIN || env.WP_CLI_BIN,
 	});
 }
@@ -151,6 +152,7 @@ async function resolveCodeboxResult(context, options = {}) {
 	const runner = options.runFuzzSuite || options.runFuzzRun || options.runRuntimeTask || options.runTask;
 	return runWpCodeboxFuzzSuite({
 		...options,
+		env: context.env,
 		taskId: context.runId,
 		input: context.wpCodeboxInput,
 		provider: context.workload.provider,

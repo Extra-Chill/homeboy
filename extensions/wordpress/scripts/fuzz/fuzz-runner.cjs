@@ -153,7 +153,7 @@ function wpCodeboxCommandFromPublicAbility(ability, options = {}) {
 async function runWpCodeboxPublicRuntimeCommand(command, invocation, tempDir, options = {}) {
 	const inputFile = path.join(tempDir, `${invocation.command}-request.json`);
 	fs.writeFileSync(inputFile, `${JSON.stringify(invocation.input, null, 2)}\n`);
-	return spawnJson(command, [invocation.command, '--input-file', inputFile, '--json'], {
+	return spawnJson(command, [invocation.command, '--input-file', inputFile, '--format=json'], {
 		cwd: process.cwd(),
 		env: options.env || process.env,
 	});
