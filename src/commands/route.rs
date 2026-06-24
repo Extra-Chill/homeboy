@@ -827,6 +827,9 @@ mod tests {
 
     #[test]
     fn linked_local_rig_check_stays_local_without_runner() {
+        // Scope the offload-metadata env var so a parallel test that sets it
+        // (process-global) cannot leak into this local/no-runner assertion.
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let temp_home = tempdir().expect("temp home");
         let _home = EnvGuard::set("HOME", temp_home.path().to_str().expect("home path"));
         write_rig_source_metadata(temp_home.path(), "linked-local", true);
@@ -1158,6 +1161,10 @@ mod tests {
 
     #[test]
     fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_only() {
+        // Isolate from a parallel test leaking the offload-metadata env var,
+        // which would otherwise short-circuit route_after_parse as a Lab
+        // offload subprocess and return Ok(None) instead of the deny error.
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let normalized = vec![
             "homeboy".to_string(),
             "--lab-only".to_string(),
