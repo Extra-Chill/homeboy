@@ -518,6 +518,7 @@ fn repo_loop_reconcile_spec(loop_id: &str) -> AgentTaskRepoLoopSpec {
                 prompt: Some("Generate a static site candidate.".to_string()),
                 tasks: Vec::new(),
                 entity_ids: Vec::new(),
+                fan_out: None,
                 tools: Vec::new(),
                 abilities: vec!["github_pull_request_publish".to_string()],
                 artifacts: vec!["static_site_pull_request".to_string()],
@@ -535,6 +536,7 @@ fn repo_loop_reconcile_spec(loop_id: &str) -> AgentTaskRepoLoopSpec {
                 prompt: Some("Validate the generated static site.".to_string()),
                 tasks: Vec::new(),
                 entity_ids: Vec::new(),
+                fan_out: None,
                 tools: Vec::new(),
                 abilities: vec!["static_validation".to_string()],
                 artifacts: Vec::new(),
@@ -790,6 +792,7 @@ fn init_from_spec_compiles_repo_workflows_into_deduped_dispatch_actions() {
                 prompt: Some("Repair this finding and report evidence.".to_string()),
                 tasks: Vec::new(),
                 entity_ids: vec!["finding:abc".to_string()],
+                fan_out: None,
                 tools: vec!["repo-inspector".to_string()],
                 abilities: vec!["apply_patch".to_string()],
                 artifacts: vec!["patch".to_string()],
@@ -921,6 +924,77 @@ fn init_from_spec_compiles_repo_workflows_into_deduped_dispatch_actions() {
         assert_eq!(
             resumed.actions[0].status,
             AgentTaskLoopActionStatus::AlreadySatisfied
+        );
+    });
+}
+
+#[test]
+fn init_from_spec_compiles_workflow_fan_out_items_into_deduped_dispatch_action() {
+    with_isolated_home(|_| {
+        let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
+            "loop_id": "repo-loop-fan-out-items",
+            "workflows": [{
+                "workflow_id": "repair-findings",
+                "prompt": "Repair each routed finding.",
+                "fan_out": {
+                    "items": ["finding:alpha", "finding:beta"],
+                    "max_items": 1,
+                    "fail_fast": false
+                }
+            }]
+        }))
+        .expect("spec deserializes");
+
+        let report = init_from_spec(ControllerFromSpecRequest { spec }).expect("spec initialized");
+
+        assert_eq!(report.actions.len(), 1);
+        match &report.actions[0].action {
+            AgentTaskLoopPolicyAction::FanOut {
+                dedupe_key,
+                entity_ids,
+                max_items,
+                fail_fast,
+                ..
+            } => {
+                assert_eq!(dedupe_key, "workflow:repair-findings");
+                assert_eq!(
+                    entity_ids,
+                    &vec!["finding:alpha".to_string(), "finding:beta".to_string()]
+                );
+                assert_eq!(*max_items, 1);
+                assert!(!fail_fast);
+            }
+            other => panic!("expected fan_out workflow action, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn init_from_spec_rejects_dynamic_artifact_fan_out_until_artifact_expansion_exists() {
+    with_isolated_home(|_| {
+        let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
+            "loop_id": "repo-loop-artifact-fan-out",
+            "workflows": [{
+                "workflow_id": "iterator",
+                "prompt": "Route each emitted finding group.",
+                "fan_out": {
+                    "mode": "per_artifact",
+                    "artifact": "finding_group",
+                    "group_by": ["owner_repo", "root_cause", "group_id"],
+                    "requires_non_empty": true
+                }
+            }]
+        }))
+        .expect("spec deserializes");
+
+        let error = init_from_spec(ControllerFromSpecRequest { spec })
+            .expect_err("dynamic artifact fan-out needs controller artifact expansion");
+
+        let message = error.to_string();
+        assert!(message.contains("workflows[].fan_out"), "{message}");
+        assert!(
+            message.contains("artifact-to-entity expansion"),
+            "{message}"
         );
     });
 }
@@ -1247,6 +1321,7 @@ fn init_from_spec_reconciles_removed_and_added_workflows() {
                 prompt: Some("Publish the validated static site.".to_string()),
                 tasks: Vec::new(),
                 entity_ids: Vec::new(),
+                fan_out: None,
                 tools: Vec::new(),
                 abilities: vec!["static_publication".to_string()],
                 artifacts: vec!["static_site_pull_request".to_string()],
@@ -1325,6 +1400,7 @@ fn init_from_spec_rejects_undeclared_workflow_requirements() {
                 prompt: Some("Repair with a declared tool.".to_string()),
                 tasks: Vec::new(),
                 entity_ids: Vec::new(),
+                fan_out: None,
                 tools: vec!["missing-tool".to_string()],
                 abilities: Vec::new(),
                 artifacts: Vec::new(),
@@ -2737,6 +2813,7 @@ fn from_spec_resume_drives_generic_workflow_gates_completion_and_lineage() {
                 prompt: Some("Repair each routed finding and report evidence.".to_string()),
                 tasks: Vec::new(),
                 entity_ids: vec!["finding:alpha".to_string(), "finding:beta".to_string()],
+                fan_out: None,
                 tools: vec!["repo-inspector".to_string()],
                 abilities: vec!["patch-writer".to_string()],
                 artifacts: vec!["candidate-patch".to_string()],

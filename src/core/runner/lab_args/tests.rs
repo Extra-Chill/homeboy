@@ -224,6 +224,66 @@ fn remap_inlines_and_rewrites_provider_config_local_paths() {
 }
 
 #[test]
+fn remap_inlines_and_rewrites_dispatch_provider_config_local_paths() {
+    let mappings = vec![
+        LabPathRemap {
+            local: "/Users/user/Developer/controller-runtime".to_string(),
+            remote: "/home/user/_lab_workspaces/controller-runtime".to_string(),
+        },
+        LabPathRemap {
+            local: "/Users/user/Developer/dispatch-provider".to_string(),
+            remote: "/home/user/_lab_workspaces/dispatch-provider".to_string(),
+        },
+    ];
+    let config = serde_json::json!({
+        "workspace_root": "/Users/user/Developer/controller-runtime",
+        "mounts": [{ "source": "/Users/user/Developer/controller-runtime", "target": "/workspace/runtime" }],
+        "runtime_component_paths": { "agent_runtime": "/Users/user/Developer/controller-runtime/runtime" },
+        "provider_plugin_paths": ["/Users/user/Developer/dispatch-provider/provider-plugin"],
+        "component_contracts": [{ "path": "/Users/user/Developer/dispatch-provider/contracts/component.json" }]
+    })
+    .to_string();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "controller".to_string(),
+        "run-from-spec".to_string(),
+        "loop.json".to_string(),
+        "--dispatch-provider-config".to_string(),
+        config,
+    ];
+
+    let out = remap_provider_config_in_args(&args, &mappings).expect("remap dispatch config");
+    let cfg_idx = out
+        .iter()
+        .position(|a| a == "--dispatch-provider-config")
+        .unwrap()
+        + 1;
+    let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
+
+    assert_eq!(
+        remapped["workspace_root"],
+        "/home/user/_lab_workspaces/controller-runtime"
+    );
+    assert_eq!(
+        remapped["mounts"][0]["source"],
+        "/home/user/_lab_workspaces/controller-runtime"
+    );
+    assert_eq!(
+        remapped["runtime_component_paths"]["agent_runtime"],
+        "/home/user/_lab_workspaces/controller-runtime/runtime"
+    );
+    assert_eq!(
+        remapped["provider_plugin_paths"][0],
+        "/home/user/_lab_workspaces/dispatch-provider/provider-plugin"
+    );
+    assert_eq!(
+        remapped["component_contracts"][0]["path"],
+        "/home/user/_lab_workspaces/dispatch-provider/contracts/component.json"
+    );
+}
+
+#[test]
 fn provider_config_materialization_preflight_rejects_missing_runtime_path() {
     let config = serde_json::json!({
         "runtime_component_paths": {

@@ -7,6 +7,8 @@
 
 use super::path_remap::try_rewrite_flag_value_args;
 
+const PROVIDER_CONFIG_FLAGS: &[&str] = &["--provider-config", "--dispatch-provider-config"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::core::runner) struct ExecutionEnvelope {
     argv: Vec<String>,
@@ -46,18 +48,18 @@ impl ExecutionEnvelope {
                 passthrough = true;
                 continue;
             }
-            if arg == "--provider-config" {
+            if let Some(flag) = provider_config_flag(arg) {
                 inputs.provider_configs.push(ArgRef {
-                    flag: "--provider-config",
+                    flag,
                     value: iter
                         .next()
                         .map_or(ArgValue::Missing, |spec| provider_config_value(spec)),
                 });
                 continue;
             }
-            if let Some(spec) = arg.strip_prefix("--provider-config=") {
+            if let Some((flag, spec)) = provider_config_inline_arg(arg) {
                 inputs.provider_configs.push(ArgRef {
-                    flag: "--provider-config",
+                    flag,
                     value: provider_config_value(spec),
                 });
                 continue;
@@ -90,15 +92,15 @@ impl ExecutionEnvelope {
         mut rewrite: impl FnMut(&str) -> crate::core::Result<String>,
     ) -> crate::core::Result<Vec<String>> {
         try_rewrite_flag_value_args(&self.argv, |arg, iter, out| {
-            if arg == "--provider-config" {
+            if provider_config_flag(arg).is_some() {
                 out.push(arg.to_string());
                 if let Some(spec) = iter.next() {
                     out.push(rewrite(spec)?);
                 }
                 return Ok(());
             }
-            if let Some(spec) = arg.strip_prefix("--provider-config=") {
-                out.push(format!("--provider-config={}", rewrite(spec)?));
+            if let Some((flag, spec)) = provider_config_inline_arg(arg) {
+                out.push(format!("{}={}", flag, rewrite(spec)?));
                 return Ok(());
             }
             out.push(arg.to_string());
@@ -126,6 +128,25 @@ impl ExecutionEnvelope {
             Ok(())
         })
     }
+}
+
+fn provider_config_flag(arg: &str) -> Option<&'static str> {
+    PROVIDER_CONFIG_FLAGS
+        .iter()
+        .copied()
+        .find(|flag| arg == *flag)
+}
+
+fn provider_config_inline_arg(arg: &str) -> Option<(&'static str, &str)> {
+    for flag in PROVIDER_CONFIG_FLAGS {
+        if let Some(value) = arg
+            .strip_prefix(flag)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            return Some((*flag, value));
+        }
+    }
+    None
 }
 
 fn provider_config_value(spec: &str) -> ArgValue {
@@ -185,6 +206,9 @@ mod tests {
             "@config.json".to_string(),
             "--provider-config={\"provider\":\"example-oauth\"}".to_string(),
             "--provider-config=-".to_string(),
+            "--dispatch-provider-config".to_string(),
+            "@dispatch.json".to_string(),
+            "--dispatch-provider-config={\"provider\":\"controller\"}".to_string(),
             "--".to_string(),
             "--provider-config".to_string(),
             "ignored".to_string(),
@@ -192,7 +216,7 @@ mod tests {
 
         let envelope = ExecutionEnvelope::from_args(&args);
 
-        assert_eq!(envelope.inputs.provider_configs.len(), 3);
+        assert_eq!(envelope.inputs.provider_configs.len(), 5);
         assert_eq!(
             envelope.inputs.provider_configs[0].flag,
             "--provider-config"
@@ -206,6 +230,18 @@ mod tests {
             ArgValue::InlineText("{\"provider\":\"example-oauth\"}".to_string())
         );
         assert_eq!(envelope.inputs.provider_configs[2].value, ArgValue::Stdin);
+        assert_eq!(
+            envelope.inputs.provider_configs[3].flag,
+            "--dispatch-provider-config"
+        );
+        assert_eq!(
+            envelope.inputs.provider_configs[3].value,
+            ArgValue::PathRef("dispatch.json".to_string())
+        );
+        assert_eq!(
+            envelope.inputs.provider_configs[4].value,
+            ArgValue::InlineText("{\"provider\":\"controller\"}".to_string())
+        );
     }
 
     #[test]

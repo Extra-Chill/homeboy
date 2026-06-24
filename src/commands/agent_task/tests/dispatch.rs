@@ -100,6 +100,7 @@ fn from_spec_dispatch_defaults_fall_back_to_current_git_checkout() {
             prompt: Some("cook the next workflow".to_string()),
             tasks: Vec::new(),
             entity_ids: Vec::new(),
+            fan_out: None,
             tools: Vec::new(),
             abilities: Vec::new(),
             artifacts: Vec::new(),

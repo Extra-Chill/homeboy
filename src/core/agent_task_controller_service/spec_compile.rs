@@ -542,21 +542,47 @@ pub(super) fn compile_loop_spec_workflow(
 ) -> Result<AgentTaskLoopPolicyAction> {
     let request = workflow_dispatch_request(spec, workflow)?;
     let dedupe_key = format!("workflow:{}", workflow.workflow_id);
-    if workflow.entity_ids.is_empty() {
+    let fan_out_entity_ids = workflow_fan_out_entity_ids(workflow)?;
+    if fan_out_entity_ids.is_empty() {
         Ok(AgentTaskLoopPolicyAction::SpawnTask {
             dedupe_key,
             entity_id: None,
             request,
         })
     } else {
+        let fan_out = workflow.fan_out.as_ref();
         Ok(AgentTaskLoopPolicyAction::FanOut {
             dedupe_key,
-            entity_ids: workflow.entity_ids.clone(),
-            max_items: crate::core::agent_task_loop_controller::DEFAULT_FAN_OUT_MAX_ITEMS,
-            fail_fast: true,
+            entity_ids: fan_out_entity_ids,
+            max_items: fan_out
+                .and_then(|fan_out| fan_out.max_items)
+                .unwrap_or(crate::core::agent_task_loop_controller::DEFAULT_FAN_OUT_MAX_ITEMS),
+            fail_fast: fan_out
+                .and_then(|fan_out| fan_out.fail_fast)
+                .unwrap_or(true),
             request_template: request,
         })
     }
+}
+
+fn workflow_fan_out_entity_ids(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Result<Vec<String>> {
+    if !workflow.entity_ids.is_empty() {
+        return Ok(workflow.entity_ids.clone());
+    }
+
+    let Some(fan_out) = &workflow.fan_out else {
+        return Ok(Vec::new());
+    };
+    if !fan_out.entity_ids.is_empty() {
+        return Ok(fan_out.entity_ids.clone());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "workflows[].fan_out",
+        "repo loop spec workflow fan_out requires concrete entity_ids/items; dynamic fan-out sources need artifact-to-entity expansion in the controller path",
+        Some(workflow.workflow_id.clone()),
+        fan_out.mode.as_ref().map(|mode| vec![format!("mode:{mode}")]),
+    ))
 }
 
 pub(super) fn workflow_dispatch_request(
@@ -803,7 +829,7 @@ pub(super) fn workflow_homeboy_plan(
         kind: "agent_task_dispatch".to_string(),
         label: Some(workflow.workflow_id.clone()),
         blocking: true,
-        scope: workflow.entity_ids.clone(),
+        scope: workflow_fan_out_entity_ids(workflow)?,
         needs: workflow.dependencies.clone(),
         needs_kind: PlanStepDependencyKind::Execution,
         status: PlanStepStatus::Ready,
