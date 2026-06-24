@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.1] - 2026-06-24
+
+### Fixed
+- Fix public fuzz CLI invocation shape
+- Fix public fuzz Codebox binary selection
+
 ## [3.13.0] - 2026-06-24
 
 ### Added
