@@ -205,6 +205,10 @@ pub(super) fn extract_field_identifier(trimmed: &str) -> Option<String> {
         return None;
     }
 
+    if is_language_keyword(&ident) {
+        return None;
+    }
+
     // Must be followed by : or ( or = or < (type params) to be an identifier.
     let after = &rest[ident.len()..].trim_start();
     if after.starts_with(':')
@@ -216,4 +220,49 @@ pub(super) fn extract_field_identifier(trimmed: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn is_language_keyword(ident: &str) -> bool {
+    matches!(
+        ident,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "continue"
+            | "default"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "from"
+            | "if"
+            | "impl"
+            | "import"
+            | "in"
+            | "interface"
+            | "loop"
+            | "match"
+            | "mod"
+            | "return"
+            | "self"
+            | "static"
+            | "struct"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "use"
+            | "while"
+    )
 }
