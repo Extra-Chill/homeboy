@@ -25,6 +25,15 @@ pub struct AgentTaskSecretEnvStatus {
     pub name: String,
     pub configured: bool,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<AgentTaskSecretEnvSourceStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskSecretEnvSourceStatus {
+    pub origin: String,
+    pub source: String,
+    pub configured: bool,
 }
 
 pub fn resolve_secret_env(
@@ -182,6 +191,7 @@ pub fn map_secret_to_keychain_bundle(
         name: name.to_string(),
         configured: true,
         source: "keychain-bundle".to_string(),
+        alternatives: Vec::new(),
     })
 }
 
@@ -246,15 +256,7 @@ fn secret_env_status_with_config_and_fallbacks(
     names
         .iter()
         .map(|name| {
-            if env::var(name).is_ok() {
-                return AgentTaskSecretEnvStatus {
-                    name: name.clone(),
-                    configured: true,
-                    source: "env".to_string(),
-                };
-            }
-
-            let source = resolve_secret_source(
+            let source_status = resolve_secret_source_status(
                 name,
                 config.secrets.get(name),
                 fallback_sources.get(name),
@@ -262,13 +264,18 @@ fn secret_env_status_with_config_and_fallbacks(
             );
             AgentTaskSecretEnvStatus {
                 name: name.clone(),
-                configured: source.is_some(),
-                source: source
-                    .map(|source| source.source.clone())
-                    .unwrap_or_else(|| "missing".to_string()),
+                configured: source_status.configured,
+                source: source_status.source,
+                alternatives: source_status.alternatives,
             }
         })
         .collect()
+}
+
+struct ResolvedSecretSourceStatus {
+    configured: bool,
+    source: String,
+    alternatives: Vec<AgentTaskSecretEnvSourceStatus>,
 }
 
 fn resolve_secret_env_with_config(
@@ -309,17 +316,77 @@ fn resolve_secret_env_with_config_and_fallbacks(
     })
 }
 
-fn resolve_secret_source<'a>(
+fn resolve_secret_source_status(
     name: &str,
-    configured_source: Option<&'a AgentTaskSecretSource>,
-    fallback_source: Option<&'a AgentTaskSecretSource>,
+    configured_source: Option<&AgentTaskSecretSource>,
+    fallback_source: Option<&AgentTaskSecretSource>,
     bundle_cache: &mut HashMap<String, Option<Value>>,
-) -> Option<&'a AgentTaskSecretSource> {
-    configured_source
-        .and_then(|source| source.resolve(name, bundle_cache).map(|_| source))
-        .or_else(|| {
-            fallback_source.and_then(|source| source.resolve(name, bundle_cache).map(|_| source))
+) -> ResolvedSecretSourceStatus {
+    let direct_env = env::var(name).is_ok();
+    let configured = configured_source
+        .map(|source| redacted_source_status("agent-task-config", source, name, bundle_cache));
+    let fallback = fallback_source
+        .map(|source| redacted_source_status("provider-default", source, name, bundle_cache));
+
+    let configured_status = configured.clone();
+    let fallback_status = fallback.clone();
+    let mut entries = Vec::new();
+    entries.push(AgentTaskSecretEnvSourceStatus {
+        origin: "process-env".to_string(),
+        source: "env".to_string(),
+        configured: direct_env,
+    });
+    if let Some(status) = configured {
+        entries.push(status);
+    }
+    if let Some(status) = fallback {
+        entries.push(status);
+    }
+
+    let selected_index = entries.iter().position(|entry| entry.configured);
+    let source = selected_index
+        .map(|index| entries[index].source.clone())
+        .unwrap_or_else(|| "missing".to_string());
+    let alternatives = entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let is_selected = Some(index) == selected_index;
+            if is_selected || (entry.origin == "process-env" && !entry.configured) {
+                None
+            } else {
+                Some(entry)
+            }
         })
+        .collect();
+
+    // Keep configured/fallback resolution order aligned with resolve_secret_source.
+    let configured = direct_env
+        || configured_status
+            .as_ref()
+            .is_some_and(|status| status.configured)
+        || fallback_status
+            .as_ref()
+            .is_some_and(|status| status.configured);
+
+    ResolvedSecretSourceStatus {
+        configured,
+        source,
+        alternatives,
+    }
+}
+
+fn redacted_source_status(
+    origin: &str,
+    source: &AgentTaskSecretSource,
+    requested_name: &str,
+    bundle_cache: &mut HashMap<String, Option<Value>>,
+) -> AgentTaskSecretEnvSourceStatus {
+    AgentTaskSecretEnvSourceStatus {
+        origin: origin.to_string(),
+        source: source.source.clone(),
+        configured: source.resolve(requested_name, bundle_cache).is_some(),
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -878,6 +945,16 @@ mod tests {
         assert_eq!(status[0].name, name);
         assert!(status[0].configured);
         assert_eq!(status[0].source, "json-file");
+        assert_eq!(
+            status[0].alternatives,
+            vec![AgentTaskSecretEnvSourceStatus {
+                origin: "agent-task-config".to_string(),
+                source: "env".to_string(),
+                configured: false,
+            }]
+        );
         assert_eq!(resolved[0].1, "fallback-access-token");
+        let serialized = serde_json::to_string(&status).expect("status json");
+        assert!(!serialized.contains("fallback-access-token"));
     }
 }
