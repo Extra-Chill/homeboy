@@ -79,6 +79,9 @@ fn controller_run_next_executes_spawn_task_plan_and_records_dedupe_lineage() {
 #[test]
 fn controller_dispatch_runtime_component_contracts_reach_spawned_agent_task_request() {
     with_temp_home(|| {
+        let component = tempfile::tempdir().expect("agents-api checkout");
+        init_runtime_component_checkout(component.path());
+        let component_path = component.path().display().to_string();
         let observed_request = Arc::new(Mutex::new(None));
         let mut controller = agent_task_loop_controller::create_controller(
             "loop-controller-runtime-components",
@@ -101,7 +104,7 @@ fn controller_dispatch_runtime_component_contracts_reach_spawned_agent_task_requ
                             "inputs": {
                                 "runtime_component_contracts": [{
                                     "slug": "agents-api",
-                                    "path": "runtime/agents-api",
+                                    "path": component_path,
                                     "loadAs": "plugin",
                                     "activate": true,
                                     "opaque": { "source": "workflow-input" }
@@ -137,7 +140,7 @@ fn controller_dispatch_runtime_component_contracts_reach_spawned_agent_task_requ
         );
         assert_eq!(
             observed.component_contracts[0].path.as_deref(),
-            Some("runtime/agents-api")
+            Some(component_path.as_str())
         );
         assert_eq!(
             observed.component_contracts[0].load_as.as_deref(),
@@ -275,6 +278,9 @@ fn controller_run_from_spec_persists_dispatch_defaults_for_generated_actions() {
 #[test]
 fn controller_run_from_spec_preserves_runtime_execution_and_components() {
     with_temp_home(|| {
+        let component = tempfile::tempdir().expect("agents-api checkout");
+        init_runtime_component_checkout(component.path());
+        let component_path = component.path().display().to_string();
         let observed_request = Arc::new(Mutex::new(None));
         let (value, exit_code) = controller_run_from_spec_with_test_executor(
             AgentTaskControllerRunFromSpecArgs {
@@ -307,7 +313,7 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
                             "runtime_config": {
                                 "component_contracts": [{
                                     "slug": "agents-api",
-                                    "path": "runtime/agents-api",
+                                    "path": component_path,
                                     "loadAs": "plugin",
                                     "activate": true
                                 }]
@@ -371,7 +377,7 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
         );
         assert_eq!(
             observed.component_contracts[0].path.as_deref(),
-            Some("runtime/agents-api")
+            Some(component_path.as_str())
         );
         assert_eq!(
             value["materialization"]["spec"]["workflows"][0]["runtime_execution"]["ability"],

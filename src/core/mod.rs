@@ -35,6 +35,7 @@ pub mod agent_task_promotion;
 pub mod agent_task_prompts;
 pub mod agent_task_provider;
 pub mod agent_task_repo_loop_compile;
+pub mod agent_task_runtime_dependency_graph;
 pub mod agent_task_schedule;
 pub mod agent_task_scheduler;
 pub mod agent_task_secrets;

@@ -16,6 +16,7 @@ use crate::core::agent_task::{
 use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
 use crate::core::agent_task_prompts;
 use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
+use crate::core::agent_task_runtime_dependency_graph;
 use crate::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskRetryPolicy};
 use crate::core::agent_task_secrets::validate_secret_env;
 use crate::core::{config, defaults, worktree, Error, Result};
@@ -83,8 +84,19 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let mut provider_config =
         dispatch_provider_config(request, &repo, workspace_target.as_ref(), &client_context)?;
     let component_contracts = dispatch_component_contracts(&provider_config, &client_context)?;
+    // Resolve + materialize the declared runtime dependency graph at known refs
+    // and preflight-fail before dispatch when a required runtime dependency is
+    // unresolved or stale. The resolved refs/paths are recorded in plan/task
+    // metadata below so run evidence shows exactly which component refs a Lab
+    // proof ran against (#6121).
+    let runtime_dependency_graph =
+        agent_task_runtime_dependency_graph::resolve_runtime_dependency_graph(
+            &component_contracts,
+        )?;
     promote_component_contracts_to_provider_config(&mut provider_config, &component_contracts);
     let secret_env = dispatch_secret_env(request, &provider_config);
+    let runtime_dependency_graph_evidence = (!runtime_dependency_graph.is_empty())
+        .then(|| runtime_dependency_graph.to_evidence_value());
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
         let instructions = dispatch_instructions(
@@ -168,6 +180,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "prompt_source": &prompt_spec.prompt,
                 "dispatch": "agent-task cook",
                 "required_capabilities": request.required_capabilities,
+                "runtime_dependency_graph": runtime_dependency_graph_evidence,
             }),
         });
     }
@@ -189,6 +202,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
         "workspace_root": workspace_root.map(|path| path.display().to_string()),
         "client_context": client_context,
         "task_url": request.task_url,
+        "runtime_dependency_graph": runtime_dependency_graph_evidence,
     });
 
     Ok(plan)
@@ -1280,6 +1294,10 @@ mod tests {
 
     #[test]
     fn dispatch_plan_promotes_runtime_component_contracts_from_client_context_inputs() {
+        let component = tempfile::tempdir().expect("agents-api component");
+        init_git_repo(component.path());
+        let component_path = component.path().display().to_string();
+
         let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
             prompt: Some("Cook with runtime components.".to_string()),
             core: DispatchCoreInputs {
@@ -1289,7 +1307,7 @@ mod tests {
                         "inputs": {
                             "runtime_component_contracts": [{
                                 "slug": "agents-api",
-                                "path": "components/agents-api",
+                                "path": component_path,
                                 "loadAs": "plugin",
                                 "activate": true,
                                 "opaque": { "preserve": "yes" }
@@ -1307,18 +1325,39 @@ mod tests {
         let contracts = &plan.tasks[0].component_contracts;
         assert_eq!(contracts.len(), 1);
         assert_eq!(contracts[0].slug.as_deref(), Some("agents-api"));
-        assert_eq!(contracts[0].path.as_deref(), Some("components/agents-api"));
+        assert_eq!(contracts[0].path.as_deref(), Some(component_path.as_str()));
         assert_eq!(contracts[0].load_as.as_deref(), Some("plugin"));
         assert_eq!(contracts[0].activate, Some(true));
         assert_eq!(contracts[0].extra["opaque"]["preserve"], "yes");
         assert_eq!(
             plan.tasks[0].executor.config["component_contracts"][0]["path"],
-            "components/agents-api"
+            component_path
+        );
+
+        // The declared runtime dependency graph is resolved at a known ref and
+        // recorded in run evidence (#6121).
+        let graph = &plan.tasks[0].metadata["runtime_dependency_graph"];
+        assert_eq!(
+            graph["schema"],
+            crate::core::agent_task_runtime_dependency_graph::RUNTIME_DEPENDENCY_GRAPH_SCHEMA
+        );
+        assert_eq!(graph["dependencies"][0]["slug"], "agents-api");
+        assert!(graph["dependencies"][0]["resolved_ref"].is_string());
+        assert!(graph["dependencies"][0]["git_provenance"]
+            .as_bool()
+            .unwrap());
+        assert_eq!(
+            plan.metadata["runtime_dependency_graph"]["dependencies"][0]["slug"],
+            "agents-api"
         );
     }
 
     #[test]
     fn dispatch_plan_accepts_component_contracts_from_provider_config() {
+        let component = tempfile::tempdir().expect("runtime-helper component");
+        init_git_repo(component.path());
+        let component_path = component.path().display().to_string();
+
         let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
             prompt: Some("Cook with provider runtime components.".to_string()),
             core: DispatchCoreInputs {
@@ -1326,7 +1365,7 @@ mod tests {
                     serde_json::json!({
                         "component_contracts": [{
                             "slug": "runtime-helper",
-                            "path": "/opt/runtime-helper",
+                            "path": component_path,
                             "loadAs": "mu-plugin",
                             "activate": false,
                             "opaque_provider_hint": { "preserved": true }
@@ -1342,10 +1381,36 @@ mod tests {
 
         let contract = &plan.tasks[0].component_contracts[0];
         assert_eq!(contract.slug.as_deref(), Some("runtime-helper"));
-        assert_eq!(contract.path.as_deref(), Some("/opt/runtime-helper"));
+        assert_eq!(contract.path.as_deref(), Some(component_path.as_str()));
         assert_eq!(contract.load_as.as_deref(), Some("mu-plugin"));
         assert_eq!(contract.activate, Some(false));
         assert_eq!(contract.extra["opaque_provider_hint"]["preserved"], true);
+    }
+
+    #[test]
+    fn dispatch_plan_preflight_fails_on_unresolved_runtime_dependency() {
+        let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with a missing runtime dependency.".to_string()),
+            core: DispatchCoreInputs {
+                provider_config: Some(
+                    serde_json::json!({
+                        "component_contracts": [{
+                            "slug": "data-machine",
+                            "path": "/nonexistent/data-machine/checkout",
+                            "loadAs": "plugin",
+                            "activate": true
+                        }]
+                    })
+                    .to_string(),
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect_err("missing runtime dependency fails dispatch preflight");
+
+        assert!(error.message.contains("could not be resolved"));
+        assert!(error.message.contains("data-machine"));
     }
 
     struct NoopExecutor;

@@ -64,6 +64,26 @@ pub(in crate::commands::agent_task) use super::super::contract;
 pub(in crate::commands::agent_task) use super::super::loop_definition;
 pub(in crate::commands::agent_task) use super::super::{ContractArgs, ContractFormat};
 
+/// Create a committed, clean git checkout at `path` so dispatch-time runtime
+/// dependency-graph resolution accepts it as a materialized component at a
+/// known ref (#6121).
+pub(crate) fn init_runtime_component_checkout(path: &std::path::Path) {
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .expect("git command runs");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    std::fs::write(path.join("plugin.php"), "<?php\n").expect("write component file");
+    run(&["init", "-b", "main"]);
+    run(&["config", "user.email", "test@example.com"]);
+    run(&["config", "user.name", "Homeboy Test"]);
+    run(&["add", "plugin.php"]);
+    run(&["commit", "-m", "init"]);
+}
+
 pub(crate) struct InspectingExecutor {
     pub(crate) run_id: String,
     pub(crate) observed_status: Arc<Mutex<Option<AgentTaskRunRecord>>>,
