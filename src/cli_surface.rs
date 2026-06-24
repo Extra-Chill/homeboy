@@ -745,6 +745,27 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.output_notes = "runs trace workflows and records observation artifacts unless using read-only subcommands";
         }
+        ["lint"] => {
+            metadata.output_notes =
+                "runs lint workflows; pass --fix to apply auto-fixable findings in place";
+            metadata.dangerous_flags = vec!["--fix", "--force"];
+        }
+        ["deps", "install"] | ["deps", "update"] | ["deps", "stack", "apply"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "mutates dependency manifests, lockfiles, or installed dependency trees";
+        }
+        ["ci", "autofix"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "commits and pushes prepared CI autofix changes";
+        }
+        ["cleanup"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "cleanup subcommands report plans by default and require --apply for removals";
+            metadata.dangerous_flags = vec!["--apply"];
+        }
         ["cleanup", "artifacts"] => {
             metadata.mutates = true;
             metadata.output_notes =
@@ -782,6 +803,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["component", "rename"]
         | ["component", "setup"] => {
             metadata.mutates = true;
+        }
+        ["component", "reconcile"] | ["component", "artifacts"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "default output is non-mutating; pass --apply to repair or remove artifacts";
+            metadata.dangerous_flags = vec!["--apply"];
         }
         ["server", "create"]
         | ["server", "set"]
@@ -833,6 +860,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes =
                 "imports observation bundle or GitHub Actions artifacts into the local run store";
         }
+        ["runs", "loop-sync"] => {
+            metadata.mutates = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes =
+                "syncs copied loop archives into observation runs/artifacts unless --dry-run is passed";
+        }
         ["runs", "artifact", "cleanup-downloads"] | ["runs", "artifact", "cleanup-persisted"] => {
             metadata.mutates = true;
             metadata.output_notes =
@@ -875,7 +908,8 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         }
         ["fuzz", "replay"] => {
             metadata.mutates = true;
-            metadata.output_notes = "replays a persisted fuzz case against local code and may write run artifacts";
+            metadata.output_notes =
+                "replays a persisted fuzz case against local code and may write run artifacts";
         }
         ["db", "delete-row"] | ["db", "drop-table"] => {
             metadata.mutates = true;
@@ -887,7 +921,11 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.operator = true;
             metadata.output_notes = "default output is a non-mutating plan; pass --apply to mutate";
         }
-        ["file", "mkdir"] | ["file", "rename"] => {
+        ["file", "copy"]
+        | ["file", "edit"]
+        | ["file", "mkdir"]
+        | ["file", "rename"]
+        | ["file", "sync"] => {
             metadata.mutates = true;
         }
         ["triage"] => {
@@ -903,11 +941,133 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.dangerous_flags = vec!["--apply"];
             metadata.lab_notes = "local-only: depends on local fleet/project/server configuration before SSH fan-out";
         }
+        ["fleet", "create"]
+        | ["fleet", "set"]
+        | ["fleet", "delete"]
+        | ["fleet", "add"]
+        | ["fleet", "remove"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "mutates local fleet configuration";
+        }
         ["api", "post"] | ["api", "put"] | ["api", "patch"] | ["api", "delete"] => {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "mutating API requests require --apply";
             metadata.dangerous_flags = vec!["--apply"];
+        }
+        ["git", "issue", "create"]
+        | ["git", "issue", "comment"]
+        | ["git", "issue", "close"]
+        | ["git", "issue", "edit"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "mutates GitHub issue state through the configured repository";
+        }
+        ["git", "pr", "create"]
+        | ["git", "pr", "edit"]
+        | ["git", "pr", "comment"]
+        | ["git", "pr", "refresh"]
+        | ["git", "pr", "policy", "open"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "mutates GitHub pull request state or branch state";
+        }
+        ["git", "pr", "fleet"] | ["git", "pr", "land"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes =
+                "reports by default or with --dry-run; apply/merge flags mutate PR state";
+            metadata.dangerous_flags = vec!["--apply", "--delete-branch"];
+        }
+        ["issues", "reconcile"] | ["issues", "reconcile-run"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes = "default output is a non-mutating issue reconciliation plan; pass --apply to mutate tracker state";
+            metadata.dangerous_flags = vec!["--apply"];
+        }
+        ["audit-baseline", "refresh"] | ["audit-baseline", "merge"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "mutates persisted audit baseline data in component configuration";
+        }
+        ["refactor"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "refactor subcommands can rewrite source files; use planning/dry-run modes where available";
+            metadata.dangerous_flags = vec!["--write", "--commit"];
+        }
+        ["refactor", "rename"]
+        | ["refactor", "add"]
+        | ["refactor", "move"]
+        | ["refactor", "propagate"]
+        | ["refactor", "transform"]
+        | ["refactor", "decompose"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "reports a plan by default; pass --write to rewrite source files";
+            metadata.dangerous_flags = vec!["--write"];
+        }
+        ["rig", "up"]
+        | ["rig", "down"]
+        | ["rig", "repair"]
+        | ["rig", "install"]
+        | ["rig", "update"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "mutates local rig runtime state or installed rig packages";
+        }
+        ["rig", "sync"]
+        | ["rig", "app", "install"]
+        | ["rig", "app", "update"]
+        | ["rig", "app", "uninstall"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes = "mutates rig-managed files unless --dry-run is passed";
+        }
+        ["rig", "sources", "remove"] | ["rig", "sources", "refresh"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "mutates installed rig source metadata";
+        }
+        ["runner", "add"]
+        | ["runner", "enable"]
+        | ["runner", "set"]
+        | ["runner", "trust"]
+        | ["runner", "pair"]
+        | ["runner", "remove"]
+        | ["runner", "connect"]
+        | ["runner", "disconnect"]
+        | ["runner", "work"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes =
+                "mutates runner configuration, trust policy, or runner lifecycle state";
+        }
+        ["runner", "doctor"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes =
+                "diagnoses runners by default; --repair mutates runner lifecycle state";
+            metadata.dangerous_flags = vec!["--repair"];
+        }
+        ["runner", "exec"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes = "executes commands on a runner unless --dry-run is passed";
+        }
+        ["runner", "workspace", "sync"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "materializes a local worktree into runner workspace state";
+            metadata.dangerous_flags = vec!["--allow-dirty-lab-workspace"];
+        }
+        ["runner", "workspace", "apply"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "applies a Lab-generated workspace patch to a local worktree";
+            metadata.dangerous_flags = vec!["--force"];
         }
         ["http", "request"] => {
             metadata.mutates = true;
@@ -920,6 +1080,89 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.dry_run_flag = Some("--dry-run");
             metadata.output_notes = "default output creates DMC worktrees one-at-a-time; pass --dry-run to plan without creating";
+        }
+        ["worktree", "create"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "creates a task worktree from a registered component checkout";
+        }
+        ["worktree", "remove"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "removes a task worktree after safety checks";
+            metadata.dangerous_flags = vec!["--force"];
+        }
+        ["worktree", "cleanup"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "removes cleanup-eligible task worktrees and rebuildable artifacts";
+            metadata.dangerous_flags = vec!["--force"];
+        }
+        ["tunnel", "service", "expose"]
+        | ["tunnel", "service", "set"]
+        | ["tunnel", "service", "remove"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "mutates private service tunnel declarations";
+        }
+        ["tunnel", "service", "start"] | ["tunnel", "service", "stop"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "mutates private service tunnel runtime state";
+        }
+        ["tunnel", "preview-client", "start"]
+        | ["tunnel", "preview-consumer", "run"]
+        | ["tunnel", "preview-ingress", "serve"]
+        | ["tunnel", "artifact-origin", "serve"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "starts or supervises tunnel preview runtime state";
+        }
+        ["tunnel", "preview-ingress", "route"] | ["tunnel", "preview-ingress", "unroute"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "mutates preview ingress route state";
+        }
+        ["tunnel", "preview-ingress", "install"] => {
+            metadata.operator = true;
+            metadata.output_notes = "renders a non-destructive operator install plan";
+        }
+        ["stack", "create"] | ["stack", "add-pr"] | ["stack", "remove-pr"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "mutates persisted stack specification metadata";
+        }
+        ["stack", "apply"] | ["stack", "rebase"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "mutates the configured stack target branch";
+        }
+        ["stack", "sync"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes = "mutates the configured stack target branch and may update the stack spec unless --dry-run is passed";
+        }
+        ["stack", "push"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "pushes the configured stack target branch to its remote";
+        }
+        ["undo"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "restores files from the latest or selected undo snapshot";
+        }
+        ["undo", "delete"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "deletes an undo snapshot without restoring it";
+        }
+        ["auth", "login"]
+        | ["auth", "set"]
+        | ["auth", "remove"]
+        | ["auth", "logout"]
+        | ["auth", "profile", "set-basic"]
+        | ["auth", "profile", "set-bearer"]
+        | ["auth", "profile", "remove"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "mutates keychain-backed authentication state";
         }
         _ => {}
     }
