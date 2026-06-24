@@ -100,7 +100,9 @@ homeboy_wp_codebox_global_cli_candidates() {
     local roots=()
     local node_bin=""
     local node_modules=""
+    local npm_root=""
     local root=""
+    local seen_roots=""
 
     if [ -n "${HOMEBOY_GLOBAL_NODE_MODULE_ROOT:-}" ]; then
         roots+=("$HOMEBOY_GLOBAL_NODE_MODULE_ROOT")
@@ -109,8 +111,16 @@ homeboy_wp_codebox_global_cli_candidates() {
         node_modules="$(cd "$(dirname "$node_bin")/../lib/node_modules" 2>/dev/null && pwd -P || true)"
         [ -n "$node_modules" ] && roots+=("$node_modules")
     fi
+    if npm_root=$(npm root -g 2>/dev/null); then
+        [ -n "$npm_root" ] && roots+=("$npm_root")
+    fi
 
     for root in "${roots[@]}"; do
+        [ -n "$root" ] || continue
+        case "\n${seen_roots}\n" in
+            *"\n${root}\n"*) continue ;;
+        esac
+        seen_roots="${seen_roots}\n${root}"
         printf '%s\n' \
             "${root}/wp-codebox-workspace/packages/cli/dist/index.js" \
             "${root}/@automattic/wp-codebox-cli/dist/index.js" \
