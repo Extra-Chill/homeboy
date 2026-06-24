@@ -87,6 +87,19 @@ SH
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Feature-detect probe used by run-release.sh: `homeboy release --help`.
+# HOMEBOY_SUPPORTS_CONFIRM_FLAG toggles whether this mock binary advertises
+# the --i-know-ci-creates-the-github-release flag, emulating newer (guarded)
+# vs older (pre-#6137) published homeboy release binaries.
+if [ "$1" = "release" ] && [ "${2:-}" = "--help" ]; then
+  echo "Usage: homeboy release [OPTIONS]"
+  echo "      --no-github-release"
+  if [ "${HOMEBOY_SUPPORTS_CONFIRM_FLAG:-true}" = "true" ]; then
+    echo "      --i-know-ci-creates-the-github-release"
+  fi
+  exit 0
+fi
+
 if [ "$1" != "--output" ]; then
   echo "missing --output" >&2
   exit 2
@@ -159,6 +172,7 @@ run_wrapper() {
   HOMEBOY_ARGS_FILE="${HOMEBOY_ARGS_FILE}" \
   HOMEBOY_AUTH_FILE="${HOMEBOY_AUTH_FILE}" \
   HOMEBOY_MOCK_SCENARIO="${HOMEBOY_MOCK_SCENARIO}" \
+  HOMEBOY_SUPPORTS_CONFIRM_FLAG="${HOMEBOY_SUPPORTS_CONFIRM_FLAG:-true}" \
   MOCK_GIT_LOG="${MOCK_GIT_LOG}" \
   RELEASE_DRY_RUN="${RELEASE_DRY_RUN:-false}" \
   RELEASE_SKIP_PUBLISH="${RELEASE_SKIP_PUBLISH:-false}" \
@@ -211,8 +225,12 @@ assert_output_line 'released=false' "${OUTPUT_FILE}" "skipped release output is 
 assert_output_line 'skipped-reason=no-releasable-commits' "${OUTPUT_FILE}" "skipped reason comes from homeboy"
 assert_output_line 'release-bump-type=patch' "${OUTPUT_FILE}" "skipped release preserves bump type when present"
 
+# GitHub-release opt-out against a NEWER homeboy binary that advertises (and
+# requires, via the #6137 guard) the confirmation flag: the wrapper must pass
+# both --no-github-release and --i-know-ci-creates-the-github-release.
 setup_fixture
 HOMEBOY_MOCK_SCENARIO="released"
+HOMEBOY_SUPPORTS_CONFIRM_FLAG="true"
 RELEASE_SKIP_PUBLISH="true"
 RELEASE_SKIP_GITHUB_RELEASE="true"
 GH_TOKEN="secret123"
@@ -220,8 +238,24 @@ run_wrapper
 ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
 assert_contains '--skip-publish' "${ARGS}" "release can opt out of package/publish steps"
 assert_contains '--no-github-release' "${ARGS}" "release can opt out of GitHub Release creation"
-assert_contains '--i-know-ci-creates-the-github-release' "${ARGS}" "CI opt-out also confirms CI creates the GitHub Release"
-unset RELEASE_SKIP_PUBLISH RELEASE_SKIP_GITHUB_RELEASE
+assert_contains '--i-know-ci-creates-the-github-release' "${ARGS}" "CI opt-out confirms the flag when the binary supports it"
+unset RELEASE_SKIP_PUBLISH RELEASE_SKIP_GITHUB_RELEASE HOMEBOY_SUPPORTS_CONFIRM_FLAG
+
+# GitHub-release opt-out against an OLDER homeboy binary that PREDATES the
+# confirmation flag (and the guard): the wrapper must pass --no-github-release
+# alone and must NOT pass the flag, which an older binary would reject with
+# "unexpected argument". This is the regression #263 introduced.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+HOMEBOY_SUPPORTS_CONFIRM_FLAG="false"
+RELEASE_SKIP_PUBLISH="true"
+RELEASE_SKIP_GITHUB_RELEASE="true"
+GH_TOKEN="secret123"
+run_wrapper
+ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
+assert_contains '--no-github-release' "${ARGS}" "older binary still opts out of GitHub Release creation"
+assert_not_contains '--i-know-ci-creates-the-github-release' "${ARGS}" "older binary that lacks the flag is not handed it"
+unset RELEASE_SKIP_PUBLISH RELEASE_SKIP_GITHUB_RELEASE HOMEBOY_SUPPORTS_CONFIRM_FLAG
 
 setup_fixture
 HOMEBOY_MOCK_SCENARIO="released"

@@ -167,7 +167,16 @@ if [ "${RELEASE_SKIP_PUBLISH}" = "true" ]; then
 fi
 
 if [ "${RELEASE_SKIP_GITHUB_RELEASE}" = "true" ]; then
-  RELEASE_ARGS+=(--no-github-release --i-know-ci-creates-the-github-release)
+  RELEASE_ARGS+=(--no-github-release)
+  # Feature-detect --i-know-ci-creates-the-github-release: newer homeboy cores
+  # (PR #6137) GUARD --no-github-release behind this confirmation flag, but the
+  # action bootstraps a PUBLISHED homeboy release binary that may PREDATE the
+  # flag and would reject it ("unexpected argument"). Older binaries that lack
+  # the flag also lack the guard, so --no-github-release alone is correct for
+  # them; only append the confirmation when the binary actually advertises it.
+  if homeboy release --help 2>/dev/null | grep -q -- '--i-know-ci-creates-the-github-release'; then
+    RELEASE_ARGS+=(--i-know-ci-creates-the-github-release)
+  fi
 fi
 
 if [ "${RELEASE_HEAD}" = "true" ]; then
