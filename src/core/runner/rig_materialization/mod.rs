@@ -732,6 +732,13 @@ fn lab_offload_rig_ids(args: &[String]) -> Vec<String> {
             passthrough = true;
             continue;
         }
+        if arg == "rig" && iter.peek().map(|value| value.as_str()) == Some("check") {
+            iter.next();
+            if let Some(rig_id) = iter.next().filter(|value| !value.starts_with('-')) {
+                push_unique(&mut rig_ids, rig_id.to_string());
+            }
+            continue;
+        }
         let raw = if arg == "--rig" {
             iter.next().map(String::as_str)
         } else {
@@ -1081,6 +1088,33 @@ mod tests {
                 "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
             ]
         );
+    }
+
+    #[test]
+    fn lab_offload_rig_ids_includes_rig_check_positional_rig() {
+        let args = vec![
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "check".to_string(),
+            "static-site-fixture-matrix".to_string(),
+        ];
+
+        assert_eq!(
+            lab_offload_rig_ids(&args),
+            vec!["static-site-fixture-matrix".to_string()]
+        );
+    }
+
+    #[test]
+    fn lab_offload_rig_ids_ignores_non_check_rig_positionals() {
+        let args = vec![
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "status".to_string(),
+            "static-site-fixture-matrix".to_string(),
+        ];
+
+        assert!(lab_offload_rig_ids(&args).is_empty());
     }
 
     #[test]
