@@ -976,8 +976,6 @@ fn run_rename_single(
         RenameScope::All => "all",
     };
 
-    let exit_code = if result.total_references == 0 { 1 } else { 0 };
-
     Ok((
         RefactorOutput::Rename {
             from: from.to_string(),
@@ -1023,7 +1021,7 @@ fn run_rename_single(
                 .collect(),
             applied: result.applied,
         },
-        exit_code,
+        0,
     ))
 }
 
@@ -1061,6 +1059,7 @@ fn parse_rename_variants(values: &[String]) -> homeboy::core::Result<Vec<(String
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::fs;
 
     #[derive(Parser)]
     struct TestCli {
@@ -1125,5 +1124,47 @@ mod tests {
         let targets = args.resolve_targets().unwrap();
         let labels: Vec<_> = targets.into_iter().map(|target| target.label).collect();
         assert_eq!(labels, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn rename_no_match_dry_run_is_successful_empty_result() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("src dir");
+        fs::write(src.join("sample.rs"), "fn present_name() {}\n").expect("fixture file");
+
+        let (output, exit_code) = run_rename_single(
+            "missing_name",
+            "new_name",
+            None,
+            Some(dir.path().to_str().expect("utf8 path")),
+            "code",
+            false,
+            &[],
+            &[],
+            &[],
+            false,
+            "all",
+            false,
+        )
+        .expect("rename should return structured output");
+
+        assert_eq!(exit_code, 0);
+        let RefactorOutput::Rename {
+            total_references,
+            total_files,
+            edits,
+            file_renames,
+            applied,
+            ..
+        } = output
+        else {
+            panic!("expected rename output");
+        };
+        assert_eq!(total_references, 0);
+        assert_eq!(total_files, 0);
+        assert!(edits.is_empty());
+        assert!(file_renames.is_empty());
+        assert!(!applied);
     }
 }

@@ -22,11 +22,11 @@ pub(super) enum RigSourcesCommand {
     },
 }
 
-pub(super) fn run(command: RigSourcesCommand) -> CmdResult<RigCommandOutput> {
+pub(super) fn run(command: Option<RigSourcesCommand>) -> CmdResult<RigCommandOutput> {
     match command {
-        RigSourcesCommand::List => list(),
-        RigSourcesCommand::Remove { source } => remove(&source),
-        RigSourcesCommand::Refresh { source } => refresh(source.as_deref()),
+        None | Some(RigSourcesCommand::List) => list(),
+        Some(RigSourcesCommand::Remove { source }) => remove(&source),
+        Some(RigSourcesCommand::Refresh { source }) => refresh(source.as_deref()),
     }
 }
 
@@ -58,4 +58,26 @@ fn refresh(source: Option<&str>) -> CmdResult<RigCommandOutput> {
         }),
         0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sources_without_subcommand_defaults_to_list() {
+        crate::test_support::with_isolated_home(|_| {
+            let (output, exit_code) = run(None).expect("sources default should list");
+
+            assert_eq!(exit_code, 0);
+            let RigCommandOutput::Sources(RigSourcesOutput { command, report }) = output else {
+                panic!("expected sources output");
+            };
+            assert_eq!(command, "rig.sources.list");
+            let RigSourcesReport::List(result) = report else {
+                panic!("expected list report");
+            };
+            assert!(result.sources.is_empty());
+        });
+    }
 }
