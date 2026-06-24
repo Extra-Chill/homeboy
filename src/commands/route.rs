@@ -546,6 +546,8 @@ mod tests {
     use super::*;
     use clap::Parser;
     use homeboy::command_contract::lab_runner_supports_contract_label;
+    use std::fs;
+    use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
 
@@ -614,6 +616,25 @@ mod tests {
         fn drop(&mut self) {
             std::env::set_current_dir(&self.previous).expect("restore current dir");
         }
+    }
+
+    fn write_rig_source_metadata(home: &Path, rig_id: &str, linked: bool) {
+        let sources_dir = home.join(".config").join("homeboy").join("rig-sources");
+        fs::create_dir_all(&sources_dir).expect("create rig sources dir");
+        let metadata = serde_json::json!({
+            "source": "/tmp/rig-package",
+            "source_root": "/tmp/rig-package",
+            "package_path": "/tmp/rig-package",
+            "rig_path": format!("/tmp/rig-package/rigs/{rig_id}/rig.json"),
+            "discovery_path": "/tmp/rig-package",
+            "linked": linked,
+            "materialized": false
+        });
+        fs::write(
+            sources_dir.join(format!("{rig_id}.json")),
+            serde_json::to_string_pretty(&metadata).expect("serialize rig source metadata"),
+        )
+        .expect("write rig source metadata");
     }
 
     #[test]
@@ -786,6 +807,57 @@ mod tests {
                 "list".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn linked_local_rig_check_disables_default_lab_offload() {
+        let temp_home = tempdir().expect("temp home");
+        let _home = EnvGuard::set("HOME", temp_home.path().to_str().expect("home path"));
+        write_rig_source_metadata(temp_home.path(), "linked-local", true);
+        let cli = Cli::parse_from(["homeboy", "rig", "check", "linked-local"]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "rig check");
+        assert!(command.portable);
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.infer_source_path_tools);
+        assert!(cli.command.supports_lab_runner());
+    }
+
+    #[test]
+    fn linked_local_rig_check_stays_local_without_runner() {
+        let temp_home = tempdir().expect("temp home");
+        let _home = EnvGuard::set("HOME", temp_home.path().to_str().expect("home path"));
+        write_rig_source_metadata(temp_home.path(), "linked-local", true);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "check".to_string(),
+            "linked-local".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let outcome = route_after_parse(&cli, &normalized, None)
+            .expect("linked local rig check should skip automatic Lab offload");
+
+        assert_eq!(outcome, None);
+        assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
+    }
+
+    #[test]
+    fn installed_git_rig_check_keeps_default_lab_offload() {
+        let temp_home = tempdir().expect("temp home");
+        let _home = EnvGuard::set("HOME", temp_home.path().to_str().expect("home path"));
+        write_rig_source_metadata(temp_home.path(), "installed-git", false);
+        let cli = Cli::parse_from(["homeboy", "rig", "check", "installed-git"]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "rig check");
+        assert!(command.portable);
+        assert!(command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.infer_source_path_tools);
     }
 
     #[test]

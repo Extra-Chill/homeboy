@@ -46,13 +46,23 @@ impl RigArgs {
     }
 
     pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
-        if self.is_check_command() {
-            return CommandPortabilityContract::lab(LabCommandContract::portable_workload(
-                RIG_CHECK_LAB_LABEL,
-                None,
-                false,
-                LAB_NO_EXTRA_TOOLS,
-            ));
+        if let RigCommand::Check { rig_id } = &self.command {
+            let contract = if rig_check_uses_linked_local_source(rig_id) {
+                LabCommandContract::explicit_runner(
+                    RIG_CHECK_LAB_LABEL,
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            } else {
+                LabCommandContract::portable_workload(
+                    RIG_CHECK_LAB_LABEL,
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            };
+            return CommandPortabilityContract::lab(contract);
         }
         if self.is_hot_resource_command() {
             return CommandPortabilityContract::lab(LabCommandContract::local_only(
@@ -62,6 +72,10 @@ impl RigArgs {
         }
         CommandPortabilityContract::none()
     }
+}
+
+fn rig_check_uses_linked_local_source(rig_id: &str) -> bool {
+    rig::read_source_metadata(rig_id).is_some_and(|source| source.linked)
 }
 
 #[derive(Subcommand)]
