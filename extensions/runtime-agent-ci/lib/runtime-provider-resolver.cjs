@@ -7,6 +7,15 @@ const DEFAULT_RUNTIME_ID = 'local-shell';
 const RUNTIME_ID_ALIASES = {
 	codebox: 'wp-codebox',
 };
+const RUNTIME_ID_ALIAS_DEPRECATIONS = {
+	codebox: {
+		schema: 'homeboy/deprecated-runtime-alias/v1',
+		alias: 'codebox',
+		replacement: 'wp-codebox',
+		quarantine: 'legacy-runtime-id-alias',
+		status: 'deprecated',
+	},
+};
 
 function repoRootFromHere() {
 	return path.resolve(__dirname, '..', '..');
@@ -92,8 +101,15 @@ function normalizeRuntimeId(runtimeId = DEFAULT_RUNTIME_ID) {
 	return RUNTIME_ID_ALIASES[id] || id;
 }
 
+function runtimeIdAliasDeprecation(runtimeId = DEFAULT_RUNTIME_ID) {
+	const id = runtimeId || DEFAULT_RUNTIME_ID;
+	return RUNTIME_ID_ALIAS_DEPRECATIONS[id] || null;
+}
+
 function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
+	const requestedId = runtimeId || DEFAULT_RUNTIME_ID;
 	const id = normalizeRuntimeId(runtimeId);
+	const aliasDeprecation = runtimeIdAliasDeprecation(runtimeId);
 	const registry = options.registry || runtimeRegistry(options);
 	const manifest = registry[id];
 	if (!manifest) {
@@ -113,6 +129,8 @@ function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 
 	return {
 		id,
+		requested_id: requestedId,
+		...(aliasDeprecation ? { deprecated_runtime_alias: aliasDeprecation } : {}),
 		manifest,
 		checkout,
 		setupCommands: normalizeCommands(materialization.setup_commands || []),
@@ -403,7 +421,9 @@ function executorScriptArg(provider) {
 
 module.exports = {
 	DEFAULT_RUNTIME_ID,
+	RUNTIME_ID_ALIAS_DEPRECATIONS,
 	normalizeRuntimeId,
+	runtimeIdAliasDeprecation,
 	resolveRuntimeProvider,
 	runtimeManifestPath,
 	runtimeRegistry,

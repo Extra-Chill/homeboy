@@ -62,6 +62,11 @@ Generic runner specs must declare `executor.backend` explicitly. Runtime-specifi
 planners may provide their own defaults, but the shared contract does not assume
 any particular backend.
 
+Runtime ids are canonical package ids. Compatibility aliases may resolve for
+existing callers, but resolvers should return explicit deprecation metadata with a
+replacement id and quarantine name. New callers should select canonical runtime
+ids directly, for example `wp-codebox` instead of the legacy `codebox` alias.
+
 ## `runtime_path` Interpolation
 
 Provider commands should reference runtime-local files with `{{runtime_path}}`:

@@ -9,7 +9,10 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const workspace = path.join(rootDir, 'fixture-workspace');
 const {
 	DEFAULT_RUNTIME_ID,
+	RUNTIME_ID_ALIAS_DEPRECATIONS,
+	normalizeRuntimeId,
 	resolveRuntimeProvider,
+	runtimeIdAliasDeprecation,
 	runtimeRegistry,
 } = require('../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
@@ -46,6 +49,19 @@ assert.equal(runtime.executor.capabilities.includes('agent_bundle_execution'), t
 assert.deepEqual(runtime.executor.runtime_execution_contracts.bundle, {
 	ability_field: 'runtime_bundle_ability',
 	required_capabilities: ['agent_bundle_execution'],
+});
+
+const codeboxAliasRuntime = resolveRuntimeProvider('codebox', { repoRoot: rootDir, workspace });
+assert.equal(normalizeRuntimeId('codebox'), 'wp-codebox');
+assert.equal(codeboxAliasRuntime.id, 'wp-codebox');
+assert.equal(codeboxAliasRuntime.requested_id, 'codebox');
+assert.deepEqual(runtimeIdAliasDeprecation('codebox'), RUNTIME_ID_ALIAS_DEPRECATIONS.codebox);
+assert.deepEqual(codeboxAliasRuntime.deprecated_runtime_alias, {
+	schema: 'homeboy/deprecated-runtime-alias/v1',
+	alias: 'codebox',
+	replacement: 'wp-codebox',
+	quarantine: 'legacy-runtime-id-alias',
+	status: 'deprecated',
 });
 
 const envRuntime = resolveRuntimeProvider('wp-codebox', {

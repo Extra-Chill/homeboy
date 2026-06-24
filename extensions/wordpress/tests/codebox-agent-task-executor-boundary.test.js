@@ -37,6 +37,14 @@ const claudeCodeSecretEnv = [
   'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
   'AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT',
 ];
+const legacyRuntimePackageAbilityAlias = (alias) => ({
+  schema: 'wp-codebox/deprecated-compatibility-alias/v1',
+  alias,
+  replacement: 'wp-codebox/run-runtime-package',
+  quarantine: 'legacy-runtime-package-ability-alias',
+  status: 'deprecated',
+});
+
 function restoreEnv(name, value) {
   if (value === undefined) {
     delete process.env[name];
@@ -59,6 +67,10 @@ assert.equal(provider.runtime_id, 'wp-codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
 assert.equal(provider.provider_credential_boundary.schema, 'wp-codebox/provider-credential-boundary/v1');
 assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'provider-credential-boundary'), true);
+assert.deepEqual(provider.deprecated_compatibility_aliases, [
+  legacyRuntimePackageAbilityAlias('agents/run-runtime-package'),
+  legacyRuntimePackageAbilityAlias('runtime-package/run'),
+]);
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
 assert.equal(provider.provider_runtime_invocation.abilities.workspaceCommand, 'wp-codebox/runner-workspace-command');
@@ -672,6 +684,7 @@ assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.ability_
   bridge_ability: 'wp-codebox/run-runtime-package',
   runtime_ability: 'wp-codebox/run-runtime-package',
   owning_components: ['wp-codebox'],
+  deprecated_compatibility_alias: legacyRuntimePackageAbilityAlias('agents/run-runtime-package'),
 });
 assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task_ability_normalization, controllerClientContextArtifactsTaskInput.runtime_task.ability_normalization);
 assert.equal(controllerClientContextArtifactsTaskInput.runtime_task.input.runtime_package, 'website-idea-agent');
@@ -696,6 +709,10 @@ const legacyRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   },
 });
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.deepEqual(
+  legacyRuntimePackageTaskInput.runtime_task.ability_normalization.deprecated_compatibility_alias,
+  legacyRuntimePackageAbilityAlias('runtime-package/run')
+);
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.runtime_package, 'example-agent');
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.agent, 'example-agent');
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.provider, 'codex');
@@ -794,6 +811,10 @@ const explicitLegacyRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   },
 });
 assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.deepEqual(
+  explicitLegacyRuntimeTaskInput.runtime_task.ability_normalization.deprecated_compatibility_alias,
+  legacyRuntimePackageAbilityAlias('runtime-package/run')
+);
 assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.input.runtime_package, 'example-agent');
 assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.input.agent, 'example-agent');
 assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.input.provider, 'codex');
