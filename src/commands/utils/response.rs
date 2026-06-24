@@ -144,6 +144,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::BrokerAuthDenied
         | ErrorCode::RigServiceFailed
         | ErrorCode::RigResourceConflict
+        | ErrorCode::RunnerLabTransportFailure
         | ErrorCode::RunnerControllerDisconnected
         | ErrorCode::StackApplyConflict => 20,
 

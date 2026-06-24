@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use crate::command_contract::RunnerWorkload;
 use crate::core::api_jobs::{Job, JobEvent, JobStatus};
 use crate::core::engine::command::CommandCaptureMetadata;
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::redaction::redact_argv;
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -15,7 +15,9 @@ use super::super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
 use super::super::daemon_http_get::daemon_get;
-use super::super::evidence::{mirror_daemon_evidence, mirror_daemon_job_progress};
+use super::super::evidence::{
+    local_job_run_id, mirror_daemon_evidence, mirror_daemon_job_progress,
+};
 use super::super::resource_metrics::RunnerResourceMetrics;
 use super::super::{Runner, RunnerCapabilityPreflight, RunnerJob, RunnerKind};
 
@@ -124,12 +126,14 @@ pub(super) fn exec_via_daemon(
             .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?;
     }
     let job_id = job.id.to_string();
-    let events = redact_runner_job_events(
-        &fetch_daemon_events(&client, local_url, &job_id)
-            .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?,
-        &env,
-        &secret_env_names,
-    );
+    let events = match fetch_daemon_events(&client, local_url, &job_id) {
+        Ok(events) => redact_runner_job_events(&events, &env, &secret_env_names),
+        Err(err) => {
+            return Err(lab_terminal_result_transport_error(
+                runner, &cwd, &command, &job, err,
+            ));
+        }
+    };
 
     let RunnerJobResultFields {
         result,
@@ -352,6 +356,54 @@ pub(super) fn daemon_job_context_error(runner_id: &str, job_id: &str, err: Error
     with_context.hints = err.hints;
     with_context.retryable = err.retryable.or(Some(true));
     with_context
+}
+
+pub(super) fn lab_terminal_result_transport_error(
+    runner: &Runner,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+    err: Error,
+) -> Error {
+    let job_id = job.id.to_string();
+    let run_id = local_job_run_id(&runner.id, &job_id);
+    let mut error = Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "Lab offload runner `{}` daemon job `{job_id}` finished with status `{}`, but Homeboy could not retrieve or parse the daemon result report: {}. This is a Lab transport/reporting failure, not a remote command failure.",
+            runner.id,
+            job.status.daemon_status_label(),
+            err.message
+        ),
+        json!({
+            "runner_id": runner.id,
+            "job_id": job_id,
+            "persisted_run_id": run_id,
+            "remote_cwd": cwd,
+            "command": redact_argv(command),
+            "job_status": job.status.daemon_status_label(),
+            "source": err.details,
+        }),
+    );
+    error.retryable = Some(true);
+    for hint in lab_offload_handoff_hints(
+        &runner.id,
+        Some(cwd),
+        &job_id,
+        Some(&run_id),
+        DaemonJobHandoffState::Terminal(job.status),
+        true,
+    ) {
+        error = error.with_hint(hint);
+    }
+    error
+        .with_hint(format!(
+            "Recover the Lab result from persisted evidence instead of forcing local execution: `homeboy runs show {run_id}`, `homeboy runs evidence {run_id}`, and `homeboy runs artifacts {run_id}`."
+        ))
+        .with_hint(format!(
+            "Inspect the daemon job report with `homeboy runner job logs {} {job_id}`.",
+            runner.id
+        ))
 }
 
 pub(super) fn daemon_job_wait_timeout(

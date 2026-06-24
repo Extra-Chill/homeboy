@@ -20,3 +20,4 @@ pub use mirror::{
     mirror_reverse_broker_evidence, mirrored_runner_job_identity, refresh_mirrored_daemon_evidence,
     runner_job_log_snapshot, RunnerJobLogSnapshot,
 };
+pub(crate) use util::local_job_run_id;

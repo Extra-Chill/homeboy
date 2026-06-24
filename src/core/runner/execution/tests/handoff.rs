@@ -445,6 +445,79 @@ fn daemon_exec_request_failed_error_surfaces_payload_detail() {
 }
 
 #[test]
+fn terminal_lab_result_transport_error_preserves_recovery_ids() {
+    let runner = ssh_runner();
+    let job_id =
+        uuid::Uuid::parse_str("94cd841d-47f8-41c5-be42-88510314c513").expect("issue job id");
+    let job = Job {
+        id: job_id,
+        operation: "runner.exec".to_string(),
+        status: JobStatus::Succeeded,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: Some(1_700_000_001_000),
+        event_count: 1,
+        source_snapshot: None,
+        stale_reason: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+    };
+    let source = Error::internal_json(
+        "error decoding response body",
+        Some("parse daemon response".to_string()),
+    );
+
+    let err = lab_terminal_result_transport_error(
+        &runner,
+        "/srv/homeboy/a8c-intelligence",
+        &[
+            "homeboy".to_string(),
+            "refactor".to_string(),
+            "--from".to_string(),
+            "lint".to_string(),
+            "--write".to_string(),
+            "a8c-intelligence".to_string(),
+        ],
+        &job,
+        source,
+    );
+
+    let run_id = format!("runner-exec-lab-{job_id}");
+    assert_eq!(err.code, ErrorCode::RunnerLabTransportFailure);
+    assert!(err.message.contains("Lab transport/reporting failure"));
+    assert!(err.message.contains("not a remote command failure"));
+    assert_eq!(err.details["runner_id"], "lab");
+    assert_eq!(err.details["job_id"], job_id.to_string());
+    assert_eq!(err.details["persisted_run_id"], run_id);
+    assert_eq!(err.details["source"]["context"], "parse daemon response");
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains(&format!("homeboy runs show {run_id}"))));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains(&format!("homeboy runs evidence {run_id}"))));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains(&format!("homeboy runs artifacts {run_id}"))));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains(&format!("homeboy runner job logs lab {job_id}"))));
+    assert!(!err.message.contains("--force-hot"));
+    assert!(!hints.iter().any(|hint| hint.contains("--allow-local-hot")));
+}
+
+#[test]
 fn daemon_exec_request_failed_error_handles_null_payload_with_reconnect_hint() {
     // The historical #3631/#3624 symptom: a stale/restarting daemon answers
     // with an empty/null error payload. We must never surface a bare `null`,
