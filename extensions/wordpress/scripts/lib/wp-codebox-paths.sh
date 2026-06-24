@@ -49,28 +49,67 @@ homeboy_wp_codebox_resolve_bin() {
     local settings_json="${1:-${HOMEBOY_SETTINGS_JSON:-}}"
     local config_label="${2:-settings}"
     local bin=""
+    local candidate=""
+    local candidates=()
 
     if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
         bin=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
     fi
-    if [ -z "$bin" ]; then
-        bin="${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}"
+    if [ -n "$bin" ]; then
+        candidates+=("$bin")
     fi
-    if [ -z "$bin" ]; then
-        bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
+    if [ -n "${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}" ]; then
+        candidates+=("$HOMEBOY_SETTINGS_WP_CODEBOX_BIN")
+    fi
+    if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ]; then
+        candidates+=("$HOMEBOY_WP_CODEBOX_BIN")
     fi
 
-    bin="${bin:-wp-codebox}"
-    if [ "$bin" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>&1; then
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] && candidates+=("$candidate")
+    done < <(type -a -p wp-codebox 2>/dev/null || true)
+
+    candidates+=("wp-codebox")
+
+    for candidate in "${candidates[@]}"; do
+        [ -n "$candidate" ] || continue
+        if homeboy_wp_codebox_bin_is_runnable "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    if ! command -v wp-codebox >/dev/null 2>&1; then
         if [ "$config_label" = "config" ]; then
             echo "ERROR: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN or config wp_codebox_bin" >&2
         else
             echo "Error: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox." >&2
         fi
-        return 1
+    else
+        echo "Error: wp-codebox was found, but no candidate passed 'wp-codebox --version'. Remove stale wrappers or set HOMEBOY_WP_CODEBOX_BIN to a working binary." >&2
     fi
 
-    printf '%s\n' "$bin"
+    return 1
+}
+
+homeboy_wp_codebox_bin_is_runnable() {
+    local bin="$1"
+
+    if [ "$bin" = "wp-codebox" ]; then
+        command -v wp-codebox >/dev/null 2>&1 || return 1
+    elif [[ "$bin" = /* || "$bin" == ./* || "$bin" == ../* ]]; then
+        case "$bin" in
+            *.js|*.cjs|*.mjs)
+                [ -f "$bin" ] || return 1
+                return 0
+                ;;
+            *)
+                [ -x "$bin" ] || return 1
+                ;;
+        esac
+    fi
+
+    "$bin" --version >/dev/null 2>&1
 }
 
 homeboy_wp_codebox_set_command() {
