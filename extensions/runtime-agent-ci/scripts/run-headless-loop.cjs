@@ -8,6 +8,7 @@ const {
   writeHeadlessDeterministicLoopArtifacts,
 } = require('../lib/headless-deterministic-loop-runner');
 
+(async () => {
 try {
   const args = parseArgs(process.argv.slice(2));
   const specPath = args.spec || args.config || process.env.HOMEBOY_RUNTIME_AGENT_CONFIG_PATH || '';
@@ -16,7 +17,7 @@ try {
   }
   const repoRoot = path.resolve(__dirname, '..', '..');
   const spec = JSON.parse(fs.readFileSync(specPath, 'utf8'));
-  const result = runHeadlessDeterministicLoop({
+  const result = await runHeadlessDeterministicLoop({
     spec,
     configPath: specPath,
     repoRoot,
@@ -38,6 +39,7 @@ try {
   process.stderr.write(`${error && error.message ? error.message : String(error)}\n`);
   process.exitCode = 1;
 }
+})();
 
 function parseArgs(argv) {
   const args = {};

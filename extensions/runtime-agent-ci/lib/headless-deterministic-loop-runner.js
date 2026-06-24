@@ -12,9 +12,10 @@ const {
   loopPolicyMaxRevolutions,
   normalizeLoopPolicy: normalizeSharedLoopPolicy,
 } = require('./loop-policy');
+const { executeFanoutReconcileRun } = require('./fanout-reconcile-runner');
 const { resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
 
-function runHeadlessDeterministicLoop(options = {}) {
+async function runHeadlessDeterministicLoop(options = {}) {
   const spec = requiredObject(options.spec || options.config || options.plan, 'spec');
   const repoRoot = options.repoRoot || options.repo_root || path.resolve(__dirname, '..', '..');
   const runtime = resolveLoopRuntime(spec, { ...options, repoRoot });
@@ -29,75 +30,40 @@ function runHeadlessDeterministicLoop(options = {}) {
 
   pushEvent(events, 'loop_started', { loop_id: loopId(spec), task_count: tasks.length, dry_run: dryRun });
 
-  for (const task of tasks) {
-    const plan = { ...spec, ...task, dry_run: dryRun };
-    let finalLoop = null;
-    const request = buildGenericAgentLoopRequest({
-      plan,
+  const fanoutRun = await executeFanoutReconcileRun({
+    plan: {
+      schema: 'homeboy/headless-deterministic-loop-task-plan/v1',
+      summary: { task_count: tasks.length },
+      task_requests: tasks.map((task, index) => ({ ...task, task_index: index })),
+    },
+    concurrency: spec.concurrency || spec.task_concurrency || spec.max_concurrency || options.concurrency,
+    task_id: (task) => task.task_id || task.workload_id || `task-${task.task_index + 1}`,
+    task_order: (record) => record.task_index,
+    execute_task_request: (task) => executeHeadlessTask({
+      ...options,
+      task,
+      spec,
       runtime,
-      configPath: options.configPath || options.config_path || '',
-      extensionPath: options.extensionPath || options.extension_path || spec.homeboy_extensions_path || repoRoot,
-      replayBundleDir: options.replayBundleDir || options.replay_bundle_dir || spec.replay_bundle_dir,
-      env: options.env,
-    });
-    pushEvent(events, 'task_planned', { task_id: request.task_id, backend: request.executor.backend });
+      repoRoot,
+      dryRun,
+      validate,
+      startedAt,
+      events,
+    }),
+    is_record_successful: (record) => record.status === 'succeeded',
+    classify_outcome: (record) => record.outcome,
+    include_reconciliation: false,
+  });
 
-    const loopPolicy = normalizeLoopPolicy(plan);
-
-    if (dryRun) {
-      finalOutcome = dryRunOutcome(request);
-      finalResults = dryRunResults(request);
-      pushEvent(events, 'task_dry_run', { task_id: request.task_id });
-    } else if (loopPolicy.enabled) {
-      pushEvent(events, 'task_policy_started', { task_id: request.task_id, max_iterations: loopPolicy.max_iterations });
-      const result = runHeadlessPolicyLoop({
-        ...options,
-        plan,
-        request,
-        runtime,
-        repoRoot,
-        configPath: options.configPath || options.config_path || '',
-        validate,
-        validationPolicy: validationPolicyForPlan(plan, options.validationPolicy || options.validation_policy),
-        loopPolicy,
-        extensionPath: options.extensionPath || options.extension_path || spec.homeboy_extensions_path || repoRoot,
-        replayBundleDir: options.replayBundleDir || options.replay_bundle_dir || spec.replay_bundle_dir,
-      });
-      finalOutcome = result.outcome;
-      finalResults = result.results;
-      finalLoop = result.loop;
-      pushEvent(events, 'task_policy_completed', { task_id: request.task_id, status: result.outcome.status, stop_reason: result.loop.policy_status.stop_reason });
-    } else {
-      pushEvent(events, 'task_started', { task_id: request.task_id });
-      const result = runGenericAgentLoop({
-        ...options,
-        plan,
-        request,
-        runtime,
-        repoRoot,
-        configPath: options.configPath || options.config_path || '',
-        validate,
-        validationPolicy: validationPolicyForPlan(plan, options.validationPolicy || options.validation_policy),
-      });
-      finalOutcome = result.outcome;
-      finalResults = result.results;
-      finalLoop = result.loop;
-      pushEvent(events, 'task_completed', { task_id: request.task_id, status: result.outcome.status });
-      if (result.assertion) {
-        pushEvent(events, 'task_asserted', { task_id: request.task_id, assertion: result.assertion });
-      }
+  for (const record of fanoutRun.records) {
+    if (!record.task_result) {
+      throw new Error(record.error_message || `headless task ${record.id || '(unknown)'} failed before producing a result`);
     }
-
-    taskResults.push({
-      task_id: request.task_id,
-      request,
-      outcome: finalOutcome,
-      results: finalResults,
-      loop: finalLoop,
-      loop_policy: finalLoop?.policy_status || null,
-      state: finalLoop?.state || null,
-    });
+    taskResults.push(record.task_result);
   }
+
+  finalOutcome = taskResults.at(-1)?.outcome || null;
+  finalResults = taskResults.at(-1)?.results || null;
 
   const completedAt = new Date().toISOString();
   const result = {
@@ -112,10 +78,101 @@ function runHeadlessDeterministicLoop(options = {}) {
     outcome: finalOutcome,
     results: finalResults,
     state: taskResults.at(-1)?.state || null,
+    fanout: {
+      schema: fanoutRun.schema,
+      status: fanoutRun.status,
+      summary: fanoutRun.summary,
+      records: fanoutRun.records.map((record) => ({
+        id: record.id,
+        task_index: record.task_index,
+        status: record.status,
+        outcome_status: record.outcome?.status || '',
+      })),
+    },
     events,
   };
   pushEvent(events, 'loop_completed', { loop_id: result.loop_id, status: result.status });
   return result;
+}
+
+function executeHeadlessTask(options = {}) {
+  const { task, spec, runtime, repoRoot, dryRun, validate, events } = options;
+  const plan = { ...spec, ...task, dry_run: dryRun };
+  let finalOutcome = null;
+  let finalResults = null;
+  let finalLoop = null;
+  const request = buildGenericAgentLoopRequest({
+    plan,
+    runtime,
+    configPath: options.configPath || options.config_path || '',
+    extensionPath: options.extensionPath || options.extension_path || spec.homeboy_extensions_path || repoRoot,
+    replayBundleDir: options.replayBundleDir || options.replay_bundle_dir || spec.replay_bundle_dir,
+    env: options.env,
+  });
+  pushEvent(events, 'task_planned', { task_id: request.task_id, backend: request.executor.backend });
+
+  const loopPolicy = normalizeLoopPolicy(plan);
+
+  if (dryRun) {
+    finalOutcome = dryRunOutcome(request);
+    finalResults = dryRunResults(request);
+    pushEvent(events, 'task_dry_run', { task_id: request.task_id });
+  } else if (loopPolicy.enabled) {
+    pushEvent(events, 'task_policy_started', { task_id: request.task_id, max_iterations: loopPolicy.max_iterations });
+    const result = runHeadlessPolicyLoop({
+      ...options,
+      plan,
+      request,
+      runtime,
+      repoRoot,
+      configPath: options.configPath || options.config_path || '',
+      validate,
+      validationPolicy: validationPolicyForPlan(plan, options.validationPolicy || options.validation_policy),
+      loopPolicy,
+      extensionPath: options.extensionPath || options.extension_path || spec.homeboy_extensions_path || repoRoot,
+      replayBundleDir: options.replayBundleDir || options.replay_bundle_dir || spec.replay_bundle_dir,
+    });
+    finalOutcome = result.outcome;
+    finalResults = result.results;
+    finalLoop = result.loop;
+    pushEvent(events, 'task_policy_completed', { task_id: request.task_id, status: result.outcome.status, stop_reason: result.loop.policy_status.stop_reason });
+  } else {
+    pushEvent(events, 'task_started', { task_id: request.task_id });
+    const result = runGenericAgentLoop({
+      ...options,
+      plan,
+      request,
+      runtime,
+      repoRoot,
+      configPath: options.configPath || options.config_path || '',
+      validate,
+      validationPolicy: validationPolicyForPlan(plan, options.validationPolicy || options.validation_policy),
+    });
+    finalOutcome = result.outcome;
+    finalResults = result.results;
+    finalLoop = result.loop;
+    pushEvent(events, 'task_completed', { task_id: request.task_id, status: result.outcome.status });
+    if (result.assertion) {
+      pushEvent(events, 'task_asserted', { task_id: request.task_id, assertion: result.assertion });
+    }
+  }
+
+  const taskResult = {
+    task_id: request.task_id,
+    request,
+    outcome: finalOutcome,
+    results: finalResults,
+    loop: finalLoop,
+    loop_policy: finalLoop?.policy_status || null,
+    state: finalLoop?.state || null,
+  };
+  return {
+    id: request.task_id,
+    task_index: task.task_index,
+    status: finalOutcome?.status === 'succeeded' ? 'succeeded' : 'failed',
+    outcome: finalOutcome,
+    task_result: taskResult,
+  };
 }
 
 function writeHeadlessDeterministicLoopArtifacts(options = {}) {
@@ -329,6 +386,7 @@ function normalizeLoopPolicy(plan) {
     mode: primitive.mode,
     max_iterations: maxIterations || 1,
     max_revolutions: primitive.max_revolutions,
+    max_synchronous_revolutions: primitive.max_synchronous_revolutions,
     duration_ms: primitive.duration_ms,
     deadline_at: primitive.deadline_at,
     accepted_statuses: normalizeArray(raw.accepted_statuses || raw.acceptedStatuses).length > 0

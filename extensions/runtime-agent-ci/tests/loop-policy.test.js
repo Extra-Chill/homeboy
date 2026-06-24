@@ -39,6 +39,9 @@ assert.throws(
   /require max_synchronous_revolutions/
 );
 assert.equal(loopPolicyMaxRevolutions(durationPolicy, { requireNonCountMaxRevolutions: true, nonCountMaxRevolutions: 3 }), 3);
+const durationPolicyWithSyncCap = normalizeLoopPolicy({ mode: 'duration', duration_ms: 5000, max_synchronous_revolutions: 4 });
+assert.equal(durationPolicyWithSyncCap.max_synchronous_revolutions, 4);
+assert.equal(loopPolicyMaxRevolutions(durationPolicyWithSyncCap, { requireNonCountMaxRevolutions: true }), 4);
 
 const deadlinePolicy = normalizeLoopPolicy({ mode: 'duration', deadline_at: 3000 });
 assert.equal(evaluateLoopPolicy(deadlinePolicy, { now: 2999 }).reason, 'continue');

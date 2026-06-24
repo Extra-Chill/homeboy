@@ -103,7 +103,7 @@ process.exit(0);
 	const request = {
 		schema: 'homeboy/agent-task-request/v1',
 		task_id: 'codex-real-executor',
-		executor: {
+			executor: {
 			backend: 'codex',
 			runtime: 'codex',
 			config: {
@@ -111,6 +111,7 @@ process.exit(0);
 				model: 'gpt-5.5',
 				command: process.execPath,
 				command_args: [mockCliPath, 'exec'],
+				artifacts_path: path.join(root, 'artifacts'),
 			},
 		},
 		instructions: 'Prove the Codex runtime boundary without leaking secrets.',
@@ -125,7 +126,32 @@ process.exit(0);
 		input: JSON.stringify(request),
 	});
 	assert.equal(runResult.status, 0, runResult.stderr);
-	assert.deepEqual(JSON.parse(runResult.stdout), executeCodexAgentTask(request));
+	const parsedRun = JSON.parse(runResult.stdout);
+	const previousRefreshToken = process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN;
+	const previousAccessToken = process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN;
+	process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN = 'refresh-token-must-not-leak';
+	process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN = 'access-token-must-not-leak';
+	try {
+		assert.deepEqual(parsedRun, executeCodexAgentTask(request));
+	} finally {
+		if (previousRefreshToken === undefined) {
+			delete process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN;
+		} else {
+			process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN = previousRefreshToken;
+		}
+		if (previousAccessToken === undefined) {
+			delete process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN;
+		} else {
+			process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN = previousAccessToken;
+		}
+	}
+	assert.equal(parsedRun.artifacts.some((artifact) => artifact.stream === 'stdout'), true);
+	assert.equal(parsedRun.artifacts.some((artifact) => artifact.stream === 'stderr'), true);
+	for (const artifact of parsedRun.artifacts) {
+		const content = fs.readFileSync(artifact.path, 'utf8');
+		assert.equal(content.includes('refresh-token-must-not-leak'), false);
+		assert.equal(content.includes('access-token-must-not-leak'), false);
+	}
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('refresh-token-must-not-leak'), false);
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('access-token-must-not-leak'), false);
 	assert.equal(executeCodexAgentTask({ ...request, executor: { backend: 'codex', runtime: 'wrong', config: {} } }).failure_code, 'agent_task.invalid_codex_request');

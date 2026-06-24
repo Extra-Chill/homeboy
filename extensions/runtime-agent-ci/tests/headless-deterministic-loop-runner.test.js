@@ -27,8 +27,9 @@ const baseSpec = {
   workload_id: 'build-site',
 };
 
+(async () => {
 const executedTaskIds = [];
-const twoRevolution = runHeadlessDeterministicLoop({
+const twoRevolution = await runHeadlessDeterministicLoop({
   spec: {
     ...baseSpec,
     loop_policy: {
@@ -75,7 +76,7 @@ assert.equal(twoRevolution.tasks[0].outcome.metadata.headless_loop_policy_status
 assert.equal(twoRevolution.tasks[0].results.scenarios[0].metadata.completion_outcome_satisfied, true);
 
 let boundedCalls = 0;
-const boundedFailure = runHeadlessDeterministicLoop({
+const boundedFailure = await runHeadlessDeterministicLoop({
   spec: {
     ...baseSpec,
     task_id: 'never-converges',
@@ -104,7 +105,7 @@ assert.equal(boundedFailure.tasks[0].loop_policy.status, 'failed');
 assert.equal(boundedFailure.tasks[0].loop_policy.stop_reason, 'max_revolutions_reached');
 assert.equal(boundedFailure.tasks[0].loop_policy.iteration_count, 2);
 
-assert.throws(
+await assert.rejects(
   () => runHeadlessDeterministicLoop({
     spec: {
       ...baseSpec,
@@ -125,7 +126,7 @@ assert.throws(
 );
 
 let durationCalls = 0;
-const durationBounded = runHeadlessDeterministicLoop({
+const durationBounded = await runHeadlessDeterministicLoop({
   spec: {
     ...baseSpec,
     task_id: 'duration-explicit-sync-cap',
@@ -153,7 +154,7 @@ assert.equal(durationBounded.tasks[0].loop_policy.stop_reason, 'max_revolutions_
 assert.equal(durationBounded.tasks[0].loop_policy.iteration_count, 2);
 
 let expiredHeadlessCalls = 0;
-const expiredHeadlessDeadline = runHeadlessDeterministicLoop({
+const expiredHeadlessDeadline = await runHeadlessDeterministicLoop({
   spec: {
     ...baseSpec,
     task_id: 'expired-headless-deadline',
@@ -178,6 +179,31 @@ assert.equal(expiredHeadlessCalls, 0);
 assert.equal(expiredHeadlessDeadline.status, 'failed');
 assert.equal(expiredHeadlessDeadline.tasks[0].loop_policy.stop_reason, 'deadline_reached');
 assert.equal(expiredHeadlessDeadline.tasks[0].loop_policy.iteration_count, 0);
+
+const multiTaskExecutionOrder = [];
+const multiTask = await runHeadlessDeterministicLoop({
+  spec: {
+    ...baseSpec,
+    loop_id: 'headless-multi-task-fixture',
+    tasks: [
+      { task_id: 'task-b', workload_id: 'task-b' },
+      { task_id: 'task-a', workload_id: 'task-a' },
+    ],
+    task_concurrency: 2,
+  },
+  runtime,
+  validate: false,
+  execute: ({ request }) => {
+    multiTaskExecutionOrder.push(request.task_id);
+    return outcome(request, request.task_id === 'task-a' ? 'succeeded' : 'failed', 'Fanout task completed.');
+  },
+});
+
+assert.deepEqual(multiTaskExecutionOrder, ['task-b', 'task-a']);
+assert.equal(multiTask.status, 'failed');
+assert.deepEqual(multiTask.tasks.map((task) => task.task_id), ['task-b', 'task-a']);
+assert.deepEqual(multiTask.fanout.records.map((record) => record.id), ['task-b', 'task-a']);
+assert.equal(multiTask.outcome.task_id, 'task-a');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-headless-loop-policy-'));
 try {
@@ -226,3 +252,7 @@ function outcome(request, status, summary) {
 }
 
 process.stdout.write('Headless deterministic loop policy checks passed\n');
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

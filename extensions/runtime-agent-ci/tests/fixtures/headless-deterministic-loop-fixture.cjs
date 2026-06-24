@@ -52,11 +52,11 @@ function createHeadlessDeterministicLoopFixture(options = {}) {
   };
 }
 
-function runHeadlessDeterministicLoopFixture(options = {}) {
+async function runHeadlessDeterministicLoopFixture(options = {}) {
   const fixture = createHeadlessDeterministicLoopFixture(options);
   const repoRoot = path.resolve(__dirname, '..', '..', '..');
   const { runHeadlessDeterministicLoop } = require(path.join(repoRoot, 'runtime-agent-ci'));
-  const result = runHeadlessDeterministicLoop({
+  const result = await runHeadlessDeterministicLoop({
     spec: fixture.spec,
     repoRoot: fixture.root,
     env: {
@@ -75,7 +75,8 @@ function assertHeadlessDeterministicLoopFixture(run) {
   assert.equal(result.tasks.length, 1);
   assert.equal(result.tasks[0].request.schema, 'homeboy/agent-task-request/v1');
   assert.equal(result.tasks[0].outcome.schema, 'homeboy/agent-task-outcome/v1');
-  assert.equal(result.tasks[0].loop.schema, 'homeboy/deterministic-loop-result/v1');
+  assert.equal(result.tasks[0].loop.schema, 'homeboy/generic-deterministic-loop-output/v1');
+  assert.equal(result.tasks[0].loop.deterministic_loop_schema, 'homeboy/deterministic-loop-result/v1');
   assert.equal(result.tasks[0].loop.status, 'completed');
   assert.equal(result.tasks[0].state.status, 'succeeded');
   assert.equal(result.tasks[0].state.artifacts.length, 1);

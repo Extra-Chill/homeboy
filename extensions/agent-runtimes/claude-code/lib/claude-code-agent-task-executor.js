@@ -4,6 +4,8 @@
  * External dependencies
  */
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 
 /**
  * Internal dependencies
@@ -100,8 +102,8 @@ function outcome(request = {}, values = {}) {
 		failureClassification: values.failure_classification,
 		failureCode: values.failure_code,
 		summary: values.summary || 'Claude Code agent task executor failed before producing a detailed outcome.',
-		artifacts: [],
-		evidenceRefs: [],
+		artifacts: values.artifacts || [],
+		evidenceRefs: values.evidence_refs || [],
 		metadata: values.metadata || {},
 	});
 }
@@ -157,6 +159,7 @@ function executeClaudeCodeAgentTask(request = {}, options = {}) {
 		maxBuffer: options.maxBuffer || 10 * 1024 * 1024,
 		...(timeoutSeconds > 0 ? { timeout: timeoutSeconds * 1000 } : {}),
 	});
+	const processEvidence = processArtifacts(request, config, spawnResult, 'claude-code');
 
 	if (spawnResult.error?.code === 'ENOENT') {
 		return outcome(request, {
@@ -185,6 +188,7 @@ function executeClaudeCodeAgentTask(request = {}, options = {}) {
 			summary: 'Claude Code adapter completed successfully.',
 			diagnostics: [{ classification: 'provider', message: 'Claude Code adapter exited with status 0.' }],
 			metadata: { exit_code: 0 },
+			...processEvidence,
 		});
 	}
 
@@ -198,7 +202,45 @@ function executeClaudeCodeAgentTask(request = {}, options = {}) {
 			exit_code: spawnResult.status,
 			...(spawnResult.signal ? { signal: spawnResult.signal } : {}),
 		},
+		...processEvidence,
 	});
+}
+
+function processArtifacts(request, config, spawnResult, provider) {
+	const artifactDir = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
+	if (!artifactDir) {
+		return {};
+	}
+	const artifacts = [];
+	const evidence_refs = [];
+	for (const stream of ['stdout', 'stderr']) {
+		const content = redactSecrets(String(spawnResult[stream] || ''), CLAUDE_CODE_SECRET_ENV);
+		if (!content) {
+			continue;
+		}
+		const filePath = path.join(artifactDir, `${safeFileSegment(request.task_id)}-${provider}-${stream}.txt`);
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, content);
+		const artifact = { id: `${provider}-${stream}`, name: `${provider}-${stream}`, kind: 'provider-process-stream', stream, path: filePath, bytes: Buffer.byteLength(content) };
+		artifacts.push(artifact);
+		evidence_refs.push({ kind: 'provider-process-stream', label: `${provider} ${stream}`, path: filePath });
+	}
+	return { artifacts, evidence_refs };
+}
+
+function safeFileSegment(value) {
+	return String(value || 'agent-task').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'agent-task';
+}
+
+function redactSecrets(content, secretEnvNames) {
+	let redacted = content;
+	for (const name of secretEnvNames) {
+		const value = process.env[name];
+		if (value) {
+			redacted = redacted.split(value).join('[redacted]');
+		}
+	}
+	return redacted;
 }
 
 function validateRequest(request) {

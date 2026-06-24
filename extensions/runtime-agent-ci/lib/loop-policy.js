@@ -8,6 +8,7 @@ function normalizeLoopPolicy(input = {}, options = {}) {
   const raw = optionalObject(input.loop_policy || input.loopPolicy || input.loop || input);
   const defaultMode = options.defaultMode || options.default_mode || '';
   const maxRevolutions = positiveInteger(raw.max_revolutions ?? raw.maxRevolutions ?? raw.max_iterations ?? raw.maxIterations ?? input.max_revolutions ?? input.maxRevolutions ?? input.max_iterations ?? input.maxIterations);
+  const maxSynchronousRevolutions = positiveInteger(raw.max_synchronous_revolutions ?? raw.maxSynchronousRevolutions ?? input.max_synchronous_revolutions ?? input.maxSynchronousRevolutions);
   const durationMs = nonNegativeInteger(raw.duration_ms ?? raw.durationMs ?? input.duration_ms ?? input.durationMs);
   const deadlineAt = normalizeDeadline(raw.deadline_at ?? raw.deadlineAt ?? input.deadline_at ?? input.deadlineAt);
   const mode = normalizeMode(raw.mode || input.mode || defaultMode || inferredMode({ maxRevolutions, durationMs, deadlineAt }));
@@ -15,6 +16,7 @@ function normalizeLoopPolicy(input = {}, options = {}) {
     schema: LOOP_POLICY_SCHEMA,
     mode,
     max_revolutions: mode === 'count' ? (maxRevolutions || positiveInteger(options.defaultMaxRevolutions ?? options.default_max_revolutions) || 1) : 0,
+    max_synchronous_revolutions: maxSynchronousRevolutions,
     duration_ms: durationMs,
     deadline_at: deadlineAt,
     cancellation_signal: raw.cancellation_signal || raw.cancellationSignal || input.cancellation_signal || input.cancellationSignal || options.cancellation_signal || options.cancellationSignal || null,
@@ -52,7 +54,7 @@ function loopPolicyMaxRevolutions(policyInput, options = {}) {
   if ((options.nonCountMaxRevolutions ?? options.non_count_max_revolutions) === Number.POSITIVE_INFINITY) {
     return Number.POSITIVE_INFINITY;
   }
-  const maxRevolutions = positiveInteger(options.nonCountMaxRevolutions ?? options.non_count_max_revolutions, 0);
+  const maxRevolutions = positiveInteger(options.nonCountMaxRevolutions ?? options.non_count_max_revolutions ?? policy.max_synchronous_revolutions, 0);
   if (maxRevolutions > 0) {
     return maxRevolutions;
   }

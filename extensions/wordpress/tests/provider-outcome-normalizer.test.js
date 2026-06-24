@@ -101,6 +101,11 @@ assert.equal(normalizeAgentTaskStatus({ status: 'completed' }), 'succeeded');
 assert.equal(normalizeAgentTaskStatus({ success: false }), 'failed');
 
 assert.equal(normalizeProviderStatus({ success: true, outcome: 'no_op' }), 'no_op');
+assert.equal(normalizeProviderStatus({ arbitrary: 'payload' }), 'provider_error');
+const unknownProviderOutput = normalizeAgentTaskOutcome(request, { arbitrary: 'payload' });
+assert.equal(unknownProviderOutput.status, 'provider_error');
+assert.equal(unknownProviderOutput.failure_classification, 'provider');
+assert.equal(unknownProviderOutput.failure_category, 'provider.error');
 assert.equal(providerFailureClassification('task', 'failed'), 'execution_failed');
 assert.equal(providerFailureClassification('incomplete', 'failed'), 'execution_failed');
 assert.equal(providerFailureClassification('max_turns', 'timeout'), 'timeout');

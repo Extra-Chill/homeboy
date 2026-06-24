@@ -10,6 +10,6 @@ const {
   runHeadlessDeterministicLoopFixture,
 } = require(path.join(repoRoot, 'runtime-agent-ci/tests/fixtures/headless-deterministic-loop-fixture.cjs'));
 
-assertHeadlessDeterministicLoopFixture(runHeadlessDeterministicLoopFixture());
+assertHeadlessDeterministicLoopFixture(await runHeadlessDeterministicLoopFixture());
 
 console.log('headless deterministic loop fixture passed');

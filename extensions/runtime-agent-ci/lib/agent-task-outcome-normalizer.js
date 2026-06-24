@@ -111,7 +111,7 @@ function normalizeProviderStatus(result = {}, exitStatus = 0) {
   if (result.success === true) {
     return 'succeeded';
   }
-  return Object.keys(result || {}).length > 0 ? 'succeeded' : 'failed';
+  return Object.keys(result || {}).length > 0 ? 'provider_error' : 'failed';
 }
 
 function providerFailureClassification(classification, status) {

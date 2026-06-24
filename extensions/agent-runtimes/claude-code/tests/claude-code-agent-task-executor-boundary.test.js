@@ -93,13 +93,14 @@ process.stdin.on('end', () => {
 	const runRequest = {
 		schema: 'homeboy/agent-task-request/v1',
 		task_id: 'claude-code-real-executor',
-		executor: {
+			executor: {
 			backend: 'claude-code',
 			runtime: 'claude-code',
 			config: {
 				provider: 'claude-code',
 				command: process.execPath,
 				command_args: [mockAdapterPath],
+				artifacts_path: path.join(root, 'artifacts'),
 			},
 		},
 		instructions: 'Prove the Claude Code provider boundary without leaking secrets.',
@@ -116,14 +117,30 @@ process.stdin.on('end', () => {
 	});
 	assert.equal(runResult.status, 0, runResult.stderr);
 	const previousRefreshToken = process.env.AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN;
+	const previousAccessToken = process.env.AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN;
 	process.env.AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN = 'refresh-token-must-not-leak';
+	process.env.AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN = 'access-token-must-not-leak';
 	try {
-		assert.deepEqual(JSON.parse(runResult.stdout), executeClaudeCodeAgentTask(runRequest));
+		const parsedRun = JSON.parse(runResult.stdout);
+		assert.deepEqual(parsedRun, executeClaudeCodeAgentTask(runRequest));
+		assert.equal(parsedRun.artifacts.some((artifact) => artifact.stream === 'stdout'), true);
+		assert.equal(parsedRun.artifacts.some((artifact) => artifact.stream === 'stderr'), true);
+		for (const artifact of parsedRun.artifacts) {
+			const content = fs.readFileSync(artifact.path, 'utf8');
+			assert.equal(content.includes('refresh-token-must-not-leak'), false);
+			assert.equal(content.includes('access-token-must-not-leak'), false);
+			assert.equal(content.includes('expires-at-must-not-leak'), false);
+		}
 	} finally {
 		if (previousRefreshToken === undefined) {
 			delete process.env.AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN;
 		} else {
 			process.env.AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN = previousRefreshToken;
+		}
+		if (previousAccessToken === undefined) {
+			delete process.env.AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN;
+		} else {
+			process.env.AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN = previousAccessToken;
 		}
 	}
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('refresh-token-must-not-leak'), false);
