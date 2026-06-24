@@ -147,9 +147,25 @@ pub struct FuzzCompareSnapshot {
     pub failure_rate: f64,
     pub finding_severity_counts: BTreeMap<String, usize>,
     pub critical_finding_keys: Vec<String>,
+    pub hotspots: Vec<FuzzCompareHotspotSnapshot>,
     pub missing_required_artifacts: Vec<String>,
     pub gate_status_counts: BTreeMap<String, usize>,
     pub gate_statuses: BTreeMap<String, String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct FuzzCompareHotspotSnapshot {
+    pub id: String,
+    pub dimension: String,
+    pub kind: Option<String>,
+    pub metric: String,
+    pub value: f64,
+    pub unit: String,
+    pub basis: Option<String>,
+    pub sample_count: Option<u64>,
+    pub rank: Option<u64>,
+    pub relative_score: Option<f64>,
+    pub label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -168,7 +184,27 @@ pub struct FuzzCompareDeltas {
     pub resolved_required_artifacts: Vec<String>,
     pub new_critical_findings: Vec<String>,
     pub resolved_critical_findings: Vec<String>,
+    pub hotspot_deltas: Vec<FuzzCompareHotspotDelta>,
+    pub new_hotspots: Vec<String>,
+    pub resolved_hotspots: Vec<String>,
     pub gate_status_changes: Vec<FuzzGateStatusChange>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCompareHotspotDelta {
+    pub id: String,
+    pub dimension: String,
+    pub metric: String,
+    pub baseline_value: Option<f64>,
+    pub candidate_value: Option<f64>,
+    pub value_delta: Option<f64>,
+    pub baseline_rank: Option<u64>,
+    pub candidate_rank: Option<u64>,
+    pub rank_delta: Option<i64>,
+    pub baseline_relative_score: Option<f64>,
+    pub candidate_relative_score: Option<f64>,
+    pub relative_score_delta: Option<f64>,
+    pub status: String,
 }
 
 #[derive(Serialize)]

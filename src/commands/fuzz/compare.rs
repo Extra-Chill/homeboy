@@ -1,14 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use homeboy::core::fuzz::{parse_fuzz_result_envelope_file, FuzzResultEnvelope};
+use homeboy::core::fuzz::{
+    parse_fuzz_hotspot_set_value, parse_fuzz_result_envelope_file, FuzzHotspot, FuzzResultEnvelope,
+};
 
 use super::report::{
     evaluate_fuzz_result_envelope_gates, fuzz_coverage_completeness, gate_status,
     required_artifact_count,
 };
 use super::types::{
-    FuzzCompareArgs, FuzzCompareDeltas, FuzzCompareOutput, FuzzCompareSnapshot,
-    FuzzGateStatusChange,
+    FuzzCompareArgs, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot,
+    FuzzCompareOutput, FuzzCompareSnapshot, FuzzGateStatusChange,
 };
 
 const FUZZ_COMPARE_SCHEMA: &str = "homeboy/fuzz-compare/v1";
@@ -120,6 +122,7 @@ fn snapshot(envelope: &FuzzResultEnvelope) -> FuzzCompareSnapshot {
         failure_rate,
         finding_severity_counts: finding_severity_counts(envelope),
         critical_finding_keys: critical_finding_keys(envelope),
+        hotspots: hotspot_snapshots(envelope),
         missing_required_artifacts,
         gate_status_counts,
         gate_statuses,
@@ -194,6 +197,17 @@ fn deltas(baseline: &FuzzCompareSnapshot, candidate: &FuzzCompareSnapshot) -> Fu
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let hotspot_deltas = hotspot_deltas(&baseline.hotspots, &candidate.hotspots);
+    let new_hotspots = hotspot_deltas
+        .iter()
+        .filter(|delta| delta.status == "new")
+        .map(|delta| delta.id.clone())
+        .collect();
+    let resolved_hotspots = hotspot_deltas
+        .iter()
+        .filter(|delta| delta.status == "resolved")
+        .map(|delta| delta.id.clone())
+        .collect();
 
     FuzzCompareDeltas {
         target_coverage_ratio: candidate.target_coverage_ratio - baseline.target_coverage_ratio,
@@ -230,8 +244,134 @@ fn deltas(baseline: &FuzzCompareSnapshot, candidate: &FuzzCompareSnapshot) -> Fu
             .difference(&candidate_critical)
             .cloned()
             .collect(),
+        hotspot_deltas,
+        new_hotspots,
+        resolved_hotspots,
         gate_status_changes: gate_status_changes(&baseline.gate_statuses, &candidate.gate_statuses),
     }
+}
+
+fn hotspot_snapshots(envelope: &FuzzResultEnvelope) -> Vec<FuzzCompareHotspotSnapshot> {
+    let mut hotspots = Vec::new();
+    collect_hotspots_from_value(
+        &serde_json::to_value(envelope).unwrap_or_default(),
+        &mut hotspots,
+    );
+    hotspots.sort_by(|a, b| {
+        a.rank
+            .unwrap_or(u64::MAX)
+            .cmp(&b.rank.unwrap_or(u64::MAX))
+            .then_with(|| {
+                b.relative_score
+                    .unwrap_or(b.value)
+                    .total_cmp(&a.relative_score.unwrap_or(a.value))
+            })
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    hotspots
+}
+
+fn collect_hotspots_from_value(
+    value: &serde_json::Value,
+    hotspots: &mut Vec<FuzzCompareHotspotSnapshot>,
+) {
+    if let Some(set) = parse_fuzz_hotspot_set_value(value) {
+        hotspots.extend(set.items.into_iter().map(hotspot_snapshot));
+        return;
+    }
+
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_hotspots_from_value(item, hotspots);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for (key, item) in object {
+                if key != "prior_observations" {
+                    collect_hotspots_from_value(item, hotspots);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn hotspot_snapshot(hotspot: FuzzHotspot) -> FuzzCompareHotspotSnapshot {
+    FuzzCompareHotspotSnapshot {
+        id: hotspot.id,
+        dimension: hotspot.dimension,
+        kind: hotspot.kind,
+        metric: hotspot.metric,
+        value: hotspot.value,
+        unit: hotspot.unit,
+        basis: hotspot.basis,
+        sample_count: hotspot.sample_count,
+        rank: hotspot.rank,
+        relative_score: hotspot.relative_score,
+        label: hotspot.label,
+    }
+}
+
+fn hotspot_deltas(
+    baseline: &[FuzzCompareHotspotSnapshot],
+    candidate: &[FuzzCompareHotspotSnapshot],
+) -> Vec<FuzzCompareHotspotDelta> {
+    let baseline_by_id = baseline
+        .iter()
+        .map(|hotspot| (hotspot.id.clone(), hotspot))
+        .collect::<BTreeMap<_, _>>();
+    let candidate_by_id = candidate
+        .iter()
+        .map(|hotspot| (hotspot.id.clone(), hotspot))
+        .collect::<BTreeMap<_, _>>();
+
+    baseline_by_id
+        .keys()
+        .chain(candidate_by_id.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|id| {
+            let before = baseline_by_id.get(&id).copied();
+            let after = candidate_by_id.get(&id).copied();
+            FuzzCompareHotspotDelta {
+                id: id.clone(),
+                dimension: after
+                    .or(before)
+                    .map(|hotspot| hotspot.dimension.clone())
+                    .unwrap_or_default(),
+                metric: after
+                    .or(before)
+                    .map(|hotspot| hotspot.metric.clone())
+                    .unwrap_or_default(),
+                baseline_value: before.map(|hotspot| hotspot.value),
+                candidate_value: after.map(|hotspot| hotspot.value),
+                value_delta: before
+                    .zip(after)
+                    .map(|(before, after)| after.value - before.value),
+                baseline_rank: before.and_then(|hotspot| hotspot.rank),
+                candidate_rank: after.and_then(|hotspot| hotspot.rank),
+                rank_delta: before
+                    .and_then(|hotspot| hotspot.rank)
+                    .zip(after.and_then(|hotspot| hotspot.rank))
+                    .map(|(before, after)| after as i64 - before as i64),
+                baseline_relative_score: before.and_then(|hotspot| hotspot.relative_score),
+                candidate_relative_score: after.and_then(|hotspot| hotspot.relative_score),
+                relative_score_delta: before
+                    .and_then(|hotspot| hotspot.relative_score)
+                    .zip(after.and_then(|hotspot| hotspot.relative_score))
+                    .map(|(before, after)| after - before),
+                status: match (before, after) {
+                    (None, Some(_)) => "new",
+                    (Some(_), None) => "resolved",
+                    (Some(_), Some(_)) => "changed",
+                    (None, None) => "absent",
+                }
+                .to_string(),
+            }
+        })
+        .collect()
 }
 
 fn count_deltas(
@@ -390,6 +530,92 @@ mod tests {
         assert!(regressions.contains(&"new critical findings".to_string()));
         assert!(regressions.contains(&"new missing required artifacts".to_string()));
         assert!(regressions.contains(&"gate changed from passed to failed".to_string()));
+    }
+
+    #[test]
+    fn fuzz_compare_reports_relative_hotspot_movement_without_regression_status() {
+        let mut baseline = envelope("baseline", 0, 0, 0, 0, &[], &[], true);
+        baseline.metadata = serde_json::json!({
+            "hotspots": {
+                "schema": "homeboy/fuzz-hotspot-set/v1",
+                "id": "baseline-hotspots",
+                "items": [
+                    {
+                        "id": "feature:alpha",
+                        "dimension": "feature",
+                        "kind": "request",
+                        "metric": "duration",
+                        "value": 100.0,
+                        "unit": "ms",
+                        "basis": "per_case",
+                        "sample_count": 12,
+                        "rank": 1,
+                        "relative_score": 0.9
+                    },
+                    {
+                        "id": "query:old",
+                        "dimension": "query",
+                        "metric": "count",
+                        "value": 9.0,
+                        "unit": "queries",
+                        "rank": 2
+                    }
+                ]
+            }
+        });
+        baseline.gates.clear();
+        baseline.required_artifacts.clear();
+
+        let mut candidate = envelope("candidate", 0, 0, 0, 0, &[], &[], true);
+        candidate.metadata = serde_json::json!({
+            "hotspots": {
+                "schema": "homeboy/fuzz-hotspot-set/v1",
+                "id": "candidate-hotspots",
+                "items": [
+                    {
+                        "id": "feature:alpha",
+                        "dimension": "feature",
+                        "kind": "request",
+                        "metric": "duration",
+                        "value": 125.0,
+                        "unit": "ms",
+                        "basis": "per_case",
+                        "sample_count": 14,
+                        "rank": 3,
+                        "relative_score": 0.7
+                    },
+                    {
+                        "id": "page:new",
+                        "dimension": "page",
+                        "metric": "duration",
+                        "value": 88.0,
+                        "unit": "ms",
+                        "rank": 1
+                    }
+                ]
+            }
+        });
+        candidate.gates.clear();
+        candidate.required_artifacts.clear();
+
+        let baseline = snapshot(&baseline);
+        let candidate = snapshot(&candidate);
+        let deltas = deltas(&baseline, &candidate);
+
+        assert!(regressions(&deltas).is_empty());
+        assert!(improvements(&deltas).is_empty());
+        assert_eq!(deltas.new_hotspots, vec!["page:new"]);
+        assert_eq!(deltas.resolved_hotspots, vec!["query:old"]);
+        let alpha = deltas
+            .hotspot_deltas
+            .iter()
+            .find(|delta| delta.id == "feature:alpha")
+            .expect("alpha delta");
+        assert_eq!(alpha.value_delta, Some(25.0));
+        assert_eq!(alpha.rank_delta, Some(2));
+        assert!(
+            (alpha.relative_score_delta.expect("relative score delta") + 0.2).abs() < f64::EPSILON
+        );
     }
 
     fn envelope(

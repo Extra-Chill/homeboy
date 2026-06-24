@@ -11,10 +11,10 @@ use super::schemas::{
     standardized_fuzz_skip_reason_codes, FUZZ_ARTIFACT_SCHEMA, FUZZ_CAMPAIGN_SCHEMA,
     FUZZ_CASE_LOG_SCHEMA, FUZZ_CASE_SCHEMA, FUZZ_CONTRACT_VERSION, FUZZ_CORE_CONTRACT_SCHEMA,
     FUZZ_COVERAGE_SCHEMA, FUZZ_COVERAGE_SUMMARY_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA,
-    FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA,
-    FUZZ_REQUIRED_ARTIFACT_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SEED_SCHEMA,
-    FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA,
-    FUZZ_WORKLOAD_SCHEMA,
+    FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_PROVENANCE_SCHEMA,
+    FUZZ_REPLAY_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
+    FUZZ_SEED_SCHEMA, FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA,
+    FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,6 +54,8 @@ pub struct FuzzContractSchemas {
     pub result_envelope: String,
     pub required_artifact: String,
     pub gate: String,
+    #[serde(default = "super::schema_defaults::fuzz_hotspot_set_schema")]
+    pub hotspot_set: String,
     #[serde(default = "lifecycle_contract_schema")]
     pub lifecycle_contract: String,
     #[serde(default = "lifecycle_result_schema")]
@@ -142,6 +144,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             result_envelope: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
             required_artifact: FUZZ_REQUIRED_ARTIFACT_SCHEMA.to_string(),
             gate: FUZZ_GATE_SCHEMA.to_string(),
+            hotspot_set: FUZZ_HOTSPOT_SET_SCHEMA.to_string(),
             lifecycle_contract: crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string(),
             lifecycle_result: crate::core::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string(),
             lifecycle_snapshot_ref: crate::core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA
