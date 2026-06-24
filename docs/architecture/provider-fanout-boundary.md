@@ -59,11 +59,10 @@ The provider returns a normalized `AgentTaskOutcome`:
 
 ## Representative normalization
 
-The fixture at `tests/fixtures/provider_fanout_payload.json` models a generic
-provider fanout result. The contract test in `tests/output_contracts_test.rs`
-normalizes it into Homeboy's generic `AgentTaskOutcome` shape and asserts that
-provider session/worker details remain provider refs or opaque metadata rather
-than new Homeboy core schema fields.
+Provider adapters normalize backend-specific fanout results into Homeboy's
+generic `AgentTaskOutcome` shape before returning them to core. Provider session,
+worker, and aggregation details stay as evidence refs or opaque metadata instead
+of becoming Homeboy core schema fields.
 
 Provider-specific fixture coverage belongs in the provider layer that owns that
 backend integration.
