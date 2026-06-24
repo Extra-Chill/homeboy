@@ -89,15 +89,15 @@ pub struct Project {
 
     /// Project-scoped CLI path used by extension deploy install steps.
     ///
-    /// On any given site the WP-CLI entrypoint is fixed (`wp`, `studio wp`,
-    /// a Lando wrapper, etc.) and shared by every component deployed there,
+    /// On any given site the WP-CLI entrypoint is fixed (`wp`, a Lando
+    /// wrapper, a project-specific tool, etc.) and shared by every component
+    /// deployed there,
     /// so this lives at the project layer. Component-level
     /// `ProjectComponentOverrides::cli_path` still wins as the most-specific
     /// escape hatch.
     ///
-    /// If unset, the deploy resolver also auto-detects Studio sites
-    /// (projects whose `base_path` is under `~/Studio/`) and defaults them
-    /// to `"studio wp"`. See `cli_path_for_project()` for the full cascade.
+    /// If unset, callers fall back to the extension default CLI path and then
+    /// the extension tool name, usually `wp`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_path: Option<String>,
 
@@ -350,56 +350,12 @@ pub fn unpin(project_id: &str, pin_type: PinType, path: &str) -> Result<()> {
 // CLI path resolution
 // ============================================================================
 
-/// Detect whether a `base_path` lives under a given Studio root directory.
-///
-/// Pure helper — accepts the Studio root explicitly so tests don't have to
-/// mutate `$HOME` (which races under parallel test runners).
-///
-/// Studio installs sites under `~/Studio/<site>/`. Tilde and env vars in
-/// `base_path` are expanded before the prefix check so configs that store
-/// `~/Studio/foo` still match.
-fn base_path_is_under_studio(base_path: Option<&str>, studio_root: &str) -> bool {
-    let raw = match base_path {
-        Some(p) if !p.is_empty() => p,
-        _ => return false,
-    };
-    if studio_root.is_empty() {
-        return false;
-    }
-
-    let expanded = shellexpand::full(raw)
-        .map(|cow| cow.into_owned())
-        .unwrap_or_else(|_| raw.to_string());
-
-    let normalized_root = if studio_root.ends_with('/') {
-        studio_root.to_string()
-    } else {
-        format!("{}/", studio_root)
-    };
-
-    expanded.starts_with(&normalized_root)
-}
-
-/// Detect whether a project's `base_path` looks like a Studio-managed site.
-///
-/// Reads the user's home directory at runtime to compute the Studio root.
-/// If `$HOME` is unset we conservatively return `false`.
-pub fn is_studio_project(base_path: Option<&str>) -> bool {
-    let home = match std::env::var("HOME") {
-        Ok(h) if !h.is_empty() => h,
-        _ => return false,
-    };
-    let studio_root = format!("{}/Studio", home.trim_end_matches('/'));
-    base_path_is_under_studio(base_path, &studio_root)
-}
-
-/// Resolve the project-scoped CLI path with auto-detection fallbacks.
+/// Resolve the project-scoped CLI path.
 ///
 /// Cascade (highest → lowest precedence):
 ///   1. Explicit `Project::cli_path` (operator override)
-///   2. Studio auto-detect: returns `"studio wp"` when `base_path` lives
-///      under `~/Studio/`
-///   3. `None` (caller falls back to component override → extension default → `"wp"`)
+///   2. `None` (caller falls back to extension default → tool name, usually
+///      `"wp"`)
 ///
 /// Component-level overrides (`ProjectComponentOverrides::cli_path`) are
 /// applied earlier in the cascade by `apply_component_overrides()`, so this
@@ -407,9 +363,6 @@ pub fn is_studio_project(base_path: Option<&str>) -> bool {
 pub fn project_cli_path(project: &Project) -> Option<String> {
     if let Some(explicit) = &project.cli_path {
         return Some(explicit.clone());
-    }
-    if is_studio_project(project.base_path.as_deref()) {
-        return Some("studio wp".to_string());
     }
     None
 }
@@ -471,62 +424,23 @@ mod config_layout_tests {
 mod cli_path_tests {
     use super::*;
 
-    fn project_with(base_path: Option<&str>, cli_path: Option<&str>) -> Project {
+    fn project_with(cli_path: Option<&str>) -> Project {
         Project {
             id: "test".to_string(),
-            base_path: base_path.map(|s| s.to_string()),
             cli_path: cli_path.map(|s| s.to_string()),
             ..Default::default()
         }
     }
 
     #[test]
-    fn base_path_under_studio_root_matches() {
-        assert!(base_path_is_under_studio(
-            Some("/Users/user/Studio/my-site"),
-            "/Users/user/Studio"
-        ));
-    }
-
-    #[test]
-    fn base_path_outside_studio_root_does_not_match() {
-        assert!(!base_path_is_under_studio(
-            Some("/var/www/my-site"),
-            "/Users/user/Studio"
-        ));
-    }
-
-    #[test]
-    fn empty_or_missing_base_path_does_not_match() {
-        assert!(!base_path_is_under_studio(None, "/Users/user/Studio"));
-        assert!(!base_path_is_under_studio(Some(""), "/Users/user/Studio"));
-    }
-
-    #[test]
-    fn empty_studio_root_does_not_match() {
-        assert!(!base_path_is_under_studio(
-            Some("/Users/user/Studio/my-site"),
-            ""
-        ));
-    }
-
-    #[test]
-    fn studio_root_without_trailing_slash_is_normalized() {
-        // Without normalization, "/Users/user/Studio" would match
-        // "/Users/user/StudioOther/x" — which is wrong.
-        assert!(!base_path_is_under_studio(
-            Some("/Users/user/StudioOther/my-site"),
-            "/Users/user/Studio"
-        ));
-    }
-
-    // Note: project_cli_path() is tested implicitly via apply_component_overrides
-    // tests in overrides.rs; those exercise the full cascade including this rung.
-    // We test the explicit-override-wins case here as the only branch that
-    // doesn't depend on $HOME.
-    #[test]
     fn explicit_project_cli_path_wins() {
-        let p = project_with(Some("/anywhere"), Some("lando wp"));
+        let p = project_with(Some("lando wp"));
         assert_eq!(project_cli_path(&p), Some("lando wp".to_string()));
+    }
+
+    #[test]
+    fn missing_project_cli_path_stays_unset() {
+        let p = project_with(None);
+        assert_eq!(project_cli_path(&p), None);
     }
 }

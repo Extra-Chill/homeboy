@@ -367,7 +367,7 @@ mod tests {
         let patch = serde_json::json!({
             "extensions": {
                 "simple-dark-mode": {
-                    "cli_path": "studio wp"
+                    "cli_path": "lando wp"
                 }
             }
         });

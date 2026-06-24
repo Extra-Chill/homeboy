@@ -353,7 +353,7 @@ pub struct Component {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_inputs: Vec<ArtifactInput>,
     /// Override the CLI path used by extension deploy install steps.
-    /// For example, Studio sites need "studio wp" instead of the default "wp".
+    /// For example, local wrappers may need "lando wp" instead of the default "wp".
     pub cli_path: Option<String>,
     /// Component-level additions to the merge-aftermath drift list.
     ///
@@ -1004,7 +1004,7 @@ mod tests {
                 "tag_pattern": "v{{version}}"
             },
             "remote_url": "https://github.com/example/sample-plugin.git",
-            "cli_path": "studio wp",
+            "cli_path": "lando wp",
             "artifact_inputs": [{
                 "component": "builder",
                 "artifact": "zip",
@@ -1034,7 +1034,7 @@ mod tests {
             component.remote_url(),
             Some("https://github.com/example/sample-plugin.git")
         );
-        assert_eq!(deploy.cli_path, Some("studio wp"));
+        assert_eq!(deploy.cli_path, Some("lando wp"));
         assert_eq!(deploy.artifact_inputs.len(), 1);
         assert_eq!(deploy.artifact_inputs[0].component, "builder");
         assert_eq!(deploy.cleanup_artifacts.len(), 1);

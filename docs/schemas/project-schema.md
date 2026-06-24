@@ -35,7 +35,6 @@ matter when the workflow needs environment context.
   "changelog_next_section_label": "string",
   "changelog_next_section_aliases": [],
   "cli_path": "string",
-  "tools": {},
   "extensions": {}
 }
 ```
@@ -83,7 +82,7 @@ matter when the workflow needs environment context.
 - **`services`** (array): Service names checked by project/fleet health status
 - **`changelog_next_section_label`** (string): Project-level changelog next-section label override
 - **`changelog_next_section_aliases`** (array): Additional labels accepted for the next changelog section
-- **`cli_path`** (string): Project-scoped CLI path used by extension deploy install steps. On any given site the WP-CLI entrypoint is fixed (`wp`, `studio wp`, a Lando wrapper, etc.) and shared by every component deployed there, so this lives at the project layer instead of being repeated per component. Component-level `component_overrides[id].cli_path` still wins as the most-specific escape hatch. If unset, the deploy resolver auto-detects Studio sites (projects whose `base_path` is under `~/Studio/`) and defaults them to `"studio wp"`.
+- **`cli_path`** (string): Project-scoped CLI path used by extension deploy install steps. On any given site the WP-CLI entrypoint is fixed (`wp`, a Lando wrapper, a project-specific tool, etc.) and shared by every component deployed there, so this lives at the project layer instead of being repeated per component. Component-level `component_overrides[id].cli_path` still wins as the most-specific escape hatch. If unset, the deploy resolver falls back to the extension default CLI path and then the extension tool name, usually `wp`.
 - **`extensions`** (object): Extension-specific settings for this project
   - Keys are extension IDs
   - Values are flat extension setting objects; `version` is reserved for extension version constraints
