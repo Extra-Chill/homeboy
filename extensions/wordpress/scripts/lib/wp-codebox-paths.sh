@@ -98,7 +98,16 @@ homeboy_wp_codebox_bin_is_runnable() {
     if [ "$bin" = "wp-codebox" ]; then
         command -v wp-codebox >/dev/null 2>&1 || return 1
     elif [[ "$bin" = /* || "$bin" == ./* || "$bin" == ../* ]]; then
-        [ -x "$bin" ] || return 1
+        case "$bin" in
+            *.js|*.cjs|*.mjs)
+                [ -f "$bin" ] || return 1
+                node "$bin" --version >/dev/null 2>&1
+                return $?
+                ;;
+            *)
+                [ -x "$bin" ] || return 1
+                ;;
+        esac
     fi
 
     "$bin" --version >/dev/null 2>&1

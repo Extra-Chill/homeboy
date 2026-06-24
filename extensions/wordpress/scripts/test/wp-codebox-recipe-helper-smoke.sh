@@ -13,6 +13,7 @@ trap 'rm -rf "$fixture"' EXIT
 fake_wp_codebox="${fixture}/wp-codebox.cjs"
 stale_path="${fixture}/stale-bin"
 valid_path="${fixture}/valid-bin"
+js_bin="${fixture}/wp-codebox-js-entry.mjs"
 recipe_file="${fixture}/recipe.json"
 artifacts_dir="${fixture}/artifacts"
 output_file="${fixture}/recipe-output.json"
@@ -48,6 +49,19 @@ fi
 exit 0
 SH
 chmod +x "${valid_path}/wp-codebox"
+
+cat > "$js_bin" <<'NODE'
+#!/usr/bin/env node
+if (process.argv[2] === '--version') {
+	process.stdout.write('fixture-wp-codebox-js 1.0.0\n');
+	process.exit(0);
+}
+NODE
+
+if ! homeboy_wp_codebox_bin_is_runnable "$js_bin"; then
+    echo "Expected resolver validation to accept readable JS CLI entrypoints via node" >&2
+    exit 1
+fi
 
 resolved_bin=$(PATH="${stale_path}:${valid_path}:${PATH}" homeboy_wp_codebox_resolve_bin '{}')
 if [ "$resolved_bin" != "${valid_path}/wp-codebox" ]; then
