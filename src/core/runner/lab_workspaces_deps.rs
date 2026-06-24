@@ -409,6 +409,28 @@ pub(super) fn source_cli_bootstrap_capability_preflight() -> RunnerCapabilityPre
     }
 }
 
+/// Path-translation preflight for a runtime-overlay install step. The overlay
+/// artifact has already been synced to a runner-side remote path and the opaque
+/// install command runs with the resolved remote workdir as cwd. Assert that no
+/// controller-local workspace path survived un-translated into the install argv
+/// before handing it to the runner, so a missed remap fails loudly here instead
+/// of installing against a non-existent local path. Kept ecosystem-agnostic:
+/// the command is opaque config data and is only checked for stray local paths.
+pub(super) fn preflight_runtime_overlay_install_argv(
+    runner_id: &str,
+    command: &[String],
+    local_path: &Path,
+    remote_workdir: &str,
+) -> Result<()> {
+    preflight_remote_argv_path_translation(
+        "Lab runtime-overlay install",
+        runner_id,
+        command,
+        local_path,
+        remote_workdir,
+    )
+}
+
 pub(super) fn bootstrap_source_cli_node_dependencies(
     runner_id: &str,
     local_path: &str,

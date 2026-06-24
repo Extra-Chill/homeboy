@@ -434,6 +434,8 @@ pub(crate) fn run_lab_offload_inner(
         remote_output_file,
         synced_rigs,
         rig_component_path_overrides,
+        runtime_overlay_env,
+        runtime_overlay_metadata,
     } = workspace_stage;
     plan = next_plan;
 
@@ -513,6 +515,13 @@ pub(crate) fn run_lab_offload_inner(
     let rig_component_path_env =
         forward_rig_component_path_env(&mut env_delta, &workspace_mapping)?;
     apply_rig_component_path_overrides(&mut env_delta, &rig_component_path_overrides);
+    // Surface synced runtime-overlay remote paths into the command env so a hot
+    // command (e.g. a CLI-runner env entry) points at the real remote runtime
+    // directory rather than a controller-local path (#3831).
+    for (name, value) in &runtime_overlay_env {
+        env_delta.insert(name.clone(), value.clone());
+    }
+    lab_metadata["runtime_overlays"] = runtime_overlay_metadata;
     let secret_env_handoff =
         build_lab_secret_env_handoff_plan(&changed_since_preflight.args, env_delta)?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();

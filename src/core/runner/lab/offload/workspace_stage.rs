@@ -17,6 +17,11 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) remote_output_file: Option<String>,
     pub(crate) synced_rigs: Vec<rig_materialization::LabOffloadRigSync>,
     pub(crate) rig_component_path_overrides: Vec<(String, String)>,
+    /// Env-var overrides surfacing synced runtime-overlay remote paths to the
+    /// hot command. Empty when no overlay declared `expose_remote_path_env`.
+    pub(crate) runtime_overlay_env: Vec<(String, String)>,
+    /// Offload-evidence metadata for the synced runtime overlays.
+    pub(crate) runtime_overlay_metadata: serde_json::Value,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -205,6 +210,33 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
         );
     }
 
+    // Materialize any declared runtime overlays: sync the built artifact
+    // directory, then run the overlay's opaque dependency-install step on the
+    // runner (after sync, before the hot command). This gives offloaded
+    // runtimes a deterministic way to install their deps remotely without
+    // syncing huge dependency trees. No-overlay offload returns an empty list
+    // here, leaving behavior unchanged (#3831).
+    let synced_runtime_overlays = sync_lab_runtime_overlays(
+        runner_id,
+        &synced.local_path,
+        lab_runtime_overlays()?,
+        &mut workspace_mapping,
+    )?;
+    let runtime_overlay_env = runtime_overlay_env_overrides(&synced_runtime_overlays);
+    let runtime_overlay_metadata = lab_runtime_overlay_metadata(&synced_runtime_overlays);
+    if !synced_runtime_overlays.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_runtime_overlays", "lab.sync_runtime_overlays")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced_runtime_overlays.len())
+                        .json("overlays", &synced_runtime_overlays),
+                )
+                .build(),
+        );
+    }
+
     let source_snapshot = SourceSnapshot::collect_local(
         runner_id,
         Path::new(&synced.local_path),
@@ -359,5 +391,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
         remote_output_file,
         synced_rigs,
         rig_component_path_overrides,
+        runtime_overlay_env,
+        runtime_overlay_metadata,
     })
 }
