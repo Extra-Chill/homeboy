@@ -86,7 +86,7 @@ pub(super) fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
-    persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    let persisted_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
     if detach_after_handoff {
         return Ok(detached_handoff_output(
             runner,
@@ -96,6 +96,7 @@ pub(super) fn exec_via_daemon(
             source_snapshot,
             job,
             require_paths,
+            persisted_run_id,
         ));
     }
 
@@ -231,13 +232,14 @@ pub(super) fn detached_handoff_output(
     source_snapshot: SourceSnapshot,
     job: Job,
     require_paths: Vec<String>,
+    mirror_run_id: Option<String>,
 ) -> (RunnerExecOutput, i32) {
     let job_id = job.id.to_string();
     print_lab_offload_handoff(
         &runner.id,
         Some(&cwd),
         &job_id,
-        None,
+        mirror_run_id.as_deref(),
         DaemonJobHandoffState::InFlight,
     );
     let stdout = serde_json::to_string_pretty(&json!({
@@ -246,6 +248,8 @@ pub(super) fn detached_handoff_output(
         "execution_location": format!("runner:{}", runner.id),
         "runner_id": runner.id.clone(),
         "job_id": job_id,
+        "persisted_run_id": mirror_run_id.as_deref(),
+        "mirror_run_id": mirror_run_id.as_deref(),
         "remote_cwd": cwd.clone(),
         "follow_commands": {
             "job_logs": format!("homeboy runner job logs {} {} --follow", runner.id, job.id),
@@ -253,8 +257,18 @@ pub(super) fn detached_handoff_output(
         }
     }))
     .unwrap_or_else(|_| "{}".to_string());
-    let runner_job = RunnerJob::from_job(&runner.id, "daemon", &command, Some(cwd.clone()), &job);
-    let handoff = runner_handoff(runner, "daemon", Some(runner_job.clone()), None);
+    let transport = match mode {
+        RunnerExecMode::ReverseBroker => "reverse_broker",
+        _ => "daemon",
+    };
+    let runner_job = RunnerJob::from_job(&runner.id, transport, &command, Some(cwd.clone()), &job);
+    let runner_result = runner_result(Some(&job), 0, &stdout, "", mirror_run_id.as_deref(), None);
+    let handoff = runner_handoff(
+        runner,
+        transport,
+        Some(runner_job.clone()),
+        Some(runner_result.clone()),
+    );
 
     (
         RunnerExecOutput {
@@ -273,13 +287,13 @@ pub(super) fn detached_handoff_output(
             runner_job: Some(runner_job),
             job_id: Some(job.id.to_string()),
             job_events: None,
-            mirror_run_id: None,
+            mirror_run_id,
             patch: None,
             mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
-            runner_result: None,
+            runner_result: Some(runner_result),
             handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
