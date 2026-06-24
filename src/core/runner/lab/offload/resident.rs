@@ -116,10 +116,18 @@ pub(crate) fn run_runner_resident_lab_offload(
         "runner_cwd": runner_workspace_root,
         "command_paths": "runner_side",
     });
+    lab_metadata["job_scoped_overrides"] = job_scoped_overrides_metadata(&request.job_overrides);
     let secret_env_handoff = build_lab_secret_env_handoff_plan(&remapped_args, Default::default())?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     env.extend(secret_env_handoff.env_delta);
+    for (name, value) in &request.job_overrides.env {
+        env.insert(name.clone(), value.clone());
+    }
+    let mut secret_env_names = secret_env_handoff.secret_env_names;
+    secret_env_names.extend(request.job_overrides.secret_env_names.clone());
+    secret_env_names.sort();
+    secret_env_names.dedup();
 
     let exec_timer = overhead.phase(LabOffloadPhase::RemoteExec);
     let (exec_output, exit_code) = exec(
@@ -130,7 +138,7 @@ pub(crate) fn run_runner_resident_lab_offload(
             allow_diagnostic_ssh: false,
             command,
             env,
-            secret_env_names: secret_env_handoff.secret_env_names,
+            secret_env_names,
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: None,

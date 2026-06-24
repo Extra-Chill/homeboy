@@ -38,6 +38,42 @@ pub(crate) fn rig_component_path_overrides_metadata(
     })
 }
 
+pub(crate) fn job_scoped_overrides_metadata(overrides: &LabJobOverrides) -> serde_json::Value {
+    let policy = RedactionPolicy::default();
+    let mut names = overrides.env.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    let secret_env_names = overrides
+        .secret_env_names
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let env = names
+        .into_iter()
+        .map(|name| {
+            let value = overrides.env.get(&name).map(String::as_str).unwrap_or("");
+            let redacted = secret_env_names.contains(name.as_str())
+                || policy.is_sensitive_key(&name)
+                || policy.redact_string(value) != value;
+            serde_json::json!({
+                "name": name,
+                "source": "job_override",
+                "forwarded_to_runner": true,
+                "value_preview": if redacted { "<redacted>".to_string() } else { value.to_string() },
+                "redacted": redacted,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "schema": "homeboy/lab-job-scoped-overrides/v1",
+        "env": env,
+        "workspace_root": overrides.workspace_root.as_ref().map(|path| serde_json::json!({
+            "source": "job_override",
+            "value": path,
+        })),
+    })
+}
+
 pub(crate) fn lab_runner_homeboy_metadata(
     runner_id: &str,
     configured_executable: &str,
@@ -251,4 +287,39 @@ pub(crate) fn runner_homeboy_daemon_display(metadata: &serde_json::Value) -> Str
         })
         .unwrap_or("<not connected>")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_scoped_overrides_metadata_redacts_sensitive_env_values() {
+        let overrides = LabJobOverrides {
+            env: std::collections::HashMap::from([
+                ("PLAIN_PATH".to_string(), "/tmp/plugin".to_string()),
+                ("API_TOKEN".to_string(), "super-secret".to_string()),
+            ]),
+            secret_env_names: vec!["API_TOKEN".to_string()],
+            workspace_root: Some("/srv/job-root".to_string()),
+        };
+
+        let metadata = job_scoped_overrides_metadata(&overrides);
+
+        assert_eq!(metadata["schema"], "homeboy/lab-job-scoped-overrides/v1");
+        assert_eq!(metadata["workspace_root"]["value"], "/srv/job-root");
+        let env = metadata["env"].as_array().expect("env array");
+        let plain = env
+            .iter()
+            .find(|entry| entry["name"] == "PLAIN_PATH")
+            .expect("plain path");
+        assert_eq!(plain["value_preview"], "/tmp/plugin");
+        assert_eq!(plain["redacted"], false);
+        let secret = env
+            .iter()
+            .find(|entry| entry["name"] == "API_TOKEN")
+            .expect("secret");
+        assert_eq!(secret["value_preview"], "<redacted>");
+        assert_eq!(secret["redacted"], true);
+    }
 }

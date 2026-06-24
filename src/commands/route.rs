@@ -4,7 +4,9 @@ use homeboy::core::git;
 use homeboy::core::lab_routing::{
     self, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest, NoopLabDispatchObserver,
 };
+use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runners::{self, RunnerExecOptions};
+use homeboy::core::Error;
 use std::collections::HashMap;
 
 use crate::commands::utils::output::write_output_file;
@@ -72,6 +74,7 @@ pub fn route_after_parse(
     let rewritten_args =
         lab_route_source_path_args(&cli.command, normalized_args, capture_mutation_patch);
     let routed_args = rewritten_args.as_deref().unwrap_or(normalized_args);
+    let job_overrides = lab_job_overrides(cli)?;
 
     let outcome = lab_routing::dispatch_lab_offload(
         LabRoutingRequest {
@@ -92,6 +95,7 @@ pub fn route_after_parse(
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
             local_output_file: output_file,
+            job_overrides,
         },
         trace_runner_id.as_deref(),
         observer,
@@ -121,6 +125,96 @@ pub fn route_after_parse(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverrides> {
+    let mut overrides = runners::LabJobOverrides::default();
+    let policy = RedactionPolicy::default();
+
+    for raw in &cli.runner_env {
+        let (name, value) = parse_lab_env_pair("runner-env", raw)?;
+        if policy.is_sensitive_key(&name) || policy.redact_string(&value) != value {
+            overrides.secret_env_names.push(name.clone());
+        }
+        overrides.env.insert(name, value);
+    }
+
+    if let Some(raw_json) = cli.lab_env_json.as_deref() {
+        let value: serde_json::Value = serde_json::from_str(raw_json).map_err(|err| {
+            Error::validation_invalid_argument(
+                "lab-env-json",
+                format!("--lab-env-json must be a JSON object: {err}"),
+                Some(raw_json.to_string()),
+                None,
+            )
+        })?;
+        let object = value.as_object().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lab-env-json",
+                "--lab-env-json must be a JSON object of string or null values",
+                Some(raw_json.to_string()),
+                None,
+            )
+        })?;
+        for (name, value) in object {
+            let name = validate_lab_env_name("lab-env-json", name)?;
+            let value = match value {
+                serde_json::Value::String(value) => value.clone(),
+                serde_json::Value::Null => String::new(),
+                _ => {
+                    return Err(Error::validation_invalid_argument(
+                        "lab-env-json",
+                        format!("--lab-env-json value for `{name}` must be a string or null"),
+                        Some(value.to_string()),
+                        None,
+                    ));
+                }
+            };
+            if policy.is_sensitive_key(&name) || policy.redact_string(&value) != value {
+                overrides.secret_env_names.push(name.clone());
+            }
+            overrides.env.insert(name, value);
+        }
+    }
+
+    overrides.secret_env_names.sort();
+    overrides.secret_env_names.dedup();
+    overrides.workspace_root = cli
+        .runner_workspace_root
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    Ok(overrides)
+}
+
+fn parse_lab_env_pair(source: &str, raw: &str) -> homeboy::core::Result<(String, String)> {
+    let (name, value) = raw.split_once('=').ok_or_else(|| {
+        Error::validation_invalid_argument(
+            source,
+            format!("--{source} expects KEY=VALUE"),
+            Some(raw.to_string()),
+            None,
+        )
+    })?;
+    Ok((validate_lab_env_name(source, name)?, value.to_string()))
+}
+
+fn validate_lab_env_name(source: &str, name: &str) -> homeboy::core::Result<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.contains('=')
+        || !name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return Err(Error::validation_invalid_argument(
+            source,
+            format!("--{source} environment names must be non-empty ASCII identifiers"),
+            Some(name.to_string()),
+            None,
+        ));
+    }
+    Ok(name.to_string())
 }
 
 fn agent_task_local_fanout_warning(command: &Commands) -> Option<String> {
@@ -674,6 +768,50 @@ mod tests {
         assert_eq!(command.hot_label, "test");
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn lab_job_overrides_parse_env_json_and_workspace_root() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner-env",
+            "STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH=/tmp/wp-codebox",
+            "--runner-env",
+            "API_TOKEN=secret-token",
+            "--lab-env-json",
+            r#"{"EXTRA_PATH":"/tmp/extra","EMPTY":null}"#,
+            "--runner-workspace-root",
+            "/srv/job-workspace",
+            "test",
+            "studio-native",
+        ]);
+
+        let overrides = lab_job_overrides(&cli).expect("overrides");
+
+        assert_eq!(
+            overrides.env["STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH"],
+            "/tmp/wp-codebox"
+        );
+        assert_eq!(overrides.env["EXTRA_PATH"], "/tmp/extra");
+        assert_eq!(overrides.env["EMPTY"], "");
+        assert_eq!(
+            overrides.workspace_root.as_deref(),
+            Some("/srv/job-workspace")
+        );
+        assert!(overrides
+            .secret_env_names
+            .contains(&"API_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn lab_job_overrides_reject_invalid_env_shapes() {
+        let cli = Cli::parse_from(["homeboy", "--runner-env", "NO_EQUALS", "test"]);
+        let err = lab_job_overrides(&cli).expect_err("invalid pair");
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+
+        let cli = Cli::parse_from(["homeboy", "--lab-env-json", "[]", "test"]);
+        let err = lab_job_overrides(&cli).expect_err("invalid json object");
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
     }
 
     #[test]

@@ -332,6 +332,7 @@ fn plan_records_skipped_auto_offload() {
         detach_after_handoff: false,
         output_file_requested: false,
         local_output_file: None,
+        job_overrides: LabJobOverrides::default(),
     })
     .expect("outcome");
 
@@ -358,6 +359,7 @@ fn lab_only_refuses_local_execution_without_lab_contract() {
         detach_after_handoff: false,
         output_file_requested: false,
         local_output_file: None,
+        job_overrides: LabJobOverrides::default(),
     });
 
     let Err(err) = outcome else {
@@ -385,6 +387,7 @@ fn build_runner_error_gives_managed_runner_replacement() {
         detach_after_handoff: false,
         output_file_requested: false,
         local_output_file: None,
+        job_overrides: LabJobOverrides::default(),
     });
 
     let Err(err) = outcome else {
@@ -425,6 +428,7 @@ fn build_lab_only_error_gives_managed_runner_replacement() {
         detach_after_handoff: false,
         output_file_requested: false,
         local_output_file: None,
+        job_overrides: LabJobOverrides::default(),
     });
 
     let Err(err) = outcome else {
@@ -467,6 +471,7 @@ fn unsupported_runner_error_guides_tunnel_service_inspection() {
         detach_after_handoff: false,
         output_file_requested: false,
         local_output_file: None,
+        job_overrides: LabJobOverrides::default(),
     });
 
     let Err(err) = outcome else {

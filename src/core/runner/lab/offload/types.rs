@@ -1,5 +1,7 @@
 //! Public request/command/outcome types for Lab offload.
 
+use std::collections::HashMap;
+
 use crate::core::plan::HomeboyPlan;
 
 pub use crate::command_contract::LabLocalExecutionPolicy;
@@ -23,6 +25,14 @@ pub struct LabOffloadRequest<'a> {
     /// run id immediately (before long-running provider execution starts) so the
     /// handle survives a local shell timeout/interruption (#5684).
     pub local_output_file: Option<&'a str>,
+    pub job_overrides: LabJobOverrides,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LabJobOverrides {
+    pub env: HashMap<String, String>,
+    pub secret_env_names: Vec<String>,
+    pub workspace_root: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

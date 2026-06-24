@@ -41,6 +41,7 @@ pub struct LabRoutingRequest<'a> {
     /// Controller-local `--output` path forwarded to the offload executor so the
     /// durable agent-task run id can be persisted before long execution (#5684).
     pub local_output_file: Option<&'a str>,
+    pub job_overrides: runners::LabJobOverrides,
 }
 
 pub(crate) fn route_lab_offload(
@@ -62,6 +63,7 @@ pub(crate) fn route_lab_offload(
         detach_after_handoff: request.detach_after_handoff,
         output_file_requested: request.output_file_requested,
         local_output_file: request.local_output_file,
+        job_overrides: request.job_overrides,
     })
 }
 
@@ -422,6 +424,7 @@ fn execute_lab_offload_with_timeout(
     let detach_after_handoff = request.detach_after_handoff;
     let output_file_requested = request.output_file_requested;
     let local_output_file = request.local_output_file.map(str::to_string);
+    let job_overrides = request.job_overrides;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = runners::execute_lab_offload(runners::LabOffloadRequest {
@@ -436,6 +439,7 @@ fn execute_lab_offload_with_timeout(
             detach_after_handoff,
             output_file_requested,
             local_output_file: local_output_file.as_deref(),
+            job_overrides,
         });
         let _ = tx.send(result);
     });
@@ -599,6 +603,7 @@ mod tests {
             detach_after_handoff: false,
             output_file_requested: false,
             local_output_file: None,
+            job_overrides: runners::LabJobOverrides::default(),
         })
         .unwrap();
 
@@ -769,6 +774,7 @@ mod tests {
                 detach_after_handoff: false,
                 output_file_requested: false,
                 local_output_file: None,
+                job_overrides: runners::LabJobOverrides::default(),
             },
             None,
             observer,
