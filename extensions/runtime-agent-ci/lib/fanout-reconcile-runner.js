@@ -8,6 +8,8 @@ const path = require('node:path');
 
 const PLAN_SCHEMA = 'homeboy/fanout-reconcile-plan/v1';
 const RUN_SCHEMA = 'homeboy/fanout-reconcile-run/v1';
+const FANOUT_RECONCILE_RECORD_STATUSES = ['completed', 'failed', 'missing_record'];
+const FANOUT_RECONCILE_RUN_STATUSES = ['incomplete', 'completed', 'failed'];
 const DEFAULT_CONCURRENCY = 3;
 
 function writeJson(filePath, value) {
@@ -279,6 +281,10 @@ function defaultProgressEvent(status, taskRequest, plan, record = null) {
 module.exports = {
   PLAN_SCHEMA,
   RUN_SCHEMA,
+  FANOUT_RECONCILE_PLAN_SCHEMA: PLAN_SCHEMA,
+  FANOUT_RECONCILE_RECORD_STATUSES,
+  FANOUT_RECONCILE_RUN_SCHEMA: RUN_SCHEMA,
+  FANOUT_RECONCILE_RUN_STATUSES,
   DEFAULT_CONCURRENCY,
   createFanoutReconcilePlan,
   executeFanoutReconcileRun,

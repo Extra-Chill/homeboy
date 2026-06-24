@@ -50,6 +50,8 @@ node runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs \
 
 Records are matched by `id`, `task_id`, `sandbox_session_id`, or `group_key`. Successful statuses default to `completed`, `success`, and `passed`; override with `success_statuses` in config. Outcomes default to the record `outcome` field; override with `outcome_path`.
 
+For Homeboy agent-task fanout, keep record status host-owned: map provider outcomes `succeeded` and `no_op` to `completed`, map every other terminal outcome to `failed`, and preserve the original provider outcome at `record.outcome.status`. A planned task with no returned record uses `missing_record`. This prevents backend-native status vocabulary from drifting into the durable host orchestration fields.
+
 ## Finding Packets
 
 `runtime-agent-ci` and `runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js` export helpers for diagnostic/finding packet inputs. `wordpress/lib/generic-fanout-reconcile-workflow.js` re-exports the same helpers for existing entrypoints.
