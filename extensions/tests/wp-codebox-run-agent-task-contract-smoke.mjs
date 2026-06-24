@@ -17,10 +17,7 @@ const {
 	codeboxRunAgentTaskInvocation,
 	codeboxRunAgentTaskRequestFromTaskInput,
 	isProductionRuntimeProfile,
-	isCodeboxLegacyAgentTaskRunResult,
 	legacyAgentTaskRunCompatibilityEnabled,
-	legacyAgentTaskRunEvidenceRefs,
-	legacyAgentTaskRunSessionArtifacts,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox'));
 
 const taskInput = {
@@ -85,48 +82,5 @@ assert.throws(
 	() => codeboxRunAgentTaskRequestFromTaskInput({ schema: 'wp-codebox/not-task-input/v1' }),
 	/wp-codebox\/task-input\/v1/
 );
-
-const legacyResult = {
-	schema: WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA,
-	artifacts: '/tmp/artifacts',
-	session: {
-		id: 'session-1',
-		artifacts: {
-			bundle_id: 'bundle-1',
-			preview_url: 'https://preview.example.test',
-		},
-	},
-};
-assert.equal(isCodeboxLegacyAgentTaskRunResult(legacyResult), true);
-assert.equal(isCodeboxLegacyAgentTaskRunResult({ schema: WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA }), false);
-assert.deepEqual(legacyAgentTaskRunSessionArtifacts(legacyResult), [
-	{
-		id: 'bundle-1',
-		kind: 'codebox-artifact-directory',
-		path: '/tmp/artifacts',
-		metadata: {
-			session_id: 'session-1',
-			preview_url: 'https://preview.example.test',
-		},
-	},
-	{
-		id: 'bundle-1',
-		kind: 'codebox-session-artifacts',
-		url: 'https://preview.example.test',
-		metadata: legacyResult.session.artifacts,
-	},
-]);
-assert.deepEqual(legacyAgentTaskRunEvidenceRefs(legacyResult), [
-	{
-		kind: 'codebox-preview',
-		uri: 'https://preview.example.test',
-		label: 'WP Codebox preview',
-	},
-	{
-		kind: 'codebox-artifact-directory',
-		uri: '/tmp/artifacts',
-		label: 'WP Codebox artifacts',
-	},
-]);
 
 console.log('wp-codebox run-agent-task contract smoke passed');

@@ -7,7 +7,6 @@
     ".": "./index.js",
     "./codebox-artifact-contract": "./lib/codebox-artifact-contract.js",
     "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js",
-    "./codebox-legacy-result-adapter": "./lib/codebox-legacy-result-adapter.js",
     "./codebox-run-agent-task-contract": "./lib/codebox-run-agent-task-contract.js",
     "./runtime-agent-bundle-result": "./lib/runtime-agent-bundle-result.js",
     "./codebox-runtime-profile": "./lib/codebox-runtime-profile.js",
