@@ -13,6 +13,7 @@ trap 'rm -rf "$fixture"' EXIT
 fake_wp_codebox="${fixture}/wp-codebox.cjs"
 stale_path="${fixture}/stale-bin"
 valid_path="${fixture}/valid-bin"
+global_node_root="${fixture}/global-node-modules"
 js_bin="${fixture}/wp-codebox-js-entry.mjs"
 recipe_file="${fixture}/recipe.json"
 artifacts_dir="${fixture}/artifacts"
@@ -63,6 +64,16 @@ fi
 resolved_bin=$(PATH="${stale_path}:${valid_path}:${PATH}" homeboy_wp_codebox_resolve_bin '{}')
 if [ "$resolved_bin" != "${valid_path}/wp-codebox" ]; then
     echo "Expected resolver to skip stale wp-codebox wrapper and select working binary" >&2
+    echo "Resolved: ${resolved_bin}" >&2
+    exit 1
+fi
+
+global_cli="${global_node_root}/wp-codebox-workspace/packages/cli/dist/index.js"
+mkdir -p "$(dirname "$global_cli")"
+printf '%s\n' 'process.exit(0);' > "$global_cli"
+resolved_bin=$(PATH="${stale_path}" HOMEBOY_GLOBAL_NODE_MODULE_ROOT="$global_node_root" homeboy_wp_codebox_resolve_bin '{}')
+if [ "$resolved_bin" != "$global_cli" ]; then
+    echo "Expected resolver to select global npm WP Codebox CLI when PATH wrappers are stale" >&2
     echo "Resolved: ${resolved_bin}" >&2
     exit 1
 fi
