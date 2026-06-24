@@ -26,6 +26,7 @@ mod runner_contract;
 mod runtime_helper;
 mod scope;
 pub mod self_check;
+mod setup_env;
 mod summary;
 pub mod test;
 pub mod trace;
