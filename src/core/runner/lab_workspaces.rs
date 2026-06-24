@@ -209,32 +209,30 @@ pub(super) fn provider_config_extra_workspaces(
     args: &[String],
     source_path: &Path,
 ) -> Result<Vec<ExtraLabWorkspace>> {
-    let Some(spec) = provider_config_spec(args) else {
-        return Ok(Vec::new());
-    };
-    let raw = match crate::core::config::read_json_spec_to_string(&spec) {
-        Ok(raw) => raw,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(_) => return Ok(Vec::new()),
-    };
-
     let source_canon = source_path
         .canonicalize()
         .unwrap_or_else(|_| source_path.to_path_buf());
 
     let mut seen = BTreeSet::new();
     let mut workspaces: Vec<ExtraLabWorkspace> = Vec::new();
-    for candidate in provider_config_candidate_paths(&value) {
-        add_candidate_extra_workspace(
-            &candidate,
-            "provider_config",
-            &source_canon,
-            &mut seen,
-            &mut workspaces,
-        )?;
+    for spec in provider_config_specs(args) {
+        let raw = match crate::core::config::read_json_spec_to_string(&spec) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        for candidate in provider_config_candidate_paths(&value) {
+            add_candidate_extra_workspace(
+                &candidate,
+                "provider_config",
+                &source_canon,
+                &mut seen,
+                &mut workspaces,
+            )?;
+        }
     }
     Ok(workspaces)
 }
@@ -440,61 +438,71 @@ pub(super) fn preflight_provider_config_source_cli_dependencies(
         return Ok(());
     }
 
-    let Some(spec) = provider_config_spec(args) else {
-        return Ok(());
-    };
-    let raw = match crate::core::config::read_json_spec_to_string(&spec) {
-        Ok(raw) => raw,
-        Err(_) => return Ok(()),
-    };
-    let value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(_) => return Ok(()),
-    };
-
-    for file in provider_config_source_cli_files(&value) {
-        let content = match fs::read_to_string(&file) {
-            Ok(content) => content,
+    for spec in provider_config_specs(args) {
+        let raw = match crate::core::config::read_json_spec_to_string(&spec) {
+            Ok(raw) => raw,
             Err(_) => continue,
         };
-        let imports = bare_module_imports(&content);
-        if let Some(package) = imports.iter().next() {
-            return Err(Error::validation_invalid_argument(
-                "provider_config",
-                format!(
-                    "Lab offload cannot preflight source-built CLI `{}` because it imports package `{}` while node_modules is excluded from the synced snapshot",
-                    file.display(),
-                    package
-                ),
-                Some(file.display().to_string()),
-                Some(vec![
+        let value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        for file in provider_config_source_cli_files(&value) {
+            let content = match fs::read_to_string(&file) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let imports = bare_module_imports(&content);
+            if let Some(package) = imports.iter().next() {
+                return Err(Error::validation_invalid_argument(
+                    "provider_config",
                     format!(
-                        "Materialize `{}` on the runner before execution, bundle it into the CLI artifact, or adjust runner snapshot policy to include the dependency path.",
+                        "Lab offload cannot preflight source-built CLI `{}` because it imports package `{}` while node_modules is excluded from the synced snapshot",
+                        file.display(),
                         package
                     ),
-                    "Use runner policy snapshot_includes for generated CLI outputs that must travel with the snapshot.".to_string(),
-                ]),
-            ));
+                    Some(file.display().to_string()),
+                    Some(vec![
+                        format!(
+                            "Materialize `{}` on the runner before execution, bundle it into the CLI artifact, or adjust runner snapshot policy to include the dependency path.",
+                            package
+                        ),
+                        "Use runner policy snapshot_includes for generated CLI outputs that must travel with the snapshot.".to_string(),
+                    ]),
+                ));
+            }
         }
     }
 
     Ok(())
 }
 
-fn provider_config_spec(args: &[String]) -> Option<String> {
+fn provider_config_specs(args: &[String]) -> Vec<String> {
+    const PROVIDER_CONFIG_FLAGS: &[&str] = &["--provider-config", "--dispatch-provider-config"];
+
+    let mut specs = Vec::new();
     let mut iter = args.iter().peekable();
     while let Some(arg) = iter.next() {
         if arg == "--" {
             break;
         }
-        if arg == "--provider-config" {
-            return iter.next().cloned();
+        if PROVIDER_CONFIG_FLAGS.iter().any(|flag| arg == *flag) {
+            if let Some(spec) = iter.next() {
+                specs.push(spec.clone());
+            }
+            continue;
         }
-        if let Some(value) = arg.strip_prefix("--provider-config=") {
-            return Some(value.to_string());
+        for flag in PROVIDER_CONFIG_FLAGS {
+            if let Some(value) = arg
+                .strip_prefix(flag)
+                .and_then(|rest| rest.strip_prefix('='))
+            {
+                specs.push(value.to_string());
+            }
         }
     }
-    None
+    specs
 }
 
 fn agent_task_plan_spec(args: &[String]) -> Option<String> {
@@ -752,6 +760,45 @@ mod provider_config_candidate_paths_tests {
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));
         assert!(workspaces[0].bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn dispatch_provider_config_file_path_syncs_containing_checkout() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let provider = controller.path().join("dispatch-provider");
+        let contract = provider.join("contracts/component.json");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(contract.parent().unwrap()).expect("contract dir");
+        std::fs::write(&contract, "{}\n").expect("contract file");
+        git(&provider, &["init", "-b", "main"]);
+        git(&provider, &["config", "user.email", "test@example.com"]);
+        git(&provider, &["config", "user.name", "Homeboy Test"]);
+        git(&provider, &["add", "."]);
+        git(&provider, &["commit", "-m", "initial"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "controller".to_string(),
+            "run-from-spec".to_string(),
+            "loop.json".to_string(),
+            "--dispatch-provider-config".to_string(),
+            serde_json::json!({
+                "provider_plugin_paths": [provider.join("provider-plugin")],
+                "component_contracts": [{ "path": contract }],
+            })
+            .to_string(),
+        ];
+
+        let workspaces = provider_config_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "provider_config");
+        assert_eq!(workspaces[0].path, provider.canonicalize().unwrap());
+        assert!(workspaces[0]
+            .snapshot_includes
+            .contains(&"contracts".to_string()));
     }
 
     #[test]
