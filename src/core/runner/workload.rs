@@ -1,8 +1,8 @@
 use crate::command_contract::{
     RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCapability,
-    RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
-    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
-    RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
+    RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision, RunnerWorkloadKind,
+    RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
+    RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
 };
 use crate::core::error::{Error, Result};
 use crate::core::plan::HomeboyPlan;
@@ -50,6 +50,9 @@ pub(crate) fn build_runner_workload(input: RunnerWorkloadBuildInput<'_>) -> Runn
             categories: required_secret_categories(input.command.hot_label),
         },
         required_extensions: input.command.required_extensions.clone(),
+        required_extension_revisions: required_extension_revisions(
+            &input.command.required_extensions,
+        ),
         mutation_policy: RunnerWorkloadMutationPolicy {
             capture_patch: input.capture_patch,
             mutation_flag: input.mutation_flag.map(str::to_string),
@@ -74,6 +77,30 @@ pub(crate) fn build_runner_workload(input: RunnerWorkloadBuildInput<'_>) -> Runn
             artifacts: Vec::new(),
         },
     }
+}
+
+fn required_extension_revisions(
+    required_extensions: &[String],
+) -> Vec<RunnerWorkloadExtensionRevision> {
+    required_extension_revisions_with(
+        required_extensions,
+        crate::core::extension::read_source_revision,
+    )
+}
+
+fn required_extension_revisions_with(
+    required_extensions: &[String],
+    mut read_revision: impl FnMut(&str) -> Option<String>,
+) -> Vec<RunnerWorkloadExtensionRevision> {
+    required_extensions
+        .iter()
+        .filter_map(|extension_id| {
+            read_revision(extension_id).map(|source_revision| RunnerWorkloadExtensionRevision {
+                extension_id: extension_id.clone(),
+                source_revision,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn validate_runner_workload_dispatch(
@@ -542,6 +569,7 @@ mod tests {
         assert_eq!(workload.required_capabilities[1].name, "playwright");
         assert_eq!(workload.required_secrets.categories, vec!["trace"]);
         assert_eq!(workload.required_extensions, vec!["browser"]);
+        assert!(workload.required_extension_revisions.is_empty());
         assert_eq!(
             workload.mutation_policy.mutation_flag.as_deref(),
             Some("--keep-overlay")
@@ -553,6 +581,21 @@ mod tests {
         );
         assert_eq!(workload.result_refs.plan_id, "lab_offload.test");
         assert_eq!(workload.result_refs.proof_id.as_deref(), Some("proof-1"));
+    }
+
+    #[test]
+    fn runner_workload_extension_revisions_pin_installed_required_extensions() {
+        let revisions = required_extension_revisions_with(
+            &["browser".to_string(), "missing".to_string()],
+            |extension_id| match extension_id {
+                "browser" => Some("abc1234".to_string()),
+                _ => None,
+            },
+        );
+
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].extension_id, "browser");
+        assert_eq!(revisions[0].source_revision, "abc1234");
     }
 
     #[test]
