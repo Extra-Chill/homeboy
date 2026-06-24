@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.12] - 2026-06-24
+
+### Changed
+- Probe npm global root for WP Codebox CLI
+
 ## [3.13.11] - 2026-06-24
 
 ### Changed
