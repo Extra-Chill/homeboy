@@ -11,7 +11,7 @@ homeboy fuzz list [<component>] [--rig <id>]
 homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>]
 homeboy fuzz validate <results-file>
 homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--output-envelope <path>]
-homeboy fuzz compare <baseline-envelope> <candidate-envelope>
+homeboy fuzz compare <baseline-envelope> <candidate-envelope> [--hotspot-policy <advisory|blocking|off>]
 homeboy fuzz replay [<artifact-or-case>] [--artifact <path>] [--case-id <id>] [--run-id <id>] [-- <runner-args>]
 ```
 
@@ -61,6 +61,14 @@ Runner scripts receive `HOMEBOY_FUZZ_RESULTS_FILE` pointing at
 `homeboy/fuzz-campaign/v1` campaign object there, `homeboy fuzz run` parses it
 and returns it as `results` in the JSON envelope. Malformed JSON fails the run
 instead of being treated as proof.
+
+Runner scripts also receive `HOMEBOY_FUZZ_ARTIFACTS_DIR`, a generic directory in
+the command run directory for raw artifacts that are too specific to normalize in
+core during execution. Runners can place case logs, coverage reports, replay
+data, minimized reproducers, hotspot sets, and engine-native traces there, then
+reference those files from the campaign `artifacts` list or `metadata.artifact_refs`.
+Homeboy core owns the path contract; extensions own artifact meaning and any
+runner/offload upload implementation beyond the persisted fuzz result envelope.
 
 Strict proof runs can require the runner to emit key fuzz artifacts directly from
 `homeboy fuzz run`:
@@ -230,11 +238,35 @@ homeboy fuzz compare baseline-envelope.json candidate-envelope.json
 ```
 
 The command emits a `homeboy/fuzz-compare/v1` JSON artifact with coverage, case
-status, finding severity, required artifact, and gate-status deltas. The compare
-status is `worse` when candidate coverage drops, failure rate increases, critical
-findings appear, required artifacts go missing, or a gate changes from passed to
-failed. It is `better` when only improvements are present, and `same` when no
-tracked deltas change.
+status, finding severity, required artifact, gate-status, and hotspot deltas. The
+blocking compare status is `worse` when candidate coverage drops, failure rate
+increases, critical findings appear, required artifacts go missing, a gate changes
+from passed to failed, or hotspot regressions are compared with
+`--hotspot-policy blocking`. It is `better` when only blocking improvements are
+present, and `same` when no blocking tracked deltas change.
+
+Relative hotspot comparison is measurement-first by default. Hotspots are compared
+by stable hotspot id and Homeboy records rank, relative-score, and value deltas
+without requiring a product-specific threshold. The default
+`--hotspot-policy advisory` classifies new or hotter hotspots as advisory
+regressions, sets `advisory_status` to `worse`, and leaves the blocking `status`
+unchanged. Use `--hotspot-policy blocking` when a workflow has decided that
+relative hotspot regressions should fail the compare, or `--hotspot-policy off`
+to keep raw hotspot deltas without advisory/blocking classification.
+
+Measurement-first production fuzzing can compare two envelopes like this:
+
+```bash
+homeboy fuzz compare baseline-envelope.json candidate-envelope.json \
+  --hotspot-policy advisory
+```
+
+The resulting `hotspot_summary` reports the policy, hotspot status,
+advisory/blocking regression counts, improvements, new hotspots, and resolved
+hotspots. Individual `deltas.hotspot_deltas[]` entries include
+`classification` values such as `advisory_regression`, `blocking_regression`,
+`measured_regression`, `advisory_improvement`, `blocking_improvement`,
+`measured_improvement`, and `unchanged`.
 
 Fuzz workloads do not have a benchmark fallback. If `homeboy fuzz run` cannot
 execute the selected workload, fix the fuzz runner, rig declaration, or Lab

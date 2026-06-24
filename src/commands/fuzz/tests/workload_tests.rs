@@ -102,6 +102,13 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
         results_path.to_string_lossy().to_string()
     )));
+    let artifacts_dir =
+        run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
+    assert!(env.contains(&(
+        "HOMEBOY_FUZZ_ARTIFACTS_DIR".to_string(),
+        artifacts_dir.to_string_lossy().to_string()
+    )));
+    assert!(artifacts_dir.is_dir());
     assert!(env.contains(&("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), "parser".to_string())));
     assert!(env.contains(&(
         "HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(),
@@ -116,6 +123,7 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
     assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
     let contract = default_runner_contract();
     assert!(contract.env.contains(&"HOMEBOY_FUZZ_WORKLOAD_ROOT"));
+    assert!(contract.env.contains(&"HOMEBOY_FUZZ_ARTIFACTS_DIR"));
 }
 
 #[test]

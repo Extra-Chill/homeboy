@@ -249,6 +249,30 @@ pub(crate) struct FuzzCompareArgs {
     /// Candidate fuzz result envelope JSON file.
     #[arg(value_name = "CANDIDATE_ENVELOPE")]
     pub(crate) candidate: PathBuf,
+
+    /// How relative hotspot regressions affect the blocking compare status.
+    #[arg(long = "hotspot-policy", value_enum, default_value_t = FuzzCompareHotspotPolicy::Advisory)]
+    pub(crate) hotspot_policy: FuzzCompareHotspotPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum FuzzCompareHotspotPolicy {
+    /// Measure and report hotspot regressions without failing the compare.
+    Advisory,
+    /// Treat relative hotspot regressions as blocking compare regressions.
+    Blocking,
+    /// Measure hotspot deltas without classifying regressions.
+    Off,
+}
+
+impl FuzzCompareHotspotPolicy {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Advisory => "advisory",
+            Self::Blocking => "blocking",
+            Self::Off => "off",
+        }
+    }
 }
 
 #[derive(Args, Clone)]
@@ -298,9 +322,10 @@ pub(crate) struct FuzzReplayArgs {
 
 pub use super::types_extra::{
     FuzzCampaignContract, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot,
-    FuzzCompareOutput, FuzzCompareSnapshot, FuzzContractOutput, FuzzCoverageCompletenessOutput,
-    FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput, FuzzDiscoverSummary,
-    FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange, FuzzListOutput, FuzzOutput,
-    FuzzPlanOutput, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput,
-    FuzzRunOutput, FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
+    FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot, FuzzContractOutput,
+    FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput,
+    FuzzDiscoverSummary, FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange,
+    FuzzListOutput, FuzzOutput, FuzzPlanOutput, FuzzReplayEnv, FuzzReplayExecution,
+    FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput, FuzzRunnerContract, FuzzValidateOutput,
+    FuzzWorkloadOutput,
 };
