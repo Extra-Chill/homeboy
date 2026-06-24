@@ -25,7 +25,7 @@ fn provider_file_secret_source_provisions_group_json_file_sources_without_values
         ),
     ]);
 
-    let provisions = provider_file_secret_source_provisions(
+    let provisions = super::super::provider_file_secret_source_provisions(
         &[
             "PROVIDER_REFRESH_TOKEN".to_string(),
             "PROVIDER_ACCESS_TOKEN".to_string(),
@@ -34,8 +34,15 @@ fn provider_file_secret_source_provisions_group_json_file_sources_without_values
         &sources,
     );
 
+    // Production groups the two json-file sources that share one path into a
+    // single provision and DROPS the `env`-source secret entirely. A single
+    // provision proves both the grouping and the non-json-file filtering.
     assert_eq!(provisions.len(), 1);
     assert_eq!(provisions[0].path, "~/.provider/auth.json");
+    // The grouped env names are sorted and deduped by production even though the
+    // required-names input was deliberately supplied REFRESH-before-ACCESS and
+    // included the unrelated env secret. The output order proves the sort, and
+    // the absence of `UNRELATED_SECRET` proves the source-kind filter.
     assert_eq!(
         provisions[0].env_names,
         vec![
@@ -43,6 +50,11 @@ fn provider_file_secret_source_provisions_group_json_file_sources_without_values
             "PROVIDER_REFRESH_TOKEN".to_string(),
         ]
     );
+    assert!(!provisions[0]
+        .env_names
+        .contains(&"UNRELATED_SECRET".to_string()));
+    // Provisions carry only the path + env-name routing, never the resolved
+    // secret values, so the credential bytes cannot leak through this grouping.
     let rendered = format!("{:?}", provisions);
     assert!(!rendered.contains("access-secret"));
     assert!(!rendered.contains("refresh-secret"));
@@ -52,6 +64,10 @@ fn provider_file_secret_source_provisions_group_json_file_sources_without_values
 fn provider_file_secret_source_provisions_include_json_file_jwt_expiration_sources() {
     let mut expires_at = json_file_source("~/.codex/auth.json", "tokens.access_token");
     expires_at.source = "json-file-jwt-expiration".to_string();
+    // Negative control: an unsupported source kind on the SAME path must be
+    // filtered out by production so it never widens the provision's env list.
+    let mut unsupported = json_file_source("~/.codex/auth.json", "tokens.access_token");
+    unsupported.source = "vault".to_string();
     let sources = HashMap::from([
         (
             "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
@@ -61,18 +77,28 @@ fn provider_file_secret_source_provisions_include_json_file_jwt_expiration_sourc
             "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
             expires_at,
         ),
+        (
+            "AI_PROVIDER_OPENAI_CODEX_VAULT_TOKEN".to_string(),
+            unsupported,
+        ),
     ]);
 
-    let provisions = provider_file_secret_source_provisions(
+    let provisions = super::super::provider_file_secret_source_provisions(
         &[
             "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
             "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_VAULT_TOKEN".to_string(),
         ],
         &sources,
     );
 
+    // Production accepts BOTH `json-file` and `json-file-jwt-expiration` kinds,
+    // grouping them under their shared path into one provision.
     assert_eq!(provisions.len(), 1);
     assert_eq!(provisions[0].path, "~/.codex/auth.json");
+    // The access-token (json-file) and expires-at (json-file-jwt-expiration)
+    // names are both retained and sorted; the unsupported `vault` kind is
+    // dropped even though it pointed at the same path.
     assert_eq!(
         provisions[0].env_names,
         vec![
@@ -80,6 +106,9 @@ fn provider_file_secret_source_provisions_include_json_file_jwt_expiration_sourc
             "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
         ]
     );
+    assert!(!provisions[0]
+        .env_names
+        .contains(&"AI_PROVIDER_OPENAI_CODEX_VAULT_TOKEN".to_string()));
 }
 
 #[test]

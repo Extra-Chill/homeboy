@@ -179,7 +179,7 @@ fn compile_loop_command_propagates_runtime_provider_model_options_into_runtime_t
     )
     .expect("write definition");
 
-    let (value, status) = loop_definition::compile_loop(CompileLoopArgs {
+    let (value, status) = super::super::loop_definition::compile_loop(CompileLoopArgs {
         definition: format!("@{}", definition_path.display()),
     })
     .expect("compile loop");
@@ -246,7 +246,7 @@ fn compile_loop_command_omits_runtime_options_without_dispatch_defaults() {
     )
     .expect("write definition");
 
-    let (value, status) = loop_definition::compile_loop(CompileLoopArgs {
+    let (value, status) = super::super::loop_definition::compile_loop(CompileLoopArgs {
         definition: format!("@{}", definition_path.display()),
     })
     .expect("compile loop");
