@@ -147,6 +147,45 @@ fn runner_exec_failure_error_surfaces_canonical_failure_context() {
 }
 
 #[test]
+fn runner_exec_failure_error_keeps_rig_not_found_without_contract_field() {
+    let output = failed_runner_exec_output(
+        "",
+        r#"{"success":false,"error":{"code":"rig.not_found","message":"Rig not found","details":{"rig":"missing"}}}"#,
+    );
+
+    let err = runner_exec_failure_error(&output).expect("runner failure error");
+
+    assert_eq!(
+        err.details["failure_context"]["error_code"].as_str(),
+        Some("rig.not_found")
+    );
+    assert_eq!(
+        err.details["failure_context"]["error_details"]["rig"].as_str(),
+        Some("missing")
+    );
+    assert!(err.details["failure_context"]
+        .get("contract_field")
+        .is_none());
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("structured error: `rig.not_found`")));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("details: {\"rig\":\"missing\"}")));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("homeboy runner exec lab -- homeboy rig list")));
+    assert!(!hints
+        .iter()
+        .any(|hint| hint.contains("unknown contract field")));
+}
+
+#[test]
 fn runner_exec_failure_error_promotes_homeboy_job_event_message_error() {
     let mut output = failed_runner_exec_output("", "generic stderr");
     output.job_events = Some(vec![crate::core::api_jobs::JobEvent {

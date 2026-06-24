@@ -55,7 +55,9 @@ use crate::core::{Error, ErrorCode, Result};
 use super::super::command_path::preflight_remote_argv_path_translation;
 use super::super::daemon_health::runner_daemon_health_failure;
 use super::super::execution::{
-    lab_offload_handoff_hints, runner_exec_failure_context_from_output, DaemonJobHandoffState,
+    append_failure_context_error_summary, lab_offload_handoff_hints,
+    runner_exec_failure_context_from_output, runner_exec_failure_context_remediation_hint,
+    DaemonJobHandoffState,
 };
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{

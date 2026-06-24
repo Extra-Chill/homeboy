@@ -392,16 +392,18 @@ pub(crate) fn append_runner_failure_context_summary(
         .persisted_run_id
         .as_deref()
         .unwrap_or("unknown persisted run");
-    let field = context
-        .contract_field
-        .as_deref()
-        .unwrap_or("unknown contract field");
-    stderr.push_str(&format!(
-        "Lab offload failure context: command `{}` failed on runner `{}`; runner job `{job}`; persisted run `{run}`; contract field `{field}`; reason: {}.\n",
+    let mut summary = format!(
+        "Lab offload failure context: command `{}` failed on runner `{}`; runner job `{job}`; persisted run `{run}`",
         redact_argv_display(&context.command),
-        context.runner_id,
-        context.reason
-    ));
+        context.runner_id
+    );
+    append_failure_context_error_summary(&mut summary, &context);
+    stderr.push_str(&summary);
+    stderr.push_str(".\n");
+    if let Some(hint) = runner_exec_failure_context_remediation_hint(&context) {
+        stderr.push_str(&hint);
+        stderr.push('\n');
+    }
 }
 
 pub(crate) fn append_runner_component_registry_repair_hint(
