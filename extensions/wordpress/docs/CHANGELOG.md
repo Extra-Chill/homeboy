@@ -2,6 +2,16 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.25] - 2026-06-24
+
+### Changed
+- Embed fixture payloads in SSI matrix artifacts
+- Collect SSI fixture results from Codebox executions
+- Use SSI allow-failure flag for matrix collection
+- Keep SSI fixture matrix collecting failed validations
+- Mount SSI fixture matrix artifacts in Codebox
+- Use supported WP Codebox plugin activation steps
+
 ## [3.13.24] - 2026-06-24
 
 ### Changed
