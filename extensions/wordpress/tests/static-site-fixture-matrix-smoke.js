@@ -159,7 +159,7 @@ async function main() {
 			outputDirectory,
 			codeboxOutput: {
 				ok: false,
-				steps: [
+				executions: [
 					{
 						metadata: { fixture_id: 'saveweb2zip-com-liquidbonsai-com' },
 						status: 'failed',
@@ -170,10 +170,24 @@ async function main() {
 							},
 						}),
 					},
+					{
+						command: 'wordpress.wp-cli',
+						exitCode: 0,
+						stdout: `#!/usr/bin/env php\n${JSON.stringify({
+							success: false,
+							status: 'blocked',
+							request: { import_args: { slug: '41-generative-art-studio' } },
+							fixture_diagnostics: {
+								fixture: { slug: '41-generative-art-studio' },
+								diagnostics: [{ code: 'missing_provider', message: 'No Codebox validation provider is registered.' }],
+							},
+						})}`,
+					},
 				],
 			},
 		});
 		assert.equal(collected.summary.failed, 2);
+		assert.ok(collected.fixtures.find((fixture) => fixture.fixture_id === '41-generative-art-studio').diagnostics.some((diagnostic) => diagnostic.code === 'missing_provider'));
 		assert.equal(collected.summary.groups.runtime_target_gap, 2);
 		assert.equal(collected.summary.groups.invalid_block_content, 1);
 		assert.equal(collected.summary.groups.broken_svg, 1);
