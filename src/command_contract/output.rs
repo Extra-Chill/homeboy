@@ -182,6 +182,13 @@ const fn refactor_command_registry_entry() -> CommandRegistryEntry {
     }
 }
 
+const fn undo_command_registry_entry() -> CommandRegistryEntry {
+    CommandRegistryEntry {
+        output_notes: "restores files from the latest or selected undo snapshot",
+        ..command_registry_entry("undo", CommandJsonFamily::Workspace)
+    }
+}
+
 pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     lab_command_registry_entry(
         "agent-task",
@@ -263,7 +270,7 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("runs", CommandJsonFamily::Workspace),
     command_registry_entry("self", CommandJsonFamily::Ops),
     command_registry_entry("stack", CommandJsonFamily::Workspace),
-    command_registry_entry("undo", CommandJsonFamily::Workspace),
+    undo_command_registry_entry(),
     command_registry_entry("auth", CommandJsonFamily::Ops),
     command_registry_entry("api", CommandJsonFamily::Ops),
     command_registry_entry("http", CommandJsonFamily::Ops),

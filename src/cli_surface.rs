@@ -1149,8 +1149,9 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "pushes the configured stack target branch to its remote";
         }
         ["undo"] => {
+            // output_notes is sourced from the authoritative command registry
+            // (undo_command_registry_entry).
             metadata.mutates = true;
-            metadata.output_notes = "restores files from the latest or selected undo snapshot";
         }
         ["undo", "delete"] => {
             metadata.mutates = true;
