@@ -741,6 +741,10 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used";
             metadata.dangerous_flags = vec!["--force", "--upgrade-runner"];
         }
+        ["trace"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "runs trace workflows and records observation artifacts unless using read-only subcommands";
+        }
         ["cleanup", "artifacts"] => {
             metadata.mutates = true;
             metadata.output_notes =
@@ -768,6 +772,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["project", "components", "clear"]
         | ["project", "pin", "add"]
         | ["project", "pin", "remove"]
+        | ["project", "pin", "rename"]
         | ["project", "pin", "update"] => {
             metadata.mutates = true;
         }
@@ -845,6 +850,32 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.dry_run_flag = Some("--dry-run");
             metadata.output_notes =
                 "reads active runs by default; --reconcile cancels stale active records unless --dry-run is passed";
+        }
+        ["agent-task", "controller", "init"]
+        | ["agent-task", "controller", "from-spec"]
+        | ["agent-task", "controller", "run-from-spec"]
+        | ["agent-task", "controller", "materialize"]
+        | ["agent-task", "controller", "events"]
+        | ["agent-task", "controller", "apply-event"]
+        | ["agent-task", "controller", "run-next"]
+        | ["agent-task", "controller", "run"]
+        | ["agent-task", "controller", "resume"]
+        | ["agent-task", "controller", "mark-human-ready"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "mutates durable agent-task loop controller state";
+        }
+        ["agent-task", "auth", "remove"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "removes one agent-task provider secret source mapping";
+        }
+        ["agent-task", "prompts", "remove"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "removes one stored agent-task prompt";
+        }
+        ["fuzz", "replay"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "replays a persisted fuzz case against local code and may write run artifacts";
         }
         ["db", "delete-row"] | ["db", "drop-table"] => {
             metadata.mutates = true;
