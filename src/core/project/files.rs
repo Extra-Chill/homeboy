@@ -260,19 +260,37 @@ fn generate_unique_delimiter(content: &str) -> String {
     delimiter
 }
 
+/// Build the shell command that writes `content` to `quoted_path` byte-for-byte.
+///
+/// A heredoc always appends a single trailing newline after its body, so writing
+/// `content` directly would silently add a `\n` that the caller never asked for
+/// (e.g. a pattern replacement on a file with no final newline). To preserve the
+/// caller's exact trailing-newline state we strip one trailing newline from the
+/// heredoc body (the heredoc re-adds exactly one) and, when the original content
+/// had no trailing newline at all, drop the heredoc's extra byte afterwards.
+fn write_content_command(quoted_path: &str, content: &str) -> String {
+    let delimiter = generate_unique_delimiter(content);
+    // The heredoc body emits `body` + a single trailing newline. Removing one
+    // trailing newline from `content` keeps multi-newline endings intact while
+    // letting the heredoc supply the final newline for content that ends in one.
+    let body = content.strip_suffix('\n').unwrap_or(content);
+    let mut command = format!("cat > {quoted_path} << '{delimiter}'\n{body}\n{delimiter}");
+
+    if !content.ends_with('\n') {
+        // Heredoc added a trailing newline the caller never wanted; drop it so the
+        // written file matches `content` exactly.
+        command.push_str(&format!("\ntruncate -s -1 {quoted_path}"));
+    }
+
+    command
+}
+
 /// Write content to file.
 pub fn write(project_id: &str, path: &str, content: &str) -> Result<WriteResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
     let full_path = resolve_remote_path(&project, &project_base_path, path)?;
-    let delimiter = generate_unique_delimiter(content);
-    let command = format!(
-        "cat > {} << '{}'\n{}\n{}",
-        shell::quote_path(&full_path),
-        delimiter,
-        content,
-        delimiter
-    );
+    let command = write_content_command(&shell::quote_path(&full_path), content);
     let output = execute_for_project(&project, &command)?;
     command::require_success(output.success, &output.stderr, "WRITE")?;
 
