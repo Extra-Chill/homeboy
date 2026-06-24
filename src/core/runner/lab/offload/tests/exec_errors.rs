@@ -188,6 +188,7 @@ fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
     };
     let status = reverse_status("homeboy-lab");
 
+    let overhead = LabOffloadOverhead::start();
     let result = automatic_capability_fallback_or_error(
         plan,
         &selection,
@@ -197,6 +198,7 @@ fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
         vec!["Install Playwright and browser binaries on the runner.".to_string()],
         false,
         false,
+        &overhead,
     );
 
     let Err(err) = result else {
@@ -222,6 +224,14 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
     };
     let status = reverse_status("homeboy-lab");
 
+    let mut overhead = LabOffloadOverhead::start();
+    overhead.set_attempted("homeboy-lab", "default", Some("reverse_tunnel"));
+    overhead.record(
+        LabOffloadPhase::Preflight,
+        std::time::Duration::from_millis(8),
+    );
+    overhead
+        .set_fallback_reason("missing required capability parity for `trace`: tools: playwright");
     let outcome = automatic_capability_fallback_or_error(
         plan,
         &selection,
@@ -231,6 +241,7 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
         Vec::new(),
         true,
         false,
+        &overhead,
     )
     .expect("explicit fallback opt-in should allow local run");
 
@@ -241,7 +252,25 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
         panic!("expected local fallback");
     };
     assert!(messages[0].contains("running locally"));
-    assert_eq!(metadata.expect("metadata")["status"], "fallback");
+    let metadata = metadata.expect("metadata");
+    assert_eq!(metadata["status"], "fallback");
+    // The fallback-to-local outcome records the runner-agnostic overhead:
+    // the attempted selection/preflight cost plus the fallback reason (#3001).
+    let overhead_meta = &metadata["lab_offload_overhead"];
+    assert_eq!(overhead_meta["schema"], "homeboy/lab-offload-overhead/v1");
+    assert_eq!(
+        overhead_meta["attempted_selection"]["runner_id"],
+        "homeboy-lab"
+    );
+    assert_eq!(overhead_meta["attempted_selection"]["source"], "default");
+    assert!(overhead_meta["fallback_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("capability parity")));
+    assert!(overhead_meta["phase_durations_ms"]["preflight"]
+        .as_u64()
+        .is_some());
+    // Workload duration stays separable: no remote exec happened on fallback.
+    assert!(overhead_meta["workload_ms"].is_null());
 }
 
 #[test]

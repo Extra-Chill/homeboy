@@ -151,6 +151,7 @@ pub(crate) fn run_lab_offload_inner(
     contract: LabOffloadCommand,
     mut plan: HomeboyPlan,
     mut messages: Vec<String>,
+    mut overhead: LabOffloadOverhead,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner = load(runner_id)?;
@@ -202,6 +203,7 @@ pub(crate) fn run_lab_offload_inner(
             runner_workspace_root,
             runner.settings.homeboy_path.as_deref().unwrap_or("homeboy"),
             &runner_status,
+            overhead,
         );
     }
 
@@ -327,6 +329,10 @@ pub(crate) fn run_lab_offload_inner(
         .clone()
         .map(prepare_lab_runner_capability);
     if let Some(capability_plan) = &capability_plan {
+        // Capability/daemon preflight is runner setup overhead (#3001); time it
+        // and record the elapsed duration on every exit path so a fallback-to-
+        // local still reports the attempted preflight cost.
+        let capability_preflight_started = std::time::Instant::now();
         let decision = match evaluate_lab_runner_capabilities_for_runner(
             &runner,
             capability_plan,
@@ -334,6 +340,10 @@ pub(crate) fn run_lab_offload_inner(
         ) {
             Ok(decision) => decision,
             Err(err) if matches!(selection.source, LabRunnerSelectionSource::Default) => {
+                overhead.record(
+                    LabOffloadPhase::Preflight,
+                    capability_preflight_started.elapsed(),
+                );
                 let reason = format!("runner capability preflight failed: {}", err.message);
                 plan = with_step(
                     plan,
@@ -348,15 +358,21 @@ pub(crate) fn run_lab_offload_inner(
                 if request.local_policy.deny_local_execution() {
                     return Err(local_execution_denied_error(&reason, Some(runner_id)));
                 }
+                overhead.set_fallback_reason(&reason);
                 return Ok(automatic_capability_fallback(
                     plan,
                     runner_id,
                     &runner_status,
                     reason,
+                    &overhead,
                 ));
             }
             Err(err) => return Err(err),
         };
+        overhead.record(
+            LabOffloadPhase::Preflight,
+            capability_preflight_started.elapsed(),
+        );
 
         let gate_result = decision.clone();
         match decision {
@@ -386,6 +402,7 @@ pub(crate) fn run_lab_offload_inner(
                         .gate_result(gate_result)
                         .build(),
                     );
+                    overhead.set_fallback_reason(&reason);
                     return automatic_capability_fallback_or_error(
                         plan,
                         &selection,
@@ -394,6 +411,7 @@ pub(crate) fn run_lab_offload_inner(
                         remediation,
                         request.local_policy.allow_local_fallback(),
                         request.local_policy.deny_local_execution(),
+                        &overhead,
                     );
                 }
                 LabRunnerSelectionSource::Explicit => {
@@ -409,6 +427,7 @@ pub(crate) fn run_lab_offload_inner(
     }
 
     let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
+    let workspace_sync_timer = overhead.phase(LabOffloadPhase::WorkspaceSync);
     let workspace_stage = prepare_lab_offload_workspace_stage(
         &request,
         &contract,
@@ -419,6 +438,7 @@ pub(crate) fn run_lab_offload_inner(
         &command_prefix.argv,
         runner.workspace_root.as_deref(),
     )?;
+    workspace_sync_timer.finish();
     let LabOffloadWorkspaceStage {
         plan: next_plan,
         sync_mode,
@@ -546,8 +566,18 @@ pub(crate) fn run_lab_offload_inner(
         "status": synced.workspace_cleanliness,
         "allow_dirty_lab_workspace": request.allow_dirty_lab_workspace,
     });
+    // Snapshot the setup overhead (selection + preflight + workspace sync)
+    // gathered so far into the metadata embedded in the runner env (#3001), so
+    // reports reading the offload metadata can separate `lab_overhead_ms` from
+    // the workload command duration. Post-exec phases (remote_exec, output
+    // parse, artifact import) are refreshed into the returned/captured metadata
+    // after the run completes below.
+    attach_lab_offload_overhead(&mut lab_metadata, &overhead);
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     env.extend(secret_env_handoff.env_delta.clone());
+    // The remaining pre-dispatch checks (secret-env, provider, path translation)
+    // are still runner setup overhead before the workload executes.
+    let pre_dispatch_started = std::time::Instant::now();
     preflight_agent_task_runner_secret_env(
         runner_id,
         &runner,
@@ -579,6 +609,10 @@ pub(crate) fn run_lab_offload_inner(
         &source_path,
         &remote_cwd,
     )?;
+    overhead.record(LabOffloadPhase::Preflight, pre_dispatch_started.elapsed());
+    // Time the workload command itself (kept separate from overhead so reports
+    // can subtract `lab_overhead_ms` from the workload duration).
+    let remote_exec_started = std::time::Instant::now();
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
@@ -598,6 +632,7 @@ pub(crate) fn run_lab_offload_inner(
             detach_after_handoff: request.detach_after_handoff,
         },
     );
+    overhead.record(LabOffloadPhase::RemoteExec, remote_exec_started.elapsed());
     let (exec_output, exit_code) = match exec_result {
         Ok(output) => output,
         Err(err) => {
@@ -681,6 +716,9 @@ pub(crate) fn run_lab_offload_inner(
     if exec_output.mirror_run_id.is_some() {
         plan = add_success_step(plan, "lab.mirror_evidence");
     }
+    // Parsing/applying the remote command output (patch extraction) is post-
+    // workload overhead, not workload time.
+    let output_parse_started = std::time::Instant::now();
     if request.capture_patch && exit_code == 0 {
         let apply_output = apply_lab_offload_patch(&exec_output)?;
         if apply_output.is_none() {
@@ -692,10 +730,17 @@ pub(crate) fn run_lab_offload_inner(
         }
         plan = with_lab_apply_patch_step(plan, apply_output);
     }
+    overhead.record(LabOffloadPhase::OutputParse, output_parse_started.elapsed());
+    // Importing the structured-output artifact back from the runner is overhead.
+    let artifact_import_started = std::time::Instant::now();
     let output_file_content = match remote_output_file.as_deref() {
         Some(path) => Some(download_lab_output_file(runner_id, path)?),
         None => None,
     };
+    overhead.record(
+        LabOffloadPhase::ArtifactImport,
+        artifact_import_started.elapsed(),
+    );
     ensure_lab_offload_streams_not_truncated(&exec_output, output_file_content.is_some())?;
     mirror_agent_task_run_plan_lifecycle(request.normalized_args, &exec_output.stdout)?;
 

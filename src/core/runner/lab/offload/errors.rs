@@ -243,17 +243,20 @@ pub(crate) fn automatic_capability_fallback(
     runner_id: &str,
     runner_status: &RunnerStatusReport,
     reason: String,
+    overhead: &LabOffloadOverhead,
 ) -> LabOffloadOutcome {
+    let mut metadata = lab_offload_metadata(
+        &plan,
+        "automatic",
+        Some(runner_id),
+        Some(status_tunnel_mode(runner_status).metadata_value()),
+        "fallback",
+        None,
+        Some(&reason),
+    );
+    attach_lab_offload_overhead(&mut metadata, overhead);
     LabOffloadOutcome::RunLocal {
-        metadata: Some(lab_offload_metadata(
-            &plan,
-            "automatic",
-            Some(runner_id),
-            Some(status_tunnel_mode(runner_status).metadata_value()),
-            "fallback",
-            None,
-            Some(&reason),
-        )),
+        metadata: Some(metadata),
         plan,
         messages: vec![format!("Lab offload: {reason}; running locally.")],
     }
@@ -267,6 +270,7 @@ pub(crate) fn automatic_capability_fallback_or_error(
     remediation: Vec<String>,
     allow_local_fallback: bool,
     deny_local_execution: bool,
+    overhead: &LabOffloadOverhead,
 ) -> Result<LabOffloadOutcome> {
     if deny_local_execution {
         return Err(local_execution_denied_error(
@@ -288,6 +292,7 @@ pub(crate) fn automatic_capability_fallback_or_error(
         &selection.runner_id,
         runner_status,
         reason,
+        overhead,
     ))
 }
 

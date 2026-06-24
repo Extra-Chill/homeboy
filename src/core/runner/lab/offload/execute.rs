@@ -100,12 +100,20 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         request.normalized_args,
     )?;
 
+    // Begin runner-agnostic overhead accounting (#3001). Each setup phase
+    // (selection, preflight, workspace sync, output parse, artifact import) is
+    // timed independently so reports can separate `lab_overhead_ms` from the
+    // workload command duration, regardless of runner transport.
+    let mut overhead = LabOffloadOverhead::start();
+
+    let selection_timer = overhead.phase(LabOffloadPhase::Selection);
     let selection = resolve_lab_runner_selection(
         &contract,
         request.explicit_runner,
         request.force_hot,
         request.local_policy.allow_local_hot(),
     )?;
+    selection_timer.finish();
     let Some(selection) = selection else {
         let reason = if request.force_hot && request.local_policy.allow_local_hot() {
             "force_hot_local_override"
@@ -127,8 +135,22 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         if request.local_policy.deny_local_execution() {
             return Err(local_execution_denied_error(reason, None));
         }
-        return Ok(skipped_automatic_run_local(plan, reason));
+        // No runner was selected: record the skip reason as the fallback so the
+        // overhead metadata consistently explains why this ran locally.
+        overhead.set_fallback_reason(reason);
+        return Ok(skipped_automatic_run_local_with_overhead(
+            plan, reason, &overhead,
+        ));
     };
+
+    // A runner was selected (explicit or default). Record the attempted
+    // selection up front so a later connect/preflight fallback still reports
+    // what the offload tried first.
+    overhead.set_attempted(
+        &selection.runner_id,
+        selection.source.metadata_value(),
+        Some(selection.mode.metadata_value()),
+    );
 
     let release_gate_local_hot_allowed =
         crate::core::defaults::resolve_release_gate_local_hot_policy().is_allowed();
@@ -168,7 +190,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .build(),
     );
 
-    match prepare_lab_runner_for_offload(&selection)? {
+    let prepare_timer = overhead.phase(LabOffloadPhase::Preflight);
+    let preparation = prepare_lab_runner_for_offload(&selection)?;
+    prepare_timer.finish();
+    match preparation {
         LabRunnerPreparation::Ready => {
             plan = with_step(
                 plan,
@@ -223,23 +248,26 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                     )],
                 ));
             }
+            overhead.set_fallback_reason(&reason);
+            let mut metadata = lab_offload_metadata(
+                &plan,
+                selection.source.metadata_value(),
+                Some(&selection.runner_id),
+                Some(selection.mode.metadata_value()),
+                "fallback",
+                None,
+                Some(&reason),
+            );
+            attach_lab_offload_overhead(&mut metadata, &overhead);
             return Ok(LabOffloadOutcome::RunLocal {
-                metadata: Some(lab_offload_metadata(
-                    &plan,
-                    selection.source.metadata_value(),
-                    Some(&selection.runner_id),
-                    Some(selection.mode.metadata_value()),
-                    "fallback",
-                    None,
-                    Some(&reason),
-                )),
+                metadata: Some(metadata),
                 plan,
                 messages: vec![format!("Lab offload: {reason}; running locally.")],
             });
         }
     }
 
-    run_lab_offload_inner(request, selection, contract, plan, messages)
+    run_lab_offload_inner(request, selection, contract, plan, messages, overhead)
 }
 
 pub(crate) fn unsupported_runner_hints(
