@@ -69,6 +69,10 @@ homeboy_wp_codebox_resolve_bin() {
         [ -n "$candidate" ] && candidates+=("$candidate")
     done < <(type -a -p wp-codebox 2>/dev/null || true)
 
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] && candidates+=("$candidate")
+    done < <(homeboy_wp_codebox_global_cli_candidates)
+
     candidates+=("wp-codebox")
 
     for candidate in "${candidates[@]}"; do
@@ -90,6 +94,28 @@ homeboy_wp_codebox_resolve_bin() {
     fi
 
     return 1
+}
+
+homeboy_wp_codebox_global_cli_candidates() {
+    local roots=()
+    local node_bin=""
+    local node_modules=""
+    local root=""
+
+    if [ -n "${HOMEBOY_GLOBAL_NODE_MODULE_ROOT:-}" ]; then
+        roots+=("$HOMEBOY_GLOBAL_NODE_MODULE_ROOT")
+    fi
+    if node_bin=$(command -v node 2>/dev/null); then
+        node_modules="$(cd "$(dirname "$node_bin")/../lib/node_modules" 2>/dev/null && pwd -P || true)"
+        [ -n "$node_modules" ] && roots+=("$node_modules")
+    fi
+
+    for root in "${roots[@]}"; do
+        printf '%s\n' \
+            "${root}/wp-codebox-workspace/packages/cli/dist/index.js" \
+            "${root}/@automattic/wp-codebox-cli/dist/index.js" \
+            "${root}/wp-codebox-workspace/node_modules/@automattic/wp-codebox-cli/dist/index.js"
+    done
 }
 
 homeboy_wp_codebox_bin_is_runnable() {
