@@ -35,8 +35,8 @@ mod workspace_plan;
 
 pub use super::lab_selection::LabRunnerSelectionSource;
 pub use offload::{
-    execute_lab_offload, LabLocalExecutionPolicy, LabOffloadCommand, LabOffloadOutcome,
-    LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
+    execute_lab_offload, LabJobOverrides, LabLocalExecutionPolicy, LabOffloadCommand,
+    LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
 };
 
 #[cfg(test)]

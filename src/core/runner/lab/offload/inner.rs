@@ -182,16 +182,21 @@ pub(crate) fn run_lab_offload_inner(
         ));
     }
 
-    let runner_workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "workspace_root",
-            "Lab offload requires runner.workspace_root so the local checkout can be mapped remotely",
-            Some(runner.id.clone()),
-            Some(vec![
-                "This Wave 3 adapter assumes workspace sync/provenance has placed the same checkout basename under runner.workspace_root.".to_string(),
-            ]),
-        )
-    })?;
+    let runner_workspace_root = request
+        .job_overrides
+        .workspace_root
+        .clone()
+        .or_else(|| runner.workspace_root.clone())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace_root",
+                "Lab offload requires runner.workspace_root so the local checkout can be mapped remotely",
+                Some(runner.id.clone()),
+                Some(vec![
+                    "This Wave 3 adapter assumes workspace sync/provenance has placed the same checkout basename under runner.workspace_root.".to_string(),
+                ]),
+            )
+        })?;
 
     if contract.workspace_mode_policy == LabOffloadWorkspaceModePolicy::RunnerResident {
         return run_runner_resident_lab_offload(
@@ -200,7 +205,7 @@ pub(crate) fn run_lab_offload_inner(
             contract,
             plan,
             messages,
-            runner_workspace_root,
+            &runner_workspace_root,
             runner.settings.homeboy_path.as_deref().unwrap_or("homeboy"),
             &runner_status,
             overhead,
@@ -441,7 +446,7 @@ pub(crate) fn run_lab_offload_inner(
         &source_path,
         homeboy_path,
         &command_prefix.argv,
-        runner.workspace_root.as_deref(),
+        Some(&runner_workspace_root),
     )?;
     workspace_sync_timer.finish();
     let LabOffloadWorkspaceStage {
@@ -560,6 +565,7 @@ pub(crate) fn run_lab_offload_inner(
         settings_env_diagnostics(&remapped_args, &secret_env_handoff.env_delta);
     lab_metadata["runner_homeboy"] = runner_homeboy.clone();
     lab_metadata["source_checkout"] = source_checkout.clone();
+    lab_metadata["job_scoped_overrides"] = job_scoped_overrides_metadata(&request.job_overrides);
     lab_metadata["rig_sync"] = serde_json::json!({
         "step": "lab.sync_rigs",
         "synced_count": synced_rigs.len(),
@@ -588,6 +594,13 @@ pub(crate) fn run_lab_offload_inner(
     lab_metadata["lab_host_telemetry"] = host_telemetry.before_metadata();
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     env.extend(secret_env_handoff.env_delta.clone());
+    for (name, value) in &request.job_overrides.env {
+        env.insert(name.clone(), value.clone());
+    }
+    let mut secret_env_names = secret_env_handoff.secret_env_names;
+    secret_env_names.extend(request.job_overrides.secret_env_names.clone());
+    secret_env_names.sort();
+    secret_env_names.dedup();
     // The remaining pre-dispatch checks (secret-env, provider, path translation)
     // are still runner setup overhead before the workload executes.
     let pre_dispatch_started = std::time::Instant::now();
@@ -634,7 +647,7 @@ pub(crate) fn run_lab_offload_inner(
             allow_diagnostic_ssh: false,
             command,
             env,
-            secret_env_names: secret_env_handoff.secret_env_names,
+            secret_env_names,
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: Some(source_snapshot),

@@ -682,6 +682,45 @@ mod tests {
     }
 
     #[test]
+    fn remote_runner_job_env_is_scoped_to_submitted_job() {
+        let store = JobStore::default();
+        let mut first = remote_runner_request("homeboy-lab", Some("extrachill"));
+        first.env.insert(
+            "STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH".to_string(),
+            "/tmp/wp-codebox".to_string(),
+        );
+        let second = remote_runner_request("homeboy-lab", Some("extrachill"));
+
+        store
+            .submit_remote_runner_job(first)
+            .expect("first job queues");
+        store
+            .submit_remote_runner_job(second)
+            .expect("second job queues");
+
+        let first_claim = store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+            .expect("first claim succeeds")
+            .expect("first claim");
+        let second_claim = store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+            .expect("second claim succeeds")
+            .expect("second claim");
+
+        assert_eq!(
+            first_claim
+                .request
+                .env
+                .get("STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH"),
+            Some(&"/tmp/wp-codebox".to_string())
+        );
+        assert!(!second_claim
+            .request
+            .env
+            .contains_key("STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH"));
+    }
+
+    #[test]
     fn remote_runner_job_submit_derives_implicit_command_secret_names() {
         let store = JobStore::default();
         let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));

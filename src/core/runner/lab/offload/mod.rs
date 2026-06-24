@@ -33,8 +33,8 @@ mod tests;
 // Public API surface.
 pub use execute::execute_lab_offload;
 pub use types::{
-    LabLocalExecutionPolicy, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
-    LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
+    LabJobOverrides, LabLocalExecutionPolicy, LabOffloadCommand, LabOffloadOutcome,
+    LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
 };
 
 // Shared external imports, re-exported so submodules can pull them via
@@ -47,7 +47,7 @@ use crate::core::agent_task_lifecycle;
 use crate::core::agent_tasks::provider::provider_runner_source_contracts;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
-use crate::core::redaction::{redact_argv, redact_argv_display};
+use crate::core::redaction::{redact_argv, redact_argv_display, RedactionPolicy};
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};

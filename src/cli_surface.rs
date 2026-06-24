@@ -59,6 +59,18 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub allow_dirty_lab_workspace: bool,
 
+    /// Add a job-scoped environment variable to a Lab offload without mutating runner config.
+    #[arg(long, global = true, value_name = "KEY=VALUE")]
+    pub runner_env: Vec<String>,
+
+    /// Add job-scoped Lab offload environment from a JSON object without mutating runner config.
+    #[arg(long, global = true, value_name = "JSON")]
+    pub lab_env_json: Option<String>,
+
+    /// Override the selected runner workspace root for this Lab offload only.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub runner_workspace_root: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
