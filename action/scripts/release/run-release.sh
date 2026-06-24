@@ -167,7 +167,7 @@ if [ "${RELEASE_SKIP_PUBLISH}" = "true" ]; then
 fi
 
 if [ "${RELEASE_SKIP_GITHUB_RELEASE}" = "true" ]; then
-  RELEASE_ARGS+=(--no-github-release)
+  RELEASE_ARGS+=(--no-github-release --i-know-ci-creates-the-github-release)
 fi
 
 if [ "${RELEASE_HEAD}" = "true" ]; then

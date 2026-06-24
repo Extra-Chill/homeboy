@@ -220,6 +220,7 @@ run_wrapper
 ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
 assert_contains '--skip-publish' "${ARGS}" "release can opt out of package/publish steps"
 assert_contains '--no-github-release' "${ARGS}" "release can opt out of GitHub Release creation"
+assert_contains '--i-know-ci-creates-the-github-release' "${ARGS}" "CI opt-out also confirms CI creates the GitHub Release"
 unset RELEASE_SKIP_PUBLISH RELEASE_SKIP_GITHUB_RELEASE
 
 setup_fixture
