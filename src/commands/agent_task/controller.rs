@@ -4,7 +4,8 @@
 use serde_json::Value;
 
 use homeboy::core::agent_task_controller_service::{
-    init_from_spec_for_resume_with_resolution, ControllerResumeStateResolution,
+    build_run_failure_summary, init_from_spec_for_resume_with_resolution,
+    ControllerResumeStateResolution,
 };
 use homeboy::core::agent_task_loop_definition::{
     materialize_repo_loop_spec, AgentTaskLoopPolicyResultMaterialization,
@@ -341,19 +342,41 @@ where
 
     let status =
         homeboy::core::agent_tasks::loop_controller::controller_status_report(&from_spec.loop_id)?;
-    Ok((
-        serde_json::json!({
-            "schema": "homeboy/agent-task-loop-controller-run-from-spec-result/v1",
-            "loop_id": from_spec.loop_id.clone(),
-            "max_actions": args.max_actions,
-            "stopped_reason": stopped_reason,
-            "materialization": materialized.value,
-            "from_spec": from_spec,
-            "results": results,
-            "status": status,
-        }),
-        exit_code,
-    ))
+
+    // On a terminal failure, normalize the nested provider/runtime failures into
+    // a compact root-cause `failure_summary` with durable evidence refs so
+    // operators never have to hand-traverse the envelope below it (#6220).
+    let failure_summary = if exit_code != 0 {
+        let status_value = serde_json::to_value(&status)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+        Some(build_run_failure_summary(
+            &from_spec.loop_id,
+            &stopped_reason,
+            &results,
+            &status_value,
+        ))
+    } else {
+        None
+    };
+
+    let mut envelope = serde_json::json!({
+        "schema": "homeboy/agent-task-loop-controller-run-from-spec-result/v1",
+        "loop_id": from_spec.loop_id.clone(),
+        "max_actions": args.max_actions,
+        "stopped_reason": stopped_reason,
+        "materialization": materialized.value,
+        "from_spec": from_spec,
+        "results": results,
+        "status": status,
+    });
+    if let Some(summary) = failure_summary {
+        let summary_value = serde_json::to_value(summary)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+        if let Value::Object(map) = &mut envelope {
+            map.insert("failure_summary".to_string(), summary_value);
+        }
+    }
+    Ok((envelope, exit_code))
 }
 
 fn materialize_controller_spec(

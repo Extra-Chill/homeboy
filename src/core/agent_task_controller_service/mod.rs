@@ -59,6 +59,7 @@ mod dispatch_defaults;
 mod pr_ownership;
 mod reports;
 mod request;
+mod run_failure_summary;
 mod spec;
 mod spec_compile;
 mod spec_source;
@@ -70,6 +71,10 @@ pub use dispatch_defaults::*;
 use pr_ownership::*;
 pub use reports::*;
 pub use request::*;
+pub use run_failure_summary::{
+    build_run_failure_summary, ControllerRunEvidenceRef, ControllerRunFailureSummary,
+    CONTROLLER_RUN_FAILURE_SUMMARY_SCHEMA,
+};
 pub use spec::*;
 pub(crate) use spec_compile::validate_loop_spec;
 use spec_compile::{
