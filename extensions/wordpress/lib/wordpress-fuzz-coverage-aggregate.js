@@ -8,6 +8,7 @@ const {
 	WORDPRESS_RUNTIME_SURFACE_ID_PREFIXES,
 	normalizeWordPressCoverageSurfaceType,
 } = require('./wordpress-surface-types');
+const { normalizeFuzzHotspotSummary } = require('./wordpress-fuzz-runtime-task');
 
 const STATUS_ORDER = ['discovered', 'exercised', 'skipped', 'failed'];
 const STATUS_PRIORITY = Object.fromEntries(STATUS_ORDER.map((status, index) => [status, index]));
@@ -165,6 +166,7 @@ function collectArtifactItems(artifact, source) {
 		appendStatusItems(items, artifact.coverage?.[status], source, status);
 	}
 	appendWordPressFuzzSchemaItems(items, artifact, source);
+	appendDerivedCoverageGapReportItems(items, artifact, source);
 	return items;
 }
 
@@ -231,6 +233,27 @@ function appendCoverageGapItems(items, gaps, source) {
 	}
 }
 
+function appendDerivedCoverageGapReportItems(items, artifact, source) {
+	if (!isPlainObject(artifact)) {
+		return;
+	}
+	const schema = stringValue(artifact.schema || artifact.artifact_schema || artifact.artifactSchema);
+	const semanticKey = stringValue(artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey);
+	if (!isCoverageGapReportArtifact({ schema, semanticKey, artifact })) {
+		return;
+	}
+	appendCoverageGapItems(items, artifact.coverage_gaps || artifact.coverageGaps || artifact.gaps, source);
+}
+
+function isCoverageGapReportArtifact({ schema = '', semanticKey = '', artifact = {} } = {}) {
+	const normalizedSchema = schema.toLowerCase();
+	const normalizedKey = semanticKey.toLowerCase();
+	return normalizedSchema.includes('coverage-gap-report')
+		|| normalizedKey === 'fuzz.coverage.gap_report'
+		|| normalizedKey === 'fuzz.coverage.gaps'
+		|| (Array.isArray(artifact.gaps) && (artifact.expected !== undefined || artifact.covered !== undefined || artifact.status !== undefined));
+}
+
 function aggregateWordPressFuzzCoverage(input = {}) {
 	const coverageManifest = normalizeWordPressFuzzCoverageManifest(input.coverage_manifest || input.coverageManifest || input.expected_coverage || input.expectedCoverage || input.discovery || input.manifest || {});
 	const expectedItems = coverageManifest.surfaces.map((surface) => normalizeFuzzCoverageItem(surface, { source: 'coverage-manifest', status: 'discovered' }));
@@ -262,6 +285,7 @@ function aggregateWordPressFuzzCoverage(input = {}) {
 		: Math.round((totals.exercised / (totals.discovered + totals.exercised)) * 10000) / 100;
 	const coverageSummary = buildCoverageSummary(totals, coverageItems);
 	const coverageGaps = buildCoverageGaps(coverageItems);
+	const hotspotSummary = aggregateFuzzHotspotSummary(input);
 
 	return {
 		schema: 'homeboy/wordpress-fuzz-coverage-aggregate/v1',
@@ -270,6 +294,7 @@ function aggregateWordPressFuzzCoverage(input = {}) {
 		coverage_manifest: coverageManifest,
 		coverage_summary: coverageSummary,
 		coverage_gaps: coverageGaps,
+		hotspot_summary: hotspotSummary,
 		byType: buildByType(coverageItems),
 		items: coverageItems,
 		gapReport: buildGapReport(coverageGaps),
@@ -280,6 +305,38 @@ function aggregateWordPressFuzzCoverage(input = {}) {
 			failed_count: coverageSummary.failed_count,
 		},
 	};
+}
+
+function aggregateFuzzHotspotSummary(input = {}) {
+	const candidates = [
+		input.hotspot_summary,
+		input.hotspotSummary,
+		input.hotspots,
+		input.performance_hotspots,
+		input.performanceHotspots,
+		...normalizeArray(input.artifacts || input.results || input.coverage || []).flatMap((artifact) => [
+			artifact?.hotspot_summary,
+			artifact?.hotspotSummary,
+			artifact?.hotspots,
+			artifact?.performance_hotspots,
+			artifact?.performanceHotspots,
+		]),
+	];
+	const summaries = candidates.map((candidate) => normalizeFuzzHotspotSummary(candidate)).filter(Boolean);
+	if (summaries.length === 0) {
+		return undefined;
+	}
+	return normalizeFuzzHotspotSummary({
+		items: summaries.flatMap((summary) => summary.items || []),
+		metadata: { sources: summaries.length },
+	});
+}
+
+function normalizeArray(value) {
+	if (value === undefined || value === null) {
+		return [];
+	}
+	return Array.isArray(value) ? value.filter(Boolean) : [value].filter(Boolean);
 }
 
 function buildCoverageSummary(totals, items) {
@@ -346,6 +403,14 @@ function formatWordPressFuzzCoverageMarkdownReport(input = {}, options = {}) {
 			lines.push(`| ${item.status} | ${escapeMarkdownCell(item.type)} | ${escapeMarkdownCell(item.label || item.id)} | ${escapeMarkdownCell(item.sources.join(', '))} |`);
 		}
 	}
+	if (aggregate.hotspot_summary?.items?.length > 0) {
+		lines.push('', '## Hotspots', '', '| Rank | Surface | Operation | Metric | Value | Unit | Samples |', '| ---: | --- | --- | --- | ---: | --- | ---: |');
+		for (const item of aggregate.hotspot_summary.items) {
+			const surface = item.surface_key || item.metadata?.surface_key || item.id;
+			const operation = item.operation_key || item.metadata?.operation_key || item.kind || item.dimension;
+			lines.push(`| ${item.rank} | ${escapeMarkdownCell(surface)} | ${escapeMarkdownCell(operation)} | ${escapeMarkdownCell(item.metric)} | ${item.value} | ${escapeMarkdownCell(item.unit || '')} | ${item.sample_count} |`);
+		}
+	}
 	return lines.join('\n');
 }
 
@@ -353,6 +418,7 @@ module.exports = {
 	aggregateWordPressFuzzCoverage,
 	collectWordPressFuzzCoverageItems,
 	formatWordPressFuzzCoverageMarkdownReport,
+	normalizeFuzzHotspotSummary,
 	normalizeWordPressFuzzCoverageManifest,
 	normalizeWordPressFuzzCoverageItem: normalizeFuzzCoverageItem,
 };

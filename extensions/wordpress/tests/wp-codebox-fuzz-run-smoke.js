@@ -11,6 +11,7 @@ const {
 	DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS,
 	DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY,
 	DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA,
+	ARTIFACT_POSTPROCESS_COMMAND,
 	WORDPRESS_CODEBOX_FUZZ_RUN_CONSUMER_SCHEMA,
 	WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
@@ -97,6 +98,25 @@ assert.deepEqual(wpCodeboxWordPressWorkloadRunInput({
 	after: [],
 	metadata: { source: 'smoke' },
 });
+
+const artifactPostprocessWorkloadInput = wpCodeboxWordPressWorkloadRunInput({
+	id: 'artifact-postprocess-workload-run',
+	steps: [{
+		command: 'artifact-postprocess',
+		args: {
+			helper: '${package.root}/tools/artifact-helper.mjs',
+			action: 'coverage-gap-report',
+			input: { type: 'artifact-root', path: '${artifacts.root}' },
+			output: { artifact: 'coverage_gap_report', path: 'coverage/gaps.json', semantic_key: 'fuzz.coverage.gap_report' },
+			parameters: { max_bytes: 1024 },
+		},
+	}],
+});
+assert.equal(artifactPostprocessWorkloadInput.steps[0].command, ARTIFACT_POSTPROCESS_COMMAND);
+assert.equal(artifactPostprocessWorkloadInput.steps[0].args.helper, '${package.root}/tools/artifact-helper.mjs');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].args.action, 'coverage-gap-report');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].args.output.semantic_key, 'fuzz.coverage.gap_report');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].metadata.contract, 'homeboy/artifact-postprocess/v1');
 
 const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
 	taskId: 'wp-codebox-fuzz-suite-smoke',
@@ -313,6 +333,8 @@ runWpCodeboxFuzzSuite({
 					fuzz_report: { path: 'reports/fuzz-report.json', content_type: 'application/json' },
 					coverage: { path: 'reports/coverage.json', content_type: 'application/json', size_bytes: 123, payload: { schema: 'wp-codebox/coverage-report/v1', covered: 1 } },
 					normalized_fuzz_result: { path: 'reports/wordpress-fuzz-result.json', content_type: 'application/json' },
+					coverage_gap_report: { path: 'reports/coverage-gaps.json', content_type: 'application/json', schema: 'homeboy/wordpress-coverage-gap-report/v1', semantic_key: 'fuzz.coverage.gap_report', payload: { schema: 'homeboy/wordpress-coverage-gap-report/v1', expected: 2, covered: 1, gaps: [{ id: 'route:/wp/v2/comments', type: 'rest_route', status: 'skipped' }] } },
+					hotspot_summary: { path: 'reports/hotspots.json', content_type: 'application/json', semantic_key: 'fuzz.hotspot.summary', payload: { schema: 'homeboy/fuzz-hotspot-summary/v1', metric: 'duration_ms', unit: 'ms', items: [{ surface: 'route:/wp/v2/posts', operation: 'GET /wp/v2/posts', value: 99, rank: 1 }] } },
 					fuzz_case: { path: 'cases/case-000.json', case_id: 'case-000' },
 					placeholder_case: { name: 'placeholder-only' },
 					failing_case: { path: 'cases/failing-case.json', case_id: 'case-002' },
@@ -348,9 +370,13 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.wordpress_fuzz_result.artifacts.some((artifact) => artifact.role === 'coverage'), true);
 	assert.equal(summary.wordpress_fuzz_result.artifacts.some((artifact) => artifact.name === 'placeholder-only'), false);
 	assert.equal(summary.coverage_gaps[0].status, 'skipped');
-	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'normalized_fuzz_result', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case', 'repro_case']);
+	assert.equal(summary.coverage_gaps.some((gap) => gap.id === 'route:/wp/v2/comments'), true);
+	assert.equal(summary.derived_artifacts.coverage_gap_reports[0].coverage_gaps[0].id, 'route:/wp/v2/comments');
+	assert.equal(summary.hotspot_summary.items[0].value, 99);
+	assert.equal(summary.derived_artifacts.artifacts.some((artifact) => artifact.role === 'hotspot_summary'), true);
+	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'normalized_fuzz_result', 'coverage_gap_report', 'hotspot_summary', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case', 'repro_case']);
 	assert.equal(summary.artifacts[0].semantic_key, 'fuzz.report');
-	assert.equal(summary.artifacts[7].semantic_key, 'fuzz.case.repro');
+	assert.equal(summary.artifacts[9].semantic_key, 'fuzz.case.repro');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'coverage').semantic_key, 'fuzz.coverage');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'coverage').size_bytes, 123);
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'coverage').payload.schema, 'wp-codebox/coverage-report/v1');
