@@ -184,18 +184,15 @@ assert.throws(
 
 const installRoot = path.join(tempRoot, 'wp-codebox-install');
 const focusedContractsPath = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'contracts.js');
-const legacyIndexPath = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js');
 fs.mkdirSync(path.dirname(focusedContractsPath), { recursive: true });
 fs.writeFileSync(focusedContractsPath, 'export function runtimeContractManifest() { return {}; }\n');
-fs.writeFileSync(legacyIndexPath, 'export function runtimeContractManifest() { return {}; }\n');
+fs.writeFileSync(path.join(path.dirname(focusedContractsPath), 'index.js'), 'export function runtimeContractManifest() { return {}; }\n');
 delete process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
 const contractCandidates = coreModuleCandidates({ wpCodeboxInstallDir: installRoot });
 assert.equal(contractCandidates[0], '@automattic/wp-codebox-core/contracts');
 assert.equal(contractCandidates[1], 'wp-codebox-workspace/contracts');
-assert.equal(contractCandidates[2], '@automattic/wp-codebox-core');
-assert.equal(contractCandidates[3], 'wp-codebox-workspace/core');
-assert.match(contractCandidates[4], /dist\/contracts\.js$/);
-assert.match(contractCandidates[5], /dist\/index\.js$/);
+assert.match(contractCandidates[2], /dist\/contracts\.js$/);
+assert.equal(contractCandidates.some((candidate) => /dist\/index\.js$/.test(candidate)), false);
 
 const mismatchedModule = path.join(tempRoot, 'mismatched-runtime-core.mjs');
 fs.writeFileSync(mismatchedModule, `

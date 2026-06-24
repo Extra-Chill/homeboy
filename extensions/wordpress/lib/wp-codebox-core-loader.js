@@ -54,7 +54,7 @@ function coreModuleCandidates(options = {}) {
 
 function setupCacheCoreModuleCandidates(options = {}) {
 	const installRoot = options.wpCodeboxInstallDir || process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.resolve(homedir(), '.cache/homeboy/wp-codebox');
-	const packageDistEntries = options.packageDistEntries || ['index.js'];
+	const packageDistEntries = options.packageDistEntries || [];
 	const candidates = [];
 	for (const entry of packageDistEntries) {
 		candidates.push(path.resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist', entry));

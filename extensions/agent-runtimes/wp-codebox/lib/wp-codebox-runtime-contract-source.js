@@ -154,9 +154,6 @@ function coreModuleCandidates(options = {}) {
   const candidates = [
     DEFAULT_CODEBOX_CONTRACTS_MODULE,
     'wp-codebox-workspace/contracts',
-    // Compatibility fallback for WP Codebox builds before focused package entrypoints.
-    '@automattic/wp-codebox-core',
-    'wp-codebox-workspace/core',
   ];
   for (const candidate of setupCacheCoreModuleCandidates(options)) {
     if (existsSync(candidate) && !candidates.includes(candidate)) {
@@ -171,9 +168,6 @@ function setupCacheCoreModuleCandidates(options = {}) {
   return [
     path.resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist/contracts.js'),
     path.resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/contracts.js'),
-    // Compatibility fallback for WP Codebox builds before focused package entrypoints.
-    path.resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist/index.js'),
-    path.resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js'),
   ];
 }
 

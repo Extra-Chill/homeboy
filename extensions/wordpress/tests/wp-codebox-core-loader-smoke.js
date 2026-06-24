@@ -21,21 +21,19 @@ async function main() {
 			packageCandidates: [
 				'@automattic/wp-codebox-core/artifacts',
 				'wp-codebox-workspace/artifacts',
-				'@automattic/wp-codebox-core',
 			],
-			packageDistEntries: ['artifacts.js', 'index.js'],
+			packageDistEntries: ['artifacts.js'],
 		});
 
 		assert.equal(candidates[0], '@automattic/wp-codebox-core/artifacts');
 		assert.equal(candidates[1], 'wp-codebox-workspace/artifacts');
-		assert.equal(candidates[2], '@automattic/wp-codebox-core');
-		assert.match(candidates[3], /dist\/artifacts\.js$/);
-		assert.match(candidates[4], /dist\/index\.js$/);
+		assert.match(candidates[2], /dist\/artifacts\.js$/);
+		assert.equal(candidates.some((candidate) => /dist\/index\.js$/.test(candidate)), false);
 
 		const result = await loadWpCodeboxCoreExport('fixtureExport', {
 			wpCodeboxInstallDir: root,
 			packageCandidates: [],
-			packageDistEntries: ['artifacts.js', 'index.js'],
+			packageDistEntries: ['artifacts.js'],
 			required: true,
 		});
 
@@ -43,15 +41,12 @@ async function main() {
 		assert.equal(result.value(), 'focused-artifacts');
 
 		fs.rmSync(path.join(dist, 'artifacts.js'));
-		const legacyResult = await loadWpCodeboxCoreExport('fixtureExport', {
+		await assert.rejects(() => loadWpCodeboxCoreExport('fixtureExport', {
 			wpCodeboxInstallDir: root,
 			packageCandidates: [],
-			packageDistEntries: ['artifacts.js', 'index.js'],
+			packageDistEntries: ['artifacts.js'],
 			required: true,
-		});
-
-		assert.match(legacyResult.source, /dist\/index\.js$/);
-		assert.equal(legacyResult.value(), 'legacy-index');
+		}), /WP Codebox core export fixtureExport is unavailable/);
 
 		console.log('wp-codebox core loader smoke passed');
 	} finally {
