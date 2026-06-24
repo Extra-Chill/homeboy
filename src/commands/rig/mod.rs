@@ -46,8 +46,8 @@ impl RigArgs {
     }
 
     pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
-        if let RigCommand::Check { rig_id } = &self.command {
-            let contract = if rig_check_uses_linked_local_source(rig_id) {
+        if let RigCommand::Check { target, .. } = &self.command {
+            let contract = if rig_check_uses_linked_local_source(target) {
                 LabCommandContract::explicit_runner(
                     RIG_CHECK_LAB_LABEL,
                     None,
@@ -75,6 +75,9 @@ impl RigArgs {
 }
 
 fn rig_check_uses_linked_local_source(rig_id: &str) -> bool {
+    if std::path::Path::new(rig_id).exists() {
+        return true;
+    }
     rig::read_source_metadata(rig_id).is_some_and(|source| source.linked)
 }
 
@@ -94,8 +97,11 @@ enum RigCommand {
     },
     /// Run a rig's `check` pipeline and report health
     Check {
-        /// Rig ID
-        rig_id: String,
+        /// Rig ID, local package path, or direct rig.json path
+        target: String,
+        /// Select a rig from a local package path containing multiple rigs
+        #[arg(long)]
+        id: Option<String>,
     },
     /// Tear down a rig: stop services and run its `down` pipeline
     Down {
@@ -195,7 +201,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::List => list(),
         RigCommand::Show { rig_id } => show(&rig_id),
         RigCommand::Up { rig_id } => up(&rig_id),
-        RigCommand::Check { rig_id } => check(&rig_id),
+        RigCommand::Check { target, id } => check(&target, id.as_deref()),
         RigCommand::Down { rig_id } => down(&rig_id),
         RigCommand::Repair { rig_id } => repair(&rig_id),
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
@@ -357,8 +363,20 @@ fn up(rig_id: &str) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn check(rig_id: &str) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(rig_id)?;
+fn check(target: &str, id: Option<&str>) -> CmdResult<RigCommandOutput> {
+    let rig = if std::path::Path::new(target).exists() {
+        rig::load_local_source(target, id)?
+    } else {
+        if id.is_some() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "id",
+                "--id is only valid when checking a local package path",
+                id.map(str::to_string),
+                None,
+            ));
+        }
+        rig::load(target)?
+    };
     let report = rig::run_check(&rig)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((

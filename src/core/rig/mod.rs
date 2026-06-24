@@ -92,8 +92,33 @@ pub use workloads::{
 
 use crate::core::error::{Error, Result};
 use crate::core::paths;
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+static LOCAL_PACKAGE_ROOTS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+
+fn remember_local_package_root(id: &str, package_root: &Path) {
+    let roots = LOCAL_PACKAGE_ROOTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut roots) = roots.lock() {
+        roots.insert(id.to_string(), package_root.to_path_buf());
+    }
+}
+
+fn forget_local_package_root(id: &str) {
+    if let Some(roots) = LOCAL_PACKAGE_ROOTS.get() {
+        if let Ok(mut roots) = roots.lock() {
+            roots.remove(id);
+        }
+    }
+}
+
+pub(crate) fn local_package_root(id: &str) -> Option<PathBuf> {
+    LOCAL_PACKAGE_ROOTS
+        .get()
+        .and_then(|roots| roots.lock().ok()?.get(id).cloned())
+}
 
 /// Byte-compare the contents of two files.
 ///
@@ -128,7 +153,68 @@ fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
     apply_trace_workload_defaults(&mut spec)?;
     let declared_id = (!spec.id.is_empty() && spec.id != id).then(|| spec.id.clone());
     spec.id = id.to_string();
+    forget_local_package_root(id);
     Ok((spec, declared_id))
+}
+
+fn read_spec_from_path(path: &Path, id_hint: Option<&str>, package_root: &Path) -> Result<RigSpec> {
+    let value = match install::materialize_rig_spec(path, package_root)? {
+        Some(value) => value,
+        None => {
+            let content = fs::read_to_string(path).map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some(format!("read rig spec {}", path.display())),
+                )
+            })?;
+            serde_json::from_str(&content).map_err(|e| {
+                Error::validation_invalid_json(
+                    e,
+                    Some(format!("parse rig spec {}", path.display())),
+                    Some(content.chars().take(200).collect()),
+                )
+            })?
+        }
+    };
+    let mut spec: RigSpec = serde_json::from_value(value).map_err(|e| {
+        Error::validation_invalid_json(e, Some(format!("parse rig spec {}", path.display())), None)
+    })?;
+    if spec.id.is_empty() {
+        spec.id = id_hint.unwrap_or_default().to_string();
+    }
+    spec.id = crate::core::extension::slugify_id(&spec.id)?;
+    remember_local_package_root(&spec.id, package_root);
+    apply_trace_workload_defaults(&mut spec)?;
+    Ok(spec)
+}
+
+fn local_package_root_for_rig_json(path: &Path) -> PathBuf {
+    let Some(rig_dir) = path.parent() else {
+        return PathBuf::from(".");
+    };
+    if rig_dir
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        == Some("rigs")
+    {
+        return rig_dir
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(rig_dir)
+            .to_path_buf();
+    }
+    rig_dir.to_path_buf()
+}
+
+fn absolute_path(path: &str) -> Result<PathBuf> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .map_err(|e| Error::internal_io(e.to_string(), Some("get current dir".into())))?
+        .join(path))
 }
 
 fn apply_trace_workload_defaults(spec: &mut RigSpec) -> Result<()> {
@@ -209,6 +295,64 @@ fn stale_source_error(id: &str, config_path: &Path) -> Option<Error> {
 /// Load a rig spec by ID from `~/.config/homeboy/rigs/{id}.json`.
 pub fn load(id: &str) -> Result<RigSpec> {
     read_config(id).map(|(spec, _)| spec)
+}
+
+/// Load a rig spec directly from a local package directory or `rig.json` path
+/// without installing it into the global rig registry.
+pub fn load_local_source(source: &str, id: Option<&str>) -> Result<RigSpec> {
+    let path = absolute_path(source)?;
+    if path.is_file() {
+        if path.file_name().and_then(|name| name.to_str()) != Some("rig.json") {
+            return Err(Error::validation_invalid_argument(
+                "source",
+                "Rig check path must point at rig.json or a package directory",
+                Some(source.to_string()),
+                None,
+            ));
+        }
+        let package_root = local_package_root_for_rig_json(&path);
+        let id_hint = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str());
+        return read_spec_from_path(&path, id.or(id_hint), &package_root);
+    }
+    if !path.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!("Path does not exist: {}", path.display()),
+            Some(source.to_string()),
+            None,
+        ));
+    }
+
+    let mut rigs = discover_rigs(&path)?;
+    if let Some(id) = id {
+        let id = crate::core::extension::slugify_id(id)?;
+        rigs.retain(|rig| rig.id == id);
+        if rigs.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "id",
+                format!("Rig '{}' not found in package", id),
+                Some(id),
+                None,
+            ));
+        }
+    } else if rigs.len() != 1 {
+        let available = rigs.iter().map(|rig| rig.id.clone()).collect::<Vec<_>>();
+        return Err(Error::validation_invalid_argument(
+            "id",
+            format!(
+                "Package contains multiple rigs; pass --id <rig>. Available: {}",
+                available.join(", ")
+            ),
+            Some(source.to_string()),
+            Some(available),
+        ));
+    }
+
+    let rig = rigs.remove(0);
+    read_spec_from_path(&rig.rig_path, Some(&rig.id), &path)
 }
 
 /// A loaded rig spec paired with the resolved on-disk package root of its

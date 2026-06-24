@@ -65,6 +65,9 @@ fn empty_outcome() -> PipelineOutcome {
 }
 
 fn package_lint_root(rig: &RigSpec) -> Option<PathBuf> {
+    if let Some(package_root) = super::local_package_root(&rig.id) {
+        return package_root.is_dir().then(|| package_root.clone());
+    }
     let metadata = read_source_metadata(&rig.id)?;
     metadata
         .discovery_path

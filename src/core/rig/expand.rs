@@ -98,6 +98,9 @@ fn normalize_exclusive_resource(resource: String) -> String {
 
 fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {
     if token == "package.root" {
+        if let Some(package_root) = super::local_package_root(&rig.id) {
+            return Some(package_root.to_string_lossy().to_string());
+        }
         return super::install::read_source_metadata(&rig.id).map(|metadata| metadata.package_path);
     }
     if let Some(rest) = token.strip_prefix("components.") {

@@ -1,8 +1,8 @@
 //! Rig install lifecycle tests. Covers `src/core/rig/install.rs`.
 
 use crate::core::rig::{
-    declared_id, discover_rigs, install, list, list_ids, load, read_source_metadata,
-    read_stack_source_metadata, run_check,
+    declared_id, discover_rigs, install, list, list_ids, load, load_local_source,
+    read_source_metadata, read_stack_source_metadata, run_check,
 };
 use crate::test_support::HomeGuard;
 use std::fs;
@@ -203,6 +203,62 @@ fn installed_rig_check_reports_package_lint_failures() {
                 .unwrap_or_default()
                 .contains("conflicted.txt")
     }));
+}
+
+#[test]
+fn local_package_rig_check_loads_without_installing_source() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    fs::write(package.path().join("marker.txt"), "ok\n").expect("marker");
+    write_rig(
+        package.path(),
+        "local-alpha",
+        r#"{
+            "id": "local-alpha",
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "marker exists", "file": "${package.root}/marker.txt" }
+                ]
+            }
+        }"#,
+    );
+
+    let rig = load_local_source(package.path().to_str().unwrap(), Some("local-alpha"))
+        .expect("load local package rig");
+    let report = run_check(&rig).expect("check local package rig");
+
+    assert!(report.success, "local package check should pass");
+    assert!(read_source_metadata("local-alpha").is_none());
+    assert!(load("local-alpha").is_err(), "rig should not be installed");
+}
+
+#[test]
+fn local_direct_rig_json_check_resolves_package_root() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    fs::write(package.path().join("marker.txt"), "ok\n").expect("marker");
+    let rig_path = write_rig(
+        package.path(),
+        "direct-alpha",
+        r#"{
+            "id": "direct-alpha",
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "marker exists", "file": "${package.root}/marker.txt" }
+                ]
+            }
+        }"#,
+    );
+
+    let rig = load_local_source(rig_path.to_str().unwrap(), None).expect("load direct rig json");
+    let report = run_check(&rig).expect("check direct rig json");
+
+    assert!(report.success, "direct rig.json check should pass");
+    assert_eq!(
+        crate::core::rig::expand::expand_vars(&rig, "${package.root}/marker.txt"),
+        package.path().join("marker.txt").to_string_lossy()
+    );
+    assert!(read_source_metadata("direct-alpha").is_none());
 }
 
 #[test]
