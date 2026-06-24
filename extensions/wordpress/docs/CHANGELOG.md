@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.22] - 2026-06-24
+
+### Changed
+- Keep SSI fixture matrix collecting failed validations
+
 ## [3.13.21] - 2026-06-24
 
 ### Changed
