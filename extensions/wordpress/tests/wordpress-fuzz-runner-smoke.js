@@ -504,7 +504,7 @@ const dispatchCli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
-		HOMEBOY_WP_CLI_BIN: fakeCodeboxBin,
+		HOMEBOY_WP_CODEBOX_BIN: fakeCodeboxBin,
 		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
 		HOMEBOY_FUZZ_WORKLOAD_ID: 'dispatch-cli-workload',
 		HOMEBOY_FUZZ_RUN_ID: 'dispatch-cli-run',
