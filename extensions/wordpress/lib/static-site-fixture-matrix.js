@@ -122,11 +122,6 @@ function buildStaticSiteFixtureMatrixRecipe(input = {}) {
 		args: [
 			`command=static-site-importer validate-in-codebox --artifact=${shellToken(artifactPathForFixture(fixture, artifactsDirectory))} --slug=${shellToken(fixture.id)} --name=${shellToken(fixture.label)} --allow-missing-woocommerce`,
 		],
-		metadata: {
-			fixture_id: fixture.id,
-			artifact: artifactPathForFixture(fixture, artifactsDirectory),
-			output: outputPathForFixture(fixture, artifactsDirectory),
-		},
 	}));
 	return {
 		schema: 'wp-codebox/workspace-recipe/v1',
@@ -606,10 +601,6 @@ function visitFixtureDirectory(directory, depth, maxDepth, callback) {
 
 function artifactPathForFixture(fixture, artifactsDirectory) {
 	return path.join(artifactsDirectory, fixture.id, 'artifact.json');
-}
-
-function outputPathForFixture(fixture, artifactsDirectory) {
-	return path.join(artifactsDirectory, fixture.id, 'validation-result.json');
 }
 
 function groupFindings(findings) {

@@ -63,6 +63,7 @@ async function main() {
 		assert.equal(Object.hasOwn(recipe, 'static_site_fixture_matrix'), false);
 		assert.equal(recipe.workflow.steps.length, 2);
 		assert.equal(recipe.workflow.steps[0].command, 'wordpress.wp-cli');
+		assert.equal(Object.hasOwn(recipe.workflow.steps[0], 'metadata'), false);
 		assert.match(recipe.workflow.steps[0].args[0], /command=static-site-importer validate-in-codebox/);
 		assert.match(recipe.workflow.steps[0].args[0], /--artifact=\/artifacts\/matrix\/41-generative-art-studio\/artifact.json/);
 
