@@ -10,6 +10,7 @@ pub mod disk_budget;
 pub mod evidence_report;
 mod lifecycle;
 pub mod records;
+mod run_failure_causes;
 pub mod runs_service;
 pub mod store;
 mod test_findings;
@@ -31,6 +32,7 @@ pub use records::{
     NewTriageItemRecord, RecordedHomeboyFinding, RunEvidenceCommands, RunListFilter, RunRecord,
     RunStatus, TraceRunRecord, TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
 };
+pub use run_failure_causes::{nested_failure_causes_from_run_detail, RunFailureCause};
 pub use store::{
     ObservationDbStatus, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,
     PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV, SOURCE_SNAPSHOT_METADATA_ENV,
