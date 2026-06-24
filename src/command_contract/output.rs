@@ -139,6 +139,37 @@ const fn manifest_command_registry_entry() -> CommandRegistryEntry {
     }
 }
 
+const fn trace_command_registry_entry() -> CommandRegistryEntry {
+    CommandRegistryEntry {
+        output_notes:
+            "runs trace workflows and records observation artifacts unless using read-only subcommands",
+        ..lab_command_registry_entry(
+            "trace",
+            CommandJsonFamily::Quality,
+            "portable Lab offload is available for trace runs",
+        )
+    }
+}
+
+const fn lint_command_registry_entry() -> CommandRegistryEntry {
+    CommandRegistryEntry {
+        output_notes: "runs lint workflows; pass --fix to apply auto-fixable findings in place",
+        ..lab_command_registry_entry(
+            "lint",
+            CommandJsonFamily::Quality,
+            "portable Lab offload is available for changed-scope lint runs",
+        )
+    }
+}
+
+const fn cleanup_command_registry_entry() -> CommandRegistryEntry {
+    CommandRegistryEntry {
+        output_notes:
+            "cleanup subcommands report plans by default and require --apply for removals",
+        ..command_registry_entry("cleanup", CommandJsonFamily::Workspace)
+    }
+}
+
 pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     lab_command_registry_entry(
         "agent-task",
@@ -163,17 +194,9 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
         CommandJsonFamily::Quality,
         "portable Lab offload is available for fuzz runs",
     ),
-    lab_command_registry_entry(
-        "trace",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for trace runs",
-    ),
+    trace_command_registry_entry(),
     command_registry_entry("observe", CommandJsonFamily::Quality),
-    lab_command_registry_entry(
-        "lint",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for changed-scope lint runs",
-    ),
+    lint_command_registry_entry(),
     command_registry_entry("db", CommandJsonFamily::Ops),
     command_registry_entry("deps", CommandJsonFamily::Ops),
     command_registry_entry("ci", CommandJsonFamily::Ops),
@@ -191,7 +214,7 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("docs", CommandJsonFamily::Workspace),
     manifest_command_registry_entry(),
     command_registry_entry("changelog", CommandJsonFamily::Workspace),
-    command_registry_entry("cleanup", CommandJsonFamily::Workspace),
+    cleanup_command_registry_entry(),
     command_registry_entry("git", CommandJsonFamily::Ops),
     command_registry_entry("issues", CommandJsonFamily::Ops),
     command_registry_entry("version", CommandJsonFamily::Workspace),

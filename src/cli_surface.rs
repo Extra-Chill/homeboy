@@ -742,12 +742,14 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.dangerous_flags = vec!["--force", "--upgrade-runner"];
         }
         ["trace"] => {
+            // output_notes is sourced from the authoritative command registry
+            // (trace_command_registry_entry); only the path-specific mutates
+            // flag is set here.
             metadata.mutates = true;
-            metadata.output_notes = "runs trace workflows and records observation artifacts unless using read-only subcommands";
         }
         ["lint"] => {
-            metadata.output_notes =
-                "runs lint workflows; pass --fix to apply auto-fixable findings in place";
+            // output_notes is sourced from the authoritative command registry
+            // (lint_command_registry_entry).
             metadata.dangerous_flags = vec!["--fix", "--force"];
         }
         ["deps", "install"] | ["deps", "update"] | ["deps", "stack", "apply"] => {
@@ -761,9 +763,9 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "commits and pushes prepared CI autofix changes";
         }
         ["cleanup"] => {
+            // output_notes is sourced from the authoritative command registry
+            // (cleanup_command_registry_entry).
             metadata.mutates = true;
-            metadata.output_notes =
-                "cleanup subcommands report plans by default and require --apply for removals";
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["cleanup", "artifacts"] => {
