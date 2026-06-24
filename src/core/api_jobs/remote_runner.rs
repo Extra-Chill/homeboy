@@ -123,7 +123,10 @@ pub(super) struct StoredRemoteRunnerJob {
 }
 
 impl JobStore {
-    pub(crate) fn submit_remote_runner_job(&self, request: RemoteRunnerJobRequest) -> Result<Job> {
+    pub(crate) fn submit_remote_runner_job(
+        &self,
+        mut request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
         if request.runner_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
                 "runner_id",
@@ -140,6 +143,11 @@ impl JobStore {
                 None,
             ));
         }
+        request.secret_env_names = crate::core::runner::runner_exec_secret_env_names(
+            &request.command,
+            None,
+            &request.secret_env_names,
+        );
         crate::core::runner::workload::validate_runner_workload_dispatch(
             request.runner_workload.as_ref(),
             &request.runner_id,

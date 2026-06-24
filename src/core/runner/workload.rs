@@ -89,7 +89,7 @@ pub(crate) fn validate_runner_workload_dispatch(
     };
     validate_runner_workload_dispatch_identity(workload, runner_id, cwd)?;
     validate_runner_workload_mutation_policy(workload, capture_patch)?;
-    validate_runner_workload_required_secrets(workload, secret_env_names)?;
+    validate_runner_workload_required_secrets(workload, command, secret_env_names)?;
     validate_runner_workload_required_capabilities(workload)?;
     validate_runner_workload_command_present(command)?;
     validate_runner_workload_command(workload, command)?;
@@ -140,8 +140,10 @@ fn validate_runner_workload_mutation_policy(
 
 fn validate_runner_workload_required_secrets(
     workload: &RunnerWorkload,
+    command: &[String],
     secret_env_names: &[String],
 ) -> Result<()> {
+    let expected = expected_required_secret_env_names(workload, command);
     for category in &workload.required_secrets.categories {
         if !matches!(category.as_str(), "agent_task" | "trace" | "tunnel") {
             return Err(workload_error(
@@ -150,14 +152,42 @@ fn validate_runner_workload_required_secrets(
             ));
         }
     }
-    if !workload.required_secrets.categories.is_empty() && secret_env_names.is_empty() {
+    let missing = expected
+        .iter()
+        .filter(|name| !secret_env_names.contains(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
         return Err(workload_error(
             "runner_workload.required_secrets",
-            "runner workload requires named secret handoff for declared secret categories"
-                .to_string(),
+            format!(
+                "runner workload secret handoff is missing required env names: {}",
+                missing.join(", ")
+            ),
         ));
     }
     Ok(())
+}
+
+fn expected_required_secret_env_names(
+    workload: &RunnerWorkload,
+    command: &[String],
+) -> Vec<String> {
+    let command = dispatch_workload_command_args(command);
+    let mut names = Vec::new();
+    for category in &workload.required_secrets.categories {
+        match category.as_str() {
+            "agent_task" => {
+                names.extend(super::lab::secrets::declared_agent_task_secret_env(command))
+            }
+            "trace" => names.extend(super::lab::secrets::declared_trace_secret_env(command)),
+            "tunnel" => names.extend(super::lab::secrets::declared_tunnel_secret_env(command)),
+            _ => {}
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn validate_runner_workload_required_capabilities(workload: &RunnerWorkload) -> Result<()> {
@@ -711,10 +741,7 @@ mod tests {
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
-            &[
-                "/srv/homeboy/bin/homeboy".to_string(),
-                "trace".to_string(),
-            ],
+            &["/srv/homeboy/bin/homeboy".to_string(), "trace".to_string()],
             &["HOMEBODY_TRACE_SECRET".to_string()],
             true,
         )
@@ -759,12 +786,122 @@ mod tests {
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "trace".to_string()],
+            &[
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "--secret-env=HOMEBODY_TRACE_SECRET".to_string(),
+            ],
             &[],
             true,
         )
         .expect_err("required secret category without named handoff must fail");
         assert_eq!(err.details["field"], "runner_workload.required_secrets");
+        assert!(err.message.contains("HOMEBODY_TRACE_SECRET"));
+    }
+
+    #[test]
+    fn runner_workload_validation_rejects_wrong_trace_secret_handoff_name() {
+        let workload = workload();
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &[
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "--secret-env=HOMEBODY_TRACE_SECRET".to_string(),
+            ],
+            &["WRONG_SECRET".to_string()],
+            true,
+        )
+        .expect_err("wrong trace secret handoff name must fail");
+        assert_eq!(err.details["field"], "runner_workload.required_secrets");
+        assert!(err.message.contains("HOMEBODY_TRACE_SECRET"));
+    }
+
+    #[test]
+    fn runner_workload_validation_rejects_wrong_agent_task_secret_handoff_name() {
+        let plan = plan();
+        let mut command = command();
+        command.hot_label = "agent-task dispatch";
+        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "dispatch".to_string(),
+                "--secret-env=AGENT_TASK_SECRET".to_string(),
+            ],
+            &["WRONG_SECRET".to_string()],
+            true,
+        )
+        .expect_err("wrong agent-task secret handoff name must fail");
+        assert_eq!(err.details["field"], "runner_workload.required_secrets");
+        assert!(err.message.contains("AGENT_TASK_SECRET"));
+    }
+
+    #[test]
+    fn runner_workload_validation_rejects_missing_tunnel_implicit_secret_handoff_name() {
+        let plan = plan();
+        let mut command = command();
+        command.hot_label = "tunnel preview-client start";
+        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &[
+                "homeboy".to_string(),
+                "tunnel".to_string(),
+                "preview-client".to_string(),
+                "start".to_string(),
+                "--ingress".to_string(),
+                "https://preview-broker.example.test".to_string(),
+                "--public-host".to_string(),
+                "preview.example.test".to_string(),
+                "--local-origin".to_string(),
+                "http://127.0.0.1:8888".to_string(),
+            ],
+            &[],
+            true,
+        )
+        .expect_err("missing implicit tunnel secret handoff name must fail");
+        assert_eq!(err.details["field"], "runner_workload.required_secrets");
+        assert!(err.message.contains("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
     }
 
     #[test]

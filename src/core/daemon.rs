@@ -372,8 +372,8 @@ fn enqueue_exec_job(
     body: Option<serde_json::Value>,
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
-    let request: ExecRequest =
-        serde_json::from_value(body.unwrap_or_else(|| json!({}))).map_err(|err| {
+    let mut request: ExecRequest = serde_json::from_value(body.unwrap_or_else(|| json!({})))
+        .map_err(|err| {
             Error::validation_invalid_argument(
                 "body",
                 format!("invalid exec request body: {err}"),
@@ -381,6 +381,11 @@ fn enqueue_exec_job(
                 None,
             )
         })?;
+    request.secret_env_names = crate::core::runner::runner_exec_secret_env_names(
+        &request.command,
+        None,
+        &request.secret_env_names,
+    );
     crate::core::runner::workload::validate_runner_workload_dispatch(
         request.runner_workload.as_ref(),
         &request.runner_id,

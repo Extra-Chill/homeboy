@@ -682,6 +682,77 @@ mod tests {
     }
 
     #[test]
+    fn remote_runner_job_submit_derives_implicit_command_secret_names() {
+        let store = JobStore::default();
+        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        request.command = vec![
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "preview-client".to_string(),
+            "start".to_string(),
+            "--ingress".to_string(),
+            "https://preview-broker.example.test".to_string(),
+            "--public-host".to_string(),
+            "preview.example.test".to_string(),
+            "--local-origin".to_string(),
+            "http://127.0.0.1:8888".to_string(),
+        ];
+        let plan = crate::core::plan::HomeboyPlan::builder_for_description(
+            crate::core::plan::PlanKind::LabOffload,
+            "test",
+        )
+        .build();
+        let command_contract = crate::core::runner::LabOffloadCommand {
+            hot_label: "tunnel preview-client start",
+            portable: true,
+            unsupported_reason: None,
+            source_path_mode: crate::core::runner::LabOffloadSourcePathMode::CwdOrPathFlag,
+            workspace_mode_policy:
+                crate::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            required_extensions: Vec::new(),
+            requires_playwright: false,
+            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
+        };
+        request.runner_workload = Some(crate::core::runner::workload::build_runner_workload(
+            crate::core::runner::workload::RunnerWorkloadBuildInput {
+                plan: &plan,
+                command: &command_contract,
+                capture_patch: request.capture_patch,
+                mutation_flag: None,
+                allow_dirty_lab_workspace: false,
+                runner_id: "homeboy-lab",
+                runner_mode: "reverse_broker",
+                assignment_source: "broker",
+                status: "queued",
+                remote_workspace: request.cwd.as_deref(),
+                fallback_reason: None,
+                workspace_mapping_ref: None,
+                proof_id: None,
+            },
+        ));
+
+        let job = store
+            .submit_remote_runner_job(request)
+            .expect("remote runner job derives implicit secret names before validation");
+
+        let inner = store.inner.lock().expect("job store mutex poisoned");
+        let stored = inner.jobs.get(&job.id).expect("job stored");
+        let remote_runner = stored.remote_runner.as_ref().expect("remote runner job");
+        assert_eq!(
+            remote_runner.request.secret_env_names,
+            vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]
+        );
+        assert_eq!(
+            remote_runner
+                .execution_request
+                .as_ref()
+                .expect("execution request")
+                .secret_env_names,
+            vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]
+        );
+    }
+
+    #[test]
     fn remote_runner_job_claim_returns_oldest_matching_job() {
         let store = JobStore::default();
         let other = store

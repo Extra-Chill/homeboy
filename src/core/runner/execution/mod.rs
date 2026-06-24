@@ -66,6 +66,7 @@ pub(crate) use daemon_api::{canonical_daemon_body, daemon_api_get};
 pub(crate) use failure::runner_exec_failure_context_from_output;
 pub(crate) use handoff::lab_offload_handoff_hints;
 pub(crate) use process::{execute_runner_process_until_cancelled, prepare_daemon_local_process};
+pub(crate) use secrets::runner_exec_secret_env_names;
 pub(crate) use worker::exec_worker_local_until_cancelled;
 
 // Public surface re-exported by the parent `runner` module. These mirror the

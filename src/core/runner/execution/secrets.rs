@@ -316,7 +316,7 @@ pub(super) fn resolve_controller_secret_env_for_command(
     Ok(resolved)
 }
 
-pub(super) fn runner_exec_secret_env_names(
+pub(crate) fn runner_exec_secret_env_names(
     command: &[String],
     preflight: Option<&RunnerCapabilityPreflight>,
     explicit_names: &[String],

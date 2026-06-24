@@ -233,6 +233,109 @@ fn runner_exec_secret_env_names_include_tunnel_preview_client_token() {
 }
 
 #[test]
+fn worker_local_workload_validation_uses_implicit_command_secret_names() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        super::super::super::create(
+            &serde_json::json!({
+                "id": "lab-local",
+                "kind": "local",
+                "workspace_root": workspace.display().to_string(),
+            })
+            .to_string(),
+            false,
+        )
+        .expect("create local runner");
+
+        let plan = crate::core::plan::HomeboyPlan::builder_for_description(
+            crate::core::plan::PlanKind::LabOffload,
+            "test",
+        )
+        .build();
+        let command_contract = crate::core::runner::LabOffloadCommand {
+            hot_label: "tunnel preview-client start",
+            portable: true,
+            unsupported_reason: None,
+            source_path_mode: crate::core::runner::LabOffloadSourcePathMode::CwdOrPathFlag,
+            workspace_mode_policy:
+                crate::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            required_extensions: Vec::new(),
+            requires_playwright: false,
+            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
+        };
+        let workload = crate::core::runner::workload::build_runner_workload(
+            crate::core::runner::workload::RunnerWorkloadBuildInput {
+                plan: &plan,
+                command: &command_contract,
+                capture_patch: false,
+                mutation_flag: None,
+                allow_dirty_lab_workspace: false,
+                runner_id: "lab-local",
+                runner_mode: "worker_local",
+                assignment_source: "worker",
+                status: "claimed",
+                remote_workspace: Some(&workspace.display().to_string()),
+                fallback_reason: None,
+                workspace_mapping_ref: None,
+                proof_id: None,
+            },
+        );
+
+        let command = vec![
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "preview-client".to_string(),
+            "start".to_string(),
+            "--ingress".to_string(),
+            "https://preview-broker.example.test".to_string(),
+            "--public-host".to_string(),
+            "preview.example.test".to_string(),
+            "--local-origin".to_string(),
+            "http://127.0.0.1:8888".to_string(),
+        ];
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
+            "dummy-token".to_string(),
+        );
+
+        let (_output, exit_code) = super::super::worker::exec_worker_local_with_process_output(
+            "lab-local",
+            RunnerExecOptions {
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command,
+                env,
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: Vec::new(),
+                runner_workload: Some(workload),
+                detach_after_handoff: false,
+            },
+            |_plan| {
+                Ok(ProcessOutput {
+                    stdout: "ok".to_string(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    metrics: None,
+                    capture: None,
+                })
+            },
+        )
+        .expect("worker-local validation accepts implicit command secret names");
+
+        assert_eq!(exit_code, 0);
+    });
+}
+
+#[test]
 fn test_exec_runs_local_runner_command() {
     crate::test_support::with_isolated_home(|_| {
         super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
