@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.3] - 2026-06-24
+
+### Changed
+- Tighten Codebox public adapter boundary
+
 ## [3.13.2] - 2026-06-24
 
 ### Changed
