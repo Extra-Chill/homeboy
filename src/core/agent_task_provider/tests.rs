@@ -320,6 +320,7 @@ fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
             ],
         },
         apply_back: AgentTaskRuntimeApplyBack::default(),
+        staging: AgentTaskRuntimeStagingContract::default(),
     };
 
     let outcome = run_provider_command(&request, &provider);
@@ -2519,4 +2520,74 @@ fn provider_exhausts_bounded_transient_retries() {
         "exhaustion should be surfaced as a diagnostic"
     );
     let _ = fs::remove_file(&state_path);
+}
+
+fn plugin_component_contract(
+    slug: &str,
+    path: &std::path::Path,
+) -> crate::core::agent_task::AgentTaskComponentContract {
+    crate::core::agent_task::AgentTaskComponentContract {
+        slug: Some(slug.to_string()),
+        path: Some(path.display().to_string()),
+        load_as: Some("plugin".to_string()),
+        activate: Some(true),
+        extra: Default::default(),
+    }
+}
+
+fn staging_provider() -> AgentTaskExecutorProvider {
+    let (_, mut provider) = request("staging", "noop".to_string());
+    provider.runtime_contract.staging = AgentTaskRuntimeStagingContract {
+        reconciled_packages: vec![AgentTaskRuntimeReconciledPackage {
+            name: "acme/runtime-lib".to_string(),
+            owner: Some("wordpress-7.0".to_string()),
+            ..AgentTaskRuntimeReconciledPackage::default()
+        }],
+        ..AgentTaskRuntimeStagingContract::default()
+    };
+    provider
+}
+
+fn staging_plan(component: crate::core::agent_task::AgentTaskComponentContract) -> AgentTaskPlan {
+    let (mut req, _) = request("staging", "noop".to_string());
+    req.component_contracts = vec![component];
+    AgentTaskPlan::new("plan-staging".to_string(), vec![req])
+}
+
+#[test]
+fn plan_reconciliation_passes_when_no_staged_plugin_shadows_runtime() {
+    let plugin = tempfile::tempdir().expect("plugin dir");
+    let plan = staging_plan(plugin_component_contract("provider-plugin", plugin.path()));
+
+    reconcile_staged_runtime_for_plan_with_providers(&plan, &[staging_provider()])
+        .expect("clean staged plugin reconciles before dispatch");
+}
+
+#[test]
+fn plan_reconciliation_refuses_shadowed_runtime_package_before_dispatch() {
+    let plugin = tempfile::tempdir().expect("plugin dir");
+    fs::create_dir_all(plugin.path().join("vendor/acme/runtime-lib"))
+        .expect("create vendored runtime dir");
+    let plan = staging_plan(plugin_component_contract("provider-plugin", plugin.path()));
+
+    let err = reconcile_staged_runtime_for_plan_with_providers(&plan, &[staging_provider()])
+        .expect_err("shadowed runtime package is refused before dispatch");
+
+    assert_eq!(err.details["field"], "staged_plugin");
+    assert!(err.message.contains("acme/runtime-lib"));
+    assert!(err.message.contains("wordpress-7.0"));
+    assert!(err.message.contains("provider-plugin"));
+}
+
+#[test]
+fn plan_reconciliation_skips_provider_without_staging_contract() {
+    let plugin = tempfile::tempdir().expect("plugin dir");
+    fs::create_dir_all(plugin.path().join("vendor/acme/runtime-lib"))
+        .expect("create vendored runtime dir");
+    let plan = staging_plan(plugin_component_contract("provider-plugin", plugin.path()));
+    // Default provider has an empty staging contract: nothing to reconcile.
+    let (_, provider) = request("staging", "noop".to_string());
+
+    reconcile_staged_runtime_for_plan_with_providers(&plan, &[provider])
+        .expect("provider without a staging contract is a no-op");
 }
