@@ -552,7 +552,12 @@ mod tests {
                             {"name": "runtime_schedule_once", "kind": "function"}
                         ]
                     }
-                ]
+                ],
+                "source_scan": {
+                    "entry_file_extensions": ["php"],
+                    "require_keywords": ["require_once", "require", "include_once", "include"],
+                    "guard_markers": ["class_exists", "function_exists", "defined"]
+                }
             }
         }))
         .unwrap()
