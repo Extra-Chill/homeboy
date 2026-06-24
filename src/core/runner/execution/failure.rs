@@ -45,24 +45,30 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
         details["failure_context"] = serde_json::to_value(failure_context).unwrap_or(Value::Null);
     }
 
-    Some(
-        Error::new(
-            ErrorCode::RemoteCommandFailed,
-            format!(
-                "Runner command failed on `{}` with exit code {}: {}",
-                output.runner_id, output.exit_code, cause
-            ),
-            details,
-        )
-        .with_hint(format!(
-            "Runner `{}` executed `{}` from `{}`.", output.runner_id, command, output.remote_cwd
-        ))
-        .with_hint(runner_exec_failure_context_hint(output))
-        .with_hint(
-            "Homeboy parsed runner-side JSON errors from stdout, stderr, and job event messages when present; inspect error.details.execution for the full job evidence."
-                .to_string(),
+    let mut error = Error::new(
+        ErrorCode::RemoteCommandFailed,
+        format!(
+            "Runner command failed on `{}` with exit code {}: {}",
+            output.runner_id, output.exit_code, cause
         ),
+        details,
     )
+    .with_hint(format!(
+        "Runner `{}` executed `{}` from `{}`.",
+        output.runner_id, command, output.remote_cwd
+    ))
+    .with_hint(runner_exec_failure_context_hint(output))
+    .with_hint(
+        "Homeboy parsed runner-side JSON errors from stdout, stderr, and job event messages when present; inspect error.details.execution for the full job evidence."
+            .to_string(),
+    );
+    if let Some(failure_context) = failure_context.as_ref() {
+        if let Some(hint) = runner_exec_failure_context_remediation_hint(failure_context) {
+            error = error.with_hint(hint);
+        }
+    }
+
+    Some(error)
 }
 
 pub(super) fn string_field(value: &Value, key: &str) -> String {
@@ -114,6 +120,10 @@ pub(super) fn runner_exec_failure_context(
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let error_details = runner_error
+        .as_ref()
+        .and_then(|error| error.get("details"))
+        .cloned();
     let reason = error_message
         .clone()
         .or_else(|| error_code.clone())
@@ -132,6 +142,7 @@ pub(super) fn runner_exec_failure_context(
         reason,
         error_code,
         error_message,
+        error_details,
     })
 }
 
@@ -139,20 +150,46 @@ pub(super) fn runner_exec_failure_context_hint(output: &RunnerExecOutput) -> Str
     let Some(context) = runner_exec_failure_context_from_output(output) else {
         return "Canonical failed command context was unavailable; inspect error.details.execution for raw runner evidence.".to_string();
     };
-    let field = context
-        .contract_field
-        .as_deref()
-        .unwrap_or("unknown contract field");
     let job = context.job_id.as_deref().unwrap_or("unknown runner job");
     let run = context
         .persisted_run_id
         .as_deref()
         .unwrap_or("unknown persisted run");
-    format!(
-        "Canonical failed command: `{}`; runner job: `{job}`; persisted run: `{run}`; contract field: `{field}`; reason: {}.",
-        redact_argv_display(&context.command),
-        context.reason
-    )
+    let mut hint = format!(
+        "Canonical failed command: `{}`; runner job: `{job}`; persisted run: `{run}`",
+        redact_argv_display(&context.command)
+    );
+    append_failure_context_error_summary(&mut hint, &context);
+    hint.push('.');
+    hint
+}
+
+pub(crate) fn append_failure_context_error_summary(
+    summary: &mut String,
+    context: &RunnerExecFailureContext,
+) {
+    if let Some(field) = context.contract_field.as_deref() {
+        summary.push_str(&format!("; contract field: `{field}`"));
+    }
+    if let Some(code) = context.error_code.as_deref() {
+        summary.push_str(&format!("; structured error: `{code}`"));
+    }
+    if let Some(details) = context.error_details.as_ref() {
+        summary.push_str(&format!("; details: {details}"));
+    }
+    summary.push_str(&format!("; reason: {}", context.reason));
+}
+
+pub(crate) fn runner_exec_failure_context_remediation_hint(
+    context: &RunnerExecFailureContext,
+) -> Option<String> {
+    match context.error_code.as_deref() {
+        Some("rig.not_found") => Some(format!(
+            "Verify the rig exists on runner `{}` with `homeboy runner exec {} -- homeboy rig list`, then rerun with an existing rig or register/sync the missing rig on that runner.",
+            context.runner_id, context.runner_id
+        )),
+        _ => None,
+    }
 }
 
 pub(super) fn error_contract_field(error: &Value) -> Option<&str> {

@@ -101,8 +101,53 @@ fn lab_offload_failure_summary_uses_runner_failure_context() {
     assert!(stderr.contains("command `homeboy test`"));
     assert!(stderr.contains("runner job `job-123`"));
     assert!(stderr.contains("persisted run `runner-exec-lab-default-job-123`"));
-    assert!(stderr.contains("contract field `cwd`"));
+    assert!(stderr.contains("contract field: `cwd`"));
     assert!(stderr.contains("Missing required field: cwd"));
+}
+
+#[test]
+fn lab_offload_failure_summary_keeps_rig_not_found_without_contract_field() {
+    let exec_output = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "lab-default".to_string(),
+        dry_run: false,
+        mode: RunnerExecMode::Daemon,
+        argv: vec![
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "up".to_string(),
+            "missing".to_string(),
+        ],
+        remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: r#"{"success":false,"error":{"code":"rig.not_found","message":"Rig not found","details":{"rig":"missing"}}}"#.to_string(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: Some("job-123".to_string()),
+        job_events: None,
+        mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        metrics: None,
+        capture: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    };
+    let mut stderr = String::new();
+
+    append_runner_failure_context_summary(&mut stderr, &exec_output);
+
+    assert!(stderr.contains("structured error: `rig.not_found`"));
+    assert!(stderr.contains("reason: Rig not found"));
+    assert!(stderr.contains("details: {\"rig\":\"missing\"}"));
+    assert!(stderr.contains("homeboy runner exec lab-default -- homeboy rig list"));
+    assert!(!stderr.contains("unknown contract field"));
+    assert!(!stderr.contains("contract field"));
 }
 
 #[test]

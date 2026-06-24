@@ -63,7 +63,10 @@ use secrets::*;
 // lab_env, lab/offload) and re-exported by the parent `runner` module.
 pub(crate) use daemon::result_event_data;
 pub(crate) use daemon_api::{canonical_daemon_body, daemon_api_get};
-pub(crate) use failure::runner_exec_failure_context_from_output;
+pub(crate) use failure::{
+    append_failure_context_error_summary, runner_exec_failure_context_from_output,
+    runner_exec_failure_context_remediation_hint,
+};
 pub(crate) use handoff::lab_offload_handoff_hints;
 pub(crate) use process::{execute_runner_process_until_cancelled, prepare_daemon_local_process};
 pub(crate) use secrets::runner_exec_secret_env_names;
@@ -162,6 +165,8 @@ pub struct RunnerExecFailureContext {
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_details: Option<Value>,
 }
 
 pub(super) struct RunnerExecFailureContextInput<'a> {
