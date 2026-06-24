@@ -453,6 +453,380 @@ pub(super) fn validate_artifact_graph_edges(spec: &AgentTaskRepoLoopSpec) -> Res
     ))
 }
 
+/// Schema emitted by [`compile_executable_plan_from_spec`].
+///
+/// Distinct from the `homeboy/controller-spec-plan/v1` projection produced by
+/// [`controller_spec_homeboy_plan`]: the controller-spec plan flattens queued
+/// controller actions for dry-run inspection, whereas this schema is the
+/// executable agent-task plan whose stages and inter-stage dependencies are
+/// derived from the loop controller spec as the single source of truth.
+pub(crate) const EXECUTABLE_PLAN_FROM_SPEC_SCHEMA: &str = "homeboy/agent-task-plan-from-spec/v1";
+
+/// Artifact `kind` suffix that marks an artifact as a Homeboy-owned runtime
+/// artifact (e.g. `static_validation_run`). Runtime artifacts are synthesized
+/// by a Homeboy runtime stage rather than authored/emitted by a repo workflow,
+/// so downstream specs can reference them without hard-coding Homeboy/Codebox
+/// internals.
+pub(crate) const HOMEBOY_RUNTIME_ARTIFACT_KIND_SUFFIX: &str = "_run";
+
+/// Stage `kind` used for the synthetic Homeboy runtime stage that produces a
+/// Homeboy-owned runtime artifact in the executable plan.
+pub(crate) const HOMEBOY_RUNTIME_STAGE_KIND: &str = "homeboy_runtime_artifact";
+
+/// True when an artifact is a Homeboy-owned runtime artifact: either its `kind`
+/// carries the runtime suffix, or no declared workflow produces it while at
+/// least one workflow consumes it (so the producer must be a Homeboy runtime,
+/// not a repo workflow). Keeping this derivation generic lets repos reference
+/// runtime artifacts like `static_validation_run` without WPSG embedding
+/// Homeboy-owned producers in its own spec.
+pub(crate) fn is_homeboy_runtime_artifact(
+    spec: &AgentTaskRepoLoopSpec,
+    artifact: &AgentTaskRepoLoopSpecArtifact,
+) -> bool {
+    if artifact
+        .kind
+        .ends_with(HOMEBOY_RUNTIME_ARTIFACT_KIND_SUFFIX)
+    {
+        return true;
+    }
+    let produced_by_workflow = spec.workflows.iter().any(|workflow| {
+        workflow.artifacts.contains(&artifact.artifact_id)
+            || workflow.emits.contains(&artifact.artifact_id)
+            || spec.artifact_graph.iter().any(|edge| {
+                edge.artifact_id == artifact.artifact_id
+                    && edge.from_workflow_id == workflow.workflow_id
+            })
+    });
+    if produced_by_workflow {
+        return false;
+    }
+    let consumed_by_workflow = spec.workflows.iter().any(|workflow| {
+        workflow.consumes.contains(&artifact.artifact_id)
+            || workflow.dependencies.contains(&artifact.artifact_id)
+            || spec.artifact_graph.iter().any(|edge| {
+                edge.artifact_id == artifact.artifact_id
+                    && edge.to_workflow_id == workflow.workflow_id
+            })
+    });
+    consumed_by_workflow
+}
+
+/// Collect the Homeboy-owned runtime artifacts a spec depends on, in declared order.
+pub(crate) fn homeboy_runtime_artifacts(
+    spec: &AgentTaskRepoLoopSpec,
+) -> Vec<&AgentTaskRepoLoopSpecArtifact> {
+    spec.artifacts
+        .iter()
+        .filter(|artifact| is_homeboy_runtime_artifact(spec, artifact))
+        .collect()
+}
+
+/// Validate that the spec's executable task bindings (`consumes`/`emits` and
+/// `dependencies` that reference artifacts) are backed by declared
+/// `artifact_flow` edges, so the executable plan can consume the controller
+/// spec as the single source of truth without inferring undeclared data flow.
+///
+/// Surfaces every binding violation at once as structured diagnostics rather
+/// than failing on the first mismatch, so a repo author can fix the spec in one
+/// pass. Homeboy-owned runtime artifacts are exempt from requiring a producer
+/// workflow edge because their producer is a Homeboy runtime stage, not a repo
+/// workflow.
+pub(crate) fn validate_artifact_flow_bindings(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
+    let mut diagnostics = Vec::new();
+    for workflow in &spec.workflows {
+        let mut consumed: Vec<&String> = workflow.consumes.iter().collect();
+        for dependency in &workflow.dependencies {
+            if spec
+                .artifacts
+                .iter()
+                .any(|artifact| &artifact.artifact_id == dependency)
+                && !consumed.contains(&dependency)
+            {
+                consumed.push(dependency);
+            }
+        }
+        for artifact_id in consumed {
+            let runtime_owned = spec
+                .artifacts
+                .iter()
+                .find(|artifact| &artifact.artifact_id == artifact_id)
+                .map(|artifact| is_homeboy_runtime_artifact(spec, artifact))
+                .unwrap_or(false);
+            if runtime_owned {
+                // Producer is a Homeboy runtime stage; no repo workflow edge required.
+                continue;
+            }
+            let has_flow_edge = spec.artifact_graph.iter().any(|edge| {
+                &edge.artifact_id == artifact_id && edge.to_workflow_id == workflow.workflow_id
+            });
+            let has_repo_producer = spec.workflows.iter().any(|producer| {
+                producer.workflow_id != workflow.workflow_id
+                    && (producer.artifacts.contains(artifact_id)
+                        || producer.emits.contains(artifact_id))
+            });
+            if !has_flow_edge && !has_repo_producer {
+                diagnostics.push(format!(
+                    "workflow '{}' consumes artifact '{}' but no artifact_flow edge or producing workflow declares it; add an artifact_graph edge or declare the artifact as a Homeboy-owned runtime artifact",
+                    workflow.workflow_id, artifact_id
+                ));
+            }
+        }
+        for artifact_id in &workflow.emits {
+            let declared = spec
+                .artifacts
+                .iter()
+                .any(|artifact| &artifact.artifact_id == artifact_id);
+            if !declared {
+                diagnostics.push(format!(
+                    "workflow '{}' emits undeclared artifact '{}'",
+                    workflow.workflow_id, artifact_id
+                ));
+            }
+        }
+    }
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "artifact_flow",
+        "repo loop spec task bindings must be backed by declared artifact_flow edges or producing workflows",
+        Some(spec.loop_id.clone()),
+        Some(diagnostics),
+    ))
+}
+
+/// Compile a loop controller spec into an executable agent-task plan whose
+/// stages and inter-stage dependencies are derived from the spec.
+///
+/// This is the from-spec compiler primitive (#5101): the executable plan builder
+/// consumes the controller spec as the single source of truth instead of being
+/// authored separately. Each workflow becomes one executable stage; stage
+/// dependencies (`needs`) are derived from `artifact_flow` (artifact_graph)
+/// edges plus `consumes`/`emits` bindings. Homeboy-owned runtime artifacts (e.g.
+/// `static_validation_run`) are represented as synthetic runtime stages that the
+/// consuming workflow stages depend on, so the data flow is complete without the
+/// repo declaring Homeboy internals.
+///
+/// Validation (`validate_loop_spec` + `validate_artifact_flow_bindings`) runs
+/// first; binding violations are surfaced as structured errors.
+pub(crate) fn compile_executable_plan_from_spec(
+    spec: &AgentTaskRepoLoopSpec,
+) -> Result<HomeboyPlan> {
+    validate_loop_spec(spec)?;
+    validate_artifact_flow_bindings(spec)?;
+
+    let spec_fingerprint = repo_loop_spec_fingerprint(spec)?;
+    let mut plan = HomeboyPlan::for_description(
+        PlanKind::AgentTask,
+        format!("executable plan from loop spec {}", spec.loop_id),
+    );
+    plan.id = format!("plan-from-spec.{}", spec.loop_id);
+    plan.mode = Some("plan".to_string());
+    plan.inputs.insert(
+        "schema".to_string(),
+        Value::String(EXECUTABLE_PLAN_FROM_SPEC_SCHEMA.to_string()),
+    );
+    plan.inputs
+        .insert("loop_id".to_string(), Value::String(spec.loop_id.clone()));
+    plan.inputs.insert(
+        "spec_fingerprint".to_string(),
+        Value::String(spec_fingerprint),
+    );
+    plan.inputs.insert(
+        "declarations".to_string(),
+        controller_spec_declarations(spec)?,
+    );
+
+    // Synthetic Homeboy-owned runtime stages: one per runtime artifact, emitting
+    // the artifact so consuming workflow stages can declare a dependency on a
+    // concrete producer stage instead of hard-coding Homeboy internals.
+    let runtime_artifacts = homeboy_runtime_artifacts(spec);
+    let runtime_stage_id = |artifact_id: &str| -> String { format!("runtime:{artifact_id}") };
+    for artifact in &runtime_artifacts {
+        let mut data = HashMap::new();
+        data.insert("kind".to_string(), Value::String(artifact.kind.clone()));
+        data.insert("required".to_string(), Value::Bool(artifact.required));
+        data.insert(
+            "owner".to_string(),
+            Value::String("homeboy_runtime".to_string()),
+        );
+        if let Some(description) = &artifact.description {
+            data.insert(
+                "description".to_string(),
+                Value::String(description.clone()),
+            );
+        }
+        plan.artifacts.push(PlanArtifact {
+            id: artifact.artifact_id.clone(),
+            path: None,
+            artifact_type: Some(artifact.kind.clone()),
+            data,
+        });
+        plan.steps.push(PlanStep {
+            id: runtime_stage_id(&artifact.artifact_id),
+            kind: HOMEBOY_RUNTIME_STAGE_KIND.to_string(),
+            label: Some(artifact.artifact_id.clone()),
+            blocking: artifact.required,
+            scope: Vec::new(),
+            needs: Vec::new(),
+            needs_kind: PlanStepDependencyKind::Execution,
+            status: PlanStepStatus::Ready,
+            inputs: HashMap::from([(
+                "runtime_artifact".to_string(),
+                serde_json::json!({
+                    "artifact_id": artifact.artifact_id,
+                    "kind": artifact.kind,
+                    "required": artifact.required,
+                    "owner": "homeboy_runtime",
+                }),
+            )]),
+            outputs: HashMap::from([(
+                "emits".to_string(),
+                Value::Array(vec![Value::String(artifact.artifact_id.clone())]),
+            )]),
+            skip_reason: None,
+            policy: HashMap::new(),
+            missing: Vec::new(),
+        });
+    }
+
+    // One executable stage per workflow; dependencies derived from artifact flow.
+    for workflow in &spec.workflows {
+        let needs = executable_stage_dependencies(spec, workflow, &runtime_artifacts);
+        plan.steps.push(PlanStep {
+            id: format!("stage:{}", workflow.workflow_id),
+            kind: "agent_task_dispatch".to_string(),
+            label: Some(workflow.workflow_id.clone()),
+            blocking: true,
+            scope: workflow_fan_out_entity_ids(workflow)?,
+            needs,
+            needs_kind: PlanStepDependencyKind::Execution,
+            status: PlanStepStatus::Ready,
+            inputs: HashMap::from([
+                (
+                    "workflow".to_string(),
+                    workflow_declaration_context(spec, workflow)?,
+                ),
+                (
+                    "plan".to_string(),
+                    serde_json::to_value(workflow_homeboy_plan(spec, workflow)?)
+                        .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                ),
+            ]),
+            outputs: HashMap::from([(
+                "emits".to_string(),
+                Value::Array(
+                    workflow_emitted_artifacts(workflow)
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            )]),
+            skip_reason: None,
+            policy: HashMap::new(),
+            missing: Vec::new(),
+        });
+    }
+
+    plan.summary = Some(crate::core::plan::PlanSummary::from_steps(&plan.steps));
+    Ok(plan)
+}
+
+/// Artifacts a workflow produces (`artifacts` + `emits` + outbound flow edges).
+fn workflow_emitted_artifacts(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Vec<String> {
+    let mut emitted = workflow.artifacts.clone();
+    for artifact_id in &workflow.emits {
+        if !emitted.contains(artifact_id) {
+            emitted.push(artifact_id.clone());
+        }
+    }
+    emitted
+}
+
+/// Derive the executable stage dependencies (`needs`) for a workflow from the
+/// artifact flow: every consumed artifact resolves to the stage that produces
+/// it — either the producing workflow stage or the synthetic Homeboy runtime
+/// stage for a Homeboy-owned runtime artifact. Explicit workflow-id
+/// dependencies are preserved as stage dependencies as well.
+fn executable_stage_dependencies(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+    runtime_artifacts: &[&AgentTaskRepoLoopSpecArtifact],
+) -> Vec<String> {
+    let mut needs: Vec<String> = Vec::new();
+    fn push_unique(needs: &mut Vec<String>, value: String) {
+        if !needs.contains(&value) {
+            needs.push(value);
+        }
+    }
+
+    // Consumed artifacts: map each to its producing stage.
+    let mut consumed: Vec<String> = workflow.consumes.clone();
+    for dependency in &workflow.dependencies {
+        if spec
+            .artifacts
+            .iter()
+            .any(|artifact| &artifact.artifact_id == dependency)
+            && !consumed.contains(dependency)
+        {
+            consumed.push(dependency.clone());
+        }
+    }
+    for edge in spec
+        .artifact_graph
+        .iter()
+        .filter(|edge| edge.to_workflow_id == workflow.workflow_id)
+    {
+        if !consumed.contains(&edge.artifact_id) {
+            consumed.push(edge.artifact_id.clone());
+        }
+    }
+
+    for artifact_id in &consumed {
+        if runtime_artifacts
+            .iter()
+            .any(|artifact| &artifact.artifact_id == artifact_id)
+        {
+            push_unique(&mut needs, format!("runtime:{artifact_id}"));
+            continue;
+        }
+        // Prefer the explicit flow edge producer; otherwise any producing workflow.
+        let producer = spec
+            .artifact_graph
+            .iter()
+            .find(|edge| {
+                &edge.artifact_id == artifact_id && edge.to_workflow_id == workflow.workflow_id
+            })
+            .map(|edge| edge.from_workflow_id.clone())
+            .or_else(|| {
+                spec.workflows
+                    .iter()
+                    .find(|producer| {
+                        producer.workflow_id != workflow.workflow_id
+                            && (producer.artifacts.contains(artifact_id)
+                                || producer.emits.contains(artifact_id))
+                    })
+                    .map(|producer| producer.workflow_id.clone())
+            });
+        if let Some(producer) = producer {
+            push_unique(&mut needs, format!("stage:{producer}"));
+        }
+    }
+
+    // Explicit workflow-id dependencies become stage dependencies.
+    for dependency in &workflow.dependencies {
+        if spec
+            .workflows
+            .iter()
+            .any(|candidate| &candidate.workflow_id == dependency)
+        {
+            push_unique(&mut needs, format!("stage:{dependency}"));
+        }
+    }
+
+    needs
+}
+
 pub(super) fn validate_declared_ids<T, F>(
     field: String,
     requested: &[String],

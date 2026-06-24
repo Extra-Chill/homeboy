@@ -86,6 +86,24 @@ pub struct ControllerPlanReport {
     pub run_command: Option<String>,
 }
 
+/// Typed report returned by `compile_plan_from_spec`.
+///
+/// Carries the executable agent-task plan derived from a loop controller spec
+/// (#5101): stages and inter-stage dependencies are compiled from the spec's
+/// workflows and `artifact_flow` edges, and Homeboy-owned runtime artifacts are
+/// surfaced as synthetic runtime stages so downstream callers do not hard-code
+/// Homeboy internals.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerExecutablePlanReport {
+    pub schema: &'static str,
+    pub loop_id: String,
+    pub spec_fingerprint: String,
+    /// Homeboy-owned runtime artifact ids the plan synthesizes (e.g. `static_validation_run`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_artifacts: Vec<String>,
+    pub plan: HomeboyPlan,
+}
+
 /// Typed report returned by `run_next` and `run_action`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ControllerActionReport {
