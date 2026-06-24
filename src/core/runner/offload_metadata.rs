@@ -187,9 +187,10 @@ mod tests {
         LAB_OFFLOAD_METADATA_SCHEMA,
     };
     use crate::command_contract::{
-        RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCommandFamily, RunnerWorkloadKind,
-        RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
-        RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
+        RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCommandFamily,
+        RunnerWorkloadExtensionRevision, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
+        RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
+        RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
     };
     use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
     use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
@@ -360,6 +361,10 @@ mod tests {
                 categories: Vec::new(),
             },
             required_extensions: vec!["browser".to_string()],
+            required_extension_revisions: vec![RunnerWorkloadExtensionRevision {
+                extension_id: "browser".to_string(),
+                source_revision: "abc1234".to_string(),
+            }],
             mutation_policy: RunnerWorkloadMutationPolicy {
                 capture_patch: false,
                 mutation_flag: None,
@@ -413,6 +418,14 @@ mod tests {
         assert_eq!(
             metadata["runner_workload"]["required_extensions"][0],
             "browser"
+        );
+        assert_eq!(
+            metadata["runner_workload"]["required_extension_revisions"][0]["extension_id"],
+            "browser"
+        );
+        assert_eq!(
+            metadata["runner_workload"]["required_extension_revisions"][0]["source_revision"],
+            "abc1234"
         );
     }
 

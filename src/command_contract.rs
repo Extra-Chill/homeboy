@@ -27,9 +27,10 @@ pub use lab::{
     LabLocalExecutionPolicy, LabLocalHotPolicy, LabRoutingPolicy, LabRunnerSupportSummary,
     LabSelectedRunnerFallbackPolicy, LabSourcePathMode, LabWorkspaceModePolicy, RunnerWorkload,
     RunnerWorkloadArtifactRef, RunnerWorkloadAssignment, RunnerWorkloadCapability,
-    RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
-    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
-    RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS, RUNNER_WORKLOAD_SCHEMA,
+    RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision, RunnerWorkloadKind,
+    RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
+    RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS,
+    RUNNER_WORKLOAD_SCHEMA,
 };
 pub(crate) use lab::{
     AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_LAB_LABEL, LAB_NO_EXTRA_TOOLS, LINT_LAB_LABEL,

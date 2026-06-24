@@ -123,10 +123,18 @@ pub struct RunnerWorkload {
     pub required_capabilities: Vec<RunnerWorkloadCapability>,
     pub required_secrets: RunnerWorkloadSecrets,
     pub required_extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_extension_revisions: Vec<RunnerWorkloadExtensionRevision>,
     pub mutation_policy: RunnerWorkloadMutationPolicy,
     pub assignment: RunnerWorkloadAssignment,
     pub state: RunnerWorkloadState,
     pub result_refs: RunnerWorkloadResultRefs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadExtensionRevision {
+    pub extension_id: String,
+    pub source_revision: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
