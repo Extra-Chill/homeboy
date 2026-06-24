@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.24] - 2026-06-24
+
+### Changed
+- Collect SSI fixture results from Codebox executions
+
 ## [3.13.23] - 2026-06-24
 
 ### Changed
