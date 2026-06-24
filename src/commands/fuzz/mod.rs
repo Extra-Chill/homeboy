@@ -1,6 +1,7 @@
 mod compare;
 mod dispatch;
 mod execution;
+mod inspect;
 mod planning;
 mod replay;
 mod report;
