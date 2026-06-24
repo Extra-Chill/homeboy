@@ -539,6 +539,8 @@ pub(crate) fn run_lab_offload_inner(
     let mut env_delta = std::collections::HashMap::new();
     let rig_component_path_env =
         forward_rig_component_path_env(&mut env_delta, &workspace_mapping)?;
+    let wordpress_dependency_paths_env =
+        forward_wordpress_dependency_paths_env(&mut env_delta, &workspace_mapping);
     apply_rig_component_path_overrides(&mut env_delta, &rig_component_path_overrides);
     // Surface synced runtime-overlay remote paths into the command env so a hot
     // command (e.g. a CLI-runner env entry) points at the real remote runtime
@@ -551,6 +553,7 @@ pub(crate) fn run_lab_offload_inner(
         build_lab_secret_env_handoff_plan(&changed_since_preflight.args, env_delta)?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
+    lab_metadata["wordpress_dependency_paths_env"] = wordpress_dependency_paths_env;
     lab_metadata["rig_component_path_overrides"] =
         rig_component_path_overrides_metadata(&rig_component_path_overrides);
     lab_metadata["settings_env"] =

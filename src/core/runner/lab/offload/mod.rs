@@ -71,7 +71,8 @@ use super::super::lab_capabilities::lab_runner_capability_contract;
 use super::super::lab_command::lab_offload_command_prefix;
 use super::super::lab_env::{
     build_lab_offload_env_with_passthroughs, forward_rig_component_path_env,
-    misplaced_runner_exec_wait_timeout_warning, settings_env_diagnostics,
+    forward_wordpress_dependency_paths_env, misplaced_runner_exec_wait_timeout_warning,
+    settings_env_diagnostics,
 };
 use super::super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 use super::super::lab_selection::{

@@ -48,12 +48,20 @@ pub(super) struct LabWorkspaceMappingEntry {
 }
 
 impl LabWorkspaceMappingEntry {
+    pub(super) fn role(&self) -> &str {
+        &self.role
+    }
+
     pub(super) fn local_path(&self) -> &str {
         &self.local_path
     }
 
     pub(super) fn remote_path(&self) -> &str {
         &self.remote_path
+    }
+
+    pub(super) fn dependency_freshness(&self) -> Option<&serde_json::Value> {
+        self.dependency_freshness.as_ref()
     }
 }
 

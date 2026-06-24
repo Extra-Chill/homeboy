@@ -10,6 +10,8 @@ use crate::core::observation::{
 };
 
 const SETTINGS_DIAGNOSTICS_SCHEMA: &str = "homeboy/lab-offload-settings-env/v1";
+pub(super) const WORDPRESS_DEPENDENCY_PATHS_ENV: &str = "HOMEBOY_WORDPRESS_DEPENDENCY_PATHS";
+const WORDPRESS_DEPENDENCY_PATHS_SCHEMA: &str = "homeboy/lab-offload-wordpress-dependency-paths/v1";
 
 pub(super) fn forward_env_if_present(env: &mut HashMap<String, String>, name: &str) {
     if let Ok(value) = std::env::var(name) {
@@ -56,6 +58,53 @@ pub(super) fn forward_rig_component_path_env(
     workspace_mapping: &[LabWorkspaceMappingEntry],
 ) -> Result<serde_json::Value> {
     forward_rig_component_path_env_entries(env, workspace_mapping, std::env::vars())
+}
+
+pub(super) fn forward_wordpress_dependency_paths_env(
+    env: &mut HashMap<String, String>,
+    workspace_mapping: &[LabWorkspaceMappingEntry],
+) -> serde_json::Value {
+    let dependencies = wordpress_dependency_paths(workspace_mapping);
+    if !dependencies.is_empty() {
+        env.insert(
+            WORDPRESS_DEPENDENCY_PATHS_ENV.to_string(),
+            serde_json::to_string(&dependencies).unwrap_or_else(|_| "{}".to_string()),
+        );
+    }
+
+    serde_json::json!({
+        "schema": WORDPRESS_DEPENDENCY_PATHS_SCHEMA,
+        "env_name": WORDPRESS_DEPENDENCY_PATHS_ENV,
+        "forwarded_to_runner": !dependencies.is_empty(),
+        "count": dependencies.len(),
+        "dependencies": dependencies,
+    })
+}
+
+fn wordpress_dependency_paths(
+    workspace_mapping: &[LabWorkspaceMappingEntry],
+) -> serde_json::Map<String, serde_json::Value> {
+    workspace_mapping
+        .iter()
+        .filter_map(|entry| {
+            let freshness = entry.dependency_freshness()?;
+            if entry.role() != "validation_dependency" {
+                return None;
+            }
+            let id = freshness.get("id")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            Some((
+                id.to_string(),
+                serde_json::json!({
+                    "local_path": entry.local_path(),
+                    "remote_path": entry.remote_path(),
+                    "evidence_path": freshness.get("evidence_path").cloned().unwrap_or(serde_json::Value::Null),
+                }),
+            ))
+        })
+        .collect()
 }
 
 fn forward_rig_component_path_env_entries(
@@ -469,6 +518,91 @@ mod tests {
         assert_eq!(err.details["field"], "HOMEBOY_UNSYNCED_COMPONENT_PATH");
         assert!(err.message.contains("was not synced to the runner"));
         assert!(!env.contains_key("HOMEBOY_UNSYNCED_COMPONENT_PATH"));
+    }
+
+    #[test]
+    fn wordpress_dependency_paths_env_exports_validation_dependency_mapping() {
+        let mapping = vec![
+            crate::core::runner::lab_workspaces::workspace_mapping_entry_for_validation_dependency(
+                &crate::core::runner::RunnerValidationDependencySyncOutput {
+                    id: "static-site-importer".to_string(),
+                    role: "validation_dependency".to_string(),
+                    local_path: "/Users/user/Developer/static-site-importer".to_string(),
+                    remote_path: "/home/user/Developer/job-123/static-site-importer".to_string(),
+                    evidence_path: "/home/user/Developer/job-123/static-site-importer/.homeboy/lab-source-evidence.json".to_string(),
+                },
+            ),
+            workspace_mapping_entry(
+                "extra",
+                &RunnerWorkspaceSyncOutput {
+                    variant: "workspace_sync",
+                    command: "runner.workspace.sync",
+                    runner_id: "homeboy-lab".to_string(),
+                    local_path: "/Users/user/Developer/other".to_string(),
+                    remote_path: "/home/user/Developer/other".to_string(),
+                    current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
+                        local_path: "/Users/user/Developer/other".to_string(),
+                        remote_path: "/home/user/Developer/other".to_string(),
+                        sync_mode: crate::core::runner::RunnerWorkspaceSyncMode::Snapshot,
+                        materialized: true,
+                        source_commit: None,
+                        source_ref: None,
+                        source_dirty: None,
+                        synthetic_checkout_commit: None,
+                    },
+                    workspace_lease: crate::core::runner::RunnerWorkspaceLease {
+                        runner_id: "homeboy-lab".to_string(),
+                        local_path: "/Users/user/Developer/other".to_string(),
+                        remote_path: "/home/user/Developer/other".to_string(),
+                        sync_mode: "snapshot".to_string(),
+                        materialized: true,
+                        lifecycle_owner: crate::core::runner::RunnerLifecycleOwner::Controller,
+                        source_commit: None,
+                        source_ref: None,
+                        source_dirty: None,
+                    },
+                    sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+                    snapshot_identity: "snapshot".to_string(),
+                    counts: crate::core::runner::ByteFileCounts { files: 1, bytes: 1 },
+                    excludes: Vec::new(),
+                    includes: Vec::new(),
+                    workspace_cleanliness: "snapshot_unique_workspace".to_string(),
+                    validation_dependencies: Vec::new(),
+                },
+            ),
+        ];
+        let mut env = HashMap::new();
+
+        let metadata = forward_wordpress_dependency_paths_env(&mut env, &mapping);
+        let exported: serde_json::Value = serde_json::from_str(
+            env.get(WORDPRESS_DEPENDENCY_PATHS_ENV)
+                .expect("dependency paths env"),
+        )
+        .expect("env json");
+
+        assert_eq!(metadata["schema"], WORDPRESS_DEPENDENCY_PATHS_SCHEMA);
+        assert_eq!(metadata["forwarded_to_runner"], true);
+        assert_eq!(metadata["count"], 1);
+        assert_eq!(
+            exported["static-site-importer"]["remote_path"],
+            "/home/user/Developer/job-123/static-site-importer"
+        );
+        assert_eq!(
+            exported["static-site-importer"]["local_path"],
+            "/Users/user/Developer/static-site-importer"
+        );
+        assert!(exported.get("other").is_none());
+    }
+
+    #[test]
+    fn wordpress_dependency_paths_env_is_absent_without_dependencies() {
+        let mut env = HashMap::new();
+
+        let metadata = forward_wordpress_dependency_paths_env(&mut env, &[]);
+
+        assert_eq!(metadata["forwarded_to_runner"], false);
+        assert_eq!(metadata["count"], 0);
+        assert!(!env.contains_key(WORDPRESS_DEPENDENCY_PATHS_ENV));
     }
 
     #[test]
