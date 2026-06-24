@@ -11,6 +11,7 @@
 //! it. The full JSON remains available via `runs show <id> --json` and is
 //! always written to `--output <file>` unchanged.
 
+use homeboy::core::observation::nested_failure_causes_from_run_detail;
 use serde_json::Value;
 
 use super::summary_json::{string_value, value_at};
@@ -52,6 +53,8 @@ fn render_run_detail(run: &Value) -> String {
         lines.push(format!("Finished: {finished}"));
     }
 
+    lines.extend(failure_summary_lines(run));
+
     if kind == "bench" {
         lines.extend(super::bench_summary::bench_hotspot_lines(run));
         lines.extend(super::bench_summary::bench_regression_threshold_lines(run));
@@ -65,6 +68,22 @@ fn render_run_detail(run: &Value) -> String {
     lines.push(format!("Full output: homeboy runs show {run_id} --json"));
 
     finish(lines)
+}
+
+fn failure_summary_lines(run: &Value) -> Vec<String> {
+    let causes = nested_failure_causes_from_run_detail(run);
+    if causes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec!["Failure summary:".to_string()];
+    for cause in causes {
+        lines.push(format!(
+            "  {}: {} ({})",
+            cause.surface, cause.message, cause.source
+        ));
+    }
+    lines
 }
 
 fn report_followup_lines(run: &Value, run_id: &str, kind: &str) -> Vec<String> {
@@ -601,6 +620,113 @@ mod tests {
         assert!(summary
             .contains("    get: homeboy runs artifact get run-1 artifact-coverage -o <path>\n"));
         assert!(!summary.contains("Key artifacts:\n  scenario-a/artifact-log"));
+    }
+
+    #[test]
+    fn failed_lab_show_summary_promotes_nested_recipe_and_browser_artifact_failures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact_path = dir.path().join("wp-codebox-result.json");
+        std::fs::write(
+            &artifact_path,
+            serde_json::to_vec(&json!({
+                "success": false,
+                "provider": "wp-codebox",
+                "result": {
+                    "recipe": {
+                        "status": "failed",
+                        "diagnostics": [{
+                            "class": "recipe_validation",
+                            "message": "Recipe validation failed: missing required step id"
+                        }]
+                    },
+                    "browser": {
+                        "status": "failed",
+                        "error": {
+                            "message": "Browser assertion failed: expected checkout button"
+                        }
+                    }
+                }
+            }))
+            .expect("serialize fixture"),
+        )
+        .expect("write artifact");
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "lab-run-1",
+                    "kind": "runner-exec",
+                    "status": "fail",
+                    "metadata": {},
+                    "artifacts": [{
+                        "id": "codebox-result",
+                        "run_id": "lab-run-1",
+                        "kind": "wp_codebox_result",
+                        "type": "file",
+                        "mime": "application/json",
+                        "path": artifact_path.display().to_string()
+                    }]
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Failure summary:\n"));
+        assert!(summary.contains(
+            "  recipe: Recipe validation failed: missing required step id (artifact codebox-result [wp_codebox_result])\n"
+        ));
+        assert!(summary.contains(
+            "  browser: Browser assertion failed: expected checkout button (artifact codebox-result [wp_codebox_result])\n"
+        ));
+        let failure_index = summary.find("Failure summary:\n").expect("failure summary");
+        let artifact_index = summary.find("Artifacts (1):\n").expect("artifacts");
+        assert!(failure_index < artifact_index);
+    }
+
+    #[test]
+    fn failed_lab_show_summary_distinguishes_wrapper_parser_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact_path = dir.path().join("structured-result.json");
+        std::fs::write(&artifact_path, b"{ not json").expect("write artifact");
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "lab-run-2",
+                    "kind": "runner-exec",
+                    "status": "failed",
+                    "metadata": {
+                        "wrapper": {
+                            "status": "failed",
+                            "error": {
+                                "code": "structured_output.parse_failed",
+                                "message": "Could not parse WP Codebox structured output"
+                            }
+                        }
+                    },
+                    "artifacts": [{
+                        "id": "structured-result",
+                        "run_id": "lab-run-2",
+                        "kind": "wp_codebox_result",
+                        "type": "file",
+                        "mime": "application/json",
+                        "path": artifact_path.display().to_string()
+                    }]
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains(
+            "  wrapper/parser: Could not parse WP Codebox structured output (metadata)\n"
+        ));
+        assert!(summary.contains("  wrapper/parser: could not parse structured artifact JSON:"));
+        assert!(!summary.contains("  recipe:"));
+        assert!(!summary.contains("  browser:"));
     }
 
     #[test]
