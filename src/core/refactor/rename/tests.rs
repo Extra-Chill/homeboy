@@ -337,6 +337,7 @@ fn extract_field_identifier_works() {
         extract_field_identifier("fn init("),
         Some("init".to_string())
     );
+    assert_eq!(extract_field_identifier("if (enabled) {"), None);
     assert_eq!(extract_field_identifier("// a comment"), None);
     assert_eq!(extract_field_identifier("#[serde(skip)]"), None);
     assert_eq!(extract_field_identifier(""), None);
@@ -385,6 +386,22 @@ fn detect_duplicate_identifiers_scopes_sibling_object_literals() {
     let content = "const tasks = [\n    {\n        promptFile: 'a.md',\n        graderFile: 'a.test.md',\n    },\n    {\n        promptFile: 'b.md',\n        graderFile: 'b.test.md',\n    },\n];\n";
     let mut warnings = Vec::new();
     detect_duplicate_identifiers("test.js", content, &mut warnings);
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn detect_duplicate_identifiers_ignores_repeated_control_flow_keywords() {
+    let content = r#"function run(items) {
+    if (items.length === 0) {
+        return;
+    }
+    if (items.length > 1) {
+        return;
+    }
+}
+"#;
+    let mut warnings = Vec::new();
+    detect_duplicate_identifiers("test.ts", content, &mut warnings);
     assert!(warnings.is_empty());
 }
 
