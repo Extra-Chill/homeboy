@@ -506,8 +506,17 @@ impl Commands {
         // returns true for the run/from-spec commands that own a portable or
         // explicit-runner base, so the other arms (which set their own
         // runner-resident policy) are left untouched.
+        //
+        // The loop-controller spec-materialization family (from-spec --resume /
+        // run-from-spec / materialize) always materializes a real worktree to
+        // apply patches, so it requires a git checkout regardless of which
+        // dispatch provider (if any) is configured — the provider predicate only
+        // covers the backend-specific path, which is `None` when no
+        // `--dispatch-backend` is supplied.
         if let Commands::AgentTask(args) = self {
-            if agent_task_provider_requires_cwd_git_checkout(&args.command) {
+            if agent_task_controller_materializes_worktree(&args.command)
+                || agent_task_provider_requires_cwd_git_checkout(&args.command)
+            {
                 contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
             }
         }
@@ -627,6 +636,22 @@ impl Commands {
         };
         CommandPortabilityContract::lab(contract)
     }
+}
+
+/// The loop-controller spec-materialization family always lays down a real git
+/// checkout of the target workspace so the controller can apply patch artifacts
+/// across actions. This holds regardless of dispatch backend, so it is decided
+/// purely from the parsed command shape (not provider resolution).
+fn agent_task_controller_materializes_worktree(command: &agent_task::AgentTaskCommand) -> bool {
+    matches!(
+        command,
+        agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
+            command: agent_task::AgentTaskControllerCommand::FromSpec(
+                agent_task::AgentTaskControllerFromSpecArgs { resume: true, .. },
+            ) | agent_task::AgentTaskControllerCommand::RunFromSpec(_)
+                | agent_task::AgentTaskControllerCommand::Materialize(_),
+        })
+    )
 }
 
 fn agent_task_provider_requires_cwd_git_checkout(command: &agent_task::AgentTaskCommand) -> bool {
