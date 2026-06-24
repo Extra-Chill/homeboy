@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.10] - 2026-06-24
+
+### Changed
+- Accept existing JS WP Codebox entrypoints
+- Accept JS WP Codebox CLI entrypoints
+- Skip stale WP Codebox wrappers
+
 ## [3.13.9] - 2026-06-24
 
 ### Changed
