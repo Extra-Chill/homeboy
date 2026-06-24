@@ -23,6 +23,7 @@ mod inner;
 mod metadata;
 mod overhead;
 mod resident;
+mod telemetry;
 mod types;
 mod workspace_stage;
 
@@ -125,4 +126,5 @@ pub(crate) use inner::*;
 pub(crate) use metadata::*;
 pub(crate) use overhead::*;
 pub(crate) use resident::*;
+pub(crate) use telemetry::*;
 pub(crate) use workspace_stage::*;

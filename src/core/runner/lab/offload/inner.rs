@@ -210,6 +210,11 @@ pub(crate) fn run_lab_offload_inner(
     let source_path =
         rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?
             .unwrap_or(lab_offload_source_path(request.normalized_args)?);
+    // Begin best-effort host-level telemetry capture around the offloaded run
+    // boundary (#3258). The opening snapshot of the controller host + watched
+    // source/artifact dir is taken now; the closing snapshot and before/after
+    // delta are produced after the run completes. Capture never fails the run.
+    let host_telemetry = LabHostTelemetryCapture::start(&source_path);
     if let Some(terminal) = terminal_lab_run_evidence(request.normalized_args, &source_path) {
         plan = with_step(
             plan,
@@ -573,6 +578,11 @@ pub(crate) fn run_lab_offload_inner(
     // parse, artifact import) are refreshed into the returned/captured metadata
     // after the run completes below.
     attach_lab_offload_overhead(&mut lab_metadata, &overhead);
+    // Embed the host-telemetry opening snapshot + runner machine identity into
+    // the metadata handed to the runner (#3258). The before/after delta is
+    // emitted controller-side after the run, but recording the pre-run host
+    // state and machine id here keeps the embedded metadata self-describing.
+    lab_metadata["lab_host_telemetry"] = host_telemetry.before_metadata();
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     env.extend(secret_env_handoff.env_delta.clone());
     // The remaining pre-dispatch checks (secret-env, provider, path translation)
@@ -740,6 +750,14 @@ pub(crate) fn run_lab_offload_inner(
     overhead.record(
         LabOffloadPhase::ArtifactImport,
         artifact_import_started.elapsed(),
+    );
+    // The workload + artifact import are done: take the closing host snapshot
+    // and surface the before/after delta controller-side (#3258). Best-effort
+    // diagnostic only — it never affects the run outcome.
+    let host_telemetry = host_telemetry.finish();
+    eprintln!(
+        "Lab offload host telemetry: {}",
+        host_telemetry.to_metadata()
     );
     ensure_lab_offload_streams_not_truncated(&exec_output, output_file_content.is_some())?;
     mirror_agent_task_run_plan_lifecycle(request.normalized_args, &exec_output.stdout)?;
