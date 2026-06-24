@@ -29,10 +29,10 @@ use super::super::CmdResult;
 use super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
-    AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs,
-    AgentTaskControllerRunNextArgs, AgentTaskControllerValidateProofArgs, AgentTaskLoopArgs,
-    AgentTaskLoopCommand, AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs,
-    AgentTaskLoopStatusArgs,
+    AgentTaskControllerPlanArgs, AgentTaskControllerProofArgs, AgentTaskControllerRunArgs,
+    AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
+    AgentTaskControllerValidateProofArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
+    AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs,
 };
 use super::command_json_value;
 
@@ -79,6 +79,7 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
                 })?;
             Ok((command_json_value(record)?, 0))
         }
+        AgentTaskControllerCommand::Proof(proof_args) => controller_proof(proof_args),
     }
 }
 
@@ -252,6 +253,133 @@ fn loop_stop(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
         }),
         0,
     ))
+}
+
+/// One-command end-to-end controller proof (#6222).
+///
+/// The operator supplies *intent + policy* (a profile name + runner), and
+/// Homeboy owns everything else: fresh run/seed/loop identity, run-input +
+/// complexity-policy materialization, provider-config defaults, preflight
+/// reconciliation (secret readiness, provider/runner readiness, extension/
+/// runtime parity), and the dispatch handoff. Preflight FAILS BEFORE DISPATCH
+/// with a Homeboy-owned fix command for any unmet dependency. On success it
+/// dispatches through the existing controller run-from-spec path and emits
+/// either the run result (preview URL / evidence) or a compact failure summary.
+fn controller_proof(args: AgentTaskControllerProofArgs) -> CmdResult<Value> {
+    controller_proof_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+#[cfg(test)]
+pub(super) fn controller_proof_with_test_executor<E>(
+    args: AgentTaskControllerProofArgs,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    controller_proof_with_executor(args, executor)
+}
+
+fn controller_proof_with_executor<E>(
+    args: AgentTaskControllerProofArgs,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let profile = agent_task_controller_service::resolve_proof_profile(
+        &args.profile,
+        args.profiles.as_deref(),
+    )?;
+
+    // Fresh seed material so every invocation derives an isolated run/loop id.
+    let seed_material = args
+        .seed
+        .clone()
+        .unwrap_or_else(default_proof_seed_material);
+
+    let env = agent_task_controller_service::ProcessSecretEnv;
+    let readiness = agent_task_controller_service::CatalogReadinessProbe;
+    let preparation = agent_task_controller_service::prepare_controller_proof(
+        profile,
+        &args.runner,
+        &seed_material,
+        &env,
+        &readiness,
+    );
+
+    let preflight_value = command_json_value(&preparation)?;
+
+    // FAIL BEFORE DISPATCH: surface the failed checks (each with a Homeboy-owned
+    // fix command) and do not run the controller.
+    if !preparation.preflight_passed {
+        return Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-controller-proof-result/v1",
+                "profile": preparation.profile.name,
+                "runner": preparation.runner,
+                "dispatched": false,
+                "preflight": preflight_value,
+            }),
+            1,
+        ));
+    }
+
+    if args.preflight_only {
+        return Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-controller-proof-result/v1",
+                "profile": preparation.profile.name,
+                "runner": preparation.runner,
+                "dispatched": false,
+                "preflight": preflight_value,
+            }),
+            0,
+        ));
+    }
+
+    // Compose the existing run-from-spec dispatch path using the proof's resolved
+    // spec source, dispatch defaults, run inputs, and run-scoped identity. The
+    // proof always reconciles stale persisted state so reruns never collide.
+    let inputs = serde_json::to_string(&preparation.run_inputs)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let run_args = AgentTaskControllerRunFromSpecArgs {
+        spec: preparation.profile.spec_source.clone(),
+        inputs: Some(inputs),
+        policy_results: Vec::new(),
+        max_actions: args.max_actions,
+        reconcile_stale: true,
+        replace: false,
+        fork: false,
+        resume_existing: false,
+        dispatch_backend: preparation.profile.dispatch_backend.clone(),
+        dispatch_selector: preparation.profile.dispatch_selector.clone(),
+        dispatch_model: None,
+        dispatch_provider_config: preparation.profile.dispatch_provider_config.clone(),
+    };
+
+    let (run_value, exit_code) = controller_run_from_spec_with_executor(run_args, executor)?;
+
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-controller-proof-result/v1",
+            "profile": preparation.profile.name,
+            "runner": preparation.runner,
+            "dispatched": true,
+            "preflight": preflight_value,
+            "run": run_value,
+        }),
+        exit_code,
+    ))
+}
+
+/// Default run-scoped seed material: a high-resolution timestamp, so each proof
+/// invocation derives an isolated run/loop id without operator input.
+fn default_proof_seed_material() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }
 
 fn controller_validate_proof(args: AgentTaskControllerValidateProofArgs) -> CmdResult<Value> {

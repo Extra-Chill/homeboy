@@ -32,6 +32,8 @@ pub enum AgentTaskControllerCommand {
     Resume(AgentTaskControllerRunNextArgs),
     /// Mark a tracked entity as human-ready work.
     MarkHumanReady(AgentTaskControllerMarkHumanReadyArgs),
+    /// Run a one-command end-to-end controller proof from a named profile + runner.
+    Proof(AgentTaskControllerProofArgs),
 }
 
 #[derive(Args, Debug)]
@@ -300,6 +302,42 @@ pub struct AgentTaskControllerRunArgs {
     /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerProofArgs {
+    /// Named proof profile (intent + policy). Resolved from the registry passed
+    /// via --profiles; the orchestration never branches on the profile name.
+    #[arg(long, value_name = "NAME")]
+    pub profile: String,
+
+    /// Runner to dispatch the proof through (for example a Lab runner id).
+    #[arg(long, value_name = "RUNNER")]
+    pub runner: String,
+
+    /// Proof profile registry JSON, @file, or - for stdin: a generic object
+    /// mapping profile names to profile definitions. Keeps profile data out of
+    /// core so adding a profile is pure data.
+    #[arg(long, value_name = "JSON")]
+    pub profiles: Option<String>,
+
+    /// Optional explicit seed material for run-scoped identity. Defaults to a
+    /// fresh timestamp so each invocation derives an isolated run/loop id.
+    #[arg(long = "seed", value_name = "SEED")]
+    pub seed: Option<String>,
+
+    /// Maximum controller actions to execute once preflight passes.
+    #[arg(
+        long = "max-actions",
+        visible_alias = "max-iterations",
+        value_name = "N",
+        default_value = "100"
+    )]
+    pub max_actions: u32,
+
+    /// Run preflight reconciliation only; do not dispatch even when it passes.
+    #[arg(long)]
+    pub preflight_only: bool,
 }
 
 #[derive(Args, Debug)]

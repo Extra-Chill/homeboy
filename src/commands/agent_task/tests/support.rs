@@ -10,15 +10,16 @@ pub(in crate::commands::agent_task) use super::super::super::agent_task_dispatch
 };
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerFromSpecArgs,
-    AgentTaskControllerMaterializeArgs, AgentTaskControllerRunFromSpecArgs,
+    AgentTaskControllerMaterializeArgs, AgentTaskControllerProofArgs,
+    AgentTaskControllerRunFromSpecArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskCookArgs, CompileLoopArgs, ReviewArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
     apply_controller_event, controller_from_spec, controller_materialize,
-    controller_run_action_with_executor, controller_run_from_spec_with_test_executor,
-    controller_run_next_with_executor,
+    controller_proof_with_test_executor, controller_run_action_with_executor,
+    controller_run_from_spec_with_test_executor, controller_run_next_with_executor,
 };
 pub(in crate::commands::agent_task) use super::super::run::{
     retry, run_cook_with_executor, run_loaded_plan, run_next_with_executor,

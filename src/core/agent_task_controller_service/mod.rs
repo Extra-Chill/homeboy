@@ -60,6 +60,7 @@ mod actions;
 mod artifacts;
 mod dispatch_defaults;
 mod pr_ownership;
+mod proof;
 mod reports;
 mod request;
 mod run_failure_summary;
@@ -72,6 +73,12 @@ use actions::*;
 use artifacts::*;
 pub use dispatch_defaults::*;
 use pr_ownership::*;
+pub use proof::{
+    derive_proof_identity, prepare_controller_proof, resolve_proof_profile, CatalogReadinessProbe,
+    ControllerProofIdentity, ControllerProofPreflightCheck, ControllerProofPreparation,
+    ControllerProofProfile, ProcessSecretEnv, ProofReadinessProbe, ProofSecretEnv,
+    CONTROLLER_PROOF_PREFLIGHT_SCHEMA,
+};
 pub use reports::*;
 pub use request::*;
 pub use run_failure_summary::{
