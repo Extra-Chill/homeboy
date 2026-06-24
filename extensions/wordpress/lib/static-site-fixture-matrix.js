@@ -410,10 +410,12 @@ function normalizeCollectedFixtureResult({ fixture, payloads, fixtureArtifactsDi
 function collectFixtureDiagnostics(payload) {
 	const diagnostics = [
 		...normalizeArray(payload.diagnostics),
+		...normalizeArray(payload.fixture_diagnostics?.diagnostics || payload.fixtureDiagnostics?.diagnostics),
 		...normalizeArray(payload.findings),
 		...normalizeArray(payload.messages),
 		...normalizeArray(payload.errors),
 		...normalizeArray(payload.warnings),
+		...normalizeArray(payload.upstream_gaps || payload.upstreamGaps).map((gap) => ({ kind: 'upstream_gap', ...objectValue(gap), message: diagnosticMessage(gap) || gap.missing || 'Upstream capability gap detected.' })),
 		...collectBlocksEngineDiagnostics(payload),
 		...collectRuntimeTargetGaps(payload).map((gap) => ({ kind: 'runtime_target_gap', ...objectValue(gap), message: diagnosticMessage(gap) || 'Runtime target gap detected.' })),
 		...collectMissingAssets(payload).map((asset) => ({ kind: missingAssetKind(asset), ...objectValue(asset), message: diagnosticMessage(asset) || 'Missing imported asset.' })),
@@ -533,7 +535,17 @@ function payloadMatchesFixture(payload, fixture) {
 }
 
 function fixtureIdentity(payload) {
-	return payload?.fixture_id || payload?.fixtureId || payload?.fixture?.id || payload?.metadata?.fixture_id || payload?.metadata?.fixtureId || '';
+	return payload?.fixture_id
+		|| payload?.fixtureId
+		|| payload?.fixture?.id
+		|| payload?.fixture?.slug
+		|| payload?.fixture_diagnostics?.fixture?.slug
+		|| payload?.fixtureDiagnostics?.fixture?.slug
+		|| payload?.request?.import_args?.slug
+		|| payload?.request?.importArgs?.slug
+		|| payload?.metadata?.fixture_id
+		|| payload?.metadata?.fixtureId
+		|| '';
 }
 
 function inferFixtureSuccess(payload, diagnostics, error, payloadCount) {
@@ -729,7 +741,13 @@ function parseJsonPayloadsFromText(text) {
 		return [];
 	}
 	const payloads = [];
-	const candidates = new Set([text.trim(), ...text.split(/\r?\n/).map((line) => line.trim())]);
+	const trimmed = text.trim();
+	const candidates = new Set([trimmed, ...text.split(/\r?\n/).map((line) => line.trim())]);
+	const firstObject = trimmed.indexOf('{');
+	const lastObject = trimmed.lastIndexOf('}');
+	if (firstObject >= 0 && lastObject > firstObject) {
+		candidates.add(trimmed.slice(firstObject, lastObject + 1));
+	}
 	for (const candidate of candidates) {
 		if (!candidate || !candidate.startsWith('{')) {
 			continue;
