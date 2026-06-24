@@ -6,16 +6,34 @@
 const { isPlainObject } = require('./shared');
 const {
 	WORDPRESS_RUNTIME_SURFACE_ID_PREFIXES,
+	normalizeWordPressCoverageSurfaceType,
 	normalizeWordPressRuntimeSurfaceType,
+	normalizeWordPressSurfaceType,
 } = require('./wordpress-surface-types');
 
 const WORDPRESS_RUNTIME_SURFACE_DISCOVERY_SCHEMA = 'homeboy/wordpress-surface-discovery/v1';
 const WORDPRESS_RUNTIME_SURFACE_COVERAGE_MANIFEST_SCHEMA = 'homeboy/wordpress-fuzz-coverage-manifest/v1';
+const WORDPRESS_UNSUPPORTED_RUNTIME_DISCOVERY_TYPES = new Set([
+	'capability',
+	'cron_event',
+	'crud_resource',
+	'db_query',
+	'external_http',
+	'hook',
+	'media',
+	'option',
+	'post_type',
+	'role',
+	'setting',
+	'taxonomy',
+	'user',
+	'wp_cli_command',
+]);
 
 function normalizeWordPressRuntimeSurfaceDiscovery(input = {}, options = {}) {
-	const surfaces = collectRuntimeSurfaceInputs(input, options)
-		.map((surface, index) => normalizeRuntimeSurface(surface, index))
-		.filter(Boolean);
+	const inputs = collectRuntimeSurfaceInputs(input, options);
+	const surfaces = inputs.map((surface, index) => normalizeRuntimeSurface(surface, index)).filter(Boolean);
+	const unsupportedSurfaces = inputs.map((surface, index) => normalizeUnsupportedSurface(surface, index)).filter(Boolean);
 
 	return {
 		schema: WORDPRESS_RUNTIME_SURFACE_DISCOVERY_SCHEMA,
@@ -24,6 +42,13 @@ function normalizeWordPressRuntimeSurfaceDiscovery(input = {}, options = {}) {
 		generated_at: input.generated_at || input.generatedAt || options.generated_at || options.generatedAt || null,
 		source: stringValue(input.source || options.source, 'wordpress-runtime'),
 		surfaces: dedupeRuntimeSurfaces(surfaces),
+		unsupported_surfaces: dedupeUnsupportedSurfaces(unsupportedSurfaces),
+		diagnostics: unsupportedSurfaces.map((surface) => ({
+			severity: 'info',
+			code: 'wordpress_surface_discovered_without_executable_runtime_collector',
+			message: `${surface.type} surface \`${surface.id}\` was discovered for diagnostics but is not counted as executable runtime coverage.`,
+			surface,
+		})),
 		metadata: isPlainObject(input.metadata) ? input.metadata : {},
 	};
 }
@@ -116,8 +141,19 @@ function appendArtifactSurfaces(surfaces, artifact) {
 	appendArraySurfaces(surfaces, artifact.admin || artifact.adminPages || artifact.admin_pages, 'admin_page', 'admin');
 	appendArraySurfaces(surfaces, artifact.ajax || artifact.actions || artifact.ajaxActions || artifact.ajax_actions, 'ajax_action', 'ajax');
 	appendArraySurfaces(surfaces, artifact.database || artifact.db || artifact.tables || artifact.databaseTables || artifact.database_tables, 'db_table', 'db');
+	appendArraySurfaces(surfaces, artifact.dbQueries || artifact.db_queries || artifact.queries || artifact.querySamples || artifact.query_samples, 'db_query', 'db-query');
 	appendArraySurfaces(surfaces, artifact.frontend || artifact.frontendUrls || artifact.frontend_urls || artifact.urls, 'frontend_url', 'frontend');
 	appendArraySurfaces(surfaces, artifact.blocks || artifact.blockTypes || artifact.block_types, 'block', 'blocks');
+	appendArraySurfaces(surfaces, artifact.hooks || artifact.hookCallbacks || artifact.hook_callbacks, 'hook', 'hooks');
+	appendArraySurfaces(surfaces, artifact.cron || artifact.cronEvents || artifact.cron_events, 'cron_event', 'cron');
+	appendArraySurfaces(surfaces, artifact.options, 'option', 'options');
+	appendArraySurfaces(surfaces, artifact.settings, 'setting', 'settings');
+	appendArraySurfaces(surfaces, artifact.roles, 'role', 'roles');
+	appendArraySurfaces(surfaces, artifact.capabilities || artifact.caps, 'capability', 'capabilities');
+	appendArraySurfaces(surfaces, artifact.users, 'user', 'users');
+	appendArraySurfaces(surfaces, artifact.media || artifact.attachments, 'media', 'media');
+	appendArraySurfaces(surfaces, artifact.postTypes || artifact.post_types, 'post_type', 'post-types');
+	appendArraySurfaces(surfaces, artifact.taxonomies, 'taxonomy', 'taxonomies');
 }
 
 function appendFuzzSurfaceArtifact(surfaces, artifact) {
@@ -169,6 +205,35 @@ function normalizeRuntimeSurface(surface, index) {
 	};
 }
 
+function normalizeUnsupportedSurface(surface, index) {
+	if (!isPlainObject(surface)) {
+		return null;
+	}
+	const runtimeType = normalizeRuntimeSurfaceType(surface.type || surface.kind || surface.category);
+	if (runtimeType) {
+		return null;
+	}
+	const coverageType = normalizeWordPressCoverageSurfaceType(surface.type || surface.kind || surface.category);
+	const canonicalType = normalizeWordPressSurfaceType(surface.type || surface.kind || surface.category) || coverageType.replace(/_/g, '-');
+	if (!coverageType || !WORDPRESS_UNSUPPORTED_RUNTIME_DISCOVERY_TYPES.has(coverageType)) {
+		return null;
+	}
+	const value = runtimeSurfaceValue(surface, coverageType, index);
+	return {
+		id: runtimeSurfaceId(surface, coverageType, value),
+		type: coverageType,
+		canonical_type: canonicalType,
+		label: stringValue(surface.label || surface.title || surface.name || surface.path || surface.url || surface.route || surface.action || surface.hook || surface.option || surface.setting || surface.role || surface.capability || surface.table || surface.value, value),
+		executable: false,
+		coverage_counted: false,
+		metadata: {
+			...(isPlainObject(surface.metadata) ? surface.metadata : {}),
+			source: stringValue(surface.source || surface.artifact, 'input'),
+			value,
+		},
+	};
+}
+
 function normalizeRuntimeSurfaceType(value) {
 	return normalizeWordPressRuntimeSurfaceType(value);
 }
@@ -181,6 +246,15 @@ function runtimeSurfaceValue(surface, type, index) {
 		|| surface.path
 		|| surface.url
 		|| surface.action
+		|| surface.hook
+		|| surface.event
+		|| surface.option
+		|| surface.setting
+		|| surface.role
+		|| surface.capability
+		|| surface.user
+		|| surface.media
+		|| surface.query
 		|| surface.table
 		|| surface.name
 		|| surface.block
@@ -202,7 +276,7 @@ function runtimeSurfaceId(surface, type, value) {
 	if (explicitId.startsWith(`${prefix}:`)) {
 		return explicitId;
 	}
-	return `${prefix}:${value}`;
+	return `${prefix || type}:${value}`;
 }
 
 function dedupeRuntimeSurfaces(surfaces) {
@@ -216,6 +290,26 @@ function dedupeRuntimeSurfaces(surfaces) {
 		byId.set(surface.id, {
 			...existing,
 			required: existing.required !== false || surface.required !== false,
+			metadata: {
+				...existing.metadata,
+				...surface.metadata,
+				sources: [...new Set([existing.metadata?.source, surface.metadata?.source, ...(existing.metadata?.sources || []), ...(surface.metadata?.sources || [])].filter(Boolean))].sort(),
+			},
+		});
+	}
+	return [...byId.values()].sort((a, b) => a.type.localeCompare(b.type) || a.id.localeCompare(b.id));
+}
+
+function dedupeUnsupportedSurfaces(surfaces) {
+	const byId = new Map();
+	for (const surface of surfaces) {
+		const existing = byId.get(surface.id);
+		if (!existing) {
+			byId.set(surface.id, surface);
+			continue;
+		}
+		byId.set(surface.id, {
+			...existing,
 			metadata: {
 				...existing.metadata,
 				...surface.metadata,

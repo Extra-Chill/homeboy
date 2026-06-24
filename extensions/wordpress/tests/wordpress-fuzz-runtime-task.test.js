@@ -83,7 +83,8 @@ Promise.all([
 		assert.equal(summary.runtime_task_result.schema, 'homeboy/fuzz-runtime-task-result/v1');
 		assert.equal(summary.runtime_task_result.provider.id, 'wp-codebox');
 		assert.equal(summary.runtime_task_result.status, 'skipped');
-		assert.equal(summary.failures[0].code, 'wp_codebox_public_fuzz_cli_unsupported');
+		assert.equal(summary.failures[0].code, 'wp_codebox_fuzz_missing_public_cli_command');
+		assert.equal(summary.metadata.preflight.required.commands[0], 'run-fuzz-suite');
 	}),
 
 	runWpCodeboxFuzzSuite({

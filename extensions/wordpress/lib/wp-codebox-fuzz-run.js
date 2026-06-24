@@ -29,15 +29,22 @@ const {
 	homeboySettings,
 	wpCodeboxCommand,
 } = require('./wp-codebox-recipe-helper');
+const {
+	WP_CODEBOX_FUZZ_PUBLIC_ABILITIES,
+	WP_CODEBOX_FUZZ_PUBLIC_COMMANDS,
+	buildWordPressFuzzCommandManifest,
+	requiredWpCodeboxContractsForFuzzPlan,
+} = require('./wordpress-fuzz-command-manifest');
 
 const WP_CODEBOX_FUZZ_SUITE_SCHEMA = 'wp-codebox/fuzz-suite/v1';
 const WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA = 'wp-codebox/fuzz-suite-result/v1';
 const WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA = 'homeboy/wordpress-codebox-fuzz-suite-consumer/v1';
+const WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA = 'homeboy/wp-codebox-fuzz-preflight/v1';
 const DEFAULT_FUZZ_SUITE_ABILITY = 'wp-codebox/run-fuzz-suite';
 const DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY = 'wp-codebox/run-wordpress-workload';
 const DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA = 'wp-codebox/wordpress-workload-run/v1';
 const DEFAULT_WP_CODEBOX_PUBLIC_CLI_BIN = 'wp';
-const WP_CODEBOX_PUBLIC_CLI_COMMANDS = ['run-fuzz-suite', 'run-wordpress-workload'];
+const WP_CODEBOX_PUBLIC_CLI_COMMANDS = WP_CODEBOX_FUZZ_PUBLIC_COMMANDS;
 const ARTIFACT_POSTPROCESS_COMMAND = 'homeboy.artifact-postprocess';
 const ARTIFACT_POSTPROCESS_COMMAND_ALIASES = new Set([ARTIFACT_POSTPROCESS_COMMAND, 'artifact-postprocess', 'homeboy.artifact_postprocess']);
 const DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS = [
@@ -348,12 +355,12 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 	}
 	const execute = objectOrUndefined(intent.execute) || {};
 	const activation = intent.plugin?.activation;
-	const path = execute.path || manifest.workload?.path;
+	const workloadPath = execute.path || manifest.workload?.path;
 	const genericCommand = homeboyFuzzWorkloadGenericPrimitiveCommand(manifest);
 	const setup = typeof activation === 'string' && activation.trim() !== ''
 		? [{ command: 'wordpress.ensure-plugin-active', args: [`plugin=${activation}`] }]
 		: undefined;
-	const action = homeboyFuzzWorkloadCaseAction({ genericCommand, path, execute });
+	const action = homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, execute });
 	const collect = normalizeArray(intent.collect).length > 0 ? normalizeArray(intent.collect) : artifacts.map((artifact) => ({ artifact: artifact.name }));
 	const assert = collect
 		.map((item) => item?.artifact)
@@ -362,12 +369,12 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 	return stripUndefined({ setup, action, assert: assert.length > 0 ? assert : undefined });
 }
 
-function homeboyFuzzWorkloadCaseAction({ genericCommand, path, execute = {} } = {}) {
+function homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, execute = {} } = {}) {
 	if (typeof genericCommand === 'string') {
 		return [{ command: genericCommand, args: homeboyFuzzCommandArgs(objectOrUndefined(execute.parameters) || {}) }];
 	}
-	if (typeof path === 'string' && path.trim() !== '') {
-		return [{ command: 'wordpress.run-workload', args: [`path=${path}`] }];
+	if (typeof workloadPath === 'string' && workloadPath.trim() !== '') {
+		return [{ command: 'wordpress.run-workload', args: [`path=${workloadPath}`] }];
 	}
 	return [];
 }
@@ -508,10 +515,14 @@ async function runWpCodeboxFuzzSuite(options = {}) {
 
 async function runWpCodeboxPublicFuzzOperation(options = {}) {
 	const request = options.request || wpCodeboxFuzzSuiteTaskRequest(options);
-	const capabilities = detectWpCodeboxPublicFuzzCapabilities(options);
+	const preflight = preflightWpCodeboxFuzzCapabilityContract({ ...options, request });
+	const capabilities = preflight.capabilities;
+	if (!preflight.ok) {
+		return unsupportedWpCodeboxPublicFuzzResult({ request, capabilities, preflight });
+	}
 	const command = publicFuzzCliCommandForRequest(request, capabilities);
 	if (!command) {
-		return unsupportedWpCodeboxPublicFuzzResult({ request, capabilities });
+		return unsupportedWpCodeboxPublicFuzzResult({ request, capabilities, preflight });
 	}
 
 	const cliResult = await runWpCodeboxPublicCli(command, wpCodeboxPublicCliInput(request, options), options);
@@ -560,6 +571,77 @@ function detectWpCodeboxPublicFuzzCapabilities(options = {}) {
 	return normalizeWpCodeboxPublicFuzzCapabilities({ commands });
 }
 
+function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
+	const request = options.request || options.taskRequest || options.task_request || null;
+	const capabilities = detectWpCodeboxPublicFuzzCapabilities(options);
+	const manifest = wpCodeboxRuntimeContractManifest(options);
+	const wordpressRuntimeAbilities = objectOrUndefined(manifest.abilities?.wordpressRuntime) || {};
+	const commandManifest = buildWordPressFuzzCommandManifest();
+	const suiteInput = request?.executor?.config?.runtime_task?.input || request?.input || {};
+	const plan = suiteInput.homeboy_fuzz_workload?.plan || suiteInput.homeboyFuzzWorkload?.plan || suiteInput.metadata?.workload?.plan || request?.input?.plan || options.plan || {};
+	const requiredPlanContracts = requiredWpCodeboxContractsForFuzzPlan(plan);
+	const requiredAbilities = { ...WP_CODEBOX_FUZZ_PUBLIC_ABILITIES };
+	const requiredCommands = requiredPublicCommandsForRequest(request, requiredPlanContracts);
+	const missingContracts = [];
+
+	for (const command of requiredCommands) {
+		if (capabilities.commands?.[command] !== true) {
+			missingContracts.push({
+				type: 'public_cli_command',
+				command,
+				message: `WP Codebox public CLI must expose \`${command}\` before Homeboy dispatches WordPress fuzz workloads.`,
+			});
+		}
+	}
+
+	if (wordpressRuntimeAbilities.runFuzzSuite !== requiredAbilities.runFuzzSuite) {
+		missingContracts.push({
+			type: 'ability',
+			ability: requiredAbilities.runFuzzSuite,
+			message: `WP Codebox runtime contract must declare \`${requiredAbilities.runFuzzSuite}\` for fuzz-suite dispatch.`,
+		});
+	}
+	if (wordpressRuntimeAbilities.runWorkload !== requiredAbilities.runWorkload) {
+		missingContracts.push({
+			type: 'ability',
+			ability: requiredAbilities.runWorkload,
+			message: `WP Codebox runtime contract must declare \`${requiredAbilities.runWorkload}\` for WordPress workload dispatch.`,
+		});
+	}
+
+	return {
+		schema: WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA,
+		ok: missingContracts.length === 0,
+		status: missingContracts.length === 0 ? 'passed' : 'failed',
+		request_id: request?.task_id,
+		capabilities,
+		required: {
+			commands: requiredCommands,
+			abilities: requiredAbilities,
+			capabilities: requiredPlanContracts.capabilities,
+		},
+		command_manifest: commandManifest,
+		missing_contracts: missingContracts,
+		diagnostics: missingContracts.map((contract) => ({
+			severity: 'error',
+			code: `wp_codebox_fuzz_missing_${contract.type}`,
+			message: contract.message,
+			contract,
+		})),
+	};
+}
+
+function requiredPublicCommandsForRequest(request = {}, requiredPlanContracts = {}) {
+	const ability = request.executor?.config?.runtime_task?.ability || request.ability;
+	if (ability === DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY) {
+		return ['run-wordpress-workload'];
+	}
+	if (ability === DEFAULT_FUZZ_SUITE_ABILITY) {
+		return ['run-fuzz-suite'];
+	}
+	return requiredPlanContracts.commands?.length > 0 ? requiredPlanContracts.commands : [...WP_CODEBOX_PUBLIC_CLI_COMMANDS];
+}
+
 function normalizeWpCodeboxPublicFuzzCapabilities(input = {}) {
 	const commands = objectOrUndefined(input.commands) || input;
 	return {
@@ -582,18 +664,19 @@ function publicFuzzCliCommandForRequest(request = {}, capabilities = {}) {
 	return undefined;
 }
 
-function unsupportedWpCodeboxPublicFuzzResult({ request = {}, capabilities = {} } = {}) {
+function unsupportedWpCodeboxPublicFuzzResult({ request = {}, capabilities = {}, preflight } = {}) {
+	const diagnostics = preflight?.diagnostics?.length > 0 ? preflight.diagnostics : [{
+		severity: 'warning',
+		code: 'wp_codebox_public_fuzz_cli_unsupported',
+		message: 'WP Codebox public fuzz execution is unavailable: neither `wp codebox run-fuzz-suite` nor `wp codebox run-wordpress-workload` is exposed by this runtime.',
+		capabilities,
+	}];
 	return {
 		schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
 		request_id: request.task_id,
 		status: 'skipped',
-		metadata: { readiness: { level: 'declared' }, unsupported: true },
-		diagnostics: [{
-			severity: 'warning',
-			code: 'wp_codebox_public_fuzz_cli_unsupported',
-			message: 'WP Codebox public fuzz execution is unavailable: neither `wp codebox run-fuzz-suite` nor `wp codebox run-wordpress-workload` is exposed by this runtime.',
-			capabilities,
-		}],
+		metadata: { readiness: { level: 'declared' }, unsupported: true, preflight },
+		diagnostics,
 	};
 }
 
@@ -1267,12 +1350,15 @@ module.exports = {
 	ARTIFACT_POSTPROCESS_COMMAND,
 	FUZZ_ARTIFACT_SEMANTIC_KEYS,
 	WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
+	WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
+	buildWordPressFuzzCommandManifest,
 	normalizeWpCodeboxFuzzArtifacts,
 	normalizeWpCodeboxFuzzSuiteResult,
 	normalizeWordPressFuzzRuntimeTaskResult,
 	detectWpCodeboxPublicFuzzCapabilities,
+	preflightWpCodeboxFuzzCapabilityContract,
 	runWpCodeboxFuzzSuite,
 	runWpCodeboxPublicFuzzOperation,
 	wpCodeboxFuzzSuiteAbility,

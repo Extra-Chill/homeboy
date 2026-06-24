@@ -1,6 +1,8 @@
 'use strict';
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA = 'homeboy/wordpress-fuzz-runtime-capabilities/v1';
+const WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA = 'homeboy/wordpress-fuzz-mutation-policy/v1';
+const WORDPRESS_FUZZ_MUTATION_MODES = Object.freeze(['isolated', 'read_only', 'destructive-deny']);
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITIES = Object.freeze([
 	'snapshot',
@@ -103,6 +105,11 @@ function capabilityFlag(capabilitySet, section, capability) {
 }
 
 function gateWordPressFuzzCaseForRuntimeCapabilities(testCase, runtimeCapabilities, options = {}) {
+	const policyGated = gateWordPressFuzzCaseForMutationPolicy(testCase, options);
+	if (policyGated) {
+		return policyGated;
+	}
+
 	const required = normalizeRequiredCapabilities(options.required_capabilities || options.requiredCapabilities || testCase.required_capabilities || testCase.requiredCapabilities);
 	if (required.length === 0) {
 		return testCase;
@@ -148,6 +155,50 @@ function gateWordPressFuzzCaseForRuntimeCapabilities(testCase, runtimeCapabiliti
 	};
 }
 
+function gateWordPressFuzzCaseForMutationPolicy(testCase = {}, options = {}) {
+	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
+	if (!mutationMode) {
+		return null;
+	}
+
+	const destructiveReasons = reasonList(testCase.destructive_reasons || testCase.destructiveReasons || testCase.destructive_reason || testCase.destructiveReason);
+	const mutates = options.mutates === true || destructiveReasons.length > 0 || testCase.metadata?.safety?.mutates === true;
+	const policy = {
+		schema: WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA,
+		mode: mutationMode,
+		mutates,
+		destructive_reasons: destructiveReasons,
+	};
+
+	let denyReason = '';
+	if (mutationMode === 'read_only' && mutates) {
+		denyReason = 'mutation-policy-read-only';
+	} else if (mutationMode === 'destructive-deny' && (mutates || destructiveReasons.length > 0)) {
+		denyReason = 'mutation-policy-destructive-deny';
+	}
+
+	if (!denyReason) {
+		return null;
+	}
+
+	const skipReasons = reasonList(testCase.skip_reasons || testCase.skipReasons || testCase.skip_reason || testCase.skipReason);
+	const metadata = isObject(testCase.metadata) ? { ...testCase.metadata } : {};
+	return {
+		...testCase,
+		executable: false,
+		skip_reasons: reasonList([...skipReasons, denyReason]),
+		destructive_reasons: destructiveReasons,
+		metadata: {
+			...metadata,
+			executable: false,
+			planned: true,
+			gated: true,
+			mutation_policy_gated: true,
+			mutation_policy: policy,
+		},
+	};
+}
+
 function requiredCapabilitiesForWordPressFuzzCase(kind) {
 	return [...(WORDPRESS_FUZZ_RUNTIME_CAPABILITY_REQUIREMENTS[kind] || [])];
 }
@@ -156,6 +207,13 @@ function normalizeRequiredCapabilities(value) {
 	return [...new Set((Array.isArray(value) ? value : [value])
 		.map(normalizeWordPressFuzzRuntimeCapability)
 		.filter(Boolean))].sort();
+}
+
+function normalizeWordPressFuzzMutationMode(value) {
+	const mode = String(value || '').trim().toLowerCase().replace(/-/g, '_') === 'read_only'
+		? 'read_only'
+		: String(value || '').trim().toLowerCase().replace(/_/g, '-');
+	return WORDPRESS_FUZZ_MUTATION_MODES.includes(mode) ? mode : '';
 }
 
 function reasonList(value) {
@@ -170,10 +228,14 @@ function isObject(value) {
 }
 
 module.exports = {
+	WORDPRESS_FUZZ_MUTATION_MODES,
+	WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA,
 	WORDPRESS_FUZZ_RUNTIME_CAPABILITIES,
 	WORDPRESS_FUZZ_RUNTIME_CAPABILITY_REQUIREMENTS,
 	WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA,
+	gateWordPressFuzzCaseForMutationPolicy,
 	gateWordPressFuzzCaseForRuntimeCapabilities,
+	normalizeWordPressFuzzMutationMode,
 	normalizeWordPressFuzzRuntimeCapabilities,
 	normalizeWordPressFuzzRuntimeCapability,
 	requiredCapabilitiesForWordPressFuzzCase,
