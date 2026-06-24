@@ -585,6 +585,63 @@ mod tests {
     }
 
     #[test]
+    fn compiles_repo_loop_workflow_fan_out_items_into_concrete_agent_tasks() {
+        let plan = compile_loop_spec_value(json!({
+            "loop_id": "example/fan-out-items",
+            "workflows": [
+                {
+                    "workflow_id": "review-page",
+                    "prompt": "Review each page.",
+                    "fan_out": { "items": ["home", "about"] }
+                }
+            ]
+        }))
+        .expect("fan_out items repo loop spec compiles");
+
+        let task_ids: Vec<&str> = plan
+            .tasks
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect();
+        assert_eq!(task_ids, vec!["review-page__home", "review-page__about"]);
+        assert_eq!(
+            plan.tasks[0].inputs["repo_loop"],
+            json!({ "entity_id": "home", "workflow_id": "review-page" })
+        );
+    }
+
+    #[test]
+    fn rejects_repo_loop_dynamic_fan_out_with_controller_diagnostic() {
+        let error = compile_loop_spec_value(json!({
+            "loop_id": "example/dynamic-fan-out",
+            "workflows": [
+                {
+                    "workflow_id": "iterator",
+                    "prompt": "Route each finding group.",
+                    "fan_out": {
+                        "mode": "per_artifact",
+                        "artifact": "finding_group",
+                        "group_by": ["owner_repo", "root_cause", "group_id"],
+                        "requires_non_empty": true
+                    }
+                }
+            ]
+        }))
+        .expect_err("dynamic fan_out requires controller artifact expansion");
+
+        assert!(error.message.contains("controller-only sections"));
+        let tried = error.details["tried"]
+            .as_array()
+            .expect("diagnostics are tried values")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tried.contains("workflows[iterator].fan_out"));
+        assert!(tried.contains("expand artifacts into concrete entity ids"));
+    }
+
+    #[test]
     fn compiles_repo_loop_artifact_graph_edges_into_output_dependencies() {
         let plan = compile_loop_spec_value(json!({
             "loop_id": "example/artifact-graph",

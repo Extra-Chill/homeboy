@@ -176,6 +176,12 @@ fn unsupported_repo_loop_spec_fields(spec: &AgentTaskRepoLoopSpec) -> Vec<String
             .push("initial_event: event evaluation belongs to agent-task controller".to_string());
     }
     for workflow in &spec.workflows {
+        if workflow_has_dynamic_fan_out(workflow) {
+            unsupported.push(format!(
+                "workflows[{}].fan_out: dynamic fan-out sources require the controller path to expand artifacts into concrete entity ids",
+                workflow.workflow_id
+            ));
+        }
         if !workflow.gates.is_empty() {
             unsupported.push(format!(
                 "workflows[{}].gates: gate execution belongs to the controller path; compile-loop only supports executable agent tasks",
@@ -196,10 +202,10 @@ fn unsupported_repo_loop_spec_fields(spec: &AgentTaskRepoLoopSpec) -> Vec<String
                 RepoLoopProducerScope::All,
             )
             .into_iter()
-            .filter(|(producer, _task_id)| !producer.entity_ids.is_empty())
+            .filter(|(producer, _task_id)| repo_loop_workflow_has_fan_out(producer))
             .map(|(producer, _task_id)| producer.workflow_id.clone())
             .collect();
-            if workflow.entity_ids.is_empty() && !fanout_producers.is_empty() {
+            if !repo_loop_workflow_has_fan_out(workflow) && !fanout_producers.is_empty() {
                 unsupported.push(format!(
                     "workflows[{}].consumes: join over fan-out artifact '{}' from workflows [{}] requires the controller path",
                     workflow.workflow_id,
@@ -213,15 +219,39 @@ fn unsupported_repo_loop_spec_fields(spec: &AgentTaskRepoLoopSpec) -> Vec<String
 }
 
 fn repo_loop_workflow_entity_ids(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Vec<Option<&str>> {
-    if workflow.entity_ids.is_empty() {
-        vec![None]
-    } else {
-        workflow
+    if !workflow.entity_ids.is_empty() {
+        return workflow
             .entity_ids
             .iter()
             .map(|entity_id| Some(entity_id.as_str()))
-            .collect()
+            .collect();
     }
+    if let Some(fan_out) = &workflow.fan_out {
+        if !fan_out.entity_ids.is_empty() {
+            return fan_out
+                .entity_ids
+                .iter()
+                .map(|entity_id| Some(entity_id.as_str()))
+                .collect();
+        }
+    }
+    vec![None]
+}
+
+fn repo_loop_workflow_has_fan_out(workflow: &AgentTaskRepoLoopSpecWorkflow) -> bool {
+    !workflow.entity_ids.is_empty()
+        || workflow
+            .fan_out
+            .as_ref()
+            .is_some_and(|fan_out| !fan_out.entity_ids.is_empty())
+}
+
+fn workflow_has_dynamic_fan_out(workflow: &AgentTaskRepoLoopSpecWorkflow) -> bool {
+    workflow.entity_ids.is_empty()
+        && workflow
+            .fan_out
+            .as_ref()
+            .is_some_and(|fan_out| fan_out.entity_ids.is_empty())
 }
 
 fn repo_loop_workflow_request(
@@ -652,24 +682,28 @@ fn repo_loop_artifact_producers<'a>(
                 })
         })
         .flat_map(|producer| match scope {
-            RepoLoopProducerScope::All if producer.entity_ids.is_empty() => {
+            RepoLoopProducerScope::All if !repo_loop_workflow_has_fan_out(producer) => {
                 vec![(producer, repo_loop_task_id(producer, None))]
             }
-            RepoLoopProducerScope::All => producer
-                .entity_ids
-                .iter()
+            RepoLoopProducerScope::All => repo_loop_workflow_entity_ids(producer)
+                .into_iter()
+                .flatten()
                 .map(|entity_id| (producer, repo_loop_task_id(producer, Some(entity_id))))
                 .collect(),
-            RepoLoopProducerScope::MatchingEntity(_) if producer.entity_ids.is_empty() => {
+            RepoLoopProducerScope::MatchingEntity(_)
+                if !repo_loop_workflow_has_fan_out(producer) =>
+            {
                 vec![(producer, repo_loop_task_id(producer, None))]
             }
-            RepoLoopProducerScope::MatchingEntity(Some(entity_id)) => producer
-                .entity_ids
-                .iter()
-                .any(|producer_entity_id| producer_entity_id == entity_id)
-                .then(|| (producer, repo_loop_task_id(producer, Some(entity_id))))
-                .into_iter()
-                .collect(),
+            RepoLoopProducerScope::MatchingEntity(Some(entity_id)) => {
+                repo_loop_workflow_entity_ids(producer)
+                    .into_iter()
+                    .flatten()
+                    .any(|producer_entity_id| producer_entity_id == entity_id)
+                    .then(|| (producer, repo_loop_task_id(producer, Some(entity_id))))
+                    .into_iter()
+                    .collect()
+            }
             RepoLoopProducerScope::MatchingEntity(None) => Vec::new(),
         })
         .collect()
@@ -789,7 +823,7 @@ fn validate_repo_loop_artifact_graph(spec: &AgentTaskRepoLoopSpec) -> Result<()>
             .find(|workflow| workflow.workflow_id == edge.to_workflow_id);
         match producer {
             Some(producer) => {
-                if !producer.entity_ids.is_empty() {
+                if repo_loop_workflow_has_fan_out(producer) {
                     diagnostics.push(format!(
                         "artifact_graph[{index}] producer workflow '{}' uses fan-out; graph compilation only supports one task per graph edge",
                         edge.from_workflow_id
@@ -811,7 +845,7 @@ fn validate_repo_loop_artifact_graph(spec: &AgentTaskRepoLoopSpec) -> Result<()>
         }
         match consumer {
             Some(consumer) => {
-                if !consumer.entity_ids.is_empty() {
+                if repo_loop_workflow_has_fan_out(consumer) {
                     diagnostics.push(format!(
                         "artifact_graph[{index}] consumer workflow '{}' uses fan-out; graph compilation only supports one task per graph edge",
                         edge.to_workflow_id
