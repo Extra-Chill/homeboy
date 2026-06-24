@@ -52,14 +52,11 @@ chmod +x "${valid_path}/wp-codebox"
 
 cat > "$js_bin" <<'NODE'
 #!/usr/bin/env node
-if (process.argv[2] === '--version') {
-	process.stdout.write('fixture-wp-codebox-js 1.0.0\n');
-	process.exit(0);
-}
+process.exit(2);
 NODE
 
 if ! homeboy_wp_codebox_bin_is_runnable "$js_bin"; then
-    echo "Expected resolver validation to accept readable JS CLI entrypoints via node" >&2
+    echo "Expected resolver validation to accept readable JS CLI entrypoints by existence" >&2
     exit 1
 fi
 

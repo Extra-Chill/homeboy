@@ -101,8 +101,7 @@ homeboy_wp_codebox_bin_is_runnable() {
         case "$bin" in
             *.js|*.cjs|*.mjs)
                 [ -f "$bin" ] || return 1
-                node "$bin" --version >/dev/null 2>&1
-                return $?
+                return 0
                 ;;
             *)
                 [ -x "$bin" ] || return 1
