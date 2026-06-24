@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.20] - 2026-06-24
+
+### Changed
+- Use supported WP Codebox plugin activation steps
+
 ## [3.13.19] - 2026-06-24
 
 ### Fixed
