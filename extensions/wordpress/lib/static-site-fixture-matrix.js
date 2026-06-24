@@ -113,14 +113,24 @@ function buildStaticSiteFixtureArtifact(fixture, options = {}) {
 function buildStaticSiteFixtureMatrixRecipe(input = {}) {
 	const matrix = input.matrix || createStaticSiteFixtureMatrix(input);
 	const artifactsDirectory = input.artifactsDirectory || input.artifacts_directory || '/artifacts/static-site-fixture-matrix';
+	const playgroundArtifactsDirectory = input.playgroundArtifactsDirectory || input.playground_artifacts_directory;
+	const commandArtifactsDirectory = playgroundArtifactsDirectory || artifactsDirectory;
 	const staticSiteImporter = normalizeStaticSiteImporterPlugin(input);
 	const extraPlugins = staticSiteImporter
 		? [staticSiteImporter.extraPlugin, ...normalizeArray(input.extraPlugins || input.extra_plugins)]
 		: normalizeArray(input.extraPlugins || input.extra_plugins);
+	const mounts = normalizeArray(input.mounts);
+	if (playgroundArtifactsDirectory) {
+		mounts.push({
+			source: artifactsDirectory,
+			target: playgroundArtifactsDirectory,
+			mode: 'readwrite',
+		});
+	}
 	const validationSteps = matrix.fixtures.map((fixture) => ({
 		command: 'wordpress.wp-cli',
 		args: [
-			`command=static-site-importer validate-in-codebox --artifact=${shellToken(artifactPathForFixture(fixture, artifactsDirectory))} --slug=${shellToken(fixture.id)} --name=${shellToken(fixture.label)} --allow-missing-woocommerce`,
+			`command=static-site-importer validate-in-codebox --artifact=${shellToken(artifactPathForFixture(fixture, commandArtifactsDirectory))} --slug=${shellToken(fixture.id)} --name=${shellToken(fixture.label)} --allow-missing-woocommerce`,
 		],
 	}));
 	return {
@@ -130,7 +140,7 @@ function buildStaticSiteFixtureMatrixRecipe(input = {}) {
 			blueprint: input.blueprint || {},
 		},
 		inputs: {
-			mounts: normalizeArray(input.mounts),
+			mounts,
 			...(extraPlugins.length > 0 ? { extra_plugins: extraPlugins } : {}),
 		},
 		workflow: {
