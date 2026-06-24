@@ -925,6 +925,14 @@ if [ -z "$ARTIFACTS_DIR" ]; then
 fi
 mkdir -p "$ARTIFACTS_DIR"
 
+if type homeboy_export_validation_dependency_paths &>/dev/null; then
+    homeboy_export_validation_dependency_paths "$WP_CODEBOX_PLUGIN_SOURCE_PATH"
+fi
+DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
+if type homeboy_export_wordpress_dependencies_json &>/dev/null; then
+    homeboy_export_wordpress_dependencies_json "$DEPENDENCY_PATHS" "$ARTIFACTS_DIR"
+fi
+
 homeboy_wp_codebox_run_prepare_steps
 
 if type homeboy_preflight_declared_validation_dependency_paths &>/dev/null; then
@@ -938,12 +946,12 @@ homeboy_wp_codebox_set_command "$WP_CODEBOX_BIN"
 wp_codebox_command=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
 WP_CODEBOX_RESOLVED_BIN="$(homeboy_wp_codebox_resolved_bin_path "$WP_CODEBOX_BIN")"
 
-if type homeboy_export_validation_dependency_paths &>/dev/null; then
-    homeboy_export_validation_dependency_paths "$WP_CODEBOX_PLUGIN_SOURCE_PATH"
-fi
-DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 if [ -n "$DEPENDENCY_PATHS" ] && type homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench &>/dev/null; then
     DEPENDENCY_PATHS=$(homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench "$DEPENDENCY_PATHS" "$ARTIFACTS_DIR")
+    export HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$DEPENDENCY_PATHS"
+fi
+if type homeboy_export_wordpress_dependencies_json &>/dev/null; then
+    homeboy_export_wordpress_dependencies_json "$DEPENDENCY_PATHS" "$ARTIFACTS_DIR"
 fi
 if [ -n "$DEPENDENCY_PATHS" ] && type homeboy_preflight_wordpress_dependency_plugins &>/dev/null; then
     if ! homeboy_preflight_wordpress_dependency_plugins "$DEPENDENCY_PATHS" "$ARTIFACTS_DIR" "bench"; then
@@ -1370,6 +1378,7 @@ homeboy_wp_codebox_emit_dependency_provenance() {
         --arg wpCodeboxBin "$WP_CODEBOX_RESOLVED_BIN" \
         --arg artifactsDir "$ARTIFACTS_DIR" \
         --argjson declaredDependencyPaths "$declared_dependency_paths_json" \
+        --argjson wordpressDependencies "${HOMEBOY_WORDPRESS_DEPENDENCIES_JSON:-[]}" \
         --argjson dependencySlugs "$(printf '%s\n' "$DEPENDENCY_SLUGS_CSV" | jq -R 'split(",") | map(select(. != ""))')" \
         --argjson extraPlugins "$EXTRA_PLUGINS_JSON" \
         --argjson mounts "$MOUNTS_JSON" \
@@ -1385,6 +1394,7 @@ homeboy_wp_codebox_emit_dependency_provenance() {
             artifacts_dir: $artifactsDir,
             dependency_slugs: $dependencySlugs,
             declared_dependency_paths: $declaredDependencyPaths,
+            wordpress_dependencies: $wordpressDependencies,
             plugin_source_path: $pluginSourcePath,
             source_root: (if $sourceRoot == "" then null else $sourceRoot end),
             source_subpath: (if $sourceSubpath == "" then null else $sourceSubpath end),
@@ -1491,7 +1501,8 @@ PREPARED_DEPENDENCIES_METADATA_FILE="${ARTIFACTS_DIR%/}/prepared-bench-dependenc
 if [ -f "$PREPARED_DEPENDENCIES_METADATA_FILE" ]; then
     PREPARED_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-prepared-dependencies.XXXXXX")
     if jq --slurpfile preparedDependencies "$PREPARED_DEPENDENCIES_METADATA_FILE" \
-        '. + {metadata: ((.metadata // {}) + {prepared_dependencies: ($preparedDependencies[0] // [])})}' \
+        --argjson wordpressDependencies "${HOMEBOY_WORDPRESS_DEPENDENCIES_JSON:-[]}" \
+        '. + {metadata: ((.metadata // {}) + {prepared_dependencies: ($preparedDependencies[0] // []), wordpress_dependencies: $wordpressDependencies})}' \
         "$RESULTS_FILE" > "$PREPARED_RESULTS_FILE"; then
         mv "$PREPARED_RESULTS_FILE" "$RESULTS_FILE"
     else

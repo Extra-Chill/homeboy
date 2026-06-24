@@ -1631,6 +1631,84 @@ homeboy_get_prepared_validation_dependency_slug() {
     ' "$metadata_file" 2>/dev/null
 }
 
+homeboy_export_wordpress_dependencies_json() {
+    local dependency_paths="${1:-}"
+    local artifacts_dir="${2:-}"
+
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local metadata_file dependencies_json
+    metadata_file="${artifacts_dir%/}/prepared-bench-dependencies.json"
+    if [ -n "$artifacts_dir" ] && [ -f "$metadata_file" ]; then
+        dependencies_json=$(jq -c '
+            if type == "array" then . else [] end
+            | map({
+                slug,
+                path: (.prepared_path // .package_root // .source_path),
+                local_path: (.source_path // .package_root // .prepared_path),
+                runner_path: (.mounted_plugin_dir // null),
+                source: (.source_type // .cache_status // null),
+                source_type: (.source_type // null),
+                ref: (.requested_revision // null),
+                plugin_file: (.plugin_file // null),
+                resolved_by: (if .cache_status then "wp-codebox-bench-prepare" else "wordpress-dependency-resolution" end)
+            })
+        ' "$metadata_file" 2>/dev/null || printf '[]\n')
+        export HOMEBOY_WORDPRESS_DEPENDENCIES_JSON="$dependencies_json"
+        return 0
+    fi
+
+    local catalog_json="${HOMEBOY_WORDPRESS_DEPENDENCY_CATALOG_JSON:-${_HOMEBOY_RESOLVED_DEPENDENCY_CATALOG_JSON:-[]}}"
+    if printf '%s' "$catalog_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        dependencies_json=$(printf '%s' "$catalog_json" | jq -c '
+            map({
+                slug,
+                path: .resolved_path,
+                local_path: .resolved_path,
+                runner_path: (if .slug then "/wordpress/wp-content/plugins/" + .slug else null end),
+                source: (.source_type // null),
+                source_type: (.source_type // null),
+                ref: (.requested_revision // null),
+                plugin_file: (.plugin_file // null),
+                resolved_by: "wordpress-dependency-resolution"
+            })
+        ' 2>/dev/null || printf '[]\n')
+        export HOMEBOY_WORDPRESS_DEPENDENCIES_JSON="$dependencies_json"
+        return 0
+    fi
+
+    local entries="[]" dependency_path dependency_slug plugin_file plugin_relative_file
+    while IFS= read -r dependency_path; do
+        [ -n "$dependency_path" ] || continue
+        [ -d "$dependency_path" ] || continue
+        dependency_slug=$(homeboy_get_validation_dependency_slug "$dependency_path" || basename "$dependency_path")
+        plugin_file=""
+        plugin_relative_file=""
+        plugin_file=$(homeboy_find_validation_dependency_plugin_main_file "$dependency_path" || true)
+        if [ -n "$plugin_file" ]; then
+            plugin_relative_file="${dependency_slug}/${plugin_file#"${dependency_path%/}/"}"
+        fi
+        entries=$(jq -nc \
+            --argjson entries "$entries" \
+            --arg slug "$dependency_slug" \
+            --arg path "$dependency_path" \
+            --arg pluginFile "$plugin_relative_file" \
+            '$entries + [{
+                slug: $slug,
+                path: $path,
+                local_path: $path,
+                runner_path: "/wordpress/wp-content/plugins/" + $slug,
+                source: "path",
+                source_type: null,
+                ref: null,
+                plugin_file: (if $pluginFile == "" then null else $pluginFile end),
+                resolved_by: "wordpress-dependency-paths"
+            }]')
+    done <<< "$dependency_paths"
+
+    export HOMEBOY_WORDPRESS_DEPENDENCIES_JSON="$entries"
+}
+
 _homeboy_command_version() {
     local command_name="${1:-}"
 
