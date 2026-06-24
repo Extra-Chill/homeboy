@@ -126,6 +126,9 @@ assert.deepEqual(
 		['coverage-summary', 'fuzz.coverage.summary', true],
 	]
 );
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'fuzz-observation-set').role, 'observation_set');
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'wp-codebox-fuzz-suite-result').role, 'codebox_result');
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'case-log').role, 'case_log');
 assert.deepEqual(
 	taskRequest.artifact_declarations.filter((artifact) => artifact.required === true).map((artifact) => artifact.name),
 	taskRequest.expected_artifacts
@@ -313,6 +316,8 @@ runWpCodeboxFuzzSuite({
 				},
 				coverage_gaps: [{ id: 'route:/wp/v2/users', type: 'rest_route', status: 'skipped' }],
 				coverage: { hooks: { actions: { init: 1 } } },
+				queries: [{ case_id: 'case-000', target_id: 'target-rest', operation_id: 'GET /wp/v2/posts', query: 'SELECT * FROM wp_posts', metric: 'query_count', count: 4, fingerprint: 'select-posts' }],
+				timings: [{ case_id: 'case-000', target_id: 'target-rest', operation_id: 'GET /wp/v2/posts', subject: 'request', duration_ms: 99 }],
 				wordpress_fuzz_result: {
 					schema: 'wordpress-fuzz-result/v1',
 					id: 'normalized-result',
@@ -386,6 +391,10 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.coverage_gaps.some((gap) => gap.id === 'route:/wp/v2/comments'), true);
 	assert.equal(summary.derived_artifacts.coverage_gap_reports[0].coverage_gaps[0].id, 'route:/wp/v2/comments');
 	assert.equal(summary.hotspot_summary.items[0].value, 99);
+	assert.equal(summary.observation_set.schema, 'homeboy/fuzz-observation-set/v1');
+	assert.equal(summary.observation_set.observations[0].family, 'query');
+	assert.equal(summary.observation_set.observations[1].metric, 'duration_ms');
+	assert.equal(summary.runtime_task_result.observation_set.observations[0].fingerprint, 'select-posts');
 	assert.equal(summary.derived_artifacts.artifacts.some((artifact) => artifact.role === 'hotspot_summary'), true);
 	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'normalized_fuzz_result', 'coverage_gap_report', 'hotspot_summary', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case', 'repro_case']);
 	assert.equal(summary.artifacts[0].semantic_key, 'fuzz.report');

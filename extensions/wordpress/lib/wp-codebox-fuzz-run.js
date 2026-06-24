@@ -21,6 +21,8 @@ const {
 } = require('./wordpress-runtime-task-planner');
 const {
 	buildWordPressFuzzRuntimeTaskRequest,
+	fuzzHotspotSummaryFromObservationSet,
+	normalizeFuzzObservationSet,
 	normalizeFuzzHotspotSummary,
 	normalizeWordPressFuzzRuntimeTaskResult,
 } = require('./wordpress-fuzz-runtime-task');
@@ -57,59 +59,76 @@ const DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS = [
 ];
 const DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS = [
 	{
+		role: 'codebox_result',
 		name: 'wp-codebox-fuzz-suite-result',
 		semantic_key: 'fuzz.result.normalized',
 		content_type: 'application/json',
 		required: true,
 	},
 	{
+		role: 'coverage_summary_gaps',
 		name: 'wordpress-fuzz-coverage',
 		semantic_key: 'fuzz.coverage',
 		content_type: 'application/json',
 		required: true,
 	},
 	{
+		role: 'observation_set',
+		name: 'fuzz-observation-set',
+		semantic_key: 'fuzz.observation_set',
+		content_type: 'application/json',
+		required: false,
+	},
+	{
+		role: 'codebox_result',
 		name: 'fuzz-report',
 		semantic_key: 'fuzz.report',
 		content_type: 'application/json',
 		required: false,
 	},
 	{
+		role: 'replay_repro_data',
 		name: 'fuzz-case-artifacts',
 		semantic_key: 'fuzz.case.artifact',
 		content_type: 'application/json',
 		required: false,
 	},
 	{
+		role: 'replay_repro_data',
 		name: 'fuzz-repro-cases',
 		semantic_key: 'fuzz.case.repro',
 		required: false,
 	},
 	{
+		role: 'result_envelope',
 		name: 'result-envelope',
 		semantic_key: 'fuzz.result.envelope',
 		content_type: 'application/json',
 		required: true,
 	},
 	{
+		role: 'case_log',
 		name: 'case-log',
 		semantic_key: 'fuzz.case.log',
 		content_type: 'application/jsonl',
 		required: true,
 	},
 	{
+		role: 'replay_data',
 		name: 'replay-data',
 		semantic_key: 'fuzz.replay.data',
 		content_type: 'application/json',
 		required: true,
 	},
 	{
+		role: 'coverage_summary',
 		name: 'coverage-summary',
 		semantic_key: 'fuzz.coverage.summary',
 		content_type: 'application/json',
 		required: true,
 	},
 	{
+		role: 'hotspot_summary',
 		name: 'hotspot-summary',
 		semantic_key: 'fuzz.hotspot.summary',
 		content_type: 'application/json',
@@ -128,6 +147,7 @@ const FUZZ_ARTIFACT_SEMANTIC_KEYS = {
 	replay_data: 'fuzz.replay.data',
 	coverage_summary: 'fuzz.coverage.summary',
 	coverage_gap_report: 'fuzz.coverage.gap_report',
+	observation_set: 'fuzz.observation_set',
 	hotspot_summary: 'fuzz.hotspot.summary',
 	result_envelope: 'fuzz.result.envelope',
 	normalized_fuzz_result: 'fuzz.result.normalized',
@@ -785,11 +805,12 @@ function normalizeWpCodeboxFuzzSuiteResult(result = {}, context = {}) {
 	const artifacts = normalizeWpCodeboxFuzzArtifacts(source, result);
 	const coverageSummary = normalizeCoverageSummary(source?.coverage_summary || source?.coverageSummary || source?.coverage?.summary);
 	const derivedArtifacts = normalizeDerivedFuzzArtifacts(source, artifacts);
+	const observationSet = normalizeCodeboxFuzzObservationSet(source, { request: context.request });
 	const coverageGaps = normalizeCoverageGaps([
 		...normalizeArray(source?.coverage_gaps || source?.coverageGaps || source?.coverage?.gaps),
 		...normalizeArray(derivedArtifacts.coverage_gap_reports).flatMap((report) => normalizeArray(report.coverage_gaps)),
 	]);
-	const hotspotSummary = normalizeFuzzHotspotSummary(source?.hotspot_summary || source?.hotspotSummary || source?.hotspots || source?.performance_hotspots || source?.performanceHotspots || derivedArtifacts.hotspot_summary, { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id });
+	const hotspotSummary = normalizeFuzzHotspotSummary(source?.hotspot_summary || source?.hotspotSummary || source?.hotspots || source?.performance_hotspots || source?.performanceHotspots || derivedArtifacts.hotspot_summary || fuzzHotspotSummaryFromObservationSet(observationSet, { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id }), { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id });
 	const normalizedResult = normalizeEmbeddedWordPressFuzzResult(source);
 	const contractFailures = wpCodeboxFuzzContractFailures({ source, result, context, artifacts, coverageSummary, normalizedResult });
 	if (contractFailures.length > 0 && ['succeeded', 'success', 'passed', 'ok'].includes(String(status).toLowerCase())) {
@@ -802,6 +823,7 @@ function normalizeWpCodeboxFuzzSuiteResult(result = {}, context = {}) {
 		artifacts,
 		failures,
 		hotspot_summary: hotspotSummary,
+		observation_set: observationSet,
 		provider_result: source,
 	}, { provider: 'wp-codebox', taskId: context.request?.task_id });
 	return stripUndefined({
@@ -814,6 +836,7 @@ function normalizeWpCodeboxFuzzSuiteResult(result = {}, context = {}) {
 		coverage: source?.coverage,
 		coverage_summary: coverageSummary,
 		coverage_gaps: coverageGaps,
+		observation_set: observationSet,
 		hotspot_summary: hotspotSummary,
 		derived_artifacts: derivedArtifacts.artifacts.length > 0 ? derivedArtifacts : undefined,
 		wordpress_fuzz_result: normalizedResult,
@@ -827,6 +850,25 @@ function normalizeWpCodeboxFuzzSuiteResult(result = {}, context = {}) {
 			runtime_task_request: objectOrUndefined(context.runtimeRequest),
 		}),
 	});
+}
+
+function normalizeCodeboxFuzzObservationSet(source = {}, context = {}) {
+	return normalizeFuzzObservationSet({
+		id: source?.observation_set?.id || source?.observationSet?.id || source?.request_id || source?.requestId || context.request?.task_id,
+		observations: [
+			...normalizeArray(source?.observation_set?.observations || source?.observationSet?.observations || source?.observations),
+			...normalizeArray(source?.measurements),
+			...normalizeArray(source?.performance?.measurements || source?.performance_measurements || source?.performanceMeasurements),
+			...normalizeArray(source?.queries || source?.query_measurements || source?.queryMeasurements || source?.query_data || source?.queryData).map((entry) => objectOrUndefined(entry) ? { family: 'query', ...entry } : entry),
+			...normalizeArray(source?.actions || source?.action_measurements || source?.actionMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'action', ...entry } : entry),
+			...normalizeArray(source?.resources || source?.resource_measurements || source?.resourceMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'resource', ...entry } : entry),
+			...normalizeArray(source?.timings || source?.timing_measurements || source?.timingMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'timing', ...entry } : entry),
+			...normalizeArray(source?.counters || source?.counter_measurements || source?.counterMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'counter', ...entry } : entry),
+		],
+		metadata: stripUndefined({
+			wp_codebox_result_schema: source?.schema,
+		}),
+	}, { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id });
 }
 
 function wpCodeboxFuzzContractFailures({ source = {}, result = {}, context = {}, artifacts = [], coverageSummary, normalizedResult }) {
@@ -1191,6 +1233,9 @@ function normalizeFuzzArtifactRole(value) {
 	}
 	if (['hotspot_summary', 'fuzz_hotspot_summary', 'hotspots', 'performance_hotspots'].includes(label)) {
 		return 'hotspot_summary';
+	}
+	if (['observation_set', 'observations', 'measurements', 'fuzz_observation_set'].includes(label)) {
+		return 'observation_set';
 	}
 	if (['coverage', 'wordpress_fuzz_coverage', 'fuzz_coverage', 'coverage_artifact'].includes(label)) {
 		return 'coverage';

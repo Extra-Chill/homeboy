@@ -4,8 +4,11 @@ const assert = require('node:assert/strict');
 
 const {
 	WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA,
+	WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA,
 	WORDPRESS_FUZZ_RUNTIME_TASK_REQUEST_SCHEMA,
 	buildWordPressFuzzRuntimeTaskRequest,
+	fuzzHotspotSummaryFromObservationSet,
+	normalizeFuzzObservationSet,
 	normalizeFuzzHotspotSummary,
 } = require('../lib/wordpress-fuzz-runtime-task');
 const {
@@ -52,6 +55,19 @@ assert.equal(normalizedHotspots.items[0].metadata.surface_key, 'rest:/wp/v2/post
 assert.equal(normalizedHotspots.items[0].metadata.operation_key, 'GET /wp/v2/posts');
 assert.equal(normalizedHotspots.items[0].metric, 'query_count');
 assert.equal(normalizedHotspots.items[0].evidence_refs[0], 'reports/query.json');
+
+const codeboxObservations = normalizeFuzzObservationSet({
+	id: 'codebox-native-measurements',
+	queries: [{ case_id: 'case-1', target_id: 'rest:/wp/v2/posts', operation_id: 'GET /wp/v2/posts', query: 'SELECT * FROM wp_posts', count: 3, metric: 'query_count' }],
+	timings: [{ case_id: 'case-1', target_id: 'rest:/wp/v2/posts', operation_id: 'GET /wp/v2/posts', subject: 'request', duration_ms: 42 }],
+});
+assert.equal(codeboxObservations.schema, WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA);
+assert.equal(codeboxObservations.observations[0].family, 'query');
+assert.equal(codeboxObservations.observations[0].metric, 'query_count');
+assert.equal(codeboxObservations.observations[1].unit, 'ms');
+const observationHotspots = fuzzHotspotSummaryFromObservationSet(codeboxObservations);
+assert.equal(observationHotspots.schema, WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA);
+assert.equal(observationHotspots.items[0].metadata.observation_id, codeboxObservations.observations[0].id);
 
 const derivedAggregate = aggregateWordPressFuzzCoverage({
 	artifacts: [

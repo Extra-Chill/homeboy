@@ -4,6 +4,7 @@ const WORDPRESS_FUZZ_RUNTIME_TASK_REQUEST_SCHEMA = 'homeboy/fuzz-runtime-task/v1
 const WORDPRESS_FUZZ_RUNTIME_TASK_RESULT_SCHEMA = 'homeboy/fuzz-runtime-task-result/v1';
 const WORDPRESS_FUZZ_HOTSPOT_SET_SCHEMA = 'homeboy/fuzz-hotspot-set/v1';
 const WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA = WORDPRESS_FUZZ_HOTSPOT_SET_SCHEMA;
+const WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA = 'homeboy/fuzz-observation-set/v1';
 
 function buildWordPressFuzzRuntimeTaskRequest(options = {}) {
 	const provider = normalizeProvider(options.provider || options.runtimeId || options.runtime_id || 'wp-codebox');
@@ -32,6 +33,10 @@ function normalizeWordPressFuzzRuntimeTaskResult(result = {}, context = {}) {
 		source.hotspot_summary || source.hotspotSummary || source.hotspots || source.hotspot_report || source.hotspotReport || source.performance_hotspots || source.performanceHotspots,
 		{ provider: provider.id, taskId: source.request_id || source.requestId || context.taskId || context.task_id }
 	);
+	const observationSet = normalizeFuzzObservationSet(
+		source.observation_set || source.observationSet || source.observations || source.measurements || source.performance || source.query_data || source.queryData,
+		{ provider: provider.id, taskId: source.request_id || source.requestId || context.taskId || context.task_id }
+	);
 
 	return stripUndefined({
 		schema: WORDPRESS_FUZZ_RUNTIME_TASK_RESULT_SCHEMA,
@@ -42,6 +47,7 @@ function normalizeWordPressFuzzRuntimeTaskResult(result = {}, context = {}) {
 		coverage: source.coverage,
 		coverage_summary: objectOrUndefined(source.coverage_summary || source.coverageSummary),
 		coverage_gaps: source.coverage_gaps || source.coverageGaps,
+		observation_set: observationSet,
 		hotspot_summary: hotspotSummary,
 		artifacts: normalizeArray(source.artifacts || source.artifact_refs || source.artifactRefs),
 		failures: normalizeArray(source.failures || source.errors || source.diagnostics),
@@ -49,6 +55,139 @@ function normalizeWordPressFuzzRuntimeTaskResult(result = {}, context = {}) {
 		provider_metadata: objectOrUndefined(source.provider_metadata || source.providerMetadata),
 		metadata: objectOrUndefined(source.metadata),
 	});
+}
+
+function normalizeFuzzObservationSet(input, defaults = {}) {
+	const source = objectOrUndefined(input) ? input : { observations: input };
+	const observations = codeboxMeasurementCandidates(source)
+		.map((entry, index) => normalizeFuzzObservation(entry, { ...defaults, index }))
+		.filter(Boolean);
+	if (observations.length === 0) {
+		return undefined;
+	}
+	return stripUndefined({
+		schema: WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA,
+		version: 1,
+		id: nonEmptyString(source.id || source.observation_set_id || source.observationSetId) || `${defaults.taskId || defaults.provider || 'wordpress'}-observations`,
+		label: nonEmptyString(source.label),
+		observations,
+		metadata: objectOrUndefined(source.metadata),
+	});
+}
+
+function codeboxMeasurementCandidates(source = {}) {
+	const candidates = [
+		source.observations,
+		source.items,
+		source.measurements,
+		source.metrics,
+		source.performance_measurements,
+		source.performanceMeasurements,
+	];
+	const plurals = { query: 'queries', action: 'actions', resource: 'resources', timing: 'timings', counter: 'counters' };
+	for (const family of ['query', 'action', 'resource', 'timing', 'counter']) {
+		candidates.push(source[family], source[plurals[family]], source[`${family}_measurements`], source[`${family}Measurements`]);
+	}
+	return candidates.flatMap(normalizeArray);
+}
+
+function normalizeFuzzObservation(entry = {}, defaults = {}) {
+	if (!objectOrUndefined(entry)) {
+		return undefined;
+	}
+	const metadata = objectOrUndefined(entry.metadata) || {};
+	const family = normalizeObservationFamily(entry.family || entry.type || entry.kind || metadata.family || inferObservationFamily(entry));
+	const metric = nonEmptyString(entry.metric || entry.metric_name || entry.metricName || entry.name || inferMetric(entry));
+	const value = numericValue(entry.value ?? entry.metric_value ?? entry.metricValue ?? entry.count ?? entry.total ?? entry.duration_ms ?? entry.durationMs ?? entry.elapsed_ms ?? entry.elapsedMs ?? entry.memory_bytes ?? entry.memoryBytes ?? entry.bytes);
+	const subject = nonEmptyString(entry.subject || entry.query || entry.sql || entry.action || entry.hook || entry.resource || entry.endpoint || entry.route || entry.url || entry.name || metric);
+	if (!family || !metric || value === undefined || !subject) {
+		return undefined;
+	}
+	const caseId = nonEmptyString(entry.case_id || entry.caseId || metadata.case_id || metadata.caseId);
+	const targetId = nonEmptyString(entry.target_id || entry.targetId || entry.surface_id || entry.surfaceId || metadata.target_id || metadata.targetId || metadata.surface_id || metadata.surfaceId);
+	const operationId = nonEmptyString(entry.operation_id || entry.operationId || entry.operation || metadata.operation_id || metadata.operationId || metadata.operation);
+	return stripUndefined({
+		id: nonEmptyString(entry.id || entry.key) || observationId({ defaults, family, caseId, targetId, operationId, metric, subject }),
+		family,
+		case_id: caseId,
+		target_id: targetId,
+		operation_id: operationId,
+		phase: nonEmptyString(entry.phase || metadata.phase),
+		subject,
+		metric,
+		value,
+		unit: nonEmptyString(entry.unit || inferObservationUnit(entry, metric, family)) || 'count',
+		fingerprint: nonEmptyString(entry.fingerprint || entry.hash || entry.signature || metadata.fingerprint),
+		sample_count: positiveInteger(entry.sample_count || entry.sampleCount || entry.samples, undefined),
+		metadata: stripUndefined({
+			...metadata,
+			provider: defaults.provider,
+		}),
+	});
+}
+
+function observationId({ defaults = {}, family, caseId, targetId, operationId, metric, subject }) {
+	return [defaults.taskId || defaults.provider || 'wordpress', family, caseId, targetId, operationId, metric, subject]
+		.filter(Boolean)
+		.join(':')
+		.replace(/\s+/g, '-');
+}
+
+function normalizeObservationFamily(value) {
+	const family = String(value || '').trim().toLowerCase().replace(/[\s.-]+/g, '_');
+	if (['action', 'query', 'resource', 'timing', 'counter'].includes(family)) {
+		return family;
+	}
+	return undefined;
+}
+
+function inferObservationFamily(entry = {}) {
+	if (entry.query !== undefined || entry.sql !== undefined || entry.query_count !== undefined || entry.queryCount !== undefined) {
+		return 'query';
+	}
+	if (entry.action !== undefined || entry.hook !== undefined) {
+		return 'action';
+	}
+	if (entry.duration_ms !== undefined || entry.durationMs !== undefined || entry.elapsed_ms !== undefined || entry.elapsedMs !== undefined) {
+		return 'timing';
+	}
+	if (entry.memory_bytes !== undefined || entry.memoryBytes !== undefined || entry.memory_peak_bytes !== undefined || entry.memoryPeakBytes !== undefined || entry.bytes !== undefined) {
+		return 'resource';
+	}
+	if (entry.count !== undefined || entry.total !== undefined) {
+		return 'counter';
+	}
+	return undefined;
+}
+
+function inferObservationUnit(entry = {}, metric = '', family = '') {
+	if (/duration|elapsed|time|latency/.test(metric) || entry.duration_ms !== undefined || entry.durationMs !== undefined || entry.elapsed_ms !== undefined || entry.elapsedMs !== undefined) {
+		return 'ms';
+	}
+	if (/bytes|memory/.test(metric) || family === 'resource') {
+		return 'bytes';
+	}
+	return 'count';
+}
+
+function fuzzHotspotSummaryFromObservationSet(input, defaults = {}) {
+	const observationSet = input?.schema === WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA ? input : normalizeFuzzObservationSet(input, defaults);
+	if (!observationSet) {
+		return undefined;
+	}
+	return normalizeFuzzHotspotSummary({
+		items: observationSet.observations.map((observation) => ({
+			surface_key: observation.target_id || observation.subject,
+			operation_key: observation.operation_id || observation.phase || observation.subject,
+			dimension: observation.family,
+			metric: observation.metric,
+			value: observation.value,
+			unit: observation.unit,
+			sample_count: observation.sample_count,
+			metadata: stripUndefined({ observation_id: observation.id, family: observation.family }),
+		})),
+		metadata: { observation_set_id: observationSet.id },
+	}, defaults);
 }
 
 function normalizeFuzzHotspotSummary(input, defaults = {}) {
@@ -85,12 +224,12 @@ function normalizeFuzzHotspotItem(entry = {}, defaults = {}) {
 	const metadata = objectOrUndefined(entry.metadata) || {};
 	const surfaceKey = nonEmptyString(entry.surface_key || entry.surfaceKey || entry.surface || entry.surface_id || entry.surfaceId || metadata.surface_key || metadata.surfaceKey || entry.key || entry.id);
 	const operationKey = nonEmptyString(entry.operation_key || entry.operationKey || entry.operation || entry.operation_id || entry.operationId || metadata.operation_key || metadata.operationKey || surfaceKey);
-	const dimension = nonEmptyString(entry.dimension || entry.kind || defaults.dimension || 'performance');
 	const metric = nonEmptyString(entry.metric || entry.metric_name || entry.metricName || defaults.metric || inferMetric(entry));
 	const value = numericValue(entry.value ?? entry.metric_value ?? entry.metricValue ?? entry.count ?? entry.total ?? entry.duration_ms ?? entry.durationMs);
 	if (!surfaceKey || !operationKey || !metric || value === undefined) {
 		return undefined;
 	}
+	const dimension = nonEmptyString(entry.dimension || entry.kind || defaults.dimension || 'performance');
 	return stripUndefined({
 		id: nonEmptyString(entry.id || entry.key) || `${surfaceKey}:${operationKey}:${metric}`,
 		dimension,
@@ -207,7 +346,10 @@ module.exports = {
 	WORDPRESS_FUZZ_RUNTIME_TASK_REQUEST_SCHEMA,
 	WORDPRESS_FUZZ_RUNTIME_TASK_RESULT_SCHEMA,
 	WORDPRESS_FUZZ_HOTSPOT_SET_SCHEMA,
+	WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA,
 	buildWordPressFuzzRuntimeTaskRequest,
+	fuzzHotspotSummaryFromObservationSet,
+	normalizeFuzzObservationSet,
 	normalizeFuzzHotspotSummary,
 	normalizeWordPressFuzzRuntimeTaskResult,
 };
