@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.6] - 2026-06-24
+
+### Changed
+- Stabilize WordPress fuzz preflight
+
 ## [3.13.5] - 2026-06-24
 
 ### Changed
