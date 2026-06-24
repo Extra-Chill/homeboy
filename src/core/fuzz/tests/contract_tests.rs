@@ -90,7 +90,7 @@ fn core_contract_deserializes_without_operation_families() {
         .contains(&FuzzOperationFamily::Read));
     assert!(contract
         .operation_families
-        .contains(&FuzzOperationFamily::BlockRender));
+        .contains(&FuzzOperationFamily::Render));
 }
 
 #[test]

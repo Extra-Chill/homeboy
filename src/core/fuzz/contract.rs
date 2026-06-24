@@ -1,7 +1,7 @@
 //! Core fuzz contract envelope: safety classes, operation families, and the
 //! product-neutral schema registry surfaced by `fuzz_core_contract`.
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use super::schema_defaults::{
     fuzz_contract_version, fuzz_core_contract_schema, lifecycle_contract_schema,
@@ -73,8 +73,7 @@ pub enum FuzzSafetyClass {
     Destructive,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FuzzOperationFamily {
     Read,
     Create,
@@ -87,8 +86,61 @@ pub enum FuzzOperationFamily {
     Query,
     Load,
     Submit,
-    BlockRender,
     PerformanceProbe,
+}
+
+impl Serialize for FuzzOperationFamily {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(fuzz_operation_family_name(*self))
+    }
+}
+
+impl<'de> Deserialize<'de> for FuzzOperationFamily {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_operation_family(&value).ok_or_else(|| {
+            de::Error::unknown_variant(
+                &value,
+                &[
+                    "read",
+                    "create",
+                    "update",
+                    "delete",
+                    "list",
+                    "search",
+                    "navigate",
+                    "render",
+                    "query",
+                    "load",
+                    "submit",
+                    "performance_probe",
+                ],
+            )
+        })
+    }
+}
+
+fn fuzz_operation_family_name(family: FuzzOperationFamily) -> &'static str {
+    match family {
+        FuzzOperationFamily::Read => "read",
+        FuzzOperationFamily::Create => "create",
+        FuzzOperationFamily::Update => "update",
+        FuzzOperationFamily::Delete => "delete",
+        FuzzOperationFamily::List => "list",
+        FuzzOperationFamily::Search => "search",
+        FuzzOperationFamily::Navigate => "navigate",
+        FuzzOperationFamily::Render => "render",
+        FuzzOperationFamily::Query => "query",
+        FuzzOperationFamily::Load => "load",
+        FuzzOperationFamily::Submit => "submit",
+        FuzzOperationFamily::PerformanceProbe => "performance_probe",
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,11 +162,10 @@ pub fn canonical_operation_family(kind: &str) -> Option<FuzzOperationFamily> {
         "list" => Some(FuzzOperationFamily::List),
         "search" => Some(FuzzOperationFamily::Search),
         "navigate" => Some(FuzzOperationFamily::Navigate),
-        "render" => Some(FuzzOperationFamily::Render),
+        "render" | "block_render" => Some(FuzzOperationFamily::Render),
         "query" => Some(FuzzOperationFamily::Query),
         "load" => Some(FuzzOperationFamily::Load),
         "submit" => Some(FuzzOperationFamily::Submit),
-        "block_render" => Some(FuzzOperationFamily::BlockRender),
         "performance_probe" => Some(FuzzOperationFamily::PerformanceProbe),
         _ => None,
     }
@@ -180,7 +231,6 @@ pub(super) fn default_fuzz_operation_families() -> Vec<FuzzOperationFamily> {
         FuzzOperationFamily::Query,
         FuzzOperationFamily::Load,
         FuzzOperationFamily::Submit,
-        FuzzOperationFamily::BlockRender,
         FuzzOperationFamily::PerformanceProbe,
     ]
 }

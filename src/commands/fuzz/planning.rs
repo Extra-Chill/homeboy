@@ -335,7 +335,6 @@ fn strategy_matches_operation(strategy: FuzzPlanStrategy, family: FuzzOperationF
                 | FuzzOperationFamily::Render
                 | FuzzOperationFamily::Query
                 | FuzzOperationFamily::Load
-                | FuzzOperationFamily::BlockRender
         ),
         FuzzPlanStrategy::Crud => matches!(
             family,
@@ -388,7 +387,6 @@ fn operation_family_name(family: FuzzOperationFamily) -> &'static str {
         FuzzOperationFamily::Query => "query",
         FuzzOperationFamily::Load => "load",
         FuzzOperationFamily::Submit => "submit",
-        FuzzOperationFamily::BlockRender => "block_render",
         FuzzOperationFamily::PerformanceProbe => "performance_probe",
     }
 }
