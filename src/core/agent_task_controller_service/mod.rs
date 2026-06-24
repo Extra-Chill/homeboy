@@ -51,6 +51,9 @@ pub const LIST_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-list/v1
 pub const FROM_SPEC_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-from-spec-result/v1";
 /// Schema for dry controller-spec plan reports.
 pub const PLAN_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-plan-result/v1";
+/// Schema for from-spec executable agent-task plan compilation reports.
+pub const EXECUTABLE_PLAN_RESULT_SCHEMA: &str =
+    "homeboy/agent-task-loop-controller-executable-plan-result/v1";
 
 mod action_state;
 mod actions;
@@ -76,7 +79,11 @@ pub use run_failure_summary::{
     CONTROLLER_RUN_FAILURE_SUMMARY_SCHEMA,
 };
 pub use spec::*;
-pub(crate) use spec_compile::validate_loop_spec;
+#[cfg(test)]
+pub(crate) use spec_compile::validate_artifact_flow_bindings;
+pub(crate) use spec_compile::{
+    compile_executable_plan_from_spec, homeboy_runtime_artifacts, validate_loop_spec,
+};
 use spec_compile::{
     compile_loop_spec_policy, compile_loop_spec_workflows, controller_spec_homeboy_plan,
     merge_policy_into_event_payload, reconcile_repo_loop_spec_actions, repo_loop_spec_fingerprint,
@@ -451,6 +458,35 @@ pub fn plan_from_spec(request: ControllerPlanRequest) -> Result<ControllerPlanRe
         plan,
         actions,
         run_command: Some("homeboy agent-task controller from-spec <spec> --resume".to_string()),
+    })
+}
+
+/// Compile a loop controller spec into an executable agent-task plan.
+///
+/// This is the from-spec compiler primitive requested in #5101: the executable
+/// plan builder consumes the loop controller spec as the single source of truth.
+/// It derives the executable plan stages and inter-stage dependencies from the
+/// spec's workflows and `artifact_flow` (artifact_graph) edges, validates task
+/// bindings against those edges, and represents Homeboy-owned runtime artifacts
+/// (e.g. `static_validation_run`) as synthetic runtime stages so downstream
+/// callers never hard-code Homeboy/Codebox internals. No controller state is
+/// written.
+pub fn compile_plan_from_spec(
+    request: ControllerPlanRequest,
+) -> Result<ControllerExecutablePlanReport> {
+    let spec = request.spec;
+    let plan = compile_executable_plan_from_spec(&spec)?;
+    let spec_fingerprint = repo_loop_spec_fingerprint(&spec)?;
+    let runtime_artifacts = homeboy_runtime_artifacts(&spec)
+        .into_iter()
+        .map(|artifact| artifact.artifact_id.clone())
+        .collect();
+    Ok(ControllerExecutablePlanReport {
+        schema: EXECUTABLE_PLAN_RESULT_SCHEMA,
+        loop_id: spec.loop_id,
+        spec_fingerprint,
+        runtime_artifacts,
+        plan,
     })
 }
 
