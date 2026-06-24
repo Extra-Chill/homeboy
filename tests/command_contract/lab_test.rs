@@ -770,6 +770,8 @@ fn agent_task_git_checkout_policy_uses_default_backend_when_backend_is_omitted()
         "homeboy",
         "agent-task",
         "cook",
+        "--to-worktree",
+        "homeboy@smoke",
         "--cwd",
         "/work/repo",
         "--prompt",
@@ -878,7 +880,7 @@ fn agent_task_git_checkout_policy_covers_cook_dispatch_workspace() {
         panic!("expected agent-task command");
     };
 
-    assert!(!agent_task_provider_requires_cwd_git_checkout_with(
+    assert!(agent_task_provider_requires_cwd_git_checkout_with(
         &args.command,
         || Some("default-patch-provider".to_string()),
         |backend, _| backend == "default-patch-provider",

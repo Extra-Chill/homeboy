@@ -658,7 +658,10 @@ fn agent_task_provider_requires_cwd_git_checkout_with(
             let backend = args.backend.clone().or_else(default_backend);
             backend.as_ref().is_some_and(|backend| {
                 provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
-            })
+            }) || args
+                .backend
+                .as_ref()
+                .is_some_and(|backend| !backend.trim().is_empty())
         }
         agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
             command:
