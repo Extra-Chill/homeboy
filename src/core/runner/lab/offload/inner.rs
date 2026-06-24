@@ -3,16 +3,58 @@
 
 use super::*;
 
-pub(crate) fn remote_lab_output_file(remote_cwd: &str) -> String {
+/// Homeboy-owned Lab artifact directory for a given runner checkout root.
+///
+/// Lab structured output is a Homeboy-owned artifact, not part of the synced
+/// source tree. Writing it inside `checkout_root` made the runner checkout
+/// dirty and the next Lab run failed the dirty-workspace preflight (#6219).
+/// Derive a sibling directory (a `-homeboy-artifacts` suffix on the checkout
+/// path) so the artifact lives OUTSIDE the git checkout and never dirties it.
+pub(crate) fn remote_lab_artifact_dir(checkout_root: &str) -> String {
+    format!("{}-homeboy-artifacts", checkout_root.trim_end_matches('/'))
+}
+
+/// Remote path for the Lab structured-output JSON file.
+///
+/// `checkout_root` is the runner-side synced checkout (or the resident
+/// workspace root). The structured output is written to a Homeboy-owned
+/// sibling artifact directory rather than into the checkout itself so repeated
+/// Lab runs against the same checkout never fail the dirty-workspace preflight.
+pub(crate) fn remote_lab_output_file(checkout_root: &str) -> String {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!(
         "{}/homeboy-lab-structured-output-{}.json",
-        remote_cwd.trim_end_matches('/'),
+        remote_lab_artifact_dir(checkout_root),
         nonce
     )
+}
+
+/// Ensure the Homeboy-owned Lab artifact directory exists on the runner before
+/// a command writes its structured output there. The directory is a sibling of
+/// the checkout, so it is not created by workspace sync and must be made
+/// explicitly. Failure here is non-fatal preparation: surface a clear error so
+/// the missing `--output` target is diagnosable instead of a late download
+/// failure.
+pub(crate) fn ensure_remote_lab_artifact_dir(runner_id: &str, output_file: &str) -> Result<()> {
+    let parent = output_file
+        .rsplit_once('/')
+        .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+        .unwrap_or(".");
+    let client = ssh_client_for_lab_runner(runner_id)?;
+    let mkdir = client.execute(&format!("mkdir -p {}", shell::quote_arg(parent)));
+    if !mkdir.success {
+        return Err(Error::internal_unexpected(format!(
+            "Lab offload could not create Homeboy-owned artifact directory `{parent}` on runner `{runner_id}`: {}",
+            mkdir.stderr.trim()
+        ))
+        .with_hint(
+            "Lab structured output is written outside the synced checkout so it does not dirty the runner workspace; the runner workspace parent must be writable.".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn args_contain_output_file(args: &[String]) -> bool {
@@ -394,6 +436,14 @@ pub(crate) fn run_lab_offload_inner(
         rig_component_path_overrides,
     } = workspace_stage;
     plan = next_plan;
+
+    // The structured-output file lives in a Homeboy-owned artifact directory
+    // that is a sibling of the synced checkout (#6219), so it is never created
+    // by workspace sync. Create it explicitly before dispatch so the remote
+    // command can write its `--output` target outside the git tree.
+    if let Some(output_file) = remote_output_file.as_deref() {
+        ensure_remote_lab_artifact_dir(runner_id, output_file)?;
+    }
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
