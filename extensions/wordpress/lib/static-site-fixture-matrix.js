@@ -159,8 +159,8 @@ function normalizeStaticSiteImporterPlugin(input = {}) {
 			activate: true,
 		},
 		activationStep: {
-			command: 'wordpress.ensure-plugin-active',
-			args: [`plugin=${pluginFile}`],
+			command: 'wordpress.wp-cli',
+			args: [`command=plugin activate ${pluginFile}`],
 		},
 	};
 }

@@ -207,7 +207,7 @@ const jsonWorkloadResult = buildWordPressFuzzRunnerResult({
 
 assert.equal(jsonWorkloadResult.wp_codebox_input.cases.length, 1);
 assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].id, 'json-workload:default');
-assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.setup, [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
 assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/json-workload.workload.json'] }]);
 assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
 assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].artifacts[0].required, true);
@@ -266,7 +266,7 @@ const remappedPluginRootResult = buildWordPressFuzzRunnerResult({
 		cases: [{
 			case_id: 'jetpack-performance-observation:default',
 			phases: {
-				setup: [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=jetpack/jetpack.php'] }],
+				setup: [{ command: 'wordpress.wp-cli', args: ['command=plugin activate jetpack/jetpack.php'] }],
 				action: [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/performance.workload.json'] }],
 			},
 		}],
