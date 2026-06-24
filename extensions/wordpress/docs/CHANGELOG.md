@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.17] - 2026-06-24
+
+### Fixed
+- Fix SSI fixture matrix workflow step schema
+
 ## [3.13.16] - 2026-06-24
 
 ### Fixed
