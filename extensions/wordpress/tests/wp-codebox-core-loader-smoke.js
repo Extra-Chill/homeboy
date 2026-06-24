@@ -17,34 +17,27 @@ async function main() {
 		fs.writeFileSync(path.join(dist, 'index.js'), 'exports.fixtureExport = () => "legacy-index";\n');
 
 		const candidates = coreModuleCandidates({
-			wpCodeboxInstallDir: root,
 			packageCandidates: [
 				'@automattic/wp-codebox-core/artifacts',
 				'wp-codebox-workspace/artifacts',
 			],
-			packageDistEntries: ['artifacts.js'],
 		});
 
 		assert.equal(candidates[0], '@automattic/wp-codebox-core/artifacts');
 		assert.equal(candidates[1], 'wp-codebox-workspace/artifacts');
-		assert.match(candidates[2], /dist\/artifacts\.js$/);
-		assert.equal(candidates.some((candidate) => /dist\/index\.js$/.test(candidate)), false);
+		assert.equal(candidates.length, 2);
 
 		const result = await loadWpCodeboxCoreExport('fixtureExport', {
-			wpCodeboxInstallDir: root,
-			packageCandidates: [],
-			packageDistEntries: ['artifacts.js'],
+			coreModule: path.join(dist, 'artifacts.js'),
 			required: true,
 		});
 
 		assert.match(result.source, /dist\/artifacts\.js$/);
 		assert.equal(result.value(), 'focused-artifacts');
 
-		fs.rmSync(path.join(dist, 'artifacts.js'));
+		const missingExportPath = path.join(dist, 'missing-artifacts.js');
 		await assert.rejects(() => loadWpCodeboxCoreExport('fixtureExport', {
-			wpCodeboxInstallDir: root,
-			packageCandidates: [],
-			packageDistEntries: ['artifacts.js'],
+			coreModule: missingExportPath,
 			required: true,
 		}), /WP Codebox core export fixtureExport is unavailable/);
 

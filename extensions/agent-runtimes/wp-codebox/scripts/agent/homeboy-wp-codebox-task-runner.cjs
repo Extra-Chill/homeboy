@@ -7,12 +7,9 @@
  * External dependencies
  */
 const fs = require('node:fs');
-const http = require('node:http');
-const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
-const { URLSearchParams } = require('node:url');
 
 const {
   assertProviderSecretEnvPreflight,
@@ -37,9 +34,6 @@ const {
   codeboxRunAgentTaskInvocation,
 } = require('../../lib/codebox-run-agent-task-contract');
 
-const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
-const WP_CODEBOX_OWNED_SUBSTRATE_SLUGS = new Set(['agents-api', 'data-machine', 'data-machine-code']);
-const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -154,123 +148,6 @@ function codexAuthGuidance() {
   return providerGuidance('codex');
 }
 
-function codexOAuthTokenUrl() {
-  return process.env.HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL || CODEX_OAUTH_TOKEN_URL;
-}
-
-function codexAuthPath() {
-  return process.env.HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH || (process.env.HOME ? path.join(process.env.HOME, '.codex', 'auth.json') : '');
-}
-
-function postForm(url, body, timeoutMs = 20000) {
-  return new Promise((resolve, reject) => {
-    let parsedUrl;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      reject(new Error('Codex provider auth preflight failed: OAuth token URL is invalid.'));
-      return;
-    }
-
-    const transport = parsedUrl.protocol === 'http:' ? http : https;
-    const encoded = new URLSearchParams(body).toString();
-    const request = transport.request(parsedUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(encoded),
-      },
-      timeout: timeoutMs,
-    }, (response) => {
-      let responseBody = '';
-      response.setEncoding('utf8');
-      response.on('data', (chunk) => {
-        responseBody += chunk;
-      });
-      response.on('end', () => {
-        resolve({ statusCode: response.statusCode || 0, body: responseBody });
-      });
-    });
-
-    request.on('timeout', () => {
-      request.destroy(new Error('Codex provider auth preflight failed: OAuth refresh timed out.'));
-    });
-    request.on('error', reject);
-    request.end(encoded);
-  });
-}
-
-async function refreshCodexAuthEnv() {
-  let response;
-  try {
-    response = await postForm(codexOAuthTokenUrl(), {
-      grant_type: 'refresh_token',
-      client_id: CODEX_OAUTH_CLIENT_ID,
-      refresh_token: process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN,
-    });
-  } catch (error) {
-    throw new Error(`Codex provider auth preflight failed: OAuth refresh request failed. ${codexAuthGuidance()}`);
-  }
-
-  if (response.statusCode < 200 || response.statusCode >= 300) {
-    throw new Error(`Codex provider auth preflight failed: OAuth refresh returned HTTP ${response.statusCode}. ${codexAuthGuidance()}`);
-  }
-
-  let data;
-  try {
-    data = JSON.parse(response.body);
-  } catch {
-    throw new Error(`Codex provider auth preflight failed: OAuth refresh returned invalid JSON. ${codexAuthGuidance()}`);
-  }
-
-  if (!data || typeof data !== 'object' || typeof data.access_token !== 'string' || data.access_token === '') {
-    throw new Error(`Codex provider auth preflight failed: OAuth refresh returned an invalid response. ${codexAuthGuidance()}`);
-  }
-
-  const expiresIn = Number.isFinite(Number(data.expires_in)) ? Number(data.expires_in) : 3600;
-  const refreshedEnv = Object.fromEntries(Object.entries({
-    AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: data.access_token,
-    AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: typeof data.refresh_token === 'string' && data.refresh_token !== ''
-      ? data.refresh_token
-      : process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN,
-    AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: String(Math.floor(Date.now() / 1000) + Math.trunc(expiresIn)),
-    AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: process.env.AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID,
-    AI_PROVIDER_OPENAI_CODEX_FEDRAMP: process.env.AI_PROVIDER_OPENAI_CODEX_FEDRAMP,
-  }).filter(([, value]) => value !== undefined && value !== null && value !== ''));
-  persistRefreshedCodexAuth(refreshedEnv);
-  return refreshedEnv;
-}
-
-function persistRefreshedCodexAuth(refreshedEnv) {
-  const authPath = codexAuthPath();
-  if (!authPath || (!process.env.HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH && !fs.existsSync(authPath))) {
-    return;
-  }
-
-  const auth = readJsonIfAvailable(authPath) || {};
-  const next = {
-    ...auth,
-    tokens: {
-      ...(plainObject(auth.tokens) ? auth.tokens : {}),
-      access_token: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN,
-      refresh_token: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN,
-      expires_at: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT,
-      account_id: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID,
-      fedramp: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_FEDRAMP,
-    },
-  };
-  try {
-    fs.mkdirSync(path.dirname(authPath), { recursive: true, mode: 0o700 });
-    const tempPath = `${authPath}.${process.pid}.tmp`;
-    fs.writeFileSync(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-    fs.renameSync(tempPath, authPath);
-    fs.chmodSync(authPath, 0o600);
-  } catch {
-    // Auth refresh is still valid for this run. A later run will surface stale
-    // credentials if the host cannot persist the rotated refresh token.
-  }
-}
-
 async function codexAuthPreflightEnv(request) {
   const manifest = providerPreflightManifest(request.provider);
   if (request.provider !== 'codex' || !manifest) {
@@ -293,7 +170,7 @@ async function codexAuthPreflightEnv(request) {
   }
 
   if (manifest.refresh_hook === 'codex-oauth-refresh') {
-    return refreshCodexAuthEnv();
+    throw new Error(`Codex provider auth preflight failed: token refresh requires a Codebox/provider-owned public credential refresh primitive; Homeboy passes secret_env names only. ${codexAuthGuidance()}`);
   }
 
   return {};
@@ -1257,16 +1134,7 @@ function componentContracts(input) {
     ...requestComponentContracts(input.parent_request).map(remapRuntimeComponentContract),
     ...requestComponentContracts(input.parent_request?.parent_request).map(remapRuntimeComponentContract),
     ...runtimeContracts,
-  ].filter((contract) => !isImplicitCodeboxOwnedSubstrateContract(contract)));
-}
-
-function isCodeboxOwnedSubstrateContract(contract) {
-  const slug = typeof contract?.slug === 'string' ? contract.slug.trim() : '';
-  return WP_CODEBOX_OWNED_SUBSTRATE_SLUGS.has(slug);
-}
-
-function isImplicitCodeboxOwnedSubstrateContract(contract) {
-  return isCodeboxOwnedSubstrateContract(contract) && contract?.metadata?.source !== 'runtime_requirements.component_contracts';
+  ]);
 }
 
 function requestComponentContracts(request) {
@@ -2429,12 +2297,12 @@ function attachRunAgentTaskCompatibilityMetadata(payload, invocation) {
 (async () => {
 try {
   const request = readTaskRequest();
-  const codexEnv = await codexAuthPreflightEnv(request);
+  await codexAuthPreflightEnv(request);
   if (request.provider === 'claude-code') {
     assertProviderSecretEnvPreflight(requestWithCliSecretEnv(request), request.provider, process.env);
   }
   assertRequiredSecretEnvAvailable(request);
-  process.exitCode = runWpCodeboxParentTask(request, codexEnv);
+  process.exitCode = runWpCodeboxParentTask(request);
 } catch (error) {
   console.error(error && error.message ? error.message : String(error));
   process.exitCode = 1;

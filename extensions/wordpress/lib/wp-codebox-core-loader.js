@@ -5,7 +5,6 @@
  */
 const path = require('node:path');
 const { existsSync } = require('node:fs');
-const { homedir } = require('node:os');
 const { pathToFileURL } = require('node:url');
 
 const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
@@ -43,24 +42,7 @@ function coreModuleCandidates(options = {}) {
 	}
 
 	const packageCandidates = options.packageCandidates || DEFAULT_CORE_PACKAGE_CANDIDATES;
-	const candidates = [...packageCandidates];
-	for (const candidate of setupCacheCoreModuleCandidates(options)) {
-		if (existsSync(candidate) && !candidates.includes(candidate)) {
-			candidates.push(candidate);
-		}
-	}
-	return candidates.map(normalizeCoreModuleSpecifier);
-}
-
-function setupCacheCoreModuleCandidates(options = {}) {
-	const installRoot = options.wpCodeboxInstallDir || process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.resolve(homedir(), '.cache/homeboy/wp-codebox');
-	const packageDistEntries = options.packageDistEntries || [];
-	const candidates = [];
-	for (const entry of packageDistEntries) {
-		candidates.push(path.resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist', entry));
-		candidates.push(path.resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist', entry));
-	}
-	return candidates;
+	return [...packageCandidates].map(normalizeCoreModuleSpecifier);
 }
 async function loadWpCodeboxCore(options = {}) {
 	const errors = [];
