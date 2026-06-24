@@ -26,7 +26,7 @@ impl FuzzArgs {
     }
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
-        self.is_run_invocation()
+        self.is_lab_offload_command()
             .then(|| LabCommandContract::portable_workload(FUZZ_LAB_LABEL, None, true, &[]))
     }
 
@@ -34,8 +34,24 @@ impl FuzzArgs {
         matches!(self.command, None | Some(FuzzCommand::Run(_)))
     }
 
+    /// Fuzz subcommands that offload to the configured Lab runner. `run`
+    /// executes the workload remotely; `list` enumerates the runner-resident
+    /// rig/extension fuzz workloads so the operator sees the same inventory the
+    /// runner would execute rather than the (possibly empty) local one. This
+    /// mirrors `bench`'s `is_lab_offload_command`, which routes its discovery
+    /// subcommands to the runner alongside `run`.
+    pub fn is_lab_offload_command(&self) -> bool {
+        matches!(
+            self.command,
+            None | Some(FuzzCommand::Run(_)) | Some(FuzzCommand::List(_))
+        )
+    }
+
     pub fn extension_override_ids(&self) -> &[String] {
-        self.run.extension_override.extensions.as_slice()
+        match &self.command {
+            Some(FuzzCommand::List(list)) => list.extension_override.extensions.as_slice(),
+            _ => self.run.extension_override.extensions.as_slice(),
+        }
     }
 }
 
