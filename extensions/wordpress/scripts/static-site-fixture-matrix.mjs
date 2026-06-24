@@ -43,6 +43,9 @@ async function main() {
 		matrix,
 		artifactsDirectory: outputDirectory,
 		wordpressVersion: options.wordpressVersion,
+		staticSiteImporterPath: options.staticSiteImporterPath ? path.resolve(options.staticSiteImporterPath) : undefined,
+		staticSiteImporterPlugin: options.staticSiteImporterPlugin,
+		staticSiteImporterSlug: options.staticSiteImporterSlug,
 	});
 	const recipeFile = path.join(outputDirectory, 'wp-codebox-static-site-fixture-matrix-recipe.json');
 	fs.writeFileSync(recipeFile, `${JSON.stringify(recipe, null, 2)}\n`);
@@ -142,7 +145,7 @@ function camelCase(value) {
 }
 
 function printHelp() {
-	process.stdout.write(`Usage: node scripts/static-site-fixture-matrix.mjs --fixture-root <path> [options]\n\nOptions:\n  --output-directory <path>   Directory for matrix artifacts and WP Codebox recipe.\n  --entrypoint <file>         Fixture entry file name. Default: index.html.\n  --max-depth <number>        Discovery depth below fixture root. Default: 2.\n  --wordpress-version <ver>   WP Codebox WordPress runtime version. Default: latest.\n  --wp-codebox-bin <path>     WP Codebox CLI binary for --run.\n  --run                       Execute the generated recipe with WP Codebox.\n`);
+	process.stdout.write(`Usage: node scripts/static-site-fixture-matrix.mjs --fixture-root <path> [options]\n\nOptions:\n  --output-directory <path>             Directory for matrix artifacts and WP Codebox recipe.\n  --entrypoint <file>                   Fixture entry file name. Default: index.html.\n  --max-depth <number>                  Discovery depth below fixture root. Default: 2.\n  --wordpress-version <ver>             WP Codebox WordPress runtime version. Default: latest.\n  --static-site-importer-path <path>    Local Static Site Importer plugin source to mount/install.\n  --static-site-importer-plugin <file>  Plugin file to activate. Default: <slug>/<slug>.php.\n  --static-site-importer-slug <slug>    Plugin slug for the mounted source. Default: source basename.\n  --wp-codebox-bin <path>               WP Codebox CLI binary for --run.\n  --run                                 Execute the generated recipe with WP Codebox.\n`);
 }
 
 main().catch((error) => {

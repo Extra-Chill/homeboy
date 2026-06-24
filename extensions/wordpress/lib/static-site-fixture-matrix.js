@@ -113,6 +113,21 @@ function buildStaticSiteFixtureArtifact(fixture, options = {}) {
 function buildStaticSiteFixtureMatrixRecipe(input = {}) {
 	const matrix = input.matrix || createStaticSiteFixtureMatrix(input);
 	const artifactsDirectory = input.artifactsDirectory || input.artifacts_directory || '/artifacts/static-site-fixture-matrix';
+	const staticSiteImporter = normalizeStaticSiteImporterPlugin(input);
+	const extraPlugins = staticSiteImporter
+		? [staticSiteImporter.extraPlugin, ...normalizeArray(input.extraPlugins || input.extra_plugins)]
+		: normalizeArray(input.extraPlugins || input.extra_plugins);
+	const validationSteps = matrix.fixtures.map((fixture) => ({
+		command: 'wordpress.wp-cli',
+		args: [
+			`command=static-site-importer validate-in-codebox --artifact=${shellToken(artifactPathForFixture(fixture, artifactsDirectory))} --slug=${shellToken(fixture.id)} --name=${shellToken(fixture.label)} --allow-missing-woocommerce`,
+		],
+		metadata: {
+			fixture_id: fixture.id,
+			artifact: artifactPathForFixture(fixture, artifactsDirectory),
+			output: outputPathForFixture(fixture, artifactsDirectory),
+		},
+	}));
 	return {
 		schema: 'wp-codebox/workspace-recipe/v1',
 		runtime: {
@@ -121,22 +136,40 @@ function buildStaticSiteFixtureMatrixRecipe(input = {}) {
 		},
 		inputs: {
 			mounts: normalizeArray(input.mounts),
+			...(extraPlugins.length > 0 ? { extraPlugins } : {}),
 		},
 		workflow: {
-			steps: matrix.fixtures.map((fixture) => ({
-				command: 'wordpress.wp-cli',
-				args: [
-					`command=static-site-importer validate-in-codebox --artifact=${shellToken(artifactPathForFixture(fixture, artifactsDirectory))} --slug=${shellToken(fixture.id)} --name=${shellToken(fixture.label)} --allow-missing-woocommerce`,
-				],
-				metadata: {
-					fixture_id: fixture.id,
-					artifact: artifactPathForFixture(fixture, artifactsDirectory),
-					output: outputPathForFixture(fixture, artifactsDirectory),
-				},
-			})),
+			steps: staticSiteImporter
+				? [staticSiteImporter.activationStep, ...validationSteps]
+				: validationSteps,
 		},
 		artifacts: {
 			directory: artifactsDirectory,
+		},
+	};
+}
+
+function normalizeStaticSiteImporterPlugin(input = {}) {
+	const source = input.staticSiteImporterPath || input.static_site_importer_path;
+	if (typeof source !== 'string' || source.trim() === '') {
+		return null;
+	}
+
+	const slugValue = input.staticSiteImporterSlug || input.static_site_importer_slug || path.basename(source);
+	const pluginFile = input.staticSiteImporterPlugin || input.static_site_importer_plugin || `${slugValue}/${slugValue}.php`;
+	return {
+		extraPlugin: {
+			source,
+			slug: slugValue,
+			activate: true,
+		},
+		activationStep: {
+			command: 'wordpress.ensure-plugin-active',
+			args: [`plugin=${pluginFile}`],
+			metadata: {
+				plugin: pluginFile,
+				slug: slugValue,
+			},
 		},
 	};
 }

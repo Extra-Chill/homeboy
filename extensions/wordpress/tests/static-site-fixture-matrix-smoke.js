@@ -66,6 +66,23 @@ async function main() {
 		assert.match(recipe.workflow.steps[0].args[0], /command=static-site-importer validate-in-codebox/);
 		assert.match(recipe.workflow.steps[0].args[0], /--artifact=\/artifacts\/matrix\/41-generative-art-studio\/artifact.json/);
 
+		const staticSiteImporterRecipe = buildStaticSiteFixtureMatrixRecipe({
+			matrix,
+			artifactsDirectory: '/artifacts/matrix',
+			staticSiteImporterPath: '/workspace/static-site-importer',
+			staticSiteImporterPlugin: 'static-site-importer/static-site-importer.php',
+			staticSiteImporterSlug: 'static-site-importer',
+		});
+		assert.deepEqual(Object.keys(staticSiteImporterRecipe).sort(), ['artifacts', 'inputs', 'runtime', 'schema', 'workflow']);
+		assert.deepEqual(staticSiteImporterRecipe.inputs.extraPlugins[0], {
+			source: '/workspace/static-site-importer',
+			slug: 'static-site-importer',
+			activate: true,
+		});
+		assert.equal(staticSiteImporterRecipe.workflow.steps[0].command, 'wordpress.ensure-plugin-active');
+		assert.deepEqual(staticSiteImporterRecipe.workflow.steps[0].args, ['plugin=static-site-importer/static-site-importer.php']);
+		assert.equal(staticSiteImporterRecipe.workflow.steps[1].command, 'wordpress.wp-cli');
+
 		assert.equal(classifyStaticSiteFinding({ message: 'This block contains unexpected or invalid content' }).group_key, 'invalid_block_content');
 		assert.equal(classifyStaticSiteFinding({ code: 'runtime_dependency_target_missing', message: '#canvas' }).group_key, 'runtime_target_gap');
 		assert.equal(classifyStaticSiteFinding({ message: 'The imported page has default gray buttons' }).group_key, 'button_style_loss');
