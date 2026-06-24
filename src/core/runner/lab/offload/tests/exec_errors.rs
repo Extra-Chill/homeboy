@@ -493,3 +493,89 @@ fn lab_structured_output_file_is_written_outside_the_checkout() {
     assert!(output_file.ends_with(".json"));
     assert!(output_file.contains("homeboy-lab-structured-output-"));
 }
+
+#[test]
+fn lab_cannot_proceed_error_names_runner_workspace_ref_dependency_and_fix_command() {
+    // A bare dependency-resolution failure as it surfaces today, before
+    // orchestration context is woven in.
+    let bare = Error::validation_invalid_argument(
+        "dependency",
+        "Could not resolve dependency checkout",
+        Some("sample-dependency".to_string()),
+        None,
+    );
+
+    let mut context = LabOrchestrationContext::for_runner_workspace(
+        "homeboy-lab",
+        "/Users/dev/Developer/sample-project",
+    )
+    .with_ref_base(Some("origin/main".to_string()));
+    context.dependency = Some("sample-dependency".to_string());
+
+    let enriched = enrich_lab_cannot_proceed_error(bare, &context);
+
+    // Structured context for machine consumers.
+    let ctx = &enriched.details["lab_orchestration_context"];
+    assert_eq!(ctx["runner_id"], "homeboy-lab");
+    assert_eq!(ctx["workspace_path"], "/Users/dev/Developer/sample-project");
+    assert_eq!(ctx["ref_base"], "origin/main");
+    assert_eq!(ctx["dependency"], "sample-dependency");
+
+    // Operator-facing hints name each known fact plus a Homeboy fix command.
+    let hints = enriched
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        hints.iter().any(|hint| hint.contains("homeboy-lab")),
+        "missing selected runner: {hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.contains("/Users/dev/Developer/sample-project")),
+        "missing workspace path: {hints:?}"
+    );
+    assert!(
+        hints.iter().any(|hint| hint.contains("origin/main")),
+        "missing ref/base: {hints:?}"
+    );
+    assert!(
+        hints.iter().any(|hint| hint.contains("sample-dependency")),
+        "missing dependency: {hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.contains("homeboy runner status homeboy-lab")
+                && hint.contains("homeboy deps install")),
+        "missing concrete Homeboy fix command: {hints:?}"
+    );
+}
+
+#[test]
+fn lab_cannot_proceed_enrichment_is_idempotent() {
+    let bare = Error::validation_invalid_argument(
+        "changed_since",
+        "Lab offload cannot resolve the requested --changed-since base before dispatch",
+        Some("origin/main".to_string()),
+        None,
+    );
+    let context = LabOrchestrationContext::for_runner_workspace(
+        "homeboy-lab",
+        "/Users/dev/Developer/sample-project",
+    )
+    .with_ref_base(Some("origin/main".to_string()));
+
+    let once = enrich_lab_cannot_proceed_error(bare, &context);
+    let hints_after_first = once.hints.len();
+    let twice = enrich_lab_cannot_proceed_error(once, &context);
+
+    // Re-enriching the same error must not duplicate context or fix hints.
+    assert_eq!(twice.hints.len(), hints_after_first);
+    assert_eq!(
+        twice.details["lab_orchestration_context"]["runner_id"],
+        "homeboy-lab"
+    );
+}

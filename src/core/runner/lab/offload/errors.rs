@@ -422,3 +422,109 @@ pub(crate) fn append_runner_component_registry_repair_hint(
 pub(crate) fn contains_component_not_found(output: &str) -> bool {
     output.contains("component.not_found") || output.contains("Component not found")
 }
+
+/// Known orchestration context for a Lab offload pre-execution stage. Every
+/// field that is populated is woven into a Lab-cannot-proceed error so the
+/// operator can self-serve a fix without SSH-ing into the runner to reconstruct
+/// which runner/workspace/ref/dependency the offload was working against
+/// (#4336).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LabOrchestrationContext {
+    /// Runner the offload selected to execute on.
+    pub(crate) runner_id: Option<String>,
+    /// Controller-local primary workspace path being materialized to the runner.
+    pub(crate) workspace_path: Option<String>,
+    /// Requested ref/base (e.g. the `--changed-since` ref) when one was named.
+    pub(crate) ref_base: Option<String>,
+    /// Dependency (checkout/override) at fault, when the failure is attributable
+    /// to a specific declared dependency rather than the primary workspace.
+    pub(crate) dependency: Option<String>,
+}
+
+impl LabOrchestrationContext {
+    pub(crate) fn for_runner_workspace(runner_id: &str, workspace_path: &str) -> Self {
+        Self {
+            runner_id: Some(runner_id.to_string()),
+            workspace_path: Some(workspace_path.to_string()),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn with_ref_base(mut self, ref_base: Option<String>) -> Self {
+        self.ref_base = ref_base.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// True once at least one orchestration fact is known and worth surfacing.
+    fn has_context(&self) -> bool {
+        self.runner_id.is_some()
+            || self.workspace_path.is_some()
+            || self.ref_base.is_some()
+            || self.dependency.is_some()
+    }
+}
+
+/// Enrich a Lab-cannot-proceed error with the orchestration context the
+/// operator needs to self-serve a fix: the selected runner, the primary
+/// workspace path, the ref/base, the dependency at fault (when known), plus a
+/// concrete Homeboy command to reconcile runner state and retry.
+///
+/// Idempotent: re-enriching an already-enriched error (e.g. when the same error
+/// bubbles through nested stages) does not duplicate the context block or the
+/// fix hints. Keeps the original error code/message; only adds details + hints.
+pub(crate) fn enrich_lab_cannot_proceed_error(
+    mut error: Error,
+    context: &LabOrchestrationContext,
+) -> Error {
+    if !context.has_context() {
+        return error;
+    }
+    // Idempotency guard: only attach the orchestration context once.
+    if error.details.get("lab_orchestration_context").is_some() {
+        return error;
+    }
+
+    if error.details.is_object() {
+        if let Some(map) = error.details.as_object_mut() {
+            map.insert(
+                "lab_orchestration_context".to_string(),
+                serde_json::json!({
+                    "runner_id": context.runner_id,
+                    "workspace_path": context.workspace_path,
+                    "ref_base": context.ref_base,
+                    "dependency": context.dependency,
+                }),
+            );
+        }
+    }
+
+    if let Some(runner_id) = &context.runner_id {
+        error = error.with_hint(format!(
+            "Lab cannot proceed on selected runner `{runner_id}`."
+        ));
+    }
+    if let Some(workspace_path) = &context.workspace_path {
+        error = error.with_hint(format!("Primary workspace: `{workspace_path}`."));
+    }
+    if let Some(ref_base) = &context.ref_base {
+        error = error.with_hint(format!("Requested ref/base: `{ref_base}`."));
+    }
+    if let Some(dependency) = &context.dependency {
+        error = error.with_hint(format!("Dependency at fault: `{dependency}`."));
+    }
+
+    // Concrete Homeboy command to fix it. Kept generic (homeboy subcommands
+    // only — no ecosystem tooling) so the core-agnostic-source gate stays green.
+    if let Some(runner_id) = &context.runner_id {
+        error = error.with_hint(format!(
+            "Fix runner state and retry: `homeboy runner status {runner_id}`, then re-materialize dependencies with `homeboy deps install` and re-run the Lab command."
+        ));
+    } else {
+        error = error.with_hint(
+            "Fix runner state and retry: select an available runner with `homeboy runner status`, re-materialize dependencies with `homeboy deps install`, and re-run the Lab command."
+                .to_string(),
+        );
+    }
+
+    error
+}

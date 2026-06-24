@@ -87,13 +87,13 @@ use super::super::lab_workspaces::{
 };
 use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
-    evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_metadata,
-    lab_offload_metadata_with_workspace_mapping, load, plan_managed_runner_source_syncs,
-    preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
-    prepare_lab_runner_capability, rig_materialization, status, sync_workspace,
-    LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport,
-    RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_changed_since_ref,
+    lab_offload_metadata, lab_offload_metadata_with_workspace_mapping, load,
+    plan_managed_runner_source_syncs, preflight_lab_offload_changed_since,
+    prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
+    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 use super::super::workload::{build_runner_workload, RunnerWorkloadBuildInput};
