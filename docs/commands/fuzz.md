@@ -121,9 +121,11 @@ Operations keep the free-form `kind` string for product-owned semantics and can
 also carry a canonical `family` for cross-runner coverage reporting. When
 `family` is omitted, Homeboy normalizes known neutral kinds and HTTP-style verbs
 to families such as `read`, `create`, `update`, `delete`, `list`, `search`,
-`navigate`, `render`, `query`, `load`, `submit`, `block_render`, and
-`performance_probe`. Unknown `kind` values remain valid and are preserved without
-a canonical family.
+`navigate`, `render`, `query`, `load`, `submit`, and `performance_probe`.
+Product-specific render kinds, such as WordPress block rendering, should keep
+their precise meaning in `kind`, `target.kind`, tags, or metadata while using
+the generic `render` family for cross-runner reporting. Unknown `kind` values
+remain valid and are preserved without a canonical family.
 
 ```json
 {
