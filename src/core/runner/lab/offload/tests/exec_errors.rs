@@ -423,8 +423,31 @@ fn lab_stream_truncation_fails_without_structured_output_file() {
 fn lab_stream_truncation_is_allowed_with_structured_output_file() {
     let output = truncated_runner_exec_output();
 
-    ensure_lab_offload_streams_not_truncated(&output, true)
-        .expect("structured output file preserves complete command result");
+    // Guard: the fixture must actually present a truncation condition, otherwise
+    // the function would short-circuit on the `!truncated` early return and this
+    // test would never reach the structured-output branch it is named for.
+    let capture = output
+        .capture
+        .as_ref()
+        .expect("fixture provides capture metadata");
+    assert!(
+        capture.stdout.truncated || capture.stderr.truncated,
+        "fixture must model a truncated stream so the structured-output branch is exercised"
+    );
+
+    // Same truncated output WITHOUT a structured output file is rejected, proving
+    // that it is specifically the structured output file that flips the decision.
+    let rejected = ensure_lab_offload_streams_not_truncated(&output, false);
+    let err = rejected.expect_err("truncated streams without structured output must be rejected");
+    assert_eq!(err.code, ErrorCode::InternalUnexpected);
+
+    // With a structured output file present, the real production decision allows
+    // the truncated streams (the complete result is preserved out-of-band).
+    let allowed = ensure_lab_offload_streams_not_truncated(&output, true);
+    assert!(
+        allowed.is_ok(),
+        "structured output file must permit truncated streams, got: {allowed:?}"
+    );
 }
 
 #[test]
