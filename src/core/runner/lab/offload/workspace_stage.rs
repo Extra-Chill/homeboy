@@ -28,6 +28,42 @@ pub(crate) struct LabOffloadWorkspaceStage {
 pub(crate) fn prepare_lab_offload_workspace_stage(
     request: &LabOffloadRequest<'_>,
     contract: &LabOffloadCommand,
+    plan: HomeboyPlan,
+    runner_id: &str,
+    source_path: &Path,
+    homeboy_path: &str,
+    command_prefix_argv: &[String],
+    runner_workspace_root: Option<&str>,
+) -> Result<LabOffloadWorkspaceStage> {
+    // Capture the orchestration facts known *before* staging so any
+    // Lab-cannot-proceed error bubbling out of the pre-execution/dispatch path
+    // names the selected runner, primary workspace, and ref/base, plus a
+    // Homeboy command to fix it — instead of a bare resolver/sync error that
+    // forces the operator to SSH into the runner to reconstruct context
+    // (#4336).
+    let context = LabOrchestrationContext::for_runner_workspace(
+        runner_id,
+        &source_path.display().to_string(),
+    )
+    .with_ref_base(lab_offload_changed_since_ref(request.normalized_args));
+
+    prepare_lab_offload_workspace_stage_inner(
+        request,
+        contract,
+        plan,
+        runner_id,
+        source_path,
+        homeboy_path,
+        command_prefix_argv,
+        runner_workspace_root,
+    )
+    .map_err(|error| enrich_lab_cannot_proceed_error(error, &context))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_lab_offload_workspace_stage_inner(
+    request: &LabOffloadRequest<'_>,
+    contract: &LabOffloadCommand,
     mut plan: HomeboyPlan,
     runner_id: &str,
     source_path: &Path,
