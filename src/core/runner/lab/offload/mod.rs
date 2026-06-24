@@ -21,6 +21,7 @@ mod execute;
 mod fallback_commands;
 mod inner;
 mod metadata;
+mod overhead;
 mod resident;
 mod types;
 mod workspace_stage;
@@ -105,7 +106,7 @@ use super::agent_task_bridge::{
 use super::evidence::terminal_lab_run_evidence;
 use super::fallback::{
     is_build_command, local_execution_denied_error, skipped_automatic_run_local,
-    unsupported_build_lab_error,
+    skipped_automatic_run_local_with_overhead, unsupported_build_lab_error,
 };
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
 use super::secrets::{build_lab_secret_env_handoff_plan, preflight_agent_task_runner_secret_env};
@@ -122,5 +123,6 @@ pub(crate) use execute::*;
 pub(crate) use fallback_commands::*;
 pub(crate) use inner::*;
 pub(crate) use metadata::*;
+pub(crate) use overhead::*;
 pub(crate) use resident::*;
 pub(crate) use workspace_stage::*;

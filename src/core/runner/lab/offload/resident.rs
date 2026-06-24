@@ -12,10 +12,14 @@ pub(crate) fn run_runner_resident_lab_offload(
     runner_workspace_root: &str,
     homeboy_path: &str,
     runner_status: &RunnerStatusReport,
+    mut overhead: LabOffloadOverhead,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, runner_status);
+    // Refreshing managed runner-resident source checkouts is workspace setup.
+    let managed_sources_timer = overhead.phase(LabOffloadPhase::WorkspaceSync);
     let source_syncs = refresh_managed_runner_sources(runner_id, runner_workspace_root)?;
+    managed_sources_timer.finish();
     if source_syncs.is_empty() {
         plan = with_step(
             plan,
@@ -117,6 +121,7 @@ pub(crate) fn run_runner_resident_lab_offload(
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     env.extend(secret_env_handoff.env_delta);
 
+    let exec_timer = overhead.phase(LabOffloadPhase::RemoteExec);
     let (exec_output, exit_code) = exec(
         runner_id,
         RunnerExecOptions {
@@ -136,6 +141,7 @@ pub(crate) fn run_runner_resident_lab_offload(
             detach_after_handoff: false,
         },
     )?;
+    exec_timer.finish();
     plan = with_step(
         plan,
         PlanStep::builder(
