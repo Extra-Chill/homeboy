@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.4] - 2026-06-24
+
+### Fixed
+- only pass --i-know-ci-creates-the-github-release when the homeboy binary supports it
+- pair --i-know-ci-creates-the-github-release with --no-github-release when RELEASE_SKIP_GITHUB_RELEASE=true
+
 ## [2.8.3] - 2026-06-23
 
 ### Fixed
