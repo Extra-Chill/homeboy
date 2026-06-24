@@ -80,6 +80,14 @@ const WP_CODEBOX_OWNED_SUBSTRATE_SLUGS = new Set(['agents-api', 'data-machine', 
 const WP_CODEBOX_RUNTIME_PACKAGE_SUBSTRATE_SLUGS = ['agents-api', 'data-machine', 'data-machine-code'];
 const WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY = 'wp-codebox/run-runtime-package';
 const LEGACY_RUNTIME_PACKAGE_ABILITIES = new Set(['agents/run-runtime-package', 'runtime-package/run']);
+const LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE = 'legacy-runtime-package-ability-alias';
+const LEGACY_RUNTIME_PACKAGE_ABILITY_DEPRECATIONS = Array.from(LEGACY_RUNTIME_PACKAGE_ABILITIES).map((ability) => ({
+  schema: 'wp-codebox/deprecated-compatibility-alias/v1',
+  alias: ability,
+  replacement: WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY,
+  quarantine: LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE,
+  status: 'deprecated',
+}));
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -186,6 +194,7 @@ function providerContract(options = {}) {
     provider_credential_boundary: providerCredentialBoundary(),
     provider_runtime_invocation: providerRuntimeInvocationContract(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
+    deprecated_compatibility_aliases: LEGACY_RUNTIME_PACKAGE_ABILITY_DEPRECATIONS,
     upstream_primitive_requirements: WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
     status: 'active',
     integration_contract: 'homeboy-wordpress-agent-task/v1',
@@ -1260,6 +1269,7 @@ function runtimeTaskAbilityNormalization({ requestedAbility, normalizedAbility }
     return null;
   }
   const runtimePackage = normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY;
+  const legacyDeprecation = legacyRuntimePackageAbilityDeprecation(requestedAbility, normalizedAbility);
   return {
     schema: 'wp-codebox/runtime-task-ability-normalization/v1',
     requested_ability: requestedAbility || normalizedAbility,
@@ -1267,6 +1277,20 @@ function runtimeTaskAbilityNormalization({ requestedAbility, normalizedAbility }
     bridge_ability: runtimePackage ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : normalizedAbility,
     runtime_ability: normalizedAbility,
     owning_components: runtimePackage ? ['wp-codebox', ...WP_CODEBOX_RUNTIME_PACKAGE_SUBSTRATE_SLUGS] : ['wp-codebox'],
+    ...(legacyDeprecation ? { deprecated_compatibility_alias: legacyDeprecation } : {}),
+  };
+}
+
+function legacyRuntimePackageAbilityDeprecation(requestedAbility, normalizedAbility) {
+  if (!LEGACY_RUNTIME_PACKAGE_ABILITIES.has(requestedAbility) || normalizedAbility !== WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
+    return null;
+  }
+  return {
+    schema: 'wp-codebox/deprecated-compatibility-alias/v1',
+    alias: requestedAbility,
+    replacement: WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY,
+    quarantine: LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE,
+    status: 'deprecated',
   };
 }
 

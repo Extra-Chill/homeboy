@@ -482,6 +482,22 @@
           "provider_run_result": ["codebox_run_result"]
         }
       },
+      "deprecated_compatibility_aliases": [
+        {
+          "schema": "wp-codebox/deprecated-compatibility-alias/v1",
+          "alias": "agents/run-runtime-package",
+          "replacement": "wp-codebox/run-runtime-package",
+          "quarantine": "legacy-runtime-package-ability-alias",
+          "status": "deprecated"
+        },
+        {
+          "schema": "wp-codebox/deprecated-compatibility-alias/v1",
+          "alias": "runtime-package/run",
+          "replacement": "wp-codebox/run-runtime-package",
+          "quarantine": "legacy-runtime-package-ability-alias",
+          "status": "deprecated"
+        }
+      ],
       "upstream_primitive_requirements": [
         {
           "id": "run-agent-task",

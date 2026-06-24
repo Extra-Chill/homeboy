@@ -27,6 +27,22 @@ assert.equal(
 );
 assert.equal(provider.command, provider.invocation.display, 'legacy command stays display-compatible during deprecation');
 assert.equal(provider.provider_metadata.schema, 'homeboy/agent-task-provider-metadata/v1');
+assert.deepEqual(provider.deprecated_compatibility_aliases, [
+	{
+		schema: 'wp-codebox/deprecated-compatibility-alias/v1',
+		alias: 'agents/run-runtime-package',
+		replacement: 'wp-codebox/run-runtime-package',
+		quarantine: 'legacy-runtime-package-ability-alias',
+		status: 'deprecated',
+	},
+	{
+		schema: 'wp-codebox/deprecated-compatibility-alias/v1',
+		alias: 'runtime-package/run',
+		replacement: 'wp-codebox/run-runtime-package',
+		quarantine: 'legacy-runtime-package-ability-alias',
+		status: 'deprecated',
+	},
+]);
 assert.equal(provider.provider_metadata.selection.backend, 'codebox');
 assert.equal(provider.provider_metadata.selection.runtime_id, 'wp-codebox');
 assert.deepEqual(provider.provider_metadata.selection.provider_id_paths, [
