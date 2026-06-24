@@ -130,7 +130,7 @@ function buildStaticSiteFixtureMatrixRecipe(input = {}) {
 	const validationSteps = matrix.fixtures.map((fixture) => ({
 		command: 'wordpress.wp-cli',
 		args: [
-			`command=static-site-importer validate-in-codebox --artifact=${shellToken(artifactPathForFixture(fixture, commandArtifactsDirectory))} --slug=${shellToken(fixture.id)} --name=${shellToken(fixture.label)} --allow-missing-woocommerce --no-error-on-fail`,
+			`command=static-site-importer validate-in-codebox --artifact=${shellToken(artifactPathForFixture(fixture, commandArtifactsDirectory))} --slug=${shellToken(fixture.id)} --name=${shellToken(fixture.label)} --allow-missing-woocommerce --allow-failure`,
 		],
 	}));
 	return {
