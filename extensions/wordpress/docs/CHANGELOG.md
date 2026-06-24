@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.4] - 2026-06-24
+
+### Changed
+- Quarantine legacy Codebox aliases
+
 ## [3.13.3] - 2026-06-24
 
 ### Changed
