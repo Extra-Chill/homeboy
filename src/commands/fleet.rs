@@ -2,7 +2,9 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::core::execution::ExecutionStepResult;
-use homeboy::core::fleet::{self, Fleet, FleetComponentDrift, FleetStatusResult};
+use homeboy::core::fleet::{
+    self, Fleet, FleetComponentDrift, FleetProjectResolutionError, FleetStatusResult,
+};
 use homeboy::core::plan::HomeboyPlan;
 use homeboy::core::project::Project;
 use homeboy::core::EntityCrudOutput;
@@ -157,6 +159,8 @@ pub struct FleetExtra {
     pub exec_plan: Option<HomeboyPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec_steps: Option<Vec<ExecutionStepResult>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_errors: Option<Vec<FleetProjectResolutionError>>,
 }
 
 pub type FleetOutput = EntityCrudOutput<Fleet, FleetExtra>;
@@ -347,14 +351,15 @@ fn remove(fleet_id: &str, project_id: &str) -> CmdResult<FleetOutput> {
 }
 
 fn projects(id: &str) -> CmdResult<FleetOutput> {
-    let projects = fleet::get_projects(id)?;
+    let resolution = fleet::resolve_projects(id)?;
 
     Ok((
         FleetOutput {
             command: "fleet.projects".to_string(),
             id: Some(id.to_string()),
             extra: FleetExtra {
-                projects: Some(projects),
+                projects: Some(resolution.projects),
+                resolution_errors: non_empty_resolution_errors(resolution.errors),
                 ..Default::default()
             },
             ..Default::default()
@@ -364,7 +369,7 @@ fn projects(id: &str) -> CmdResult<FleetOutput> {
 }
 
 fn components(id: &str) -> CmdResult<FleetOutput> {
-    let components = fleet::component_usage(id)?;
+    let (components, resolution_errors) = fleet::component_usage_with_resolution(id)?;
 
     Ok((
         FleetOutput {
@@ -372,6 +377,7 @@ fn components(id: &str) -> CmdResult<FleetOutput> {
             id: Some(id.to_string()),
             extra: FleetExtra {
                 components: Some(components),
+                resolution_errors: non_empty_resolution_errors(resolution_errors),
                 ..Default::default()
             },
             ..Default::default()
@@ -569,6 +575,12 @@ fn validate_exec_apply_boundary(
             command.join(" ")
         )]),
     ))
+}
+
+fn non_empty_resolution_errors(
+    errors: Vec<FleetProjectResolutionError>,
+) -> Option<Vec<FleetProjectResolutionError>> {
+    (!errors.is_empty()).then_some(errors)
 }
 
 #[cfg(test)]

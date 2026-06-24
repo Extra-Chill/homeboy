@@ -80,7 +80,9 @@ pub fn collect_exec_run(
         shell::quote_args(&command)
     };
 
-    let projects = fleet::get_projects(fleet_id)?;
+    let resolution = fleet::resolve_projects(fleet_id)?;
+    resolution.ensure_complete(fleet_id)?;
+    let projects = resolution.projects;
 
     if projects.is_empty() {
         return Err(crate::core::Error::validation_invalid_argument(
@@ -363,5 +365,28 @@ mod tests {
         .expect_err("real fleet exec should require --apply");
 
         assert!(error.message.contains("requires explicit --apply"));
+    }
+
+    #[test]
+    fn fleet_exec_fails_when_fleet_references_missing_project() {
+        crate::test_support::with_isolated_home(|_| {
+            fleet::save(&fleet::Fleet::new(
+                "production".to_string(),
+                vec!["missing-site".to_string()],
+            ))
+            .expect("fleet config");
+
+            let error = collect_exec_run(
+                "production",
+                vec!["wp".to_string(), "plugin".to_string(), "list".to_string()],
+                true,
+                false,
+                None,
+            )
+            .expect_err("unresolved fleet projects should block exec planning");
+
+            assert!(error.message.contains("references unresolved project"));
+            assert!(error.message.contains("missing-site"));
+        });
     }
 }
