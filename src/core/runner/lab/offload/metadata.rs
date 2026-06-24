@@ -119,6 +119,28 @@ pub(crate) fn lab_materialization_proof_metadata(
     })
 }
 
+pub(crate) fn lab_runtime_dependency_manifest_metadata(
+    command_prefix: &[String],
+    required_extensions: &[String],
+    runner_homeboy: &serde_json::Value,
+    source_checkout: &serde_json::Value,
+    workspace_mapping: &serde_json::Value,
+    remapped_args: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "homeboy/lab-runtime-dependency-manifest/v1",
+        "homeboy_binary": runner_homeboy,
+        "extension_runtime": {
+            "required_extensions": required_extensions,
+            "command_prefix": redact_argv(command_prefix),
+        },
+        "executor_runtime": provider_config_runtime_manifest(remapped_args),
+        "provider_plugins": provider_config_runtime_manifest(remapped_args),
+        "components": workspace_mapping,
+        "source_checkout": source_checkout,
+    })
+}
+
 pub(crate) fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
     let branch = metadata
         .get("git_branch")

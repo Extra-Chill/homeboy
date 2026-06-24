@@ -58,7 +58,8 @@ use super::super::execution::{
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
     inject_agent_task_default_provider_config_in_args, lab_at_file_specs, lab_offload_source_path,
-    materialize_agent_task_specs_in_args, remap_lab_at_file_args, remap_path_settings_in_args,
+    materialize_agent_task_specs_in_args, preflight_provider_config_paths_materialized_in_args,
+    provider_config_runtime_manifest, remap_lab_at_file_args, remap_path_settings_in_args,
     remap_provider_config_in_args, rewrite_lab_offload_args,
     rewrite_runner_resident_lab_offload_args, LabAtFileSpec, LabPathRemap,
 };
