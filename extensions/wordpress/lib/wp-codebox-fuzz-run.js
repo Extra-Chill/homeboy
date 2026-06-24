@@ -298,7 +298,7 @@ function homeboyFuzzWorkloadPlanCasePhases(entry = {}, manifest = {}, artifacts 
 	}
 	const activation = manifest.metadata?.fixture?.activation || firstHomeboyFuzzWorkloadActivation(manifest);
 	const setup = typeof activation === 'string' && activation.trim() !== ''
-		? [{ command: 'wordpress.ensure-plugin-active', args: [`plugin=${activation}`] }]
+		? [wpCodeboxPluginActivationStep(activation)]
 		: undefined;
 	const command = entry.command || entry.target?.entrypoint || entry.target?.id;
 	const action = typeof command === 'string' && command.trim() !== ''
@@ -378,7 +378,7 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 	const workloadPath = execute.path || manifest.workload?.path;
 	const genericCommand = homeboyFuzzWorkloadGenericPrimitiveCommand(manifest);
 	const setup = typeof activation === 'string' && activation.trim() !== ''
-		? [{ command: 'wordpress.ensure-plugin-active', args: [`plugin=${activation}`] }]
+		? [wpCodeboxPluginActivationStep(activation)]
 		: undefined;
 	const action = homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, execute });
 	const collect = normalizeArray(intent.collect).length > 0 ? normalizeArray(intent.collect) : artifacts.map((artifact) => ({ artifact: artifact.name }));
@@ -387,6 +387,10 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 		.filter(Boolean)
 		.map((artifact) => ({ command: 'wordpress.collect-workload-result', args: [`artifact=${artifact}`] }));
 	return stripUndefined({ setup, action, assert: assert.length > 0 ? assert : undefined });
+}
+
+function wpCodeboxPluginActivationStep(plugin) {
+	return { command: 'wordpress.wp-cli', args: [`command=plugin activate ${plugin}`] };
 }
 
 function homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, execute = {} } = {}) {

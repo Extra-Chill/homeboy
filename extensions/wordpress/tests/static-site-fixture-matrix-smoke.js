@@ -80,9 +80,9 @@ async function main() {
 			slug: 'static-site-importer',
 			activate: true,
 		});
-		assert.equal(staticSiteImporterRecipe.workflow.steps[0].command, 'wordpress.ensure-plugin-active');
+		assert.equal(staticSiteImporterRecipe.workflow.steps[0].command, 'wordpress.wp-cli');
 		assert.equal(Object.hasOwn(staticSiteImporterRecipe.workflow.steps[0], 'metadata'), false);
-		assert.deepEqual(staticSiteImporterRecipe.workflow.steps[0].args, ['plugin=static-site-importer/static-site-importer.php']);
+		assert.deepEqual(staticSiteImporterRecipe.workflow.steps[0].args, ['command=plugin activate static-site-importer/static-site-importer.php']);
 		assert.equal(staticSiteImporterRecipe.workflow.steps[1].command, 'wordpress.wp-cli');
 
 		assert.equal(classifyStaticSiteFinding({ message: 'This block contains unexpected or invalid content' }).group_key, 'invalid_block_content');

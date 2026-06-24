@@ -197,7 +197,7 @@ const jsonWorkloadInput = wpCodeboxFuzzSuiteInput({ id: 'json-workload-run', hom
 assert.equal(jsonWorkloadInput.cases.length, 1);
 assert.equal(jsonWorkloadInput.cases[0].id, 'json-workload-smoke:default');
 assert.equal(jsonWorkloadInput.cases[0].target.entrypoint, 'wordpress.run-workload');
-assert.deepEqual(jsonWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(jsonWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/json-workload-smoke.workload.json'] }]);
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].required, true);
@@ -235,7 +235,7 @@ const genericPrimitiveManifest = {
 };
 const genericPrimitiveInput = wpCodeboxFuzzSuiteInput({ id: 'generic-primitive-run', homeboyFuzzWorkload: genericPrimitiveManifest });
 assert.equal(genericPrimitiveInput.cases[0].target.entrypoint, 'wordpress.fuzz-admin-pages');
-assert.deepEqual(genericPrimitiveInput.cases[0].phases.setup, [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(genericPrimitiveInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
 assert.deepEqual(genericPrimitiveInput.cases[0].phases.action, [{ command: 'wordpress.fuzz-admin-pages', args: ['safe_methods=GET', 'max_pages=80', 'enumerate_menus=true'] }]);
 assert.deepEqual(genericPrimitiveInput.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=admin_page_coverage'] }]);
 
@@ -284,7 +284,7 @@ const planWorkloadInput = wpCodeboxFuzzSuiteInput({ id: 'plan-workload-run', hom
 assert.equal(planWorkloadInput.cases.length, 1);
 assert.equal(planWorkloadInput.cases[0].id, 'plan-workload-smoke:default');
 assert.equal(planWorkloadInput.cases[0].target.entrypoint, 'wordpress.inventory-rest-routes');
-assert.deepEqual(planWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(planWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
 assert.deepEqual(planWorkloadInput.cases[0].phases.action, [{
 	command: 'wordpress.inventory-rest-routes',
 	args: ['plugin=sample-plugin/sample-plugin.php', 'namespaces=sample/v1,sample/v2', 'artifact=route_inventory'],
