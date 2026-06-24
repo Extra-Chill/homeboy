@@ -284,6 +284,99 @@ fn remap_inlines_and_rewrites_dispatch_provider_config_local_paths() {
 }
 
 #[test]
+fn provider_config_materialization_preflight_rejects_missing_runtime_path() {
+    let config = serde_json::json!({
+        "runtime_component_paths": {
+            "runtime_core": "/definitely/missing/homeboy-runtime-core"
+        }
+    })
+    .to_string();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--provider-config".to_string(),
+        config,
+    ];
+
+    let err = preflight_provider_config_paths_materialized_in_args(&args, &[])
+        .expect_err("missing runtime path should fail before dispatch");
+
+    assert!(err.message.contains("provider-config runtime path"));
+    assert!(err
+        .details
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value.contains("/definitely/missing/homeboy-runtime-core")));
+}
+
+#[test]
+fn provider_config_materialization_preflight_accepts_synced_runtime_paths() {
+    let controller = tempfile::tempdir().expect("controller");
+    let runtime = controller.path().join("runtime-core");
+    let nested = runtime.join("packages/cli/dist/index.js");
+    std::fs::create_dir_all(nested.parent().unwrap()).expect("runtime dirs");
+    std::fs::write(&nested, "#!/usr/bin/env node\n").expect("runtime cli");
+    let local_runtime = runtime.to_string_lossy().to_string();
+    let local_nested = nested.to_string_lossy().to_string();
+    let config = serde_json::json!({
+        "runtime_component_paths": {
+            "runtime_core": local_runtime,
+        },
+        "source_cli": local_nested,
+        "mounts": [{ "source": runtime, "target": "/workspace/runtime-core" }],
+    })
+    .to_string();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--provider-config".to_string(),
+        config,
+    ];
+    let mappings = vec![LabPathRemap {
+        local: runtime
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        remote: "/runner/runtime-core".to_string(),
+    }];
+
+    preflight_provider_config_paths_materialized_in_args(&args, &mappings)
+        .expect("synced runtime paths should pass readiness preflight");
+}
+
+#[test]
+fn provider_config_runtime_manifest_records_effective_paths() {
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--provider-config".to_string(),
+        serde_json::json!({
+            "runtime_component_paths": { "runtime_core": "/runner/runtime-core" },
+            "provider_plugin_paths": ["/runner/provider-plugin"],
+            "model": "example-model"
+        })
+        .to_string(),
+    ];
+
+    let manifest = provider_config_runtime_manifest(&args);
+    let paths = manifest["provider_configs"][0]["paths"]
+        .as_array()
+        .expect("paths");
+
+    assert!(paths
+        .iter()
+        .any(|entry| entry["path"] == "/runner/runtime-core"));
+    assert!(paths
+        .iter()
+        .any(|entry| entry["path"] == "/runner/provider-plugin"));
+    assert!(!paths.iter().any(|entry| entry["path"] == "example-model"));
+}
+
+#[test]
 fn remap_prunes_stale_unresolved_provider_plugin_path() {
     // #4829: a `provider_plugin_paths` entry inherited from stale/global
     // settings points at a controller-local absolute directory that is not part

@@ -451,6 +451,14 @@ pub(crate) fn run_lab_offload_inner(
         &workspace_mapping_metadata,
         &synced_rigs,
     );
+    lab_metadata["runtime_dependency_manifest"] = lab_runtime_dependency_manifest_metadata(
+        &command_prefix.argv,
+        &contract.required_extensions,
+        &runner_homeboy,
+        &source_checkout,
+        &workspace_mapping_metadata,
+        &remapped_args,
+    );
     let mut env_delta = std::collections::HashMap::new();
     let rig_component_path_env =
         forward_rig_component_path_env(&mut env_delta, &workspace_mapping)?;

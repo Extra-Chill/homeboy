@@ -260,6 +260,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
         })
         .collect();
     preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
+    preflight_provider_config_paths_materialized_in_args(&offload_args, &path_remaps)?;
     let remapped_args = rig_materialization::remap_bench_rig_default_component_to_primary_snapshot(
         &offload_args,
         &remote_cwd,

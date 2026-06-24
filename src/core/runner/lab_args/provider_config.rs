@@ -4,6 +4,8 @@
 //! supplied as `@file`/inline JSON. These helpers inline file specs, remap
 //! embedded paths, and inject a default provider config for agent-task dispatch.
 
+use std::path::Path;
+
 use serde_json::Value;
 
 use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
@@ -11,8 +13,81 @@ use crate::core::config::read_json_spec_to_string;
 use crate::core::defaults;
 use crate::core::{Error, Result};
 
-use super::envelope::ExecutionEnvelope;
-use super::path_remap::{remap_paths_in_value, LabPathRemap};
+use super::envelope::{ArgValue, ExecutionEnvelope};
+use super::path_remap::{remap_local_path, remap_paths_in_value, LabPathRemap};
+
+const RUNTIME_MANIFEST_SCHEMA: &str = "homeboy/lab-provider-config-runtime/v1";
+
+pub(in crate::core::runner) fn preflight_provider_config_paths_materialized_in_args(
+    args: &[String],
+    mappings: &[LabPathRemap],
+) -> Result<()> {
+    let envelope = ExecutionEnvelope::from_args(args);
+    let mut failures = Vec::new();
+
+    for config in &envelope.inputs.provider_configs {
+        let Some((_source, raw)) = provider_config_raw_value(&config.value)? else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        collect_unmaterialized_paths(&value, "$", mappings, &mut failures);
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    let preview = failures
+        .iter()
+        .take(5)
+        .map(|failure| {
+            format!(
+                "{} at {} ({})",
+                failure.path, failure.location, failure.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(Error::validation_invalid_argument(
+        "provider-config",
+        format!(
+            "Lab offload cannot dispatch because {} provider-config runtime path(s) were not materialized on the selected runner",
+            failures.len()
+        ),
+        Some(preview),
+        Some(vec![
+            "Use controller-local paths that exist so Lab can sync and rewrite them to runner paths before dispatch.".to_string(),
+            "Remove stale runtime/component/provider-plugin paths from the provider config when the run should use runner-installed defaults.".to_string(),
+            "Run with --force-hot --allow-local-hot only if you intentionally want to bypass Lab offload and execute locally.".to_string(),
+        ]),
+    ))
+}
+
+pub(in crate::core::runner) fn provider_config_runtime_manifest(args: &[String]) -> Value {
+    let envelope = ExecutionEnvelope::from_args(args);
+    let mut configs = Vec::new();
+    for config in &envelope.inputs.provider_configs {
+        let Ok(Some((source, raw))) = provider_config_raw_value(&config.value) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let mut paths = Vec::new();
+        collect_runtime_manifest_paths(&value, "$", &mut paths);
+        configs.push(serde_json::json!({
+            "source": source,
+            "paths": paths,
+        }));
+    }
+
+    serde_json::json!({
+        "schema": RUNTIME_MANIFEST_SCHEMA,
+        "provider_configs": configs,
+    })
+}
 
 /// Rewrite controller-local absolute paths inside a `--provider-config` value to
 /// their synced remote equivalents, and inline the result so the runner does not
@@ -102,6 +177,175 @@ fn is_agent_task_dispatch_or_cook(args: &[String]) -> bool {
         .skip(agent_task_index + 1)
         .find(|arg| !arg.starts_with('-'))
         .is_some_and(|command| matches!(command.as_str(), "dispatch" | "cook"))
+}
+
+fn provider_config_raw_value(value: &ArgValue) -> Result<Option<(String, String)>> {
+    match value {
+        ArgValue::InlineText(raw) => Ok(Some(("inline".to_string(), raw.clone()))),
+        ArgValue::PathRef(path) => {
+            let spec = format!("@{path}");
+            let raw = read_json_spec_to_string(&spec).map_err(|err| {
+                Error::validation_invalid_argument(
+                    "provider-config",
+                    "failed to read Lab offload --provider-config @file input",
+                    Some(err.to_string()),
+                    None,
+                )
+                .with_hint(
+                    "Lab offload reads --provider-config @file specs on the controller before dispatch; provide a readable JSON file or inline JSON.",
+                )
+            })?;
+            Ok(Some((spec, raw)))
+        }
+        ArgValue::Stdin | ArgValue::Missing => Ok(None),
+    }
+}
+
+#[derive(Debug)]
+struct UnmaterializedPath {
+    location: String,
+    path: String,
+    reason: &'static str,
+}
+
+fn collect_unmaterialized_paths(
+    value: &Value,
+    location: &str,
+    mappings: &[LabPathRemap],
+    failures: &mut Vec<UnmaterializedPath>,
+) {
+    match value {
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_unmaterialized_paths(
+                    item,
+                    &format!("{location}[{index}]"),
+                    mappings,
+                    failures,
+                );
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                let child_location = format!("{location}.{key}");
+                if is_materializable_provider_config_path_key(key) {
+                    collect_unmaterialized_path_strings(item, &child_location, mappings, failures);
+                } else {
+                    collect_unmaterialized_paths(item, &child_location, mappings, failures);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_unmaterialized_path_strings(
+    value: &Value,
+    location: &str,
+    mappings: &[LabPathRemap],
+    failures: &mut Vec<UnmaterializedPath>,
+) {
+    match value {
+        Value::String(text) if is_controller_path_like(text) => {
+            if let Some(reason) = unmaterialized_path_reason(text, mappings) {
+                failures.push(UnmaterializedPath {
+                    location: location.to_string(),
+                    path: text.to_string(),
+                    reason,
+                });
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_unmaterialized_path_strings(
+                    item,
+                    &format!("{location}[{index}]"),
+                    mappings,
+                    failures,
+                );
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                collect_unmaterialized_path_strings(
+                    item,
+                    &format!("{location}.{key}"),
+                    mappings,
+                    failures,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_materializable_provider_config_path_key(key: &str) -> bool {
+    matches!(
+        key,
+        "workspace_root"
+            | "source"
+            | "source_cli"
+            | "provider_root"
+            | "provider_support"
+            | "runtime_component_paths"
+            | "provider_plugin_paths"
+            | "component_contracts"
+            | "path"
+    )
+}
+
+fn unmaterialized_path_reason(path: &str, mappings: &[LabPathRemap]) -> Option<&'static str> {
+    let expanded = shellexpand::tilde(path).to_string();
+    if !Path::new(&expanded).exists() {
+        return Some("controller path does not exist");
+    }
+
+    let ordered = super::path_remap::order_mappings_by_specificity(mappings);
+    if remap_local_path(path, &ordered).is_some() || path_is_under_remote_mapping(path, mappings) {
+        return None;
+    }
+
+    Some("controller path was not synced to the runner")
+}
+
+fn path_is_under_remote_mapping(path: &str, mappings: &[LabPathRemap]) -> bool {
+    mappings.iter().any(|mapping| {
+        if mapping.remote.is_empty() {
+            return false;
+        }
+        path == mapping.remote
+            || path.starts_with(&format!("{}/", mapping.remote.trim_end_matches('/')))
+    })
+}
+
+fn collect_runtime_manifest_paths(value: &Value, location: &str, paths: &mut Vec<Value>) {
+    match value {
+        Value::String(text) if is_runtime_manifest_path(text) => {
+            paths.push(serde_json::json!({
+                "location": location,
+                "path": text,
+            }));
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_runtime_manifest_paths(item, &format!("{location}[{index}]"), paths);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                collect_runtime_manifest_paths(item, &format!("{location}.{key}"), paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_runtime_manifest_path(value: &str) -> bool {
+    is_controller_path_like(value) || value.starts_with('.')
+}
+
+fn is_controller_path_like(value: &str) -> bool {
+    value.starts_with('/') || value.starts_with("~/")
 }
 
 /// Resolve a provider-config spec (inline JSON / `@file`), remap its
