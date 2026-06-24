@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.23] - 2026-06-24
+
+### Changed
+- Use SSI allow-failure flag for matrix collection
+
 ## [3.13.22] - 2026-06-24
 
 ### Changed
