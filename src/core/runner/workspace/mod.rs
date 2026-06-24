@@ -20,7 +20,7 @@ pub use types::{
 
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, local_snapshot_stats,
-    materialize_snapshot, snapshot_identity,
+    materialize_snapshot, materialize_snapshot_git, snapshot_identity,
 };
 pub(crate) use types::{canonical_workspace_path, DEFAULT_EXCLUDES};
 pub(crate) use util::{git_output, parent_remote_path, sanitize_path_segment};
