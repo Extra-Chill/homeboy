@@ -193,6 +193,8 @@ pub struct AgentTaskRepoLoopSpecWorkflow {
     pub tasks: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entity_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_out: Option<AgentTaskRepoLoopSpecFanOut>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -213,6 +215,19 @@ pub struct AgentTaskRepoLoopSpecWorkflow {
     pub runtime_execution: Value,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub inputs: Value,
+}
+
+/// Generic fan-out declaration for a workflow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecFanOut {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, alias = "items", skip_serializing_if = "Vec::is_empty")]
+    pub entity_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_fast: Option<bool>,
 }
 
 /// Artifact contract declared by a repo loop spec.
