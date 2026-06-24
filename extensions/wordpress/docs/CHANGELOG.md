@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.15] - 2026-06-24
+
+### Changed
+- Mount SSI in fixture matrix recipes
+
 ## [3.13.14] - 2026-06-24
 
 ### Changed
