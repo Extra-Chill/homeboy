@@ -24,9 +24,9 @@ use crate::core::agent_task_loop_controller::{
     AgentTaskLoopControllerRecord, AgentTaskLoopControllerState, AgentTaskLoopEntity,
     AgentTaskLoopExternalEvent, AgentTaskLoopHistoryEvent, AgentTaskLoopPolicy,
     AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef,
-    AgentTaskLoopRunRef, AgentTaskLoopTaskLineage, AgentTaskLoopTerminalStatus,
-    AgentTaskLoopTransition, AgentTaskPrOwnershipRequest, AgentTaskPrOwnershipState,
-    AgentTaskPrOwnershipStatusUpdate,
+    AgentTaskLoopRunRef, AgentTaskLoopRunnerAvailability, AgentTaskLoopRunnerExecutionTarget,
+    AgentTaskLoopTaskLineage, AgentTaskLoopTerminalStatus, AgentTaskLoopTransition,
+    AgentTaskPrOwnershipRequest, AgentTaskPrOwnershipState, AgentTaskPrOwnershipStatusUpdate,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -34,6 +34,7 @@ use crate::core::agent_task_scheduler::{
 use crate::core::agent_task_service::{self, AgentTaskRunResult};
 use crate::core::git::{pr_find, pr_view, PrFindOptions, PrState};
 use crate::core::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus};
+use crate::core::runner::{self, RunnerActiveJobState};
 use crate::core::{Error, Result};
 use std::collections::HashMap;
 use std::process::Command;
