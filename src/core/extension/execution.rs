@@ -103,7 +103,56 @@ pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
         ));
     }
 
+    // Persist the runtime env the extension's provider discovers now that setup
+    // has run. On a Lab runner, setup configures runner-local state (e.g. a
+    // freshly built WP Codebox core module path); persisting the resolved env
+    // lets a later capability execution (`homeboy fuzz run`) replay the same
+    // effective runtime env without manual operator injection. Persistence is
+    // best-effort: a discovery failure must not fail an otherwise-successful
+    // setup.
+    persist_setup_runtime_env(&extension, extension_id);
+
     Ok(ExtensionSetupResult { exit_code })
+}
+
+/// Capture and persist the runtime env an extension's env provider discovers
+/// after a successful setup, so later capability executions on the same runner
+/// replay the same effective env. Best-effort: failures are swallowed.
+fn persist_setup_runtime_env(extension: &ExtensionManifest, extension_id: &str) {
+    let Some(extension_path) = extension.extension_path.as_deref() else {
+        return;
+    };
+    if extension.env_provider_script().is_none() {
+        return;
+    }
+
+    // Seed the provider with the canonical exec-context vars so the discovery
+    // script sees the same baseline a capability execution would. We resolve the
+    // env against the extension path itself because setup has no component
+    // context; env providers that depend on runner-local setup state (rather
+    // than a specific component checkout) resolve correctly here.
+    let extension_dir = Path::new(extension_path);
+    let base_env = build_exec_env(
+        extension_id,
+        None,
+        None,
+        "{}",
+        Some(extension_path),
+        None,
+        None,
+        None,
+    );
+
+    match super::env_provider::env_vars(extension, extension_dir, &base_env) {
+        Ok(discovered) if !discovered.is_empty() => {
+            let _ = super::setup_env::persist(extension_id, &discovered);
+        }
+        // No discovered env (or a discovery error): clear any stale persisted
+        // document so a previous run's values never leak into fuzz execution.
+        _ => {
+            let _ = super::setup_env::persist(extension_id, &[]);
+        }
+    }
 }
 
 /// Backward-compatible alias for existing command API usage.
@@ -418,6 +467,15 @@ pub(crate) fn build_capability_env(
         None,
         Some(&component_path_value),
     );
+    // Replay the runtime env discovered during extension setup before invoking
+    // the live env provider. On a Lab runner, fuzz execution runs in a fresh
+    // process from the one that ran setup; the persisted setup env guarantees
+    // capability execution receives the same effective runtime env (e.g. the
+    // configured WP Codebox core module path) without manual injection. Live
+    // provider discovery below still overrides any value it can re-resolve.
+    let persisted_setup_env = super::setup_env::load(extension_name);
+    env.extend(persisted_setup_env.iter().cloned());
+
     let mut provider_env = env.clone();
     provider_env.extend(extra_env.iter().cloned());
     if let Ok(extension) = env_provider::load_manifest_from_dir(extension_path) {
@@ -933,6 +991,114 @@ mod tests {
         assert!(env
             .iter()
             .any(|(key, value)| key == "FIXTURE_ENV" && value == "fixture-component"));
+    }
+
+    #[test]
+    fn build_capability_env_replays_persisted_setup_runtime_env() {
+        // Regression for #5919: a Lab runner that discovers runtime env during
+        // extension setup (e.g. the WP Codebox core module path) must replay
+        // that same effective env into capability execution (fuzz) — without
+        // manual operator injection — even when the env provider does not
+        // re-resolve the value in the fresh capability process.
+        crate::test_support::with_isolated_home(|_| {
+            let extension = tempfile::tempdir().expect("extension dir");
+            let component = tempfile::tempdir().expect("component dir");
+            let extension_id = extension.path().file_name().unwrap().to_string_lossy();
+            // No env provider script: the only source of the runtime env is the
+            // value persisted during setup.
+            std::fs::write(
+                extension.path().join(format!("{extension_id}.json")),
+                r#"{ "name": "Fixture", "version": "1.0.0" }"#,
+            )
+            .expect("manifest");
+
+            super::super::setup_env::persist(
+                &extension_id,
+                &[(
+                    "HOMEBOY_WP_CODEBOX_CORE_MODULE".to_string(),
+                    "/runner/wp-codebox/core.mjs".to_string(),
+                )],
+            )
+            .expect("persist setup env");
+
+            let env = build_capability_env(
+                &extension_id,
+                "fixture-component",
+                extension.path(),
+                component.path(),
+                "{}",
+                &[],
+            )
+            .expect("capability env");
+
+            assert!(
+                env.iter()
+                    .any(|(key, value)| key == "HOMEBOY_WP_CODEBOX_CORE_MODULE"
+                        && value == "/runner/wp-codebox/core.mjs"),
+                "fuzz capability env must replay persisted extension setup runtime env"
+            );
+        });
+    }
+
+    #[test]
+    fn build_capability_env_lets_live_provider_override_persisted_setup_env() {
+        // Live env-provider discovery is freshest: when both a persisted setup
+        // value and a live provider value exist for the same key, the live
+        // value must win so a rebuilt runner checkout is honored.
+        crate::test_support::with_isolated_home(|_| {
+            let extension = tempfile::tempdir().expect("extension dir");
+            let component = tempfile::tempdir().expect("component dir");
+            let extension_id = extension.path().file_name().unwrap().to_string_lossy();
+            std::fs::write(
+                extension.path().join(format!("{extension_id}.json")),
+                r#"{
+                    "name": "Fixture",
+                    "version": "1.0.0",
+                    "env_provider": { "script": "env.sh" }
+                }"#,
+            )
+            .expect("manifest");
+            std::fs::write(
+                extension.path().join("env.sh"),
+                "#!/bin/sh\nprintf '{\"SHARED_KEY\":\"live\"}'\n",
+            )
+            .expect("env provider");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(extension.path().join("env.sh"))
+                    .expect("env provider metadata")
+                    .permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(extension.path().join("env.sh"), permissions)
+                    .expect("env provider executable");
+            }
+
+            super::super::setup_env::persist(
+                &extension_id,
+                &[("SHARED_KEY".to_string(), "persisted".to_string())],
+            )
+            .expect("persist setup env");
+
+            let env = build_capability_env(
+                &extension_id,
+                "fixture-component",
+                extension.path(),
+                component.path(),
+                "{}",
+                &[],
+            )
+            .expect("capability env");
+
+            // Both entries are present; std Command applies env last-wins, so the
+            // live provider value (appended after the persisted value) wins.
+            let last_shared = env
+                .iter()
+                .filter(|(key, _)| key == "SHARED_KEY")
+                .next_back()
+                .map(|(_, value)| value.clone());
+            assert_eq!(last_shared.as_deref(), Some("live"));
+        });
     }
 
     #[test]
