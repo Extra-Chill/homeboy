@@ -88,7 +88,11 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
     let prepared = prepare_source(source)?;
     let discovered = discover_rigs_for_install(&prepared.discovery_path, id, all)?;
     let selected = select_rigs(discovered, id, all, source)?;
-    let discovered_stacks = discover_stacks(&prepared.discovery_path)?;
+    let discovered_stacks = if id.is_some() && !all {
+        Vec::new()
+    } else {
+        discover_stacks(&prepared.discovery_path)?
+    };
 
     fs::create_dir_all(paths::rigs()?)
         .map_err(|e| Error::internal_io(e.to_string(), Some("create rigs dir".into())))?;
