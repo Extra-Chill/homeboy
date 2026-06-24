@@ -161,10 +161,6 @@ function normalizeStaticSiteImporterPlugin(input = {}) {
 		activationStep: {
 			command: 'wordpress.ensure-plugin-active',
 			args: [`plugin=${pluginFile}`],
-			metadata: {
-				plugin: pluginFile,
-				slug: slugValue,
-			},
 		},
 	};
 }

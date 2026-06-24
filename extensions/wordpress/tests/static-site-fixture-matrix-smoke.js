@@ -81,6 +81,7 @@ async function main() {
 			activate: true,
 		});
 		assert.equal(staticSiteImporterRecipe.workflow.steps[0].command, 'wordpress.ensure-plugin-active');
+		assert.equal(Object.hasOwn(staticSiteImporterRecipe.workflow.steps[0], 'metadata'), false);
 		assert.deepEqual(staticSiteImporterRecipe.workflow.steps[0].args, ['plugin=static-site-importer/static-site-importer.php']);
 		assert.equal(staticSiteImporterRecipe.workflow.steps[1].command, 'wordpress.wp-cli');
 
