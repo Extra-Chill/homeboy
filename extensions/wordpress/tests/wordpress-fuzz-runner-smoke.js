@@ -462,19 +462,19 @@ fs.mkdirSync(path.dirname(fakeCodeboxBin), { recursive: true });
 const dispatchResultsPath = path.join(tempDir, 'dispatch-results.json');
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
-const subcommand = process.argv.slice(2, 4).join(' ');
-if (subcommand === 'codebox run-fuzz-suite' && process.argv.includes('--help')) {
-  process.stdout.write('usage: wp codebox run-fuzz-suite');
+const subcommand = process.argv[2];
+if (subcommand === 'run-fuzz-suite' && process.argv.includes('--help')) {
+  process.stdout.write('usage: wp-codebox run-fuzz-suite');
   process.exit(0);
 }
-if (subcommand === 'codebox run-wordpress-workload' && process.argv.includes('--help')) {
+if (subcommand === 'run-wordpress-workload' && process.argv.includes('--help')) {
   process.stderr.write('unknown command');
   process.exit(1);
 }
 const inputFileIndex = process.argv.indexOf('--input-file');
 const request = inputFileIndex === -1 ? undefined : JSON.parse(fs.readFileSync(process.argv[inputFileIndex + 1], 'utf8'));
-if (subcommand !== 'codebox run-fuzz-suite' || inputFileIndex === -1 || process.argv.includes('--input=-') || !process.argv.includes('--format=json')) {
-  process.stderr.write('expected public wp codebox run-fuzz-suite command');
+if (subcommand !== 'run-fuzz-suite' || inputFileIndex === -1 || process.argv.includes('--input=-') || !process.argv.includes('--format=json')) {
+  process.stderr.write('expected public wp-codebox run-fuzz-suite command');
   process.exit(1);
 }
 if (request.schema !== 'wp-codebox/fuzz-suite/v1' || request.metadata?.homeboy_agent_task_request?.task_id !== 'dispatch-cli-run') {

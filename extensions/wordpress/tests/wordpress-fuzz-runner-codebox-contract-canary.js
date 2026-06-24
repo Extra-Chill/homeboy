@@ -53,20 +53,19 @@ fs.mkdirSync(emptyCodeboxInstallRoot, { recursive: true });
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 
-const namespace = process.argv[2];
-const command = process.argv[3];
+const command = process.argv[2];
 const inputFileIndex = process.argv.indexOf('--input-file');
-if (namespace === 'codebox' && command === 'run-fuzz-suite' && process.argv.includes('--help')) {
-  process.stdout.write('usage: wp codebox run-fuzz-suite');
-  process.exit(0);
+if (command === 'run-fuzz-suite' && process.argv.includes('--help')) {
+	process.stdout.write('usage: wp-codebox run-fuzz-suite');
+	process.exit(0);
 }
-if (namespace === 'codebox' && command === 'run-wordpress-workload' && process.argv.includes('--help')) {
-  process.stderr.write('unknown command');
-  process.exit(1);
+if (command === 'run-wordpress-workload' && process.argv.includes('--help')) {
+	process.stderr.write('unknown command');
+	process.exit(1);
 }
-if (namespace !== 'codebox' || command !== 'run-fuzz-suite' || inputFileIndex < 0 || !process.argv.includes('--format=json')) {
-  process.stderr.write('expected public codebox run-fuzz-suite --input-file <file> --format=json invocation');
-  process.exit(1);
+if (command !== 'run-fuzz-suite' || inputFileIndex < 0 || !process.argv.includes('--format=json')) {
+	process.stderr.write('expected public run-fuzz-suite --input-file <file> --format=json invocation');
+	process.exit(1);
 }
 
 const request = JSON.parse(fs.readFileSync(process.argv[inputFileIndex + 1], 'utf8'));
