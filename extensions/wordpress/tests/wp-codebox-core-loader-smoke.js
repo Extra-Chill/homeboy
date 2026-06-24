@@ -21,6 +21,7 @@ async function main() {
 				'@automattic/wp-codebox-core/artifacts',
 				'wp-codebox-workspace/artifacts',
 			],
+			includeGlobalNodeModuleRoots: false,
 		});
 
 		assert.equal(candidates[0], '@automattic/wp-codebox-core/artifacts');
@@ -40,6 +41,28 @@ async function main() {
 			coreModule: missingExportPath,
 			required: true,
 		}), /WP Codebox core export fixtureExport is unavailable/);
+
+		const globalRoot = path.join(root, 'global-node-modules');
+		const globalRecipeBuilders = path.join(globalRoot, 'wp-codebox-workspace', 'packages', 'runtime-core', 'dist');
+		fs.mkdirSync(globalRecipeBuilders, { recursive: true });
+		fs.writeFileSync(path.join(globalRecipeBuilders, 'recipe-builders.js'), 'exports.fixtureExport = () => "global-runtime-core";\n');
+
+		const globalCandidates = coreModuleCandidates({
+			packageCandidates: [],
+			globalNodeModuleRoots: [globalRoot],
+			runtimeCoreEntries: ['packages/runtime-core/dist/recipe-builders.js'],
+			packageDistEntries: ['recipe-builders.js'],
+		});
+		assert.ok(globalCandidates.some((candidate) => candidate.endsWith('/wp-codebox-workspace/packages/runtime-core/dist/recipe-builders.js')));
+
+		const globalResult = await loadWpCodeboxCoreExport('fixtureExport', {
+			packageCandidates: [],
+			globalNodeModuleRoots: [globalRoot],
+			runtimeCoreEntries: ['packages/runtime-core/dist/recipe-builders.js'],
+			packageDistEntries: ['recipe-builders.js'],
+			required: true,
+		});
+		assert.equal(globalResult.value(), 'global-runtime-core');
 
 		console.log('wp-codebox core loader smoke passed');
 	} finally {
