@@ -79,6 +79,28 @@ pub struct DeployConfig {
     pub tagged: bool,
 }
 
+impl DeployConfig {
+    /// Build the common status/check configuration: inspect every component,
+    /// avoid mutating local checkouts, and compare the current HEAD.
+    pub fn check_all_no_pull_head() -> Self {
+        Self {
+            component_ids: vec![],
+            all: true,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: true,
+            force: false,
+            skip_build: true,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: true,
+            head: true,
+            tagged: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeployArtifactSource {
@@ -444,8 +466,8 @@ fn default_remote_branch(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_bulk_component_ids, ComponentDeployResult, ComponentStatus, DeployResult,
-        ReleaseState, ReleaseStateStatus,
+        parse_bulk_component_ids, ComponentDeployResult, ComponentStatus, DeployConfig,
+        DeployResult, ReleaseState, ReleaseStateStatus,
     };
     use crate::core::component::{Component, ScopedExtensionConfig};
     use crate::core::extension::{DeployCapability, ExtensionManifest, RemotePathRootRule};
@@ -514,6 +536,25 @@ mod tests {
             baseline_ref: Some("v1.0.0".to_string()),
             baseline_warning: None,
         }
+    }
+
+    #[test]
+    fn check_all_no_pull_head_config_matches_status_check_contract() {
+        let config = DeployConfig::check_all_no_pull_head();
+
+        assert!(config.component_ids.is_empty());
+        assert!(config.all);
+        assert!(!config.outdated);
+        assert!(!config.behind_upstream);
+        assert!(!config.dry_run);
+        assert!(config.check);
+        assert!(!config.force);
+        assert!(config.skip_build);
+        assert!(!config.keep_deps);
+        assert_eq!(config.expected_version, None);
+        assert!(config.no_pull);
+        assert!(config.head);
+        assert!(!config.tagged);
     }
 
     #[test]

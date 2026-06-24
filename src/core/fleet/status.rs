@@ -264,21 +264,7 @@ fn collect_project_component_statuses(
     proj: &project::Project,
     component_summary: &mut FleetComponentSummary,
 ) -> Vec<FleetComponentStatus> {
-    let config = DeployConfig {
-        component_ids: vec![],
-        all: true,
-        outdated: false,
-        behind_upstream: false,
-        dry_run: false,
-        check: true,
-        force: false,
-        skip_build: true,
-        keep_deps: false,
-        expected_version: None,
-        no_pull: true,
-        head: true,
-        tagged: false,
-    };
+    let config = DeployConfig::check_all_no_pull_head();
 
     match deploy::run(project_id, &config) {
         Ok(result) => {

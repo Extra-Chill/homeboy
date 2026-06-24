@@ -864,21 +864,7 @@ fn default_origin_branch(path: &str) -> Option<String> {
 /// Uses deploy check mode internally, which handles SSH resolution.
 /// Returns empty map on failure (e.g., no server configured, SSH unavailable).
 fn fetch_project_remote_versions(project_id: &str) -> std::collections::HashMap<String, String> {
-    let config = DeployConfig {
-        component_ids: vec![],
-        all: true,
-        outdated: false,
-        behind_upstream: false,
-        dry_run: false,
-        check: true,
-        force: false,
-        skip_build: true,
-        keep_deps: false,
-        expected_version: None,
-        no_pull: true,
-        head: true,
-        tagged: false,
-    };
+    let config = DeployConfig::check_all_no_pull_head();
 
     match deploy::run(project_id, &config) {
         Ok(result) => result
