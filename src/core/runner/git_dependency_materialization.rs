@@ -8,7 +8,8 @@ use crate::core::error::{Error, Result};
 use super::{
     workspace::{
         canonical_workspace_path, effective_snapshot_excludes, git_output, local_snapshot_stats,
-        materialize_snapshot, snapshot_identity, ByteFileCounts, DEFAULT_EXCLUDES,
+        materialize_snapshot, materialize_snapshot_git, snapshot_identity, ByteFileCounts,
+        DEFAULT_EXCLUDES,
     },
     Runner, RunnerWorkspaceSyncMode,
 };
@@ -100,7 +101,27 @@ pub(crate) fn materialize_git_dependency(
     let excludes = effective_snapshot_excludes(excludes, &runner.policy.snapshot_includes);
     let snapshot = snapshot_identity(&local_path, &excludes, &runner.policy.snapshot_includes)?;
     let stats = local_snapshot_stats(&local_path, &excludes, &runner.policy.snapshot_includes)?;
-    materialize_snapshot(runner, &local_path, &options.remote_path, &excludes)?;
+    // The default snapshot excludes strip `.git`/`.git/**`, so a plain
+    // `materialize_snapshot` lands a runner-side component path with NO git
+    // provenance (no HEAD, no refs). Canonical trace preflight probes the
+    // materialized component path for git provenance and rejects it as
+    // `not-git` before the workload starts (#4314). When the source checkout is
+    // a real git worktree, seed a synthetic git checkout on the runner so the
+    // materialized path carries canonical provenance (a committed HEAD at the
+    // snapshot identity, with the source commit recorded), letting trace
+    // preflight accept it. A non-git source has no provenance to preserve, so it
+    // keeps the plain snapshot.
+    if freshness.status == DependencyUpdateStatus::NotGit {
+        materialize_snapshot(runner, &local_path, &options.remote_path, &excludes)?;
+    } else {
+        materialize_snapshot_git(
+            runner,
+            &local_path,
+            &options.remote_path,
+            &excludes,
+            &snapshot,
+        )?;
+    }
 
     Ok(RunnerGitDependencyMaterializationOutput {
         local_path: local_path.display().to_string(),
@@ -465,7 +486,69 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{ensure_git_dependency_fresh, DependencyUpdateStatus};
+    use super::{
+        ensure_git_dependency_fresh, materialize_git_dependency, DependencyUpdateStatus,
+        RunnerGitDependencyMaterializationOptions,
+    };
+
+    #[test]
+    fn materialized_git_dependency_preserves_canonical_git_provenance() {
+        // Regression for #4314: the default snapshot excludes strip `.git`, so a
+        // plain snapshot lands a runner-side component path with no git
+        // provenance and canonical trace preflight rejects it as `not-git`
+        // before the workload starts. Materializing a real git checkout must
+        // seed a synthetic git checkout on the runner so the materialized path
+        // is a valid git work tree with a committed HEAD.
+        crate::test_support::with_isolated_home(|_| {
+            let fixture = GitFixture::new();
+            fixture.commit_file("initial.txt", "initial");
+            fixture.push();
+            let checkout = fixture.clone_checkout();
+
+            let runner_root = tempfile::tempdir().expect("runner root");
+            crate::core::runner::create(
+                &format!(
+                    r#"{{"id":"lab-local-git-dependency","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let runner =
+                crate::core::runner::load("lab-local-git-dependency").expect("load runner");
+
+            let remote_path = runner_root
+                .path()
+                .join("materialized-dependency")
+                .display()
+                .to_string();
+            let output = materialize_git_dependency(
+                &runner,
+                RunnerGitDependencyMaterializationOptions {
+                    local_path: checkout.path().display().to_string(),
+                    remote_path: remote_path.clone(),
+                    remote_url: None,
+                    required_subpath: None,
+                    pinned_ref: None,
+                    allow_dirty: false,
+                },
+            )
+            .expect("materialize git dependency");
+
+            assert_eq!(output.remote_path, remote_path);
+            let remote = Path::new(&remote_path);
+            // Canonical provenance preserved: the materialized path is a real git
+            // work tree with a resolvable HEAD, so trace preflight no longer
+            // rejects it as `not-git`.
+            assert_eq!(
+                git_output(remote, &["rev-parse", "--is-inside-work-tree"]),
+                "true"
+            );
+            assert!(!git_output(remote, &["rev-parse", "HEAD"]).is_empty());
+            // Working tree is a clean committed snapshot, not a dirty checkout.
+            assert!(git_output(remote, &["status", "--porcelain=v1"]).is_empty());
+        });
+    }
 
     #[test]
     fn auto_update_clean_dependency_fast_forwards_to_upstream() {
