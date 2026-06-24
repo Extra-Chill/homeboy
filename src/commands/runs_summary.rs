@@ -61,9 +61,44 @@ fn render_run_detail(run: &Value) -> String {
     lines.extend(super::bench_summary::bench_coverage_lines(run));
     lines.extend(key_artifact_lines(run, run_id));
     lines.extend(artifact_lines(run, run_id));
+    lines.extend(report_followup_lines(run, run_id, kind));
     lines.push(format!("Full output: homeboy runs show {run_id} --json"));
 
     finish(lines)
+}
+
+fn report_followup_lines(run: &Value, run_id: &str, kind: &str) -> Vec<String> {
+    if kind != "bench" {
+        return Vec::new();
+    }
+
+    let Some(component) = string_value(run, &["component_id"]) else {
+        return Vec::new();
+    };
+
+    let mut filter = format!("--kind bench --component {component}");
+    if let Some(rig) = string_value(run, &["rig_id"]) {
+        filter.push_str(&format!(" --rig {rig}"));
+    }
+    if let Some(scenario) = first_bench_scenario(run) {
+        filter.push_str(&format!(" --scenario {scenario}"));
+    }
+
+    vec![
+        "Reports:".to_string(),
+        format!("  history: homeboy runs list {filter}"),
+        format!("  distribution: homeboy runs distribution {filter} --field <metadata.path>"),
+        format!(
+            "  compare: homeboy runs bench-compare --from-run <other-run-id> --to-run {run_id}"
+        ),
+    ]
+}
+
+fn first_bench_scenario(run: &Value) -> Option<&str> {
+    value_at(run, &["metadata", "scenario_metrics"])
+        .and_then(Value::as_array)
+        .and_then(|scenarios| scenarios.first())
+        .and_then(|scenario| string_value(scenario, &["scenario_id"]))
 }
 
 /// Surface every recorded artifact with its best on-disk / network locator
@@ -182,6 +217,15 @@ mod tests {
             "    get: homeboy runs artifact get bench-run-42 bench_artifact -o <path>\n"
         ));
         assert!(summary.contains("  admin_url [admin_url]: https://example.test/wp-admin/\n"));
+        assert!(summary.contains("Reports:\n"));
+        assert!(summary
+            .contains("  history: homeboy runs list --kind bench --component homeboy --rig rtc\n"));
+        assert!(summary.contains(
+            "  distribution: homeboy runs distribution --kind bench --component homeboy --rig rtc --field <metadata.path>\n"
+        ));
+        assert!(summary.contains(
+            "  compare: homeboy runs bench-compare --from-run <other-run-id> --to-run bench-run-42\n"
+        ));
         assert!(summary.contains("Full output: homeboy runs show bench-run-42 --json\n"));
         // URL artifacts are not fetchable via `runs artifact get`.
         assert!(!summary.contains("get: homeboy runs artifact get bench-run-42 admin_url"));
@@ -400,6 +444,36 @@ mod tests {
         assert!(
             summary.contains("    get: homeboy runs artifact get fuzz-run-7 seed-1 -o <path>\n")
         );
+        assert!(!summary.contains("Reports:\n"));
+    }
+
+    #[test]
+    fn bench_show_summary_filters_followup_reports_by_scenario_when_available() {
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "bench-run-42",
+                    "kind": "bench",
+                    "status": "pass",
+                    "component_id": "homeboy",
+                    "metadata": {
+                        "scenario_metrics": [{"scenario_id": "cold", "metrics": {"p95_ms": 42.0}}]
+                    },
+                    "artifacts": []
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains(
+            "  history: homeboy runs list --kind bench --component homeboy --scenario cold\n"
+        ));
+        assert!(summary.contains(
+            "  distribution: homeboy runs distribution --kind bench --component homeboy --scenario cold --field <metadata.path>\n"
+        ));
     }
 
     #[test]

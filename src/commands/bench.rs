@@ -128,11 +128,11 @@ enum BenchCommand {
     Matrix(settings_matrix::BenchMatrixArgs),
     /// List declared benchmark scenarios without executing them
     List(BenchListArgs),
-    /// List persisted benchmark runs for a component
+    /// Compatibility alias for `homeboy runs list --kind bench --component <component>`
     History(BenchHistoryArgs),
-    /// Aggregate categorical values from persisted benchmark metadata
+    /// Compatibility alias for `homeboy runs distribution --kind bench --component <component>`
     Distribution(BenchDistributionArgs),
-    /// Compare two persisted benchmark runs
+    /// Compatibility alias for `homeboy runs bench-compare --from-run <id> --to-run <id>`
     Compare(BenchCompareArgs),
 }
 
