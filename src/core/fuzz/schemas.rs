@@ -21,6 +21,7 @@ pub const FUZZ_EXECUTION_REQUEST_SCHEMA: &str = "homeboy/fuzz-execution-request/
 pub const FUZZ_RESULT_ENVELOPE_SCHEMA: &str = "homeboy/fuzz-result-envelope/v1";
 pub const FUZZ_REQUIRED_ARTIFACT_SCHEMA: &str = "homeboy/fuzz-required-artifact/v1";
 pub const FUZZ_GATE_SCHEMA: &str = "homeboy/fuzz-gate/v1";
+pub const FUZZ_HOTSPOT_SET_SCHEMA: &str = "homeboy/fuzz-hotspot-set/v1";
 pub const FUZZ_SKIP_REASON_UNSAFE: &str = "unsafe";
 pub const FUZZ_SKIP_REASON_DESTRUCTIVE: &str = "destructive";
 pub const FUZZ_SKIP_REASON_AUTH_REQUIRED: &str = "auth_required";

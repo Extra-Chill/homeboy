@@ -226,6 +226,18 @@ pub(crate) struct FuzzReportArgs {
     /// Stable envelope id. Defaults to --run-id, then the campaign id.
     #[arg(long = "envelope-id", value_name = "ID")]
     pub(crate) envelope_id: Option<String>,
+
+    /// Gate profile to apply while creating the report envelope.
+    #[arg(long = "gate-profile", value_enum, default_value_t = FuzzReportGateProfile::Default)]
+    pub(crate) gate_profile: FuzzReportGateProfile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum FuzzReportGateProfile {
+    /// Preserve measurement evidence without default threshold gates.
+    Measurement,
+    /// Apply Homeboy's default fuzz evidence gates.
+    Default,
 }
 
 #[derive(Args, Clone)]
@@ -285,10 +297,10 @@ pub(crate) struct FuzzReplayArgs {
 }
 
 pub use super::types_extra::{
-    FuzzCampaignContract, FuzzCompareDeltas, FuzzCompareOutput, FuzzCompareSnapshot,
-    FuzzContractOutput, FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput,
-    FuzzDiscoverOutput, FuzzDiscoverSummary, FuzzExecutionOutput, FuzzGateEvaluation,
-    FuzzGateStatusChange, FuzzListOutput, FuzzOutput, FuzzPlanOutput, FuzzReplayEnv,
-    FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput, FuzzRunnerContract,
-    FuzzValidateOutput, FuzzWorkloadOutput,
+    FuzzCampaignContract, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot,
+    FuzzCompareOutput, FuzzCompareSnapshot, FuzzContractOutput, FuzzCoverageCompletenessOutput,
+    FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput, FuzzDiscoverSummary,
+    FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange, FuzzListOutput, FuzzOutput,
+    FuzzPlanOutput, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput,
+    FuzzRunOutput, FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
 };

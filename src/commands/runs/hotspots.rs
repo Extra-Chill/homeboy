@@ -8,6 +8,7 @@ use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
 
+use homeboy::core::fuzz::parse_fuzz_hotspot_set_value;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use homeboy::core::Error;
@@ -310,7 +311,12 @@ fn rank_hotspots(artifacts: &[LoadedFuzzArtifact], limit: usize) -> Vec<HotspotR
 }
 
 fn extract_hotspot_points(json: &Value) -> Vec<HotspotPoint> {
-    let mut points = standardized_hotspots(json);
+    let mut points = typed_hotspots(json);
+    if !points.is_empty() {
+        return points;
+    }
+
+    points = standardized_hotspots(json);
     if !points.is_empty() {
         return points;
     }
@@ -318,6 +324,40 @@ fn extract_hotspot_points(json: &Value) -> Vec<HotspotPoint> {
     points.extend(finding_hotspots(json));
     points.extend(coverage_gap_hotspots(json));
     points
+}
+
+fn typed_hotspots(json: &Value) -> Vec<HotspotPoint> {
+    let mut points = Vec::new();
+    collect_typed_hotspots(json, &mut points);
+    points
+}
+
+fn collect_typed_hotspots(json: &Value, points: &mut Vec<HotspotPoint>) {
+    if let Some(set) = parse_fuzz_hotspot_set_value(json) {
+        points.extend(set.items.into_iter().map(|item| HotspotPoint {
+            key: item.id,
+            label: item.label,
+            score: item.relative_score.unwrap_or(item.value),
+            source: format!("typed:{}", set.id),
+        }));
+        return;
+    }
+
+    match json {
+        Value::Array(items) => {
+            for item in items {
+                collect_typed_hotspots(item, points);
+            }
+        }
+        Value::Object(object) => {
+            for (key, item) in object {
+                if key != "prior_observations" {
+                    collect_typed_hotspots(item, points);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn standardized_hotspots(json: &Value) -> Vec<HotspotPoint> {
@@ -566,6 +606,72 @@ mod tests {
         assert_eq!(ranked[0].run_ids, vec!["run-a", "run-b"]);
         assert_eq!(ranked[1].key, "beta");
         assert_eq!(ranked[1].score, 4.0);
+    }
+
+    #[test]
+    fn typed_hotspots_take_precedence_over_loose_payloads() {
+        let points = extract_hotspot_points(&json!({
+            "schema": "homeboy/fuzz-result-envelope/v1",
+            "hotspots": {
+                "schema": "homeboy/fuzz-hotspot-set/v1",
+                "id": "set-1",
+                "items": [
+                    {
+                        "id": "route:search",
+                        "dimension": "route",
+                        "kind": "request",
+                        "metric": "duration",
+                        "value": 123.0,
+                        "unit": "ms",
+                        "basis": "per_case",
+                        "sample_count": 10,
+                        "rank": 1,
+                        "relative_score": 0.91,
+                        "label": "Search route",
+                        "labels": ["read", "hot"],
+                        "evidence_refs": ["case-log:1"],
+                        "artifact_refs": ["profile.json"]
+                    }
+                ]
+            },
+            "campaign": {
+                "findings": [{ "id": "fallback", "severity": "critical" }]
+            }
+        }));
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].key, "route:search");
+        assert_eq!(points[0].label.as_deref(), Some("Search route"));
+        assert_eq!(points[0].score, 0.91);
+        assert_eq!(points[0].source, "typed:set-1");
+    }
+
+    #[test]
+    fn nested_typed_hotspots_use_contract_score() {
+        let points = extract_hotspot_points(&json!({
+            "schema": "homeboy/fuzz-result-envelope/v1",
+            "metadata": {
+                "hotspots": {
+                    "schema": "homeboy/fuzz-hotspot-set/v1",
+                    "id": "metadata-set",
+                    "items": [
+                        {
+                            "id": "route:checkout",
+                            "dimension": "route",
+                            "metric": "duration",
+                            "value": 950.0,
+                            "unit": "ms",
+                            "relative_score": 0.82
+                        }
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].key, "route:checkout");
+        assert_eq!(points[0].score, 0.82);
+        assert_eq!(points[0].source, "typed:metadata-set");
     }
 
     #[test]

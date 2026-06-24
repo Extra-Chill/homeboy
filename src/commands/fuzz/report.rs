@@ -16,7 +16,7 @@ pub(super) const FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND: &str = "fuzz_result_envelop
 
 use super::types::{
     FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput, FuzzGateEvaluation,
-    FuzzReportArgs, FuzzReportOutput, FuzzValidateArgs, FuzzValidateOutput,
+    FuzzReportArgs, FuzzReportGateProfile, FuzzReportOutput, FuzzValidateArgs, FuzzValidateOutput,
 };
 
 pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<FuzzValidateOutput> {
@@ -65,6 +65,7 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
         .clone()
         .or_else(|| args.run.run_id.clone())
         .unwrap_or_else(|| campaign.id.clone());
+    let (required_artifacts, gates) = report_gate_contract(args.gate_profile);
     let metadata = fuzz_result_metadata(args.run.inventory.as_deref())?;
     let mut envelope = FuzzResultEnvelope {
         schema: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
@@ -82,15 +83,15 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
             seed: args.run.seed,
             max_duration: args.run.max_duration,
             args: args.run.args,
-            required_artifacts: default_fuzz_required_artifacts(),
-            gates: default_fuzz_gates(),
+            required_artifacts: required_artifacts.clone(),
+            gates: gates.clone(),
             metadata: serde_json::Value::Null,
             extra: std::collections::BTreeMap::new(),
         },
         campaign: Some(campaign.clone()),
         artifacts: campaign.artifacts.clone(),
-        required_artifacts: default_fuzz_required_artifacts(),
-        gates: default_fuzz_gates(),
+        required_artifacts,
+        gates,
         provenance: Some(fuzz_provenance(run_id)),
         metadata,
         extra: std::collections::BTreeMap::new(),
@@ -123,6 +124,18 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
         performance_hotspots,
         gates,
     })
+}
+
+fn report_gate_contract(
+    profile: FuzzReportGateProfile,
+) -> (
+    Vec<homeboy::core::fuzz::FuzzRequiredArtifact>,
+    Vec<homeboy::core::fuzz::FuzzGate>,
+) {
+    match profile {
+        FuzzReportGateProfile::Measurement => (Vec::new(), Vec::new()),
+        FuzzReportGateProfile::Default => (default_fuzz_required_artifacts(), default_fuzz_gates()),
+    }
 }
 
 pub(super) fn persist_fuzz_result_envelope(
@@ -245,11 +258,28 @@ pub(super) fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvalua
 pub(super) fn evaluate_fuzz_result_envelope_gates(
     envelope: &FuzzResultEnvelope,
 ) -> Vec<FuzzGateEvaluation> {
-    let mut gates = envelope
+    let metrics = envelope
         .campaign
         .as_ref()
-        .map(evaluate_fuzz_gates)
-        .unwrap_or_default();
+        .map(|campaign| FuzzGateMetrics::from_campaign(campaign, &FuzzGateProfile::default()));
+    let mut gates = envelope
+        .gates
+        .iter()
+        .map(|gate| {
+            let observed = metrics
+                .as_ref()
+                .map(|metrics| observed_gate_metric(metrics, gate.metric.as_str()))
+                .unwrap_or(0.0);
+            let passed = threshold_passes(observed, gate.operator, gate.value);
+            FuzzGateEvaluation {
+                gate_id: gate.id.clone(),
+                status: if passed { "passed" } else { "failed" }.to_string(),
+                metric: gate.metric.clone(),
+                observed,
+                expected: gate.value,
+            }
+        })
+        .collect::<Vec<_>>();
 
     gates.extend(
         envelope
@@ -269,6 +299,16 @@ pub(super) fn evaluate_fuzz_result_envelope_gates(
     );
 
     gates
+}
+
+fn observed_gate_metric(metrics: &FuzzGateMetrics, metric: &str) -> f64 {
+    match metric {
+        "open_findings" => metrics.open_findings as f64,
+        "case_log_artifacts" => metrics.case_evidence_artifacts as f64,
+        "target_coverage_ratio" => metrics.target_coverage_ratio,
+        "operation_coverage_ratio" => metrics.operation_coverage_ratio,
+        _ => 0.0,
+    }
 }
 
 pub(super) fn required_artifact_count(envelope: &FuzzResultEnvelope, kind: &str) -> usize {

@@ -97,7 +97,13 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
         assert!(persisted.id.starts_with("fuzz-"));
         let store = ObservationStore::open_initialized().expect("store");
         assert!(store.get_run(&persisted.id).expect("get run").is_some());
-        assert_eq!(store.list_artifacts(&persisted.id).expect("artifacts").len(), 1);
+        assert_eq!(
+            store
+                .list_artifacts(&persisted.id)
+                .expect("artifacts")
+                .len(),
+            1
+        );
     });
 }
 
@@ -340,6 +346,7 @@ fn fuzz_report_persists_result_envelope_artifact_for_run_id() {
             run: fuzz_run_args_with_run_id("report-run-1"),
             output_envelope: None,
             envelope_id: None,
+            gate_profile: FuzzReportGateProfile::Measurement,
         })
         .expect("fuzz report");
 
@@ -353,6 +360,10 @@ fn fuzz_report_persists_result_envelope_artifact_for_run_id() {
             .performance_hotspots
             .hottest_metric_families
             .is_empty());
+        assert_eq!(output.status, "passed");
+        assert!(output.gates.is_empty());
+        assert!(output.envelope.gates.is_empty());
+        assert!(output.envelope.required_artifacts.is_empty());
         let store = ObservationStore::open_initialized().expect("store");
         let artifacts = store.list_artifacts("report-run-1").expect("artifacts");
         let envelope_artifact = artifacts
@@ -396,6 +407,7 @@ fn fuzz_report_fails_required_artifact_gate_when_replay_data_is_missing() {
             run: fuzz_run_args_with_run_id("report-run-missing-replay"),
             output_envelope: None,
             envelope_id: None,
+            gate_profile: FuzzReportGateProfile::Default,
         })
         .expect("fuzz report");
 
@@ -439,6 +451,7 @@ fn fuzz_report_passes_required_artifact_gates_with_seed_replay_data() {
             run: fuzz_run_args_with_run_id("report-run-with-replay"),
             output_envelope: None,
             envelope_id: None,
+            gate_profile: FuzzReportGateProfile::Default,
         })
         .expect("fuzz report");
 
@@ -468,6 +481,7 @@ fn fuzz_report_records_existing_output_envelope_path_as_artifact() {
             run: fuzz_run_args_with_run_id("report-run-output"),
             output_envelope: Some(envelope_path.clone()),
             envelope_id: Some("custom-envelope".to_string()),
+            gate_profile: FuzzReportGateProfile::Measurement,
         })
         .expect("fuzz report");
 
