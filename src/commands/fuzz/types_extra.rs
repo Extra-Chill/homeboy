@@ -121,14 +121,30 @@ pub struct FuzzCompareOutput {
     pub schema: String,
     pub command: String,
     pub status: String,
+    pub advisory_status: String,
     pub baseline_file: String,
     pub candidate_file: String,
     pub baseline: FuzzCompareSnapshot,
     pub candidate: FuzzCompareSnapshot,
     pub deltas: FuzzCompareDeltas,
+    pub hotspot_summary: FuzzCompareHotspotSummary,
     pub regressions: Vec<String>,
+    pub advisories: Vec<String>,
     pub improvements: Vec<String>,
     pub summary: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCompareHotspotSummary {
+    pub policy: String,
+    pub status: String,
+    pub total: usize,
+    pub regressions: usize,
+    pub advisory_regressions: usize,
+    pub blocking_regressions: usize,
+    pub improvements: usize,
+    pub new_hotspots: usize,
+    pub resolved_hotspots: usize,
 }
 
 #[derive(Serialize, Clone)]
@@ -205,6 +221,7 @@ pub struct FuzzCompareHotspotDelta {
     pub candidate_relative_score: Option<f64>,
     pub relative_score_delta: Option<f64>,
     pub status: String,
+    pub classification: String,
 }
 
 #[derive(Serialize)]

@@ -362,12 +362,11 @@ pub(super) fn select_workload<'a>(
             "workload",
             "No fuzz workloads are declared for this component/rig/extension selection",
             None,
-            Some(vec![
-                "Run `homeboy fuzz list <component> --rig <id>` to inspect the resolved selection.".to_string(),
-                "Declare extension fuzz workloads, component scripts.fuzz commands, or rig fuzz_workloads before claiming fuzz coverage.".to_string(),
-                "If the command is available in source but not on the Lab runner, run `homeboy runner status <id>` and refresh or upgrade the runner binary.".to_string(),
-            ]),
-        ));
+            None,
+        )
+        .with_hint("Run `homeboy fuzz list <component> --rig <id>` to inspect the resolved selection.")
+        .with_hint("Declare extension fuzz workloads, component scripts.fuzz commands, or rig fuzz_workloads before claiming fuzz coverage.")
+        .with_hint("If the command is available in source but not on the Lab runner, run `homeboy runner status <id>` and refresh or upgrade the runner binary."));
     }
 
     let mut path_workloads = workloads
@@ -387,11 +386,14 @@ pub(super) fn select_workload<'a>(
             "workload",
             "Multiple fuzz workloads are declared; select one explicitly with --workload <id>",
             None,
-            Some(vec![
-                format!("Available workload ids: {}", workload_ids.join(", ")),
-                "Run `homeboy fuzz list` for labels, descriptions, sources, and manifest paths."
-                    .to_string(),
-            ]),
+            None,
+        )
+        .with_hint(format!(
+            "Available workload ids: {}",
+            workload_ids.join(", ")
+        ))
+        .with_hint(
+            "Run `homeboy fuzz list` for labels, descriptions, sources, and manifest paths.",
         ));
     }
 

@@ -9,8 +9,9 @@ use super::report::{
     required_artifact_count,
 };
 use super::types::{
-    FuzzCompareArgs, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot,
-    FuzzCompareOutput, FuzzCompareSnapshot, FuzzGateStatusChange,
+    FuzzCompareArgs, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotPolicy,
+    FuzzCompareHotspotSnapshot, FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot,
+    FuzzGateStatusChange,
 };
 
 const FUZZ_COMPARE_SCHEMA: &str = "homeboy/fuzz-compare/v1";
@@ -20,8 +21,10 @@ pub(super) fn run_compare(args: FuzzCompareArgs) -> homeboy::core::Result<FuzzCo
     let candidate_envelope = parse_fuzz_result_envelope_file(&args.candidate)?;
     let baseline = snapshot(&baseline_envelope);
     let candidate = snapshot(&candidate_envelope);
-    let deltas = deltas(&baseline, &candidate);
+    let deltas = deltas(&baseline, &candidate, args.hotspot_policy);
+    let hotspot_summary = hotspot_summary(&deltas, args.hotspot_policy);
     let regressions = regressions(&deltas);
+    let advisories = advisories(&deltas);
     let improvements = improvements(&deltas);
     let status = if regressions.is_empty() {
         if improvements.is_empty() {
@@ -38,14 +41,20 @@ pub(super) fn run_compare(args: FuzzCompareArgs) -> homeboy::core::Result<FuzzCo
         schema: FUZZ_COMPARE_SCHEMA.to_string(),
         command: "fuzz.compare".to_string(),
         status: status.clone(),
+        advisory_status: advisory_status(&status, &advisories),
         baseline_file: args.baseline.to_string_lossy().to_string(),
         candidate_file: args.candidate.to_string_lossy().to_string(),
         baseline,
         candidate,
         deltas,
+        hotspot_summary,
         regressions,
+        advisories,
         improvements,
-        summary: vec![format!("fuzz compare status: {status}")],
+        summary: vec![
+            format!("fuzz compare status: {status}"),
+            format!("hotspot policy: {}", args.hotspot_policy.as_str()),
+        ],
     })
 }
 
@@ -176,7 +185,11 @@ fn critical_finding_keys(envelope: &FuzzResultEnvelope) -> Vec<String> {
     keys
 }
 
-fn deltas(baseline: &FuzzCompareSnapshot, candidate: &FuzzCompareSnapshot) -> FuzzCompareDeltas {
+fn deltas(
+    baseline: &FuzzCompareSnapshot,
+    candidate: &FuzzCompareSnapshot,
+    hotspot_policy: FuzzCompareHotspotPolicy,
+) -> FuzzCompareDeltas {
     let baseline_missing = baseline
         .missing_required_artifacts
         .iter()
@@ -197,7 +210,7 @@ fn deltas(baseline: &FuzzCompareSnapshot, candidate: &FuzzCompareSnapshot) -> Fu
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let hotspot_deltas = hotspot_deltas(&baseline.hotspots, &candidate.hotspots);
+    let hotspot_deltas = hotspot_deltas(&baseline.hotspots, &candidate.hotspots, hotspot_policy);
     let new_hotspots = hotspot_deltas
         .iter()
         .filter(|delta| delta.status == "new")
@@ -316,6 +329,7 @@ fn hotspot_snapshot(hotspot: FuzzHotspot) -> FuzzCompareHotspotSnapshot {
 fn hotspot_deltas(
     baseline: &[FuzzCompareHotspotSnapshot],
     candidate: &[FuzzCompareHotspotSnapshot],
+    policy: FuzzCompareHotspotPolicy,
 ) -> Vec<FuzzCompareHotspotDelta> {
     let baseline_by_id = baseline
         .iter()
@@ -335,7 +349,14 @@ fn hotspot_deltas(
         .map(|id| {
             let before = baseline_by_id.get(&id).copied();
             let after = candidate_by_id.get(&id).copied();
-            FuzzCompareHotspotDelta {
+            let status = match (before, after) {
+                (None, Some(_)) => "new",
+                (Some(_), None) => "resolved",
+                (Some(_), Some(_)) => "changed",
+                (None, None) => "absent",
+            }
+            .to_string();
+            let mut delta = FuzzCompareHotspotDelta {
                 id: id.clone(),
                 dimension: after
                     .or(before)
@@ -362,16 +383,118 @@ fn hotspot_deltas(
                     .and_then(|hotspot| hotspot.relative_score)
                     .zip(after.and_then(|hotspot| hotspot.relative_score))
                     .map(|(before, after)| after - before),
-                status: match (before, after) {
-                    (None, Some(_)) => "new",
-                    (Some(_), None) => "resolved",
-                    (Some(_), Some(_)) => "changed",
-                    (None, None) => "absent",
-                }
-                .to_string(),
-            }
+                status,
+                classification: String::new(),
+            };
+            delta.classification = hotspot_classification(&delta, policy);
+            delta
         })
         .collect()
+}
+
+fn hotspot_classification(
+    delta: &FuzzCompareHotspotDelta,
+    policy: FuzzCompareHotspotPolicy,
+) -> String {
+    match hotspot_direction(delta) {
+        HotspotDirection::Regression => match policy {
+            FuzzCompareHotspotPolicy::Advisory => "advisory_regression",
+            FuzzCompareHotspotPolicy::Blocking => "blocking_regression",
+            FuzzCompareHotspotPolicy::Off => "measured_regression",
+        },
+        HotspotDirection::Improvement => match policy {
+            FuzzCompareHotspotPolicy::Advisory => "advisory_improvement",
+            FuzzCompareHotspotPolicy::Blocking => "blocking_improvement",
+            FuzzCompareHotspotPolicy::Off => "measured_improvement",
+        },
+        HotspotDirection::Unchanged => "unchanged",
+    }
+    .to_string()
+}
+
+#[derive(PartialEq, Eq)]
+enum HotspotDirection {
+    Regression,
+    Improvement,
+    Unchanged,
+}
+
+fn hotspot_direction(delta: &FuzzCompareHotspotDelta) -> HotspotDirection {
+    if delta.status == "new" {
+        return HotspotDirection::Regression;
+    }
+    if delta.status == "resolved" {
+        return HotspotDirection::Improvement;
+    }
+
+    let rank_regressed = delta.rank_delta.is_some_and(|change| change < 0);
+    let rank_improved = delta.rank_delta.is_some_and(|change| change > 0);
+    let score_regressed = delta
+        .relative_score_delta
+        .is_some_and(|change| change > 0.0);
+    let score_improved = delta
+        .relative_score_delta
+        .is_some_and(|change| change < 0.0);
+    let value_regressed = delta.value_delta.is_some_and(|change| change > 0.0);
+    let value_improved = delta.value_delta.is_some_and(|change| change < 0.0);
+
+    if rank_regressed || score_regressed || value_regressed {
+        HotspotDirection::Regression
+    } else if rank_improved || score_improved || value_improved {
+        HotspotDirection::Improvement
+    } else {
+        HotspotDirection::Unchanged
+    }
+}
+
+fn hotspot_summary(
+    deltas: &FuzzCompareDeltas,
+    policy: FuzzCompareHotspotPolicy,
+) -> FuzzCompareHotspotSummary {
+    let advisory_regressions = deltas
+        .hotspot_deltas
+        .iter()
+        .filter(|delta| delta.classification == "advisory_regression")
+        .count();
+    let blocking_regressions = deltas
+        .hotspot_deltas
+        .iter()
+        .filter(|delta| delta.classification == "blocking_regression")
+        .count();
+    let measured_regressions = deltas
+        .hotspot_deltas
+        .iter()
+        .filter(|delta| delta.classification == "measured_regression")
+        .count();
+    let improvements = deltas
+        .hotspot_deltas
+        .iter()
+        .filter(|delta| delta.classification.ends_with("_improvement"))
+        .count();
+    let regressions = advisory_regressions + blocking_regressions + measured_regressions;
+
+    FuzzCompareHotspotSummary {
+        policy: policy.as_str().to_string(),
+        status: if blocking_regressions > 0 {
+            "blocking_regression"
+        } else if advisory_regressions > 0 {
+            "advisory_regression"
+        } else if measured_regressions > 0 {
+            "measured_regression"
+        } else if improvements > 0 {
+            "improved"
+        } else {
+            "same"
+        }
+        .to_string(),
+        total: deltas.hotspot_deltas.len(),
+        regressions,
+        advisory_regressions,
+        blocking_regressions,
+        improvements,
+        new_hotspots: deltas.new_hotspots.len(),
+        resolved_hotspots: deltas.resolved_hotspots.len(),
+    }
 }
 
 fn count_deltas(
@@ -437,7 +560,27 @@ fn regressions(deltas: &FuzzCompareDeltas) -> Vec<String> {
     }) {
         regressions.push("gate changed from passed to failed".to_string());
     }
+    if deltas
+        .hotspot_deltas
+        .iter()
+        .any(|delta| delta.classification == "blocking_regression")
+    {
+        regressions.push("hotspot regressions".to_string());
+    }
     regressions
+}
+
+fn advisories(deltas: &FuzzCompareDeltas) -> Vec<String> {
+    let mut advisories = Vec::new();
+    let hotspot_regressions = deltas
+        .hotspot_deltas
+        .iter()
+        .filter(|delta| delta.classification == "advisory_regression")
+        .count();
+    if hotspot_regressions > 0 {
+        advisories.push(format!("hotspot regressions: {hotspot_regressions}"));
+    }
+    advisories
 }
 
 fn improvements(deltas: &FuzzCompareDeltas) -> Vec<String> {
@@ -463,7 +606,23 @@ fn improvements(deltas: &FuzzCompareDeltas) -> Vec<String> {
     }) {
         improvements.push("gate changed from failed to passed".to_string());
     }
+    if deltas
+        .hotspot_deltas
+        .iter()
+        .any(|delta| delta.classification == "blocking_improvement")
+    {
+        improvements.push("hotspots improved".to_string());
+    }
     improvements
+}
+
+fn advisory_status(status: &str, advisories: &[String]) -> String {
+    if status == "worse" || !advisories.is_empty() {
+        "worse"
+    } else {
+        status
+    }
+    .to_string()
 }
 
 fn is_failure_status(status: &str) -> bool {
@@ -489,7 +648,7 @@ mod tests {
     fn fuzz_compare_reports_same_when_candidate_matches_baseline() {
         let baseline = snapshot(&envelope("baseline", 2, 2, 4, 4, &[], &[], true));
         let candidate = snapshot(&envelope("candidate", 2, 2, 4, 4, &[], &[], true));
-        let deltas = deltas(&baseline, &candidate);
+        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
 
         assert!(regressions(&deltas).is_empty());
         assert!(improvements(&deltas).is_empty());
@@ -499,7 +658,7 @@ mod tests {
     fn fuzz_compare_reports_better_candidate() {
         let baseline = snapshot(&envelope("baseline", 4, 3, 8, 6, &["failed"], &[], false));
         let candidate = snapshot(&envelope("candidate", 4, 4, 8, 8, &["passed"], &[], true));
-        let deltas = deltas(&baseline, &candidate);
+        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
 
         assert!(regressions(&deltas).is_empty());
         assert!(improvements(&deltas).contains(&"target coverage improved".to_string()));
@@ -521,7 +680,7 @@ mod tests {
             &["critical"],
             false,
         ));
-        let deltas = deltas(&baseline, &candidate);
+        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
         let regressions = regressions(&deltas);
 
         assert!(regressions.contains(&"target coverage dropped".to_string()));
@@ -533,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_compare_reports_relative_hotspot_movement_without_regression_status() {
+    fn fuzz_compare_reports_relative_hotspot_movement_as_advisory_by_default() {
         let mut baseline = envelope("baseline", 0, 0, 0, 0, &[], &[], true);
         baseline.metadata = serde_json::json!({
             "hotspots": {
@@ -600,10 +759,17 @@ mod tests {
 
         let baseline = snapshot(&baseline);
         let candidate = snapshot(&candidate);
-        let deltas = deltas(&baseline, &candidate);
+        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
+        let summary = hotspot_summary(&deltas, FuzzCompareHotspotPolicy::Advisory);
 
         assert!(regressions(&deltas).is_empty());
+        assert_eq!(advisories(&deltas), vec!["hotspot regressions: 2"]);
         assert!(improvements(&deltas).is_empty());
+        assert_eq!(summary.policy, "advisory");
+        assert_eq!(summary.status, "advisory_regression");
+        assert_eq!(summary.advisory_regressions, 2);
+        assert_eq!(summary.blocking_regressions, 0);
+        assert_eq!(summary.improvements, 1);
         assert_eq!(deltas.new_hotspots, vec!["page:new"]);
         assert_eq!(deltas.resolved_hotspots, vec!["query:old"]);
         let alpha = deltas
@@ -613,8 +779,53 @@ mod tests {
             .expect("alpha delta");
         assert_eq!(alpha.value_delta, Some(25.0));
         assert_eq!(alpha.rank_delta, Some(2));
+        assert_eq!(alpha.classification, "advisory_regression");
         assert!(
             (alpha.relative_score_delta.expect("relative score delta") + 0.2).abs() < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn fuzz_compare_blocking_hotspot_policy_affects_compare_status_data() {
+        let mut baseline = envelope("baseline", 0, 0, 0, 0, &[], &[], true);
+        baseline.metadata = serde_json::json!({
+            "hotspots": {
+                "schema": "homeboy/fuzz-hotspot-set/v1",
+                "id": "baseline-hotspots",
+                "items": [
+                    { "id": "path:alpha", "dimension": "path", "metric": "duration", "value": 100.0, "unit": "ms", "rank": 2, "relative_score": 0.5 }
+                ]
+            }
+        });
+        baseline.gates.clear();
+        baseline.required_artifacts.clear();
+
+        let mut candidate = envelope("candidate", 0, 0, 0, 0, &[], &[], true);
+        candidate.metadata = serde_json::json!({
+            "hotspots": {
+                "schema": "homeboy/fuzz-hotspot-set/v1",
+                "id": "candidate-hotspots",
+                "items": [
+                    { "id": "path:alpha", "dimension": "path", "metric": "duration", "value": 140.0, "unit": "ms", "rank": 1, "relative_score": 0.9 }
+                ]
+            }
+        });
+        candidate.gates.clear();
+        candidate.required_artifacts.clear();
+
+        let baseline = snapshot(&baseline);
+        let candidate = snapshot(&candidate);
+        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Blocking);
+        let regressions = regressions(&deltas);
+        let summary = hotspot_summary(&deltas, FuzzCompareHotspotPolicy::Blocking);
+
+        assert!(regressions.contains(&"hotspot regressions".to_string()));
+        assert_eq!(summary.policy, "blocking");
+        assert_eq!(summary.status, "blocking_regression");
+        assert_eq!(summary.blocking_regressions, 1);
+        assert_eq!(
+            deltas.hotspot_deltas[0].classification,
+            "blocking_regression"
         );
     }
 

@@ -545,6 +545,7 @@ pub(super) fn default_runner_contract() -> FuzzRunnerContract {
         extension_script_required: true,
         env: vec![
             "HOMEBOY_FUZZ_RESULTS_FILE",
+            "HOMEBOY_FUZZ_ARTIFACTS_DIR",
             "HOMEBOY_FUZZ_WORKLOAD_ID",
             "HOMEBOY_FUZZ_WORKLOAD_PATH",
             "HOMEBOY_FUZZ_WORKLOAD_ROOT",
@@ -609,6 +610,18 @@ pub(super) fn fuzz_runner_env(
         "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
         results_path.to_string_lossy().to_string(),
     )];
+    let artifacts_dir =
+        run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
+    std::fs::create_dir_all(&artifacts_dir).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some(artifacts_dir.display().to_string()),
+        )
+    })?;
+    env.push((
+        "HOMEBOY_FUZZ_ARTIFACTS_DIR".to_string(),
+        artifacts_dir.to_string_lossy().to_string(),
+    ));
     if let Some(workload) = workload {
         env.push(("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), workload.id.clone()));
         if let Some(path) = fuzz_runner_workload_path(workload, rig_context, run_dir)? {
