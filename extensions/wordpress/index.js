@@ -54,6 +54,7 @@ module.exports = {
 	...require('./lib/wordpress-fuzz-plan-from-surfaces'),
 	...require('./lib/wordpress-fuzz-campaign'),
 	...require('./lib/wordpress-fuzz-runner'),
+	...require('./lib/wordpress-fuzz-runtime-task'),
 	buildStaticVisualParityRecipe: staticVisualParity.buildStaticVisualParityRecipe,
 	createStaticServer: staticVisualParity.createStaticServer,
 	normalizeStaticVisualParityArtifacts: staticVisualParity.normalizeStaticVisualParityArtifacts,

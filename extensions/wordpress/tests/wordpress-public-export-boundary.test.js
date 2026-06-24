@@ -41,6 +41,8 @@ assert.equal(typeof wordpress.buildWordPressFuzzPlanFromSurfaces, 'function');
 assert.equal(typeof wordpress.compileWordPressFuzzCampaign, 'function');
 assert.equal(typeof wordpress.detectWordPressFuzzPlanResultGaps, 'function');
 assert.equal(typeof wordpress.buildWordPressFuzzRunnerResult, 'function');
+assert.equal(typeof wordpress.buildWordPressFuzzRuntimeTaskRequest, 'function');
+assert.equal(typeof wordpress.normalizeFuzzHotspotSummary, 'function');
 assert.equal(typeof wordpress.wpCodebox, 'object');
 assert.equal(typeof wordpress.wpCodebox.resolveWpCodeboxArtifactPath, 'function');
 assert.equal(typeof wordpress.wpCodebox.runWpCodeboxRecipe, 'function');
@@ -48,6 +50,7 @@ assert.equal(typeof wordpress.wpCodebox.buildWpCodeboxFuzzPlanRecipe, 'function'
 assert.equal(typeof wordpress.wpCodebox.buildWpCodeboxFuzzPlanRecipeLegacyRunAlias, 'function');
 assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzRunTaskRequest, 'function');
 assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzSuiteTaskRequest, 'function');
+assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzRuntimeTaskRequest, 'function');
 
 assert.equal(typeof wordpress.resolveWpCodeboxArtifactPath, 'function');
 assert.equal(typeof wordpress.runWpCodeboxRecipe, 'function');

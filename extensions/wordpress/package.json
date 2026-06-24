@@ -64,7 +64,8 @@
     "./wordpress-hook-surface-discovery": "./lib/wordpress-hook-surface-discovery.js",
     "./wp-codebox-fuzz-suite": "./lib/wp-codebox-fuzz-run.js",
     "./wp-codebox-fuzz-run": "./lib/wp-codebox-fuzz-run.js",
-    "./wordpress-fuzz-runner": "./lib/wordpress-fuzz-runner.js"
+    "./wordpress-fuzz-runner": "./lib/wordpress-fuzz-runner.js",
+    "./wordpress-fuzz-runtime-task": "./lib/wordpress-fuzz-runtime-task.js"
   },
   "scripts": {
     "lint:js": "eslint",
@@ -154,6 +155,7 @@
     "test:wp-codebox-fuzz-suite": "node tests/wp-codebox-fuzz-run-smoke.js",
     "test:wp-codebox-fuzz-run": "npm run test:wp-codebox-fuzz-suite",
     "test:wordpress-fuzz-runner": "node tests/wordpress-fuzz-runner-smoke.js",
+    "test:wordpress-fuzz-runtime-task": "node tests/wordpress-fuzz-runtime-task.test.js",
     "test:wordpress-fuzz-runner-codebox-contract": "node tests/wordpress-fuzz-runner-codebox-contract-canary.js",
     "test:wordpress-public-export-boundary": "node tests/wordpress-public-export-boundary.test.js",
     "test:wordpress-manifest-settings": "node tests/wordpress-manifest-settings-smoke.js",

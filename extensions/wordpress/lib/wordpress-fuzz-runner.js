@@ -19,6 +19,7 @@ const {
 	normalizeWpCodeboxFuzzSuiteResult,
 	runWpCodeboxFuzzSuite,
 	wpCodeboxFuzzSuiteInput,
+	wpCodeboxFuzzRuntimeTaskRequest,
 	wpCodeboxFuzzSuiteTaskRequest,
 } = require('./wp-codebox-fuzz-run');
 const { aggregateWordPressFuzzCoverage } = require('./wordpress-fuzz-coverage-aggregate');
@@ -64,7 +65,15 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 	const instructions = fuzzSuiteInstructions({ workload, workloadId, runId });
 	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities });
 	const runtimeRequirements = wpCodeboxRuntimeRequirementsFromWorkload(workload, { env });
-	const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
+	const runtimeTaskRequest = wpCodeboxFuzzRuntimeTaskRequest({
+		taskId: runId,
+		input: wpCodeboxInput,
+		provider: workload.provider,
+		runtimeId: workload.runtime_id || workload.runtimeId || 'wp-codebox',
+		runtimeRequirements,
+		instructions,
+	});
+	const taskRequest = runtimeTaskRequest.provider_request || wpCodeboxFuzzSuiteTaskRequest({
 		taskId: runId,
 		input: wpCodeboxInput,
 		provider: workload.provider,
@@ -85,6 +94,7 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 		runtimeCapabilities,
 		wpCodeboxInput,
 		runtimeRequirements,
+		runtimeTaskRequest,
 		taskRequest,
 		codeboxPlanRecipe,
 	};
@@ -100,6 +110,7 @@ function buildWordPressFuzzRunnerSummary({
 	runtimeCapabilities,
 	wpCodeboxInput,
 	runtimeRequirements,
+	runtimeTaskRequest,
 	taskRequest,
 	codeboxPlanRecipe,
 	codeboxResult,
@@ -122,8 +133,11 @@ function buildWordPressFuzzRunnerSummary({
 		wp_codebox_runtime_requirements: runtimeRequirements,
 		wp_codebox_task_request: taskRequest,
 		wp_codebox_plan_recipe: codeboxPlanRecipe,
+		fuzz_runtime_task_request: runtimeTaskRequest,
+		fuzz_runtime_task_result: codeboxResult.runtime_task_result,
 		wp_codebox_result: codeboxResult,
 		coverage,
+		hotspot_summary: codeboxResult.hotspot_summary || coverage?.hotspot_summary,
 		homeboy_fuzz_campaign: homeboyFuzzCampaign,
 		metadata: objectOrUndefined(workload.metadata),
 	});
@@ -343,11 +357,15 @@ function precomputedCodeboxResult(workload = {}) {
 }
 
 function aggregateCoverage(workload, codeboxResult) {
-	const coverageInput = workload.coverage_artifacts || workload.coverageArtifacts || codeboxResult?.coverage;
+	const derivedCoverage = codeboxResult?.derived_artifacts?.coverage_gap_reports;
+	const coverageInput = workload.coverage_artifacts || workload.coverageArtifacts || codeboxResult?.coverage || derivedCoverage;
 	if (!coverageInput) {
-		return undefined;
+		return codeboxResult?.hotspot_summary ? aggregateWordPressFuzzCoverage({ hotspot_summary: codeboxResult.hotspot_summary }) : undefined;
 	}
-	return aggregateWordPressFuzzCoverage(coverageInput);
+	const artifacts = coverageInput === derivedCoverage
+		? normalizeArray(coverageInput)
+		: [...normalizeArray(coverageInput), ...normalizeArray(derivedCoverage)];
+	return aggregateWordPressFuzzCoverage({ artifacts, hotspot_summary: codeboxResult?.hotspot_summary });
 }
 
 function hasCoverageFailures(coverage) {
@@ -377,6 +395,7 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 			wp_codebox_result_schema: codeboxResult?.result_schema,
 			diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
 			artifact_refs: normalizeArray(codeboxResult?.artifacts),
+			hotspot_summary: codeboxResult?.hotspot_summary,
 			wordpress_fuzz_result: codeboxResult?.wordpress_fuzz_result,
 		}),
 	});

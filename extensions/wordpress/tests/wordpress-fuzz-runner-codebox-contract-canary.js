@@ -105,6 +105,7 @@ const cli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
+		HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH: 'legacy-codebox-bin',
 		HOMEBOY_WP_CODEBOX_BIN: fakeCodeboxBin,
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
 		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
