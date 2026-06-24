@@ -53,6 +53,61 @@ fn rename_spec_generates_variants() {
 }
 
 #[test]
+fn rename_spec_preserves_exact_branded_display_string() {
+    let spec = RenameSpec::new(
+        "Figma to WordPress",
+        "Figma to WordPress Studio",
+        RenameScope::All,
+    );
+
+    assert!(spec.variants.iter().any(|variant| {
+        variant.label == "exact"
+            && variant.from == "Figma to WordPress"
+            && variant.to == "Figma to WordPress Studio"
+    }));
+    assert!(spec
+        .variants
+        .iter()
+        .any(|variant| variant.from == "Figma To Word Press"));
+}
+
+#[test]
+fn normal_rename_matches_branded_display_string_without_literal() {
+    let dir = std::env::temp_dir().join("homeboy_refactor_branded_display_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        dir.join("test.md"),
+        "# Figma to WordPress\n\nFigma to WordPress workshop\n",
+    )
+    .unwrap();
+
+    let spec = RenameSpec::new(
+        "Figma to WordPress",
+        "Figma to WordPress Studio",
+        RenameScope::All,
+    );
+    assert!(!spec.literal);
+
+    let mut result = generate_renames(&spec, &dir);
+    assert_eq!(result.edits.len(), 1);
+    assert!(result.references.iter().any(|reference| {
+        reference.matched == "Figma to WordPress"
+            && reference.replacement == "Figma to WordPress Studio"
+    }));
+
+    apply_renames(&mut result, &dir).unwrap();
+    let content = std::fs::read_to_string(dir.join("test.md")).unwrap();
+    assert_eq!(
+        content,
+        "# Figma to WordPress Studio\n\nFigma to WordPress Studio workshop\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn find_references_in_temp_dir() {
     let dir = std::env::temp_dir().join("homeboy_refactor_test");
     let _ = std::fs::create_dir_all(&dir);
