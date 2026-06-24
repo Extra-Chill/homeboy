@@ -99,4 +99,23 @@ const siblingDiscoveredResult = spawnSync(process.execPath, [script], {
 assert.equal(siblingDiscoveredResult.status, 0, siblingDiscoveredResult.stderr);
 assert.equal(JSON.parse(siblingDiscoveredResult.stdout).schema, 'wp-codebox/workspace-recipe/v1');
 
+const globalNodeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-global-node-'));
+const globalRuntimeModule = path.join(globalNodeRoot, 'wp-codebox-workspace', 'packages', 'runtime-core', 'dist', 'recipe-builders.js');
+fs.mkdirSync(path.dirname(globalRuntimeModule), { recursive: true });
+fs.copyFileSync(fixtureCoreModule, globalRuntimeModule);
+
+const globalDiscoveredResult = spawnSync(process.execPath, [script], {
+	cwd: path.join(__dirname, '..'),
+	input: JSON.stringify(input),
+	encoding: 'utf8',
+	env: {
+		...process.env,
+		HOMEBOY_GLOBAL_NODE_MODULE_ROOT: globalNodeRoot,
+		HOMEBOY_WP_CODEBOX_CORE_MODULE: '',
+	},
+});
+
+assert.equal(globalDiscoveredResult.status, 0, globalDiscoveredResult.stderr);
+assert.equal(JSON.parse(globalDiscoveredResult.stdout).schema, 'wp-codebox/workspace-recipe/v1');
+
 console.log('wp-codebox phpunit recipe builder smoke passed');

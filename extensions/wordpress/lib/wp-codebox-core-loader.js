@@ -63,6 +63,14 @@ function coreModuleCandidates(options = {}) {
 		}
 	}
 
+	for (const root of globalNodeModuleRoots(options)) {
+		for (const candidate of globalNodeModuleCoreCandidates(root, options)) {
+			if (existsSync(candidate) && !candidates.includes(candidate)) {
+				candidates.push(candidate);
+			}
+		}
+	}
+
 	return candidates.map(normalizeCoreModuleSpecifier);
 }
 
@@ -92,6 +100,37 @@ function workspaceRoots(options = {}) {
 	];
 
 	return [...new Set(roots.filter(Boolean))];
+}
+
+function globalNodeModuleRoots(options = {}) {
+	if (options.includeGlobalNodeModuleRoots === false) {
+		return [];
+	}
+
+	const configuredRoots = Array.isArray(options.globalNodeModuleRoots) ? options.globalNodeModuleRoots : [];
+	const roots = [
+		...configuredRoots,
+		process.env.HOMEBOY_GLOBAL_NODE_MODULE_ROOT,
+		path.resolve(path.dirname(process.execPath), '..', 'lib', 'node_modules'),
+	];
+
+	return [...new Set(roots.filter(Boolean))];
+}
+
+function globalNodeModuleCoreCandidates(root, options = {}) {
+	const runtimeCoreEntries = options.runtimeCoreEntries || DEFAULT_RUNTIME_CORE_ENTRIES;
+	const packageDistEntries = options.packageDistEntries || ['index.js'];
+	const candidates = [];
+
+	for (const entry of runtimeCoreEntries) {
+		candidates.push(path.resolve(root, 'wp-codebox-workspace', entry));
+	}
+	for (const entry of packageDistEntries) {
+		candidates.push(path.resolve(root, '@automattic', 'wp-codebox-core', 'dist', entry));
+		candidates.push(path.resolve(root, 'wp-codebox-workspace', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', entry));
+	}
+
+	return candidates;
 }
 
 function codeboxRepoCandidates(root) {
@@ -165,5 +204,6 @@ module.exports = {
 	loadWpCodeboxCore,
 	loadWpCodeboxCoreExport,
 	loadWpCodeboxCoreFunction,
+	globalNodeModuleRoots,
 	RUNTIME_CORE_ENTRY,
 };
