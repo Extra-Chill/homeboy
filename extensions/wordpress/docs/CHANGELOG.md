@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.8] - 2026-06-24
+
+### Changed
+- Run npm fallback after empty WordPress PHPUnit discovery
+
 ## [3.13.7] - 2026-06-24
 
 ### Changed
