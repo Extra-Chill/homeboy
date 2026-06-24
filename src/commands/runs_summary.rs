@@ -15,6 +15,9 @@ use serde_json::Value;
 
 use super::summary_json::{string_value, value_at};
 
+const FAILURE_CAUSE_LIMIT: usize = 4;
+const STRUCTURED_ARTIFACT_READ_LIMIT_BYTES: u64 = 1024 * 1024;
+
 /// Render a compact summary for a serialized `RunsOutput` value. Returns
 /// `None` for any variant other than `show`, leaving other `runs`
 /// subcommands with their existing full-JSON presentation.
@@ -52,6 +55,8 @@ fn render_run_detail(run: &Value) -> String {
         lines.push(format!("Finished: {finished}"));
     }
 
+    lines.extend(failure_summary_lines(run));
+
     if kind == "bench" {
         lines.extend(super::bench_summary::bench_hotspot_lines(run));
         lines.extend(super::bench_summary::bench_regression_threshold_lines(run));
@@ -65,6 +70,278 @@ fn render_run_detail(run: &Value) -> String {
     lines.push(format!("Full output: homeboy runs show {run_id} --json"));
 
     finish(lines)
+}
+
+fn failure_summary_lines(run: &Value) -> Vec<String> {
+    if !run_failed(run) {
+        return Vec::new();
+    }
+
+    let mut causes = Vec::new();
+    if let Some(metadata) = value_at(run, &["metadata"]) {
+        collect_failure_causes(metadata, "metadata", &mut causes);
+    }
+    if let Some(artifacts) = value_at(run, &["artifacts"]).and_then(Value::as_array) {
+        for artifact in artifacts {
+            let artifact_id = string_value(artifact, &["id"]).unwrap_or("artifact");
+            let artifact_kind = string_value(artifact, &["kind"]).unwrap_or("");
+            let source = if artifact_kind.is_empty() {
+                format!("artifact {artifact_id}")
+            } else {
+                format!("artifact {artifact_id} [{artifact_kind}]")
+            };
+            if let Some(metadata) =
+                value_at(artifact, &["metadata_json"]).or_else(|| value_at(artifact, &["metadata"]))
+            {
+                collect_failure_causes(metadata, &source, &mut causes);
+            }
+            if let Some(value) = structured_artifact_json(artifact, &source, &mut causes) {
+                collect_failure_causes(&value, &source, &mut causes);
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for cause in causes {
+        let key = (
+            cause.surface.clone(),
+            cause.message.to_ascii_lowercase(),
+            cause.source.clone(),
+        );
+        if seen.insert(key) {
+            deduped.push(cause);
+        }
+    }
+    deduped.sort_by_key(|cause| cause.priority());
+    deduped.truncate(FAILURE_CAUSE_LIMIT);
+
+    if deduped.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec!["Failure summary:".to_string()];
+    for cause in deduped {
+        lines.push(format!(
+            "  {}: {} ({})",
+            cause.surface, cause.message, cause.source
+        ));
+    }
+    lines
+}
+
+fn run_failed(run: &Value) -> bool {
+    matches!(
+        string_value(run, &["status"]),
+        Some("fail" | "failed" | "error" | "stale")
+    )
+}
+
+#[derive(Debug)]
+struct NestedFailureCause {
+    surface: String,
+    message: String,
+    source: String,
+}
+
+impl NestedFailureCause {
+    fn priority(&self) -> u8 {
+        match self.surface.as_str() {
+            "recipe" | "browser" => 0,
+            "wp_codebox" => 1,
+            "wrapper/parser" => 2,
+            _ => 9,
+        }
+    }
+}
+
+fn structured_artifact_json(
+    artifact: &Value,
+    source: &str,
+    causes: &mut Vec<NestedFailureCause>,
+) -> Option<Value> {
+    let path = string_value(artifact, &["path"])?;
+    if !looks_like_structured_artifact(artifact, path) {
+        return None;
+    }
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return None;
+    };
+    if !metadata.is_file() || metadata.len() > STRUCTURED_ARTIFACT_READ_LIMIT_BYTES {
+        return None;
+    }
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return None;
+    };
+    match serde_json::from_str::<Value>(&body) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            causes.push(NestedFailureCause {
+                surface: "wrapper/parser".to_string(),
+                message: format!("could not parse structured artifact JSON: {err}"),
+                source: source.to_string(),
+            });
+            None
+        }
+    }
+}
+
+fn looks_like_structured_artifact(artifact: &Value, path: &str) -> bool {
+    if path.ends_with(".json") {
+        return true;
+    }
+    matches!(
+        string_value(artifact, &["mime"]),
+        Some("application/json" | "text/json")
+    )
+}
+
+fn collect_failure_causes(value: &Value, source: &str, out: &mut Vec<NestedFailureCause>) {
+    collect_failure_causes_at(value, source, "", out);
+}
+
+fn collect_failure_causes_at(
+    value: &Value,
+    source: &str,
+    context: &str,
+    out: &mut Vec<NestedFailureCause>,
+) {
+    match value {
+        Value::Object(map) => {
+            let node_context = object_context(value, context);
+            if object_indicates_failure(value) {
+                if let Some(message) = object_failure_message(value) {
+                    out.push(NestedFailureCause {
+                        surface: classify_failure_surface(&node_context, &message),
+                        message,
+                        source: source.to_string(),
+                    });
+                }
+            }
+            if let Some(Value::Array(diagnostics)) = map.get("diagnostics") {
+                for diagnostic in diagnostics {
+                    if let Some(message) = object_failure_message(diagnostic) {
+                        let diagnostic_context = object_context(diagnostic, &node_context);
+                        out.push(NestedFailureCause {
+                            surface: classify_failure_surface(&diagnostic_context, &message),
+                            message,
+                            source: source.to_string(),
+                        });
+                    }
+                }
+            }
+            for (key, nested) in map {
+                let next_context = append_context(&node_context, key);
+                collect_failure_causes_at(nested, source, &next_context, out);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_failure_causes_at(nested, source, context, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn object_context(value: &Value, base: &str) -> String {
+    let mut context = base.to_string();
+    for key in [
+        "class",
+        "kind",
+        "code",
+        "type",
+        "surface",
+        "phase",
+        "component",
+    ] {
+        if let Some(value) = string_value(value, &[key]) {
+            context = append_context(&context, value);
+        }
+    }
+    context
+}
+
+fn append_context(base: &str, value: &str) -> String {
+    if base.is_empty() {
+        value.to_string()
+    } else {
+        format!("{base} {value}")
+    }
+}
+
+fn object_indicates_failure(value: &Value) -> bool {
+    value.get("success").and_then(Value::as_bool) == Some(false)
+        || string_value(value, &["status"]).is_some_and(failure_word)
+        || string_value(value, &["state"]).is_some_and(failure_word)
+        || value.get("error").is_some()
+        || value.get("failure").is_some()
+}
+
+fn failure_word(value: &str) -> bool {
+    matches!(value, "fail" | "failed" | "error" | "errored" | "blocked")
+}
+
+fn object_failure_message(value: &Value) -> Option<String> {
+    for path in [
+        &["message"][..],
+        &["diagnostic"][..],
+        &["summary"][..],
+        &["reason"][..],
+        &["error", "message"][..],
+        &["failure", "message"][..],
+    ] {
+        if let Some(message) = string_value(value, path) {
+            if useful_failure_message(message) {
+                return Some(message.to_string());
+            }
+        }
+    }
+    value
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|message| useful_failure_message(message))
+        .map(str::to_string)
+}
+
+fn useful_failure_message(message: &str) -> bool {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    !matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "failed" | "failure" | "error" | "false"
+    )
+}
+
+fn classify_failure_surface(context: &str, message: &str) -> String {
+    let haystack = format!("{context} {message}").to_ascii_lowercase();
+    if haystack.contains("browser")
+        || haystack.contains("playwright")
+        || haystack.contains("page.")
+        || haystack.contains("console")
+        || haystack.contains("network")
+    {
+        "browser".to_string()
+    } else if haystack.contains("recipe")
+        || haystack.contains("schema")
+        || haystack.contains("validation")
+        || haystack.contains("required step")
+    {
+        "recipe".to_string()
+    } else if haystack.contains("parse")
+        || haystack.contains("parser")
+        || haystack.contains("wrapper")
+        || haystack.contains("structured output")
+        || haystack.contains("invalid json")
+    {
+        "wrapper/parser".to_string()
+    } else if haystack.contains("codebox") || haystack.contains("wp_codebox") {
+        "wp_codebox".to_string()
+    } else {
+        "nested".to_string()
+    }
 }
 
 fn report_followup_lines(run: &Value, run_id: &str, kind: &str) -> Vec<String> {
@@ -601,6 +878,113 @@ mod tests {
         assert!(summary
             .contains("    get: homeboy runs artifact get run-1 artifact-coverage -o <path>\n"));
         assert!(!summary.contains("Key artifacts:\n  scenario-a/artifact-log"));
+    }
+
+    #[test]
+    fn failed_lab_show_summary_promotes_nested_recipe_and_browser_artifact_failures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact_path = dir.path().join("wp-codebox-result.json");
+        std::fs::write(
+            &artifact_path,
+            serde_json::to_vec(&json!({
+                "success": false,
+                "provider": "wp-codebox",
+                "result": {
+                    "recipe": {
+                        "status": "failed",
+                        "diagnostics": [{
+                            "class": "recipe_validation",
+                            "message": "Recipe validation failed: missing required step id"
+                        }]
+                    },
+                    "browser": {
+                        "status": "failed",
+                        "error": {
+                            "message": "Browser assertion failed: expected checkout button"
+                        }
+                    }
+                }
+            }))
+            .expect("serialize fixture"),
+        )
+        .expect("write artifact");
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "lab-run-1",
+                    "kind": "runner-exec",
+                    "status": "fail",
+                    "metadata": {},
+                    "artifacts": [{
+                        "id": "codebox-result",
+                        "run_id": "lab-run-1",
+                        "kind": "wp_codebox_result",
+                        "type": "file",
+                        "mime": "application/json",
+                        "path": artifact_path.display().to_string()
+                    }]
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Failure summary:\n"));
+        assert!(summary.contains(
+            "  recipe: Recipe validation failed: missing required step id (artifact codebox-result [wp_codebox_result])\n"
+        ));
+        assert!(summary.contains(
+            "  browser: Browser assertion failed: expected checkout button (artifact codebox-result [wp_codebox_result])\n"
+        ));
+        let failure_index = summary.find("Failure summary:\n").expect("failure summary");
+        let artifact_index = summary.find("Artifacts (1):\n").expect("artifacts");
+        assert!(failure_index < artifact_index);
+    }
+
+    #[test]
+    fn failed_lab_show_summary_distinguishes_wrapper_parser_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact_path = dir.path().join("structured-result.json");
+        std::fs::write(&artifact_path, b"{ not json").expect("write artifact");
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "lab-run-2",
+                    "kind": "runner-exec",
+                    "status": "failed",
+                    "metadata": {
+                        "wrapper": {
+                            "status": "failed",
+                            "error": {
+                                "code": "structured_output.parse_failed",
+                                "message": "Could not parse WP Codebox structured output"
+                            }
+                        }
+                    },
+                    "artifacts": [{
+                        "id": "structured-result",
+                        "run_id": "lab-run-2",
+                        "kind": "wp_codebox_result",
+                        "type": "file",
+                        "mime": "application/json",
+                        "path": artifact_path.display().to_string()
+                    }]
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains(
+            "  wrapper/parser: Could not parse WP Codebox structured output (metadata)\n"
+        ));
+        assert!(summary.contains("  wrapper/parser: could not parse structured artifact JSON:"));
+        assert!(!summary.contains("  recipe:"));
+        assert!(!summary.contains("  browser:"));
     }
 
     #[test]
