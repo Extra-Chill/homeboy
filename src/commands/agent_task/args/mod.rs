@@ -123,8 +123,8 @@ pub struct AgentTaskFanoutRunPlanArgs {
 pub use controller::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerCommand, AgentTaskControllerFromSpecArgs,
     AgentTaskControllerInitArgs, AgentTaskControllerMarkHumanReadyArgs,
-    AgentTaskControllerMaterializeArgs, AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs,
-    AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
+    AgentTaskControllerMaterializeArgs, AgentTaskControllerPlanArgs, AgentTaskControllerProofArgs,
+    AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
     AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs,
 };
 
