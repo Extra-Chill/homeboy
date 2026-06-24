@@ -590,6 +590,17 @@ pub struct RefactorBulkSummary {
 
 impl RefactorTargetArgs {
     fn resolve_targets(&self) -> homeboy::core::Result<Vec<RefactorTarget>> {
+        self.resolve_targets_with_cwd_fallback(false)
+    }
+
+    fn resolve_targets_for_file_operation(&self) -> homeboy::core::Result<Vec<RefactorTarget>> {
+        self.resolve_targets_with_cwd_fallback(true)
+    }
+
+    fn resolve_targets_with_cwd_fallback(
+        &self,
+        allow_cwd_fallback: bool,
+    ) -> homeboy::core::Result<Vec<RefactorTarget>> {
         let component_ids = collect_component_ids(&self.component_ids, &self.components);
         if self.path.is_some() && !component_ids.is_empty() {
             return Err(homeboy::core::Error::validation_invalid_argument(
@@ -608,6 +619,10 @@ impl RefactorTargetArgs {
         }
 
         if component_ids.is_empty() {
+            if allow_cwd_fallback {
+                return resolve_refactor_cwd_target();
+            }
+
             return Err(homeboy::core::Error::validation_missing_argument(vec![
                 "component".to_string(),
             ]));
@@ -622,6 +637,32 @@ impl RefactorTargetArgs {
             })
             .collect())
     }
+}
+
+fn resolve_refactor_cwd_target() -> homeboy::core::Result<Vec<RefactorTarget>> {
+    let cwd = std::env::current_dir().map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some("current directory".to_string()))
+    })?;
+    if !cwd.is_dir() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "path",
+            format!("Not a directory: {}", cwd.display()),
+            None,
+            None,
+        ));
+    }
+
+    let label = cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(".")
+        .to_string();
+
+    Ok(vec![RefactorTarget {
+        component_id: None,
+        path: Some(cwd.to_string_lossy().to_string()),
+        label,
+    }])
 }
 
 fn resolve_refactor_target(
@@ -881,7 +922,7 @@ fn run_rename(
     context: &str,
     write: bool,
 ) -> CmdResult<RefactorOutput> {
-    let targets = target.resolve_targets()?;
+    let targets = target.resolve_targets_for_file_operation()?;
     run_across_targets("rename", targets, |component_id, path| {
         run_rename_single(
             from,
