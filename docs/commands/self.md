@@ -12,7 +12,7 @@ homeboy self <COMMAND>
 
 - `status` — report the active binary, version, and install/update signals
 - `identity` — report the active binary build identity without external probes
-- `doctor` — report one authoritative binary/runtime view across the controller and every configured runner
+- `doctor` — report one authoritative binary/runtime view and command-surface drift checks
 - `cleanup-runtime-tmp` — plan or delete orphaned Homeboy runtime temp entries
 
 ### `status`
@@ -47,11 +47,18 @@ point; each runner row reports its configured executable path, the version and
 build identity of its active daemon (when connected), and how that compares to
 the controller.
 
+The report also includes a read-only `command_surface` section that compares the
+in-process source command registry, the docs command index, and the help-facing
+top-level command names. Runtime extension docs such as `cargo` and `wp` are
+reported separately so stale core entries still stand out without requiring an
+extension to be installed.
+
 When every participant agrees with the controller, `agrees` is `true` and the
 command exits `0`. When any runner reports a different version or a stale daemon
 (a daemon started by a different build than the configured runner executable),
 `agrees` is `false`, the disagreement is described in `drift_notes`, and the
-command exits non-zero so cook loops can detect binary-identity drift.
+command exits non-zero so cook loops can detect binary-identity or command
+surface drift.
 
 ### `cleanup-runtime-tmp`
 

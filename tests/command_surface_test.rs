@@ -1,7 +1,8 @@
 use clap::{CommandFactory, Parser};
 use homeboy::cli_surface::{
-    command_surface_from_with_depth, current_command_safety_manifest, current_command_surface, Cli,
-    CommandSafetyEntry, CommandSafetyManifest, Commands,
+    command_surface_doctor_report, command_surface_from_with_depth,
+    current_command_safety_manifest, current_command_surface, Cli, CommandSafetyEntry,
+    CommandSafetyManifest, Commands,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -483,6 +484,49 @@ fn command_docs_files_match_command_index_snapshot() {
         documented.contains("audit") && documented.contains("report"),
         "commands-index.md should document representative commands `audit` and `report`: {documented:?}"
     );
+}
+
+#[test]
+fn command_surface_doctor_report_agrees_for_matching_sets() {
+    let source = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
+    let docs = BTreeSet::from([
+        "cargo".to_string(),
+        "fuzz".to_string(),
+        "manifest".to_string(),
+        "wp".to_string(),
+    ]);
+    let help = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
+    let extension_docs = BTreeSet::from(["cargo".to_string(), "wp".to_string()]);
+
+    let report = command_surface_doctor_report(source, docs, help, extension_docs);
+
+    assert!(report.agrees);
+    assert!(report.drift_notes.is_empty());
+    assert_eq!(report.runtime_extension_docs, vec!["cargo", "wp"]);
+}
+
+#[test]
+fn command_surface_doctor_report_detects_docs_and_help_mismatches() {
+    let source = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
+    let docs = BTreeSet::from(["lab".to_string(), "manifest".to_string(), "wp".to_string()]);
+    let help = BTreeSet::from(["fuzz".to_string(), "lab".to_string()]);
+    let extension_docs = BTreeSet::from(["wp".to_string()]);
+
+    let report = command_surface_doctor_report(source, docs, help, extension_docs);
+
+    assert!(!report.agrees);
+    assert_eq!(report.missing_from_docs_index, vec!["fuzz"]);
+    assert_eq!(report.stale_docs_index, vec!["lab"]);
+    assert_eq!(report.missing_from_help, vec!["manifest"]);
+    assert_eq!(report.missing_from_source_registry, vec!["lab"]);
+    assert!(report
+        .drift_notes
+        .iter()
+        .any(|note| note.contains("missing from docs") && note.contains("fuzz")));
+    assert!(report
+        .drift_notes
+        .iter()
+        .any(|note| note.contains("stale commands") && note.contains("lab")));
 }
 
 #[test]

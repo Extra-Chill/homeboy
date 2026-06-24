@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand};
+use homeboy::cli_surface::current_command_surface_doctor_report;
 use homeboy::core::build_identity;
 use homeboy::core::engine;
 use homeboy::core::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
@@ -69,9 +70,31 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
                 collect_controller_input(),
                 collect_runner_inputs(),
             );
-            let exit_code = if view.agrees { 0 } else { 1 };
-            let json = serde_json::to_value(view)
+            let command_surface = current_command_surface_doctor_report();
+            let exit_code = if view.agrees && command_surface.agrees {
+                0
+            } else {
+                1
+            };
+            let mut json = serde_json::to_value(view)
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+            if let Value::Object(ref mut object) = json {
+                object.insert("agrees".to_string(), Value::Bool(exit_code == 0));
+                if let Some(Value::Array(notes)) = object.get_mut("drift_notes") {
+                    notes.extend(
+                        command_surface
+                            .drift_notes
+                            .iter()
+                            .cloned()
+                            .map(Value::String),
+                    );
+                }
+                object.insert(
+                    "command_surface".to_string(),
+                    serde_json::to_value(command_surface)
+                        .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
+                );
+            }
             Ok((json, exit_code))
         }
         SelfCommand::CleanupRuntimeTmp(args) => {
