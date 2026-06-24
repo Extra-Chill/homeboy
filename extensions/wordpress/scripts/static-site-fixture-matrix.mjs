@@ -42,6 +42,7 @@ async function main() {
 	const recipe = buildStaticSiteFixtureMatrixRecipe({
 		matrix,
 		artifactsDirectory: outputDirectory,
+		playgroundArtifactsDirectory: options.playgroundArtifactsDirectory || '/wordpress/wp-content/uploads/static-site-fixture-matrix',
 		wordpressVersion: options.wordpressVersion,
 		staticSiteImporterPath: options.staticSiteImporterPath ? path.resolve(options.staticSiteImporterPath) : undefined,
 		staticSiteImporterPlugin: options.staticSiteImporterPlugin,

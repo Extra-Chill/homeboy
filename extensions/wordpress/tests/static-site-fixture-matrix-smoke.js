@@ -69,12 +69,18 @@ async function main() {
 
 		const staticSiteImporterRecipe = buildStaticSiteFixtureMatrixRecipe({
 			matrix,
-			artifactsDirectory: '/artifacts/matrix',
+			artifactsDirectory: '/host/artifacts/matrix',
+			playgroundArtifactsDirectory: '/wordpress/wp-content/uploads/static-site-fixture-matrix',
 			staticSiteImporterPath: '/workspace/static-site-importer',
 			staticSiteImporterPlugin: 'static-site-importer/static-site-importer.php',
 			staticSiteImporterSlug: 'static-site-importer',
 		});
 		assert.deepEqual(Object.keys(staticSiteImporterRecipe).sort(), ['artifacts', 'inputs', 'runtime', 'schema', 'workflow']);
+		assert.deepEqual(staticSiteImporterRecipe.inputs.mounts, [{
+			source: '/host/artifacts/matrix',
+			target: '/wordpress/wp-content/uploads/static-site-fixture-matrix',
+			mode: 'readwrite',
+		}]);
 		assert.deepEqual(staticSiteImporterRecipe.inputs.extra_plugins[0], {
 			source: '/workspace/static-site-importer',
 			slug: 'static-site-importer',
@@ -84,6 +90,7 @@ async function main() {
 		assert.equal(Object.hasOwn(staticSiteImporterRecipe.workflow.steps[0], 'metadata'), false);
 		assert.deepEqual(staticSiteImporterRecipe.workflow.steps[0].args, ['command=plugin activate static-site-importer/static-site-importer.php']);
 		assert.equal(staticSiteImporterRecipe.workflow.steps[1].command, 'wordpress.wp-cli');
+		assert.match(staticSiteImporterRecipe.workflow.steps[1].args[0], /--artifact=\/wordpress\/wp-content\/uploads\/static-site-fixture-matrix\/41-generative-art-studio\/artifact.json/);
 
 		assert.equal(classifyStaticSiteFinding({ message: 'This block contains unexpected or invalid content' }).group_key, 'invalid_block_content');
 		assert.equal(classifyStaticSiteFinding({ code: 'runtime_dependency_target_missing', message: '#canvas' }).group_key, 'runtime_target_gap');
