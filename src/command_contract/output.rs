@@ -170,6 +170,18 @@ const fn cleanup_command_registry_entry() -> CommandRegistryEntry {
     }
 }
 
+const fn refactor_command_registry_entry() -> CommandRegistryEntry {
+    CommandRegistryEntry {
+        output_notes:
+            "refactor subcommands can rewrite source files; use planning/dry-run modes where available",
+        ..lab_command_registry_entry(
+            "refactor",
+            CommandJsonFamily::Workspace,
+            "portable Lab offload is available for refactor source runs",
+        )
+    }
+}
+
 pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     lab_command_registry_entry(
         "agent-task",
@@ -233,11 +245,7 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
         "portable Lab offload is available for audit source runs",
     ),
     command_registry_entry("audit-baseline", CommandJsonFamily::Quality),
-    lab_command_registry_entry(
-        "refactor",
-        CommandJsonFamily::Workspace,
-        "portable Lab offload is available for refactor source runs",
-    ),
+    refactor_command_registry_entry(),
     command_registry_entry("refs", CommandJsonFamily::Workspace),
     lab_command_registry_entry(
         "rig",

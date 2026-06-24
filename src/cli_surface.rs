@@ -995,8 +995,9 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "mutates persisted audit baseline data in component configuration";
         }
         ["refactor"] => {
+            // output_notes is sourced from the authoritative command registry
+            // (refactor_command_registry_entry).
             metadata.mutates = true;
-            metadata.output_notes = "refactor subcommands can rewrite source files; use planning/dry-run modes where available";
             metadata.dangerous_flags = vec!["--write", "--commit"];
         }
         ["refactor", "rename"]
