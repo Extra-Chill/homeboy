@@ -19,6 +19,44 @@ pub enum FuzzOutput {
     Report(FuzzReportOutput),
     Compare(FuzzCompareOutput),
     Replay(FuzzReplayOutput),
+    Inspect(FuzzInspectOutput),
+}
+
+/// Raw fuzz-result inspection output for `homeboy fuzz inspect <run-id>`.
+///
+/// Surfaces the bytes a runner wrote to `HOMEBOY_FUZZ_RESULTS_FILE`
+/// (and/or the persisted result envelope) without requiring the operator
+/// to spelunk runner job logs or chase remote temp paths.
+#[derive(Serialize)]
+pub struct FuzzInspectOutput {
+    pub command: String,
+    pub status: String,
+    pub run_id: String,
+    /// The run id that actually owns the raw fuzz-result artifact. For a
+    /// Lab-offloaded run this is the downstream `fuzz` run discovered via the
+    /// shared `remote_job_id`, which may differ from the queried `run_id`.
+    pub source_run_id: String,
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    pub artifact_path: String,
+    pub fetch_command: Option<String>,
+    /// Parsed JSON body when the raw result is valid JSON; otherwise null.
+    pub result: Option<serde_json::Value>,
+    /// Raw text body when the result is not valid JSON (or `--raw` text fallback).
+    pub raw: Option<String>,
+    pub candidates: Vec<FuzzInspectCandidate>,
+    pub next_steps: Vec<String>,
+}
+
+/// One discoverable raw fuzz-result artifact considered by `fuzz inspect`.
+#[derive(Serialize)]
+pub struct FuzzInspectCandidate {
+    pub run_id: String,
+    pub artifact_id: String,
+    pub kind: String,
+    pub artifact_type: String,
+    pub path: String,
+    pub exists: bool,
 }
 
 #[derive(Serialize)]

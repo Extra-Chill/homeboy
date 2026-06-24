@@ -59,6 +59,20 @@ pub(crate) enum FuzzCommand {
     Compare(FuzzCompareArgs),
     /// Resolve replay metadata for persisted fuzz cases
     Replay(FuzzReplayArgs),
+    /// Print the raw fuzz runner result for a run without spelunking runner logs
+    Inspect(FuzzInspectArgs),
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct FuzzInspectArgs {
+    /// Homeboy run id whose raw fuzz result should be inspected. Accepts the
+    /// fuzz run id or the Lab runner-exec run id that offloaded it.
+    #[arg(value_name = "RUN_ID")]
+    pub(crate) run_id: String,
+
+    /// Print the result body as raw bytes/text instead of pretty JSON.
+    #[arg(long = "raw")]
+    pub(crate) raw: bool,
 }
 
 #[derive(Args, Clone)]
@@ -325,7 +339,7 @@ pub use super::types_extra::{
     FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot, FuzzContractOutput,
     FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput,
     FuzzDiscoverSummary, FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange,
-    FuzzListOutput, FuzzOutput, FuzzPlanOutput, FuzzReplayEnv, FuzzReplayExecution,
-    FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput, FuzzRunnerContract, FuzzValidateOutput,
-    FuzzWorkloadOutput,
+    FuzzInspectCandidate, FuzzInspectOutput, FuzzListOutput, FuzzOutput, FuzzPlanOutput,
+    FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput,
+    FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
 };

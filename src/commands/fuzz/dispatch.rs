@@ -11,6 +11,7 @@ use homeboy::core::fuzz::{
 use super::super::{CmdResult, GlobalArgs};
 use super::compare::run_compare;
 use super::execution::run_run;
+use super::inspect::run_inspect;
 use super::planning::run_plan;
 use super::replay::run_replay;
 use super::report::{run_report, run_validate};
@@ -44,6 +45,11 @@ pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
         Some(FuzzCommand::Replay(replay_args)) => {
             let (output, exit) = run_replay(replay_args)?;
             Ok((FuzzOutput::Replay(output), exit))
+        }
+        Some(FuzzCommand::Inspect(inspect_args)) => {
+            let output = run_inspect(inspect_args)?;
+            let exit = i32::from(output.status != "ok");
+            Ok((FuzzOutput::Inspect(output), exit))
         }
         None => {
             let (output, exit) = run_run(args.run)?;

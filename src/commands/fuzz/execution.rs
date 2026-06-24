@@ -521,12 +521,14 @@ pub(super) fn fuzz_evidence_followups(
 ) -> Vec<String> {
     let mut followups = match run_id.filter(|run_id| !run_id.trim().is_empty()) {
         Some(run_id) => vec![
+            format!("homeboy fuzz inspect {run_id}"),
             format!("homeboy runs show {run_id}"),
             format!("homeboy runs evidence {run_id}"),
             format!("homeboy runs artifacts {run_id}"),
         ],
         None => vec![
             "Use --run-id <stable-id> when the downstream runner records persisted Homeboy evidence.".to_string(),
+            "Inspect the raw runner result with `homeboy fuzz inspect <run-id>` (no runner-log spelunking).".to_string(),
             "Inspect persisted proof with `homeboy runs show <run-id>` and `homeboy runs evidence <run-id>`.".to_string(),
         ],
     };
