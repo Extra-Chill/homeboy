@@ -92,9 +92,27 @@ pub struct ProcessTreeTermination {
     pub owner_pid: u32,
     pub descendant_pids: Vec<u32>,
     pub signalled_pids: Vec<u32>,
+    /// The strongest signal actually delivered to the tree. "SIGTERM" when a
+    /// graceful terminate was sufficient, "SIGKILL" when one or more processes
+    /// survived the grace period and had to be force-killed.
     pub signal: &'static str,
+    /// Pids that were still alive after the SIGTERM grace window and therefore
+    /// received an escalated SIGKILL.
+    pub killed_pids: Vec<u32>,
+    /// Pids that survived even the SIGKILL escalation (e.g. uninterruptible
+    /// sleep, or owned by another user). Operators may need to act on these
+    /// manually; the recovery commands cover them.
+    pub surviving_pids: Vec<u32>,
     pub recovery_commands: Vec<String>,
 }
+
+/// How long to wait for a process tree to exit after SIGTERM before escalating
+/// to SIGKILL. Kept short so `agent-task cancel` stays responsive while still
+/// giving providers a chance to flush/cleanup on a graceful terminate.
+#[cfg(unix)]
+const SIGTERM_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
+#[cfg(unix)]
+const SIGTERM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> {
     if owner_pid > i32::MAX as u32 {
@@ -116,38 +134,48 @@ pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> 
         targets.sort_unstable();
         targets.dedup();
 
-        for pid in targets.iter().rev() {
-            unsafe {
-                if libc::kill(*pid as libc::pid_t, libc::SIGTERM) != 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(Error::internal_unexpected(format!(
-                            "failed to signal pid {} with SIGTERM: {}",
-                            pid, err
-                        )));
-                    }
-                }
-            }
+        // Phase 1: SIGTERM the whole tree, deepest descendants first so parents
+        // do not respawn or reparent children mid-teardown.
+        signal_pids(&targets, libc::SIGTERM)?;
+
+        // Phase 2: wait out a short grace period, then SIGKILL any survivors so a
+        // provider that ignores SIGTERM (or is wedged) cannot keep the run alive.
+        let mut killed_pids = Vec::new();
+        let survivors_after_term = wait_for_exit(&targets, SIGTERM_GRACE);
+        if !survivors_after_term.is_empty() {
+            signal_pids(&survivors_after_term, libc::SIGKILL)?;
+            killed_pids = survivors_after_term;
         }
 
-        let recovery_commands = if targets.is_empty() {
-            Vec::new()
+        // Anything still alive after SIGKILL is genuinely unkillable from here
+        // (uninterruptible sleep, different owner, ...). Surface it for recovery.
+        let surviving_pids: Vec<u32> = targets
+            .iter()
+            .copied()
+            .filter(|pid| pid_is_running(*pid))
+            .collect();
+
+        let signal = if killed_pids.is_empty() {
+            "SIGTERM"
         } else {
-            vec![format!(
-                "kill -TERM {}",
-                targets
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )]
+            "SIGKILL"
         };
+
+        let mut recovery_commands = Vec::new();
+        if !targets.is_empty() {
+            recovery_commands.push(format!("kill -TERM {}", join_pids(&targets)));
+        }
+        if !surviving_pids.is_empty() {
+            recovery_commands.push(format!("kill -KILL {}", join_pids(&surviving_pids)));
+        }
 
         return Ok(ProcessTreeTermination {
             owner_pid,
             descendant_pids,
             signalled_pids: targets,
-            signal: "SIGTERM",
+            signal,
+            killed_pids,
+            surviving_pids,
             recovery_commands,
         });
     }
@@ -162,6 +190,69 @@ pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> 
             None,
         ))
     }
+}
+
+/// Build the recovery commands an operator should run to manually terminate a
+/// provider process tree when Homeboy cannot signal it itself (e.g. the recorded
+/// owner pid lives on a different host/runner, or this is a non-Unix host). This
+/// never signals anything — it only renders deterministic, copy-pasteable
+/// commands keyed on the recorded pid so the operator does not have to spelunk.
+pub fn process_tree_recovery_commands(owner_pid: u32) -> Vec<String> {
+    vec![
+        format!(
+            "ps -axo pid=,ppid=,command= | awk -v root={owner_pid} 'function walk(p){{print p; for(i in C[p]) walk(C[p][i])}} {{C[$2][length(C[$2])+1]=$1; CMD[$1]=$0}} END{{walk(root)}}'"
+        ),
+        format!("pkill -TERM -P {owner_pid}"),
+        format!("kill -TERM {owner_pid}"),
+        format!("kill -KILL {owner_pid}  # if it ignores SIGTERM"),
+    ]
+}
+
+#[cfg(unix)]
+fn signal_pids(pids: &[u32], signal: libc::c_int) -> Result<()> {
+    // Deepest-first: `pids` is sorted ascending and descendants generally have
+    // higher pids than their owner, so iterating in reverse approximates a
+    // bottom-up teardown.
+    for pid in pids.iter().rev() {
+        unsafe {
+            if libc::kill(*pid as libc::pid_t, signal) != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(Error::internal_unexpected(format!(
+                        "failed to signal pid {} with signal {}: {}",
+                        pid, signal, err
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Poll the given pids until they all exit or `grace` elapses. Returns the pids
+/// still running when the window closes (the SIGKILL escalation set).
+#[cfg(unix)]
+fn wait_for_exit(pids: &[u32], grace: std::time::Duration) -> Vec<u32> {
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        let survivors: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|pid| pid_is_running(*pid))
+            .collect();
+        if survivors.is_empty() || std::time::Instant::now() >= deadline {
+            return survivors;
+        }
+        std::thread::sleep(SIGTERM_POLL_INTERVAL);
+    }
+}
+
+#[cfg(unix)]
+fn join_pids(pids: &[u32]) -> String {
+    pids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(unix)]
@@ -284,5 +375,57 @@ mod process_tree_tests {
         descendants.sort_unstable();
 
         assert_eq!(descendants, vec![11, 12, 13]);
+    }
+
+    #[test]
+    fn process_tree_recovery_commands_reference_recorded_pid() {
+        let commands = process_tree_recovery_commands(4242);
+        assert!(!commands.is_empty());
+        assert!(commands.iter().any(|cmd| cmd.contains("4242")));
+        assert!(commands.iter().any(|cmd| cmd.contains("kill -KILL 4242")));
+    }
+
+    #[test]
+    fn terminate_process_tree_escalates_to_sigkill_on_sigterm_resistant_child() {
+        // A child that ignores SIGTERM forces the SIGKILL escalation path.
+        let mut child = Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .spawn()
+            .expect("spawn sigterm-resistant child");
+        let pid = child.id();
+
+        let termination = terminate_process_tree(pid).expect("terminate sigterm-resistant tree");
+
+        // It survived SIGTERM and had to be SIGKILL'd.
+        assert_eq!(termination.signal, "SIGKILL");
+        assert!(termination.killed_pids.contains(&pid));
+        assert!(termination.surviving_pids.is_empty());
+        assert!(termination
+            .recovery_commands
+            .iter()
+            .any(|cmd| cmd.contains(&pid.to_string())));
+
+        // Reap so we do not leak a zombie into the test runner.
+        let _ = child.wait();
+        assert!(!pid_is_running(pid));
+    }
+
+    #[test]
+    fn terminate_process_tree_uses_sigterm_for_cooperative_child() {
+        // A plain sleep exits on SIGTERM, so no escalation is needed.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn cooperative child");
+        let pid = child.id();
+
+        let termination = terminate_process_tree(pid).expect("terminate cooperative tree");
+
+        assert_eq!(termination.signal, "SIGTERM");
+        assert!(termination.killed_pids.is_empty());
+        assert!(termination.surviving_pids.is_empty());
+
+        let _ = child.wait();
+        assert!(!pid_is_running(pid));
     }
 }
