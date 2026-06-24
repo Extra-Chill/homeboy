@@ -1116,6 +1116,26 @@ Evidence expectations:
   include the rerun commands above. Do not cite machine-local paths as PR
   evidence.
 
+Components that use npm for their canonical smoke gate can opt into an npm
+fallback when WP Codebox plugin activation succeeds but PHPUnit discovery finds
+no PHPUnit files:
+
+```json
+{
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "npm_test_script": "headless-preview-boot-smoke"
+      }
+    }
+  }
+}
+```
+
+The fallback runs `npm run <npm_test_script>` from the component checkout after
+empty PHPUnit discovery. Composer `scripts.test` remains the first fallback when
+present.
+
 ### Nested Plugin Source Roots
 
 Runtime bench runs normally treat the selected Homeboy component path as the

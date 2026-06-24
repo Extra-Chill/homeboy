@@ -976,6 +976,13 @@
       "description": "How the WP Codebox PHPUnit backend treats successful WordPress install/activation when discovery finds zero PHPUnit files. Use 'skipped' for components that intentionally test through smoke scripts, or 'failed' when the component expects PHPUnit coverage. Components with phpunit.xml(.dist) still fail on zero discovery."
     },
     {
+      "id": "npm_test_script",
+      "label": "npm test fallback script",
+      "type": "string",
+      "default": "",
+      "description": "package.json script to run after WP Codebox plugin install/activation succeeds but PHPUnit discovery finds no PHPUnit files. Composer scripts.test remains the first fallback when present."
+    },
+    {
       "id": "wordpress_runtime_blueprint",
       "label": "WordPress runtime blueprint",
       "type": "object",

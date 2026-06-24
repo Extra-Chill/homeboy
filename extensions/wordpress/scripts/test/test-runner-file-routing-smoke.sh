@@ -147,6 +147,32 @@ printf '{"success":true,"executions":[{"stdout":"OK (1 test, 1 assertion)\n","st
 SH
 chmod +x "${TMPDIR}/stubs/wp-codebox.sh"
 
+cat > "${TMPDIR}/stubs/phpunit-recipe-builder.mjs" <<'NODE'
+#!/usr/bin/env node
+import fs from 'node:fs';
+
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const options = input.options || input;
+const recipe = {
+  schema: 'wp-codebox/workspace-recipe/v1',
+  runtime: { wp: options.wordpressVersion, blueprint: { steps: [] } },
+  inputs: { mounts: options.mounts || [] },
+  workflow: { steps: [{ command: 'wordpress.phpunit', args: [
+    `plugin-slug=${options.pluginSlug}`,
+    `test-file=${options.selectedTestFile || ''}`,
+    `changed-tests-json=${JSON.stringify(options.changedTestFiles || [])}`,
+    `env-json=${JSON.stringify(options.env || {})}`,
+    `wp-config-defines-json=${JSON.stringify(options.wpConfigDefines || {})}`,
+    `autoload-file=${options.autoloadFile}`,
+    `tests-dir=${options.testsDir}`,
+    `dependency-mounts=${(options.dependencyMounts || []).filter(Boolean).join(',')}`,
+    `multisite=${options.multisite ? '1' : '0'}`,
+  ] }] },
+};
+process.stdout.write(`${JSON.stringify(recipe, null, 2)}\n`);
+NODE
+chmod +x "${TMPDIR}/stubs/phpunit-recipe-builder.mjs"
+
 # Stub for the real-WordPress smoke runner. The real runner boots WordPress via
 # WP Codebox; for routing assertions we only need to confirm smoke files reach it
 # and the HOST_SMOKE marker contract, so this stub emits those markers for each
@@ -186,6 +212,17 @@ fi
 echo "contract smoke passed"
 SH
 chmod +x "${TMPDIR}/stubs/composer"
+
+cat > "${TMPDIR}/stubs/npm" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" != "run" ] || [ "${2:-}" != "headless-preview-boot-smoke" ]; then
+    echo "Unexpected npm command: $*" >&2
+    exit 2
+fi
+echo "headless preview boot smoke passed"
+SH
+chmod +x "${TMPDIR}/stubs/npm"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
@@ -284,6 +321,7 @@ HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND="wp-codebox" \
 HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="${TMPDIR}/stubs/phpunit-recipe-builder.mjs" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php --filter ImportAgent > "${TMPDIR}/phpunit-file.out"
 
 assert_contains "${TMPDIR}/phpunit-file.out" "WP_CODEBOX_STUB"
@@ -316,6 +354,7 @@ HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="${TMPDIR}/stubs/phpunit-recipe-builder.mjs" \
 HOMEBOY_CHANGED_TEST_FILES=$'tests/import-agent-ability-smoke.php\ntests/Unit/ImportAgentAbilityTest.php' \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/changed-mixed-files.out"
 
@@ -329,6 +368,7 @@ HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="${TMPDIR}/stubs/phpunit-recipe-builder.mjs" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php --filter ImportAgent > "${TMPDIR}/wp-codebox-file.out"
 
 assert_contains "${TMPDIR}/wp-codebox-file.out" "WP_CODEBOX_STUB"
@@ -349,6 +389,7 @@ HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_SETTINGS_JSON='{"wp_codebox_bin":"'"${TMPDIR}/stubs/wp-codebox.sh"'","wordpress_runtime_version":"latest"}' \
+HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="${TMPDIR}/stubs/phpunit-recipe-builder.mjs" \
 WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-settings-args.txt" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php > "${TMPDIR}/wp-codebox-settings.out"
 
@@ -363,6 +404,7 @@ HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="${TMPDIR}/stubs/phpunit-recipe-builder.mjs" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/registration-drift.out" 2>&1
 status=$?
 set -e
@@ -389,12 +431,36 @@ HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$no_phpunit_component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="${TMPDIR}/stubs/phpunit-recipe-builder.mjs" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/no-phpunit-composer.out" 2>&1
 
 assert_contains "${TMPDIR}/no-phpunit-composer.out" "Running Composer test script"
 assert_contains "${TMPDIR}/no-phpunit-composer.out" "contract smoke passed"
 assert_not_contains "${TMPDIR}/no-phpunit-composer.out" "NO PHPUNIT TEST FILES DISCOVERED"
 assert_not_contains "${TMPDIR}/no-phpunit-composer.out" "wordpress.phpunit crashed before producing a structured response"
+
+no_phpunit_npm_component="${TMPDIR}/no-phpunit-npm-component"
+mkdir -p "${no_phpunit_npm_component}/tests"
+cat > "${no_phpunit_npm_component}/package.json" <<'JSON'
+{"scripts":{"headless-preview-boot-smoke":"node tests/headless-preview-boot-smoke.mjs"}}
+JSON
+
+WP_CODEBOX_STUB_NO_PHPUNIT=1 \
+PATH="${TMPDIR}/stubs:${PATH}" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$no_phpunit_npm_component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_SETTINGS_JSON='{"npm_test_script":"headless-preview-boot-smoke"}' \
+HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="${TMPDIR}/stubs/phpunit-recipe-builder.mjs" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/no-phpunit-npm.out" 2>&1
+
+assert_contains "${TMPDIR}/no-phpunit-npm.out" "Running npm test script"
+assert_contains "${TMPDIR}/no-phpunit-npm.out" "Script: headless-preview-boot-smoke"
+assert_contains "${TMPDIR}/no-phpunit-npm.out" "headless preview boot smoke passed"
+assert_not_contains "${TMPDIR}/no-phpunit-npm.out" "NO PHPUNIT TEST FILES DISCOVERED"
+assert_not_contains "${TMPDIR}/no-phpunit-npm.out" "wordpress.phpunit crashed before producing a structured response"
 
 set +e
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \

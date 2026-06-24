@@ -7,6 +7,7 @@ const require = createRequire(import.meta.url);
 const {
 	coreModuleCandidates,
 	loadWpCodeboxCoreExport,
+	RUNTIME_CORE_ENTRY,
 } = require('../../lib/wp-codebox-core-loader.js');
 
 const RECIPE_BUILDER_MODULE_OPTIONS = {
@@ -17,6 +18,7 @@ const RECIPE_BUILDER_MODULE_OPTIONS = {
 		'@automattic/wp-codebox-core',
 	],
 	packageDistEntries: ['recipe-builders.js', 'index.js'],
+	runtimeCoreEntries: ['packages/runtime-core/dist/recipe-builders.js', RUNTIME_CORE_ENTRY],
 };
 
 export async function loadCodeboxRecipeBuilder(requiredExport) {
@@ -32,7 +34,7 @@ export async function loadCodeboxRecipeBuilder(requiredExport) {
 			`Install/build a WP Codebox recipe-builder module that exports ${requiredExport}.`,
 			'Use the public @automattic/wp-codebox-core/recipe-builders export or wp-codebox-workspace/recipe-builders.',
 			`Pass --setting wp_codebox_core_module=@automattic/wp-codebox-core/recipe-builders, or set HOMEBOY_WP_CODEBOX_CORE_MODULE to a compatible recipe-builder module.`,
-			'Fallback discovery only checks the configured WP Codebox install cache for packaged @automattic/wp-codebox-core entries.',
+			`Fallback discovery also checks sibling wp-codebox checkouts for packages/runtime-core/dist/recipe-builders.js and ${RUNTIME_CORE_ENTRY}.`,
 			'This is separate from HOMEBOY_WP_CODEBOX_BIN / wp_codebox_bin, which only selects the wp-codebox CLI.',
 			'Homeboy Extensions no longer falls back to bundled WP Codebox recipe builders because that stale local copy can drift from the Codebox recipe contract.',
 			`Tried ${candidates.length} candidate(s):`,

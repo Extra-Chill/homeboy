@@ -73,6 +73,31 @@ component_has_composer_test_script() {
     ' "${PLUGIN_PATH}/composer.json" 2>/dev/null
 }
 
+component_npm_test_script() {
+    [ -f "${PLUGIN_PATH}/package.json" ] || return 1
+
+    NPM_TEST_SCRIPT="$(php -r '
+        $settings = json_decode(getenv("HOMEBOY_SETTINGS_JSON") ?: "{}", true);
+        $package = json_decode(file_get_contents($argv[1]), true);
+        if (!is_array($settings)) {
+            $settings = [];
+        }
+        if (!is_array($package) || !isset($package["scripts"]) || !is_array($package["scripts"])) {
+            exit(1);
+        }
+        $script = $settings["npm_test_script"] ?? $settings["node_test_script"] ?? $settings["test_npm_script"] ?? null;
+        if ($script === null && isset($package["scripts"]["test"])) {
+            $script = "test";
+        }
+        if (!is_string($script) || $script === "" || !isset($package["scripts"][$script])) {
+            exit(1);
+        }
+        echo $script;
+    ' "${PLUGIN_PATH}/package.json" 2>/dev/null)" || return 1
+
+    [ -n "$NPM_TEST_SCRIPT" ]
+}
+
 run_composer_test_script() {
     echo ""
     echo "Running Composer test script..."
@@ -89,6 +114,26 @@ run_composer_test_script() {
         ( cd "${PLUGIN_PATH}" && composer test -- "${PASSTHROUGH_ARGS[@]}" )
     else
         ( cd "${PLUGIN_PATH}" && composer test )
+    fi
+}
+
+run_npm_test_script() {
+    echo ""
+    echo "Running npm test script..."
+    echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
+    echo "  Backend: npm-script"
+    echo "  Script: ${NPM_TEST_SCRIPT}"
+
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "ERROR: package.json declares scripts.${NPM_TEST_SCRIPT}, but npm is not available on PATH." >&2
+        FAILED_STEP="npm test script setup"
+        return 1
+    fi
+
+    if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
+        ( cd "${PLUGIN_PATH}" && npm run "$NPM_TEST_SCRIPT" -- "${PASSTHROUGH_ARGS[@]}" )
+    else
+        ( cd "${PLUGIN_PATH}" && npm run "$NPM_TEST_SCRIPT" )
     fi
 }
 
@@ -264,6 +309,11 @@ TEST_DIR="${PLUGIN_PATH}/tests"
 if [ ! -d "$TEST_DIR" ]; then
     if component_has_composer_test_script; then
         run_composer_test_script
+        exit $?
+    fi
+
+    if component_npm_test_script; then
+        run_npm_test_script
         exit $?
     fi
 
@@ -1018,6 +1068,12 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
     if component_has_composer_test_script; then
         rm -f "$RESULT_FILE"
         run_composer_test_script
+        exit $?
+    fi
+
+    if component_npm_test_script; then
+        rm -f "$RESULT_FILE"
+        run_npm_test_script
         exit $?
     fi
 
