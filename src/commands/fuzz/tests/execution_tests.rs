@@ -22,6 +22,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             require_coverage_summary: false,
             require_result_envelope: false,
             max_duration: None,
+            gate_profile: FuzzGateProfileArg::Measurement,
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");
@@ -276,6 +277,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             require_coverage_summary: false,
             require_result_envelope: false,
             max_duration: None,
+            gate_profile: FuzzGateProfileArg::Measurement,
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");
@@ -341,12 +343,14 @@ fn fuzz_report_persists_result_envelope_artifact_for_run_id() {
         )
         .expect("results file");
 
+        let mut run_args = fuzz_run_args_with_run_id("report-run-1");
+        run_args.gate_profile = FuzzGateProfileArg::Measurement;
+
         let output = run_report(FuzzReportArgs {
             results_file: results_path,
-            run: fuzz_run_args_with_run_id("report-run-1"),
+            run: run_args,
             output_envelope: None,
             envelope_id: None,
-            gate_profile: FuzzReportGateProfile::Measurement,
         })
         .expect("fuzz report");
 
@@ -402,12 +406,14 @@ fn fuzz_report_fails_required_artifact_gate_when_replay_data_is_missing() {
         )
         .expect("results file");
 
+        let mut run_args = fuzz_run_args_with_run_id("report-run-missing-replay");
+        run_args.gate_profile = FuzzGateProfileArg::Strict;
+
         let output = run_report(FuzzReportArgs {
             results_file: results_path,
-            run: fuzz_run_args_with_run_id("report-run-missing-replay"),
+            run: run_args,
             output_envelope: None,
             envelope_id: None,
-            gate_profile: FuzzReportGateProfile::Default,
         })
         .expect("fuzz report");
 
@@ -446,12 +452,14 @@ fn fuzz_report_passes_required_artifact_gates_with_seed_replay_data() {
         )
         .expect("results file");
 
+        let mut run_args = fuzz_run_args_with_run_id("report-run-with-replay");
+        run_args.gate_profile = FuzzGateProfileArg::Strict;
+
         let output = run_report(FuzzReportArgs {
             results_file: results_path,
-            run: fuzz_run_args_with_run_id("report-run-with-replay"),
+            run: run_args,
             output_envelope: None,
             envelope_id: None,
-            gate_profile: FuzzReportGateProfile::Default,
         })
         .expect("fuzz report");
 
@@ -476,12 +484,14 @@ fn fuzz_report_records_existing_output_envelope_path_as_artifact() {
         )
         .expect("results file");
 
+        let mut run_args = fuzz_run_args_with_run_id("report-run-output");
+        run_args.gate_profile = FuzzGateProfileArg::Measurement;
+
         run_report(FuzzReportArgs {
             results_file: results_path,
-            run: fuzz_run_args_with_run_id("report-run-output"),
+            run: run_args,
             output_envelope: Some(envelope_path.clone()),
             envelope_id: Some("custom-envelope".to_string()),
-            gate_profile: FuzzReportGateProfile::Measurement,
         })
         .expect("fuzz report");
 

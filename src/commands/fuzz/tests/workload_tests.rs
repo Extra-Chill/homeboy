@@ -82,6 +82,7 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         require_coverage_summary: false,
         require_result_envelope: false,
         max_duration: Some("60s".to_string()),
+        gate_profile: FuzzGateProfileArg::Measurement,
         args: vec![],
     };
     let workload = FuzzWorkloadOutput {
@@ -121,9 +122,14 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         "/tmp/fuzz-inventory.json".to_string()
     )));
     assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
+    assert!(env.contains(&(
+        "HOMEBOY_FUZZ_GATE_PROFILE".to_string(),
+        "measurement".to_string()
+    )));
     let contract = default_runner_contract();
     assert!(contract.env.contains(&"HOMEBOY_FUZZ_WORKLOAD_ROOT"));
     assert!(contract.env.contains(&"HOMEBOY_FUZZ_ARTIFACTS_DIR"));
+    assert!(contract.env.contains(&"HOMEBOY_FUZZ_GATE_PROFILE"));
 }
 
 #[test]
@@ -174,6 +180,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         require_coverage_summary: false,
         require_result_envelope: false,
         max_duration: None,
+        gate_profile: FuzzGateProfileArg::Measurement,
         args: vec![],
     };
     let workload = FuzzWorkloadOutput {

@@ -7,6 +7,7 @@ use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
     FUZZ_LAB_LABEL,
 };
+use homeboy::core::fuzz::FuzzGateProfile;
 
 #[derive(Args)]
 pub struct FuzzArgs {
@@ -175,6 +176,10 @@ pub struct FuzzRunArgs {
     #[arg(long, value_name = "DURATION")]
     pub(crate) max_duration: Option<String>,
 
+    /// Required artifact and gate profile to request from the fuzz runner.
+    #[arg(long = "gate-profile", value_enum, default_value_t = FuzzGateProfileArg::Measurement)]
+    pub(crate) gate_profile: FuzzGateProfileArg,
+
     /// Additional runner arguments reserved for the fuzz extension script.
     #[arg(last = true)]
     pub(crate) args: Vec<String>,
@@ -257,17 +262,38 @@ pub(crate) struct FuzzReportArgs {
     #[arg(long = "envelope-id", value_name = "ID")]
     pub(crate) envelope_id: Option<String>,
 
-    /// Gate profile to apply while creating the report envelope.
-    #[arg(long = "gate-profile", value_enum, default_value_t = FuzzReportGateProfile::Default)]
-    pub(crate) gate_profile: FuzzReportGateProfile,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum FuzzReportGateProfile {
+pub(crate) enum FuzzGateProfileArg {
     /// Preserve measurement evidence without default threshold gates.
     Measurement,
-    /// Apply Homeboy's default fuzz evidence gates.
-    Default,
+    /// Require replayable evidence without complete coverage gates.
+    Evidence,
+    /// Require declared target and operation coverage completeness.
+    CoverageComplete,
+    /// Require evidence and complete coverage gates.
+    Strict,
+}
+
+impl FuzzGateProfileArg {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Measurement => "measurement",
+            Self::Evidence => "evidence",
+            Self::CoverageComplete => "coverage-complete",
+            Self::Strict => "strict",
+        }
+    }
+
+    pub(crate) fn as_core(self) -> FuzzGateProfile {
+        match self {
+            Self::Measurement => FuzzGateProfile::Measurement,
+            Self::Evidence => FuzzGateProfile::Evidence,
+            Self::CoverageComplete => FuzzGateProfile::CoverageComplete,
+            Self::Strict => FuzzGateProfile::Strict,
+        }
+    }
 }
 
 #[derive(Args, Clone)]
@@ -352,10 +378,11 @@ pub(crate) struct FuzzReplayArgs {
 
 pub use super::types_extra::{
     FuzzCampaignContract, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot,
-    FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot, FuzzContractOutput,
-    FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput,
-    FuzzDiscoverSummary, FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange,
-    FuzzInspectCandidate, FuzzInspectOutput, FuzzListOutput, FuzzOutput, FuzzPlanOutput,
-    FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput,
-    FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
+    FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot,
+    FuzzContractGateProfileOutput, FuzzContractOutput, FuzzCoverageCompletenessOutput,
+    FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput, FuzzDiscoverSummary,
+    FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange, FuzzInspectCandidate,
+    FuzzInspectOutput, FuzzListOutput, FuzzOutput, FuzzPlanOutput, FuzzReplayEnv,
+    FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput, FuzzRunnerContract,
+    FuzzValidateOutput, FuzzWorkloadOutput,
 };

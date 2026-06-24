@@ -3,5 +3,6 @@
 mod campaign_tests;
 mod contract_tests;
 mod hotspot_tests;
+mod observation_tests;
 mod parse_tests;
 mod surface_tests;

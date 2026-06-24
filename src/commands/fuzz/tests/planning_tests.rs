@@ -85,6 +85,36 @@ fn fuzz_plan_selects_inventory_targets_operations_seeds_and_budgets() {
         serde_json::json!(120)
     );
     assert_eq!(metadata["isolation"]["required"], serde_json::json!(true));
+    assert_eq!(
+        metadata["planner"]["gate_profile"],
+        serde_json::json!("measurement")
+    );
+    assert!(metadata["required_artifact_ids"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(metadata["gate_ids"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn fuzz_plan_strict_profile_requests_required_artifacts_and_gates() {
+    let mut args = planner_args();
+    args.run.gate_profile = FuzzGateProfileArg::Strict;
+
+    let metadata = super::plan_inventory_selection(&args, &planner_inventory()).unwrap();
+
+    assert_eq!(
+        metadata["planner"]["gate_profile"],
+        serde_json::json!("strict")
+    );
+    assert!(metadata["required_artifact_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("case-log")));
+    assert!(metadata["gate_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("target-coverage-complete")));
 }
 
 #[test]

@@ -555,6 +555,7 @@ pub(super) fn default_runner_contract() -> FuzzRunnerContract {
             "HOMEBOY_FUZZ_SEED",
             "HOMEBOY_FUZZ_INVENTORY_FILE",
             "HOMEBOY_FUZZ_MAX_DURATION",
+            "HOMEBOY_FUZZ_GATE_PROFILE",
         ],
     }
 }
@@ -649,6 +650,10 @@ pub(super) fn fuzz_runner_env(
         "HOMEBOY_FUZZ_MAX_DURATION",
         args.max_duration.as_ref(),
     );
+    env.push((
+        "HOMEBOY_FUZZ_GATE_PROFILE".to_string(),
+        args.gate_profile.as_str().to_string(),
+    ));
     Ok(env)
 }
 

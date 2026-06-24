@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::fuzz::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_core_contract,
-    merge_fuzz_target_inventory, parse_fuzz_target_inventory_file, FuzzProvenance,
-    FuzzTargetInventory, FUZZ_PROVENANCE_SCHEMA,
+    fuzz_gate_profile_contract, merge_fuzz_target_inventory, parse_fuzz_target_inventory_file,
+    FuzzGateProfile, FuzzProvenance, FuzzTargetInventory, FUZZ_PROVENANCE_SCHEMA,
 };
 
 use super::super::{CmdResult, GlobalArgs};
@@ -115,11 +115,29 @@ pub(super) fn run_discover(args: FuzzDiscoverArgs) -> homeboy::core::Result<Fuzz
 }
 
 pub(super) fn run_contract() -> FuzzContractOutput {
+    let mut gate_profiles = BTreeMap::new();
+    for (name, profile) in [
+        ("measurement", FuzzGateProfile::Measurement),
+        ("evidence", FuzzGateProfile::Evidence),
+        ("coverage-complete", FuzzGateProfile::CoverageComplete),
+        ("strict", FuzzGateProfile::Strict),
+    ] {
+        let (required_artifacts, gates) = fuzz_gate_profile_contract(profile);
+        gate_profiles.insert(
+            name.to_string(),
+            super::types::FuzzContractGateProfileOutput {
+                required_artifacts,
+                gates,
+            },
+        );
+    }
+
     FuzzContractOutput {
         command: "fuzz.contract".to_string(),
         contract: fuzz_core_contract(),
         required_artifacts: default_fuzz_required_artifacts(),
         gates: default_fuzz_gates(),
+        gate_profiles,
     }
 }
 

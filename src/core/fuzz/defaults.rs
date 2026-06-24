@@ -4,6 +4,43 @@ use super::coverage::FuzzThresholdOperator;
 use super::envelope::{FuzzGate, FuzzRequiredArtifact};
 use super::schemas::{FUZZ_GATE_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuzzGateProfile {
+    Measurement,
+    Evidence,
+    CoverageComplete,
+    Strict,
+}
+
+pub fn fuzz_gate_profile_contract(
+    profile: FuzzGateProfile,
+) -> (Vec<FuzzRequiredArtifact>, Vec<FuzzGate>) {
+    match profile {
+        FuzzGateProfile::Measurement => (Vec::new(), Vec::new()),
+        FuzzGateProfile::Evidence => (
+            default_fuzz_required_artifacts()
+                .into_iter()
+                .filter(|artifact| artifact.id != "coverage-summary")
+                .collect(),
+            default_fuzz_gates()
+                .into_iter()
+                .filter(|gate| matches!(gate.id.as_str(), "no-open-findings" | "has-case-evidence"))
+                .collect(),
+        ),
+        FuzzGateProfile::CoverageComplete => (
+            default_fuzz_required_artifacts()
+                .into_iter()
+                .filter(|artifact| artifact.id == "coverage-summary")
+                .collect(),
+            default_fuzz_gates()
+                .into_iter()
+                .filter(|gate| gate.kind == "coverage_completeness")
+                .collect(),
+        ),
+        FuzzGateProfile::Strict => (default_fuzz_required_artifacts(), default_fuzz_gates()),
+    }
+}
+
 pub fn default_fuzz_required_artifacts() -> Vec<FuzzRequiredArtifact> {
     vec![
         FuzzRequiredArtifact {

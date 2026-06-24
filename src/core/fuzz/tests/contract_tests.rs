@@ -36,6 +36,10 @@ fn core_contract_lists_product_neutral_schema_ids() {
     );
     assert_eq!(contract.schemas.gate, FUZZ_GATE_SCHEMA);
     assert_eq!(
+        contract.schemas.observation_set,
+        FUZZ_OBSERVATION_SET_SCHEMA
+    );
+    assert_eq!(
         contract.schemas.lifecycle_contract,
         crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
     );
@@ -52,6 +56,44 @@ fn core_contract_lists_product_neutral_schema_ids() {
     assert!(contract
         .skip_reason_codes
         .contains(&FUZZ_SKIP_REASON_AUTH_REQUIRED.to_string()));
+}
+
+#[test]
+fn fuzz_gate_profiles_are_measurement_first_and_named() {
+    let (measurement_artifacts, measurement_gates) =
+        fuzz_gate_profile_contract(FuzzGateProfile::Measurement);
+    assert!(measurement_artifacts.is_empty());
+    assert!(measurement_gates.is_empty());
+
+    let (evidence_artifacts, evidence_gates) =
+        fuzz_gate_profile_contract(FuzzGateProfile::Evidence);
+    assert!(evidence_artifacts
+        .iter()
+        .any(|artifact| artifact.id == "case-log"));
+    assert!(!evidence_artifacts
+        .iter()
+        .any(|artifact| artifact.id == "coverage-summary"));
+    assert!(evidence_gates
+        .iter()
+        .any(|gate| gate.id == "has-case-evidence"));
+    assert!(!evidence_gates
+        .iter()
+        .any(|gate| gate.id == "target-coverage-complete"));
+
+    let (coverage_artifacts, coverage_gates) =
+        fuzz_gate_profile_contract(FuzzGateProfile::CoverageComplete);
+    assert_eq!(coverage_artifacts.len(), 1);
+    assert_eq!(coverage_artifacts[0].id, "coverage-summary");
+    assert!(coverage_gates
+        .iter()
+        .all(|gate| gate.kind == "coverage_completeness"));
+
+    let (strict_artifacts, strict_gates) = fuzz_gate_profile_contract(FuzzGateProfile::Strict);
+    assert_eq!(
+        strict_artifacts.len(),
+        default_fuzz_required_artifacts().len()
+    );
+    assert_eq!(strict_gates.len(), default_fuzz_gates().len());
 }
 
 #[test]
