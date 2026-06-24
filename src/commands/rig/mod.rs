@@ -159,7 +159,7 @@ enum RigCommand {
     /// Inspect or remove installed rig sources
     Sources {
         #[command(subcommand)]
-        command: sources::RigSourcesCommand,
+        command: Option<sources::RigSourcesCommand>,
     },
     /// Install, update, or remove this rig's desktop app launcher.
     App {
@@ -481,4 +481,27 @@ fn app_uninstall(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
         }),
         0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        rig: RigArgs,
+    }
+
+    #[test]
+    fn parses_sources_without_nested_subcommand() {
+        let cli = TestCli::try_parse_from(["homeboy", "sources"])
+            .expect("rig sources should parse without nested subcommand");
+
+        let RigCommand::Sources { command } = cli.rig.command else {
+            panic!("expected rig sources command");
+        };
+        assert!(command.is_none());
+    }
 }
