@@ -261,6 +261,12 @@ impl RenameSpec {
 
         let mut variants = Vec::new();
 
+        variants.push(CaseVariant {
+            from: from.to_string(),
+            to: to.to_string(),
+            label: "exact".to_string(),
+        });
+
         // If word splitting produced words, generate cross-separator variants.
         // If it produced a single word (e.g., "widget"), the joins all collapse
         // to the same thing, and dedup handles it naturally.
