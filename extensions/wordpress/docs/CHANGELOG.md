@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.18] - 2026-06-24
+
+### Changed
+- Translate Codebox fuzz measurements
+
 ## [3.13.17] - 2026-06-24
 
 ### Fixed
