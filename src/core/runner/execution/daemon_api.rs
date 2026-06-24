@@ -39,6 +39,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
         ));
     };
     let client = Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;

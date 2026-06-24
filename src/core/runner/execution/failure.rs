@@ -302,12 +302,9 @@ pub(super) fn daemon_exec_request_failed_error(
     }
 }
 
-/// The exec POST itself failed at the transport layer (connection refused /
-/// reset while the daemon restarts, tunnel torn down, etc.). Surface a clear
-/// reconnect path rather than a bare reqwest error string (#3631, #3624).
-pub(super) fn daemon_exec_transport_error(runner_id: &str, err: reqwest::Error) -> Error {
+pub(super) fn daemon_exec_loopback_transport_error(runner_id: &str, err: std::io::Error) -> Error {
     Error::internal_unexpected(format!(
-        "could not reach runner `{runner_id}` daemon to submit the exec request: {err}"
+        "could not reach runner `{runner_id}` daemon to submit the exec request over loopback HTTP: {err}"
     ))
     .with_hint(format!(
         "The daemon tunnel may be stale or the daemon may have restarted. Reconnect with `homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}` and retry."
