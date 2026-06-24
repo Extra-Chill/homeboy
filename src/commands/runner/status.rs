@@ -205,6 +205,11 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
             purpose: "Resolve the latest benchmark run id for evidence inspection.",
         },
         LabFollowup {
+            label: "latest_fuzz_run",
+            command: "homeboy runs latest-run --kind fuzz".to_string(),
+            purpose: "Resolve the latest fuzz run id for evidence inspection.",
+        },
+        LabFollowup {
             label: "run_artifacts",
             command: "homeboy runs artifacts <run-id>".to_string(),
             purpose: "List recorded run artifacts through Homeboy.",
@@ -218,6 +223,11 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
             label: "run_refs",
             command: "homeboy runs refs --kind bench --limit 10".to_string(),
             purpose: "List recent benchmark run and artifact refs.",
+        },
+        LabFollowup {
+            label: "fuzz_run_refs",
+            command: "homeboy runs refs --kind fuzz --limit 10".to_string(),
+            purpose: "List recent fuzz run and artifact refs.",
         },
     ];
     let Some(runner_id) = runner_id else {

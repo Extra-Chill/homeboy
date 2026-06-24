@@ -44,6 +44,13 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
         ),
         (parsed_command(&["homeboy", "fuzz"]), "fuzz"),
         (parsed_command(&["homeboy", "fuzz", "run"]), "fuzz"),
+        // `fuzz list` offloads (unlike `bench list`) because fuzz workloads are
+        // rig/extension-declared and may only exist on the runner, so the
+        // operator must see the runner-resident inventory, not the local one.
+        (
+            parsed_command(&["homeboy", "fuzz", "list", "--rig", "studio"]),
+            "fuzz",
+        ),
         (parsed_command(&["homeboy", "trace"]), "trace"),
         (
             parsed_command(&["homeboy", "refactor", "--from", "audit"]),
@@ -384,6 +391,43 @@ fn test_supports_lab_runner() {
     assert!(cli.force_hot);
     assert!(cli.allow_local_hot);
     assert!(cli.command.supports_lab_runner());
+}
+
+#[test]
+fn fuzz_run_and_list_offload_but_other_subcommands_stay_local() {
+    // `fuzz run` and `fuzz list` select the configured Lab runner so both the
+    // workload execution and the runner-resident workload inventory route to
+    // the runner. This mirrors how `bench run`/discovery offload while keeping
+    // the read-only/local-only fuzz subcommands (contract, plan, validate,
+    // report, compare, replay, inspect) local.
+    for args in [
+        ["homeboy", "fuzz", "run"].as_slice(),
+        ["homeboy", "fuzz", "list"].as_slice(),
+        ["homeboy", "fuzz", "list", "--rig", "studio"].as_slice(),
+    ] {
+        let command = parsed_command(args);
+        assert!(
+            command.supports_lab_runner(),
+            "expected {args:?} to support Lab offload"
+        );
+        let contract = command.lab_contract().expect("fuzz offload contract");
+        assert_eq!(contract.hot_label, "fuzz");
+        assert_eq!(contract.portability, LabCommandPortability::Portable);
+    }
+
+    for args in [
+        ["homeboy", "fuzz", "contract"].as_slice(),
+        ["homeboy", "fuzz", "plan"].as_slice(),
+        ["homeboy", "fuzz", "validate", "campaign.json"].as_slice(),
+        ["homeboy", "fuzz", "inspect", "run-123"].as_slice(),
+    ] {
+        let command = parsed_command(args);
+        assert!(
+            !command.supports_lab_runner(),
+            "expected {args:?} to stay local"
+        );
+        assert!(command.lab_contract().is_none());
+    }
 }
 
 #[test]
