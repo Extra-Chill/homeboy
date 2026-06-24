@@ -136,7 +136,7 @@ function buildStaticSiteFixtureMatrixRecipe(input = {}) {
 		},
 		inputs: {
 			mounts: normalizeArray(input.mounts),
-			...(extraPlugins.length > 0 ? { extraPlugins } : {}),
+			...(extraPlugins.length > 0 ? { extra_plugins: extraPlugins } : {}),
 		},
 		workflow: {
 			steps: staticSiteImporter

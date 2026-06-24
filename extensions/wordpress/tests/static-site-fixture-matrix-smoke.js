@@ -74,7 +74,7 @@ async function main() {
 			staticSiteImporterSlug: 'static-site-importer',
 		});
 		assert.deepEqual(Object.keys(staticSiteImporterRecipe).sort(), ['artifacts', 'inputs', 'runtime', 'schema', 'workflow']);
-		assert.deepEqual(staticSiteImporterRecipe.inputs.extraPlugins[0], {
+		assert.deepEqual(staticSiteImporterRecipe.inputs.extra_plugins[0], {
 			source: '/workspace/static-site-importer',
 			slug: 'static-site-importer',
 			activate: true,
