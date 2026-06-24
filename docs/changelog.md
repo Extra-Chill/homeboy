@@ -4,6 +4,99 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.260.0] - 2026-06-24
+
+### Added
+- check local rig sources
+- add job-scoped runner overrides
+- add measurement profiles and observations
+- capture host-level telemetry for offloaded benchmark runs (#3258)
+- structured offload overhead phase timings in run metadata (#3001)
+- enrich Lab-cannot-proceed errors with runner/workspace/ref/dependency + fix command (#4336)
+- feat(agent-task): one-command controller proof workflow (#6222)
+- first-class lab fuzz run/list route (#5790)
+- runtime overlay dependency-install contract for offload (#3831)
+- materialize declared dependency graph on offload (#3292)
+- feat(agent-task): compile loop controller spec into executable plan (#5101)
+- reconcile runtime dependency conflicts before dispatch (#6223)
+- feat(agent-task): materialize declared runtime dependency graph for Lab proofs (#6121)
+- preserve canonical git provenance for materialized component paths (#4314)
+- persist extension setup runtime env for Lab fuzz execution (#5919)
+- write Lab artifacts outside synced checkout to avoid dirty workspace (#6219)
+- mirror raw fuzz results into run evidence (#5997)
+- feat(agent-task): reconcile stale controller state on proof runs (#6221)
+- feat(agent-task): compact controller failure summary with evidence refs (#6220)
+- add hotspot measurement contracts
+- report command surface drift
+- feat(agent-task): live cancellation of running provider process trees (#5680)
+- feat(agent-task): emit durable run id before Lab offload execution (#5684)
+- feat(agent-task): make dispatch provider/selector config self-explanatory (#6122)
+- snapshot workspaces satisfy git-checkout for write-capable tasks (#6136)
+- feat(agent-task): propagate runtime provider/model opts in from-spec (#6125)
+- feat(agent-task): guard controller resume against stale loop state (#6123)
+- persist generic fuzz run evidence
+- feat(agent-task): link latest raw executor input/result as run evidence (#6124)
+- add strict artifact gates
+- reuse performance hotspot summaries
+- surface concurrent main advance before final notes/tag (#6141)
+- guard --no-github-release against misuse on manual releases (#6137)
+- clarify publish vs GitHub Release terminology (#6139)
+- advertise repair command when GitHub Release is missing (#6138)
+
+### Changed
+- Surface nested Lab run failure causes
+- split oversized tests.rs and types.rs (#6285)
+- reduce execution.rs item count under threshold (#6276)
+- make offload stream-truncation test non-vacuous (#6265)
+- Stabilize fuzz hotspot compare contract
+- Add Lab runtime dependency reconciliation diagnostics
+- Improve provider secret readiness status
+- Support static workflow fanout declarations
+- remove Studio CLI path inference
+- remove product-specific tool config
+- centralize status check config
+- remove low-signal output contract scaffolding
+- align command adapter migration expectation
+- make 4 vacuous tests assert on real production output (#6205)
+- split offload.rs god-file (#6189)
+- test(agent-task): make loop-compile runtime-opts test non-vacuous (#6197)
+- Consume public Codebox result envelopes
+- split plan_steps.rs god-file (#6181)
+- split oversized mod.rs and types.rs (#6166)
+- Skip prior observations in hotspot traversal
+- Parse nested fuzz hotspot payloads
+- Read remote artifacts in runs hotspots
+
+### Fixed
+- realign cli_surface trace manifest + harden process_tree SIGKILL escalation
+- restore RED-main tests after merge-volume drift (clusters A/B/C)
+- smooth refactor and rig source no-ops
+- suppress keyword duplicate warnings
+- preserve exact rename variants
+- isolate id installs from stale sources
+- default rename target to cwd
+- pin runner workload extension revisions
+- export validation dependency paths
+- avoid placeholder contract fields
+- sync rig check packages before offload
+- keep linked local checks on controller
+- keep render operation family generic
+- Fix runner daemon exec handoff
+- repair remaining failing tests (main RED)
+- preserve file-write newlines and require git checkout for run-from-spec routing
+- repair 3 upgrade::runners tests (main RED)
+- repair 6 dead_guard detector tests (main RED)
+- Fix Lab dispatch provider config remapping
+- Fix Lab controller dispatch secret handoff
+- require git checkout for explicit cook backends
+- classify additional command safety metadata
+- surface project resolution errors
+- type terminal daemon reporting failures
+- fix(agent-task): enforce controller runner policy
+- validate derived workload secrets
+- surface detached handoff run ids
+- include subdirectory in component changelog URL (#6146)
+
 ## [0.259.0] - 2026-06-23
 
 ### Added
