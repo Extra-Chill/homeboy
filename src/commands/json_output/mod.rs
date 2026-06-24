@@ -411,6 +411,7 @@ mod tests {
                         inputs: None,
                         policy_results: Vec::new(),
                         max_actions: 1,
+                        reconcile_stale: false,
                         replace: false,
                         fork: false,
                         resume_existing: false,

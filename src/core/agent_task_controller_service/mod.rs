@@ -286,20 +286,32 @@ pub fn init_from_spec_for_resume_with_resolution(
 
     // Persisted state is stale/incompatible. Honor the operator's resolution.
     match resolution {
-        ControllerResumeStateResolution::Guard => Err(Error::validation_invalid_argument(
-            "spec_fingerprint",
-            format!(
-                "agent-task controller from-spec --resume refuses to resume existing controller '{}' because the persisted spec fingerprint is missing or different; choose --replace, --fork, or --resume-existing, use a fresh loop_id, or re-run from-spec without --resume to reconcile state explicitly",
-                record.loop_id
-            ),
-            previous,
-            Some(vec![
-                format!("current_spec_fingerprint={spec_fingerprint}"),
-                format!("controller_path={controller_path}"),
-                "resolutions=--replace|--fork|--resume-existing".to_string(),
-            ]),
-        )),
-        ControllerResumeStateResolution::Replace => {
+        ControllerResumeStateResolution::Guard => {
+            let prior = previous
+                .as_deref()
+                .map(|fingerprint| format!("prior_spec_fingerprint={fingerprint}"))
+                .unwrap_or_else(|| "prior_spec_fingerprint=<none>".to_string());
+            Err(Error::validation_invalid_argument(
+                "spec_fingerprint",
+                format!(
+                    "refusing to reuse stale persisted controller state for '{}': the persisted spec fingerprint is missing or different from the requested spec. Re-run with --reconcile-stale to safely reset run-scoped state automatically, or choose --replace, --fork, or --resume-existing; a fresh loop_id also avoids the conflict",
+                    record.loop_id
+                ),
+                previous.clone(),
+                Some(vec![
+                    format!("state_path={controller_path}"),
+                    prior,
+                    format!("requested_spec_fingerprint={spec_fingerprint}"),
+                    "safe_next_action=--reconcile-stale (auto reset run-scoped state, no manual cleanup)".to_string(),
+                    "resolutions=--reconcile-stale|--replace|--fork|--resume-existing".to_string(),
+                ]),
+            ))
+        }
+        ControllerResumeStateResolution::Replace
+        | ControllerResumeStateResolution::ReconcileStale => {
+            // Both discard the stale persisted record and re-create isolated
+            // run-scoped state from the spec; `ReconcileStale` is the one-flag
+            // proof-run alias surfaced under its own evidence keyword (#6221).
             reset_controller_state(&record.loop_id)?;
             let mut report = init_from_spec(request)?;
             report.resume_state = Some(ControllerResumeStateReport {

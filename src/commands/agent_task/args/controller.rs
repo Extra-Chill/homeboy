@@ -124,16 +124,23 @@ pub struct AgentTaskControllerRunFromSpecArgs {
     )]
     pub max_actions: u32,
 
+    /// One-flag safe proof-run mode: automatically reset stale persisted controller
+    /// state and re-derive isolated run-scoped state from this spec, with no manual
+    /// state cleanup. Use this for proof/rerun workflows when the persisted spec
+    /// fingerprint conflicts with the requested spec.
+    #[arg(long = "reconcile-stale", conflicts_with_all = ["replace", "fork", "resume_existing"])]
+    pub reconcile_stale: bool,
+
     /// Discard stale persisted controller state and re-create it from this spec before running.
-    #[arg(long, conflicts_with_all = ["fork", "resume_existing"])]
+    #[arg(long, conflicts_with_all = ["fork", "resume_existing", "reconcile_stale"])]
     pub replace: bool,
 
     /// Apply this spec under a derived fork loop id, leaving the original controller untouched.
-    #[arg(long, conflicts_with_all = ["replace", "resume_existing"])]
+    #[arg(long, conflicts_with_all = ["replace", "resume_existing", "reconcile_stale"])]
     pub fork: bool,
 
     /// Accept stale/mismatched persisted state and resume the existing controller as-is.
-    #[arg(long = "resume-existing", conflicts_with_all = ["replace", "fork"])]
+    #[arg(long = "resume-existing", conflicts_with_all = ["replace", "fork", "reconcile_stale"])]
     pub resume_existing: bool,
 
     /// Executor backend to use for controller-spawned dispatch actions when the action omits one.

@@ -33,6 +33,13 @@ pub enum ControllerResumeStateResolution {
     Fork,
     /// Resume the persisted controller as-is, accepting the stale/mismatched state.
     ResumeExisting,
+    /// One-flag safe proof-run mode: reset stale persisted state automatically,
+    /// re-deriving isolated run-scoped controller state from the spec without
+    /// any manual state cleanup. Behaves like [`Replace`] for stale state but is
+    /// surfaced as its own keyword so proof-run evidence reads cleanly (#6221).
+    ///
+    /// [`Replace`]: ControllerResumeStateResolution::Replace
+    ReconcileStale,
 }
 
 impl ControllerResumeStateResolution {
@@ -43,6 +50,7 @@ impl ControllerResumeStateResolution {
             ControllerResumeStateResolution::Replace => "replace",
             ControllerResumeStateResolution::Fork => "fork",
             ControllerResumeStateResolution::ResumeExisting => "resume-existing",
+            ControllerResumeStateResolution::ReconcileStale => "reconcile-stale",
         }
     }
 }

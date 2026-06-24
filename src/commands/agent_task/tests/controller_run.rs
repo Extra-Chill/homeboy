@@ -173,6 +173,7 @@ fn controller_run_from_spec_materializes_runs_bounded_actions_and_returns_status
                 ),
                 policy_results: Vec::new(),
                 max_actions: 1,
+                reconcile_stale: false,
                 replace: false,
                 fork: false,
                 resume_existing: false,
@@ -229,6 +230,7 @@ fn controller_run_from_spec_persists_dispatch_defaults_for_generated_actions() {
                 inputs: None,
                 policy_results: Vec::new(),
                 max_actions: 1,
+                reconcile_stale: false,
                 replace: false,
                 fork: false,
                 resume_existing: false,
@@ -316,6 +318,7 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
                 ),
                 policy_results: Vec::new(),
                 max_actions: 1,
+                reconcile_stale: false,
                 replace: false,
                 fork: false,
                 resume_existing: false,
@@ -390,6 +393,7 @@ fn controller_run_from_spec_rejects_unbounded_zero_max_actions() {
                 inputs: None,
                 policy_results: Vec::new(),
                 max_actions: 0,
+                reconcile_stale: false,
                 replace: false,
                 fork: false,
                 resume_existing: false,
@@ -404,6 +408,106 @@ fn controller_run_from_spec_rejects_unbounded_zero_max_actions() {
 
         assert_eq!(error.details["field"], "max-actions");
         assert!(error.message.contains("greater than zero"));
+    });
+}
+
+fn run_from_spec_proof_args(
+    loop_id: &str,
+    prompt: &str,
+    reconcile_stale: bool,
+) -> AgentTaskControllerRunFromSpecArgs {
+    AgentTaskControllerRunFromSpecArgs {
+        spec: serde_json::to_string(&json!({
+            "loop_id": loop_id,
+            "workflows": [{ "workflow_id": "brief", "prompt": prompt }]
+        }))
+        .expect("spec json"),
+        inputs: None,
+        policy_results: Vec::new(),
+        max_actions: 1,
+        reconcile_stale,
+        replace: false,
+        fork: false,
+        resume_existing: false,
+        dispatch_backend: Some("fixture".to_string()),
+        dispatch_selector: None,
+        dispatch_model: None,
+        dispatch_provider_config: None,
+    }
+}
+
+#[test]
+fn controller_run_from_spec_guards_stale_state_with_actionable_diagnostics() {
+    with_temp_home(|| {
+        // First proof run persists base controller state.
+        controller_run_from_spec_with_test_executor(
+            run_from_spec_proof_args("run-from-spec-stale-guard", "Draft the brief.", false),
+            ArtifactCapturingExecutor::default(),
+        )
+        .expect("base proof run");
+
+        // A changed spec under the same loop id must NOT silently reuse the
+        // stale base controller state on a run-scoped proof run.
+        let error = controller_run_from_spec_with_test_executor(
+            run_from_spec_proof_args("run-from-spec-stale-guard", "Rewrite the brief.", false),
+            ArtifactCapturingExecutor::default(),
+        )
+        .expect_err("stale state is guarded");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error
+            .message
+            .contains("refusing to reuse stale persisted controller state"));
+        let tried = error
+            .details
+            .get("tried")
+            .and_then(Value::as_array)
+            .expect("guard diagnostic lists tried details");
+        let detail_has = |needle: &str| {
+            tried.iter().any(|detail| {
+                detail
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(needle))
+            })
+        };
+        assert!(detail_has("state_path="), "{tried:?}");
+        assert!(detail_has("prior_spec_fingerprint="), "{tried:?}");
+        assert!(detail_has("requested_spec_fingerprint="), "{tried:?}");
+        assert!(
+            detail_has("safe_next_action=--reconcile-stale"),
+            "{tried:?}"
+        );
+    });
+}
+
+#[test]
+fn controller_run_from_spec_reconcile_stale_recovers_without_manual_cleanup() {
+    with_temp_home(|| {
+        controller_run_from_spec_with_test_executor(
+            run_from_spec_proof_args("run-from-spec-reconcile", "Draft the brief.", false),
+            ArtifactCapturingExecutor::default(),
+        )
+        .expect("base proof run");
+
+        // The one-flag safe mode resets run-scoped state automatically.
+        let (value, exit_code) = controller_run_from_spec_with_test_executor(
+            run_from_spec_proof_args("run-from-spec-reconcile", "Rewrite the brief.", true),
+            ArtifactCapturingExecutor::default(),
+        )
+        .expect("reconcile-stale recovers the proof run");
+
+        assert_eq!(exit_code, 0, "{value:#}");
+        assert_eq!(value["loop_id"], "run-from-spec-reconcile");
+        assert_eq!(value["from_spec"]["initialized"], true);
+        assert_eq!(value["from_spec"]["resume_state"]["action"], "replacing");
+        assert_eq!(
+            value["from_spec"]["resume_state"]["resolution"],
+            "reconcile-stale"
+        );
+        assert_eq!(
+            value["from_spec"]["resume_state"]["fingerprint_match"],
+            false
+        );
     });
 }
 

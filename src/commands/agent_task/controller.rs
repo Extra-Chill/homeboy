@@ -321,7 +321,12 @@ where
         ControllerFromSpecRequest {
             spec: materialized.spec.clone(),
         },
-        resume_state_resolution(args.replace, args.fork, args.resume_existing),
+        resume_state_resolution(
+            args.reconcile_stale,
+            args.replace,
+            args.fork,
+            args.resume_existing,
+        ),
     )?;
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
@@ -464,11 +469,14 @@ fn controller_plan(args: AgentTaskControllerPlanArgs) -> CmdResult<Value> {
 /// flags into a controller stale-state resolution. Clap enforces exclusivity,
 /// so at most one is set; none selected falls back to the guarded default.
 fn resume_state_resolution(
+    reconcile_stale: bool,
     replace: bool,
     fork: bool,
     resume_existing: bool,
 ) -> ControllerResumeStateResolution {
-    if replace {
+    if reconcile_stale {
+        ControllerResumeStateResolution::ReconcileStale
+    } else if replace {
         ControllerResumeStateResolution::Replace
     } else if fork {
         ControllerResumeStateResolution::Fork
@@ -498,7 +506,7 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
     let report = if args.resume {
         init_from_spec_for_resume_with_resolution(
             ControllerFromSpecRequest { spec },
-            resume_state_resolution(args.replace, args.fork, args.resume_existing),
+            resume_state_resolution(false, args.replace, args.fork, args.resume_existing),
         )?
     } else {
         agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?
