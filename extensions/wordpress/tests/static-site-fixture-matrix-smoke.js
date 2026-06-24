@@ -57,6 +57,9 @@ async function main() {
 		assert.equal(artifact.summary.has_images, true);
 		assert.ok(artifact.files.some((file) => file.path === 'website/index.html'));
 		assert.ok(artifact.files.some((file) => file.path === 'website/js/script.js'));
+		assert.match(artifact.files.find((file) => file.path === 'website/index.html').content, /canvas/);
+		assert.match(artifact.files.find((file) => file.path === 'website/js/script.js').content, /getElementById/);
+		assert.equal(artifact.files.find((file) => file.path === 'website/images/og-image.png').content_base64, Buffer.from('png').toString('base64'));
 
 		const recipe = buildStaticSiteFixtureMatrixRecipe({ matrix, artifactsDirectory: '/artifacts/matrix' });
 		assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');

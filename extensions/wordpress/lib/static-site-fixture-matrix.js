@@ -83,12 +83,22 @@ function createStaticSiteFixtureMatrix(input = {}) {
 function buildStaticSiteFixtureArtifact(fixture, options = {}) {
 	const normalized = normalizeFixture(fixture);
 	const files = collectFixtureFiles(normalized.directory, options);
-	const artifactFiles = files.map((file) => ({
-		path: `website/${file.relative_path}`,
-		source_path: file.absolute_path,
-		type: file.type,
-		bytes: file.bytes,
-	}));
+	const artifactFiles = files.map((file) => {
+		const artifactFile = {
+			path: `website/${file.relative_path}`,
+			source_path: file.absolute_path,
+			type: file.type,
+			bytes: file.bytes,
+		};
+		const payload = fs.readFileSync(file.absolute_path);
+		if (isTextPayloadType(file.type)) {
+			artifactFile.content = payload.toString('utf8');
+		} else {
+			artifactFile.content_base64 = payload.toString('base64');
+		}
+
+		return artifactFile;
+	});
 
 	return {
 		schema: WEBSITE_ARTIFACT_SCHEMA,
@@ -658,6 +668,15 @@ function fileType(filePath) {
 
 function isImagePath(filePath) {
 	return /\.(png|jpe?g|gif|webp|svg)$/i.test(filePath);
+}
+
+function isTextPayloadType(type) {
+	return typeof type === 'string' && (
+		type.startsWith('text/') ||
+		type === 'application/javascript' ||
+		type === 'application/json' ||
+		type === 'image/svg+xml'
+	);
 }
 
 function commonFixtureRoot(fixtures) {
