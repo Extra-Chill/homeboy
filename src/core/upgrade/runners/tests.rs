@@ -161,7 +161,7 @@ fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
         Some("/home/user/Developer/_lab_workspaces/homeboy-source")
     );
     assert!(calls[1].0[2].contains("git fetch origin"));
-    assert!(calls[1].0[2].contains("git branch --set-upstream-to"));
+    assert!(calls[1].0[2].contains("git checkout --detach"));
     assert_eq!(
         calls[2].0,
         vec![
@@ -887,21 +887,22 @@ fn source_runner_upgrade_realigns_to_materialized_source_build_when_path_shadows
                     String::new(),
                     0,
                 ),
-                2 => ("{\"success\":true}\n".to_string(), String::new(), 0),
-                3 => (
-                    format!("homeboy {}+oldbuild\n", current_version()),
-                    String::new(),
-                    0,
-                ),
+                2 => ("prepared source checkout\n".to_string(), String::new(), 0),
+                3 => ("{\"success\":true}\n".to_string(), String::new(), 0),
                 4 => (
                     format!("homeboy {}+oldbuild\n", current_version()),
                     String::new(),
                     0,
                 ),
-                5 if options.command[0] == source_binary => {
+                5 => (
+                    format!("homeboy {}+oldbuild\n", current_version()),
+                    String::new(),
+                    0,
+                ),
+                6 if options.command[0] == source_binary => {
                     (format!("homeboy {}\n", current_version()), String::new(), 0)
                 }
-                6 if options.command[0] == source_binary => (
+                7 if options.command[0] == source_binary => (
                     format!("{}\n", build_identity::current().display),
                     String::new(),
                     0,
@@ -942,9 +943,10 @@ fn source_runner_upgrade_realigns_to_materialized_source_build_when_path_shadows
     assert_eq!(updated[0].bare_homeboy_version, None);
     assert_eq!(updated[0].path_drift, None);
     assert_eq!(path_updates, vec![("lab".to_string(), source_binary)]);
-    assert_eq!(commands[1][0], stale_path);
-    assert_eq!(commands[1][commands[1].len() - 2], "--source-path");
-    assert_eq!(commands[1][commands[1].len() - 1], remote_source);
+    assert_eq!(&commands[1][..2], &["sh".to_string(), "-lc".to_string()]);
+    assert_eq!(commands[2][0], stale_path);
+    assert_eq!(commands[2][commands[2].len() - 2], "--source-path");
+    assert_eq!(commands[2][commands[2].len() - 1], remote_source);
     assert!(updated[0].detail.contains("to source-built"));
 }
 
@@ -975,21 +977,22 @@ fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
                     String::new(),
                     0,
                 ),
-                2 => ("{\"success\":true}\n".to_string(), String::new(), 0),
-                3 => (
-                    format!("homeboy {}+oldbuild\n", current_version()),
-                    String::new(),
-                    0,
-                ),
+                2 => ("prepared source checkout\n".to_string(), String::new(), 0),
+                3 => ("{\"success\":true}\n".to_string(), String::new(), 0),
                 4 => (
                     format!("homeboy {}+oldbuild\n", current_version()),
                     String::new(),
                     0,
                 ),
-                5 if options.command[0] == source_binary => {
+                5 => (
+                    format!("homeboy {}+oldbuild\n", current_version()),
+                    String::new(),
+                    0,
+                ),
+                6 if options.command[0] == source_binary => {
                     (format!("homeboy {}\n", current_version()), String::new(), 0)
                 }
-                6 if options.command[0] == source_binary => {
+                7 if options.command[0] == source_binary => {
                     (format!("{expected_identity}\n"), String::new(), 0)
                 }
                 other => (
