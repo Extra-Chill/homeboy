@@ -329,7 +329,7 @@ fn declared_agent_task_controller_secret_env_with_providers(
         if let Some(name) = arg.strip_prefix("--secret-env=") {
             names.push(name.to_string());
         }
-        if arg == "--provider-config" {
+        if arg == "--provider-config" || arg == "--dispatch-provider-config" {
             if let Some(spec) = args.get(index + 1) {
                 names.extend(declared_provider_config_secret_env(spec)?);
             }
@@ -337,6 +337,9 @@ fn declared_agent_task_controller_secret_env_with_providers(
             continue;
         }
         if let Some(spec) = arg.strip_prefix("--provider-config=") {
+            names.extend(declared_provider_config_secret_env(spec)?);
+        }
+        if let Some(spec) = arg.strip_prefix("--dispatch-provider-config=") {
             names.extend(declared_provider_config_secret_env(spec)?);
         }
         index += 1;
@@ -377,16 +380,26 @@ fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Result<Option
     let Some(command) = args.get(agent_task_index + 1).map(String::as_str) else {
         return Ok(None);
     };
-    if !matches!(command, "cook" | "dispatch" | "loop") {
+    if !matches!(command, "cook" | "dispatch" | "loop" | "controller") {
         return Ok(None);
     }
 
-    let Some(backend) = option_arg_after(args, agent_task_index + 2, "--backend") else {
+    let (backend_flag, selector_flag, model_flag, provider_config_flag) = match command {
+        "controller" | "loop" => (
+            "--dispatch-backend",
+            "--dispatch-selector",
+            "--dispatch-model",
+            "--dispatch-provider-config",
+        ),
+        _ => ("--backend", "--selector", "--model", "--provider-config"),
+    };
+
+    let Some(backend) = option_arg_after(args, agent_task_index + 2, backend_flag) else {
         return Ok(None);
     };
-    let selector = option_arg_after(args, agent_task_index + 2, "--selector");
-    let model = option_arg_after(args, agent_task_index + 2, "--model");
-    let provider_config = option_arg_after(args, agent_task_index + 2, "--provider-config")
+    let selector = option_arg_after(args, agent_task_index + 2, selector_flag);
+    let model = option_arg_after(args, agent_task_index + 2, model_flag);
+    let provider_config = option_arg_after(args, agent_task_index + 2, provider_config_flag)
         .map(|spec| read_provider_config_value(&spec))
         .transpose()?
         .unwrap_or(serde_json::Value::Null);
@@ -1050,6 +1063,140 @@ mod tests {
                 "HOMEBOY_PROVIDER_REFRESH_TOKEN".to_string(),
                 "OPENAI_API_KEY".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn declared_agent_task_controller_run_from_spec_includes_dispatch_provider_config_secrets() {
+        let names = declared_agent_task_secret_env(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "controller".to_string(),
+            "run-from-spec".to_string(),
+            "@controller-spec.json".to_string(),
+            "--dispatch-provider-config".to_string(),
+            serde_json::json!({
+                "provider": "example",
+                "secret_env": ["HOMEBOY_CONTROLLER_PROVIDER_TOKEN"]
+            })
+            .to_string(),
+        ]);
+
+        assert_eq!(names, vec!["HOMEBOY_CONTROLLER_PROVIDER_TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn lab_secret_env_handoff_plan_hydrates_controller_dispatch_provider_config_secret() {
+        let _secret = RemovedEnvVar::new("HOMEBOY_CONTROLLER_PROVIDER_TOKEN");
+        std::env::set_var(
+            "HOMEBOY_CONTROLLER_PROVIDER_TOKEN",
+            "controller-secret-value",
+        );
+
+        let plan = build_lab_secret_env_handoff_plan(
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "controller".to_string(),
+                "run-from-spec".to_string(),
+                "@controller-spec.json".to_string(),
+                "--dispatch-provider-config".to_string(),
+                serde_json::json!({
+                    "provider": "example",
+                    "secret_env": ["HOMEBOY_CONTROLLER_PROVIDER_TOKEN"]
+                })
+                .to_string(),
+            ],
+            HashMap::new(),
+        )
+        .expect("controller dispatch provider config secret should hydrate");
+
+        assert_eq!(
+            plan.secret_env_names,
+            vec!["HOMEBOY_CONTROLLER_PROVIDER_TOKEN".to_string()]
+        );
+        assert_eq!(
+            plan.env_delta
+                .get("HOMEBOY_CONTROLLER_PROVIDER_TOKEN")
+                .map(String::as_str),
+            Some("controller-secret-value")
+        );
+        assert!(plan
+            .diagnostics
+            .to_string()
+            .contains("HOMEBOY_CONTROLLER_PROVIDER_TOKEN"));
+        assert!(!plan
+            .diagnostics
+            .to_string()
+            .contains("controller-secret-value"));
+    }
+
+    #[test]
+    fn hydrate_agent_task_secret_env_fails_missing_controller_dispatch_provider_config_secret() {
+        let _secret = RemovedEnvVar::new("HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN");
+        crate::test_support::with_isolated_home(|_| {
+            let mut env = HashMap::new();
+
+            let err = hydrate_agent_task_secret_env(
+                &[
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "controller".to_string(),
+                    "run-from-spec".to_string(),
+                    "@controller-spec.json".to_string(),
+                    "--dispatch-provider-config".to_string(),
+                    serde_json::json!({
+                        "provider": "example",
+                        "secret_env": ["HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN"]
+                    })
+                    .to_string(),
+                ],
+                &mut env,
+            )
+            .expect_err("missing controller dispatch provider config secret should fail");
+
+            assert_eq!(err.details["field"].as_str(), Some("secret-env"));
+            assert!(err
+                .message
+                .contains("HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN"));
+            assert!(err.message.contains("missing"));
+            assert!(err.details.to_string().contains("agent-task auth map-env"));
+        });
+    }
+
+    #[test]
+    fn declared_agent_task_controller_dispatch_provider_defaults_include_controller_sources() {
+        let provider = fixture_provider_with_example_defaults();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "controller".to_string(),
+            "run-from-spec".to_string(),
+            "@controller-spec.json".to_string(),
+            "--dispatch-backend".to_string(),
+            "sample-runtime".to_string(),
+            "--dispatch-provider-config".to_string(),
+            serde_json::json!({ "provider": "example-oauth" }).to_string(),
+        ];
+
+        let names = declared_agent_task_controller_secret_env_with_providers(
+            &args,
+            std::slice::from_ref(&provider),
+        )
+        .expect("dispatch provider config should parse");
+        let sources = declared_agent_task_controller_secret_sources_with_providers(
+            &args,
+            1,
+            std::slice::from_ref(&provider),
+        )
+        .expect("dispatch provider config sources should parse");
+
+        assert!(names.contains(&"EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()));
+        assert_eq!(
+            sources
+                .get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
+                .and_then(|source| source.path.as_deref()),
+            Some("~/.example-provider/auth.json")
         );
     }
 
