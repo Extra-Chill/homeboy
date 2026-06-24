@@ -783,7 +783,6 @@
         "structural::src/core/deterministic_loop.rs::HighItemCount",
         "structural::src/core/extension/bench/run.rs::GodFile",
         "structural::src/core/extension/bench/run.rs::HighItemCount",
-        "structural::src/core/extension/execution.rs::HighItemCount",
         "structural::src/core/extension/grammar.rs::GodFile",
         "structural::src/core/extension/trace/report.rs::HighItemCount",
         "structural::src/core/git/github.rs::GodFile",
