@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.14] - 2026-06-24
+
+### Changed
+- Expose typed WordPress dependency metadata
+
 ## [3.13.13] - 2026-06-24
 
 ### Changed
