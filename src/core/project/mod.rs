@@ -79,8 +79,6 @@ pub struct Project {
     #[serde(default)]
     pub database: DatabaseConfig,
     #[serde(default)]
-    pub tools: ToolsConfig,
-    #[serde(default)]
     pub api: ApiConfig,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -451,6 +449,21 @@ mod config_layout_tests {
 
             assert_eq!(list_ids().expect("project ids"), vec!["canonical"]);
         });
+    }
+
+    #[test]
+    fn legacy_product_specific_tools_config_is_ignored() {
+        let project: Project = serde_json::from_str(
+            r#"{
+                "domain": "legacy.test",
+                "tools": {
+                    "legacy_tool": { "legacy_setting": "value" }
+                }
+            }"#,
+        )
+        .expect("legacy project config should deserialize");
+
+        assert_eq!(project.domain.as_deref(), Some("legacy.test"));
     }
 }
 
