@@ -95,7 +95,7 @@ pub(super) fn job_status_as_run_status(status: JobStatus) -> &'static str {
     }
 }
 
-pub(super) fn local_job_run_id(runner_id: &str, job_id: &str) -> String {
+pub(crate) fn local_job_run_id(runner_id: &str, job_id: &str) -> String {
     format!("runner-exec-{}-{}", sanitize_id_segment(runner_id), job_id)
 }
 
