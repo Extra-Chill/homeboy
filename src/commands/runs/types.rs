@@ -54,15 +54,15 @@ pub struct RunsArgs {
 
 #[derive(Subcommand, Clone)]
 pub(super) enum RunsCommand {
-    /// List persisted observation runs
+    /// List persisted observation runs; canonical replacement for `bench history` and `rig runs`
     List(RunsListArgs),
-    /// Aggregate categorical values from persisted run metadata
+    /// Aggregate persisted run metadata; canonical replacement for `bench distribution`
     Distribution(RunsDistributionArgs),
     /// Show the latest persisted observation run matching filters
     LatestRun(RunsLatestRunArgs),
     /// Compare selected metrics across persisted run history
     Compare(RunsCompareArgs),
-    /// Compare two persisted benchmark runs by exact run id
+    /// Compare two persisted benchmark runs by exact run id; canonical replacement for `bench compare`
     BenchCompare(RunsBenchCompareArgs),
     /// Aggregate hotspot rankings across persisted fuzz run artifacts
     Hotspots(RunsHotspotsArgs),
@@ -80,7 +80,7 @@ pub(super) enum RunsCommand {
     },
     /// Show a generic resume plan for a validation-progress run
     ResumePlan { run_id: String },
-    /// Show stable evidence registry data for one run
+    /// Show stable evidence registry data for one run; start here for reviewer-facing evidence
     Evidence { run_id: String },
     /// List artifacts recorded for one run
     Artifacts { run_id: String },

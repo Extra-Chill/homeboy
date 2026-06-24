@@ -44,7 +44,7 @@ pub(super) fn exec_worker_local_with_process_output(
         project_id: options.project_id.clone(),
         command: options.command.clone(),
         env: options.env.clone(),
-        secret_env_names,
+        secret_env_names: secret_env_names.clone(),
         capture_patch: options.capture_patch,
         raw_exec: options.raw_exec,
         source_snapshot: options.source_snapshot.clone(),
@@ -56,7 +56,7 @@ pub(super) fn exec_worker_local_with_process_output(
         runner_id,
         Some(&plan.cwd),
         &options.command,
-        &options.secret_env_names,
+        &secret_env_names,
         options.capture_patch,
     )?;
     let required_extensions = required_extensions_for_command(

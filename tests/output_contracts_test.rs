@@ -9,11 +9,6 @@ use homeboy::commands::extension::{ExtensionDetail, ExtensionOutput};
 use homeboy::commands::rig::RigCommandOutput;
 use homeboy::commands::runs::RunsOutput;
 use homeboy::commands::utils::response::cli_response_for_json_result;
-use homeboy::core::agent_task::{
-    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskOutcome, AgentTaskOutcomeStatus,
-    AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
-    AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
-};
 use homeboy::core::code_audit::report::{
     AuditChangedSinceSummary, AuditCommandOutput, AuditFixability, AuditSummaryGroup,
     AuditSummaryOutput, FixabilityKindBreakdown,
@@ -360,209 +355,6 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
 }
 
 #[test]
-fn provider_fanout_payload_normalizes_to_homeboy_outcome_refs() {
-    let provider_payload: Value =
-        serde_json::from_str(include_str!("fixtures/provider_fanout_payload.json"))
-            .expect("provider fanout fixture parses");
-
-    let outcome = normalize_provider_fanout_fixture("provider-fanout-smoke", &provider_payload);
-
-    assert_eq!(outcome.schema, AGENT_TASK_OUTCOME_SCHEMA);
-    assert_eq!(outcome.task_id, "provider-fanout-smoke");
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert_eq!(outcome.artifacts.len(), 1);
-    assert_eq!(outcome.artifacts[0].schema, AGENT_TASK_ARTIFACT_SCHEMA);
-    assert_eq!(outcome.artifacts[0].kind, "manifest");
-    assert_eq!(outcome.evidence_refs.len(), 7);
-    assert!(outcome
-        .evidence_refs
-        .iter()
-        .any(|evidence| evidence.uri == "provider://sessions/provider-session-parent-123/events"));
-    assert!(outcome
-        .evidence_refs
-        .iter()
-        .any(|evidence| evidence.uri == "provider://sessions/provider-session-worker-1"));
-    assert!(outcome
-        .evidence_refs
-        .iter()
-        .any(|evidence| evidence.uri == "provider://fanout/provider-fanout-123/aggregate"));
-
-    let workflow = outcome.workflow.expect("workflow evidence");
-    assert_eq!(workflow.schema, AGENT_TASK_WORKFLOW_SCHEMA);
-    assert_eq!(workflow.steps.len(), 2);
-    assert_eq!(workflow.steps[0].id, "worker-build");
-    assert_eq!(
-        workflow.steps[0].status,
-        AgentTaskWorkflowStepStatus::Succeeded
-    );
-    assert_eq!(workflow.steps[0].artifact_refs[0].kind, "patch");
-    assert_eq!(workflow.steps[1].artifact_refs[0].kind, "screenshot");
-
-    assert_eq!(outcome.metadata["provider"], json!("runtime-provider"));
-    assert_eq!(
-        outcome.metadata["provider_schema"],
-        json!("example-provider/fanout-result/v1")
-    );
-    assert_eq!(
-        outcome.metadata["provider_refs"]["fanout_id"],
-        json!("provider-fanout-123")
-    );
-    assert_eq!(
-        outcome.metadata["provider_refs"]["worker_ids"],
-        json!(["worker-build", "worker-proof"])
-    );
-    assert!(outcome.metadata.get("workers").is_none());
-    assert!(outcome.metadata.get("sessions").is_none());
-}
-
-fn normalize_provider_fanout_fixture(task_id: &str, provider_payload: &Value) -> AgentTaskOutcome {
-    let fanout_id = provider_payload["fanout_id"].as_str().expect("fanout id");
-    let parent_session = &provider_payload["parent_session"];
-    let workers = provider_payload["workers"]
-        .as_array()
-        .expect("workers array");
-
-    let mut evidence_refs = vec![
-        AgentTaskEvidenceRef {
-            kind: "provider_fanout".to_string(),
-            uri: format!("provider://fanout/{fanout_id}"),
-            label: Some("Provider fanout".to_string()),
-        },
-        AgentTaskEvidenceRef {
-            kind: "event_stream".to_string(),
-            uri: parent_session["event_stream_uri"]
-                .as_str()
-                .expect("parent event stream")
-                .to_string(),
-            label: Some("Provider parent event stream".to_string()),
-        },
-    ];
-
-    let mut workflow_steps = Vec::new();
-    let mut worker_ids = Vec::new();
-
-    for worker in workers {
-        let worker_id = worker["id"].as_str().expect("worker id");
-        worker_ids.push(worker_id.to_string());
-        evidence_refs.push(AgentTaskEvidenceRef {
-            kind: "worker_session".to_string(),
-            uri: worker["session_ref"]
-                .as_str()
-                .expect("worker session ref")
-                .to_string(),
-            label: Some(format!("Provider worker {worker_id}")),
-        });
-        evidence_refs.push(AgentTaskEvidenceRef {
-            kind: "worker_result".to_string(),
-            uri: worker["result_ref"]
-                .as_str()
-                .expect("worker result ref")
-                .to_string(),
-            label: Some(format!("Provider worker {worker_id} result")),
-        });
-
-        let artifact_refs = worker["artifact_refs"]
-            .as_array()
-            .expect("worker artifact refs")
-            .iter()
-            .map(|artifact_ref| AgentTaskEvidenceRef {
-                kind: artifact_ref["kind"]
-                    .as_str()
-                    .expect("artifact kind")
-                    .to_string(),
-                uri: artifact_ref["uri"]
-                    .as_str()
-                    .expect("artifact uri")
-                    .to_string(),
-                label: artifact_ref["label"].as_str().map(str::to_string),
-            })
-            .collect();
-
-        workflow_steps.push(AgentTaskWorkflowStepEvidence {
-            id: worker_id.to_string(),
-            label: worker["agent"].as_str().map(str::to_string),
-            status: match worker["status"].as_str() {
-                Some("succeeded") => AgentTaskWorkflowStepStatus::Succeeded,
-                Some("failed") => AgentTaskWorkflowStepStatus::Failed,
-                _ => AgentTaskWorkflowStepStatus::Running,
-            },
-            depends_on: Vec::new(),
-            started_at: None,
-            finished_at: None,
-            duration_ms: worker["duration_ms"].as_u64(),
-            metrics: json!({}),
-            artifact_refs,
-            diagnostics: Vec::new(),
-            suggestions: Vec::new(),
-            metadata: json!({ "provider_ref": worker["result_ref"] }),
-        });
-    }
-
-    evidence_refs.push(AgentTaskEvidenceRef {
-        kind: "aggregation_result".to_string(),
-        uri: provider_payload["aggregation"]["result_ref"]
-            .as_str()
-            .expect("aggregation result ref")
-            .to_string(),
-        label: Some("Provider fanout aggregation".to_string()),
-    });
-
-    let artifacts = provider_payload["artifacts"]
-        .as_array()
-        .expect("artifacts array")
-        .iter()
-        .map(|artifact| AgentTaskArtifact {
-            schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: artifact["id"].as_str().expect("artifact id").to_string(),
-            kind: artifact["kind"]
-                .as_str()
-                .expect("artifact kind")
-                .to_string(),
-            name: artifact["label"].as_str().map(str::to_string),
-            label: artifact["label"].as_str().map(str::to_string),
-            role: None,
-            semantic_key: None,
-            path: None,
-            url: artifact["uri"].as_str().map(str::to_string),
-            mime: artifact["mime"].as_str().map(str::to_string),
-            size_bytes: None,
-            sha256: None,
-            metadata: json!({ "provider": "runtime-provider" }),
-        })
-        .collect();
-
-    AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-        task_id: task_id.to_string(),
-        status: AgentTaskOutcomeStatus::Succeeded,
-        summary: provider_payload["summary"].as_str().map(str::to_string),
-        failure_classification: None,
-        artifacts,
-        typed_artifacts: Vec::new(),
-        evidence_refs,
-        diagnostics: Vec::new(),
-        outputs: json!({ "fanout_id": fanout_id }),
-        workflow: Some(AgentTaskWorkflowEvidence {
-            schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
-            id: fanout_id.to_string(),
-            label: Some("Provider fanout".to_string()),
-            steps: workflow_steps,
-            metadata: json!({ "provider": "runtime-provider" }),
-        }),
-        follow_up: None,
-        metadata: json!({
-            "provider": "runtime-provider",
-            "provider_schema": provider_payload["schema"],
-            "provider_refs": {
-                "fanout_id": fanout_id,
-                "parent_session_id": parent_session["id"],
-                "worker_ids": worker_ids
-            }
-        }),
-    }
-}
-
-#[test]
 fn extension_show_output_contracts_use_top_level_structured_sidecars() {
     let output = typed_output_value(ExtensionOutput::Show {
         extension: ExtensionDetail {
@@ -644,13 +436,7 @@ fn typed_output_value<T: Serialize>(output: T) -> Value {
 }
 
 fn variant_contract(name: &'static str, value: Value) -> VariantContract {
-    VariantContract {
-        name,
-        value: json!({
-            "variant": name,
-            "payload": value,
-        }),
-    }
+    VariantContract { name, value }
 }
 
 fn assert_unique_variant_signatures(group: &str, contracts: Vec<VariantContract>) {
@@ -668,10 +454,6 @@ fn assert_unique_variant_signatures(group: &str, contracts: Vec<VariantContract>
 }
 
 fn variant_signature(value: &Value) -> String {
-    if let Some(variant) = value.get("variant").and_then(Value::as_str) {
-        return format!("variant={variant}");
-    }
-
     if let Some(command) = value.get("command").and_then(Value::as_str) {
         return format!("command={command}");
     }

@@ -225,8 +225,75 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
 }
 
 #[test]
+fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
+    crate::test_support::with_isolated_home(|_| {
+        allow_unauthenticated_loopback_broker();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let _ = crate::core::daemon::serve_listener(listener);
+        });
+        let broker_url = format!("http://{addr}");
+
+        let (output, exit_code) = exec_via_reverse_broker(
+            &ssh_runner(),
+            &broker_url,
+            "/srv/homeboy/project".to_string(),
+            Some("extrachill".to_string()),
+            vec!["homeboy".to_string(), "test".to_string()],
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            Vec::new(),
+            None,
+            true,
+        )
+        .expect("reverse broker detached exec");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.mode, RunnerExecMode::ReverseBroker);
+        let job_id = output.job_id.as_deref().expect("job id");
+        let mirror_run_id = output.mirror_run_id.as_deref().expect("mirror run id");
+        assert_eq!(mirror_run_id, format!("runner-exec-lab-{job_id}"));
+        assert_eq!(
+            output
+                .runner_result
+                .as_ref()
+                .and_then(|result| result.mirror_run_id.as_deref()),
+            Some(mirror_run_id)
+        );
+        assert_eq!(
+            output
+                .handoff
+                .as_ref()
+                .and_then(|handoff| handoff.result.as_ref())
+                .and_then(|result| result.mirror_run_id.as_deref()),
+            Some(mirror_run_id)
+        );
+
+        let stdout: Value = serde_json::from_str(&output.stdout).expect("handoff stdout json");
+        assert_eq!(stdout["persisted_run_id"].as_str(), Some(mirror_run_id));
+        assert_eq!(stdout["mirror_run_id"].as_str(), Some(mirror_run_id));
+        assert_eq!(stdout["job_id"].as_str(), Some(job_id));
+
+        let store = crate::core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
+        let run = store
+            .get_run(mirror_run_id)
+            .expect("read mirror run")
+            .expect("mirror run");
+        assert_eq!(
+            run.metadata_json["lab"]["remote_job"]["id"].as_str(),
+            Some(job_id)
+        );
+    });
+}
+
+#[test]
 fn reverse_broker_exec_submits_job_and_polls_result() {
     crate::test_support::with_isolated_home(|_| {
+        allow_unauthenticated_loopback_broker();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let addr = listener.local_addr().expect("addr");
         std::thread::spawn(move || {
@@ -379,6 +446,15 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
         assert_eq!(artifact.run_id, mirror_run_id);
         assert_eq!(artifact.path, "metadata-only:reverse-patch");
     });
+}
+
+fn allow_unauthenticated_loopback_broker() {
+    super::super::super::broker_auth::BrokerAuthStore {
+        allow_unauthenticated_loopback: true,
+        ..Default::default()
+    }
+    .save()
+    .expect("save loopback broker auth opt-in");
 }
 
 #[test]

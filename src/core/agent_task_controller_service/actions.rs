@@ -19,8 +19,35 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
+    execute_controller_action_with_runner_availability(
+        record,
+        action_id,
+        executor,
+        dispatch,
+        controller_runner_availability,
+    )
+}
+
+pub(super) fn execute_controller_action_with_runner_availability<E, D, F>(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+    executor: E,
+    dispatch: &D,
+    mut runner_availability: F,
+) -> Result<AgentTaskRunResult<ControllerActionReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    D: ControllerDispatchHook,
+    F: FnMut(&str) -> AgentTaskLoopRunnerAvailability,
+{
     let action = claim_controller_action(record, action_id)?;
     controller::write_controller(record)?;
+
+    if let Some(result) =
+        enforce_claimed_action_runner_policy(record, action_id, &action, &mut runner_availability)?
+    {
+        return Ok(result);
+    }
 
     match execute_claimed_controller_action(record, &action, executor, dispatch) {
         Ok((execution, exit_code)) => {
@@ -70,6 +97,125 @@ where
             controller::write_controller(record)?;
             Err(error)
         }
+    }
+}
+
+fn enforce_claimed_action_runner_policy<F>(
+    record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
+    action: &AgentTaskLoopPolicyActionRecord,
+    runner_availability: &mut F,
+) -> Result<Option<AgentTaskRunResult<ControllerActionReport>>>
+where
+    F: FnMut(&str) -> AgentTaskLoopRunnerAvailability,
+{
+    let decision = record.resolve_action_runner_policy(&action.action, runner_availability);
+    if let Some(blocked_status) = decision.blocked_status {
+        let diagnostic = decision.diagnostic.ok_or_else(|| {
+            Error::internal_unexpected(
+                "runner policy returned a blocked status without a diagnostic".to_string(),
+            )
+        })?;
+        record.block_action_for_runner_policy(action_id, blocked_status, diagnostic.clone())?;
+        controller::write_controller(record)?;
+        let execution = serde_json::json!({
+            "mode": "runner_policy",
+            "status": action_status_report_label(blocked_status),
+            "diagnostics": [diagnostic],
+        });
+        return Ok(Some(AgentTaskRunResult {
+            value: ControllerActionReport {
+                schema: ACTION_RESULT_SCHEMA,
+                loop_id: record.loop_id.clone(),
+                claimed: true,
+                action_id: Some(action_id.to_string()),
+                status: Some(action_status_report_label(blocked_status).to_string()),
+                failure_summary: Some(controller_action_failure_summary(
+                    record, action, &execution,
+                )),
+                execution: Some(execution),
+                controller: record.clone(),
+            },
+            exit_code: 1,
+        }));
+    }
+
+    if let Some(AgentTaskLoopRunnerExecutionTarget::Runner(runner)) = decision.target {
+        let diagnostic = AgentTaskLoopActionDiagnostic {
+            code: "runner_action_dispatch_unimplemented".to_string(),
+            message: format!(
+                "controller action '{}' targets runner `{runner}`, but controller runner dispatch is not implemented; refusing local fallback",
+                action.action_id
+            ),
+            runner: Some(runner.clone()),
+            details: serde_json::json!({
+                "action_id": action.action_id,
+                "dedupe_key": action.dedupe_key,
+            }),
+        };
+        let execution = serde_json::json!({
+            "mode": "runner_policy",
+            "status": "failed",
+            "target": "runner",
+            "runner": runner,
+            "diagnostics": [diagnostic],
+        });
+        complete_controller_action(record, action_id, &execution, 1)?;
+        controller::write_controller(record)?;
+        return Ok(Some(AgentTaskRunResult {
+            value: ControllerActionReport {
+                schema: ACTION_RESULT_SCHEMA,
+                loop_id: record.loop_id.clone(),
+                claimed: true,
+                action_id: Some(action_id.to_string()),
+                status: Some("failed".to_string()),
+                failure_summary: Some(controller_action_failure_summary(
+                    record, action, &execution,
+                )),
+                execution: Some(execution),
+                controller: record.clone(),
+            },
+            exit_code: 1,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn controller_runner_availability(runner_id: &str) -> AgentTaskLoopRunnerAvailability {
+    match runner::status(runner_id) {
+        Ok(status)
+            if status.connected
+                && status.stale_daemon.is_none()
+                && status.active_job_state == RunnerActiveJobState::Available =>
+        {
+            AgentTaskLoopRunnerAvailability::Available
+        }
+        Ok(status) => AgentTaskLoopRunnerAvailability::Unavailable {
+            reason: format!(
+                "runner `{runner_id}` is not available for controller action execution: state={:?}, connected={}, stale_daemon={}, active_job_state={:?}",
+                status.state,
+                status.connected,
+                status.stale_daemon.is_some(),
+                status.active_job_state
+            ),
+        },
+        Err(error) => AgentTaskLoopRunnerAvailability::Unavailable {
+            reason: format!("runner `{runner_id}` is not available for controller action execution: {error}"),
+        },
+    }
+}
+
+fn action_status_report_label(status: AgentTaskLoopActionStatus) -> &'static str {
+    match status {
+        AgentTaskLoopActionStatus::Pending => "pending",
+        AgentTaskLoopActionStatus::Running => "running",
+        AgentTaskLoopActionStatus::AlreadySatisfied => "already_satisfied",
+        AgentTaskLoopActionStatus::Completed => "completed",
+        AgentTaskLoopActionStatus::Failed => "failed",
+        AgentTaskLoopActionStatus::BlockedRunnerUnavailable => "blocked_runner_unavailable",
+        AgentTaskLoopActionStatus::BlockedRemoteMaterialization => "blocked_remote_materialization",
+        AgentTaskLoopActionStatus::BlockedLocalFallbackDenied => "blocked_local_fallback_denied",
     }
 }
 

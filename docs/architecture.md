@@ -211,19 +211,6 @@ the higher-level system model and core/extension boundary, see
 - `body`
 - `store`
 
-### `ToolsConfig`
-
-- `bandcamp_scraper`
-- `newsletter`
-
-### `BandcampScraperConfig`
-
-- `default_tag`
-
-### `NewsletterConfig`
-
-- `sendy_list_id`
-
 ## Manifests
 
 ### `ExtensionManifest`

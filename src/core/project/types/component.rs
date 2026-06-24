@@ -36,7 +36,7 @@ pub struct ProjectComponentOverrides {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_inputs: Vec<crate::core::component::ArtifactInput>,
     /// Override the CLI path used by extension deploy install steps.
-    /// For example, Studio sites need "studio wp" instead of the default "wp".
+    /// For example, local wrappers may need "lando wp" instead of the default "wp".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_path: Option<String>,
 }

@@ -80,7 +80,7 @@ pub(super) fn exec_via_reverse_broker(
             Some("parse reverse broker job".to_string()),
         )
     })?;
-    persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    let persisted_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
     if detach_after_handoff {
         return Ok(detached_handoff_output(
             runner,
@@ -90,6 +90,7 @@ pub(super) fn exec_via_reverse_broker(
             source_snapshot,
             job,
             require_paths,
+            persisted_run_id,
         ));
     }
 

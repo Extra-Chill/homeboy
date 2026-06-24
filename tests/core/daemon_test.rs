@@ -840,6 +840,78 @@ fn routes_exec_body_to_daemon_job() {
 }
 
 #[test]
+fn daemon_exec_derives_implicit_command_secret_names_before_workload_validation() {
+    let _home = HomeGuard::new();
+    let store = JobStore::default();
+    let cwd = std::env::current_dir()
+        .expect("cwd")
+        .to_string_lossy()
+        .to_string();
+    let plan = crate::core::plan::HomeboyPlan::builder_for_description(
+        crate::core::plan::PlanKind::LabOffload,
+        "test",
+    )
+    .build();
+    let command_contract = crate::core::runner::LabOffloadCommand {
+        hot_label: "tunnel preview-client start",
+        portable: true,
+        unsupported_reason: None,
+        source_path_mode: crate::core::runner::LabOffloadSourcePathMode::CwdOrPathFlag,
+        workspace_mode_policy:
+            crate::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+        required_extensions: Vec::new(),
+        requires_playwright: false,
+        routing_policy: crate::command_contract::LabRoutingPolicy::default(),
+    };
+    let workload = crate::core::runner::workload::build_runner_workload(
+        crate::core::runner::workload::RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command_contract,
+            capture_patch: false,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "homeboy-lab",
+            runner_mode: "daemon",
+            assignment_source: "daemon",
+            status: "queued",
+            remote_workspace: Some(&cwd),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        },
+    );
+
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "cwd": cwd,
+            "command": [
+                "homeboy",
+                "tunnel",
+                "preview-client",
+                "start",
+                "--ingress",
+                "https://preview-broker.example.test",
+                "--public-host",
+                "preview.example.test",
+                "--local-origin",
+                "http://127.0.0.1:8888"
+            ],
+            "env": {
+                "HOMEBOY_PREVIEW_TUNNEL_TOKEN": "dummy-token"
+            },
+            "runner_workload": workload
+        })),
+        &store,
+    );
+
+    assert_eq!(response.status_code, 200);
+    assert_eq!(response.body["endpoint"], "jobs.exec");
+}
+
+#[test]
 fn daemon_exec_does_not_require_runner_config_on_daemon_host() {
     let _home = HomeGuard::new();
     let store = JobStore::default();

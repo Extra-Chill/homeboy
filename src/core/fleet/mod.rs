@@ -41,6 +41,44 @@ pub struct Fleet {
     pub priority_labels: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetProjectResolutionError {
+    pub project_id: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FleetProjectResolution {
+    pub projects: Vec<crate::core::project::Project>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<FleetProjectResolutionError>,
+}
+
+impl FleetProjectResolution {
+    pub fn ensure_complete(&self, fleet_id: &str) -> Result<()> {
+        if self.errors.is_empty() {
+            return Ok(());
+        }
+
+        let missing_projects = self
+            .errors
+            .iter()
+            .map(|error| error.project_id.clone())
+            .collect::<Vec<_>>();
+        Err(Error::validation_invalid_argument(
+            "fleet",
+            format!(
+                "Fleet '{}' references unresolved project{}: {}",
+                fleet_id,
+                if missing_projects.len() == 1 { "" } else { "s" },
+                missing_projects.join(", ")
+            ),
+            Some(fleet_id.to_string()),
+            Some(missing_projects),
+        ))
+    }
+}
+
 impl Fleet {
     pub fn new(id: String, project_ids: Vec<String>) -> Self {
         Self {
@@ -107,38 +145,59 @@ pub fn remove_project(fleet_id: &str, project_id: &str) -> Result<Fleet> {
     Ok(fleet)
 }
 
-/// Get all projects in a fleet with full project data
-pub fn get_projects(fleet_id: &str) -> Result<Vec<crate::core::project::Project>> {
+/// Resolve all projects in a fleet, preserving failures for callers to surface.
+pub fn resolve_projects(fleet_id: &str) -> Result<FleetProjectResolution> {
     let fleet = load(fleet_id)?;
-    let mut projects = Vec::new();
+    resolve_fleet_projects(&fleet)
+}
+
+pub fn resolve_fleet_projects(fleet: &Fleet) -> Result<FleetProjectResolution> {
+    let mut resolution = FleetProjectResolution::default();
 
     for project_id in &fleet.project_ids {
-        if let Ok(project) = project::load(project_id) {
-            projects.push(project);
+        match project::load(project_id) {
+            Ok(project) => resolution.projects.push(project),
+            Err(error) => resolution.errors.push(FleetProjectResolutionError {
+                project_id: project_id.clone(),
+                error: error.to_string(),
+            }),
         }
     }
 
-    Ok(projects)
+    Ok(resolution)
+}
+
+/// Get all successfully resolved projects in a fleet with full project data.
+pub fn get_projects(fleet_id: &str) -> Result<Vec<crate::core::project::Project>> {
+    Ok(resolve_projects(fleet_id)?.projects)
 }
 
 /// Get component usage across a fleet (component_id -> Vec<project_id>)
 pub fn component_usage(fleet_id: &str) -> Result<std::collections::HashMap<String, Vec<String>>> {
+    Ok(component_usage_with_resolution(fleet_id)?.0)
+}
+
+pub fn component_usage_with_resolution(
+    fleet_id: &str,
+) -> Result<(
+    std::collections::HashMap<String, Vec<String>>,
+    Vec<FleetProjectResolutionError>,
+)> {
     let fleet = load(fleet_id)?;
     let mut usage: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
+    let resolution = resolve_fleet_projects(&fleet)?;
 
-    for project_id in &fleet.project_ids {
-        if let Ok(project) = project::load(project_id) {
-            for component_id in project::project_component_ids(&project) {
-                usage
-                    .entry(component_id)
-                    .or_default()
-                    .push(project_id.clone());
-            }
+    for project in &resolution.projects {
+        for component_id in project::project_component_ids(project) {
+            usage
+                .entry(component_id)
+                .or_default()
+                .push(project.id.clone());
         }
     }
 
-    Ok(usage)
+    Ok((usage, resolution.errors))
 }
 
 // Fleet Sync was removed in #101 — it had OpenClaw-specific logic hardcoded
@@ -206,5 +265,29 @@ mod tests {
             parsed.priority_labels,
             Some(vec!["urgent".to_string(), "release-blocker".to_string()])
         );
+    }
+
+    #[test]
+    fn resolve_projects_preserves_missing_project_errors() {
+        crate::test_support::with_isolated_home(|_| {
+            let project = crate::core::project::Project {
+                id: "configured-site".to_string(),
+                ..Default::default()
+            };
+            crate::core::project::save(&project).expect("project config");
+            save(&Fleet::new(
+                "production".to_string(),
+                vec!["configured-site".to_string(), "missing-site".to_string()],
+            ))
+            .expect("fleet config");
+
+            let resolution = resolve_projects("production").expect("resolution");
+
+            assert_eq!(resolution.projects.len(), 1);
+            assert_eq!(resolution.projects[0].id, "configured-site");
+            assert_eq!(resolution.errors.len(), 1);
+            assert_eq!(resolution.errors[0].project_id, "missing-site");
+            assert!(resolution.errors[0].error.contains("Project not found"));
+        });
     }
 }

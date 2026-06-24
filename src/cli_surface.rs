@@ -1,5 +1,6 @@
 use clap::{Command, CommandFactory, Parser, Subcommand};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::command_contract::registered_command;
@@ -212,6 +213,20 @@ pub struct CommandSurfaceEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandSafetyManifest {
     pub commands: Vec<CommandSafetyEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandSurfaceDoctorReport {
+    pub agrees: bool,
+    pub source_registry_commands: Vec<String>,
+    pub docs_index_commands: Vec<String>,
+    pub help_commands: Vec<String>,
+    pub runtime_extension_docs: Vec<String>,
+    pub missing_from_docs_index: Vec<String>,
+    pub stale_docs_index: Vec<String>,
+    pub missing_from_help: Vec<String>,
+    pub missing_from_source_registry: Vec<String>,
+    pub drift_notes: Vec<String>,
 }
 
 impl CommandSafetyManifest {
@@ -471,6 +486,114 @@ pub fn current_command_safety_manifest() -> CommandSafetyManifest {
     command_safety_manifest_from(current_command_surface())
 }
 
+pub fn current_command_surface_doctor_report() -> CommandSurfaceDoctorReport {
+    let surface = current_command_surface();
+    let manifest = command_safety_manifest_from(surface.clone());
+    let source_registry_commands = manifest
+        .commands
+        .iter()
+        .filter(|entry| visible_manifest_entry_with_docs_path(entry))
+        .map(|entry| entry.name.clone())
+        .collect();
+    let help_commands = surface
+        .commands
+        .iter()
+        .filter(|entry| !entry.hidden)
+        .map(|entry| entry.name.clone())
+        .collect();
+    let docs_index_commands =
+        documented_command_index_entries(include_str!("../docs/commands/commands-index.md"));
+
+    command_surface_doctor_report(
+        source_registry_commands,
+        docs_index_commands,
+        help_commands,
+        runtime_extension_doc_commands(),
+    )
+}
+
+pub fn command_surface_doctor_report(
+    source_registry_commands: BTreeSet<String>,
+    docs_index_commands: BTreeSet<String>,
+    help_commands: BTreeSet<String>,
+    runtime_extension_docs: BTreeSet<String>,
+) -> CommandSurfaceDoctorReport {
+    let documented_core_commands: BTreeSet<String> = docs_index_commands
+        .difference(&runtime_extension_docs)
+        .cloned()
+        .collect();
+
+    let missing_from_docs_index =
+        sorted_difference(&source_registry_commands, &docs_index_commands);
+    let stale_docs_index = sorted_difference(&documented_core_commands, &source_registry_commands);
+    let missing_from_help = sorted_difference(&source_registry_commands, &help_commands);
+    let missing_from_source_registry = sorted_difference(&help_commands, &source_registry_commands);
+
+    let mut drift_notes = Vec::new();
+    push_drift_note(
+        &mut drift_notes,
+        &missing_from_docs_index,
+        "source registry commands missing from docs/commands/commands-index.md",
+    );
+    push_drift_note(
+        &mut drift_notes,
+        &stale_docs_index,
+        "docs/commands/commands-index.md lists stale commands",
+    );
+    push_drift_note(
+        &mut drift_notes,
+        &missing_from_help,
+        "source registry commands missing from help-facing command surface",
+    );
+    push_drift_note(
+        &mut drift_notes,
+        &missing_from_source_registry,
+        "help-facing commands missing from source registry",
+    );
+
+    CommandSurfaceDoctorReport {
+        agrees: drift_notes.is_empty(),
+        source_registry_commands: source_registry_commands.into_iter().collect(),
+        docs_index_commands: docs_index_commands.into_iter().collect(),
+        help_commands: help_commands.into_iter().collect(),
+        runtime_extension_docs: runtime_extension_docs.into_iter().collect(),
+        missing_from_docs_index,
+        stale_docs_index,
+        missing_from_help,
+        missing_from_source_registry,
+        drift_notes,
+    }
+}
+
+fn visible_manifest_entry_with_docs_path(entry: &CommandSafetyEntry) -> bool {
+    !entry.hidden && entry.docs.path.is_some()
+}
+
+fn documented_command_index_entries(index: &str) -> BTreeSet<String> {
+    let command_section = index.split("Related:").next().unwrap_or(index);
+
+    command_section
+        .lines()
+        .filter_map(|line| line.strip_prefix("- ["))
+        .filter_map(|rest| rest.split(']').next())
+        .map(str::to_string)
+        .collect()
+}
+
+fn runtime_extension_doc_commands() -> BTreeSet<String> {
+    BTreeSet::from(["cargo".to_string(), "wp".to_string()])
+}
+
+fn sorted_difference(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
+    left.difference(right).cloned().collect()
+}
+
+fn push_drift_note(notes: &mut Vec<String>, commands: &[String], label: &str) {
+    if !commands.is_empty() {
+        notes.push(format!("{label}: {}", commands.join(", ")));
+    }
+}
+
 pub fn command_safety_manifest_from(surface: CommandSurface) -> CommandSafetyManifest {
     command_safety_manifest_from_dynamic(surface, &[])
 }
@@ -618,6 +741,10 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used";
             metadata.dangerous_flags = vec!["--force", "--upgrade-runner"];
         }
+        ["trace"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "runs trace workflows and records observation artifacts unless using read-only subcommands";
+        }
         ["cleanup", "artifacts"] => {
             metadata.mutates = true;
             metadata.output_notes =
@@ -645,6 +772,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["project", "components", "clear"]
         | ["project", "pin", "add"]
         | ["project", "pin", "remove"]
+        | ["project", "pin", "rename"]
         | ["project", "pin", "update"] => {
             metadata.mutates = true;
         }
@@ -722,6 +850,32 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.dry_run_flag = Some("--dry-run");
             metadata.output_notes =
                 "reads active runs by default; --reconcile cancels stale active records unless --dry-run is passed";
+        }
+        ["agent-task", "controller", "init"]
+        | ["agent-task", "controller", "from-spec"]
+        | ["agent-task", "controller", "run-from-spec"]
+        | ["agent-task", "controller", "materialize"]
+        | ["agent-task", "controller", "events"]
+        | ["agent-task", "controller", "apply-event"]
+        | ["agent-task", "controller", "run-next"]
+        | ["agent-task", "controller", "run"]
+        | ["agent-task", "controller", "resume"]
+        | ["agent-task", "controller", "mark-human-ready"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "mutates durable agent-task loop controller state";
+        }
+        ["agent-task", "auth", "remove"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "removes one agent-task provider secret source mapping";
+        }
+        ["agent-task", "prompts", "remove"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "removes one stored agent-task prompt";
+        }
+        ["fuzz", "replay"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "replays a persisted fuzz case against local code and may write run artifacts";
         }
         ["db", "delete-row"] | ["db", "drop-table"] => {
             metadata.mutates = true;

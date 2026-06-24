@@ -1004,8 +1004,6 @@ impl AgentTaskLoopControllerRecord {
         record
     }
 
-    // Part of the loop-controller API exercised only by tests; production wiring is pending.
-    #[cfg(test)]
     pub(crate) fn block_action_for_runner_policy(
         &mut self,
         action_id: &str,

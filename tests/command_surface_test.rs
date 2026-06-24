@@ -1,7 +1,8 @@
 use clap::{CommandFactory, Parser};
 use homeboy::cli_surface::{
-    command_surface_from_with_depth, current_command_safety_manifest, current_command_surface, Cli,
-    CommandSafetyEntry, CommandSafetyManifest, Commands,
+    command_surface_doctor_report, command_surface_from_with_depth,
+    current_command_safety_manifest, current_command_surface, Cli, CommandSafetyEntry,
+    CommandSafetyManifest, Commands,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -486,6 +487,49 @@ fn command_docs_files_match_command_index_snapshot() {
 }
 
 #[test]
+fn command_surface_doctor_report_agrees_for_matching_sets() {
+    let source = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
+    let docs = BTreeSet::from([
+        "cargo".to_string(),
+        "fuzz".to_string(),
+        "manifest".to_string(),
+        "wp".to_string(),
+    ]);
+    let help = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
+    let extension_docs = BTreeSet::from(["cargo".to_string(), "wp".to_string()]);
+
+    let report = command_surface_doctor_report(source, docs, help, extension_docs);
+
+    assert!(report.agrees);
+    assert!(report.drift_notes.is_empty());
+    assert_eq!(report.runtime_extension_docs, vec!["cargo", "wp"]);
+}
+
+#[test]
+fn command_surface_doctor_report_detects_docs_and_help_mismatches() {
+    let source = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
+    let docs = BTreeSet::from(["lab".to_string(), "manifest".to_string(), "wp".to_string()]);
+    let help = BTreeSet::from(["fuzz".to_string(), "lab".to_string()]);
+    let extension_docs = BTreeSet::from(["wp".to_string()]);
+
+    let report = command_surface_doctor_report(source, docs, help, extension_docs);
+
+    assert!(!report.agrees);
+    assert_eq!(report.missing_from_docs_index, vec!["fuzz"]);
+    assert_eq!(report.stale_docs_index, vec!["lab"]);
+    assert_eq!(report.missing_from_help, vec!["manifest"]);
+    assert_eq!(report.missing_from_source_registry, vec!["lab"]);
+    assert!(report
+        .drift_notes
+        .iter()
+        .any(|note| note.contains("missing from docs") && note.contains("fuzz")));
+    assert!(report
+        .drift_notes
+        .iter()
+        .any(|note| note.contains("stale commands") && note.contains("lab")));
+}
+
+#[test]
 fn upgrade_runner_selector_does_not_collide_with_global_lab_runner_flag() {
     let root = Cli::command();
     let root_flags: BTreeSet<String> = root
@@ -563,7 +607,7 @@ fn runner_env_rejects_legacy_show_values_flag() {
 }
 
 #[test]
-fn docs_cover_focused_command_surface_cleanup_targets() {
+fn auth_and_self_docs_cover_live_command_variants() {
     let auth = include_str!("../docs/commands/auth.md");
     assert!(auth.contains("`profile`"));
     assert!(auth.contains("set-basic"));
@@ -576,10 +620,23 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
     assert!(self_docs.contains("--older-than-days"));
     assert!(self_docs.contains("--apply"));
 
-    let extension = include_str!("../docs/commands/extension.md");
-    assert!(extension.contains("install-for-component --source <source> [--path <component_path>]"));
-    assert!(!extension.contains("install-for-component") || !extension.contains("--revision"));
+    assert_documented_commands_parse(&[
+        &["homeboy", "auth", "profile", "set-basic", "dev"],
+        &["homeboy", "auth", "profile", "set-bearer", "dev"],
+        &["homeboy", "self", "identity"],
+        &["homeboy", "self", "doctor"],
+        &[
+            "homeboy",
+            "self",
+            "cleanup-runtime-tmp",
+            "--older-than-days",
+            "14",
+        ],
+    ]);
+}
 
+#[test]
+fn report_and_runs_docs_cover_live_command_variants() {
     let report = include_str!("../docs/commands/report.md");
     assert!(report.contains("`performance-digest`"));
 
@@ -592,54 +649,51 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
     assert!(runs.contains("`drift`"));
     assert!(runs.contains("`loop-sync`"));
 
-    let cargo = include_str!("../docs/commands/cargo.md");
-    assert!(cargo.contains("extension-provided"));
-    let wp = include_str!("../docs/commands/wp.md");
-    assert!(wp.contains("extension-provided"));
-
-    for args in [
-        ["homeboy", "auth", "profile", "set-basic", "dev"].as_slice(),
-        ["homeboy", "auth", "profile", "set-bearer", "dev"].as_slice(),
-        ["homeboy", "self", "identity"].as_slice(),
-        ["homeboy", "self", "doctor"].as_slice(),
-        [
-            "homeboy",
-            "self",
-            "cleanup-runtime-tmp",
-            "--older-than-days",
-            "14",
-        ]
-        .as_slice(),
-        [
+    assert_documented_commands_parse(&[
+        &[
             "homeboy",
             "report",
             "performance-digest",
             "--output-dir",
             ".",
-        ]
-        .as_slice(),
-        ["homeboy", "runs", "artifact", "get", "run-1", "artifact-1"].as_slice(),
-        ["homeboy", "runs", "latest-run"].as_slice(),
-        ["homeboy", "runs", "evidence", "run-1"].as_slice(),
-        ["homeboy", "runs", "findings", "run-1"].as_slice(),
-        ["homeboy", "runs", "query", "--select", "$.status"].as_slice(),
-        ["homeboy", "runs", "drift", "--metric", "$.status"].as_slice(),
-        ["homeboy", "runs", "loop-sync", ".", "--dry-run"].as_slice(),
-        [
+        ],
+        &["homeboy", "runs", "artifact", "get", "run-1", "artifact-1"],
+        &["homeboy", "runs", "latest-run"],
+        &["homeboy", "runs", "evidence", "run-1"],
+        &["homeboy", "runs", "findings", "run-1"],
+        &["homeboy", "runs", "query", "--select", "$.status"],
+        &["homeboy", "runs", "drift", "--metric", "$.status"],
+        &["homeboy", "runs", "loop-sync", ".", "--dry-run"],
+        &[
             "homeboy",
             "runs",
             "artifact",
             "cleanup-persisted",
             "--older-than-days",
             "30",
-        ]
-        .as_slice(),
-    ] {
-        Cli::try_parse_from(args).unwrap_or_else(|error| {
-            panic!("documented cleanup target failed to parse: {args:?}\n{error}")
-        });
-    }
+        ],
+    ]);
+}
 
+#[test]
+fn extension_command_docs_cover_live_install_for_component_flags() {
+    let extension = include_str!("../docs/commands/extension.md");
+    let install_for_component =
+        command_doc_heading_section(extension, "### `install-for-component`");
+    assert!(install_for_component
+        .contains("install-for-component --source <source> [--path <component_path>]"));
+
+    Cli::try_parse_from([
+        "homeboy",
+        "extension",
+        "install-for-component",
+        "--source",
+        "https://example.com/extensions.git",
+    ])
+    .expect("documented extension install-for-component command should parse");
+
+    assert!(!install_for_component.contains("--revision"));
+    assert!(!install_for_component.contains("--ref"));
     assert!(
         Cli::try_parse_from([
             "homeboy",
@@ -653,6 +707,30 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
         .is_err(),
         "extension install-for-component should not advertise or accept stale --revision/--ref flags"
     );
+}
+
+#[test]
+fn extension_provided_command_docs_identify_extension_origin() {
+    let cargo = include_str!("../docs/commands/cargo.md");
+    assert!(cargo.contains("extension-provided"));
+    let wp = include_str!("../docs/commands/wp.md");
+    assert!(wp.contains("extension-provided"));
+}
+
+fn command_doc_heading_section<'a>(document: &'a str, heading: &str) -> &'a str {
+    let section = document
+        .split_once(heading)
+        .unwrap_or_else(|| panic!("missing command docs heading {heading}"))
+        .1;
+    section.split("\n### ").next().unwrap_or(section)
+}
+
+fn assert_documented_commands_parse(commands: &[&[&str]]) {
+    for args in commands {
+        Cli::try_parse_from(*args).unwrap_or_else(|error| {
+            panic!("documented command failed to parse: {args:?}\n{error}")
+        });
+    }
 }
 
 #[test]

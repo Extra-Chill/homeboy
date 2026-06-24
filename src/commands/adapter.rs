@@ -206,7 +206,7 @@ mod tests {
             Commands::Manifest(crate::commands::manifest::ManifestArgs {}),
             CommandOutputFileMode::None,
         )
-        .is_ok());
+        .is_err());
     }
 
     #[test]

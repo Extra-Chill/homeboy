@@ -114,9 +114,10 @@ pub fn collect_status(
     health_only: bool,
 ) -> crate::core::Result<FleetStatusResult> {
     let fl = super::load(fleet_id)?;
+    let resolution = super::resolve_fleet_projects(&fl)?;
 
     if cached {
-        return collect_cached_status(&fl.project_ids);
+        return collect_cached_status(&fl.project_ids, resolution);
     }
 
     // Deduplicate servers: collect health once per unique server
@@ -125,14 +126,17 @@ pub fn collect_status(
     let mut summary = FleetStatusSummary::default();
     summary.projects.total = fl.project_ids.len() as u32;
 
-    for project_id in &fl.project_ids {
-        let proj = match project::load(project_id) {
-            Ok(p) => p,
-            Err(_) => {
-                summary.projects.unreachable += 1;
-                continue;
-            }
-        };
+    for error in &resolution.errors {
+        summary.projects.unreachable += 1;
+        summary.warnings.push(FleetWarning {
+            server_id: String::new(),
+            project_id: error.project_id.clone(),
+            message: format!("fleet references unresolved project: {}", error.error),
+        });
+    }
+
+    for proj in &resolution.projects {
+        let project_id = &proj.id;
 
         // Collect health (deduped by server_id)
         let health = if let Some(ref server_id) = proj.server_id {
@@ -211,16 +215,25 @@ pub fn collect_status(
 }
 
 /// Collect cached status (local versions only, no SSH).
-fn collect_cached_status(project_ids: &[String]) -> crate::core::Result<FleetStatusResult> {
+fn collect_cached_status(
+    project_ids: &[String],
+    resolution: super::FleetProjectResolution,
+) -> crate::core::Result<FleetStatusResult> {
     let mut project_statuses = Vec::new();
     let mut summary = FleetStatusSummary::default();
     summary.projects.total = project_ids.len() as u32;
 
-    for project_id in project_ids {
-        let proj = match project::load(project_id) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+    for error in &resolution.errors {
+        summary.projects.unreachable += 1;
+        summary.warnings.push(FleetWarning {
+            server_id: String::new(),
+            project_id: error.project_id.clone(),
+            message: format!("fleet references unresolved project: {}", error.error),
+        });
+    }
+
+    for proj in &resolution.projects {
+        let project_id = &proj.id;
 
         summary.projects.healthy += 1; // Can't know health without SSH
 
@@ -264,21 +277,7 @@ fn collect_project_component_statuses(
     proj: &project::Project,
     component_summary: &mut FleetComponentSummary,
 ) -> Vec<FleetComponentStatus> {
-    let config = DeployConfig {
-        component_ids: vec![],
-        all: true,
-        outdated: false,
-        behind_upstream: false,
-        dry_run: false,
-        check: true,
-        force: false,
-        skip_build: true,
-        keep_deps: false,
-        expected_version: None,
-        no_pull: true,
-        head: true,
-        tagged: false,
-    };
+    let config = DeployConfig::check_all_no_pull_head();
 
     match deploy::run(project_id, &config) {
         Ok(result) => {
@@ -407,5 +406,41 @@ fn compute_server_summary(
             }
             None => summary.servers.unreachable += 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::fleet::{self, Fleet};
+    use crate::core::project::{self, Project};
+    use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn cached_status_surfaces_unresolved_fleet_projects() {
+        with_isolated_home(|_| {
+            project::save(&Project {
+                id: "configured-site".to_string(),
+                ..Default::default()
+            })
+            .expect("project config");
+            fleet::save(&Fleet::new(
+                "production".to_string(),
+                vec!["configured-site".to_string(), "missing-site".to_string()],
+            ))
+            .expect("fleet config");
+
+            let result = collect_status("production", true, false).expect("status");
+
+            assert_eq!(result.summary.projects.total, 2);
+            assert_eq!(result.summary.projects.healthy, 1);
+            assert_eq!(result.summary.projects.unreachable, 1);
+            assert_eq!(result.projects.len(), 1);
+            assert_eq!(result.summary.warnings.len(), 1);
+            assert_eq!(result.summary.warnings[0].project_id, "missing-site");
+            assert!(result.summary.warnings[0]
+                .message
+                .contains("unresolved project"));
+        });
     }
 }

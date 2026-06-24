@@ -106,7 +106,7 @@ enum RigCommand {
         /// Rig ID
         rig_id: String,
     },
-    /// List persisted observation runs for this rig
+    /// Compatibility alias for `homeboy runs list --rig <rig-id>`
     Runs {
         /// Rig ID
         rig_id: String,

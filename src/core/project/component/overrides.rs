@@ -46,11 +46,11 @@ fn apply_overrides_layer(
 /// Fleet-level overrides provide defaults, project-level overrides take precedence.
 ///
 /// `cli_path` has an extra fallback step: if no explicit override at any layer
-/// sets it, the project-scoped `Project::cli_path` (or Studio auto-detect) fills
-/// it in via [`crate::core::project::project_cli_path`]. This makes "every component
-/// on this site uses `studio wp`" a one-line project config instead of a per-
-/// component repeat. Component-level `cli_path` still wins as the most-specific
-/// escape hatch.
+/// sets it, the project-scoped `Project::cli_path` fills it in via
+/// [`crate::core::project::project_cli_path`]. This makes "every component on
+/// this site uses the same wrapper CLI" a one-line project config instead of a
+/// per-component repeat. Component-level `cli_path` still wins as the
+/// most-specific escape hatch.
 pub fn apply_component_overrides(
     component: &crate::core::component::Component,
     project: &Project,
@@ -76,9 +76,9 @@ pub fn apply_component_overrides(
         apply_overrides_layer(&mut merged, overrides);
     }
 
-    // cli_path-only fallback: project-scoped CLI path (and Studio auto-detect)
-    // fills in the gap when no explicit override at any layer set it. This is
-    // intentionally last so any explicit override above wins.
+    // cli_path-only fallback: project-scoped CLI path fills in the gap when no
+    // explicit override at any layer set it. This is intentionally last so any
+    // explicit override above wins.
     if merged.cli_path.is_none() {
         if let Some(cli_path) = project_cli_fallback {
             merged.cli_path = Some(cli_path);
@@ -245,12 +245,12 @@ mod tests {
         assert_eq!(component.cli_path, None);
 
         let overrides = ProjectComponentOverrides {
-            cli_path: Some("studio wp".to_string()),
+            cli_path: Some("lando wp".to_string()),
             ..Default::default()
         };
 
         apply_overrides_layer(&mut component, &overrides);
-        assert_eq!(component.cli_path, Some("studio wp".to_string()));
+        assert_eq!(component.cli_path, Some("lando wp".to_string()));
     }
 
     #[test]
@@ -261,14 +261,14 @@ mod tests {
         overrides.insert(
             "my-plugin".to_string(),
             ProjectComponentOverrides {
-                cli_path: Some("studio wp".to_string()),
+                cli_path: Some("lando wp".to_string()),
                 ..Default::default()
             },
         );
-        let project = project_with_overrides("my-studio-site", overrides);
+        let project = project_with_overrides("my-site", overrides);
 
         let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.cli_path, Some("studio wp".to_string()));
+        assert_eq!(result.cli_path, Some("lando wp".to_string()));
     }
 
     /// Project-scoped `cli_path` fills in when no explicit component override sets it.
@@ -278,12 +278,12 @@ mod tests {
         let component = base_component("my-plugin");
         let project = Project {
             id: "my-site".to_string(),
-            cli_path: Some("studio wp".to_string()),
+            cli_path: Some("lando wp".to_string()),
             ..Default::default()
         };
 
         let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.cli_path, Some("studio wp".to_string()));
+        assert_eq!(result.cli_path, Some("lando wp".to_string()));
     }
 
     /// Component-level override is the most-specific escape hatch and wins
@@ -302,7 +302,7 @@ mod tests {
         );
         let project = Project {
             id: "my-site".to_string(),
-            cli_path: Some("studio wp".to_string()),
+            cli_path: Some("wp-env run cli wp".to_string()),
             component_overrides: overrides,
             ..Default::default()
         };
@@ -320,7 +320,7 @@ mod tests {
 
         let project = Project {
             id: "my-site".to_string(),
-            cli_path: Some("studio wp".to_string()),
+            cli_path: Some("lando wp".to_string()),
             ..Default::default()
         };
 
