@@ -610,9 +610,9 @@ mod tests {
     #[test]
     fn cluster_by_name_segments_groups_shared_prefixes() {
         let names = vec![
-            "extract_php_signatures",
-            "extract_rust_signatures",
-            "extract_js_signatures",
+            "extract_alpha_signatures",
+            "extract_beta_signatures",
+            "extract_gamma_signatures",
             "generate_stub",
             "generate_import",
             "generate_test",
@@ -629,14 +629,14 @@ mod tests {
         // All 3 extract_* functions should be in the same cluster
         let extract_cluster = clusters
             .iter()
-            .find(|(_, items)| items.contains(&"extract_php_signatures"));
+            .find(|(_, items)| items.contains(&"extract_alpha_signatures"));
         assert!(
             extract_cluster.is_some(),
             "extract_* functions should be clustered together"
         );
         let extract_items = &extract_cluster.unwrap().1;
-        assert!(extract_items.contains(&"extract_rust_signatures"));
-        assert!(extract_items.contains(&"extract_js_signatures"));
+        assert!(extract_items.contains(&"extract_beta_signatures"));
+        assert!(extract_items.contains(&"extract_gamma_signatures"));
 
         // All 3 generate_* functions should be in the same cluster
         let generate_cluster = clusters
