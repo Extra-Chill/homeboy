@@ -458,11 +458,15 @@ impl JobStore {
             ));
         }
         if stored.job.claimed_by_runner_id.as_deref() != Some(runner_id) {
-            return Err(Error::validation_invalid_argument(
-                "runner_id",
+            // A runner attempting to act on a job claimed by a *different*
+            // runner is an authorization violation, not a plain validation
+            // error: it must surface as a `broker.auth_denied` (401) so a
+            // second runner with its own valid token cannot finish/heartbeat
+            // another runner's job.
+            return Err(Error::broker_auth_denied(
                 "remote runner job is not claimed by this runner",
                 Some(runner_id.to_string()),
-                None,
+                Vec::new(),
             ));
         }
         if claim_id.trim().is_empty() {
