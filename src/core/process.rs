@@ -113,6 +113,12 @@ pub struct ProcessTreeTermination {
 const SIGTERM_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 #[cfg(unix)]
 const SIGTERM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+/// How long to wait after escalating to SIGKILL before declaring a pid an
+/// unkillable survivor. SIGKILL delivery/reaping is asynchronous, so a process
+/// that is being torn down can still appear briefly running; without this grace
+/// the survivor set is racy (a freshly SIGKILL'd child reports as surviving).
+#[cfg(unix)]
+const SIGKILL_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 
 pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> {
     if owner_pid > i32::MAX as u32 {
@@ -144,6 +150,9 @@ pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> 
         let survivors_after_term = wait_for_exit(&targets, SIGTERM_GRACE);
         if !survivors_after_term.is_empty() {
             signal_pids(&survivors_after_term, libc::SIGKILL)?;
+            // SIGKILL delivery/reaping is asynchronous; poll for the kill to
+            // take effect before declaring any pid an unkillable survivor.
+            wait_for_exit(&survivors_after_term, SIGKILL_GRACE);
             killed_pids = survivors_after_term;
         }
 
