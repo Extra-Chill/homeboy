@@ -55,6 +55,11 @@ pub(crate) fn run_runner_resident_lab_offload(
     let remote_output_file = request
         .output_file_requested
         .then(|| remote_lab_output_file(runner_workspace_root));
+    // Structured output goes to a Homeboy-owned sibling artifact directory
+    // outside the resident checkout (#6219); create it before dispatch.
+    if let Some(output_file) = remote_output_file.as_deref() {
+        ensure_remote_lab_artifact_dir(runner_id, output_file)?;
+    }
     let remapped_args = rewrite_runner_resident_lab_offload_args(
         request.normalized_args,
         remote_output_file.as_deref(),

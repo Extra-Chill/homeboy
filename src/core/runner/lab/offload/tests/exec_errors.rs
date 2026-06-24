@@ -426,3 +426,47 @@ fn lab_stream_truncation_is_allowed_with_structured_output_file() {
     ensure_lab_offload_streams_not_truncated(&output, true)
         .expect("structured output file preserves complete command result");
 }
+
+#[test]
+fn lab_artifact_dir_is_a_sibling_outside_the_checkout() {
+    let checkout = "/srv/runner/workspaces/homeboy-core";
+    let artifact_dir = remote_lab_artifact_dir(checkout);
+
+    // The artifact directory must NOT live inside the synced git checkout,
+    // otherwise its structured output would dirty the workspace (#6219).
+    assert_eq!(
+        artifact_dir,
+        "/srv/runner/workspaces/homeboy-core-homeboy-artifacts"
+    );
+    assert!(
+        !artifact_dir.starts_with(&format!("{checkout}/")),
+        "artifact dir `{artifact_dir}` must not be nested inside checkout `{checkout}`"
+    );
+}
+
+#[test]
+fn lab_artifact_dir_ignores_trailing_slash_on_checkout() {
+    assert_eq!(
+        remote_lab_artifact_dir("/srv/runner/workspaces/homeboy-core/"),
+        "/srv/runner/workspaces/homeboy-core-homeboy-artifacts"
+    );
+}
+
+#[test]
+fn lab_structured_output_file_is_written_outside_the_checkout() {
+    let checkout = "/srv/runner/workspaces/homeboy-core";
+    let output_file = remote_lab_output_file(checkout);
+
+    // Structured output goes into the Homeboy-owned sibling artifact directory,
+    // never directly into the synced checkout root.
+    assert!(
+        output_file.starts_with(&format!("{checkout}-homeboy-artifacts/")),
+        "structured output `{output_file}` must live in the sibling artifact dir"
+    );
+    assert!(
+        !output_file.starts_with(&format!("{checkout}/")),
+        "structured output `{output_file}` must not dirty the checkout `{checkout}`"
+    );
+    assert!(output_file.ends_with(".json"));
+    assert!(output_file.contains("homeboy-lab-structured-output-"));
+}
