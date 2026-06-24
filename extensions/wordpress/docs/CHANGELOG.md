@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.21] - 2026-06-24
+
+### Changed
+- Mount SSI fixture matrix artifacts in Codebox
+
 ## [3.13.20] - 2026-06-24
 
 ### Changed
