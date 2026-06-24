@@ -75,12 +75,16 @@ pub fn validate_component_local_paths(project: &Project) -> Result<()> {
         return Ok(());
     }
 
-    Err(Error::validation_invalid_argument(
+    let mut err = Error::validation_invalid_argument(
         "components.local_path",
         "Project has component local_path blockers",
         Some(project.id.clone()),
-        Some(blockers),
-    ))
+        Some(blockers.clone()),
+    );
+    for blocker in blockers {
+        err = err.with_hint(blocker);
+    }
+    Err(err)
 }
 
 pub fn validate_component_local_path(project: &Project, component_id: &str) -> Result<()> {
@@ -97,12 +101,16 @@ pub fn validate_component_local_path(project: &Project, component_id: &str) -> R
         return Ok(());
     }
 
-    Err(Error::validation_invalid_argument(
+    let mut err = Error::validation_invalid_argument(
         "components.local_path",
         "Project component has a missing local_path",
         Some(project.id.clone()),
-        Some(blockers),
-    ))
+        Some(blockers.clone()),
+    );
+    for blocker in blockers {
+        err = err.with_hint(blocker);
+    }
+    Err(err)
 }
 
 fn component_local_path_blockers(project: &Project) -> Vec<String> {

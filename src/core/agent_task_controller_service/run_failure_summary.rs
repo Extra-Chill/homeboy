@@ -205,7 +205,13 @@ fn classify_owner_surface(
     {
         return OwnerSurface::ExtensionProvider;
     }
-    if haystack.contains("codebox") || haystack.contains("plugin activation") {
+    let provider_hint = provider.unwrap_or("").to_ascii_lowercase();
+    if haystack.contains("codebox")
+        || provider_hint.contains("codebox")
+        || phase.contains("codebox")
+        || phase.contains("plugin_activation")
+        || haystack.contains("plugin activation")
+    {
         return OwnerSurface::WpCodebox;
     }
     if haystack.contains("php fatal")
@@ -334,13 +340,15 @@ fn declared_ref_from_item(container_key: &str, item: &Value) -> Option<Controlle
     let uri = string_field(item, "uri")
         .or_else(|| string_field(item, "url"))
         .or_else(|| string_field(item, "path"))?;
-    let kind = string_field(item, "kind").unwrap_or_else(|| {
-        if container_key == "evidence_refs" {
-            "evidence_bundle".to_string()
-        } else {
-            "artifact_bundle".to_string()
-        }
-    });
+    // The evidence-ref `kind` is its own taxonomy (`artifact_bundle`,
+    // `evidence_bundle`, ...) keyed by the declaring container, not by the
+    // artifact's intrinsic `kind` (e.g. `log_bundle`). Classify by container so
+    // declared provider artifacts surface as `artifact_bundle`.
+    let kind = if container_key == "evidence_refs" {
+        "evidence_bundle".to_string()
+    } else {
+        "artifact_bundle".to_string()
+    };
     let label = string_field(item, "label")
         .or_else(|| string_field(item, "name"))
         .or_else(|| string_field(item, "role"));

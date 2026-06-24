@@ -391,7 +391,10 @@ fn derive_fork_loop_id(requested_loop_id: &str, spec_fingerprint: &str) -> Strin
         .chars()
         .take(12)
         .collect::<String>();
-    format!("{requested_loop_id}/fork-{short}")
+    // Use a sanitization-stable separator: the loop_id becomes a single path
+    // segment (slashes are collapsed to `_` by sanitize_path_segment), so the
+    // persisted `record.loop_id` would otherwise diverge from the derived id.
+    format!("{requested_loop_id}-fork-{short}")
 }
 
 /// Remove a persisted controller record (and its directory) so a replace

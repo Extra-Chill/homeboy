@@ -559,10 +559,12 @@ pub(crate) fn validate_artifact_flow_bindings(spec: &AgentTaskRepoLoopSpec) -> R
             let has_flow_edge = spec.artifact_graph.iter().any(|edge| {
                 &edge.artifact_id == artifact_id && edge.to_workflow_id == workflow.workflow_id
             });
+            // A consume binding must be backed by an explicit emit or an
+            // artifact_flow edge. A producer merely declaring the artifact in
+            // its `artifacts` set does not establish a consume flow.
             let has_repo_producer = spec.workflows.iter().any(|producer| {
                 producer.workflow_id != workflow.workflow_id
-                    && (producer.artifacts.contains(artifact_id)
-                        || producer.emits.contains(artifact_id))
+                    && producer.emits.contains(artifact_id)
             });
             if !has_flow_edge && !has_repo_producer {
                 diagnostics.push(format!(

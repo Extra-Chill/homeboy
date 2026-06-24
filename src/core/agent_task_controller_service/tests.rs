@@ -1194,7 +1194,7 @@ fn init_from_spec_for_resume_fork_isolates_under_derived_loop_id() {
         assert_eq!(resume_state.action, "forking");
         assert_eq!(resume_state.requested_loop_id, "repo-loop-resume-fork");
         assert_ne!(report.loop_id, "repo-loop-resume-fork");
-        assert!(report.loop_id.starts_with("repo-loop-resume-fork/fork-"));
+        assert!(report.loop_id.starts_with("repo-loop-resume-fork-fork-"));
 
         // The original controller still carries the base fingerprint, untouched.
         let original = status("repo-loop-resume-fork").expect("original controller intact");
