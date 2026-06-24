@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.11] - 2026-06-24
+
+### Changed
+- Discover global WP Codebox CLI entrypoints
+
 ## [3.13.10] - 2026-06-24
 
 ### Changed
