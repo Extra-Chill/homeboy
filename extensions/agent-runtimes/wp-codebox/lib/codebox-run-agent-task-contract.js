@@ -8,12 +8,6 @@ const {
 } = require('./wp-codebox-runtime-contract-source');
 
 const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
-const {
-  isCodeboxLegacyAgentTaskRunResult,
-  allowLegacyCodeboxResultCompatibility,
-  legacyAgentTaskRunEvidenceRefs,
-  legacyAgentTaskRunSessionArtifacts,
-} = require('./codebox-legacy-result-adapter');
 
 const WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.agentTask.runRequest;
 const WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.agentTask.runResult;
@@ -120,8 +114,4 @@ module.exports = {
   codeboxRunAgentTaskRequestFromTaskInput,
   isProductionRuntimeProfile,
   legacyAgentTaskRunCompatibilityEnabled,
-  allowLegacyCodeboxResultCompatibility,
-  isCodeboxLegacyAgentTaskRunResult,
-  legacyAgentTaskRunEvidenceRefs,
-  legacyAgentTaskRunSessionArtifacts,
 };

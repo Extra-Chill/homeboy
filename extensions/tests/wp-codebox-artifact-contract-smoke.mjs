@@ -35,7 +35,6 @@ assert.equal(artifactRoleFromCodeboxArtifact({ kind: 'codebox-patch' }, { artifa
 assert.equal(artifactRoleFromCodeboxArtifact({ path: '/tmp/files/changed-files.json' }), 'artifact');
 assert.equal(artifactRoleFromCodeboxArtifact({ path: '/tmp/files/changed-files.json' }, { allowArtifactRoleFallbackCompatibility: true }), 'changed_files');
 assert.equal(allowArtifactRoleFallbackCompatibility({}), false);
-assert.equal(allowArtifactRoleFallbackCompatibility({ allowLegacyCodeboxResultCompatibility: true }), true);
 
 assert.deepEqual(typedArtifactFileRefs({ fileRefs: [{ path: 'artifact.json' }] }), [{ path: 'artifact.json' }]);
 
@@ -101,15 +100,8 @@ const projectedResult = {
   ],
 };
 assert.equal(artifactResultEnvelopeFromCodeboxResult(projectedResult), null);
-const projectedEnvelope = artifactResultEnvelopeFromCodeboxResult(projectedResult, { allowLegacyCodeboxResultCompatibility: true });
-assert.equal(projectedEnvelope.operation, 'import-artifact-bundle');
 assert.deepEqual(Object.keys(typedArtifactsFromCodeboxResult(projectedResult)), []);
-assert.deepEqual(Object.keys(typedArtifactsFromCodeboxResult(projectedResult, { allowLegacyCodeboxResultCompatibility: true })), ['review']);
 assert.equal(artifactResultEnvelopeFromCodeboxResult({ artifactResult: artifactResultEnvelope }), null);
-assert.equal(
-  artifactResultEnvelopeFromCodeboxResult({ artifactResult: artifactResultEnvelope }, { allowLegacyCodeboxResultCompatibility: true }).operation,
-  'import-artifact-bundle'
-);
 assert.deepEqual(typedArtifactsFromCodeboxResult({
   artifact_result: artifactResultEnvelope,
   metadata: {
@@ -200,21 +192,6 @@ assert.deepEqual(typedArtifactsFromCodeboxResult({
     },
   },
 }), {});
-assert.equal(typedArtifactsFromCodeboxResult({
-  metadata: {
-    agent_runtime: {
-      result: {
-        schema: 'wp-codebox/artifact-result-envelope/v1',
-        outputs: {
-          typed_artifacts: {
-            legacy: { type: 'json', payload: { old: true } },
-          },
-        },
-      },
-    },
-  },
-}, { allowLegacyCodeboxResultCompatibility: true }).legacy.payload.old, true);
-
 assert.deepEqual(normalizeCaseArtifactIndex({
   case_refs: [{
     componentId: 'component-one',

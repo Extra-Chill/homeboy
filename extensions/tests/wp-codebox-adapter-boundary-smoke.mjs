@@ -11,7 +11,6 @@ process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(repoRoot, 'tests', 'fix
 const runtimePackage = require(path.join(repoRoot, 'agent-runtimes', 'wp-codebox'));
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'agent-runtimes', 'wp-codebox', 'package.json'), 'utf8'));
 
-assert.equal(runtimePackage.DEPRECATED_CODEBOX_LEGACY_RESULT_ADAPTER.status, 'deprecated');
 assert.equal(runtimePackage.wpCodeboxCliDescriptor().schema, 'wp-codebox/cli-descriptor/v1');
 
 const stableConsumerExports = [
@@ -26,20 +25,12 @@ for (const exportName of stableConsumerExports) {
   assert.doesNotMatch(JSON.stringify(packageJson.exports[exportName]), forbidden, `${exportName} export should stay on the WP Codebox runtime package contract`);
 }
 
-const allowedLegacyImporters = new Set([
-  'agent-runtimes/wp-codebox/index.js',
-  'agent-runtimes/wp-codebox/lib/codebox-artifact-contract.js',
-  'agent-runtimes/wp-codebox/lib/codebox-run-agent-task-contract.js',
-  'agent-runtimes/wp-codebox/lib/codebox-legacy-result-adapter.js',
-]);
 const runtimeFiles = walk(path.join(repoRoot, 'agent-runtimes', 'wp-codebox'))
   .filter((filePath) => filePath.endsWith('.js'));
 for (const filePath of runtimeFiles) {
   const relativePath = path.relative(repoRoot, filePath);
   const source = fs.readFileSync(filePath, 'utf8');
-  if (source.includes('codebox-legacy-result-adapter')) {
-    assert.equal(allowedLegacyImporters.has(relativePath), true, `${relativePath} must not depend on deprecated legacy result parsing`);
-  }
+  assert.equal(source.includes('codebox-legacy-result-adapter'), false, `${relativePath} must not depend on removed legacy result parsing`);
 }
 
 function walk(directory) {

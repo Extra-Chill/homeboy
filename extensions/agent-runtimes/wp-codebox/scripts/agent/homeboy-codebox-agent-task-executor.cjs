@@ -19,9 +19,6 @@ const {
   providerContract,
 } = require('../../lib/codebox-agent-task-executor');
 const {
-  discoverCodeboxArtifactRefs,
-} = require('../../lib/codebox-artifact-contract');
-const {
   normalizeStringArray,
   providerAuthEnvSources,
   providerDiagnosticClass,
@@ -206,7 +203,6 @@ function providerAuthEnv(taskInput) {
 function timeoutPayload(timeoutMs, request = {}) {
   const artifacts = argValue('--artifacts') || request.executor?.config?.artifacts || '';
   const evidencePath = artifacts ? `${artifacts}/homeboy-codebox-task-runner.json` : '';
-  const discovered = discoverCodeboxArtifactRefs(artifacts);
   const knownArtifacts = [];
   if (artifacts) {
     knownArtifacts.push({
@@ -224,23 +220,11 @@ function timeoutPayload(timeoutMs, request = {}) {
       metadata: { artifacts },
     });
   }
-  for (const artifact of discovered.artifacts) {
-    if (!knownArtifacts.some((knownArtifact) => knownArtifact.path === artifact.path)) {
-      knownArtifacts.push(artifact);
-    }
-  }
-
   const evidenceRefs = evidencePath && fs.existsSync(evidencePath) ? [{
     kind: 'codebox-task-runner-preflight',
     uri: evidencePath,
     label: 'WP Codebox task runner preflight evidence',
   }] : [];
-  for (const ref of discovered.evidenceRefs) {
-    if (!evidenceRefs.some((knownRef) => knownRef.uri === ref.uri)) {
-      evidenceRefs.push(ref);
-    }
-  }
-
   return {
     success: false,
     timeout: true,
@@ -256,9 +240,6 @@ function timeoutPayload(timeoutMs, request = {}) {
         artifacts,
         evidence_path: evidencePath,
         artifact_ref_count: knownArtifacts.length,
-        runtime_id: discovered.runtimeId,
-        last_known_phase: discovered.lastKnownPhase,
-        last_heartbeat: discovered.lastHeartbeat,
       },
     }],
     metadata: {
@@ -267,9 +248,6 @@ function timeoutPayload(timeoutMs, request = {}) {
       artifacts,
       evidence_path: evidencePath,
       artifact_ref_count: knownArtifacts.length,
-      runtime_id: discovered.runtimeId,
-      last_known_phase: discovered.lastKnownPhase,
-      last_heartbeat: discovered.lastHeartbeat,
     },
   };
 }

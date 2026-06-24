@@ -48,10 +48,7 @@ const repoLoopCapabilities = [
 ];
 
 function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
-  return rawAgentTaskOutcomeFromCodeboxResult(request, result, {
-    allowLegacyCodeboxResultCompatibility: true,
-    ...options,
-  });
+  return rawAgentTaskOutcomeFromCodeboxResult(request, result, options);
 }
 
 function exampleAgentCiCodeboxExecutorConfig(config = {}) {
@@ -262,27 +259,6 @@ function writeBundleFixture(root) {
   fs.mkdirSync(bundle, { recursive: true });
   fs.writeFileSync(path.join(bundle, 'manifest.json'), '{}\n');
   return bundle;
-}
-
-function writeTimeoutArtifacts(artifactRoot, taskId) {
-  const bundleRoot = path.join(artifactRoot, `artifact-${taskId}`);
-  const filesRoot = path.join(bundleRoot, 'files');
-  fs.mkdirSync(filesRoot, { recursive: true });
-  fs.writeFileSync(path.join(bundleRoot, 'manifest.json'), JSON.stringify({
-    schema: 'wp-codebox/artifact-manifest/v1',
-    phase: 'agent.inspecting-runtime',
-  }));
-  fs.writeFileSync(path.join(filesRoot, 'runtime-reference-manifest.json'), JSON.stringify({
-    schema: 'wp-codebox/runtime-reference-manifest/v1',
-    runtime: { id: `runtime-${taskId}` },
-  }));
-  fs.writeFileSync(path.join(filesRoot, 'command.log'), 'ran wp-codebox.agent-sandbox-run\n');
-  fs.writeFileSync(path.join(filesRoot, 'agent-transcript.jsonl'), '{"role":"assistant","content":"partial transcript"}\n');
-  fs.writeFileSync(path.join(filesRoot, 'heartbeat.json'), JSON.stringify({
-    phase: 'agent.inspecting-runtime',
-    heartbeat: { at: '2026-06-01T00:00:00.000Z', turn: 3 },
-  }));
-  return bundleRoot;
 }
 
 const request = {
@@ -2684,9 +2660,6 @@ try {
   providerPluginValidation() { return null; },
   providerSecretEnv() { return []; },
 };\n`);
-  fs.writeFileSync(path.join(installedRuntime, 'lib', 'codebox-artifact-contract.js'), `module.exports = {
-  discoverCodeboxArtifactRefs() { return { artifacts: [], evidenceRefs: [], runtimeId: '', lastKnownPhase: '', lastHeartbeat: null }; },
-};\n`);
   fs.writeFileSync(path.join(installedLayoutRoot, 'extensions', 'wordpress', 'lib', 'wp-codebox-core-loader.js'), `module.exports = { async loadWpCodeboxCore() { return {}; } };\n`);
   const installedLayoutResult = spawnSync(process.execPath, [path.join(installedRuntime, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs')], {
     encoding: 'utf8',
@@ -3279,7 +3252,7 @@ try {
   assert.deepEqual(printedContract.failure_classifications, provider.failure_classifications);
 
   const artifactRoot = path.join(root, 'timeout-artifacts');
-  const bundleRoot = writeTimeoutArtifacts(artifactRoot, 'task-timeout');
+  fs.mkdirSync(artifactRoot, { recursive: true });
   const hangingRequest = {
     ...request,
     task_id: 'task-timeout',
@@ -3306,17 +3279,12 @@ try {
   assert.equal(timeoutOutcome.artifacts[0].path, artifactRoot);
   assert.equal(timeoutOutcome.metadata.codebox.evidence_path, path.join(artifactRoot, 'homeboy-codebox-task-runner.json'));
   assert.equal(timeoutOutcome.metadata.codebox.timeout_classification, 'provider_timeout');
-  assert.equal(timeoutOutcome.metadata.codebox.runtime_id, 'runtime-task-timeout');
-  assert.equal(timeoutOutcome.metadata.codebox.last_known_phase, 'agent.inspecting-runtime');
-  assert.equal(timeoutOutcome.metadata.codebox.last_heartbeat.turn, 3);
-  assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-artifact-bundle' && artifact.path === bundleRoot), true);
-  assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-runtime-reference-manifest'), true);
-  assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-log'), true);
-  assert.equal(timeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-transcript'), true);
-  assert.equal(timeoutOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-transcript'), true);
+  assert.equal(timeoutOutcome.metadata.codebox.artifact_ref_count, 1);
+  assert.equal(timeoutOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-artifact-directory' && ref.uri === artifactRoot), true);
+  assert.equal(timeoutOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-transcript'), false);
 
   const configArtifactRoot = path.join(root, 'timeout-config-artifacts');
-  const configBundleRoot = writeTimeoutArtifacts(configArtifactRoot, 'task-timeout-config-artifacts');
+  fs.mkdirSync(configArtifactRoot, { recursive: true });
   const configArtifactRequest = {
     ...request,
     task_id: 'task-timeout-config-artifacts',
@@ -3345,10 +3313,9 @@ try {
   assert.equal(configArtifactTimeoutOutcome.artifacts[0].path, configArtifactRoot);
   assert.equal(configArtifactTimeoutOutcome.metadata.codebox.artifacts, configArtifactRoot);
   assert.equal(configArtifactTimeoutOutcome.metadata.codebox.evidence_path, path.join(configArtifactRoot, 'homeboy-codebox-task-runner.json'));
-  assert.equal(configArtifactTimeoutOutcome.metadata.codebox.artifact_ref_count > 0, true);
-  assert.equal(configArtifactTimeoutOutcome.metadata.codebox.runtime_id, 'runtime-task-timeout-config-artifacts');
-  assert.equal(configArtifactTimeoutOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-artifact-bundle' && artifact.path === configBundleRoot), true);
-  assert.equal(configArtifactTimeoutOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-transcript'), true);
+  assert.equal(configArtifactTimeoutOutcome.metadata.codebox.artifact_ref_count, 1);
+  assert.equal(configArtifactTimeoutOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-artifact-directory' && ref.uri === configArtifactRoot), true);
+  assert.equal(configArtifactTimeoutOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-transcript'), false);
 
   const missingSecretResult = spawnSync(process.execPath, [
     wpCodeboxRuntimeExecutor,

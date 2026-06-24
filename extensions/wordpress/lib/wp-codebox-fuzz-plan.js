@@ -2,7 +2,6 @@
 
 const WP_CODEBOX_WORKSPACE_RECIPE_SCHEMA = 'wp-codebox/workspace-recipe/v1';
 const WP_CODEBOX_FUZZ_SUITE_SCHEMA = 'wp-codebox/fuzz-suite/v1';
-const WP_CODEBOX_FUZZ_RUN_SCHEMA = legacyWpCodeboxFuzzRunSchemaAlias();
 const WORDPRESS_FUZZ_PLAN_RECIPE_BUILDER_SCHEMA = 'homeboy/wordpress-fuzz-plan-recipe-builder/v1';
 const DEFAULT_WORKFLOW_STEP = { command: 'inspect-mounted-inputs' };
 const FUZZ_PHASES = ['setup', 'action', 'assert', 'teardown'];
@@ -38,15 +37,6 @@ function buildWpCodeboxFuzzPlanRecipe(input = {}) {
 			}),
 		}),
 	});
-}
-
-function buildWpCodeboxFuzzPlanRecipeLegacyRunAlias(input = {}) {
-	const recipe = buildWpCodeboxFuzzPlanRecipe(input);
-	return { ...recipe, fuzzRun: recipe.fuzzSuite };
-}
-
-function legacyWpCodeboxFuzzRunSchemaAlias() {
-	return WP_CODEBOX_FUZZ_SUITE_SCHEMA;
 }
 
 function normalizeFuzzCases(cases) {
@@ -199,10 +189,7 @@ function stripUndefined(value) {
 
 module.exports = {
 	WORDPRESS_FUZZ_PLAN_RECIPE_BUILDER_SCHEMA,
-	WP_CODEBOX_FUZZ_RUN_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	WP_CODEBOX_WORKSPACE_RECIPE_SCHEMA,
 	buildWpCodeboxFuzzPlanRecipe,
-	buildWpCodeboxFuzzPlanRecipeLegacyRunAlias,
-	legacyWpCodeboxFuzzRunSchemaAlias,
 };

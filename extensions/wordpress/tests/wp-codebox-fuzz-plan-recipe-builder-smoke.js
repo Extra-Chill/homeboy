@@ -5,12 +5,9 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
 const {
-	WP_CODEBOX_FUZZ_RUN_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	WP_CODEBOX_WORKSPACE_RECIPE_SCHEMA,
 	buildWpCodeboxFuzzPlanRecipe,
-	buildWpCodeboxFuzzPlanRecipeLegacyRunAlias,
-	legacyWpCodeboxFuzzRunSchemaAlias,
 } = require('../lib/wp-codebox-fuzz-plan');
 
 const plan = {
@@ -38,8 +35,6 @@ const recipe = buildWpCodeboxFuzzPlanRecipe(plan);
 assert.equal(recipe.schema, WP_CODEBOX_WORKSPACE_RECIPE_SCHEMA);
 assert.equal(recipe.fuzzRun, undefined);
 assert.equal(recipe.fuzzSuite.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
-assert.equal(WP_CODEBOX_FUZZ_RUN_SCHEMA, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
-assert.equal(legacyWpCodeboxFuzzRunSchemaAlias(), WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.equal(recipe.fuzzSuite.cases[0].case_id, 'case-001');
 assert.deepEqual(recipe.fuzzSuite.cases[0].phases.action, [{
 	command: 'wordpress.wp-cli',
@@ -48,10 +43,6 @@ assert.deepEqual(recipe.fuzzSuite.cases[0].phases.action, [{
 assert.equal(recipe.inputs.mounts[0].mode, 'readonly');
 assert.equal(recipe.fuzzSuite.metadata.planner, 'homeboy/wordpress-fuzz-plan-recipe-builder/v1');
 assert(!JSON.stringify(recipe).includes('woocommerce'), 'fuzz plan builder must stay product-agnostic');
-
-const legacyRecipe = buildWpCodeboxFuzzPlanRecipeLegacyRunAlias(plan);
-assert.equal(legacyRecipe.fuzzSuite.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
-assert.equal(legacyRecipe.fuzzRun, legacyRecipe.fuzzSuite);
 
 const script = path.join(__dirname, '..', 'scripts', 'fuzz', 'build-wp-codebox-fuzz-plan-recipe.mjs');
 const result = spawnSync(process.execPath, [script], {

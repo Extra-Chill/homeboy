@@ -148,7 +148,7 @@ async function resolveCodeboxResult(context, options = {}) {
 		return normalizeCodeboxResult(context.workload, { runId: context.runId });
 	}
 
-	const runner = options.runFuzzSuite || options.runFuzzRun || options.runRuntimeTask || options.runTask;
+	const runner = options.runFuzzSuite || options.runRuntimeTask || options.runTask;
 	return runWpCodeboxFuzzSuite({
 		...options,
 		taskId: context.runId,
