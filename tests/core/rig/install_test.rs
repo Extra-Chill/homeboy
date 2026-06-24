@@ -360,6 +360,36 @@ fn install_multi_rig_package_can_select_id() {
 }
 
 #[test]
+#[cfg(unix)]
+fn install_id_skips_stacks_from_stale_unrelated_installed_sources() {
+    let _home = HomeGuard::new();
+    let stale_source = tempfile::tempdir().expect("stale source");
+    write_rig(stale_source.path(), "stale-rig", &minimal_rig("stale-rig"));
+    let stale_stack = write_stack(stale_source.path(), "stale-stack", "stale-component");
+    install(stale_source.path().to_str().unwrap(), None, false).expect("install stale source");
+    fs::remove_dir_all(stale_source.path()).expect("remove stale source");
+
+    let package = tempfile::tempdir().expect("package");
+    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+    write_rig(package.path(), "beta", &minimal_rig("beta"));
+    write_stack(package.path(), "stale-stack", "other-component");
+
+    let result = install(package.path().to_str().unwrap(), Some("alpha"), false)
+        .expect("install requested rig despite stale unrelated stack source");
+
+    assert_eq!(result.installed.len(), 1);
+    assert_eq!(result.installed[0].id, "alpha");
+    assert!(result.installed_stacks.is_empty());
+    assert!(crate::core::paths::rig_config("alpha").unwrap().exists());
+    assert!(!crate::core::paths::rig_config("beta").unwrap().exists());
+    assert_eq!(
+        fs::read_link(crate::core::paths::stack_config("stale-stack").unwrap())
+            .expect("stale stack symlink remains reported by sources list"),
+        stale_stack
+    );
+}
+
+#[test]
 fn install_id_skips_invalid_unrelated_rigs_in_package() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
