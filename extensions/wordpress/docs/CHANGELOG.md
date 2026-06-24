@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.2] - 2026-06-24
+
+### Changed
+- Remove legacy Codebox result adapters
+- Use public Codebox adapter boundaries
+
 ## [3.13.1] - 2026-06-24
 
 ### Fixed
