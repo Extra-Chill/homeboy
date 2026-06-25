@@ -375,6 +375,48 @@ assert.equal(planWorkloadInput.cases[0].metadata.source_plan_case, true);
 assert.equal(planWorkloadInput.cases[0].metadata.target_id, 'sample-rest-routes');
 assert.deepEqual(planWorkloadInput.cases[0].inputs.budget_keys, ['max_rest_p95_duration_ms']);
 
+const genericPlanWorkloadInput = wpCodeboxFuzzSuiteInput({
+	id: 'generic-plan-workload-run',
+	homeboyFuzzWorkload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'generic-plan-workload',
+		plan: {
+			schema: 'wordpress-fuzz-plan/v1',
+			id: 'generic-plan',
+			targets: [{
+				id: 'hook:init',
+				surface_id: 'hook:init',
+				cases: [{ id: 'hook:init-generic-fuzz', intent: 'exercise-hook', operation: { hook: 'init' } }],
+			}],
+		},
+	},
+});
+assert.equal(genericPlanWorkloadInput.cases[0].target.entrypoint, 'wordpress.run-fuzz-case');
+assert.deepEqual(genericPlanWorkloadInput.cases[0].input, {
+	case_id: 'hook:init-generic-fuzz',
+	target_id: 'hook:init',
+	surface_id: 'hook:init',
+	intent: 'exercise-hook',
+	operation: { hook: 'init' },
+});
+assert.equal(genericPlanWorkloadInput.cases[0].phases.action[0].command, 'wordpress.run-fuzz-case');
+assert.deepEqual(genericPlanWorkloadInput.cases[0].phases.action[0].args, [
+	'case_id=hook:init-generic-fuzz',
+	'target_id=hook:init',
+	'surface_id=hook:init',
+	'intent=exercise-hook',
+	'operation={"hook":"init"}',
+]);
+
+const genericPlanTaskRequest = wpCodeboxFuzzSuiteTaskRequest({ taskId: 'generic-plan-task', input: genericPlanWorkloadInput });
+const genericPlanPreflight = preflightWpCodeboxFuzzCapabilityContract({
+	request: genericPlanTaskRequest,
+	runtimeContractManifest: manifest,
+	publicCliCapabilities: { commands: { 'run-fuzz-suite': true } },
+});
+assert.equal(genericPlanPreflight.ok, false);
+assert.equal(genericPlanPreflight.missing_contracts.some((contract) => contract.command === 'run-wordpress-workload'), true);
+
 let invoked = false;
 runWpCodeboxFuzzSuite({
 	taskId: 'wp-codebox-fuzz-suite-delegation-smoke',
@@ -475,6 +517,7 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.observation_set.schema, 'homeboy/fuzz-observation-set/v1');
 	assert.equal(summary.observation_set.observations[0].family, 'query');
 	assert.equal(summary.observation_set.observations[1].metric, 'duration_ms');
+	assert.equal(summary.observation_set.observations.some((observation) => observation.case_id === 'case-000' && observation.metric === 'query_count'), true);
 	assert.equal(summary.runtime_task_result.observation_set.observations[0].fingerprint, 'select-posts');
 	assert.equal(summary.derived_artifacts.artifacts.some((artifact) => artifact.role === 'hotspot_summary'), true);
 	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'normalized_fuzz_result', 'coverage_gap_report', 'hotspot_summary', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case', 'repro_case']);

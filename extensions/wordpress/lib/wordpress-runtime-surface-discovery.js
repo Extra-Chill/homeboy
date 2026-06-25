@@ -154,6 +154,7 @@ function appendArtifactSurfaces(surfaces, artifact) {
 	appendArraySurfaces(surfaces, artifact.media || artifact.attachments, 'media', 'media');
 	appendArraySurfaces(surfaces, artifact.postTypes || artifact.post_types, 'post_type', 'post-types');
 	appendArraySurfaces(surfaces, artifact.taxonomies, 'taxonomy', 'taxonomies');
+	appendArraySurfaces(surfaces, artifact.wpCli || artifact.wp_cli || artifact.wpCliCommands || artifact.wp_cli_commands || artifact.commands, 'wp_cli_command', 'wp-cli');
 }
 
 function appendFuzzSurfaceArtifact(surfaces, artifact) {
@@ -256,6 +257,7 @@ function runtimeSurfaceValue(surface, type, index) {
 		|| surface.media
 		|| surface.query
 		|| surface.table
+		|| surface.command
 		|| surface.name
 		|| surface.block
 		|| surface.block_name
