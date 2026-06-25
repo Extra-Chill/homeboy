@@ -739,7 +739,6 @@
         "structural::src/core/agent_task_controller_service/artifacts.rs::HighItemCount",
         "structural::src/core/agent_task_controller_service/tests.rs::GodFile",
         "structural::src/core/agent_task_controller_service/tests.rs::HighItemCount",
-        "structural::src/core/agent_task_lifecycle.rs::GodFile",
         "structural::src/core/agent_task_promotion.rs::GodFile",
         "structural::src/core/agent_task_promotion.rs::HighItemCount",
         "structural::src/core/agent_task_provider.rs::GodFile",
