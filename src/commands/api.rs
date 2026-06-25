@@ -117,6 +117,16 @@ fn mutating_command(command: &ApiCommand) -> Option<(&'static str, &str, &bool)>
 }
 
 fn build_api_json(args: &ApiArgs) -> String {
+    let body_payload =
+        |method: &'static str, endpoint: &String, body: &Option<String>, form: &[String]| {
+            (
+                method,
+                endpoint.clone(),
+                build_body(body, form),
+                body_format(form),
+            )
+        };
+
     let (method, endpoint, body, body_format) = match &args.command {
         ApiCommand::Get { endpoint } => ("GET", endpoint.clone(), None, "json"),
         ApiCommand::Post {
@@ -124,34 +134,19 @@ fn build_api_json(args: &ApiArgs) -> String {
             apply: _,
             body,
             form,
-        } => (
-            "POST",
-            endpoint.clone(),
-            build_body(body, form),
-            body_format(form),
-        ),
+        } => body_payload("POST", endpoint, body, form),
         ApiCommand::Put {
             endpoint,
             apply: _,
             body,
             form,
-        } => (
-            "PUT",
-            endpoint.clone(),
-            build_body(body, form),
-            body_format(form),
-        ),
+        } => body_payload("PUT", endpoint, body, form),
         ApiCommand::Patch {
             endpoint,
             apply: _,
             body,
             form,
-        } => (
-            "PATCH",
-            endpoint.clone(),
-            build_body(body, form),
-            body_format(form),
-        ),
+        } => body_payload("PATCH", endpoint, body, form),
         ApiCommand::Delete { endpoint, apply: _ } => ("DELETE", endpoint.clone(), None, "json"),
     };
 
