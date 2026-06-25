@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.27] - 2026-06-25
+
+### Changed
+- Pass workload steps to Codebox fuzz runtime
+
 ## [3.13.26] - 2026-06-25
 
 ### Changed
