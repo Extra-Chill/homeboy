@@ -154,10 +154,26 @@ pub struct FuzzRunOutput {
     pub passthrough_args: Vec<String>,
     pub target_inventory: Option<FuzzTargetInventory>,
     pub execution: Option<FuzzExecutionOutput>,
+    pub postprocess: Vec<FuzzArtifactPostprocessOutput>,
     pub results: Option<FuzzCampaign>,
     pub campaign_contract: FuzzCampaignContract,
     pub runner_contract: FuzzRunnerContract,
     pub evidence_followups: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct FuzzArtifactPostprocessOutput {
+    pub id: String,
+    pub helper: String,
+    pub action: String,
+    pub input: Option<String>,
+    pub output: String,
+    pub required: bool,
+    pub exit_code: Option<i32>,
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]

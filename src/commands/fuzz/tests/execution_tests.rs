@@ -405,6 +405,128 @@ fn fuzz_artifact_ref_validation_reports_missing_local_refs() {
 }
 
 #[test]
+fn fuzz_artifact_postprocess_collects_declared_output_under_artifact_root() {
+    with_isolated_home(|home| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workload_path = temp.path().join("parser.json");
+        std::fs::write(&workload_path, "{}").expect("workload");
+        let spec: RigSpec = serde_json::from_value(serde_json::json!({
+            "id": "package-fuzz",
+            "fuzz_workloads": {
+                "generic": [
+                    {
+                        "path": "${package.root}/parser.json",
+                        "artifact_postprocess": [
+                            {
+                                "id": "coverage-summary",
+                                "helper": "sh",
+                                "action": "-c",
+                                "input": "${run.fuzz_results}",
+                                "output": "coverage/summary.json",
+                                "parameters": {
+                                    "args": ["cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\""]
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }))
+        .expect("parse rig spec");
+        let context = FuzzRigContext {
+            spec,
+            package_root: Some(temp.path().to_path_buf()),
+        };
+        let workload = FuzzWorkloadOutput {
+            id: "parser".to_string(),
+            label: None,
+            description: None,
+            source: format!("rig_workloads:generic:{}", workload_path.display()),
+            manifest_path: Some(workload_path.to_string_lossy().to_string()),
+        };
+        let results_path = home.path().join("fuzz-results.json");
+        std::fs::write(&results_path, r#"{"status":"ok"}"#).expect("results");
+        let artifacts_dir = home.path().join("fuzz-artifacts");
+
+        let outputs = run_fuzz_artifact_postprocess(
+            Some(&context),
+            Some("generic"),
+            Some(&workload),
+            &results_path,
+            &artifacts_dir,
+        )
+        .expect("postprocess");
+
+        assert_eq!(outputs.len(), 1);
+        assert!(outputs[0].success);
+        let collected = artifacts_dir.join("coverage/summary.json");
+        assert!(collected.is_file());
+        assert_eq!(
+            std::fs::read_to_string(collected).expect("collected"),
+            r#"{"status":"ok"}"#
+        );
+    });
+}
+
+#[test]
+fn required_fuzz_artifact_postprocess_fails_when_output_is_missing() {
+    with_isolated_home(|home| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workload_path = temp.path().join("parser.json");
+        std::fs::write(&workload_path, "{}").expect("workload");
+        let spec: RigSpec = serde_json::from_value(serde_json::json!({
+            "id": "package-fuzz",
+            "fuzz_workloads": {
+                "generic": [
+                    {
+                        "path": "${package.root}/parser.json",
+                        "artifact_postprocess": [
+                            {
+                                "id": "gap-report",
+                                "helper": "sh",
+                                "action": "-c",
+                                "output": "gaps/report.json",
+                                "parameters": { "args": ["true"] }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }))
+        .expect("parse rig spec");
+        let context = FuzzRigContext {
+            spec,
+            package_root: Some(temp.path().to_path_buf()),
+        };
+        let workload = FuzzWorkloadOutput {
+            id: "parser".to_string(),
+            label: None,
+            description: None,
+            source: format!("rig_workloads:generic:{}", workload_path.display()),
+            manifest_path: Some(workload_path.to_string_lossy().to_string()),
+        };
+        let results_path = home.path().join("fuzz-results.json");
+        std::fs::write(&results_path, "{}").expect("results");
+        let artifacts_dir = home.path().join("fuzz-artifacts");
+
+        let outputs = run_fuzz_artifact_postprocess(
+            Some(&context),
+            Some("generic"),
+            Some(&workload),
+            &results_path,
+            &artifacts_dir,
+        )
+        .expect("postprocess");
+
+        assert_eq!(outputs.len(), 1);
+        assert!(!outputs[0].success);
+        let error = fuzz_postprocess_error(&outputs).expect("required failure");
+        assert!(error.contains("gap-report"));
+        assert!(error.contains("did not create required output"));
+    });
+}
+
+#[test]
 fn fuzz_report_persists_result_envelope_artifact_for_run_id() {
     with_isolated_home(|home| {
         let artifact_root = home.path().join("agent-readable-artifacts");

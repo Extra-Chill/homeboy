@@ -481,6 +481,7 @@ fn test_trace_variants() {
 fn workload_with_trace_metadata() -> WorkloadSpec {
     WorkloadSpec {
         path: "/tmp/scoped.trace.mjs".to_string(),
+        artifact_postprocess: Vec::new(),
         trace_phase_template: None,
         public_preview: None,
         check_groups: Some(vec!["desktop-app".to_string()]),

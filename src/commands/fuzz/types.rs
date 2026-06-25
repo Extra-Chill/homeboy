@@ -385,12 +385,12 @@ pub(crate) struct FuzzReplayArgs {
 }
 
 pub use super::types_extra::{
-    FuzzCampaignContract, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot,
-    FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot,
-    FuzzContractGateProfileOutput, FuzzContractOutput, FuzzCoverageCompletenessOutput,
-    FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput, FuzzDiscoverSummary,
-    FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange, FuzzInspectCandidate,
-    FuzzInspectOutput, FuzzListOutput, FuzzOutput, FuzzPlanOutput, FuzzReplayEnv,
-    FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput, FuzzRunnerContract,
-    FuzzValidateOutput, FuzzWorkloadOutput,
+    FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzCompareDeltas,
+    FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot, FuzzCompareHotspotSummary,
+    FuzzCompareOutput, FuzzCompareSnapshot, FuzzContractGateProfileOutput, FuzzContractOutput,
+    FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput,
+    FuzzDiscoverSummary, FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange,
+    FuzzInspectCandidate, FuzzInspectOutput, FuzzListOutput, FuzzOutput, FuzzPlanOutput,
+    FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput,
+    FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
 };

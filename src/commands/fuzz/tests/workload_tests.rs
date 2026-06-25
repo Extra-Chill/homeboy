@@ -42,6 +42,45 @@ fn fuzz_workloads_include_rig_declared_paths() {
 }
 
 #[test]
+fn fuzz_workload_parses_artifact_postprocess_metadata() {
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "package-fuzz",
+        "fuzz_workloads": {
+            "generic": [
+                {
+                    "path": "fuzz/parser.json",
+                    "artifact_postprocess": [
+                        {
+                            "id": "coverage-summary",
+                            "helper": "fuzz-helper",
+                            "action": "summarize-coverage",
+                            "input": "${run.fuzz_results}",
+                            "output": "coverage/summary.json",
+                            "parameters": {
+                                "format": "json",
+                                "threshold": 1
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    }))
+    .expect("parse rig spec");
+
+    let postprocess = spec.fuzz_workloads["generic"][0].artifact_postprocess();
+
+    assert_eq!(postprocess.len(), 1);
+    assert_eq!(postprocess[0].id.as_deref(), Some("coverage-summary"));
+    assert_eq!(postprocess[0].helper, "fuzz-helper");
+    assert_eq!(postprocess[0].action, "summarize-coverage");
+    assert_eq!(postprocess[0].input.as_deref(), Some("${run.fuzz_results}"));
+    assert_eq!(postprocess[0].output, "coverage/summary.json");
+    assert!(postprocess[0].required);
+    assert_eq!(postprocess[0].parameters["format"], "json");
+}
+
+#[test]
 fn resolve_component_id_uses_fuzz_default_component() {
     let spec: RigSpec = serde_json::from_value(serde_json::json!({
         "id": "package-fuzz",

@@ -48,6 +48,7 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
             stdout: String::new(),
             stderr: String::new(),
         }),
+        postprocess: Vec::new(),
         results: Some(results),
         campaign_contract: fuzz_campaign_contract(None, Some("seed-1")),
         runner_contract: FuzzRunnerContract {
