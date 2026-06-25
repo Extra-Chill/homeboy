@@ -551,6 +551,13 @@ fn dispatch_provider_config(
     });
     map.entry("client_context".to_string())
         .or_insert_with(|| client_context.clone());
+    if let Some(runtime_execution) = client_context
+        .get("runtime_execution")
+        .filter(|value| !value.is_null())
+    {
+        map.entry("runtime_execution".to_string())
+            .or_insert_with(|| runtime_execution.clone());
+    }
     map.entry("task_url".to_string())
         .or_insert_with(|| serde_json::json!(request.task_url));
 
@@ -720,7 +727,7 @@ mod tests {
             cwd: Some(workspace.path().display().to_string()),
             repo: Some("data-machine".to_string()),
             client_context: Some(
-                r#"{"surface":"chat","conversation_id":"opaque-123"}"#.to_string(),
+                r#"{"surface":"chat","conversation_id":"opaque-123","runtime_execution":{"kind":"bundle","ability":"runtime-package/run","input":{"package":{"source":"bundles/store-idea-agent","slug":"store-idea-agent"},"workflow":{"id":"store-idea-artifact-flow"}}}}"#.to_string(),
             ),
             ..DispatchRequestOverrides::default()
         }))
@@ -745,6 +752,10 @@ mod tests {
         assert_eq!(
             plan.tasks[0].metadata["client_context"]["conversation_id"],
             "opaque-123"
+        );
+        assert_eq!(
+            plan.tasks[0].executor.config["runtime_execution"]["input"]["package"]["slug"],
+            "store-idea-agent"
         );
         let serialized = serde_json::to_string(&plan).expect("serialize plan");
         assert!(!serialized.contains("discord"));

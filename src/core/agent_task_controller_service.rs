@@ -174,6 +174,8 @@ pub struct AgentTaskRepoLoopSpecWorkflow {
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub inputs: Value,
     #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub runtime_execution: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
     pub execution: Value,
 }
 
@@ -724,6 +726,7 @@ fn workflow_client_context(
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
         "inputs": workflow.inputs,
+        "runtime_execution": workflow.runtime_execution,
     }))
 }
 
@@ -2685,6 +2688,19 @@ mod tests {
                     gates: vec!["quality".to_string()],
                     metrics: vec!["visual-parity".to_string()],
                     inputs: json!({ "finding_key": "abc" }),
+                    runtime_execution: json!({
+                        "kind": "bundle",
+                        "ability": "runtime-package/run",
+                        "input": {
+                            "package": {
+                                "source": "bundles/repair-agent",
+                                "slug": "repair-agent"
+                            },
+                            "workflow": {
+                                "id": "repair-flow"
+                            }
+                        }
+                    }),
                     execution: Value::Null,
                 }],
                 artifacts: vec![AgentTaskRepoLoopSpecArtifact {
@@ -2777,6 +2793,10 @@ mod tests {
                     assert_eq!(context["plan"]["artifacts"][0]["id"], "patch");
                     assert_eq!(context["gates"][0]["gate_id"], "quality");
                     assert_eq!(context["metrics"][0]["metric_id"], "visual-parity");
+                    assert_eq!(
+                        context["runtime_execution"]["input"]["package"]["slug"],
+                        "repair-agent"
+                    );
                 }
                 other => panic!("expected fan_out workflow action, got {other:?}"),
             }
@@ -2818,6 +2838,7 @@ mod tests {
                     gates: Vec::new(),
                     metrics: Vec::new(),
                     inputs: Value::Null,
+                    runtime_execution: Value::Null,
                     execution: Value::Null,
                 }],
                 artifacts: Vec::new(),
@@ -2867,6 +2888,7 @@ mod tests {
                     gates: Vec::new(),
                     metrics: Vec::new(),
                     inputs: Value::Null,
+                    runtime_execution: Value::Null,
                     execution: json!({
                         "kind": "command",
                         "command": "/bin/sh",
@@ -3344,6 +3366,7 @@ mod tests {
                     gates: vec!["quality".to_string()],
                     metrics: vec!["coverage".to_string()],
                     inputs: json!({ "scope": "changed findings" }),
+                    runtime_execution: Value::Null,
                     execution: Value::Null,
                 }],
                 artifacts: vec![AgentTaskRepoLoopSpecArtifact {
