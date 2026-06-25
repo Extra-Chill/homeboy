@@ -58,8 +58,7 @@
     "./benchmark-matrix-report": "./lib/benchmark-matrix-report.js",
     "./fanout-reconcile-runner": "./lib/fanout-reconcile-runner.js",
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js",
-    "./static-site-fanout-adapter": "./lib/static-site-fanout-adapter.js",
-    "./static-site-fixture-matrix": "./lib/static-site-fixture-matrix.js",
+    "./fixture-workload-matrix": "./lib/fixture-workload-matrix.js",
     "./audit-fanout-runtime-provider": "./lib/audit-fanout-runtime-provider.js",
     "./audit-wp-codebox-fanout": "./lib/audit-wp-codebox-fanout.js",
     "./wordpress-runtime-task-planner": "./lib/wordpress-runtime-task-planner.js",
@@ -126,8 +125,7 @@
     "test:fanout-reconcile-runner": "node tests/fanout-reconcile-runner-smoke.js",
     "test:generic-fanout-reconcile-workflow": "node tests/generic-fanout-reconcile-workflow-smoke.js",
     "test:generic-fanout-reconcile-boundary": "node ../tests/generic-fanout-reconcile-boundary.test.mjs",
-    "test:static-site-fanout-adapter": "node tests/static-site-fanout-adapter-smoke.js",
-    "test:static-site-fixture-matrix": "node tests/static-site-fixture-matrix-smoke.js",
+    "test:fixture-workload-matrix": "node tests/fixture-workload-matrix-smoke.js",
     "test:audit-fanout-runtime-provider": "node tests/audit-fanout-runtime-provider-smoke.js",
     "test:wordpress-bench-state-sampling": "php tests/wordpress-bench-state-sampling-helper-smoke.php",
     "test:wordpress-bench-artifacts": "php tests/wordpress-bench-artifact-helper-smoke.php",
@@ -164,7 +162,7 @@
     "test:wordpress-manifest-settings": "node tests/wordpress-manifest-settings-smoke.js",
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js",
     "test:replay-envelope": "node tests/replay-envelope-smoke.js",
-    "static-site-fixture-matrix": "node scripts/static-site-fixture-matrix.mjs"
+    "fixture-workload-matrix": "node scripts/fixture-workload-matrix.mjs"
   },
   "devDependencies": {
     "@wordpress/eslint-plugin": "^25.3.0",
