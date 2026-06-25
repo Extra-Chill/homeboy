@@ -747,8 +747,6 @@
         "structural::src/core/agent_task_scheduler/outcome.rs::HighItemCount",
         "structural::src/core/agent_task_scheduler/tests/fixtures.rs::HighItemCount",
         "structural::src/core/agent_task_scheduler/tests/scheduling_tests.rs::HighItemCount",
-        "structural::src/core/agent_task_service.rs::GodFile",
-        "structural::src/core/agent_task_service.rs::HighItemCount",
         "structural::src/core/agent_tool_control_plane.rs::HighItemCount",
         "structural::src/core/ci_failure_log_triage.rs::HighItemCount",
         "structural::src/core/code_audit/conventions.rs::GodFile",
