@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 
 const {
 	DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS,
@@ -196,13 +197,26 @@ const jsonWorkloadManifest = {
 const jsonWorkloadInput = wpCodeboxFuzzSuiteInput({ id: 'json-workload-run', homeboyFuzzWorkload: jsonWorkloadManifest });
 assert.equal(jsonWorkloadInput.cases.length, 1);
 assert.equal(jsonWorkloadInput.cases[0].id, 'json-workload-smoke:default');
+assert.equal(jsonWorkloadInput.cases[0].target.kind, 'runtime');
 assert.equal(jsonWorkloadInput.cases[0].target.entrypoint, 'wordpress.run-workload');
+assert.deepEqual(jsonWorkloadInput.cases[0].input, { args: ['path=${package.root}/bench/json-workload-smoke.workload.json'] });
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/json-workload-smoke.workload.json'] }]);
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].required, true);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].metadata.semantic_key, 'fuzz.suite_result');
 assert.equal(jsonWorkloadInput.metadata.artifacts.expected[0].required, true);
+
+const wooDbApiFixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/woo-db-api-rest-query-profile-fuzz.json'), 'utf8'));
+const wooDbApiInput = wpCodeboxFuzzSuiteInput({ id: 'woo-db-api-rest-query-profile-run', homeboyFuzzWorkload: wooDbApiFixture.workload });
+assert.equal(wooDbApiInput.cases[0].id, 'rest-db-query-profile:default');
+assert.deepEqual(wooDbApiInput.cases[0].target, { kind: 'runtime', id: 'wordpress.run-workload', entrypoint: 'wordpress.run-workload' });
+assert.deepEqual(wooDbApiInput.cases[0].input, { args: ['path=${package.root}/bench/rest-db-query-profile.workload.json'] });
+assert.deepEqual(wooDbApiInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/rest-db-query-profile.workload.json'] }]);
+const wooDbApiSummary = normalizeWpCodeboxFuzzSuiteResult(wooDbApiFixture.result);
+assert.equal(wooDbApiSummary.hotspot_summary.items[0].value, 12);
+assert.equal(wooDbApiSummary.observation_set.observations[0].fingerprint, 'select-products');
+assert.equal(wooDbApiSummary.observation_set.observations[1].metric, 'duration_ms');
 
 const genericPrimitiveManifest = {
 	schema: 'homeboy/fuzz-workload/v1',
@@ -284,6 +298,7 @@ const planWorkloadInput = wpCodeboxFuzzSuiteInput({ id: 'plan-workload-run', hom
 assert.equal(planWorkloadInput.cases.length, 1);
 assert.equal(planWorkloadInput.cases[0].id, 'plan-workload-smoke:default');
 assert.equal(planWorkloadInput.cases[0].target.entrypoint, 'wordpress.inventory-rest-routes');
+assert.deepEqual(planWorkloadInput.cases[0].input, { args: ['plugin=sample-plugin/sample-plugin.php', 'namespaces=sample/v1,sample/v2', 'artifact=route_inventory'] });
 assert.deepEqual(planWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
 assert.deepEqual(planWorkloadInput.cases[0].phases.action, [{
 	command: 'wordpress.inventory-rest-routes',

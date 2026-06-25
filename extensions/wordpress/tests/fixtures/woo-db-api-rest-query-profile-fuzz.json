@@ -1,0 +1,58 @@
+{
+  "workload": {
+    "schema": "homeboy/fuzz-workload/v1",
+    "id": "rest-db-query-profile",
+    "label": "REST DB query profile",
+    "target": { "type": "wordpress-plugin", "slug": "woocommerce" },
+    "workload": {
+      "runner": "wp-codebox",
+      "type": "json",
+      "path": "${package.root}/bench/rest-db-query-profile.workload.json",
+      "entry": "wp-codebox/run-fuzz-suite"
+    },
+    "artifacts": {
+      "expected": [
+        { "name": "rest_db_query_profile", "role": "fuzz_report", "semantic_key": "fuzz.suite_result", "schema": "wp-codebox/fuzz-suite-result/v1", "required": true }
+      ]
+    },
+    "cases": [
+      {
+        "case_id": "rest-db-query-profile:default",
+        "artifacts": [
+          { "name": "rest_db_query_profile", "path": "rest-db-query-profile/fuzz-suite-result.json", "required": true }
+        ],
+        "intent": {
+          "schema": "homeboy/fuzz-workload-intent/v1",
+          "type": "wordpress-plugin-workload",
+          "plugin": { "activation": "woocommerce/woocommerce.php" },
+          "execute": { "workload_ref": "default", "path": "${package.root}/bench/rest-db-query-profile.workload.json", "type": "json", "entry": "wp-codebox/run-fuzz-suite" },
+          "collect": [ { "artifact": "rest_db_query_profile" } ]
+        }
+      }
+    ]
+  },
+  "result": {
+    "schema": "wp-codebox/fuzz-suite-result/v1",
+    "request_id": "woo-db-api-rest-query-profile-20260624-1",
+    "status": "succeeded",
+    "suite": { "id": "rest-db-query-profile" },
+    "summary": { "total": 1, "passed": 1, "failed": 0, "error": 0, "skipped": 0 },
+    "queries": [
+      { "case_id": "rest-db-query-profile:default", "target_id": "wc-store-products", "operation_id": "GET /wc/store/v1/products", "query": "SELECT * FROM wp_posts WHERE post_type = 'product'", "metric": "query_count", "count": 12, "fingerprint": "select-products" }
+    ],
+    "timings": [
+      { "case_id": "rest-db-query-profile:default", "target_id": "wc-store-products", "operation_id": "GET /wc/store/v1/products", "subject": "request", "duration_ms": 145 }
+    ],
+    "hotspot_summary": {
+      "schema": "homeboy/fuzz-hotspot-summary/v1",
+      "metric": "query_count",
+      "unit": "queries",
+      "items": [
+        { "surface": "wc-store-products", "operation": "GET /wc/store/v1/products", "value": 12, "rank": 1 }
+      ]
+    },
+    "artifacts": {
+      "fuzz_report": { "path": "rest-db-query-profile/fuzz-suite-result.json", "content_type": "application/json" }
+    }
+  }
+}

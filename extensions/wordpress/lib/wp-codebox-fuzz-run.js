@@ -271,12 +271,13 @@ function homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry = {}, manifest = {}, i
 	const caseId = entry.case_id || entry.caseId || entry.id || `${manifest.id || 'fuzz-workload'}:${index}`;
 	const artifacts = normalizeHomeboyFuzzCaseArtifacts(entry, manifest);
 	const command = entry.command || entry.target?.entrypoint || entry.target?.id;
+	const input = homeboyFuzzRuntimeCommandInput(entry.input);
 	return stripUndefined({
 		id: caseId,
 		case_id: caseId,
 		target: { kind: 'runtime', id: command, entrypoint: command },
 		description: entry.description || manifest.label,
-		input: objectOrUndefined(entry.input),
+		input,
 		inputs: objectOrUndefined(entry.inputs),
 		phases: homeboyFuzzWorkloadPlanCasePhases(entry, manifest, artifacts),
 		artifacts,
@@ -346,17 +347,13 @@ function homeboyFuzzWorkloadCaseToWpCodeboxCase(entry = {}, manifest = {}, index
 	const execute = objectOrUndefined(intent.execute) || {};
 	const artifacts = normalizeHomeboyFuzzCaseArtifacts(entry, manifest);
 	const command = homeboyFuzzWorkloadGenericPrimitiveCommand(manifest) || 'wordpress.run-workload';
+	const input = homeboyFuzzWorkloadRuntimeCommandInput(entry, manifest, execute);
 	return stripUndefined({
 		id: caseId,
 		case_id: caseId,
 		target: { kind: 'runtime', id: command, entrypoint: command },
 		description: entry.description || manifest.label,
-		input: stripUndefined({
-			path: execute.path || manifest.workload?.path,
-			type: execute.type || manifest.workload?.type,
-			entry: execute.entry || manifest.workload?.entry,
-			parameters: objectOrUndefined(execute.parameters),
-		}),
+		input,
 		inputs: objectOrUndefined(entry.inputs),
 		phases: homeboyFuzzWorkloadCasePhases(entry, manifest, intent, artifacts),
 		artifacts,
@@ -367,6 +364,33 @@ function homeboyFuzzWorkloadCaseToWpCodeboxCase(entry = {}, manifest = {}, index
 			intent: objectOrUndefined(entry.intent),
 		}),
 	});
+}
+
+function homeboyFuzzRuntimeCommandInput(input) {
+	const direct = objectOrUndefined(input);
+	if (!direct) {
+		return undefined;
+	}
+	if (Array.isArray(direct.args)) {
+		return direct;
+	}
+	const args = homeboyFuzzCommandArgs(direct);
+	return args.length > 0 ? { args } : direct;
+}
+
+function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execute = {}) {
+	if (objectOrUndefined(entry.input)) {
+		return homeboyFuzzRuntimeCommandInput(entry.input);
+	}
+	const workloadPath = execute.path || manifest.workload?.path;
+	if (typeof workloadPath === 'string' && workloadPath.trim() !== '') {
+		return { args: [`path=${workloadPath}`] };
+	}
+	const parameters = objectOrUndefined(execute.parameters);
+	if (parameters) {
+		return homeboyFuzzRuntimeCommandInput(parameters);
+	}
+	return undefined;
 }
 
 function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, artifacts = []) {
