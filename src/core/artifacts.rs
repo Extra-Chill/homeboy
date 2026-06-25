@@ -27,6 +27,7 @@ pub use super::artifact_origin::{
     inspect, serve, status, status_with_command, ArtifactOriginInspect, ArtifactOriginServeSpec,
     ArtifactOriginStatus,
 };
+pub use super::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 pub use super::artifact_ref::{
     ArtifactReference, METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
 };

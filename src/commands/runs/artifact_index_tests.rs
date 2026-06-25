@@ -180,3 +180,59 @@ fn runs_artifacts_surfaces_matrix_summary_from_typed_packets() {
         assert_eq!(summary.finding_packet_refs[0].kind, "finding_packets");
     });
 }
+
+#[test]
+fn runs_artifacts_surfaces_static_html_preview_entrypoints() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "runner-exec",
+                "generic-site-generator",
+                "html-artifacts",
+                serde_json::json!({ "schema": "example/run/v1" }),
+            ))
+            .expect("run");
+        store
+            .finish_run(&run.id, RunStatus::Pass, None)
+            .expect("finish run");
+        let site = home.path().join("site-output");
+        std::fs::create_dir_all(site.join("case-a")).expect("site dirs");
+        std::fs::write(site.join("index.html"), b"<html>Home</html>").expect("index");
+        std::fs::write(site.join("case-a/index.html"), b"<html>Case</html>").expect("case");
+        store
+            .record_directory_artifact_with_metadata(
+                &run.id,
+                "generated_site",
+                &site,
+                serde_json::json!({
+                    "role": "static_site_artifact",
+                    "entrypoints": [{
+                        "path": "index.html",
+                        "label": "Open generated homepage",
+                        "mime_type": "text/html"
+                    }]
+                }),
+            )
+            .expect("record directory");
+
+        let (output, _) = handlers::artifacts(&run.id).expect("artifacts");
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("expected artifacts output");
+        };
+
+        assert_eq!(output.preview_entrypoints.len(), 2);
+        assert_eq!(output.preview_entrypoints[0].path, "index.html");
+        assert_eq!(
+            output.preview_entrypoints[0].label,
+            "Open generated homepage"
+        );
+        assert_eq!(output.preview_entrypoints[0].mime_type, "text/html");
+        assert!(output
+            .preview_entrypoints
+            .iter()
+            .any(|entrypoint| entrypoint.path == "case-a/index.html"));
+        assert_eq!(output.preview_entrypoints[0].public_url, None);
+    });
+}

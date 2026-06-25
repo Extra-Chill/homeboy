@@ -52,24 +52,25 @@ homeboy runs evidence "$run_id"
 
 If `runs evidence` reports success with zero artifacts, the workload is not yet
 reviewable. Keep the run id and output directory, then use the artifact
-promotion or attach command once available. Proposed future shapes are:
+promotion or attach command that matches the output shape:
 
 ```sh
-# Proposed/upcoming: attach a runner-side directory to an existing run.
+# Attach an existing runner-side file to an existing run.
+homeboy runs artifact attach "$run_id" \
+  --runner lab-runner \
+  --path /workspace/example-component/artifacts/review/summary.json \
+  --name review-summary
+
+# Proposed/upcoming: promote a runner-side directory to an existing run.
 homeboy runner artifact promote lab-runner "$run_id" \
   --path artifacts/review \
   --kind static_html \
   --entry index.html
-
-# Proposed/upcoming: attach a local directory to a persisted run.
-homeboy runs artifact attach "$run_id" artifacts/review \
-  --kind static_html \
-  --entry index.html
 ```
 
-Until those commands exist, prefer workflows that already register artifacts
-through the runner daemon, a command-specific artifact contract, CI artifact
-upload, or `runs import --from-gh-actions`.
+Until directory promotion exists, prefer workflows that already register
+directory artifacts through the runner daemon, a command-specific artifact
+contract, CI artifact upload, or `runs import --from-gh-actions`.
 
 ## Static HTML Example
 
@@ -132,10 +133,11 @@ done
   --json artifacts/matrix/matrix-summary.json
 ```
 
-Proposed/upcoming aggregate attach shape:
+Proposed/upcoming aggregate directory promotion shape:
 
 ```sh
-homeboy runs artifact attach "$run_id" artifacts/matrix \
+homeboy runner artifact promote lab-runner "$run_id" \
+  --path artifacts/matrix \
   --kind matrix_static_html \
   --entry index.html
 homeboy runs evidence "$run_id"

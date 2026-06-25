@@ -150,6 +150,10 @@ fn validation_progress_ledger_for_run(run: &RunRecord) -> Option<ValidationProgr
 pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let artifacts = runs_service::list_artifacts_for_run(&store, run_id)?;
+    let preview_entrypoints = artifacts
+        .iter()
+        .flat_map(homeboy::core::artifacts::html_preview_entrypoints)
+        .collect();
     let findings = store.list_findings(FindingListFilter {
         run_id: Some(run_id.to_string()),
         tool: None,
@@ -164,6 +168,7 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
             command: "runs.artifacts",
             run_id: run_id.to_string(),
             artifacts,
+            preview_entrypoints,
             matrix_summary,
         }),
         0,
@@ -172,6 +177,7 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
 
 pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
     match args.command {
+        RunsArtifactCommand::Attach(args) => remote_artifact::attach(args),
         RunsArtifactCommand::Get(args) => artifact_get(args),
         RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
         RunsArtifactCommand::CleanupPersisted(args) => remote_artifact::cleanup_persisted(args),

@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::artifact_links::ArtifactViewerDescriptor;
-use homeboy::core::artifacts::MatrixArtifactSummary;
+use homeboy::core::artifacts::{ArtifactPreviewEntrypoint, MatrixArtifactSummary};
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::runners::RunnerArtifactRef;
@@ -147,6 +147,7 @@ pub enum RunsOutput {
     ResumePlan(RunsResumePlanOutput),
     Evidence(RunsEvidenceOutput),
     Artifacts(RunsArtifactsOutput),
+    ArtifactAttach(RunsArtifactAttachOutput),
     ArtifactGet(RunsArtifactGetOutput),
     ArtifactCleanupDownloads(RunsArtifactCleanupDownloadsOutput),
     ArtifactCleanupPersisted(RunsArtifactCleanupPersistedOutput),
@@ -182,6 +183,8 @@ pub struct RunsArtifactsOutput {
     pub command: &'static str,
     pub run_id: String,
     pub artifacts: Vec<ArtifactRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview_entrypoints: Vec<ArtifactPreviewEntrypoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matrix_summary: Option<MatrixArtifactSummary>,
 }
@@ -208,12 +211,38 @@ pub struct RunsArtifactArgs {
 
 #[derive(Subcommand, Clone)]
 pub(super) enum RunsArtifactCommand {
+    /// Attach an existing runner-side output file to a persisted run
+    Attach(RunsArtifactAttachArgs),
     /// Copy a recorded file artifact to a local path
     Get(RunsArtifactGetArgs),
     /// Plan or delete locally cached runner artifact downloads
     CleanupDownloads(RunsArtifactCleanupDownloadsArgs),
     /// Plan or delete persisted local run artifacts and their database records
     CleanupPersisted(RunsArtifactCleanupPersistedArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct RunsArtifactAttachArgs {
+    /// Observation run id that should own the attached artifact
+    pub run_id: String,
+    /// Runner ID that can read the path
+    #[arg(long)]
+    pub runner: String,
+    /// Absolute runner-side file path under an allowed workspace/output root
+    #[arg(long)]
+    pub path: String,
+    /// Artifact kind/name to record in the observation store
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactAttachOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    pub runner_id: String,
+    pub source_path: String,
+    pub artifact: ArtifactRecord,
 }
 
 #[derive(Args, Clone)]

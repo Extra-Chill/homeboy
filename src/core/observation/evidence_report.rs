@@ -23,6 +23,7 @@ use serde_json::Value;
 
 use super::{ArtifactRecord, RunRecord};
 use crate::core::artifact_address::{ArtifactAddress, ArtifactAddressKind};
+use crate::core::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 use crate::core::artifact_ref::{ArtifactRef, EvidenceRef};
 use crate::core::evidence_manifest::{EvidenceManifest, EVIDENCE_MANIFEST_SCHEMA};
 use crate::core::observation::disk_budget::DiskBudget;
@@ -103,6 +104,8 @@ pub struct EvidenceArtifact {
     pub created_at: String,
     pub exists: bool,
     pub retention_candidate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview_entrypoints: Vec<ArtifactPreviewEntrypoint>,
 }
 
 #[derive(Serialize)]
@@ -192,6 +195,7 @@ pub fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> EvidenceArtifact
             }
             let size = artifact_size_bytes(artifact);
             total_size_bytes = total_size_bytes.saturating_add(size);
+            let preview_entrypoints = html_preview_entrypoints(artifact);
             EvidenceArtifact {
                 id: reference.id.clone(),
                 kind: reference.kind.clone(),
@@ -208,6 +212,7 @@ pub fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> EvidenceArtifact
                 created_at: artifact.created_at.clone(),
                 exists,
                 retention_candidate: artifact.artifact_type != "url",
+                preview_entrypoints,
                 reference,
             }
         })
