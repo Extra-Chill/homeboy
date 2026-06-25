@@ -177,6 +177,7 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
 
 pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
     match args.command {
+        RunsArtifactCommand::Attach(args) => remote_artifact::attach(args),
         RunsArtifactCommand::Get(args) => artifact_get(args),
         RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
         RunsArtifactCommand::CleanupPersisted(args) => remote_artifact::cleanup_persisted(args),
