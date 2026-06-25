@@ -264,6 +264,50 @@ mod tests {
     }
 
     #[test]
+    fn evidence_command_surfaces_static_html_preview_entrypoints() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let artifact_root = home.path().join("agent-readable-artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "runner-exec",
+                    "generic-site-generator",
+                    "html-artifacts",
+                    serde_json::json!({ "schema": "example/run/v1" }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("finish run");
+            let site = home.path().join("site-output");
+            std::fs::create_dir_all(&site).expect("site dir");
+            std::fs::write(site.join("index.html"), b"<html>Home</html>").expect("index");
+            store
+                .record_directory_artifact(&run.id, "generated_site", &site)
+                .expect("record directory");
+
+            let (output, _) = evidence(&run.id).expect("evidence");
+            let RunsOutput::Evidence(output) = output else {
+                panic!("expected evidence output");
+            };
+
+            let artifact = output
+                .artifact_index
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "generated_site")
+                .expect("generated site artifact");
+            assert_eq!(artifact.artifact_type, "directory");
+            assert_eq!(artifact.preview_entrypoints.len(), 1);
+            assert_eq!(artifact.preview_entrypoints[0].path, "index.html");
+            assert_eq!(artifact.preview_entrypoints[0].label, "Open generated site");
+            assert_eq!(artifact.preview_entrypoints[0].public_url, None);
+        });
+    }
+
+    #[test]
     fn evidence_links_reject_unvalidated_local_urls() {
         with_isolated_home(|_home| {
             let _xdg = XdgGuard::unset();
