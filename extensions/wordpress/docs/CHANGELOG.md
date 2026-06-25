@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.36] - 2026-06-25
+
+### Fixed
+- Fix WP Codebox source CLI export
+
 ## [3.13.35] - 2026-06-25
 
 ### Changed
