@@ -204,6 +204,23 @@ const performanceEvidenceResult = normalizeWordPressFuzzResult({
 			status: 'passed',
 			metrics: { queryCount: 'many' },
 		},
+		{
+			id: 'runtime-workload-case',
+			status: 'passed',
+			metadata: {
+				execution: {
+					result: {
+						json: {
+							metrics: {
+								query_count: 2,
+								query_time_ms: 6,
+								top_queries: [{ shape: 'SELECT option_value FROM wp_options WHERE option_name = ?', count: 2 }],
+							},
+						},
+					},
+				},
+			},
+		},
 	],
 });
 
@@ -220,6 +237,9 @@ assert.equal(performanceEvidenceResult.cases[0].performance_metric_reasons.query
 assert.equal(performanceEvidenceResult.cases[1].performance_metric_reasons.query_count.reason, 'metric_not_provided');
 assert.equal(performanceEvidenceResult.cases[2].performance_metric_reasons.query_count.status, 'unsupported');
 assert.equal(performanceEvidenceResult.cases[2].performance_metric_reasons.query_count.source_key, 'queryCount');
+assert.equal(performanceEvidenceResult.cases[3].performance_metrics.query_count, 2);
+assert.equal(performanceEvidenceResult.cases[3].performance_metrics.query_time_ms, 6);
+assert.deepEqual(performanceEvidenceResult.cases[3].performance_summaries.top_queries, [{ shape: 'SELECT option_value FROM wp_options WHERE option_name = ?', count: 2 }]);
 assert.deepEqual(performanceEvidenceResult.cases[0].performance_summaries.top_queries, [{ shape: 'SELECT * FROM wp_posts WHERE ID = ?', count: 4 }]);
 assert.deepEqual(performanceEvidenceResult.cases[0].performance_summaries.top_tables, [{ table: 'wp_posts', count: 5 }]);
 assert.equal(performanceEvidenceResult.cases[0].performance_summaries.browser_network.failed_request_count, 1);
@@ -229,13 +249,13 @@ assert.deepEqual(performanceEvidenceResult.findings.map((finding) => finding.cod
 	'browser_failed_request_count_budget_exceeded',
 ]);
 assert.equal(performanceEvidenceResult.summary.performance_metrics.request_duration_ms, 120);
-assert.equal(performanceEvidenceResult.summary.performance_metrics.query_count, 7);
-assert.equal(performanceEvidenceResult.summary.performance_metrics.query_time_ms, 18);
+assert.equal(performanceEvidenceResult.summary.performance_metrics.query_count, 9);
+assert.equal(performanceEvidenceResult.summary.performance_metrics.query_time_ms, 24);
 assert.equal(performanceEvidenceResult.summary.performance_metrics.memory_peak_bytes, 4096);
 assert.equal(performanceEvidenceResult.summary.performance_metrics.browser_request_count, 9);
 assert.equal(performanceEvidenceResult.summary.performance_metrics.browser_failed_request_count, 1);
 assert.equal(performanceEvidenceResult.summary.performance_metrics.browser_network_idle_ms, 250);
-assert.equal(performanceEvidenceResult.summary.performance_metric_reasons.query_count.observed, 1);
+assert.equal(performanceEvidenceResult.summary.performance_metric_reasons.query_count.observed, 2);
 assert.equal(performanceEvidenceResult.summary.performance_metric_reasons.query_count.missing, 1);
 assert.equal(performanceEvidenceResult.summary.performance_metric_reasons.query_count.unsupported, 1);
 

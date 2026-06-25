@@ -366,6 +366,8 @@ function normalizeCasePerformanceMetrics(result) {
 		result.metrics,
 		result.performance_metrics || result.performanceMetrics,
 		result.metadata?.metrics,
+		result.metadata?.execution?.result?.json,
+		result.metadata?.execution?.result?.json?.metrics,
 		result.db_query || result.dbQuery,
 		result.memory,
 		result.admin_browser || result.adminBrowser,
@@ -410,7 +412,8 @@ function normalizeMetricReasons(result, metrics) {
 }
 
 function normalizeCasePerformanceSummaries(result) {
-	const querySources = [result.db_query || result.dbQuery, result.metrics, result.performance_metrics || result.performanceMetrics, result.metadata?.metrics];
+	const executionJson = result.metadata?.execution?.result?.json;
+	const querySources = [result.db_query || result.dbQuery, result.metrics, result.performance_metrics || result.performanceMetrics, result.metadata?.metrics, executionJson, executionJson?.metrics];
 	const browser = result.admin_browser || result.adminBrowser || {};
 	const browserMetrics = result.browser_metrics || result.browserMetrics || browser.browserMetrics || {};
 	const networkMetrics = result.network_metrics || result.networkMetrics || browser.networkMetrics || {};
