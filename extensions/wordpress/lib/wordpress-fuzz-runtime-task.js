@@ -5,6 +5,7 @@ const WORDPRESS_FUZZ_RUNTIME_TASK_RESULT_SCHEMA = 'homeboy/fuzz-runtime-task-res
 const WORDPRESS_FUZZ_HOTSPOT_SET_SCHEMA = 'homeboy/fuzz-hotspot-set/v1';
 const WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA = WORDPRESS_FUZZ_HOTSPOT_SET_SCHEMA;
 const WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA = 'homeboy/fuzz-observation-set/v1';
+const WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA = 'wp-codebox/wordpress-hotspots/v1';
 
 function buildWordPressFuzzRuntimeTaskRequest(options = {}) {
 	const provider = normalizeProvider(options.provider || options.runtimeId || options.runtime_id || 'wp-codebox');
@@ -192,7 +193,7 @@ function fuzzHotspotSummaryFromObservationSet(input, defaults = {}) {
 
 function normalizeFuzzHotspotSummary(input, defaults = {}) {
 	const source = objectOrUndefined(input) ? input : { items: input };
-	const rawItems = source.hotspots || source.items || source.entries || source.summary || [];
+	const rawItems = codeboxWordPressHotspotItems(source);
 	const summaryDefaults = {
 		...defaults,
 		dimension: nonEmptyString(source.dimension || source.kind || defaults.dimension),
@@ -217,13 +218,37 @@ function normalizeFuzzHotspotSummary(input, defaults = {}) {
 	});
 }
 
+function codeboxWordPressHotspotItems(source = {}) {
+	const direct = source.hotspots || source.items || source.entries || source.summary;
+	if (direct !== undefined) {
+		return direct;
+	}
+	if (source.schema !== WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA) {
+		return [];
+	}
+	return [
+		...typedHotspotItems(source.database || source.db || source.queries || source.query_hotspots || source.queryHotspots, 'database'),
+		...typedHotspotItems(source.api || source.rest || source.routes || source.rest_routes || source.restRoutes, 'api'),
+		...typedHotspotItems(source.performance || source.timing || source.timings, 'performance'),
+	];
+}
+
+function typedHotspotItems(value, dimension) {
+	return normalizeArray(value).flatMap((entry) => {
+		if (Array.isArray(entry)) {
+			return typedHotspotItems(entry, dimension);
+		}
+		return objectOrUndefined(entry) ? [{ dimension, ...entry }] : [];
+	});
+}
+
 function normalizeFuzzHotspotItem(entry = {}, defaults = {}) {
 	if (!objectOrUndefined(entry)) {
 		return undefined;
 	}
 	const metadata = objectOrUndefined(entry.metadata) || {};
-	const surfaceKey = nonEmptyString(entry.surface_key || entry.surfaceKey || entry.surface || entry.surface_id || entry.surfaceId || metadata.surface_key || metadata.surfaceKey || entry.key || entry.id);
-	const operationKey = nonEmptyString(entry.operation_key || entry.operationKey || entry.operation || entry.operation_id || entry.operationId || metadata.operation_key || metadata.operationKey || surfaceKey);
+	const surfaceKey = nonEmptyString(entry.surface_key || entry.surfaceKey || entry.surface || entry.surface_id || entry.surfaceId || entry.route || entry.endpoint || entry.path || entry.table || entry.query || metadata.surface_key || metadata.surfaceKey || entry.key || entry.id);
+	const operationKey = nonEmptyString(entry.operation_key || entry.operationKey || entry.operation || entry.operation_id || entry.operationId || entry.method || entry.verb || entry.action || metadata.operation_key || metadata.operationKey || surfaceKey);
 	const metric = nonEmptyString(entry.metric || entry.metric_name || entry.metricName || defaults.metric || inferMetric(entry));
 	const value = numericValue(entry.value ?? entry.metric_value ?? entry.metricValue ?? entry.count ?? entry.total ?? entry.duration_ms ?? entry.durationMs);
 	if (!surfaceKey || !operationKey || !metric || value === undefined) {
@@ -347,6 +372,7 @@ module.exports = {
 	WORDPRESS_FUZZ_RUNTIME_TASK_RESULT_SCHEMA,
 	WORDPRESS_FUZZ_HOTSPOT_SET_SCHEMA,
 	WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA,
+	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
 	buildWordPressFuzzRuntimeTaskRequest,
 	fuzzHotspotSummaryFromObservationSet,
 	normalizeFuzzObservationSet,

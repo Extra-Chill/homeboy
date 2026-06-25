@@ -17,6 +17,7 @@ const {
 	WORDPRESS_FUZZ_OBSERVATION_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
+	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
 	buildWordPressFuzzCommandManifest,
 	wpCodeboxFuzzSuiteAbility,
 	wpCodeboxFuzzSuiteSchema,
@@ -131,6 +132,7 @@ assert.deepEqual(
 	]
 );
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'fuzz-observation-set').role, 'observation_set');
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'wordpress-hotspots').schema, WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA);
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'wp-codebox-fuzz-suite-result').role, 'codebox_result');
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'case-log').role, 'case_log');
 assert.deepEqual(
@@ -475,7 +477,7 @@ runWpCodeboxFuzzSuite({
 					coverage: { path: 'reports/coverage.json', content_type: 'application/json', size_bytes: 123, payload: { schema: 'wp-codebox/coverage-report/v1', covered: 1 } },
 					normalized_fuzz_result: { path: 'reports/wordpress-fuzz-result.json', content_type: 'application/json' },
 					coverage_gap_report: { path: 'reports/coverage-gaps.json', content_type: 'application/json', schema: 'homeboy/wordpress-coverage-gap-report/v1', semantic_key: 'fuzz.coverage.gap_report', payload: { schema: 'homeboy/wordpress-coverage-gap-report/v1', expected: 2, covered: 1, gaps: [{ id: 'route:/wp/v2/comments', type: 'rest_route', status: 'skipped' }] } },
-					hotspot_summary: { path: 'reports/hotspots.json', content_type: 'application/json', semantic_key: 'fuzz.hotspot.summary', payload: { schema: 'homeboy/fuzz-hotspot-summary/v1', metric: 'duration_ms', unit: 'ms', items: [{ surface: 'route:/wp/v2/posts', operation: 'GET /wp/v2/posts', value: 99, rank: 1 }] } },
+					hotspot_summary: { name: 'wordpress-hotspots', path: 'reports/hotspots.json', content_type: 'application/json', schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA, payload: { schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA, db: [{ table: 'wp_posts', operation: 'SELECT', metric: 'query_count', count: 4 }], api: [{ route: '/wp-json/wp/v2/posts', method: 'GET', metric: 'duration_ms', duration_ms: 99 }] } },
 					fuzz_case: { path: 'cases/case-000.json', case_id: 'case-000' },
 					placeholder_case: { name: 'placeholder-only' },
 					failing_case: { path: 'cases/failing-case.json', case_id: 'case-002' },
@@ -513,7 +515,8 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.coverage_gaps[0].status, 'skipped');
 	assert.equal(summary.coverage_gaps.some((gap) => gap.id === 'route:/wp/v2/comments'), true);
 	assert.equal(summary.derived_artifacts.coverage_gap_reports[0].coverage_gaps[0].id, 'route:/wp/v2/comments');
-	assert.equal(summary.hotspot_summary.items[0].value, 99);
+	assert.equal(summary.hotspot_summary.items.some((item) => item.dimension === 'api' && item.value === 99), true);
+	assert.equal(summary.hotspot_summary.items.some((item) => item.dimension === 'database' && item.metadata.surface_key === 'wp_posts'), true);
 	assert.equal(summary.observation_set.schema, 'homeboy/fuzz-observation-set/v1');
 	assert.equal(summary.observation_set.observations[0].family, 'query');
 	assert.equal(summary.observation_set.observations[1].metric, 'duration_ms');
@@ -540,7 +543,7 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.observation.summary.coverage.surface_count, 3);
 	assert.equal(summary.observation.metrics.coverage.exercised_count, 1);
 	assert.equal(summary.observation.metrics.db_query.query_count, 1);
-	assert.equal(summary.observation.metrics.hotspots.count, 1);
+	assert.equal(summary.observation.metrics.hotspots.count, 2);
 	assert.equal(summary.observation.artifacts.find((artifact) => artifact.role === 'normalized_fuzz_result').semantic_key, 'fuzz.result.normalized');
 	assert.equal(summary.observation.normalized_result.schema, 'wordpress-fuzz-result/v1');
 
@@ -746,6 +749,55 @@ runWpCodeboxFuzzSuite({
 	}, { request: requiredOutputRequest });
 	assert.equal(requiredOutputObserved.succeeded, true);
 	assert.equal(requiredOutputObserved.failures.length, 0);
+	const hotspotArtifactRequest = wpCodeboxFuzzSuiteTaskRequest({
+		taskId: 'required-hotspot-artifact-suite-task',
+		artifactDeclarations: [],
+		input: wpCodeboxFuzzSuiteInput({
+			id: 'required-hotspot-artifact-suite',
+			metadata: {
+				output_requirements: {
+					required_artifact_keys: ['fuzz.hotspot.summary'],
+					required_artifact_schemas: [WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA],
+				},
+			},
+		}),
+	});
+	const hotspotArtifactObserved = normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			cases: [{ id: 'required-hotspot-case', status: 'passed' }],
+			artifacts: {
+				hotspot_summary: {
+					name: 'wordpress-hotspots',
+					path: 'reports/wordpress-hotspots.json',
+					schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+					payload: {
+						schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+						db: [{ table: 'wp_posts', operation: 'SELECT', metric: 'query_count', count: 7 }],
+						api: [{ route: '/wp-json/wp/v2/posts', method: 'GET', metric: 'duration_ms', duration_ms: 33 }],
+					},
+				},
+			},
+		},
+	}, { request: hotspotArtifactRequest });
+	assert.equal(hotspotArtifactObserved.succeeded, true);
+	assert.equal(hotspotArtifactObserved.hotspot_summary.items.some((item) => item.dimension === 'database' && item.value === 7), true);
+	assert.equal(hotspotArtifactObserved.hotspot_summary.items.some((item) => item.dimension === 'api' && item.value === 33), true);
+	const hotspotArtifactMissing = normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			cases: [{ id: 'missing-hotspot-case', status: 'passed' }],
+			artifacts: { coverage: { path: 'coverage.json', semantic_key: 'fuzz.coverage' } },
+		},
+	}, { request: hotspotArtifactRequest });
+	assert.equal(hotspotArtifactMissing.succeeded, false);
+	assert(hotspotArtifactMissing.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_output_artifacts_missing'));
+	assert(hotspotArtifactMissing.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_output_artifact_schemas_missing'));
+	assert(hotspotArtifactMissing.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_hotspot_artifact_missing'));
 	const requiredOutputMissing = normalizeWpCodeboxFuzzSuiteResult({
 		json: {
 			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
