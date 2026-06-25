@@ -261,7 +261,6 @@ pub(crate) struct FuzzReportArgs {
     /// Stable envelope id. Defaults to --run-id, then the campaign id.
     #[arg(long = "envelope-id", value_name = "ID")]
     pub(crate) envelope_id: Option<String>,
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

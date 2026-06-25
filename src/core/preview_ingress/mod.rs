@@ -16,9 +16,7 @@ mod serve;
 mod types;
 
 pub use install::{render_install_plan, render_install_status_plan};
-pub use routes::{
-    list_routes, register_route, remove_route, status, status_for_host,
-};
+pub use routes::{list_routes, register_route, remove_route, status, status_for_host};
 pub use serve::serve;
 pub use types::{
     PreviewIngressFailure, PreviewIngressInstallCheck, PreviewIngressInstallCheckStatus,

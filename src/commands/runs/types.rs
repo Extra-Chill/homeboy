@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::artifact_links::ArtifactViewerDescriptor;
+use homeboy::core::artifacts::MatrixArtifactSummary;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::runners::RunnerArtifactRef;
@@ -181,6 +182,8 @@ pub struct RunsArtifactsOutput {
     pub command: &'static str,
     pub run_id: String,
     pub artifacts: Vec<ArtifactRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matrix_summary: Option<MatrixArtifactSummary>,
 }
 
 #[derive(Serialize)]

@@ -101,9 +101,7 @@ pub fn report(
         None => checks::warning(
             "memory",
             "RAM totals could not be detected".to_string(),
-            Some(
-                "Ensure /proc/meminfo or sysctl is available on the remote runner".to_string(),
-            ),
+            Some("Ensure /proc/meminfo or sysctl is available on the remote runner".to_string()),
         ),
     });
 
@@ -157,8 +155,7 @@ pub fn report(
         "Make the remote workspace root writable by the runner user",
     ));
 
-    let artifact_store_available =
-        probes::remote_artifact_store_available(client, &artifact_root);
+    let artifact_store_available = probes::remote_artifact_store_available(client, &artifact_root);
     checks.push(checks::path_writable_check(
         "artifact_store.available",
         artifact_store_available,

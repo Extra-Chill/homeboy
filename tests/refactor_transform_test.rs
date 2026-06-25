@@ -114,13 +114,7 @@ fn rename_defaults_to_cwd_git_worktree_without_component_metadata() {
 
     let output = homeboy_command()
         .args([
-            "refactor",
-            "rename",
-            "--from",
-            "old_name",
-            "--to",
-            "new_name",
-            "--write",
+            "refactor", "rename", "--from", "old_name", "--to", "new_name", "--write",
         ])
         .current_dir(&root)
         .env("HOME", &root)

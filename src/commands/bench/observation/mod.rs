@@ -4,7 +4,8 @@ mod metadata;
 mod status;
 
 pub(in crate::commands::bench) use lifecycle::{
-    finish_error, finish_success, history_hints, persisted_run_pointer, start, BenchObservationStart,
+    finish_error, finish_success, history_hints, persisted_run_pointer, start,
+    BenchObservationStart,
 };
 
 #[cfg(test)]

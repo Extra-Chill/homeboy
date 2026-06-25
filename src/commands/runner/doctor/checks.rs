@@ -72,9 +72,7 @@ pub fn playwright_check(playwright: bool, browser_ready: bool) -> RunnerCheck {
         (false, false) => warning(
             "playwright.browser_ready",
             "Playwright/browser readiness was not detected".to_string(),
-            Some(
-                "Install Playwright and browser binaries for browser-backed traces".to_string(),
-            ),
+            Some("Install Playwright and browser binaries for browser-backed traces".to_string()),
         ),
     }
 }
@@ -168,11 +166,7 @@ pub fn ok(id: impl Into<String>, message: String, remediation: Option<String>) -
     }
 }
 
-pub fn warning(
-    id: impl Into<String>,
-    message: String,
-    remediation: Option<String>,
-) -> RunnerCheck {
+pub fn warning(id: impl Into<String>, message: String, remediation: Option<String>) -> RunnerCheck {
     RunnerCheck {
         id: id.into(),
         status: RunnerDoctorStatus::Warning,

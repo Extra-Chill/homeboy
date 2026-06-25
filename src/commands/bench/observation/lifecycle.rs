@@ -6,8 +6,13 @@ use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::core::rig::RigStateSnapshot;
 
-use super::artifacts::{record_bench_observation_artifacts, record_if_exists, record_memory_timeline_artifacts};
-use super::metadata::{bench_observation_command, bench_observation_finish_metadata, bench_observation_initial_metadata};
+use super::artifacts::{
+    record_bench_observation_artifacts, record_if_exists, record_memory_timeline_artifacts,
+};
+use super::metadata::{
+    bench_observation_command, bench_observation_finish_metadata,
+    bench_observation_initial_metadata,
+};
 use super::status::write_status_file;
 use crate::commands::bench::BenchRunArgs;
 
@@ -34,7 +39,9 @@ pub(in crate::commands::bench) struct BenchObservationStart<'a> {
     pub rig_snapshot: Option<&'a RigStateSnapshot>,
     pub run_dir: &'a RunDir,
 }
-pub(in crate::commands::bench) fn start(start: BenchObservationStart<'_>) -> Option<BenchObservation> {
+pub(in crate::commands::bench) fn start(
+    start: BenchObservationStart<'_>,
+) -> Option<BenchObservation> {
     let metadata = bench_observation_initial_metadata(
         start.component_label,
         start.args,

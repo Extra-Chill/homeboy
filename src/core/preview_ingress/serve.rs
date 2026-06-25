@@ -24,9 +24,9 @@ use super::routes::{
 };
 use super::types::{
     PreviewClientSession, PreviewClientSessions, PreviewCloseRequest, PreviewIngressAuth,
-    PreviewIngressFailure, PreviewIngressLogLine, PreviewIngressRoute, PreviewIngressRouteLifecycle,
-    PreviewIngressServeSpec, PreviewNextRequest, PreviewRegisterRequest, PreviewRespondChunkRequest,
-    PreviewRespondRequest,
+    PreviewIngressFailure, PreviewIngressLogLine, PreviewIngressRoute,
+    PreviewIngressRouteLifecycle, PreviewIngressServeSpec, PreviewNextRequest,
+    PreviewRegisterRequest, PreviewRespondChunkRequest, PreviewRespondRequest,
 };
 
 pub fn serve(spec: PreviewIngressServeSpec) -> Result<super::types::PreviewIngressStatus> {

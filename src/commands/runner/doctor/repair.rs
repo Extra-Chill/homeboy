@@ -10,7 +10,9 @@ pub fn apply(
         report.repairs.push(RunnerRepair {
             id: "repair.scope".to_string(),
             status: RunnerDoctorStatus::Warning,
-            message: "No repairs were applied because --repair is only active for --scope lab-offload".to_string(),
+            message:
+                "No repairs were applied because --repair is only active for --scope lab-offload"
+                    .to_string(),
             commands: Vec::new(),
         });
         return;

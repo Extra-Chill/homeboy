@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use homeboy::core::observation::runs_service;
-use homeboy::core::observation::{ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::observation::{FindingListFilter, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::validation_progress::ValidationProgressLedger;
 use homeboy::core::Error;
 use homeboy::core::{api_jobs, runners as runner};
@@ -150,11 +150,21 @@ fn validation_progress_ledger_for_run(run: &RunRecord) -> Option<ValidationProgr
 pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let artifacts = runs_service::list_artifacts_for_run(&store, run_id)?;
+    let findings = store.list_findings(FindingListFilter {
+        run_id: Some(run_id.to_string()),
+        tool: None,
+        file: None,
+        fingerprint: None,
+        limit: Some(10_000),
+    })?;
+    let matrix_summary =
+        homeboy::core::artifacts::summarize_matrix_artifacts(run_id, &artifacts, &findings);
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
             run_id: run_id.to_string(),
             artifacts,
+            matrix_summary,
         }),
         0,
     ))
