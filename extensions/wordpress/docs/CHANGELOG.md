@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.14.1] - 2026-06-25
+
+### Changed
+- Replace static-site matrix with generic fixture workloads
+
 ## [3.14.0] - 2026-06-25
 
 ### Added
