@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.28] - 2026-06-25
+
+### Changed
+- Pass runtime requirements to Codebox CLI
+
 ## [3.13.27] - 2026-06-25
 
 ### Changed
