@@ -1,5 +1,6 @@
 mod compare;
 mod dispatch;
+mod doctor;
 mod execution;
 mod inspect;
 mod planning;

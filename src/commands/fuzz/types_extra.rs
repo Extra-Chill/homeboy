@@ -11,6 +11,7 @@ use homeboy::core::performance_hotspots::PerformanceHotspotSummary;
 #[serde(tag = "variant", rename_all = "snake_case")]
 pub enum FuzzOutput {
     Contract(FuzzContractOutput),
+    Doctor(FuzzDoctorOutput),
     Discover(FuzzDiscoverOutput),
     List(FuzzListOutput),
     Plan(FuzzPlanOutput),
@@ -20,6 +21,41 @@ pub enum FuzzOutput {
     Compare(FuzzCompareOutput),
     Replay(FuzzReplayOutput),
     Inspect(FuzzInspectOutput),
+}
+
+#[derive(Serialize)]
+pub struct FuzzDoctorOutput {
+    pub command: String,
+    pub status: String,
+    pub homeboy: FuzzDoctorHomeboyOutput,
+    pub extension: FuzzDoctorExtensionOutput,
+    pub update_hint: String,
+}
+
+#[derive(Serialize)]
+pub struct FuzzDoctorHomeboyOutput {
+    pub controller_version: String,
+}
+
+#[derive(Serialize)]
+pub struct FuzzDoctorExtensionOutput {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub path: String,
+    pub linked: bool,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits_behind: Option<usize>,
+    pub update_command: String,
 }
 
 /// Raw fuzz-result inspection output for `homeboy fuzz inspect <run-id>`.

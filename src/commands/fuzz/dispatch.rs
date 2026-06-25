@@ -10,6 +10,7 @@ use homeboy::core::fuzz::{
 
 use super::super::{CmdResult, GlobalArgs};
 use super::compare::run_compare;
+use super::doctor::run_doctor;
 use super::execution::run_run;
 use super::inspect::run_inspect;
 use super::planning::run_plan;
@@ -24,6 +25,9 @@ use super::workloads::{fuzz_workloads, load_rig, resolve_component_id, resolve_f
 pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
     match args.command {
         Some(FuzzCommand::Contract) => Ok((FuzzOutput::Contract(run_contract()), 0)),
+        Some(FuzzCommand::Doctor(doctor_args)) => {
+            Ok((FuzzOutput::Doctor(run_doctor(doctor_args)?), 0))
+        }
         Some(FuzzCommand::Discover(discover_args)) => {
             Ok((FuzzOutput::Discover(run_discover(discover_args)?), 0))
         }
