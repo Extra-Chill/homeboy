@@ -27,7 +27,8 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
         git::configure_identity(&component.local_path, &identity)?;
     }
 
-    let monorepo = git::MonorepoContext::detect(&component.local_path, &input.component_id);
+    let monorepo =
+        super::planning_semver::release_monorepo_context(&component, &input.component_id);
     let version_info = crate::core::release::version::read_component_version(&component)?;
     let current_version = &version_info.version;
     let tag_name = format_tag(current_version, monorepo.as_ref());

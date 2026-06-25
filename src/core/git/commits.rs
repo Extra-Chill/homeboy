@@ -24,6 +24,8 @@ pub struct MonorepoContext {
     pub git_root: String,
     /// Relative path from git root to the component (e.g. "api-client").
     pub path_prefix: String,
+    /// Pathspecs used to scope release commit collection.
+    pub path_prefixes: Vec<String>,
     /// Tag prefix for this component (e.g. "api-client"), used to create
     /// tags like `api-client-v1.0.0`.
     pub tag_prefix: String,
@@ -41,6 +43,7 @@ impl MonorepoContext {
         Some(MonorepoContext {
             git_root,
             path_prefix: path_prefix.clone(),
+            path_prefixes: vec![path_prefix.clone()],
             // Use component_id for tag prefix — it's the canonical name
             tag_prefix: component_id.to_string(),
         })
@@ -562,6 +565,17 @@ pub fn get_commits_since_tag_for_path(
     tag: Option<&str>,
     path_prefix: Option<&str>,
 ) -> Result<Vec<CommitInfo>> {
+    let path_prefixes = path_prefix.into_iter().collect::<Vec<_>>();
+    get_commits_since_tag_for_paths(path, tag, &path_prefixes)
+}
+
+/// Get commits since a given tag, optionally filtered to only those touching
+/// any of the provided path prefixes relative to the git root.
+pub fn get_commits_since_tag_for_paths(
+    path: &str,
+    tag: Option<&str>,
+    path_prefixes: &[&str],
+) -> Result<Vec<CommitInfo>> {
     let range = tag
         .map(|t| format!("{}..HEAD", t))
         .unwrap_or_else(|| "HEAD".to_string());
@@ -574,9 +588,11 @@ pub fn get_commits_since_tag_for_path(
         format_str,
     ];
 
-    // Add path filter for monorepo scoping: `git log <range> -- <path_prefix>`
-    if let Some(prefix) = path_prefix {
+    // Add path filters for monorepo scoping: `git log <range> -- <path>...`
+    if !path_prefixes.is_empty() {
         args.push("--".to_string());
+    }
+    for prefix in path_prefixes {
         args.push(prefix.to_string());
     }
 
@@ -1231,6 +1247,7 @@ mod tests {
         let ctx = MonorepoContext {
             git_root: "/repo".to_string(),
             path_prefix: "wordpress".to_string(),
+            path_prefixes: vec!["wordpress".to_string()],
             tag_prefix: "wordpress".to_string(),
         };
         assert_eq!(ctx.format_tag("1.2.3"), "wordpress-v1.2.3");

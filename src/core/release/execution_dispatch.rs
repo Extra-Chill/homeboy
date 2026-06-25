@@ -246,7 +246,7 @@ fn planned_release_tag_name(context: &ReleaseExecutionContext) -> Result<String>
                 )
             })?;
     let monorepo =
-        git::MonorepoContext::detect(&context.component.local_path, context.component_id);
+        super::planning_semver::release_monorepo_context(context.component, context.component_id);
 
     Ok(monorepo
         .as_ref()

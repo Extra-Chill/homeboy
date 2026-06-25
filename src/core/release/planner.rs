@@ -2,7 +2,6 @@
 
 use crate::core::engine::validation::ValidationCollector;
 use crate::core::error::{Error, Result};
-use crate::core::git;
 use crate::core::release::version;
 
 use super::context::{load_component, resolve_extensions};
@@ -11,7 +10,8 @@ use super::planning_changelog::{build_changelog_plan, generate_changelog_entries
 use super::planning_policy::release_skip_plan;
 use super::planning_semver::{
     build_semver_recommendation, current_version_tag_at_head, current_version_tag_name,
-    validate_current_version_tag_reachable, validate_release_version_floor,
+    release_monorepo_context, validate_current_version_tag_reachable,
+    validate_release_version_floor,
 };
 use super::planning_worktree::validate_release_worktree;
 use super::types::{
@@ -31,7 +31,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
 
     let mut v = ValidationCollector::new();
 
-    let monorepo = git::MonorepoContext::detect(&component.local_path, component_id);
+    let monorepo = release_monorepo_context(&component, component_id);
     let version_info = v.capture(version::read_component_version(&component), "version");
     if let Some(ref info) = version_info {
         if let Some(message) = v

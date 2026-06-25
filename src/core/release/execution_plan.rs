@@ -129,7 +129,7 @@ fn initial_release_state(
     }
 
     let version_info = super::version::read_component_version(component)?;
-    let monorepo = git::MonorepoContext::detect(&component.local_path, component_id);
+    let monorepo = super::planning_semver::release_monorepo_context(component, component_id);
     let expected_tag = match monorepo.as_ref() {
         Some(ctx) => ctx.format_tag(&version_info.version),
         None => format!("v{}", version_info.version),

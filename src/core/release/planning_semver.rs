@@ -1,4 +1,4 @@
-use crate::core::component::Component;
+use crate::core::component::{resolve_component_scope, Component, ScopeCommand};
 use crate::core::error::{Error, Result};
 use crate::core::git;
 
@@ -62,6 +62,129 @@ pub(super) fn build_semver_recommendation(
         is_underbump,
         reasons: recommendation_reasons(&commits, recommended),
     }))
+}
+
+pub(super) fn release_monorepo_context(
+    component: &Component,
+    component_id: &str,
+) -> Option<git::MonorepoContext> {
+    let mut context = git::MonorepoContext::detect(&component.local_path, component_id);
+    let extra_prefixes = release_scope_prefixes(component);
+
+    if let Some(ctx) = context.as_mut() {
+        for prefix in extra_prefixes {
+            let component_prefix = ctx.path_prefix.trim_end_matches('/');
+            let scoped = if prefix == component_prefix
+                || prefix.starts_with(&format!("{}/", component_prefix))
+            {
+                prefix
+            } else {
+                format!("{}/{}", component_prefix, prefix)
+            };
+            if !ctx.path_prefixes.contains(&scoped) {
+                ctx.path_prefixes.push(scoped);
+            }
+        }
+        return context;
+    }
+
+    if extra_prefixes.is_empty() {
+        return None;
+    }
+
+    let git_root = git::get_git_root(&component.local_path).ok()?;
+    Some(git::MonorepoContext {
+        git_root,
+        path_prefix: extra_prefixes[0].clone(),
+        path_prefixes: extra_prefixes,
+        tag_prefix: component_id.to_string(),
+    })
+}
+
+fn release_scope_prefixes(component: &Component) -> Vec<String> {
+    let scope = resolve_component_scope(component, ScopeCommand::Release);
+    let mut prefixes: Vec<String> = scope
+        .include
+        .iter()
+        .filter_map(|path| normalize_release_scope_path(path))
+        .collect();
+
+    if prefixes.is_empty() {
+        if let Some(prefix) = infer_common_release_prefix(component) {
+            prefixes.push(prefix);
+        }
+    }
+
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+fn infer_common_release_prefix(component: &Component) -> Option<String> {
+    let mut paths = Vec::new();
+
+    if let Some(targets) = component.version_targets.as_ref() {
+        paths.extend(
+            targets
+                .iter()
+                .filter_map(|target| normalize_release_scope_path(&target.file)),
+        );
+    }
+
+    if let Some(target) = component.changelog_target.as_ref() {
+        if let Some(path) = normalize_release_scope_path(target) {
+            paths.push(path);
+        }
+    }
+
+    common_directory_prefix(&paths)
+}
+
+fn normalize_release_scope_path(path: &str) -> Option<String> {
+    let mut value = path.trim().trim_start_matches("./").trim_matches('/');
+    if value.is_empty() || value == "." {
+        return None;
+    }
+
+    if let Some(wildcard) = value.find('*') {
+        value = value[..wildcard].trim_end_matches('/');
+    }
+
+    if value.is_empty() || value == "." {
+        return None;
+    }
+
+    Some(value.to_string())
+}
+
+fn common_directory_prefix(paths: &[String]) -> Option<String> {
+    let mut iter = paths.iter();
+    let first = iter.next()?;
+    let mut prefix: Vec<&str> = first.split('/').collect();
+    if prefix.len() <= 1 {
+        return None;
+    }
+    prefix.pop();
+
+    for path in iter {
+        let mut dirs: Vec<&str> = path.split('/').collect();
+        if dirs.len() <= 1 {
+            return None;
+        }
+        dirs.pop();
+
+        let keep = prefix
+            .iter()
+            .zip(dirs.iter())
+            .take_while(|(left, right)| left == right)
+            .count();
+        prefix.truncate(keep);
+        if prefix.is_empty() {
+            return None;
+        }
+    }
+
+    Some(prefix.join("/"))
 }
 
 pub(super) fn validate_release_version_floor(
@@ -178,10 +301,11 @@ pub(super) fn resolve_tag_and_commits(
                 latest_tag.as_deref(),
                 Some(&ctx.tag_prefix),
             )?;
-            let commits = git::get_commits_since_tag_for_path(
+            let path_prefixes: Vec<&str> = ctx.path_prefixes.iter().map(String::as_str).collect();
+            let commits = git::get_commits_since_tag_for_paths(
                 &ctx.git_root,
                 latest_tag.as_deref(),
-                Some(&ctx.path_prefix),
+                &path_prefixes,
             )?;
             Ok((latest_tag, commits))
         }
@@ -299,10 +423,10 @@ fn commit_range(latest_tag: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_semver_recommendation, resolve_tag_and_commits,
+        build_semver_recommendation, release_monorepo_context, resolve_tag_and_commits,
         validate_current_version_tag_reachable, validate_release_version_floor,
     };
-    use crate::core::component::Component;
+    use crate::core::component::{CommandScopeConfig, Component, ScopeConfig, VersionTarget};
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new("git")
@@ -320,6 +444,9 @@ mod tests {
     }
 
     fn commit_file(dir: &std::path::Path, name: &str, content: &str, message: &str) {
+        if let Some(parent) = dir.join(name).parent() {
+            std::fs::create_dir_all(parent).expect("create fixture parent");
+        }
         std::fs::write(dir.join(name), content).expect("write fixture file");
         run_git(dir, &["add", name]);
         run_git(dir, &["commit", "-q", "-m", message]);
@@ -422,6 +549,86 @@ mod tests {
         assert_eq!(latest_tag.as_deref(), Some("v1.0.0"));
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "fix: patch bug");
+    }
+
+    #[test]
+    fn repo_root_component_uses_release_scope_for_commits() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "package-a-v1.0.0"]);
+        commit_file(
+            dir,
+            "packages/package-b/VERSION",
+            "1.0.1",
+            "fix: update sibling package",
+        );
+        commit_file(
+            dir,
+            "packages/package-a/VERSION",
+            "1.0.1",
+            "fix: update package a",
+        );
+        let mut component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        component.scopes = Some(ScopeConfig {
+            release: Some(CommandScopeConfig {
+                include: vec!["packages/package-a/**".to_string()],
+                exclude: vec![],
+            }),
+            ..Default::default()
+        });
+
+        let monorepo = release_monorepo_context(&component, "package-a")
+            .expect("release scope should create monorepo context");
+        let (latest_tag, commits) = resolve_tag_and_commits(&component.local_path, Some(&monorepo))
+            .expect("scoped commits should resolve");
+
+        assert_eq!(latest_tag.as_deref(), Some("package-a-v1.0.0"));
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "fix: update package a");
+    }
+
+    #[test]
+    fn repo_root_component_infers_commit_scope_from_release_files() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "package-a-v1.0.0"]);
+        commit_file(
+            dir,
+            "packages/package-b/VERSION",
+            "1.0.1",
+            "fix: update sibling package",
+        );
+        commit_file(
+            dir,
+            "packages/package-a/VERSION",
+            "1.0.1",
+            "fix: update package a",
+        );
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            changelog_target: Some("packages/package-a/docs/CHANGELOG.md".to_string()),
+            version_targets: Some(vec![VersionTarget {
+                file: "packages/package-a/VERSION".to_string(),
+                pattern: None,
+                artifact_path: None,
+            }]),
+            ..Default::default()
+        };
+
+        let monorepo = release_monorepo_context(&component, "package-a")
+            .expect("release files should create monorepo context");
+        assert_eq!(monorepo.path_prefixes, vec!["packages/package-a"]);
+        let (latest_tag, commits) = resolve_tag_and_commits(&component.local_path, Some(&monorepo))
+            .expect("scoped commits should resolve");
+
+        assert_eq!(latest_tag.as_deref(), Some("package-a-v1.0.0"));
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "fix: update package a");
     }
 
     #[test]
