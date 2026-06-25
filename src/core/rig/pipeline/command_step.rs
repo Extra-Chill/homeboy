@@ -66,7 +66,10 @@ pub(super) fn run_command_step(
 fn settings_env(settings: &[(String, String)]) -> Vec<(String, String)> {
     let mut env = Vec::new();
     for (key, value) in settings {
-        env.push((format!("HOMEBOY_SETTINGS_{}", key.to_uppercase()), value.clone()));
+        env.push((
+            format!("HOMEBOY_SETTINGS_{}", key.to_uppercase()),
+            value.clone(),
+        ));
         let sanitized = shell_safe_setting_env_key(key);
         let raw = format!("HOMEBOY_SETTINGS_{}", key.to_uppercase());
         if sanitized != raw {

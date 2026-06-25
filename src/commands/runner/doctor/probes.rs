@@ -91,11 +91,7 @@ pub fn local_tool_probe(command: &str, version_args: &[&str]) -> ToolProbe {
     }
 }
 
-pub fn remote_tool_probe(
-    client: &SshClient,
-    command: &str,
-    version_args: &[&str],
-) -> ToolProbe {
+pub fn remote_tool_probe(client: &SshClient, command: &str, version_args: &[&str]) -> ToolProbe {
     let path = common::remote_line(
         client,
         &format!("command -v {}", common::shell_word(command)),
@@ -953,9 +949,7 @@ pub(super) fn daemon_exec_check(
     {
         details.insert("job_id".to_string(), job_id.to_string());
     }
-    if status_code < 400
-        && body.get("success").and_then(serde_json::Value::as_bool) == Some(true)
-    {
+    if status_code < 400 && body.get("success").and_then(serde_json::Value::as_bool) == Some(true) {
         return checks::ok_with_details(
             "daemon.exec",
             "Connected runner daemon accepted a lightweight exec probe".to_string(),

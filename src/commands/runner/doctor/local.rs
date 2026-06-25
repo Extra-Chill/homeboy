@@ -59,7 +59,10 @@ pub fn report(
         None => checks::warning(
             "memory",
             "RAM totals could not be detected".to_string(),
-            Some("Install platform tools such as sysctl/vm_stat or run on Linux with /proc/meminfo".to_string()),
+            Some(
+                "Install platform tools such as sysctl/vm_stat or run on Linux with /proc/meminfo"
+                    .to_string(),
+            ),
         ),
     });
 

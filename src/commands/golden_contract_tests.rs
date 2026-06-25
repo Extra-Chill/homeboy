@@ -130,6 +130,7 @@ fn runs_command_json_contract_matches_golden_fixture() {
                     command: "runs.artifacts",
                     run_id: "run-contract-1".to_string(),
                     artifacts: vec![artifact_record()],
+                    matrix_summary: None,
                 })),
                 scenario("runs query json", RunsOutput::Query(RunsQueryOutput {
                     command: "runs.query",

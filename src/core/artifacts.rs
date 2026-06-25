@@ -43,6 +43,10 @@ pub use super::change_artifact::{
     ChangeArtifactProvenance, ChangeArtifactSummary, ChangeDelta, ChangeDeltaFile, ChangePatch,
     CHANGE_APPLY_RESULT_SCHEMA, CHANGE_ARTIFACT_SCHEMA,
 };
+pub use super::matrix_artifact_summary::{
+    render_matrix_artifact_summary_markdown, summarize_matrix_artifacts, MatrixArtifactSummary,
+    MatrixSummaryCount, MATRIX_ARTIFACT_SUMMARY_SCHEMA,
+};
 pub use super::publication_artifacts::index_remote_published_artifact_refs_for_run;
 pub use super::structured_sidecar::{
     default_path, default_producer, default_schema_version, registry, schema, validate_payload,

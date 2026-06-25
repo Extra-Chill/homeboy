@@ -5,9 +5,7 @@ use std::process::Command;
 use super::git;
 use crate::core::runner::workspace::git::{git_snapshot, materialize_git_command};
 use crate::core::runner::workspace::sync::sync_workspace;
-use crate::core::runner::workspace::types::{
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-};
+use crate::core::runner::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::core::runner::workspace::util::git_output;
 
 #[test]
@@ -371,8 +369,7 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
             ],
         );
         let detached_head = git_output(source.path(), &["rev-parse", "HEAD"]).unwrap();
-        let detached_short =
-            git_output(source.path(), &["rev-parse", "--short", "HEAD"]).unwrap();
+        let detached_short = git_output(source.path(), &["rev-parse", "--short", "HEAD"]).unwrap();
 
         crate::core::runner::create(
             &format!(

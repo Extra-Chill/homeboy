@@ -6,6 +6,7 @@ use super::CmdResult;
 mod bench_coverage;
 mod browser_evidence_compare;
 mod failure_digest;
+mod matrix_artifacts;
 mod performance_digest;
 mod report_compare;
 
@@ -20,6 +21,10 @@ pub use browser_evidence_compare::{
     BrowserEvidenceCompareReport, VisualCompareOptions,
 };
 pub use failure_digest::{render_failure_digest_from_args, FailureDigestArgs};
+pub use matrix_artifacts::{
+    matrix_artifacts_from_args, render_matrix_artifacts_from_args, MatrixArtifactsArgs,
+    MatrixArtifactsReport,
+};
 pub use performance_digest::{
     performance_digest_from_args, render_performance_digest_from_args, PerformanceDigestArgs,
     PerformanceDigestReport,
@@ -45,6 +50,8 @@ pub enum ReportCommand {
     BenchCoverage(BenchCoverageArgs),
     /// Compare before/after browser evidence artifact sets
     BrowserEvidenceCompare(BrowserEvidenceCompareArgs),
+    /// Summarize matrix-style run artifacts and finding packets
+    MatrixArtifacts(MatrixArtifactsArgs),
     /// Compare structured matrix/report artifacts
     Compare(ReportCompareArgs),
 }
@@ -59,6 +66,8 @@ pub struct ReportOutput {
     pub bench_coverage: Option<BenchCoverageReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_evidence_compare: Option<BrowserEvidenceCompareReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matrix_artifacts: Option<MatrixArtifactsReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_compare: Option<ReportCompareReport>,
 }
@@ -76,6 +85,9 @@ pub fn is_markdown_mode(args: &ReportArgs) -> bool {
     ) || matches!(
         &args.command,
         ReportCommand::BrowserEvidenceCompare(compare_args) if compare_args.format == "markdown"
+    ) || matches!(
+        &args.command,
+        ReportCommand::MatrixArtifacts(matrix_args) if matrix_args.format == "markdown"
     ) || matches!(
         &args.command,
         ReportCommand::Compare(compare_args) if compare_args.format == "markdown"
@@ -100,6 +112,10 @@ pub fn run_markdown(args: ReportArgs) -> CmdResult<String> {
             let markdown = render_browser_evidence_compare_from_args(&compare_args)?;
             Ok((markdown, 0))
         }
+        ReportCommand::MatrixArtifacts(matrix_args) => {
+            let markdown = render_matrix_artifacts_from_args(&matrix_args)?;
+            Ok((markdown, 0))
+        }
         ReportCommand::Compare(compare_args) => {
             let markdown = render_report_compare_from_args(&compare_args)?;
             Ok((markdown, 0))
@@ -118,6 +134,7 @@ pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOut
                     performance_digest: None,
                     bench_coverage: None,
                     browser_evidence_compare: None,
+                    matrix_artifacts: None,
                     report_compare: None,
                 },
                 0,
@@ -132,6 +149,7 @@ pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOut
                     performance_digest: Some(report),
                     bench_coverage: None,
                     browser_evidence_compare: None,
+                    matrix_artifacts: None,
                     report_compare: None,
                 },
                 0,
@@ -147,6 +165,7 @@ pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOut
                     performance_digest: None,
                     bench_coverage: Some(report),
                     browser_evidence_compare: None,
+                    matrix_artifacts: None,
                     report_compare: None,
                 },
                 0,
@@ -161,6 +180,22 @@ pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOut
                     performance_digest: None,
                     bench_coverage: None,
                     browser_evidence_compare: Some(report),
+                    matrix_artifacts: None,
+                    report_compare: None,
+                },
+                0,
+            ))
+        }
+        ReportCommand::MatrixArtifacts(matrix_args) => {
+            let report = matrix_artifacts_from_args(&matrix_args)?;
+            Ok((
+                ReportOutput {
+                    command: "report.matrix-artifacts".to_string(),
+                    markdown: report.markdown.clone(),
+                    performance_digest: None,
+                    bench_coverage: None,
+                    browser_evidence_compare: None,
+                    matrix_artifacts: Some(report),
                     report_compare: None,
                 },
                 0,
@@ -175,6 +210,7 @@ pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOut
                     performance_digest: None,
                     bench_coverage: None,
                     browser_evidence_compare: None,
+                    matrix_artifacts: None,
                     report_compare: Some(report),
                 },
                 0,

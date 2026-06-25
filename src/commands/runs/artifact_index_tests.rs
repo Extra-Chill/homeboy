@@ -2,7 +2,7 @@ use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy::test_support::with_isolated_home;
 use serde_json::Value;
 
-use super::{list_runs, RunsListArgs, RunsOutput};
+use super::{handlers, list_runs, RunsListArgs, RunsOutput};
 
 struct XdgGuard(Option<String>);
 
@@ -112,5 +112,71 @@ fn rig_runs_list_surfaces_compact_artifact_index() {
             artifact_index.failed_step_refs[0].label,
             "produce proof report"
         );
+    });
+}
+
+#[test]
+fn runs_artifacts_surfaces_matrix_summary_from_typed_packets() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "fixture.matrix",
+                "static-site-importer",
+                "ssi-fixtures",
+                serde_json::json!({ "schema": "example/matrix-run/v1" }),
+            ))
+            .expect("matrix run");
+        store
+            .finish_run(&run.id, RunStatus::Fail, None)
+            .expect("finish matrix run");
+        let summary = home.path().join("summary.json");
+        std::fs::write(
+            &summary,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "example/matrix-summary/v1",
+                "fixture_count": 2,
+                "finding_count": 3,
+                "group_counts": { "markup": 2, "links": 1 },
+                "findings": [
+                    { "kind": "missing_block", "fixture": "home" },
+                    { "kind": "missing_block", "fixture": "about" }
+                ]
+            }))
+            .expect("summary json"),
+        )
+        .expect("write summary");
+        let packets = home.path().join("finding-packets.json");
+        std::fs::write(
+            &packets,
+            serde_json::to_vec(&serde_json::json!({
+                "finding_packets": [
+                    { "diagnostic_kind": "broken_link", "fixture_id": "home" }
+                ]
+            }))
+            .expect("packet json"),
+        )
+        .expect("write packets");
+        store
+            .record_artifact(&run.id, "matrix_summary", &summary)
+            .expect("record summary");
+        store
+            .record_artifact(&run.id, "finding_packets", &packets)
+            .expect("record packets");
+
+        let (output, _) = handlers::artifacts(&run.id).expect("artifacts");
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("expected artifacts output");
+        };
+        let summary = output.matrix_summary.expect("matrix summary");
+
+        assert_eq!(summary.fixture_count, 2);
+        assert_eq!(summary.finding_count, 3);
+        assert_eq!(summary.group_counts[0].key, "markup");
+        assert_eq!(summary.top_diagnostic_kinds[0].key, "missing_block");
+        assert_eq!(summary.top_fixtures[0].key, "home");
+        assert_eq!(summary.result_refs[0].kind, "matrix_summary");
+        assert_eq!(summary.finding_packet_refs[0].kind, "finding_packets");
     });
 }

@@ -563,8 +563,7 @@ pub(crate) fn validate_artifact_flow_bindings(spec: &AgentTaskRepoLoopSpec) -> R
             // artifact_flow edge. A producer merely declaring the artifact in
             // its `artifacts` set does not establish a consume flow.
             let has_repo_producer = spec.workflows.iter().any(|producer| {
-                producer.workflow_id != workflow.workflow_id
-                    && producer.emits.contains(artifact_id)
+                producer.workflow_id != workflow.workflow_id && producer.emits.contains(artifact_id)
             });
             if !has_flow_edge && !has_repo_producer {
                 diagnostics.push(format!(

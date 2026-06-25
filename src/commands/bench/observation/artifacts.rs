@@ -4,9 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use homeboy::core::artifacts as artifact_links;
 use homeboy::core::engine::run_dir::{self, RunDir};
-use homeboy::core::extension::bench::{
-    BenchDiagnostic, BenchDiagnosticSource, BenchResults,
-};
+use homeboy::core::extension::bench::{BenchDiagnostic, BenchDiagnosticSource, BenchResults};
 use homeboy::core::observation::{finding_records_from_budget, ArtifactRecord};
 
 use super::lifecycle::BenchObservation;

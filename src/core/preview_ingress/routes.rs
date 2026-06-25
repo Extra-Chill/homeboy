@@ -5,8 +5,8 @@ use crate::core::error::{Error, Result};
 use crate::core::paths;
 
 use super::types::{
-    PreviewClientSessions, PreviewIngressFailure, PreviewIngressRoute, PreviewIngressRouteLifecycle,
-    PreviewIngressRouteStatus, PreviewIngressStatus,
+    PreviewClientSessions, PreviewIngressFailure, PreviewIngressRoute,
+    PreviewIngressRouteLifecycle, PreviewIngressRouteStatus, PreviewIngressStatus,
 };
 
 pub fn register_route(route: PreviewIngressRoute) -> Result<PreviewIngressRoute> {
