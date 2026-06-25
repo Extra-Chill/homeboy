@@ -172,6 +172,12 @@ assert.equal(failingBudgetResult.summary.performance_metrics.query_count, 5);
 const performanceEvidenceResult = normalizeWordPressFuzzResult({
 	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
 	id: 'performance-evidence-result',
+	summary: {
+		performance_metrics: {
+			query_count: 0,
+			query_time_ms: 0,
+		},
+	},
 	cases: [
 		{
 			id: 'profiled-rest-case',

@@ -619,6 +619,7 @@ function normalizeWordPressFuzzResult(result) {
 	const resultBudget = normalizePerformanceBudget(result.budget || result.budgets || result.performance_budget || result.performanceBudget || result.metadata?.budget || result.metadata?.budgets);
 	const resultBudgetFindings = normalizeBudgetFindings({ budget: resultBudget, metrics: performanceMetrics, subject: result.id || 'wordpress-fuzz-result' });
 	const summary = {
+		...(result.summary || {}),
 		...caseSummary,
 		case_counts: { ...caseSummary, ...(result.summary?.case_counts || result.summary?.caseCounts || {}) },
 		surface_count: countUnique(cases, 'surface_id'),
@@ -632,7 +633,6 @@ function normalizeWordPressFuzzResult(result) {
 		performance_metrics: performanceMetrics,
 		performance_metric_reasons: summarizePerformanceMetricReasons(cases),
 		budget_failure_count: countBudgetFindings(cases) + resultBudgetFindings.length,
-		...(result.summary || {}),
 	};
 	const status = normalizeFuzzStatus(result.status || (summary.failed || summary.errored || summary.budget_failure_count ? 'failed' : 'passed'));
 	if (!RESULT_STATUSES.has(status)) {
