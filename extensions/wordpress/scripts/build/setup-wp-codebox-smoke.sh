@@ -92,16 +92,13 @@ while [ "$#" -gt 0 ]; do
             ;;
         run)
             mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
+            mkdir -p "${prefix}/packages/cli/dist"
             printf '%s\n' 'export const fixture = true;' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
-            exit 0
-            ;;
-        exec)
-            shift
-            if [ "${1:-}" != "--" ] || [ "${2:-}" != "wp-codebox" ]; then
-                printf 'unexpected npm exec invocation: %s\n' "$*" >&2
-                exit 1
-            fi
-            printf '%s\n' 'wp-codebox source stub'
+            cat > "${prefix}/packages/cli/dist/index.js" <<'NODE'
+#!/usr/bin/env node
+console.log('wp-codebox source stub');
+NODE
+            chmod +x "${prefix}/packages/cli/dist/index.js"
             exit 0
             ;;
         *)
@@ -160,6 +157,11 @@ source_wp_codebox_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${SOUR
 
 if [ "$(PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" "${source_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
     echo "Expected source fallback wrapper to execute built CLI" >&2
+    exit 1
+fi
+
+if [ "${source_wp_codebox_bin}" != "${TMPDIR}/source-install/source/packages/cli/dist/index.js" ]; then
+    echo "Expected source fallback to export the built WP Codebox CLI, got: ${source_wp_codebox_bin}" >&2
     exit 1
 fi
 
@@ -245,6 +247,11 @@ missing_release_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${MISSING_REL
 
 if [ "$(PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" "${missing_release_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
     echo "Expected missing release artifact to fall back to built CLI" >&2
+    exit 1
+fi
+
+if [ "${missing_release_wp_codebox_bin}" != "${TMPDIR}/missing-release-install/source/packages/cli/dist/index.js" ]; then
+    echo "Expected missing release fallback to export the built WP Codebox CLI, got: ${missing_release_wp_codebox_bin}" >&2
     exit 1
 fi
 

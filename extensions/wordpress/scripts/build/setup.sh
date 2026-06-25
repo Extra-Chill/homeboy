@@ -158,11 +158,14 @@ EOF
         exit 1
     }
 
-    cat > "${bin_path}" <<EOF
-#!/usr/bin/env bash
-exec npm --prefix "${repo_dir}" exec -- wp-codebox "\$@"
-EOF
-    chmod +x "${bin_path}"
+    local source_bin_path
+    source_bin_path="${repo_dir}/packages/cli/dist/index.js"
+    if [ ! -x "${source_bin_path}" ]; then
+        echo "Built WP Codebox source did not contain an executable CLI at ${source_bin_path}" >&2
+        exit 1
+    fi
+
+    bin_path="${source_bin_path}"
 
     write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${bin_path}"
     write_github_env "PATH" "${bin_dir}:${PATH}"
