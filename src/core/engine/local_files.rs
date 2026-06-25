@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::core::error::{Error, Result};
 
@@ -70,7 +71,7 @@ impl FileSystem for LocalFs {
             )
         })?;
 
-        let tmp_path = parent.join(format!("{}.tmp", filename.to_string_lossy()));
+        let tmp_path = unique_temp_path(parent, filename.to_string_lossy().as_ref());
 
         fs::write(&tmp_path, content)
             .map_err(|e| Error::internal_io(e.to_string(), Some("write temp file".to_string())))?;
@@ -176,7 +177,7 @@ pub fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<
         )
     })?;
 
-    let tmp_path = parent.join(format!("{}.tmp", filename.to_string_lossy()));
+    let tmp_path = unique_temp_path(parent, filename.to_string_lossy().as_ref());
 
     fs::write(&tmp_path, content).map_err(|e| {
         Error::internal_io(e.to_string(), Some(format!("{} (write temp)", operation)))
@@ -188,10 +189,22 @@ pub fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<
     Ok(())
 }
 
+fn unique_temp_path(parent: &Path, filename: &str) -> PathBuf {
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    parent.join(format!(
+        ".{}.{}.{}.tmp",
+        filename,
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::{Arc, Barrier};
     use tempfile::tempdir;
     use tempfile::NamedTempFile;
 
@@ -204,6 +217,41 @@ mod tests {
         fs.write(&path, "hello world").unwrap();
         let content = fs.read(&path).unwrap();
         assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn local_fs_write_uses_unique_temp_paths_for_concurrent_writers() {
+        let dir = tempdir().unwrap();
+        let path = Arc::new(dir.path().join("config.json"));
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    local()
+                        .write(&path, &format!(r#"{{"writer":{index}}}"#))
+                        .expect("concurrent write succeeds");
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("writer thread");
+        }
+
+        let content = fs::read_to_string(path.as_ref()).expect("read final config");
+        serde_json::from_str::<serde_json::Value>(&content).expect("valid json");
+        let temp_files: Vec<_> = fs::read_dir(dir.path())
+            .expect("list tempdir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(
+            temp_files.is_empty(),
+            "temp files left behind: {temp_files:?}"
+        );
     }
 
     #[test]

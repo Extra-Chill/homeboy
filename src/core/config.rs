@@ -8,6 +8,7 @@ use crate::core::output::{
 use crate::core::paths;
 use crate::core::Result;
 use serde::{de::DeserializeOwned, Serialize};
+use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
 
 mod json_io;
@@ -22,6 +23,68 @@ pub use json_ops::collect_array_fields;
 pub(crate) use json_ops::{merge_config, remove_config};
 pub(crate) use json_pointer::value_type_name;
 pub use json_pointer::{remove_json_pointer, set_json_pointer};
+
+pub(crate) fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock_path = paths::homeboy()?.join("config.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create config lock directory".to_string()),
+            )
+        })?;
+    }
+
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some("open config lock".to_string()))
+        })?;
+
+    let _guard = ConfigLockGuard::lock(lock_file)?;
+    operation()
+}
+
+struct ConfigLockGuard {
+    #[allow(dead_code)]
+    file: File,
+}
+
+impl ConfigLockGuard {
+    #[cfg(unix)]
+    fn lock(file: File) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if result != 0 {
+            return Err(Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some("lock config".to_string()),
+            ));
+        }
+
+        Ok(Self { file })
+    }
+
+    #[cfg(not(unix))]
+    fn lock(file: File) -> Result<Self> {
+        Ok(Self { file })
+    }
+}
+
+impl Drop for ConfigLockGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
 
 // ============================================================================
 // Config Entity Trait
