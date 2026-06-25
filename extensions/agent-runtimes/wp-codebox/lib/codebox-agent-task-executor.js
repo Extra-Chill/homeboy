@@ -75,6 +75,7 @@ const {
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
 const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
+const AGENT_TASK_EVENT_SCHEMA = 'homeboy/agent-task-event/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 const WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY = 'wp-codebox/run-runtime-package';
 const LEGACY_RUNTIME_PACKAGE_ABILITIES = new Set(['agents/run-runtime-package', 'runtime-package/run']);
@@ -2925,10 +2926,236 @@ function providerNotRegisteredDiagnostic(request, result = {}) {
   };
 }
 
+function normalizeCodeboxAgentTaskEvents(request, result = {}, options = {}) {
+  assertAgentTaskRequest(request);
+  const diagnostics = [];
+  const sourceEvents = [];
+  const addEvents = (events, source) => {
+    for (const event of normalizeArray(events)) {
+      if (event && typeof event === 'object' && !Array.isArray(event)) {
+        sourceEvents.push({ event, source, index: sourceEvents.length });
+      }
+    }
+  };
+
+  for (const source of codeboxEventSources(result, options)) {
+    if (source.kind === 'events') {
+      addEvents(source.events, source.source);
+      continue;
+    }
+    if (source.kind === 'json') {
+      const parsed = parseEventJsonPayload(source.contents);
+      if (parsed) {
+        addEvents(eventsFromPayload(parsed), source.source);
+      }
+      continue;
+    }
+    if (source.kind === 'file') {
+      const payload = readEventPayloadFile(source.path, diagnostics);
+      if (payload) {
+        addEvents(eventsFromPayload(payload), `file:${source.path}`);
+      }
+    }
+  }
+
+  const sorted = sourceEvents.sort((left, right) => compareCodeboxEventEntries(left, right));
+  const events = sorted.map((entry, index) => normalizeCodeboxAgentTaskEvent(request, entry.event, index + 1, entry.source));
+  return { events, diagnostics };
+}
+
+function codeboxEventSources(result = {}, options = {}) {
+  const publicEnvelope = options.publicResultEnvelope || codeboxPublicResultEnvelope(result, options) || {};
+  const sources = [
+    { kind: 'events', source: 'options.events', events: options.events },
+    { kind: 'events', source: 'result.events', events: result.events },
+    { kind: 'events', source: 'result.normalized_events', events: result.normalized_events || result.normalizedEvents },
+    { kind: 'events', source: 'result.agent_task_events', events: result.agent_task_events || result.agentTaskEvents },
+    { kind: 'events', source: 'result.callback_events', events: result.callback_events || result.callbackEvents },
+    { kind: 'events', source: 'result.outputs.callback_events', events: result.outputs?.callback_events || result.outputs?.callbackEvents },
+    { kind: 'events', source: 'result.metadata.callback_events', events: result.metadata?.callback_events || result.metadata?.callbackEvents },
+    { kind: 'events', source: 'public.outputs.callback_events', events: publicEnvelope.outputs?.callback_events || publicEnvelope.outputs?.callbackEvents },
+    { kind: 'events', source: 'public.metadata.callback_events', events: publicEnvelope.metadata?.callback_events || publicEnvelope.metadata?.callbackEvents },
+    { kind: 'json', source: 'options.stdout', contents: options.stdout },
+    { kind: 'json', source: 'result.stdout', contents: result.stdout },
+  ];
+  for (const execution of resultExecutionsFromPayload(result)) {
+    sources.push({ kind: 'json', source: 'execution.stdout', contents: execution.stdout });
+  }
+  for (const filePath of codeboxEventFileCandidates(result, options)) {
+    sources.push({ kind: 'file', path: filePath });
+  }
+  return sources;
+}
+
+function codeboxEventFileCandidates(result = {}, options = {}) {
+  const configured = [
+    options.eventsFile,
+    options.events_file,
+    options.eventFile,
+    options.event_file,
+    options.resultFile,
+    options.result_file,
+    result.events_file,
+    result.eventsFile,
+    result.events_path,
+    result.eventsPath,
+    result.event_file,
+    result.eventFile,
+    result.event_path,
+    result.eventPath,
+    result.result_file,
+    result.resultFile,
+    result.result_path,
+    result.resultPath,
+    result.metadata?.events_file,
+    result.metadata?.eventsFile,
+    result.metadata?.events_path,
+    result.metadata?.eventsPath,
+    result.metadata?.result_file,
+    result.metadata?.resultFile,
+  ];
+  const refs = [
+    ...normalizeArray(result.artifacts),
+    ...normalizeArray(result.evidence_refs),
+    ...normalizeArray(result.evidenceRefs),
+    ...normalizeArray(result.artifact_result?.artifact_refs),
+    ...normalizeArray(result.artifact_result?.artifactRefs),
+    ...normalizeArray(result.artifact_result?.evidence_refs),
+    ...normalizeArray(result.artifact_result?.evidenceRefs),
+  ];
+  for (const ref of refs) {
+    const candidate = ref?.path || ref?.file || ref?.uri;
+    if (candidate && /(?:event|result).+\.json$|\.events\.json$|events\.json$|result\.json$/i.test(String(candidate))) {
+      configured.push(candidate);
+    }
+  }
+  return uniqueStrings(configured.filter((candidate) => typeof candidate === 'string' && candidate !== ''));
+}
+
+function readEventPayloadFile(filePath, diagnostics) {
+  if (!fs.existsSync(filePath)) {
+    diagnostics.push({
+      class: 'codebox.events_file_missing',
+      message: `WP Codebox event/result file was not found: ${filePath}.`,
+      data: { path: filePath },
+    });
+    return null;
+  }
+  try {
+    const parsed = readJsonFile(filePath);
+    if (parsed !== null) {
+      return parsed;
+    }
+  } catch {
+  }
+  diagnostics.push({
+    class: 'codebox.events_file_invalid_json',
+    message: `WP Codebox event/result file did not contain valid JSON: ${filePath}.`,
+    data: { path: filePath },
+  });
+  return null;
+}
+
+function eventsFromPayload(payload) {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+  return [
+    ...normalizeArray(payload.events),
+    ...normalizeArray(payload.normalized_events || payload.normalizedEvents),
+    ...normalizeArray(payload.agent_task_events || payload.agentTaskEvents),
+    ...normalizeArray(payload.callback_events || payload.callbackEvents),
+    ...normalizeArray(payload.outputs?.callback_events || payload.outputs?.callbackEvents),
+    ...normalizeArray(payload.metadata?.callback_events || payload.metadata?.callbackEvents),
+    ...resultExecutionsFromPayload(payload).flatMap((execution) => eventsFromPayload(parseEventJsonPayload(execution.stdout) || {})),
+  ];
+}
+
+function parseEventJsonPayload(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function resultExecutionsFromPayload(payload = {}) {
+  return [
+    ...normalizeArray(payload.executions),
+    ...normalizeArray(payload.run?.executions),
+  ].filter((execution) => execution && typeof execution === 'object' && !Array.isArray(execution));
+}
+
+function compareCodeboxEventEntries(left, right) {
+  const leftTime = Date.parse(left.event.created_at || left.event.createdAt || left.event.timestamp || left.event.time || '');
+  const rightTime = Date.parse(right.event.created_at || right.event.createdAt || right.event.timestamp || right.event.time || '');
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) {
+    return Number.isFinite(leftTime) ? -1 : 1;
+  }
+  const leftSequence = Number.parseInt(left.event.sequence ?? left.event.seq ?? left.event.order ?? '', 10);
+  const rightSequence = Number.parseInt(right.event.sequence ?? right.event.seq ?? right.event.order ?? '', 10);
+  if (Number.isFinite(leftSequence) && Number.isFinite(rightSequence) && leftSequence !== rightSequence) {
+    return leftSequence - rightSequence;
+  }
+  const leftWorker = String(left.event.worker_id || left.event.workerId || left.event.worker || left.event.metadata?.worker_id || '');
+  const rightWorker = String(right.event.worker_id || right.event.workerId || right.event.worker || right.event.metadata?.worker_id || '');
+  if (leftWorker !== rightWorker) {
+    return leftWorker.localeCompare(rightWorker);
+  }
+  return left.index - right.index;
+}
+
+function normalizeCodeboxAgentTaskEvent(request, event, sequence, source) {
+  const metadata = sanitizePublicMetadata({
+    ...(event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata) ? event.metadata : {}),
+    source,
+    source_schema: event.schema,
+    source_sequence: event.sequence ?? event.seq ?? event.order,
+  });
+  const artifactRefs = normalizeArray(event.artifact_refs || event.artifactRefs);
+  const artifacts = [
+    ...normalizeArray(event.artifacts),
+    ...artifactRefs,
+  ];
+  return withoutEmptyObjectValues({
+    schema: AGENT_TASK_EVENT_SCHEMA,
+    event_id: event.event_id || event.eventId || event.id || `${request.task_id}:${sequence}`,
+    task_id: event.task_id || event.taskId || request.task_id,
+    parent_task_id: event.parent_task_id || event.parentTaskId || request.parent_task_id,
+    sequence,
+    type: event.type || event.name || event.event || event.action || event.status || 'codebox.event',
+    name: event.name,
+    status: event.status,
+    message: event.message || event.summary,
+    created_at: event.created_at || event.createdAt || event.timestamp || event.time || new Date(0).toISOString(),
+    worker_id: event.worker_id || event.workerId || event.worker || event.metadata?.worker_id,
+    group_key: event.group_key || event.groupKey || request.group_key,
+    artifacts: artifacts.map((artifact, index) => artifactFromCodeboxArtifact(artifact, index)).filter(Boolean),
+    evidence_refs: normalizeArray(event.evidence_refs || event.evidenceRefs).map((ref) => agentTaskEvidenceRefFromRef(ref, 'codebox_event_evidence')).filter((ref) => ref.uri),
+    diagnostics: normalizeArray(event.diagnostics).map((diagnostic) => ({
+      class: diagnostic.class || diagnostic.kind || diagnostic.code || 'codebox.event',
+      message: diagnostic.message || String(diagnostic),
+      data: sanitizePublicMetadata(diagnostic.data || {}),
+    })),
+    metadata,
+  });
+}
+
 function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   assertAgentTaskRequest(request);
   const publicResultEnvelope = codeboxPublicResultEnvelope(result, options);
   const envelopeOptions = { ...options, publicResultEnvelope };
+  const normalizedEventEnvelope = normalizeCodeboxAgentTaskEvents(request, result, envelopeOptions);
   const runSummary = codeboxRunSummary(result, envelopeOptions);
   const recipeSummary = codeboxRecipeRunSummary(result, envelopeOptions);
   const localStatus = normalizeStatus(result, options.exitStatus ?? 0);
@@ -2970,7 +3197,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     artifacts: normalizeArtifacts(result, runSummary, recipeSummary, envelopeOptions),
     evidenceRefs: normalizeEvidenceRefs(result, runSummary, recipeSummary, envelopeOptions),
     outputs,
-    diagnostics: [providerDiagnostic, envelopeBoundaryDiagnostic, missingRequiredTypedArtifacts, invalidRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
+    diagnostics: [providerDiagnostic, envelopeBoundaryDiagnostic, missingRequiredTypedArtifacts, invalidRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...normalizedEventEnvelope.diagnostics, ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),
@@ -2982,6 +3209,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary, envelopeOptions)),
       artifact_declarations: sanitizePublicMetadata(artifactDeclarationsMetadataFromRequest(request)),
       typed_artifacts: sanitizePublicMetadata(outputs.typed_artifacts || {}),
+      normalized_events: sanitizePublicMetadata(normalizedEventEnvelope.events),
       sandbox_policy: sanitizePublicMetadata({
         policy: result.task_input?.policy,
         sandbox_tool_policy: result.task_input?.sandbox_tool_policy,
@@ -2995,7 +3223,17 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   } else if (envelopeBoundaryDiagnostic || missingRequiredTypedArtifacts || invalidRequiredTypedArtifacts) {
     outcome.failure_classification = 'execution_failed';
   }
-  return outcomeWithOutputTypedArtifacts(outcome, outputs);
+  return outcomeWithOutputTypedArtifacts(outcomeWithNormalizedEvents(outcome, normalizedEventEnvelope.events), outputs);
+}
+
+function outcomeWithNormalizedEvents(outcome, events) {
+  if (!Array.isArray(events) || events.length === 0) {
+    return outcome;
+  }
+  return {
+    ...outcome,
+    events,
+  };
 }
 
 function outcomeWithOutputTypedArtifacts(outcome, outputs) {
@@ -3048,9 +3286,11 @@ module.exports = {
   WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
   WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
   RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA,
+  AGENT_TASK_EVENT_SCHEMA,
   providerContract,
   providerRuntimeInvocationContract,
   codeboxTaskRequestFromAgentTaskRequest,
   reconcileRunSummaryWithPublicEnvelope,
+  normalizeCodeboxAgentTaskEvents,
   agentTaskOutcomeFromCodeboxResult,
 };
