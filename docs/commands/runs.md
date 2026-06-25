@@ -54,6 +54,14 @@ homeboy --output json runs refs --kind trace --component gutenberg --aggregate-a
 
 `homeboy runs evidence <run-id>` emits reviewer-facing evidence using generic artifact addresses. Local operator files are represented as non-reviewer-visible `homeboy://run/<run-id>/artifact/<artifact-id>` handles with a fetch command instead of absolute machine paths. Remote runner artifacts use `runner-artifact://...` refs, validated public HTTP(S) URLs are emitted as public evidence links, and metadata-only evidence remains non-public. Lab-specific publication or mirroring policy belongs in runner/extension enrichment, not in the generic evidence serializer.
 
+When a run passed but `runs evidence` has zero artifacts, the command completed
+but did not produce reviewable evidence. Preserve the run id and output directory,
+then promote or attach artifacts through the command-specific surface when it is
+available. See
+[Artifact loop for runner and matrix workflows](../operators/artifact-loop-runner-matrix.md)
+for generic runner, static HTML, and matrix examples; proposed future attach
+commands are documented there as upcoming rather than current CLI.
+
 `homeboy runs artifact cleanup-downloads` plans cleanup for local runner artifact downloads under Homeboy's artifact root (`<artifact-root>/runner`). By default it is a dry run; pass `--apply` to remove the planned cache subtree. Use `--runner` and `--run-id` to narrow cleanup to a specific runner or run cache.
 
 `homeboy runs artifact cleanup-persisted` plans cleanup for persisted local run artifacts and their database records. By default it is a dry run; pass `--apply` to delete planned artifact files/directories and remove their database rows.

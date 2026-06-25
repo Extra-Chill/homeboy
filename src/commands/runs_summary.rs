@@ -128,7 +128,12 @@ fn artifact_lines(run: &Value, run_id: &str) -> Vec<String> {
         return Vec::new();
     };
     if artifacts.is_empty() {
-        return vec!["Artifacts: none recorded".to_string()];
+        return vec![
+            "Artifacts: none recorded".to_string(),
+            format!(
+                "  hint: if this run produced files that reviewers need, promote or attach the output directory before sharing evidence; see `homeboy docs operators/artifact-loop-runner-matrix` and `homeboy runs evidence {run_id}`."
+            ),
+        ];
     }
 
     let mut lines = vec![format!("Artifacts ({}):", artifacts.len())];
