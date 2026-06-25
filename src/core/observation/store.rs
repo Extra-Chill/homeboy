@@ -48,7 +48,11 @@ pub struct ObservationStore {
 impl ObservationStore {
     /// Open and lazily initialize the local observed-state database.
     pub fn open_initialized() -> Result<Self> {
-        let path = database_path()?;
+        Self::open_initialized_at(database_path()?)
+    }
+
+    pub fn open_initialized_at(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
                 Error::internal_io(

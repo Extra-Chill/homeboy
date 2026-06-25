@@ -6,6 +6,7 @@ use super::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskFollowUp, AgentTaskOutcome, AgentTaskOutcomeStatus,
 };
+use super::markdown::escape_markdown_table_cell;
 
 pub const AGENT_TASK_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-aggregate/v1";
 
@@ -472,10 +473,6 @@ fn matrix_row(outcome: &AgentTaskOutcome) -> Option<AgentTaskMatrixRow> {
             .cloned()
             .unwrap_or(Value::Null),
     })
-}
-
-fn escape_markdown_table_cell(value: &str) -> String {
-    value.replace('|', "\\|").replace('\n', " ")
 }
 
 fn aggregate_schema() -> String {

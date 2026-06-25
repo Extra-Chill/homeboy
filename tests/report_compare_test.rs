@@ -1,8 +1,8 @@
 use std::fs;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use homeboy::commands::report::{compare_report_artifacts_from_args, ReportCompareArgs};
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
+use homeboy::core::report_compare::compare_report_artifacts_with_store;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -16,43 +16,6 @@ fn args(old: String, new: String) -> ReportCompareArgs {
         new,
         format: "markdown".to_string(),
     }
-}
-
-struct EnvGuard {
-    home: Option<String>,
-    xdg_data_home: Option<String>,
-}
-
-impl EnvGuard {
-    fn isolate(home: &std::path::Path) -> Self {
-        let guard = Self {
-            home: std::env::var("HOME").ok(),
-            xdg_data_home: std::env::var("XDG_DATA_HOME").ok(),
-        };
-        std::env::set_var("HOME", home);
-        std::env::set_var("XDG_DATA_HOME", home.join("data"));
-        homeboy::core::set_artifact_root_override(Some(home.join("artifacts")));
-        guard
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match &self.xdg_data_home {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-        homeboy::core::set_artifact_root_override(None);
-    }
-}
-
-fn env_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 #[test]
@@ -84,10 +47,9 @@ fn report_compare_summarizes_file_artifact_deltas() {
 
 #[test]
 fn report_compare_accepts_run_artifact_refs() {
-    let _lock = env_lock();
     let home = support::temp_dir("report-compare-run-artifacts");
-    let _env = EnvGuard::isolate(home.path());
-    let store = ObservationStore::open_initialized().expect("store");
+    let store = ObservationStore::open_initialized_at(home.path().join("observations.sqlite"))
+        .expect("store");
     let old_run = store
         .start_run(
             NewRunRecord::builder("matrix")
@@ -113,11 +75,10 @@ fn report_compare_accepts_run_artifact_refs() {
         .record_artifact(&new_run.id, "matrix-report", &new_path)
         .expect("new artifact");
 
-    let report = compare_report_artifacts_from_args(&args(
-        format!("{}:{}", old_run.id, old_artifact.id),
-        format!("{}:{}", new_run.id, new_artifact.id),
-    ))
-    .expect("compare report");
+    let old_ref = format!("{}:{}", old_run.id, old_artifact.id);
+    let new_ref = format!("{}:{}", new_run.id, new_artifact.id);
+    let report = compare_report_artifacts_with_store(Some(&store), &old_ref, &new_ref)
+        .expect("compare report");
 
     assert_eq!(report.total.delta, -1);
     assert_eq!(
@@ -129,7 +90,7 @@ fn report_compare_accepts_run_artifact_refs() {
         format!("{}:{}", new_run.id, new_artifact.id)
     );
 
-    let run_report = compare_report_artifacts_from_args(&args(old_run.id.clone(), new_run.id.clone()))
+    let run_report = compare_report_artifacts_with_store(Some(&store), &old_run.id, &new_run.id)
         .expect("compare report from run ids");
     assert_eq!(run_report.total.delta, -1);
 }
