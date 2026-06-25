@@ -1663,7 +1663,13 @@ fn insert_artifact_aliases(
             .get(artifact_id)
             .is_none_or(|value| value.is_null() || value.as_str() == Some(""));
         if should_insert {
-            inputs.insert(artifact_id.clone(), artifact.clone());
+            inputs.insert(
+                artifact_id.clone(),
+                artifact
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or_else(|| artifact.clone()),
+            );
         }
     }
 }
@@ -3355,18 +3361,14 @@ mod tests {
                 context["inputs"]["artifacts"]["concept_packet"]["payload"]["title"],
                 "Demo"
             );
-            assert_eq!(
-                context["inputs"]["concept_packet"]["payload"]["title"],
-                "Demo"
-            );
+            assert_eq!(context["inputs"]["concept_packet"]["title"], "Demo");
             assert_eq!(
                 context["runtime_execution"]["input"]["input"]["artifacts"]["concept_packet"]
                     ["payload"]["title"],
                 "Demo"
             );
             assert_eq!(
-                context["runtime_execution"]["input"]["input"]["concept_packet"]["payload"]
-                    ["title"],
+                context["runtime_execution"]["input"]["input"]["concept_packet"]["title"],
                 "Demo"
             );
         });
