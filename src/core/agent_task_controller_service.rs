@@ -1769,6 +1769,45 @@ fn persist_controller_artifacts(loop_id: &str, action_id: &str, artifacts: &Valu
     Ok(())
 }
 
+fn persist_controller_execution_artifacts(
+    loop_id: &str,
+    action_id: &str,
+    execution: &Value,
+) -> Result<()> {
+    let mut artifacts = serde_json::Map::new();
+    collect_artifact_map(&mut artifacts, execution.pointer("/result/artifacts"));
+    collect_artifact_map(&mut artifacts, execution.pointer("/result/typed_artifacts"));
+    collect_artifact_map(
+        &mut artifacts,
+        execution.pointer("/result/result/artifacts"),
+    );
+    collect_artifact_map(
+        &mut artifacts,
+        execution.pointer("/result/result/typed_artifacts"),
+    );
+    if let Some(outcomes) = execution
+        .pointer("/result/aggregate/outcomes")
+        .and_then(Value::as_array)
+    {
+        for outcome in outcomes {
+            collect_artifact_map(&mut artifacts, outcome.pointer("/outputs/artifacts"));
+            collect_artifact_map(&mut artifacts, outcome.pointer("/outputs/typed_artifacts"));
+            collect_artifact_map(&mut artifacts, outcome.pointer("/metadata/artifacts"));
+            collect_artifact_map(&mut artifacts, outcome.pointer("/metadata/typed_artifacts"));
+        }
+    }
+    persist_controller_artifacts(loop_id, action_id, &Value::Object(artifacts))
+}
+
+fn collect_artifact_map(target: &mut serde_json::Map<String, Value>, value: Option<&Value>) {
+    let Some(object) = value.and_then(Value::as_object) else {
+        return;
+    };
+    for (artifact_id, artifact) in object {
+        target.insert(artifact_id.clone(), artifact.clone());
+    }
+}
+
 fn artifact_refs_from_command_result(artifacts: &Value) -> Vec<AgentTaskLoopArtifactRef> {
     let Some(object) = artifacts.as_object() else {
         return Vec::new();
@@ -2457,6 +2496,7 @@ fn complete_controller_action(
         AgentTaskLoopActionStatus::Failed
     };
     set_controller_action_status(record, action_id, status)?;
+    persist_controller_execution_artifacts(&record.loop_id, action_id, execution)?;
     push_controller_history(
         record,
         if exit_code == 0 {
@@ -3170,6 +3210,43 @@ mod tests {
             )
             .expect("persisted artifact json");
             assert_eq!(persisted["schema"], "example/ValidationResult/v1");
+        });
+    }
+
+    #[test]
+    fn completion_persists_aggregate_outcome_artifacts() {
+        with_isolated_home(|home| {
+            let execution = json!({
+                "result": {
+                    "aggregate": {
+                        "outcomes": [{
+                            "outputs": {
+                                "typed_artifacts": {
+                                    "static_site_candidate": {
+                                        "schema": "wp-site-generator/StaticSiteCandidate/v1",
+                                        "artifact_url": "https://artifacts.example.test/static-site-candidate.json"
+                                    }
+                                }
+                            }
+                        }]
+                    }
+                }
+            });
+
+            persist_controller_execution_artifacts("repo-loop-dispatch", "action-6", &execution)
+                .expect("persist aggregate artifacts");
+
+            let persisted_artifact = home
+                .path()
+                .join(".local/share/homeboy/artifacts/agent-task-loop-controller/repo-loop-dispatch/action-6/static_site_candidate.json");
+            let persisted: Value = serde_json::from_str(
+                &fs::read_to_string(&persisted_artifact).expect("persisted aggregate artifact"),
+            )
+            .expect("persisted artifact json");
+            assert_eq!(
+                persisted["schema"],
+                "wp-site-generator/StaticSiteCandidate/v1"
+            );
         });
     }
 
