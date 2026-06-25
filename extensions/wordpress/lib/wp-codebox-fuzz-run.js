@@ -42,6 +42,7 @@ const WP_CODEBOX_FUZZ_SUITE_SCHEMA = 'wp-codebox/fuzz-suite/v1';
 const WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA = 'wp-codebox/fuzz-suite-result/v1';
 const WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA = 'homeboy/wordpress-codebox-fuzz-suite-consumer/v1';
 const WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA = 'homeboy/wp-codebox-fuzz-preflight/v1';
+const WORDPRESS_FUZZ_OBSERVATION_SCHEMA = 'homeboy/wordpress-fuzz-observation/v1';
 const DEFAULT_FUZZ_SUITE_ABILITY = 'wp-codebox/run-fuzz-suite';
 const DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY = 'wp-codebox/run-wordpress-workload';
 const DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA = 'wp-codebox/wordpress-workload-run/v1';
@@ -382,6 +383,10 @@ function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execu
 	if (objectOrUndefined(entry.input)) {
 		return homeboyFuzzRuntimeCommandInput(entry.input);
 	}
+	const workloadDefinition = objectOrUndefined(execute.definition) || objectOrUndefined(manifest.workload?.definition);
+	if (workloadDefinition) {
+		return homeboyFuzzWorkloadRunInputFromDefinition(workloadDefinition, { entry: execute.entry || manifest.workload?.entry });
+	}
 	const workloadPath = execute.path || manifest.workload?.path;
 	if (typeof workloadPath === 'string' && workloadPath.trim() !== '') {
 		const workloadInput = homeboyFuzzWorkloadRunInputFromFile(workloadPath, { entry: execute.entry || manifest.workload?.entry });
@@ -397,6 +402,24 @@ function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execu
 	return undefined;
 }
 
+function homeboyFuzzWorkloadRunInputFromDefinition(source = {}, options = {}) {
+	const steps = normalizeWordPressWorkloadSteps(source.run || source.steps);
+	if (steps.length === 0) {
+		return undefined;
+	}
+	return wpCodeboxWordPressWorkloadRunInput({
+		id: source.id || options.entry,
+		before: source.before,
+		steps,
+		after: source.after,
+		metadata: stripUndefined({
+			...(objectOrUndefined(source.metadata) || {}),
+			source: 'inline',
+			source_entry: options.entry,
+		}),
+	});
+}
+
 function homeboyFuzzWorkloadRunInputFromFile(workloadPath, options = {}) {
 	const filePath = String(workloadPath || '').trim();
 	if (!filePath || !fs.existsSync(filePath)) {
@@ -405,7 +428,7 @@ function homeboyFuzzWorkloadRunInputFromFile(workloadPath, options = {}) {
 	let source;
 	try {
 		source = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-	} catch (_error) {
+	} catch {
 		return undefined;
 	}
 	const steps = normalizeWordPressWorkloadSteps(source.run || source.steps, { sourceFilePath: filePath });
@@ -432,11 +455,12 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 	const execute = objectOrUndefined(intent.execute) || {};
 	const activation = intent.plugin?.activation;
 	const workloadPath = execute.path || manifest.workload?.path;
+	const workloadDefinition = objectOrUndefined(execute.definition) || objectOrUndefined(manifest.workload?.definition);
 	const genericCommand = homeboyFuzzWorkloadGenericPrimitiveCommand(manifest);
 	const setup = typeof activation === 'string' && activation.trim() !== ''
 		? [wpCodeboxPluginActivationStep(activation)]
 		: undefined;
-	const action = homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, execute });
+	const action = homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, workloadDefinition, execute });
 	const collect = normalizeArray(intent.collect).length > 0 ? normalizeArray(intent.collect) : artifacts.map((artifact) => ({ artifact: artifact.name }));
 	const assert = collect
 		.map((item) => item?.artifact)
@@ -449,12 +473,15 @@ function wpCodeboxPluginActivationStep(plugin) {
 	return { command: 'wordpress.wp-cli', args: [`command=plugin activate ${plugin}`] };
 }
 
-function homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, execute = {} } = {}) {
+function homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, workloadDefinition, execute = {} } = {}) {
 	if (typeof genericCommand === 'string') {
 		return [{ command: genericCommand, args: homeboyFuzzCommandArgs(objectOrUndefined(execute.parameters) || {}) }];
 	}
 	if (typeof workloadPath === 'string' && workloadPath.trim() !== '') {
 		return [{ command: 'wordpress.run-workload', args: [`path=${workloadPath}`] }];
+	}
+	if (objectOrUndefined(workloadDefinition)) {
+		return [{ command: 'wordpress.run-workload' }];
 	}
 	return [];
 }
@@ -944,6 +971,16 @@ function normalizeWpCodeboxFuzzSuiteResult(result = {}, context = {}) {
 		observation_set: observationSet,
 		provider_result: source,
 	}, { provider: 'wp-codebox', taskId: context.request?.task_id });
+	const observation = buildWordPressFuzzObservation({
+		source,
+		status,
+		artifacts,
+		coverageSummary,
+		hotspotSummary,
+		normalizedResult,
+		failures,
+		context,
+	});
 	return stripUndefined({
 		schema: WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
 		delegated_schema: WP_CODEBOX_FUZZ_SUITE_SCHEMA,
@@ -951,6 +988,7 @@ function normalizeWpCodeboxFuzzSuiteResult(result = {}, context = {}) {
 		request_id: source?.request_id || source?.requestId || context.request?.task_id,
 		status,
 		succeeded: status ? ['succeeded', 'success', 'passed', 'ok'].includes(String(status).toLowerCase()) : undefined,
+		observation,
 		coverage: source?.coverage,
 		coverage_summary: coverageSummary,
 		coverage_gaps: coverageGaps,
@@ -1018,7 +1056,204 @@ function wpCodeboxFuzzContractFailures({ source = {}, result = {}, context = {},
 		});
 	}
 
+	const requiredOutputFailures = requiredFuzzOutputFailures({ source, context, artifacts, normalizedResult });
+	failures.push(...requiredOutputFailures);
+
 	return failures;
+}
+
+function buildWordPressFuzzObservation({ source = {}, status, artifacts = [], coverageSummary, hotspotSummary, normalizedResult, failures = [], context = {} } = {}) {
+	const succeeded = status ? ['succeeded', 'success', 'passed', 'ok'].includes(String(status).toLowerCase()) : undefined;
+	const summary = normalizeObservationSummary(source, normalizedResult, coverageSummary);
+	return stripUndefined({
+		schema: WORDPRESS_FUZZ_OBSERVATION_SCHEMA,
+		version: 1,
+		id: source?.suite?.id || source?.request_id || source?.requestId || context.request?.task_id || normalizedResult?.id,
+		status,
+		succeeded,
+		source: stripUndefined({
+			provider: 'wp-codebox',
+			result_schema: source?.schema || WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			suite_id: source?.suite?.id,
+			request_id: source?.request_id || source?.requestId || context.request?.task_id,
+		}),
+		summary,
+		metrics: normalizeObservationMetrics({ coverageSummary, hotspotSummary, normalizedResult }),
+		artifacts,
+		failures: failures.length > 0 ? failures : undefined,
+		normalized_result: normalizedResult,
+	});
+}
+
+function normalizeObservationSummary(source = {}, normalizedResult, coverageSummary) {
+	const sourceSummary = objectOrUndefined(source?.summary) || {};
+	const normalizedSummary = objectOrUndefined(normalizedResult?.summary) || {};
+	return stripUndefined({
+		total: numberOrUndefined(sourceSummary.total ?? normalizedSummary.total),
+		passed: numberOrUndefined(sourceSummary.passed ?? normalizedSummary.passed),
+		failed: numberOrUndefined(sourceSummary.failed ?? normalizedSummary.failed),
+		errored: numberOrUndefined(sourceSummary.errored ?? sourceSummary.error ?? normalizedSummary.errored),
+		skipped: numberOrUndefined(sourceSummary.skipped ?? normalizedSummary.skipped),
+		coverage: objectOrUndefined(coverageSummary),
+	});
+}
+
+function normalizeObservationMetrics({ coverageSummary, hotspotSummary, normalizedResult } = {}) {
+	const fuzzSummary = objectOrUndefined(normalizedResult?.summary) || {};
+	return stripUndefined({
+		coverage: objectOrUndefined(coverageSummary),
+		db_query: objectOrUndefined(fuzzSummary.db_query_metrics),
+		performance: objectOrUndefined(fuzzSummary.performance_metrics),
+		admin_browser_errors: objectOrUndefined(fuzzSummary.admin_browser_errors),
+		http_guardrail_outcomes: objectOrUndefined(fuzzSummary.http_guardrail_outcomes),
+		hotspots: hotspotSummary ? stripUndefined({
+			schema: hotspotSummary.schema,
+			id: hotspotSummary.id,
+			metric: hotspotSummary.metric,
+			unit: hotspotSummary.unit,
+			count: normalizeArray(hotspotSummary.items).length,
+			items: hotspotSummary.items,
+		}) : undefined,
+	});
+}
+
+function requiredFuzzOutputFailures({ source = {}, context = {}, artifacts = [], normalizedResult } = {}) {
+	const requirements = fuzzOutputRequirements(source, context);
+	const failures = [];
+	const missingMetricPaths = requirements.normalizedMetricPaths.filter((metricPath) => !hasNumericPath(normalizedResult, metricPath));
+	if (missingMetricPaths.length > 0) {
+		failures.push({
+			severity: 'error',
+			code: 'wp_codebox_fuzz_required_normalized_metrics_missing',
+			message: 'WP Codebox fuzz result is missing declared normalized metric paths.',
+			missing_metric_paths: missingMetricPaths,
+		});
+	}
+
+	const missingArtifactKeys = requirements.artifactKeys.filter((key) => !artifacts.some((artifact) => fuzzArtifactMatchesKey(artifact, key)));
+	if (missingArtifactKeys.length > 0) {
+		failures.push({
+			severity: 'error',
+			code: 'wp_codebox_fuzz_required_output_artifacts_missing',
+			message: 'WP Codebox fuzz result is missing declared output artifact keys.',
+			missing_artifact_keys: missingArtifactKeys,
+		});
+	}
+
+	const missingEvidenceStatuses = requirements.evidenceStatuses.filter((requirement) => !pathMatchesExpectedStatus({ normalizedResult, source }, requirement));
+	if (missingEvidenceStatuses.length > 0) {
+		failures.push({
+			severity: 'error',
+			code: 'wp_codebox_fuzz_required_evidence_status_missing',
+			message: 'WP Codebox fuzz result is missing declared evidence status checks.',
+			missing_evidence_statuses: missingEvidenceStatuses,
+		});
+	}
+
+	return failures;
+}
+
+function fuzzOutputRequirements(source = {}, context = {}) {
+	const metadata = mergedFuzzRequestMetadata(source, context);
+	const outputRequirements = objectOrUndefined(metadata.output_requirements || metadata.outputRequirements || metadata.required_outputs || metadata.requiredOutputs) || {};
+	return {
+		normalizedMetricPaths: normalizeStringList(
+			metadata.required_normalized_metric_paths
+			|| metadata.requiredNormalizedMetricPaths
+			|| metadata.required_metric_paths
+			|| metadata.requiredMetricPaths
+			|| outputRequirements.required_normalized_metric_paths
+			|| outputRequirements.requiredNormalizedMetricPaths
+			|| outputRequirements.required_metric_paths
+			|| outputRequirements.requiredMetricPaths
+		),
+		artifactKeys: normalizeStringList(
+			metadata.required_artifact_keys
+			|| metadata.requiredArtifactKeys
+			|| outputRequirements.required_artifact_keys
+			|| outputRequirements.requiredArtifactKeys
+		),
+		evidenceStatuses: normalizeEvidenceStatusRequirements(
+			metadata.required_evidence_statuses
+			|| metadata.requiredEvidenceStatuses
+			|| outputRequirements.required_evidence_statuses
+			|| outputRequirements.requiredEvidenceStatuses
+		),
+	};
+}
+
+function normalizeStringList(value) {
+	return normalizeArray(value)
+		.map((entry) => typeof entry === 'string' ? entry.trim() : '')
+		.filter(Boolean);
+}
+
+function normalizeEvidenceStatusRequirements(value) {
+	return normalizeArray(value)
+		.map((entry) => {
+			if (typeof entry === 'string') {
+				const [evidencePath, status] = entry.split('=').map((part) => String(part || '').trim());
+				return evidencePath && status ? { path: evidencePath, status } : undefined;
+			}
+			if (!objectOrUndefined(entry)) {
+				return undefined;
+			}
+			const evidencePath = entry.path || entry.metric_path || entry.metricPath || entry.evidence_path || entry.evidencePath;
+			const status = entry.status || entry.expected || entry.value;
+			return evidencePath && status !== undefined ? { path: String(evidencePath), status: String(status) } : undefined;
+		})
+		.filter(Boolean);
+}
+
+function hasNumericPath(source, metricPath) {
+	return valuesAtPath(source, metricPath).some((value) => Number.isFinite(Number(value)));
+}
+
+function pathMatchesExpectedStatus(sources = {}, requirement = {}) {
+	return valuesAtPath(sources, requirement.path).some((value) => String(value) === String(requirement.status));
+}
+
+function valuesAtPath(source, valuePath) {
+	if (!source || typeof valuePath !== 'string' || valuePath.trim() === '') {
+		return [];
+	}
+	const normalizedPath = valuePath.trim().replace(/^\$\.?/, '').replace(/^\//, '').replace(/\//g, '.');
+	const parts = normalizedPath.split('.').filter(Boolean);
+	return valuesAtPathParts([source], parts);
+}
+
+function valuesAtPathParts(values, parts) {
+	if (parts.length === 0) {
+		return values;
+	}
+	const [part, ...rest] = parts;
+	const next = [];
+	for (const value of values) {
+		if (part === '*') {
+			if (Array.isArray(value)) {
+				next.push(...value);
+			} else if (objectOrUndefined(value)) {
+				next.push(...Object.values(value));
+			}
+			continue;
+		}
+		if (Array.isArray(value) && /^\d+$/.test(part)) {
+			next.push(value[Number(part)]);
+			continue;
+		}
+		if (objectOrUndefined(value) && Object.prototype.hasOwnProperty.call(value, part)) {
+			next.push(value[part]);
+		}
+	}
+	return valuesAtPathParts(next.filter((value) => value !== undefined), rest);
+}
+
+function mergedFuzzRequestMetadata(source = {}, context = {}) {
+	const input = context.request?.executor?.config?.runtime_task?.input || context.request?.input || context.input || {};
+	return {
+		...(objectOrUndefined(input.metadata) || {}),
+		...(objectOrUndefined(source?.metadata) || {}),
+	};
 }
 
 function wpCodeboxFuzzAllowsEmpty(source = {}, context = {}) {
@@ -1045,6 +1280,12 @@ function wpCodeboxFuzzRequiredArtifactDeclarations(request = {}) {
 		.filter((artifact) => artifact?.required === true);
 }
 
+function fuzzArtifactMatchesKey(artifact = {}, key) {
+	return [artifact.name, artifact.role, artifact.semantic_key || artifact.semanticKey, artifact.path, artifact.metadata?.semantic_key || artifact.metadata?.semanticKey]
+		.filter(Boolean)
+		.map(String)
+		.includes(String(key));
+}
 function wpCodeboxFuzzCaseCount(source = {}, normalizedResult) {
 	const cases = source?.cases || source?.fuzz_cases || source?.fuzzCases || normalizedResult?.cases;
 	if (Array.isArray(cases)) {
@@ -1490,9 +1731,12 @@ function normalizeCoverageSummary(value) {
 	}
 	return stripUndefined({
 		surface_count: numberOrUndefined(value.surface_count ?? value.surfaceCount ?? value.surface ?? value.total),
-		exercised_count: numberOrUndefined(value.exercised_count ?? value.exercisedCount ?? value.exercised),
+		exercised_count: numberOrUndefined(value.exercised_count ?? value.exercisedCount ?? value.exercised ?? value.executed ?? value.generated),
 		skipped_count: numberOrUndefined(value.skipped_count ?? value.skippedCount ?? value.skipped),
 		failed_count: numberOrUndefined(value.failed_count ?? value.failedCount ?? value.failed),
+		untested_count: numberOrUndefined(value.untested_count ?? value.untestedCount ?? value.untested),
+		discovered_count: numberOrUndefined(value.discovered_count ?? value.discoveredCount ?? value.discovered),
+		generated_count: numberOrUndefined(value.generated_count ?? value.generatedCount ?? value.generated),
 		coverage_percent: numberOrUndefined(value.coverage_percent ?? value.coveragePercent),
 	});
 }
@@ -1556,9 +1800,11 @@ module.exports = {
 	FUZZ_ARTIFACT_SEMANTIC_KEYS,
 	WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
 	WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA,
+	WORDPRESS_FUZZ_OBSERVATION_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	buildWordPressFuzzCommandManifest,
+	buildWordPressFuzzObservation,
 	normalizeWpCodeboxFuzzArtifacts,
 	normalizeWpCodeboxFuzzSuiteResult,
 	normalizeWordPressFuzzRuntimeTaskResult,

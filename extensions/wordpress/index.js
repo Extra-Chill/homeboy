@@ -11,6 +11,7 @@ module.exports = {
 	...require('./lib/wordpress-bootstrap-timeline'),
 	...require('./lib/request-profiler'),
 	...require('./lib/rest-db-query-profiler'),
+	...require('./lib/wordpress-rest-db-query-profile-preset'),
 	...require('./lib/db-inventory'),
 	...require('./lib/wordpress-discovery-inventory'),
 	...require('./lib/browser-request-coverage'),

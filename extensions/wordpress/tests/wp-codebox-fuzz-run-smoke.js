@@ -14,6 +14,7 @@ const {
 	ARTIFACT_POSTPROCESS_COMMAND,
 	WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
 	WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA,
+	WORDPRESS_FUZZ_OBSERVATION_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	buildWordPressFuzzCommandManifest,
@@ -489,6 +490,62 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'case_artifact').semantic_key, 'fuzz.case.artifact');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'repro_case').semantic_key, 'fuzz.case.repro');
 	assert.equal(summary.artifacts.some((artifact) => artifact.name === 'placeholder-only'), false);
+	assert.equal(summary.observation.schema, WORDPRESS_FUZZ_OBSERVATION_SCHEMA);
+	assert.equal(summary.observation.status, 'succeeded');
+	assert.equal(summary.observation.succeeded, true);
+	assert.equal(summary.observation.summary.total, 2);
+	assert.equal(summary.observation.summary.coverage.surface_count, 3);
+	assert.equal(summary.observation.metrics.coverage.exercised_count, 1);
+	assert.equal(summary.observation.metrics.db_query.query_count, 1);
+	assert.equal(summary.observation.metrics.hotspots.count, 1);
+	assert.equal(summary.observation.artifacts.find((artifact) => artifact.role === 'normalized_fuzz_result').semantic_key, 'fuzz.result.normalized');
+	assert.equal(summary.observation.normalized_result.schema, 'wordpress-fuzz-result/v1');
+
+	const wooFinalArtifactShape = {
+		schema: 'homeboy/fuzz-campaign/v1',
+		version: 1,
+		id: 'woo-db-api-rest-query-profile-20260625-16',
+		metadata: {
+			status: 'passed',
+			success: true,
+			artifact_refs: [{
+				role: 'fuzz_report',
+				semantic_key: 'fuzz.result.normalized',
+				name: 'wp-codebox-fuzz-suite-result',
+				content: {
+					schema: 'wp-codebox/fuzz-suite-result/v1',
+					suite: { id: 'woo-db-api-rest-query-profile-20260625-16' },
+					status: 'passed',
+					success: true,
+					summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+					coverageSummary: { discovered: 1, generated: 1, executed: 1, skipped: 0, untested: 0, skippedReasons: [] },
+					cases: [{
+						id: 'rest-db-query-profile:default',
+						status: 'passed',
+						success: true,
+						target: { kind: 'runtime', id: 'wordpress.run-workload', entrypoint: 'wordpress.run-workload' },
+						diagnostics: [],
+						metadata: {
+							input: { schema: 'wp-codebox/wordpress-workload-run/v1', id: 'rest-db-query-profile' },
+							description: 'REST DB query profile coverage',
+							adapter: 'wp-codebox',
+						},
+					}],
+				},
+			}],
+		},
+	};
+	const wooObservation = normalizeWpCodeboxFuzzSuiteResult(wooFinalArtifactShape.metadata.artifact_refs[0].content).observation;
+	assert.equal(wooObservation.schema, WORDPRESS_FUZZ_OBSERVATION_SCHEMA);
+	assert.equal(wooObservation.id, 'woo-db-api-rest-query-profile-20260625-16');
+	assert.equal(wooObservation.status, 'passed');
+	assert.equal(wooObservation.summary.total, 1);
+	assert.equal(wooObservation.summary.coverage.discovered_count, 1);
+	assert.equal(wooObservation.summary.coverage.generated_count, 1);
+	assert.equal(wooObservation.summary.coverage.exercised_count, 1);
+	assert.equal(wooObservation.summary.coverage.untested_count, 0);
+	assert.equal(wooObservation.source.result_schema, 'wp-codebox/fuzz-suite-result/v1');
+	assert.equal(wooObservation.normalized_result.cases[0].id, 'rest-db-query-profile:default');
 	assert.deepEqual(normalizeWpCodeboxFuzzSuiteResult({
 		json: {
 			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
@@ -610,6 +667,58 @@ runWpCodeboxFuzzSuite({
 	}, { request: taskRequest });
 	assert.equal(declaredOnlyEmpty.succeeded, true);
 	assert.deepEqual(declaredOnlyEmpty.failures, []);
+	const requiredOutputRequest = wpCodeboxFuzzSuiteTaskRequest({
+		taskId: 'required-output-suite-task',
+		artifactDeclarations: [],
+		input: wpCodeboxFuzzSuiteInput({
+			id: 'required-output-suite',
+			metadata: {
+				output_requirements: {
+					required_normalized_metric_paths: ['cases.*.performance_metrics.query_count'],
+					required_artifact_keys: ['fuzz.result.normalized'],
+					required_evidence_statuses: [
+						{ path: 'normalizedResult.cases.*.performance_metric_reasons.query_count.status', status: 'observed' },
+					],
+				},
+			},
+		}),
+	});
+	const requiredOutputObserved = normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			wordpress_fuzz_result: {
+				schema: 'wordpress-fuzz-result/v1',
+				status: 'passed',
+				cases: [{
+					id: 'required-output-case',
+					status: 'passed',
+					performance_metrics: { query_count: 0 },
+					performance_metric_reasons: { query_count: { status: 'observed' } },
+				}],
+			},
+			artifactRefs: [{ name: 'wordpress-fuzz-result', role: 'normalized_fuzz_result', semantic_key: 'fuzz.result.normalized', path: 'wordpress-fuzz-result.json' }],
+		},
+	}, { request: requiredOutputRequest });
+	assert.equal(requiredOutputObserved.succeeded, true);
+	assert.equal(requiredOutputObserved.failures.length, 0);
+	const requiredOutputMissing = normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			wordpress_fuzz_result: {
+				schema: 'wordpress-fuzz-result/v1',
+				status: 'passed',
+				cases: [{ id: 'required-output-case', status: 'passed', performance_metric_reasons: { query_count: { status: 'missing' } } }],
+			},
+		},
+	}, { request: requiredOutputRequest });
+	assert.equal(requiredOutputMissing.succeeded, false);
+	assert(requiredOutputMissing.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_normalized_metrics_missing'));
+	assert(requiredOutputMissing.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_output_artifacts_missing'));
+	assert(requiredOutputMissing.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_evidence_status_missing'));
 	assert.equal(normalizeWpCodeboxFuzzSuiteResult({ status: 'passed' }).result_schema, WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA);
 	assert.equal(normalizeWpCodeboxFuzzSuiteResult({ status: 'passed' }).schema, WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA);
 	return runWpCodeboxFuzzSuite({ taskId: 'suite-run', runFuzzSuite: async () => ({ status: 'passed' }) });
