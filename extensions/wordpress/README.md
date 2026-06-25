@@ -663,19 +663,6 @@ shorthand; Homeboy core only sees generic durable agent-task plans.
 and runtime-path dispatch; it forwards to the WordPress payload so both monorepo
 and installed extension layouts use the same implementation.
 
-### Static-site fanout adapter
-
-`lib/static-site-fanout-adapter.js` groups static-site import validation findings
-into generic `homeboy/agent-task-request/v1` requests by default. The adapter does
-not default the executor backend to WP Codebox; callers that need a runtime should
-pass an explicit `backend`/`runtime_backend` value or an `agent_task.backend`
-override.
-
-Legacy WP Codebox request compatibility remains available as an explicit
-compatibility path. Pass `compatibility_provider: "wp-codebox"` for new
-compatibility callers, or keep `request_kind: "wp-codebox"` for existing callers
-that already use that flag. Both produce `wp-codebox/task-input/v1` task requests.
-
 The generic provider boundary is documented in
 [`../docs/agent-runtime-package-contract.md`](../docs/agent-runtime-package-contract.md).
 Discovery exposes the required request fields, outcome status vocabulary,
