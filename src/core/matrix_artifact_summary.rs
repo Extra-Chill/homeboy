@@ -4,10 +4,24 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::artifact_ref::{ArtifactRef, ARTIFACT_REF_SCHEMA};
+use crate::core::artifact_ref::{ArtifactRef, EvidenceRef, ARTIFACT_REF_SCHEMA};
 use crate::core::observation::{ArtifactRecord, FindingRecord};
 
 pub const MATRIX_ARTIFACT_SUMMARY_SCHEMA: &str = "homeboy/matrix-artifact-summary/v1";
+pub const GENERIC_MATRIX_SUMMARY_SCHEMA: &str = "homeboy/matrix-summary/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GenericMatrixSummary {
+    pub schema: String,
+    pub run_id: String,
+    pub status: String,
+    pub case_count: usize,
+    pub failed_count: usize,
+    pub needs_review_count: usize,
+    pub source_artifact: ArtifactRef,
+    pub artifact_refs: Vec<EvidenceRef>,
+    pub preview_refs: Vec<EvidenceRef>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixArtifactSummary {
@@ -93,6 +107,128 @@ pub fn summarize_matrix_artifacts(
         result_refs: acc.result_refs,
         finding_packet_refs: acc.finding_packet_refs,
     })
+}
+
+pub fn generic_matrix_summary_from_artifacts(
+    run_id: &str,
+    artifacts: &[ArtifactRecord],
+) -> Option<GenericMatrixSummary> {
+    for artifact in artifacts {
+        let Some(value) = read_json_artifact(artifact) else {
+            continue;
+        };
+        if schema_at(&value) != Some(GENERIC_MATRIX_SUMMARY_SCHEMA) {
+            continue;
+        }
+        return Some(generic_matrix_summary_from_value(run_id, artifact, &value));
+    }
+    None
+}
+
+fn generic_matrix_summary_from_value(
+    run_id: &str,
+    artifact: &ArtifactRecord,
+    value: &Value,
+) -> GenericMatrixSummary {
+    GenericMatrixSummary {
+        schema: GENERIC_MATRIX_SUMMARY_SCHEMA.to_string(),
+        run_id: run_id.to_string(),
+        status: first_string(
+            value,
+            &[
+                &["status"][..],
+                &["overall_status"][..],
+                &["summary", "status"][..],
+                &["matrix", "status"][..],
+            ],
+        )
+        .unwrap_or("unknown")
+        .to_string(),
+        case_count: first_usize(
+            value,
+            &[
+                &["case_count"][..],
+                &["total_cases"][..],
+                &["summary", "case_count"][..],
+                &["matrix", "case_count"][..],
+            ],
+        )
+        .or_else(|| array_len(value, &["cases"]))
+        .or_else(|| array_len(value, &["results"]))
+        .unwrap_or(0),
+        failed_count: first_usize(
+            value,
+            &[
+                &["failed_count"][..],
+                &["fail_count"][..],
+                &["summary", "failed_count"][..],
+                &["status_counts", "failed"][..],
+                &["status_counts", "fail"][..],
+            ],
+        )
+        .unwrap_or(0),
+        needs_review_count: first_usize(
+            value,
+            &[
+                &["needs_review_count"][..],
+                &["review_count"][..],
+                &["summary", "needs_review_count"][..],
+                &["status_counts", "needs_review"][..],
+            ],
+        )
+        .unwrap_or(0),
+        source_artifact: artifact_ref_with_metadata(artifact),
+        artifact_refs: collect_evidence_refs(value, &["artifact_refs"], "artifact"),
+        preview_refs: collect_evidence_refs(value, &["preview_refs"], "preview"),
+    }
+}
+
+fn schema_at(value: &Value) -> Option<&str> {
+    string_at(value, &["schema"]).or_else(|| string_at(value, &["$schema"]))
+}
+
+fn first_string<'a>(value: &'a Value, paths: &[&[&str]]) -> Option<&'a str> {
+    paths.iter().find_map(|path| string_at(value, path))
+}
+
+fn first_usize(value: &Value, paths: &[&[&str]]) -> Option<usize> {
+    paths
+        .iter()
+        .find_map(|path| value_at(value, path).and_then(Value::as_u64))
+        .map(|count| count as usize)
+}
+
+fn array_len(value: &Value, path: &[&str]) -> Option<usize> {
+    value_at(value, path)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+}
+
+fn collect_evidence_refs(value: &Value, path: &[&str], default_kind: &str) -> Vec<EvidenceRef> {
+    value_at(value, path)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| evidence_ref_from_value(item, default_kind))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn evidence_ref_from_value(value: &Value, default_kind: &str) -> Option<EvidenceRef> {
+    if let Some(target) = value.as_str() {
+        return Some(EvidenceRef::new(default_kind, target, target));
+    }
+    let target = string_at(value, &["ref"])
+        .or_else(|| string_at(value, &["target"]))
+        .or_else(|| string_at(value, &["url"]))
+        .or_else(|| string_at(value, &["path"]))?;
+    let kind = string_at(value, &["kind"]).unwrap_or(default_kind);
+    let label = string_at(value, &["label"])
+        .or_else(|| string_at(value, &["id"]))
+        .unwrap_or(target);
+    Some(EvidenceRef::new(kind, target, label))
 }
 
 pub fn render_matrix_artifact_summary_markdown(summary: &MatrixArtifactSummary) -> String {

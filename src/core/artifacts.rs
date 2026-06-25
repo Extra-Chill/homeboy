@@ -45,8 +45,9 @@ pub use super::change_artifact::{
     CHANGE_APPLY_RESULT_SCHEMA, CHANGE_ARTIFACT_SCHEMA,
 };
 pub use super::matrix_artifact_summary::{
-    render_matrix_artifact_summary_markdown, summarize_matrix_artifacts, MatrixArtifactSummary,
-    MatrixSummaryCount, MATRIX_ARTIFACT_SUMMARY_SCHEMA,
+    generic_matrix_summary_from_artifacts, render_matrix_artifact_summary_markdown,
+    summarize_matrix_artifacts, GenericMatrixSummary, MatrixArtifactSummary, MatrixSummaryCount,
+    GENERIC_MATRIX_SUMMARY_SCHEMA, MATRIX_ARTIFACT_SUMMARY_SCHEMA,
 };
 pub use super::publication_artifacts::index_remote_published_artifact_refs_for_run;
 pub use super::structured_sidecar::{

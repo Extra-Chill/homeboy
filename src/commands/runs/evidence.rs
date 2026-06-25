@@ -24,6 +24,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let failure = evidence_report::evidence_failure_summary(&run);
     let retention = evidence_report::evidence_retention(&artifact_root, &run.id);
     let evidence_links = evidence_report::evidence_links(&artifacts);
+    let matrix_summary = evidence_report::evidence_matrix_summary(&run, &artifacts);
     let (evidence_manifest, evidence_manifest_errors) =
         evidence_report::evidence_manifest(&run, &artifacts);
 
@@ -49,6 +50,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
             failure,
             disk_budget,
             evidence_links,
+            matrix_summary,
             evidence_manifest,
             evidence_manifest_errors,
         }),
@@ -340,6 +342,75 @@ mod tests {
             assert_eq!(review.public_url, None);
             assert_eq!(review.address.kind, ArtifactAddressKind::MetadataOnly);
             assert!(output.evidence_links.is_empty());
+        });
+    }
+
+    #[test]
+    fn evidence_surfaces_generic_matrix_summary_artifact() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "matrix",
+                    "homeboy",
+                    "generic",
+                    serde_json::json!({}),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish run");
+            let summary_path = home.path().join("matrix-summary.json");
+            std::fs::write(
+                &summary_path,
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": "homeboy/matrix-summary/v1",
+                    "status": "needs_review",
+                    "case_count": 4,
+                    "failed_count": 1,
+                    "needs_review_count": 2,
+                    "artifact_refs": [
+                        "homeboy://run/example/artifact/matrix-log",
+                        { "kind": "report", "ref": "runner-artifact://runner/run/report", "label": "runner report" }
+                    ],
+                    "preview_refs": [
+                        { "kind": "preview", "url": "https://example.test/preview", "label": "preview" }
+                    ],
+                    "cases": [
+                        { "opaque": "domain data stays unread" }
+                    ]
+                }))
+                .expect("summary json"),
+            )
+            .expect("write summary");
+            store
+                .record_artifact(&run.id, "matrix_summary", &summary_path)
+                .expect("record summary");
+
+            let (output, _) = evidence(&run.id).expect("evidence");
+            let RunsOutput::Evidence(output) = output else {
+                panic!("expected evidence output");
+            };
+            let summary = output.matrix_summary.expect("matrix summary");
+
+            assert_eq!(summary.schema, "homeboy/matrix-summary/v1");
+            assert_eq!(summary.run_id, run.id);
+            assert_eq!(summary.status, "needs_review");
+            assert_eq!(summary.case_count, 4);
+            assert_eq!(summary.failed_count, 1);
+            assert_eq!(summary.needs_review_count, 2);
+            assert_eq!(summary.source_artifact.kind, "matrix_summary");
+            assert_eq!(summary.artifact_refs.len(), 2);
+            assert_eq!(
+                summary.artifact_refs[0].target,
+                "homeboy://run/example/artifact/matrix-log"
+            );
+            assert_eq!(summary.artifact_refs[1].kind, "report");
+            assert_eq!(
+                summary.preview_refs[0].target,
+                "https://example.test/preview"
+            );
         });
     }
 
