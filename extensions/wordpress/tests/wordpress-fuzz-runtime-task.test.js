@@ -10,6 +10,7 @@ const {
 	fuzzHotspotSummaryFromObservationSet,
 	normalizeFuzzObservationSet,
 	normalizeFuzzHotspotSummary,
+	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
 } = require('../lib/wordpress-fuzz-runtime-task');
 const {
 	WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
@@ -69,6 +70,17 @@ const observationHotspots = fuzzHotspotSummaryFromObservationSet(codeboxObservat
 assert.equal(observationHotspots.schema, WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA);
 assert.equal(observationHotspots.items[0].metadata.observation_id, codeboxObservations.observations[0].id);
 
+const codeboxWordPressHotspots = normalizeFuzzHotspotSummary({
+	schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+	db: [{ table: 'wp_posts', operation: 'SELECT', metric: 'query_count', count: 11 }],
+	api: [{ route: '/wp-json/wp/v2/posts', method: 'GET', metric: 'duration_ms', duration_ms: 84 }],
+});
+assert.equal(codeboxWordPressHotspots.schema, WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA);
+assert.equal(codeboxWordPressHotspots.items[0].dimension, 'database');
+assert.equal(codeboxWordPressHotspots.items[0].metadata.surface_key, 'wp_posts');
+assert.equal(codeboxWordPressHotspots.items[1].dimension, 'api');
+assert.equal(codeboxWordPressHotspots.items[1].metadata.operation_key, 'GET');
+
 const derivedAggregate = aggregateWordPressFuzzCoverage({
 	artifacts: [
 		{
@@ -82,10 +94,18 @@ const derivedAggregate = aggregateWordPressFuzzCoverage({
 			semantic_key: 'fuzz.hotspot.summary',
 			hotspots: [{ surface: 'route:/wp/v2/posts', operation: 'GET /wp/v2/posts', metric: 'duration_ms', value: 77 }],
 		},
+		{
+			name: 'wordpress-hotspots',
+			payload: {
+				schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+				db: [{ table: 'wp_options', operation: 'SELECT', metric: 'query_count', count: 5 }],
+			},
+		},
 	],
 });
 assert.equal(derivedAggregate.coverage_gaps[0].id, 'route:/wp/v2/comments');
 assert.equal(derivedAggregate.hotspot_summary.items[0].value, 77);
+assert.equal(derivedAggregate.hotspot_summary.items.some((item) => item.metadata.surface_key === 'wp_options'), true);
 
 Promise.all([
 	runWpCodeboxFuzzSuite({

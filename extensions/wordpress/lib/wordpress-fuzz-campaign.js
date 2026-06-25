@@ -18,7 +18,9 @@ const {
 } = require('./wordpress-performance-observation-aggregate');
 const {
 	DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS,
+	DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
+	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
 } = require('./wp-codebox-fuzz-run');
@@ -83,6 +85,7 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 		taskId: input.task_id || input.taskId || options.taskId || options.task_id || `${plan.id}-wp-codebox-fuzz-suite`,
 		input: suiteInput,
 		artifactDeclarations: productionArtifactDeclarations(production),
+		expectedArtifacts: productionExpectedArtifacts(production),
 	});
 
 	return {
@@ -188,7 +191,7 @@ function defaultCampaignArtifactsWithOptions(options = {}) {
 		expected: [
 			{ name: 'wordpress_fuzz_result', role: 'normalized_fuzz_result', semantic_key: 'fuzz.result.normalized', required: true },
 			{ name: 'wordpress_fuzz_coverage', role: 'coverage', semantic_key: 'fuzz.coverage', required: true },
-			{ name: 'wordpress_fuzz_hotspots', role: 'hotspot_summary', semantic_key: 'fuzz.hotspot.summary', required: hotspotRequired },
+			{ name: 'wordpress-hotspots', role: 'hotspot_summary', semantic_key: 'fuzz.hotspot.summary', schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA, required: hotspotRequired },
 			{ name: 'wordpress_performance_observation', role: 'fuzz_report', semantic_key: 'fuzz.performance', required: false },
 		],
 	};
@@ -197,7 +200,15 @@ function defaultCampaignArtifactsWithOptions(options = {}) {
 function productionOutputRequirements() {
 	return {
 		required_artifact_keys: ['fuzz.coverage', 'fuzz.hotspot.summary'],
+		required_artifact_schemas: [WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA],
 	};
+}
+
+function productionExpectedArtifacts(production = false) {
+	if (!production) {
+		return undefined;
+	}
+	return [...new Set([...DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS, 'wordpress-hotspots'])];
 }
 
 function productionArtifactDeclarations(production = false) {

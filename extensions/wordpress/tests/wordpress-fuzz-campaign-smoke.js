@@ -3,6 +3,10 @@
 const assert = require('node:assert/strict');
 
 const {
+	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+} = require('../lib/wp-codebox-fuzz-run');
+
+const {
 	WORDPRESS_FUZZ_CAMPAIGN_SCHEMA,
 	WORDPRESS_FUZZ_PLAN_RESULT_GAP_REPORT_SCHEMA,
 	aggregateWordPressFuzzCampaignResult,
@@ -98,7 +102,11 @@ const productionCampaign = compileWordPressFuzzCampaign({
 assert.equal(productionCampaign.workload.metadata.production_campaign, true);
 assert.equal(productionCampaign.wp_codebox.input.metadata.production_campaign, true);
 assert.deepEqual(productionCampaign.wp_codebox.input.metadata.output_requirements.required_artifact_keys, ['fuzz.coverage', 'fuzz.hotspot.summary']);
+assert.deepEqual(productionCampaign.wp_codebox.input.metadata.output_requirements.required_artifact_schemas, [WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA]);
+assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').name, 'wordpress-hotspots');
 assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').required, true);
+assert.equal(productionCampaign.wp_codebox.task_request.expected_artifacts.includes('wordpress-hotspots'), true);
 assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').required, true);
+assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').schema, WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA);
 
 console.log('wordpress fuzz campaign smoke passed');

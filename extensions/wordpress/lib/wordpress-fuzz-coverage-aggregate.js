@@ -308,19 +308,24 @@ function aggregateWordPressFuzzCoverage(input = {}) {
 }
 
 function aggregateFuzzHotspotSummary(input = {}) {
+	const artifactHotspotCandidates = normalizeArray(input.artifacts || input.results || input.coverage || []).flatMap((artifact) => [
+		artifact,
+		artifact?.hotspot_summary,
+		artifact?.hotspotSummary,
+		artifact?.hotspots,
+		artifact?.performance_hotspots,
+		artifact?.performanceHotspots,
+		artifact?.payload,
+		artifact?.data,
+		artifact?.content,
+	]);
 	const candidates = [
 		input.hotspot_summary,
 		input.hotspotSummary,
 		input.hotspots,
 		input.performance_hotspots,
 		input.performanceHotspots,
-		...normalizeArray(input.artifacts || input.results || input.coverage || []).flatMap((artifact) => [
-			artifact?.hotspot_summary,
-			artifact?.hotspotSummary,
-			artifact?.hotspots,
-			artifact?.performance_hotspots,
-			artifact?.performanceHotspots,
-		]),
+		...artifactHotspotCandidates,
 	];
 	const summaries = candidates.map((candidate) => normalizeFuzzHotspotSummary(candidate)).filter(Boolean);
 	if (summaries.length === 0) {
