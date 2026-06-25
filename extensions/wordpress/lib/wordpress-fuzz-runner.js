@@ -137,6 +137,7 @@ function buildWordPressFuzzRunnerSummary({
 		fuzz_runtime_task_request: runtimeTaskRequest,
 		fuzz_runtime_task_result: codeboxResult.runtime_task_result,
 		wp_codebox_result: codeboxResult,
+		observation: codeboxResult.observation,
 		coverage,
 		observation_set: codeboxResult.observation_set,
 		hotspot_summary: codeboxResult.hotspot_summary || coverage?.hotspot_summary,
@@ -400,6 +401,7 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 			artifact_refs: normalizeArray(codeboxResult?.artifacts),
 			observation_set: codeboxResult?.observation_set,
 			hotspot_summary: codeboxResult?.hotspot_summary,
+			observation: codeboxResult?.observation,
 			wordpress_fuzz_result: codeboxResult?.wordpress_fuzz_result,
 		}),
 	});

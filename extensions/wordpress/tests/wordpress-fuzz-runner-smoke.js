@@ -103,6 +103,8 @@ assert.equal(result.homeboy_fuzz_campaign.safety_class, 'read_only');
 assert.equal(result.homeboy_fuzz_campaign.metadata.status, 'failed');
 assert.equal(result.homeboy_fuzz_campaign.metadata.wp_codebox_result_schema, 'wp-codebox/fuzz-suite-result/v1');
 assert.equal(result.homeboy_fuzz_campaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
+assert.equal(result.observation.schema, 'homeboy/wordpress-fuzz-observation/v1');
+assert.equal(result.homeboy_fuzz_campaign.metadata.observation.schema, 'homeboy/wordpress-fuzz-observation/v1');
 assert(!JSON.stringify(result).includes('woocommerce'), 'WordPress fuzz runner must stay product-agnostic');
 
 const executedResult = buildWordPressFuzzRunnerResult({
@@ -124,6 +126,7 @@ const executedResult = buildWordPressFuzzRunnerResult({
 assert.equal(executedResult.status, 'succeeded');
 assert.equal(executedResult.succeeded, true);
 assert.equal(executedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'artifacts/replay.json');
+assert.equal(executedResult.observation.status, 'succeeded');
 
 const mutatingPlanResult = buildWordPressFuzzRunnerResult({
 	env: {
