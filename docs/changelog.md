@@ -4,6 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.261.0] - 2026-06-25
+
+### Added
+- add fuzz runtime doctor
+
+### Changed
+- Expose agent task bridge status
+- split component/mod.rs god-file into submodules
+- split agent_task god-file into module submodules
+- split agent_task_promotion god-file into module dir
+- split agent_task_service god-file into module dir
+- Add report artifact comparison
+- Separate matrix quality findings from failures
+- split agent_task_lifecycle god-file (tech debt)
+- Improve runner exec run naming
+- split agent_task_loop_controller god-file into module dir
+- Summarize matrix run artifacts
+
+### Fixed
+- restore imports in extracted test modules after god-file splits
+- prevent concurrent attach-path write races
+- allow component removal with stale remaining paths
+- scope project local path validation
+- skip already-at-head dry runs before preflight
+
 ## [0.260.2] - 2026-06-25
 
 ### Changed
