@@ -71,7 +71,7 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 }
 
 /// Resolve the daemon base URL, falling back to the running daemon's address.
-pub fn resolve_daemon_url(daemon_url: Option<String>) -> Result<String> {
+fn resolve_daemon_url(daemon_url: Option<String>) -> Result<String> {
     if let Some(url) = daemon_url.filter(|url| !url.trim().is_empty()) {
         return Ok(url);
     }
