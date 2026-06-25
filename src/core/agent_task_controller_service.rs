@@ -1724,6 +1724,7 @@ fn record_run_command_outputs(
 ) -> Result<()> {
     let run_id = format!("{}:{}", record.loop_id, action.action_id);
     let artifact_refs = artifact_refs_from_command_result(artifacts);
+    persist_controller_artifacts(&record.loop_id, &action.action_id, artifacts)?;
     if let Some(entity_id) = entity_id {
         if let Some(entity) = record.entities.get_mut(entity_id) {
             entity.artifact_refs.extend(artifact_refs.clone());
@@ -1745,6 +1746,25 @@ fn record_run_command_outputs(
             inputs: request.clone(),
             outputs: serde_json::json!({ "artifacts": artifacts }),
         });
+    }
+    Ok(())
+}
+
+fn persist_controller_artifacts(loop_id: &str, action_id: &str, artifacts: &Value) -> Result<()> {
+    let Some(object) = artifacts.as_object() else {
+        return Ok(());
+    };
+    if object.is_empty() {
+        return Ok(());
+    }
+    let root = paths::artifact_root()?
+        .join("agent-task-loop-controller")
+        .join(sanitize_loop_action_id(loop_id))
+        .join(action_id);
+    fs::create_dir_all(&root).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    for (artifact_id, artifact) in object {
+        let path = root.join(format!("{}.json", sanitize_loop_action_id(artifact_id)));
+        write_json_file(&path, artifact)?;
     }
     Ok(())
 }
@@ -3068,7 +3088,7 @@ mod tests {
 
     #[test]
     fn run_command_workflow_executes_deterministic_artifact_action() {
-        with_isolated_home(|_| {
+        with_isolated_home(|home| {
             let spec = AgentTaskRepoLoopSpec {
                 schema: None,
                 loop_id: "repo-loop-command".to_string(),
@@ -3142,6 +3162,14 @@ mod tests {
                     ["artifact_url"],
                 "artifact://validation-result"
             );
+            let persisted_artifact = home
+                .path()
+                .join(".local/share/homeboy/artifacts/agent-task-loop-controller/repo-loop-command/action-1/validation_result.json");
+            let persisted: Value = serde_json::from_str(
+                &fs::read_to_string(&persisted_artifact).expect("persisted controller artifact"),
+            )
+            .expect("persisted artifact json");
+            assert_eq!(persisted["schema"], "example/ValidationResult/v1");
         });
     }
 
