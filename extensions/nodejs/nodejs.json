@@ -59,6 +59,13 @@
       "type": "string",
       "default": "",
       "description": "npm script to run when homeboy test receives passthrough test args, for example 'test:unit'"
+    },
+    {
+      "id": "bench_env",
+      "label": "Bench Environment",
+      "type": "object",
+      "default": {},
+      "description": "Additional non-secret environment values consumed by Node.js bench workloads."
     }
   ],
   "ci": {
