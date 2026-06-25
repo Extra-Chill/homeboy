@@ -1490,6 +1490,7 @@ fn hydrate_consumed_artifacts(record: &AgentTaskLoopControllerRecord, request: &
 
     let mut hydrated = request.clone();
     merge_request_input_artifacts(&mut hydrated, &artifacts);
+    merge_runtime_execution_input_artifacts(&mut hydrated, &artifacts);
     merge_dispatch_context_artifacts(&mut hydrated, &artifacts);
     hydrated
 }
@@ -1622,7 +1623,33 @@ fn merge_dispatch_context_artifacts(
         return;
     };
     merge_request_input_artifacts(&mut context, artifacts);
+    merge_runtime_execution_input_artifacts(&mut context, artifacts);
     *context_value = Value::String(context.to_string());
+}
+
+fn merge_runtime_execution_input_artifacts(
+    request: &mut Value,
+    artifacts: &serde_json::Map<String, Value>,
+) {
+    let Some(runtime_input) = request
+        .get_mut("runtime_execution")
+        .and_then(|runtime_execution| runtime_execution.get_mut("input"))
+        .and_then(|input| input.get_mut("input"))
+    else {
+        return;
+    };
+    let Some(runtime_input) = runtime_input.as_object_mut() else {
+        return;
+    };
+    let artifact_inputs = runtime_input
+        .entry("artifacts".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(artifact_inputs) = artifact_inputs.as_object_mut() else {
+        return;
+    };
+    for (artifact_id, artifact) in artifacts {
+        artifact_inputs.insert(artifact_id.clone(), artifact.clone());
+    }
 }
 
 fn loop_action_io_dir(loop_id: &str, action_id: &str) -> Result<PathBuf> {
@@ -3273,7 +3300,13 @@ mod tests {
                             "client_context": json!({
                                 "schema": "homeboy/repo-loop-workflow-context/v1",
                                 "workflow_id": "design",
-                                "inputs": { "consumes": ["concept_packet"] }
+                                "inputs": { "consumes": ["concept_packet"] },
+                                "runtime_execution": {
+                                    "kind": "bundle",
+                                    "input": {
+                                        "input": { "site_kind": "store" }
+                                    }
+                                }
                             }).to_string()
                         }
                     }),
@@ -3304,6 +3337,11 @@ mod tests {
             .expect("client context json");
             assert_eq!(
                 context["inputs"]["artifacts"]["concept_packet"]["payload"]["title"],
+                "Demo"
+            );
+            assert_eq!(
+                context["runtime_execution"]["input"]["input"]["artifacts"]["concept_packet"]
+                    ["payload"]["title"],
                 "Demo"
             );
         });
