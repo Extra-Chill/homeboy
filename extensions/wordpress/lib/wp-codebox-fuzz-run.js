@@ -626,10 +626,12 @@ async function runWpCodeboxPublicFuzzOperation(options = {}) {
 
 function wpCodeboxPublicCliInput(request = {}, options = {}) {
 	const input = request.executor?.config?.runtime_task?.input || options.input || {};
+	const runtimeRequirements = objectOrUndefined(request.executor?.config?.runtime_requirements || request.runtime_requirements);
 	return {
 		...input,
 		metadata: {
 			...(objectOrUndefined(input.metadata) || {}),
+			runtime_requirements: runtimeRequirements,
 			homeboy_agent_task_request: request,
 		},
 	};

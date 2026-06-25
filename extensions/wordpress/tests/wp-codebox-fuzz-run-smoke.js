@@ -25,6 +25,7 @@ const {
 	normalizeWpCodeboxFuzzSuiteResult,
 	detectWpCodeboxPublicFuzzCapabilities,
 	preflightWpCodeboxFuzzCapabilityContract,
+	runWpCodeboxPublicFuzzOperation,
 	runWpCodeboxFuzzSuite,
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
@@ -589,6 +590,10 @@ runWpCodeboxFuzzSuite({
 	return runWpCodeboxFuzzSuite({
 		taskId: 'public-cli-suite-run',
 		input,
+		runtimeRequirements: {
+			extra_plugins: [{ slug: 'sample-plugin', source: '/runner/components/sample-plugin', loadAs: 'plugin' }],
+			runtime_env: { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: '/runner/workloads' },
+		},
 		runPublicCli: ({ args, stdin }) => {
 			if (args.join(' ') === 'run-fuzz-suite --help') {
 				return { status: 0, stdout: 'usage' };
@@ -600,7 +605,10 @@ runWpCodeboxFuzzSuite({
 			assert.equal(args[1], '--input-file');
 			assert.equal(args[3], '--format=json');
 			assert.equal(stdin, undefined);
-			assert.equal(JSON.parse(fs.readFileSync(args[2], 'utf8')).schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+			const publicCliInput = JSON.parse(fs.readFileSync(args[2], 'utf8'));
+			assert.equal(publicCliInput.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+			assert.equal(publicCliInput.metadata.runtime_requirements.extra_plugins[0].source, '/runner/components/sample-plugin');
+			assert.equal(publicCliInput.metadata.runtime_requirements.runtime_env.WP_CODEBOX_FUZZ_WORKLOAD_ROOT, '/runner/workloads');
 			return {
 				status: 0,
 				stdout: JSON.stringify({
