@@ -1265,14 +1265,15 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
+    let request = hydrate_consumed_artifacts(record, request);
     let mode = request
         .get("mode")
         .and_then(Value::as_str)
         .unwrap_or("run_plan");
     match mode {
         "run_plan" => {
-            let plan = plan_from_controller_request(request)?;
-            let run_id = controller_request_run_id(request, dedupe_key, &action.action_id);
+            let plan = plan_from_controller_request(&request)?;
+            let run_id = controller_request_run_id(&request, dedupe_key, &action.action_id);
             let submitted = lifecycle::submit_plan(&plan, Some(&run_id))?;
             record_controller_spawn(
                 record,
@@ -1280,7 +1281,7 @@ where
                 dedupe_key,
                 entity_id,
                 &submitted.run_id,
-                request,
+                &request,
             )?;
             let run_result = agent_task_service::run_submitted(submitted.run_id.clone(), executor)?;
             let aggregate_value = serde_json::to_value(&run_result.value)
@@ -1296,8 +1297,8 @@ where
             ))
         }
         "submit" => {
-            let plan = plan_from_controller_request(request)?;
-            let run_id = controller_request_run_id(request, dedupe_key, &action.action_id);
+            let plan = plan_from_controller_request(&request)?;
+            let run_id = controller_request_run_id(&request, dedupe_key, &action.action_id);
             let submitted = lifecycle::submit_plan(&plan, Some(&run_id))?;
             record_controller_spawn(
                 record,
@@ -1305,7 +1306,7 @@ where
                 dedupe_key,
                 entity_id,
                 &submitted.run_id,
-                request,
+                &request,
             )?;
             Ok((
                 serde_json::json!({
@@ -1317,8 +1318,8 @@ where
             ))
         }
         "run" => {
-            let run_id = required_string(request, "run_id")?;
-            record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, request)?;
+            let run_id = required_string(&request, "run_id")?;
+            record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, &request)?;
             let run_result = agent_task_service::run_submitted(run_id.clone(), executor)?;
             let aggregate_value = serde_json::to_value(&run_result.value)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
@@ -1328,8 +1329,8 @@ where
             ))
         }
         "resume" => {
-            let run_id = required_string(request, "run_id")?;
-            record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, request)?;
+            let run_id = required_string(&request, "run_id")?;
+            record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, &request)?;
             let run_result = agent_task_service::resume(run_id.clone(), executor)?;
             let aggregate_value = serde_json::to_value(&run_result.value)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
@@ -1346,7 +1347,7 @@ where
                 None => serde_json::json!({ "claimed": false }),
             };
             if let Some(run_id) = value.get("run_id").and_then(Value::as_str) {
-                record_controller_spawn(record, action, dedupe_key, entity_id, run_id, request)?;
+                record_controller_spawn(record, action, dedupe_key, entity_id, run_id, &request)?;
             }
             Ok((
                 serde_json::json!({ "mode": mode, "result": value }),
@@ -1354,9 +1355,9 @@ where
             ))
         }
         "dispatch" => {
-            let (value, exit_code) = dispatch.dispatch(request)?;
+            let (value, exit_code) = dispatch.dispatch(&request)?;
             if let Some(run_id) = value.get("run_id").and_then(Value::as_str) {
-                record_controller_spawn(record, action, dedupe_key, entity_id, run_id, request)?;
+                record_controller_spawn(record, action, dedupe_key, entity_id, run_id, &request)?;
             }
             Ok((
                 serde_json::json!({ "mode": mode, "result": value }),
@@ -1381,6 +1382,7 @@ fn execute_run_command_action(
     entity_id: Option<&str>,
     request: &Value,
 ) -> Result<(Value, i32)> {
+    let request = hydrate_consumed_artifacts(record, request);
     let execution = request.get("execution").unwrap_or(&Value::Null);
     let command = required_string(execution, "command")?;
     let args = execution
@@ -1450,7 +1452,7 @@ fn execute_run_command_action(
     let effective_exit_code = if command_success { 0 } else { 1 };
 
     if command_success {
-        record_run_command_outputs(record, action, dedupe_key, entity_id, request, &artifacts)?;
+        record_run_command_outputs(record, action, dedupe_key, entity_id, &request, &artifacts)?;
     }
 
     Ok((
@@ -1468,6 +1470,159 @@ fn execute_run_command_action(
         }),
         effective_exit_code,
     ))
+}
+
+fn hydrate_consumed_artifacts(record: &AgentTaskLoopControllerRecord, request: &Value) -> Value {
+    let consumed = consumed_artifact_ids(request);
+    if consumed.is_empty() {
+        return request.clone();
+    }
+
+    let mut artifacts = serde_json::Map::new();
+    for artifact_id in consumed {
+        if let Some(artifact) = find_controller_artifact(record, &artifact_id) {
+            artifacts.insert(artifact_id, artifact);
+        }
+    }
+    if artifacts.is_empty() {
+        return request.clone();
+    }
+
+    let mut hydrated = request.clone();
+    merge_request_input_artifacts(&mut hydrated, &artifacts);
+    merge_dispatch_context_artifacts(&mut hydrated, &artifacts);
+    hydrated
+}
+
+fn consumed_artifact_ids(request: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    append_string_array(&mut ids, request.get("consumes"));
+    if let Some(context) = request
+        .get("dispatch")
+        .and_then(|dispatch| dispatch.get("client_context"))
+        .and_then(Value::as_str)
+        .and_then(|context| serde_json::from_str::<Value>(context).ok())
+    {
+        append_string_array(
+            &mut ids,
+            context
+                .get("inputs")
+                .and_then(|inputs| inputs.get("consumes")),
+        );
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn append_string_array(ids: &mut Vec<String>, value: Option<&Value>) {
+    let Some(values) = value.and_then(Value::as_array) else {
+        return;
+    };
+    ids.extend(
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    );
+}
+
+fn find_controller_artifact(
+    record: &AgentTaskLoopControllerRecord,
+    artifact_id: &str,
+) -> Option<Value> {
+    for lineage in record.task_lineage.iter().rev() {
+        if let Some(artifact) = artifact_from_outputs(&lineage.outputs, artifact_id) {
+            return Some(artifact);
+        }
+    }
+    for event in record.history.iter().rev() {
+        if let Some(artifact) = artifact_from_history_payload(&event.payload, artifact_id) {
+            return Some(artifact);
+        }
+    }
+    None
+}
+
+fn artifact_from_outputs(outputs: &Value, artifact_id: &str) -> Option<Value> {
+    outputs
+        .get("artifacts")
+        .and_then(|artifacts| artifacts.get(artifact_id))
+        .or_else(|| {
+            outputs
+                .get("typed_artifacts")
+                .and_then(|artifacts| artifacts.get(artifact_id))
+        })
+        .cloned()
+}
+
+fn artifact_from_history_payload(payload: &Value, artifact_id: &str) -> Option<Value> {
+    let result = payload.get("execution")?.get("result")?;
+    if let Some(artifact) = artifact_from_outputs(result, artifact_id) {
+        return Some(artifact);
+    }
+    let outcomes = result
+        .get("aggregate")
+        .and_then(|aggregate| aggregate.get("outcomes"))
+        .and_then(Value::as_array)?;
+    for outcome in outcomes.iter().rev() {
+        if let Some(artifact) =
+            artifact_from_outputs(outcome.get("outputs").unwrap_or(&Value::Null), artifact_id)
+        {
+            return Some(artifact);
+        }
+        if let Some(artifact) = outcome
+            .get("metadata")
+            .and_then(|metadata| metadata.get("typed_artifacts"))
+            .and_then(|artifacts| artifacts.get(artifact_id))
+            .cloned()
+        {
+            return Some(artifact);
+        }
+    }
+    None
+}
+
+fn merge_request_input_artifacts(request: &mut Value, artifacts: &serde_json::Map<String, Value>) {
+    let Some(object) = request.as_object_mut() else {
+        return;
+    };
+    let inputs = object
+        .entry("inputs".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(inputs) = inputs.as_object_mut() else {
+        return;
+    };
+    let artifact_inputs = inputs
+        .entry("artifacts".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(artifact_inputs) = artifact_inputs.as_object_mut() else {
+        return;
+    };
+    for (artifact_id, artifact) in artifacts {
+        artifact_inputs.insert(artifact_id.clone(), artifact.clone());
+    }
+}
+
+fn merge_dispatch_context_artifacts(
+    request: &mut Value,
+    artifacts: &serde_json::Map<String, Value>,
+) {
+    let Some(context_value) = request
+        .get_mut("dispatch")
+        .and_then(|dispatch| dispatch.get_mut("client_context"))
+    else {
+        return;
+    };
+    let Some(context_string) = context_value.as_str() else {
+        return;
+    };
+    let Ok(mut context) = serde_json::from_str::<Value>(context_string) else {
+        return;
+    };
+    merge_request_input_artifacts(&mut context, artifacts);
+    *context_value = Value::String(context.to_string());
 }
 
 fn loop_action_io_dir(loop_id: &str, action_id: &str) -> Result<PathBuf> {
@@ -3077,6 +3232,148 @@ mod tests {
                 .clone()
                 .expect("provider saw request");
             assert_eq!(observed.task_id, "controller-service-task");
+        });
+    }
+
+    #[test]
+    fn dispatch_action_receives_consumed_artifacts_from_prior_outputs() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-dispatch-consumes".to_string(),
+                phase: "build".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+            record.task_lineage.push(AgentTaskLoopTaskLineage {
+                run_id: "concept-run".to_string(),
+                task_id: None,
+                parent_run_id: None,
+                parent_task_id: None,
+                entity_id: None,
+                dedupe_key: Some("workflow:concept".to_string()),
+                artifact_refs: Vec::new(),
+                inputs: Value::Null,
+                outputs: json!({
+                    "typed_artifacts": {
+                        "concept_packet": {
+                            "schema": "example/ConceptPacket/v1",
+                            "payload": { "title": "Demo" }
+                        }
+                    }
+                }),
+            });
+            record.record_action(
+                AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "workflow:design".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "dispatch",
+                        "dispatch": {
+                            "prompt": "Use the concept packet.",
+                            "client_context": json!({
+                                "schema": "homeboy/repo-loop-workflow-context/v1",
+                                "workflow_id": "design",
+                                "inputs": { "consumes": ["concept_packet"] }
+                            }).to_string()
+                        }
+                    }),
+                },
+                "run design",
+            );
+            controller::write_controller(&record).expect("controller written");
+
+            let dispatch = CapturingDispatchHook::default();
+            let result = run_next(
+                "loop-service-dispatch-consumes",
+                CapturingExecutor::default(),
+                &dispatch,
+            )
+            .expect("dispatch executed");
+
+            assert_eq!(result.exit_code, 0);
+            let observed = dispatch
+                .observed_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let context: Value = serde_json::from_str(
+                observed[0]["dispatch"]["client_context"]
+                    .as_str()
+                    .expect("client context string"),
+            )
+            .expect("client context json");
+            assert_eq!(
+                context["inputs"]["artifacts"]["concept_packet"]["payload"]["title"],
+                "Demo"
+            );
+        });
+    }
+
+    #[test]
+    fn command_action_receives_consumed_artifacts_from_prior_outputs() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-command-consumes".to_string(),
+                phase: "validate".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+            record.task_lineage.push(AgentTaskLoopTaskLineage {
+                run_id: "candidate-run".to_string(),
+                task_id: None,
+                parent_run_id: None,
+                parent_task_id: None,
+                entity_id: None,
+                dedupe_key: Some("workflow:candidate".to_string()),
+                artifact_refs: Vec::new(),
+                inputs: Value::Null,
+                outputs: json!({
+                    "artifacts": {
+                        "static_site_candidate": {
+                            "schema": "example/StaticSiteCandidate/v1",
+                            "files": [{ "path": "index.html" }]
+                        }
+                    }
+                }),
+            });
+            record.record_action(
+                AgentTaskLoopPolicyAction::RunCommand {
+                    dedupe_key: "workflow:static-validation".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "command",
+                        "consumes": ["static_site_candidate"],
+                        "artifacts": ["validation_result"],
+                        "execution": {
+                            "kind": "command",
+                            "command": "/bin/sh",
+                            "args": ["-c", "printf '%s\n' '{\"artifacts\":{\"validation_result\":{\"schema\":\"example/ValidationResult/v1\"}}}' > \"$HOMEBOY_LOOP_ACTION_OUTPUT\""]
+                        }
+                    }),
+                },
+                "run validation",
+            );
+            controller::write_controller(&record).expect("controller written");
+
+            let result = run_next(
+                "loop-service-command-consumes",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("command executed");
+
+            assert_eq!(result.exit_code, 0);
+            let input = read_json_file(&PathBuf::from(
+                result.value.execution.unwrap()["input_path"]
+                    .as_str()
+                    .expect("input path"),
+            ))
+            .expect("command input");
+            assert_eq!(
+                input["request"]["inputs"]["artifacts"]["static_site_candidate"]["files"][0]
+                    ["path"],
+                "index.html"
+            );
         });
     }
 
