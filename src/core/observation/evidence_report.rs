@@ -24,6 +24,7 @@ use serde_json::Value;
 use super::{ArtifactRecord, RunRecord};
 use crate::core::artifact_address::{ArtifactAddress, ArtifactAddressKind};
 use crate::core::artifact_ref::{ArtifactRef, EvidenceRef};
+use crate::core::artifacts::{generic_matrix_summary_from_artifacts, GenericMatrixSummary};
 use crate::core::evidence_manifest::{EvidenceManifest, EVIDENCE_MANIFEST_SCHEMA};
 use crate::core::observation::disk_budget::DiskBudget;
 
@@ -48,6 +49,8 @@ pub struct RunEvidenceReport<S: Serialize> {
     pub failure: EvidenceFailureSummary,
     pub disk_budget: DiskBudget,
     pub evidence_links: Vec<EvidenceLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matrix_summary: Option<GenericMatrixSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_manifest: Option<EvidenceManifest>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -366,6 +369,14 @@ pub fn evidence_links(artifacts: &[ArtifactRecord]) -> Vec<EvidenceLink> {
             })
         })
         .collect()
+}
+
+/// Resolve a generic matrix dashboard summary from typed JSON artifacts.
+pub fn evidence_matrix_summary(
+    run: &RunRecord,
+    artifacts: &[ArtifactRecord],
+) -> Option<GenericMatrixSummary> {
+    generic_matrix_summary_from_artifacts(&run.id, artifacts)
 }
 
 /// Resolve an embedded evidence manifest from run metadata or artifacts.
