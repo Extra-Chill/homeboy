@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.260.1] - 2026-06-25
+
+### Fixed
+- filter local package checks by id before parsing
+
 ## [0.260.0] - 2026-06-24
 
 ### Added
