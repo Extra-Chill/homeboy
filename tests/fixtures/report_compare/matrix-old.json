@@ -1,0 +1,24 @@
+{
+  "matrix": {
+    "findings": [
+      {
+        "stable_id": "core-html:fixture-a",
+        "group": "generated",
+        "diagnostic_kind": "generated_document_contains_core_html",
+        "fixture": "fixture-a"
+      },
+      {
+        "stable_id": "core-html:fixture-b",
+        "group": "generated",
+        "diagnostic_kind": "generated_document_contains_core_html",
+        "fixture": "fixture-b"
+      },
+      {
+        "stable_id": "runtime-target:fixture-b",
+        "group": "runtime",
+        "diagnostic_kind": "runtime_dependency_target_missing",
+        "fixture": "fixture-b"
+      }
+    ]
+  }
+}

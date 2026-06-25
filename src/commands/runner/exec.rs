@@ -19,6 +19,7 @@ pub(super) fn exec(
     script_file: Option<String>,
     env: Vec<String>,
     dry_run: bool,
+    run_id: Option<String>,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
     let script = script_file
@@ -64,9 +65,26 @@ pub(super) fn exec(
             required_extensions: Vec::new(),
             require_paths,
             runner_workload: None,
+            run_id: validate_runner_exec_run_id(run_id)?,
             detach_after_handoff: false,
         },
     )
+}
+
+fn validate_runner_exec_run_id(run_id: Option<String>) -> homeboy::core::Result<Option<String>> {
+    let Some(run_id) = run_id else {
+        return Ok(None);
+    };
+    let trimmed = run_id.trim();
+    if trimmed.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "run_id",
+            "runner exec --run-id must not be empty",
+            Some(run_id),
+            None,
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 /// Maximum number of bytes retained when reading a runner exec script into

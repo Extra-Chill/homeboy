@@ -249,6 +249,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         dry_run: bool,
 
+        /// Explicit persisted run id for ad hoc runner exec evidence.
+        #[arg(long = "run-id")]
+        run_id: Option<String>,
+
         /// Print remote stdout/stderr directly instead of the structured JSON envelope.
         /// Use global --output to still write the full structured envelope to a file.
         #[arg(long)]

@@ -60,6 +60,8 @@ impl FuzzArgs {
 pub(crate) enum FuzzCommand {
     /// Print the product-neutral fuzz schema contract
     Contract,
+    /// Diagnose active fuzz runtime provenance and installed extension revision
+    Doctor(FuzzDoctorArgs),
     /// Normalize and merge discovered fuzz target inventory artifacts
     Discover(FuzzDiscoverArgs),
     /// List declared fuzz workloads without executing them
@@ -78,6 +80,13 @@ pub(crate) enum FuzzCommand {
     Replay(FuzzReplayArgs),
     /// Print the raw fuzz runner result for a run without spelunking runner logs
     Inspect(FuzzInspectArgs),
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct FuzzDoctorArgs {
+    /// Extension whose active install should be diagnosed.
+    #[arg(long = "extension", value_name = "ID", required = true)]
+    pub(crate) extension_id: String,
 }
 
 #[derive(Args, Clone)]

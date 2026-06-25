@@ -176,10 +176,42 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     };
 
     if options.dry_run {
+        let early_plan = super::plan(&input.component_id, &options).ok();
+        let skipped_reason = early_plan.as_ref().and_then(skipped_reason_from_plan);
+
+        if skipped_reason.as_deref() == Some("release-already-at-head") {
+            let plan = early_plan.expect("skipped reason came from plan");
+            let new_version = if input.pipeline.head {
+                current_component_version(&component)?
+            } else {
+                extract_new_version_from_plan(&plan)
+            };
+            let tag = new_version
+                .as_ref()
+                .map(|v| format_tag(v, monorepo.as_ref()));
+
+            return Ok((
+                ReleaseCommandResult {
+                    phase: execution.phase,
+                    component_id: input.component_id,
+                    status: release_command_status(true, skipped_reason.as_deref(), None),
+                    bump_type,
+                    dry_run: true,
+                    releasable_commits: releasable_count,
+                    new_version,
+                    tag,
+                    skipped_reason,
+                    plan: Some(plan),
+                    run: None,
+                    deployment: None,
+                    release_summary: release_summary_for_skipped_plan(),
+                },
+                0,
+            ));
+        }
+
         let dry_run_preflight = run_dry_run_preflights(&input.component_id, &options)?;
         if let Some(run) = dry_run_preflight {
-            let plan = super::plan(&input.component_id, &options).ok();
-            let skipped_reason = plan.as_ref().and_then(skipped_reason_from_plan);
             let status = release_command_status(true, skipped_reason.as_deref(), Some(&run));
             let release_summary = release_summary_from_run(&run);
             return Ok((
@@ -193,7 +225,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
                     new_version: None,
                     tag: None,
                     skipped_reason,
-                    plan,
+                    plan: early_plan,
                     run: Some(run),
                     deployment: None,
                     release_summary,
@@ -202,7 +234,10 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             ));
         }
 
-        let plan = super::plan(&input.component_id, &options)?;
+        let plan = match early_plan {
+            Some(plan) => plan,
+            None => super::plan(&input.component_id, &options)?,
+        };
         let new_version = if input.pipeline.head {
             current_component_version(&component)?
         } else {
@@ -1136,5 +1171,85 @@ mod tests {
 
         input.recover = true;
         assert_eq!(release_execution_plan(&input).phase, ReleasePhase::Recover);
+    }
+
+    #[test]
+    fn dry_run_release_already_at_head_skips_before_default_branch_preflight() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        setup_release_already_at_head_fixture(temp.path());
+
+        let (result, exit_code) = run_command(ReleaseCommandInput {
+            component_id: "fixture".to_string(),
+            path_override: Some(temp.path().to_string_lossy().to_string()),
+            dry_run: true,
+            bump_override: Some("patch".to_string()),
+            ..Default::default()
+        })
+        .expect("dry-run already-at-head should return a skipped result");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(result.status, "skipped");
+        assert_eq!(
+            result.skipped_reason.as_deref(),
+            Some("release-already-at-head")
+        );
+        assert!(
+            result.run.is_none(),
+            "dry-run should not execute mutation preflights"
+        );
+        assert!(result
+            .plan
+            .as_ref()
+            .expect("plan")
+            .plan
+            .hints
+            .iter()
+            .any(|hint| hint.contains("homeboy release fixture --head")));
+    }
+
+    #[test]
+    fn apply_release_already_at_head_keeps_default_branch_preflight_strict() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        setup_release_already_at_head_fixture(temp.path());
+
+        let (result, exit_code) = run_command(ReleaseCommandInput {
+            component_id: "fixture".to_string(),
+            path_override: Some(temp.path().to_string_lossy().to_string()),
+            bump_override: Some("patch".to_string()),
+            ..Default::default()
+        })
+        .expect("apply path should return a failed preflight run, not bypass strictness");
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(result.status, "failed");
+        let run = result.run.expect("failed preflight run");
+        assert!(run.result.steps.iter().any(|step| {
+            step.id == "preflight.default_branch" && step.status == ReleaseStepStatus::Failed
+        }));
+    }
+
+    fn setup_release_already_at_head_fixture(dir: &std::path::Path) {
+        run_in(dir, &["git", "init", "-q", "--initial-branch", "main"]);
+        run_in(dir, &["git", "config", "user.email", "test@example.com"]);
+        run_in(dir, &["git", "config", "user.name", "Test"]);
+        run_in(dir, &["git", "config", "commit.gpgsign", "false"]);
+        std::fs::write(
+            dir.join("homeboy.json"),
+            r#"{
+                "id": "fixture",
+                "version_targets": [
+                    { "file": "VERSION", "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+)$" }
+                ]
+            }"#,
+        )
+        .expect("write homeboy config");
+        std::fs::write(dir.join("VERSION"), "1.2.3\n").expect("write version");
+        run_in(dir, &["git", "add", "."]);
+        run_in(dir, &["git", "commit", "-q", "-m", "release: v1.2.3"]);
+        run_in(dir, &["git", "tag", "v1.2.3"]);
+        run_in(
+            dir,
+            &["git", "checkout", "-q", "-b", "feature/retry-release"],
+        );
     }
 }

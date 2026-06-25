@@ -146,7 +146,13 @@ fn command_failed(results: &Map<String, Value>, command: &str) -> bool {
 fn is_attention_status(status: &str) -> bool {
     matches!(
         status,
-        "fail" | "error" | "baseline_red" | "baseline-red" | "inconclusive"
+        "fail"
+            | "error"
+            | "baseline_red"
+            | "baseline-red"
+            | "inconclusive"
+            | "executed_with_findings"
+            | "execution_failed"
     )
 }
 

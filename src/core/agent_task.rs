@@ -29,7 +29,7 @@ mod matrix;
 pub(crate) use matrix::expand_agent_task_matrix;
 pub use matrix::{
     AgentTaskMatrixAggregate, AgentTaskMatrixAggregateCell, AgentTaskMatrixAxis,
-    AgentTaskMatrixCell, AgentTaskMatrixError, AgentTaskMatrixPlan,
+    AgentTaskMatrixCell, AgentTaskMatrixError, AgentTaskMatrixExecutionState, AgentTaskMatrixPlan,
 };
 
 /// Provider capability payload used by extension discovery and durable run metadata.

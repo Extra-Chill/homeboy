@@ -18,6 +18,7 @@
 mod lab;
 mod output;
 mod public_variants;
+pub mod safety_manifest;
 
 pub use lab::{
     lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,

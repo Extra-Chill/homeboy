@@ -177,8 +177,9 @@ pub(super) fn persist_lab_offload_handoff_run(
     cwd: &str,
     command: &[String],
     job: &Job,
+    run_id: Option<&str>,
 ) -> Option<String> {
-    match mirror_daemon_job_progress(runner, cwd, command, job, &[]) {
+    match mirror_daemon_job_progress(runner, cwd, command, job, &[], run_id) {
         Ok(run) => Some(run.id),
         Err(err) => {
             eprintln!(

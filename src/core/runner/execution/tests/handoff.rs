@@ -206,10 +206,11 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
             "/srv/homeboy/project",
             &["homeboy".to_string(), "trace".to_string()],
             &job,
+            None,
         )
         .expect("persist handoff run");
 
-        assert_eq!(run_id, format!("runner-exec-lab-{job_id}"));
+        assert_eq!(run_id, format!("runner-exec-trace-lab-{job_id}"));
         let store = crate::core::observation::ObservationStore::open_initialized().expect("store");
         let run = store
             .get_run(&run_id)
@@ -247,6 +248,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
             None,
             Vec::new(),
             None,
+            None,
             true,
         )
         .expect("reverse broker detached exec");
@@ -255,7 +257,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
         assert_eq!(output.mode, RunnerExecMode::ReverseBroker);
         let job_id = output.job_id.as_deref().expect("job id");
         let mirror_run_id = output.mirror_run_id.as_deref().expect("mirror run id");
-        assert_eq!(mirror_run_id, format!("runner-exec-lab-{job_id}"));
+        assert_eq!(mirror_run_id, format!("runner-exec-test-lab-{job_id}"));
         assert_eq!(
             output
                 .runner_result
@@ -379,6 +381,7 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
             None,
             Vec::new(),
             None,
+            None,
             false,
         )
         .expect("reverse broker exec");
@@ -390,7 +393,7 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
         assert_eq!(output.runner_id, "lab");
         assert!(output.job_id.is_some());
         let mirror_run_id = output.mirror_run_id.as_deref().expect("mirror run id");
-        assert!(mirror_run_id.starts_with("runner-exec-lab-"));
+        assert!(mirror_run_id.starts_with("runner-exec-test-lab-"));
         assert_eq!(
             output
                 .patch
@@ -493,6 +496,7 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
         None,
         Vec::new(),
         None,
+        None,
         false,
     )
     .expect_err("daemon exec failure");
@@ -564,7 +568,7 @@ fn terminal_lab_result_transport_error_preserves_recovery_ids() {
         source,
     );
 
-    let run_id = format!("runner-exec-lab-{job_id}");
+    let run_id = format!("runner-exec-refactor-lab-{job_id}");
     assert_eq!(err.code, ErrorCode::RunnerLabTransportFailure);
     assert!(err.message.contains("Lab transport/reporting failure"));
     assert!(err.message.contains("not a remote command failure"));
@@ -651,6 +655,7 @@ fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
         false,
         None,
         Vec::new(),
+        None,
         None,
         false,
     )

@@ -6,9 +6,7 @@ pub type CmdResult<T> = homeboy::core::Result<(T, i32)>;
 
 mod key_artifacts;
 
-pub(crate) fn escape_markdown_table_cell(value: &str) -> String {
-    value.replace('|', "\\|")
-}
+pub(crate) use crate::core::markdown::escape_markdown_table_cell;
 
 /// Parse a `KEY=value` string into a (key, value) tuple.
 /// Used by clap `value_parser` attributes on `--setting` and `--input` flags.

@@ -146,6 +146,7 @@ pub(crate) fn run_runner_resident_lab_offload(
             required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
             runner_workload: None,
+            run_id: None,
             detach_after_handoff: false,
         },
     )?;
@@ -240,6 +241,7 @@ pub(crate) fn refresh_managed_runner_sources(
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
                 runner_workload: None,
+                run_id: None,
                 detach_after_handoff: false,
             },
         )?;

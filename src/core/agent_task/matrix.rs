@@ -3,8 +3,8 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskOutcome,
-    AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA,
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
+    AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA,
     AGENT_TASK_MATRIX_PLAN_SCHEMA,
 };
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
@@ -37,7 +37,18 @@ pub struct AgentTaskMatrixAggregate {
     pub schema: String,
     pub plan_id: String,
     pub passed: bool,
+    #[serde(default = "matrix_execution_state_not_run")]
+    pub execution_state: AgentTaskMatrixExecutionState,
     pub cells: Vec<AgentTaskMatrixAggregateCell>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskMatrixExecutionState {
+    ExecutedClean,
+    ExecutedWithFindings,
+    ExecutionFailed,
+    NotRun,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,6 +58,8 @@ pub struct AgentTaskMatrixAggregateCell {
     pub axes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<AgentTaskOutcomeStatus>,
+    #[serde(default = "matrix_execution_state_not_run")]
+    pub execution_state: AgentTaskMatrixExecutionState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<AgentTaskArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -235,11 +248,15 @@ impl AgentTaskMatrixAggregate {
             .map(|outcome| (outcome.task_id.as_str(), outcome))
             .collect();
         let mut passed = true;
+        let mut execution_state = AgentTaskMatrixExecutionState::ExecutedClean;
         let cells = plan
             .cells
             .iter()
             .map(|cell| {
                 let outcome = outcomes_by_task.get(cell.task.task_id.as_str()).copied();
+                let cell_execution_state = matrix_execution_state_for_outcome(outcome);
+                execution_state =
+                    aggregate_matrix_execution_state(execution_state, cell_execution_state);
                 if !matches!(
                     outcome.map(|outcome| outcome.status),
                     Some(AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp)
@@ -251,6 +268,7 @@ impl AgentTaskMatrixAggregate {
                     task_id: cell.task.task_id.clone(),
                     axes: cell.axes.clone(),
                     status: outcome.map(|outcome| outcome.status),
+                    execution_state: cell_execution_state,
                     artifacts: outcome
                         .map(|outcome| outcome.artifacts.clone())
                         .unwrap_or_default(),
@@ -271,9 +289,102 @@ impl AgentTaskMatrixAggregate {
             schema: AGENT_TASK_MATRIX_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
             passed,
+            execution_state,
             cells,
         }
     }
+}
+
+fn matrix_execution_state_for_outcome(
+    outcome: Option<&AgentTaskOutcome>,
+) -> AgentTaskMatrixExecutionState {
+    let Some(outcome) = outcome else {
+        return AgentTaskMatrixExecutionState::NotRun;
+    };
+
+    match outcome.status {
+        AgentTaskOutcomeStatus::Succeeded => {
+            if outcome_has_quality_findings(outcome) {
+                AgentTaskMatrixExecutionState::ExecutedWithFindings
+            } else {
+                AgentTaskMatrixExecutionState::ExecutedClean
+            }
+        }
+        AgentTaskOutcomeStatus::NoOp => AgentTaskMatrixExecutionState::NotRun,
+        AgentTaskOutcomeStatus::ProviderError
+        | AgentTaskOutcomeStatus::Timeout
+        | AgentTaskOutcomeStatus::Cancelled => AgentTaskMatrixExecutionState::ExecutionFailed,
+        AgentTaskOutcomeStatus::Failed
+            if matches!(
+                outcome.failure_classification,
+                Some(
+                    AgentTaskFailureClassification::Provider
+                        | AgentTaskFailureClassification::Transient
+                        | AgentTaskFailureClassification::Timeout
+                        | AgentTaskFailureClassification::CapabilityMissing
+                        | AgentTaskFailureClassification::InvalidInput
+                        | AgentTaskFailureClassification::ExecutionFailed
+                        | AgentTaskFailureClassification::Unknown
+                )
+            ) =>
+        {
+            AgentTaskMatrixExecutionState::ExecutionFailed
+        }
+        AgentTaskOutcomeStatus::Failed
+        | AgentTaskOutcomeStatus::UnableToRemediate
+        | AgentTaskOutcomeStatus::FollowUpIssue => {
+            AgentTaskMatrixExecutionState::ExecutedWithFindings
+        }
+    }
+}
+
+fn aggregate_matrix_execution_state(
+    current: AgentTaskMatrixExecutionState,
+    next: AgentTaskMatrixExecutionState,
+) -> AgentTaskMatrixExecutionState {
+    use AgentTaskMatrixExecutionState::*;
+    match (current, next) {
+        (ExecutionFailed, _) | (_, ExecutionFailed) => ExecutionFailed,
+        (ExecutedWithFindings, _) | (_, ExecutedWithFindings) => ExecutedWithFindings,
+        (NotRun, _) | (_, NotRun) => NotRun,
+        (ExecutedClean, ExecutedClean) => ExecutedClean,
+    }
+}
+
+fn outcome_has_quality_findings(outcome: &AgentTaskOutcome) -> bool {
+    value_has_non_empty_array(
+        &outcome.outputs,
+        &[
+            "findings",
+            "failures",
+            "test_failures",
+            "errors",
+            "budget_findings",
+        ],
+    ) || outcome.typed_artifacts.iter().any(|artifact| {
+        value_has_non_empty_array(
+            &artifact.payload,
+            &[
+                "findings",
+                "failures",
+                "test_failures",
+                "errors",
+                "budget_findings",
+            ],
+        )
+    })
+}
+
+fn value_has_non_empty_array(value: &Value, keys: &[&str]) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    keys.iter().any(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    })
 }
 
 fn matrix_plan_schema() -> String {
@@ -282,6 +393,10 @@ fn matrix_plan_schema() -> String {
 
 fn matrix_aggregate_schema() -> String {
     AGENT_TASK_MATRIX_AGGREGATE_SCHEMA.to_string()
+}
+
+fn matrix_execution_state_not_run() -> AgentTaskMatrixExecutionState {
+    AgentTaskMatrixExecutionState::NotRun
 }
 
 fn validate_axes(axes: &[AgentTaskMatrixAxis]) -> Result<(), AgentTaskMatrixError> {
@@ -621,16 +736,89 @@ mod tests {
         assert_eq!(aggregate.schema, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA);
         assert!(!aggregate.passed);
         assert_eq!(
+            aggregate.execution_state,
+            AgentTaskMatrixExecutionState::ExecutionFailed
+        );
+        assert_eq!(
             aggregate.cells[0].status,
             Some(AgentTaskOutcomeStatus::Succeeded)
+        );
+        assert_eq!(
+            aggregate.cells[0].execution_state,
+            AgentTaskMatrixExecutionState::ExecutedClean
         );
         assert_eq!(aggregate.cells[0].artifacts[0].id, "metrics");
         assert_eq!(
             aggregate.cells[1].status,
             Some(AgentTaskOutcomeStatus::Failed)
         );
+        assert_eq!(
+            aggregate.cells[1].execution_state,
+            AgentTaskMatrixExecutionState::ExecutionFailed
+        );
         assert_eq!(aggregate.cells[1].axes["model"], "claude");
         assert_eq!(aggregate.cells[1].diagnostics[0].class, "runner");
+    }
+
+    #[test]
+    fn matrix_aggregate_separates_quality_findings_from_execution_failure() {
+        let plan = expand_agent_task_matrix(
+            "bench-plan",
+            vec![AgentTaskMatrixAxis {
+                name: "rig".to_string(),
+                values: vec!["baseline".to_string(), "candidate".to_string()],
+            }],
+            template_request(),
+        )
+        .expect("expand matrix");
+
+        let aggregate = AgentTaskMatrixAggregate::from_outcomes(
+            &plan,
+            &[
+                AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: plan.cells[0].task.task_id.clone(),
+                    status: AgentTaskOutcomeStatus::Succeeded,
+                    summary: Some("clean".to_string()),
+                    failure_classification: None,
+                    artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: Value::Null,
+                    workflow: None,
+                    follow_up: None,
+                    metadata: json!({}),
+                },
+                AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: plan.cells[1].task.task_id.clone(),
+                    status: AgentTaskOutcomeStatus::Failed,
+                    summary: Some("budget threshold exceeded".to_string()),
+                    failure_classification: None,
+                    artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: Vec::new(),
+                    outputs: json!({
+                        "budget_findings": [{"rule": "p95", "message": "too slow"}]
+                    }),
+                    workflow: None,
+                    follow_up: None,
+                    metadata: json!({}),
+                },
+            ],
+        );
+
+        assert!(!aggregate.passed);
+        assert_eq!(
+            aggregate.execution_state,
+            AgentTaskMatrixExecutionState::ExecutedWithFindings
+        );
+        assert_eq!(
+            aggregate.cells[1].execution_state,
+            AgentTaskMatrixExecutionState::ExecutedWithFindings
+        );
     }
 
     fn template_request() -> AgentTaskRequest {

@@ -1,0 +1,100 @@
+use super::*;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopExternalEvent {
+    pub event_id: String,
+    pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopHistoryEvent {
+    pub event_id: String,
+    pub event_type: String,
+    pub recorded_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopControllerStatusReport {
+    pub schema: String,
+    pub controller: AgentTaskLoopControllerRecord,
+    pub diagnostics: AgentTaskLoopControllerDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopControllerDiagnostics {
+    pub schema: String,
+    pub stale_pending_threshold_seconds: i64,
+    pub summary: AgentTaskLoopControllerDiagnosticSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_actions: Vec<AgentTaskLoopPendingActionDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_gates: Vec<AgentTaskLoopAcceptanceGateDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopControllerDiagnosticSummary {
+    pub pending_action_count: usize,
+    pub stale_pending_action_count: usize,
+    pub orphaned_pending_action_count: usize,
+    pub acceptance_gate_count: usize,
+    pub missing_acceptance_gate_count: usize,
+    pub failed_acceptance_gate_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskLoopAcceptanceGateStatus {
+    Satisfied,
+    Missing,
+    Failed,
+    Warning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopAcceptanceGateDiagnostic {
+    pub bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    pub status: AgentTaskLoopAcceptanceGateStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_status: Option<AgentTaskGateBundleStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub problems: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopPendingActionDiagnostic {
+    pub action_id: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referenced_run_id: Option<String>,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_seconds: Option<i64>,
+    pub stale: bool,
+    pub orphaned: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub problems: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_commands: Vec<String>,
+}
