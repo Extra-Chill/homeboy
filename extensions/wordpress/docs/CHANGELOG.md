@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.34] - 2026-06-25
+
+### Changed
+- Preserve normalized fuzz summary metrics
+
 ## [3.13.33] - 2026-06-25
 
 ### Changed
