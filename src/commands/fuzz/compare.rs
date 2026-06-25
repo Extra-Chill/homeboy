@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::core::fuzz::{
-    parse_fuzz_hotspot_set_value, parse_fuzz_result_envelope_file, FuzzHotspot, FuzzResultEnvelope,
+    parse_fuzz_hotspot_set_value, parse_fuzz_observation_set_value,
+    parse_fuzz_result_envelope_file, FuzzHotspot, FuzzObservationFamily, FuzzResultEnvelope,
 };
 
 use super::report::{
@@ -19,10 +20,28 @@ const FUZZ_COMPARE_SCHEMA: &str = "homeboy/fuzz-compare/v1";
 pub(super) fn run_compare(args: FuzzCompareArgs) -> homeboy::core::Result<FuzzCompareOutput> {
     let baseline_envelope = parse_fuzz_result_envelope_file(&args.baseline)?;
     let candidate_envelope = parse_fuzz_result_envelope_file(&args.candidate)?;
+    compare_envelopes(
+        baseline_envelope,
+        candidate_envelope,
+        args.hotspot_policy,
+        args.baseline.to_string_lossy().to_string(),
+        args.candidate.to_string_lossy().to_string(),
+        "fuzz.compare",
+    )
+}
+
+pub(crate) fn compare_envelopes(
+    baseline_envelope: FuzzResultEnvelope,
+    candidate_envelope: FuzzResultEnvelope,
+    hotspot_policy: FuzzCompareHotspotPolicy,
+    baseline_ref: String,
+    candidate_ref: String,
+    command: &str,
+) -> homeboy::core::Result<FuzzCompareOutput> {
     let baseline = snapshot(&baseline_envelope);
     let candidate = snapshot(&candidate_envelope);
-    let deltas = deltas(&baseline, &candidate, args.hotspot_policy);
-    let hotspot_summary = hotspot_summary(&deltas, args.hotspot_policy);
+    let deltas = deltas(&baseline, &candidate, hotspot_policy);
+    let hotspot_summary = hotspot_summary(&deltas, hotspot_policy);
     let regressions = regressions(&deltas);
     let advisories = advisories(&deltas);
     let improvements = improvements(&deltas);
@@ -39,11 +58,11 @@ pub(super) fn run_compare(args: FuzzCompareArgs) -> homeboy::core::Result<FuzzCo
 
     Ok(FuzzCompareOutput {
         schema: FUZZ_COMPARE_SCHEMA.to_string(),
-        command: "fuzz.compare".to_string(),
+        command: command.to_string(),
         status: status.clone(),
         advisory_status: advisory_status(&status, &advisories),
-        baseline_file: args.baseline.to_string_lossy().to_string(),
-        candidate_file: args.candidate.to_string_lossy().to_string(),
+        baseline_file: baseline_ref,
+        candidate_file: candidate_ref,
         baseline,
         candidate,
         deltas,
@@ -53,7 +72,7 @@ pub(super) fn run_compare(args: FuzzCompareArgs) -> homeboy::core::Result<FuzzCo
         improvements,
         summary: vec![
             format!("fuzz compare status: {status}"),
-            format!("hotspot policy: {}", args.hotspot_policy.as_str()),
+            format!("hotspot policy: {}", hotspot_policy.as_str()),
         ],
     })
 }
@@ -290,6 +309,45 @@ fn collect_hotspots_from_value(
 ) {
     if let Some(set) = parse_fuzz_hotspot_set_value(value) {
         hotspots.extend(set.items.into_iter().map(hotspot_snapshot));
+        return;
+    }
+    if let Some(set) = parse_fuzz_observation_set_value(value) {
+        hotspots.extend(set.observations.into_iter().map(|observation| {
+            let dimension = match observation.family {
+                FuzzObservationFamily::Action => "action",
+                FuzzObservationFamily::Query => "query",
+                FuzzObservationFamily::Resource => "resource",
+                FuzzObservationFamily::Timing => "timing",
+                FuzzObservationFamily::Counter => "counter",
+            }
+            .to_string();
+            let id = observation.fingerprint.clone().unwrap_or_else(|| {
+                [
+                    Some(dimension.as_str()),
+                    Some(observation.subject.as_str()),
+                    Some(observation.metric.as_str()),
+                    observation.operation_id.as_deref(),
+                    observation.case_id.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(":")
+            });
+            FuzzCompareHotspotSnapshot {
+                id,
+                dimension,
+                kind: Some("observation".to_string()),
+                metric: observation.metric,
+                value: observation.value,
+                unit: observation.unit,
+                basis: Some("fuzz_observation_set".to_string()),
+                sample_count: observation.sample_count,
+                rank: None,
+                relative_score: Some(observation.value.abs()),
+                label: Some(observation.subject),
+            }
+        }));
         return;
     }
 
@@ -786,6 +844,38 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_compare_promotes_observation_sets_to_hotspots() {
+        let mut envelope = envelope("candidate", 0, 0, 0, 0, &[], &[], true);
+        envelope.metadata = serde_json::json!({
+            "observations": {
+                "schema": "homeboy/fuzz-observation-set/v1",
+                "version": 1,
+                "id": "candidate-observations",
+                "observations": [
+                    {
+                        "id": "observation-1",
+                        "family": "timing",
+                        "subject": "page-load",
+                        "metric": "duration",
+                        "value": 123.0,
+                        "unit": "ms",
+                        "sample_count": 4,
+                        "fingerprint": "page-load:duration"
+                    }
+                ]
+            }
+        });
+
+        let snapshot = snapshot(&envelope);
+
+        assert_eq!(snapshot.hotspots.len(), 1);
+        assert_eq!(snapshot.hotspots[0].id, "page-load:duration");
+        assert_eq!(snapshot.hotspots[0].dimension, "timing");
+        assert_eq!(snapshot.hotspots[0].kind.as_deref(), Some("observation"));
+        assert_eq!(snapshot.hotspots[0].relative_score, Some(123.0));
+    }
+
+    #[test]
     fn fuzz_compare_blocking_hotspot_policy_affects_compare_status_data() {
         let mut baseline = envelope("baseline", 0, 0, 0, 0, &[], &[], true);
         baseline.metadata = serde_json::json!({
@@ -901,6 +991,7 @@ mod tests {
                     seed_id: None,
                     fingerprint: Some(format!("fingerprint-{index}")),
                     artifact_ids: Vec::new(),
+                    source_refs: Vec::new(),
                     metadata: serde_json::Value::Null,
                     extra: BTreeMap::new(),
                 })

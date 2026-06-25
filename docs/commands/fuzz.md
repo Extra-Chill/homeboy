@@ -67,8 +67,10 @@ the command run directory for raw artifacts that are too specific to normalize i
 core during execution. Runners can place case logs, coverage reports, replay
 data, minimized reproducers, hotspot sets, and engine-native traces there, then
 reference those files from the campaign `artifacts` list or `metadata.artifact_refs`.
-Homeboy core owns the path contract; extensions own artifact meaning and any
-runner/offload upload implementation beyond the persisted fuzz result envelope.
+`homeboy fuzz run` persists this directory as a `fuzz_artifacts` run artifact and
+validates local refs that point inside it when possible. Homeboy core owns the
+path contract; extensions own artifact meaning and any runner/offload upload
+implementation beyond the persisted fuzz result envelope.
 
 Runners that collect action, query, resource, timing, or counter measurements can
 emit a `homeboy/fuzz-observation-set/v1` artifact. Each observation includes a
@@ -144,6 +146,11 @@ Product-specific render kinds, such as WordPress block rendering, should keep
 their precise meaning in `kind`, `target.kind`, tags, or metadata while using
 the generic `render` family for cross-runner reporting. Unknown `kind` values
 remain valid and are preserved without a canonical family.
+
+Targets, operations, findings, and hotspots may include optional `source_refs`
+for generic code/corpus/config coverage pointers. Source ref meaning is
+producer-owned; Homeboy preserves the refs for cross-artifact reporting without
+embedding product-specific source taxonomies.
 
 ```json
 {

@@ -64,7 +64,7 @@ fn operation_normalizes_canonical_families_from_kind() {
             { "id": "create-1", "kind": "post" },
             { "id": "update-1", "kind": "PATCH" },
             { "id": "delete-1", "kind": "delete" },
-            { "id": "block-render-1", "kind": "block-render" },
+            { "id": "render-1", "kind": "render" },
             { "id": "performance-1", "kind": "performance probe" }
         ]
     }))
@@ -106,30 +106,5 @@ fn operation_preserves_declared_canonical_family() {
     assert_eq!(
         surface.operations[0].family,
         Some(FuzzOperationFamily::Search)
-    );
-}
-
-#[test]
-fn operation_reads_legacy_block_render_family_as_render() {
-    let surface = FuzzSurface::from_value(json!({
-        "id": "surface-1",
-        "kind": "renderer",
-        "safety_class": "read_only",
-        "operations": [
-            { "id": "render-specialized-unit", "kind": "block_render", "family": "block_render" }
-        ]
-    }))
-    .expect("surface contract");
-
-    assert_eq!(surface.operations[0].kind, "block_render");
-    assert_eq!(
-        surface.operations[0].family,
-        Some(FuzzOperationFamily::Render)
-    );
-
-    let serialized = serde_json::to_value(&surface).expect("serialized surface");
-    assert_eq!(
-        serialized["operations"][0]["family"],
-        serde_json::json!("render")
     );
 }

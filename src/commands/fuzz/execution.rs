@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
@@ -90,10 +90,14 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     } else {
         (None, None)
     };
+    let artifacts_dir =
+        run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
+    let artifact_ref_validation = fuzz_artifact_ref_validation(results.as_ref(), &artifacts_dir);
     let artifact_validation_error = fuzz_run_artifact_validation_error(&args, results.as_ref());
     let combined_results_error = results_error
         .as_deref()
-        .or(artifact_validation_error.as_deref());
+        .or(artifact_validation_error.as_deref())
+        .or(artifact_ref_validation.error.as_deref());
     let outcome = fuzz_run_outcome(
         runner_output.exit_code,
         runner_output.success,
@@ -119,8 +123,10 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         success,
         args: &args,
         results_path: &results_path,
+        artifacts_dir: &artifacts_dir,
         results: results.as_ref(),
         results_error: combined_results_error,
+        missing_artifact_refs: &artifact_ref_validation.missing_refs,
     })?;
     let evidence_followups = fuzz_evidence_followups(
         args.run_id.as_deref(),
@@ -410,8 +416,10 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) success: bool,
     pub(super) args: &'a FuzzRunArgs,
     pub(super) results_path: &'a Path,
+    pub(super) artifacts_dir: &'a Path,
     pub(super) results: Option<&'a FuzzCampaign>,
     pub(super) results_error: Option<&'a str>,
+    pub(super) missing_artifact_refs: &'a [String],
 }
 
 pub(super) fn persist_fuzz_run_evidence(
@@ -436,6 +444,7 @@ pub(super) fn persist_fuzz_run_evidence(
         "status": input.status,
         "campaign_id": input.results.map(|campaign| campaign.id.as_str()),
         "results_error": input.results_error,
+        "missing_artifact_refs": input.missing_artifact_refs,
         "coverage_completeness": input.results.map(fuzz_coverage_completeness),
         "gates": input.results.map(evaluate_fuzz_gates),
     });
@@ -468,7 +477,140 @@ pub(super) fn persist_fuzz_run_evidence(
     if input.results_path.is_file() {
         store.record_artifact(&run_id, "fuzz_results", input.results_path)?;
     }
+    if input.artifacts_dir.is_dir() {
+        store.record_directory_artifact_with_metadata(
+            &run_id,
+            "fuzz_artifacts",
+            input.artifacts_dir,
+            serde_json::json!({
+                "source": "HOMEBOY_FUZZ_ARTIFACTS_DIR",
+                "missing_artifact_refs": input.missing_artifact_refs,
+            }),
+        )?;
+    }
     Ok(Some(run))
+}
+
+#[derive(Default)]
+pub(super) struct FuzzArtifactRefValidation {
+    pub(super) missing_refs: Vec<String>,
+    pub(super) error: Option<String>,
+}
+
+pub(super) fn fuzz_artifact_ref_validation(
+    results: Option<&FuzzCampaign>,
+    artifacts_dir: &Path,
+) -> FuzzArtifactRefValidation {
+    let Some(campaign) = results else {
+        return FuzzArtifactRefValidation::default();
+    };
+    let mut missing_refs = Vec::new();
+    for artifact in &campaign.artifacts {
+        if let Some(path) = artifact
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.path.as_deref())
+        {
+            collect_missing_artifact_ref(path, artifacts_dir, &mut missing_refs);
+        }
+    }
+    collect_missing_artifact_refs_from_metadata(
+        &campaign.metadata,
+        artifacts_dir,
+        &mut missing_refs,
+    );
+    missing_refs.sort();
+    missing_refs.dedup();
+
+    let error = (!missing_refs.is_empty()).then(|| {
+        format!(
+            "fuzz campaign references artifact path(s) missing from HOMEBOY_FUZZ_ARTIFACTS_DIR: {}",
+            missing_refs.join(", ")
+        )
+    });
+    FuzzArtifactRefValidation {
+        missing_refs,
+        error,
+    }
+}
+
+fn collect_missing_artifact_refs_from_metadata(
+    value: &serde_json::Value,
+    artifacts_dir: &Path,
+    missing_refs: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(refs) = object.get("artifact_refs") {
+                collect_artifact_refs_value(refs, artifacts_dir, missing_refs);
+            }
+            for value in object.values() {
+                collect_missing_artifact_refs_from_metadata(value, artifacts_dir, missing_refs);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_missing_artifact_refs_from_metadata(value, artifacts_dir, missing_refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_artifact_refs_value(
+    value: &serde_json::Value,
+    artifacts_dir: &Path,
+    missing_refs: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::String(path) => {
+            collect_missing_artifact_ref(path, artifacts_dir, missing_refs)
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_artifact_refs_value(value, artifacts_dir, missing_refs);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for key in ["path", "artifact", "ref"] {
+                if let Some(path) = object.get(key).and_then(serde_json::Value::as_str) {
+                    collect_missing_artifact_ref(path, artifacts_dir, missing_refs);
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_missing_artifact_ref(path: &str, artifacts_dir: &Path, missing_refs: &mut Vec<String>) {
+    let Some(resolved) = resolve_local_fuzz_artifact_ref(path, artifacts_dir) else {
+        return;
+    };
+    if !resolved.exists() {
+        missing_refs.push(path.to_string());
+    }
+}
+
+fn resolve_local_fuzz_artifact_ref(path: &str, artifacts_dir: &Path) -> Option<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty()
+        || trimmed.contains("://")
+        || trimmed.starts_with("homeboy://")
+        || trimmed.starts_with("runner-artifact://")
+    {
+        return None;
+    }
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() {
+        candidate
+            .starts_with(artifacts_dir)
+            .then(|| candidate.to_path_buf())
+    } else {
+        (!trimmed.starts_with(".."))
+            .then(|| artifacts_dir.join(candidate))
+            .filter(|path| path.starts_with(artifacts_dir))
+    }
 }
 
 fn fuzz_run_command(

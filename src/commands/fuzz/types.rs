@@ -320,7 +320,7 @@ pub(crate) struct FuzzCompareArgs {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum FuzzCompareHotspotPolicy {
+pub enum FuzzCompareHotspotPolicy {
     /// Measure and report hotspot regressions without failing the compare.
     Advisory,
     /// Treat relative hotspot regressions as blocking compare regressions.

@@ -79,6 +79,8 @@ pub struct FuzzHotspot {
     pub evidence_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<FuzzProvenance>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -110,6 +112,7 @@ impl FuzzHotspot {
         self.labels = normalize_string_vec(std::mem::take(&mut self.labels));
         self.evidence_refs = normalize_string_vec(std::mem::take(&mut self.evidence_refs));
         self.artifact_refs = normalize_string_vec(std::mem::take(&mut self.artifact_refs));
+        self.source_refs = normalize_string_vec(std::mem::take(&mut self.source_refs));
         Ok(())
     }
 }

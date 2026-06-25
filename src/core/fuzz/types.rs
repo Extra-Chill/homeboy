@@ -84,6 +84,8 @@ pub struct FuzzOperation {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<String>,
 }
 
 impl FuzzOperation {
@@ -96,6 +98,7 @@ impl FuzzOperation {
         self.target_id = normalize_optional_string(self.target_id.take());
         self.label = normalize_optional_string(self.label.take());
         self.tags = normalize_string_vec(std::mem::take(&mut self.tags));
+        self.source_refs = normalize_string_vec(std::mem::take(&mut self.source_refs));
         Ok(())
     }
 }
@@ -114,6 +117,8 @@ pub struct FuzzTarget {
     pub operations: Vec<FuzzOperation>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
 }
@@ -126,6 +131,7 @@ impl FuzzTarget {
         self.kind = required_trimmed("target.kind", &self.kind)?;
         self.label = normalize_optional_string(self.label.take());
         self.locator = normalize_optional_string(self.locator.take());
+        self.source_refs = normalize_string_vec(std::mem::take(&mut self.source_refs));
         for operation in &mut self.operations {
             operation.normalize()?;
         }
