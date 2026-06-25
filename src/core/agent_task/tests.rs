@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[test]
 fn request_round_trips_generic_agent_task_shape() {

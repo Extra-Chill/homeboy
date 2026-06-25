@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::*;
+use std::collections::HashMap;
 use std::path::Path;
 
 fn with_isolated_home<T>(f: impl FnOnce(&Path) -> T) -> T {

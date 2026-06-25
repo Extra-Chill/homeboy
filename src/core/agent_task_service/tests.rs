@@ -3,13 +3,18 @@
 use super::*;
 use crate::core::agent_task::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy,
-    AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
-    AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
+    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
-use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
+use crate::core::agent_task_schedule::AgentTaskPlan;
+use crate::core::agent_task_scheduler::{
+    AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskState,
+};
 use crate::core::run_lifecycle_record::RunExecutionState;
+use crate::core::{agent_task_lifecycle, worktree};
 use crate::test_support::with_isolated_home;
+use serde_json::Value;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
