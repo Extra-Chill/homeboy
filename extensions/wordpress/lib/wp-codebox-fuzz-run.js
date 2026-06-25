@@ -384,6 +384,10 @@ function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execu
 	}
 	const workloadPath = execute.path || manifest.workload?.path;
 	if (typeof workloadPath === 'string' && workloadPath.trim() !== '') {
+		const workloadInput = homeboyFuzzWorkloadRunInputFromFile(workloadPath, { entry: execute.entry || manifest.workload?.entry });
+		if (workloadInput) {
+			return workloadInput;
+		}
 		return { args: [`path=${workloadPath}`] };
 	}
 	const parameters = objectOrUndefined(execute.parameters);
@@ -391,6 +395,34 @@ function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execu
 		return homeboyFuzzRuntimeCommandInput(parameters);
 	}
 	return undefined;
+}
+
+function homeboyFuzzWorkloadRunInputFromFile(workloadPath, options = {}) {
+	const filePath = String(workloadPath || '').trim();
+	if (!filePath || !fs.existsSync(filePath)) {
+		return undefined;
+	}
+	let source;
+	try {
+		source = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+	} catch (_error) {
+		return undefined;
+	}
+	const steps = normalizeWordPressWorkloadSteps(source.run || source.steps);
+	if (steps.length === 0) {
+		return undefined;
+	}
+	return wpCodeboxWordPressWorkloadRunInput({
+		id: source.id || options.entry,
+		before: source.before,
+		steps,
+		after: source.after,
+		metadata: stripUndefined({
+			...(objectOrUndefined(source.metadata) || {}),
+			source_path: filePath,
+			source_entry: options.entry,
+		}),
+	});
 }
 
 function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, artifacts = []) {

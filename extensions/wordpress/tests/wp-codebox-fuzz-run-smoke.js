@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const {
@@ -168,6 +169,14 @@ const preflightPassed = preflightWpCodeboxFuzzCapabilityContract({
 });
 assert.equal(preflightPassed.ok, true);
 
+const tempWorkloadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-run-smoke-'));
+const jsonWorkloadPath = path.join(tempWorkloadDir, 'json-workload-smoke.workload.json');
+fs.writeFileSync(jsonWorkloadPath, `${JSON.stringify({
+	id: 'json-workload-smoke',
+	run: [{ type: 'php', code: 'return array("ok" => true);' }],
+	metadata: { fixture: 'json-workload-smoke' },
+})}\n`, 'utf8');
+
 const jsonWorkloadManifest = {
 	schema: 'homeboy/fuzz-workload/v1',
 	id: 'json-workload-smoke',
@@ -176,7 +185,7 @@ const jsonWorkloadManifest = {
 	workload: {
 		runner: 'wp-codebox',
 		type: 'json',
-		path: '${package.root}/bench/json-workload-smoke.workload.json',
+		path: jsonWorkloadPath,
 		entry: 'wp-codebox/run-fuzz-suite',
 	},
 	artifacts: {
@@ -189,7 +198,7 @@ const jsonWorkloadManifest = {
 			schema: 'homeboy/fuzz-workload-intent/v1',
 			type: 'wordpress-plugin-workload',
 			plugin: { activation: 'sample-plugin/sample-plugin.php' },
-			execute: { workload_ref: 'default', path: '${package.root}/bench/json-workload-smoke.workload.json', type: 'json', entry: 'wp-codebox/run-fuzz-suite' },
+			execute: { workload_ref: 'default', path: jsonWorkloadPath, type: 'json', entry: 'wp-codebox/run-fuzz-suite' },
 			collect: [{ artifact: 'json_fuzz_result' }],
 		},
 	}],
@@ -199,20 +208,47 @@ assert.equal(jsonWorkloadInput.cases.length, 1);
 assert.equal(jsonWorkloadInput.cases[0].id, 'json-workload-smoke:default');
 assert.equal(jsonWorkloadInput.cases[0].target.kind, 'runtime');
 assert.equal(jsonWorkloadInput.cases[0].target.entrypoint, 'wordpress.run-workload');
-assert.deepEqual(jsonWorkloadInput.cases[0].input, { args: ['path=${package.root}/bench/json-workload-smoke.workload.json'] });
+assert.deepEqual(jsonWorkloadInput.cases[0].input, {
+	schema: DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA,
+	id: 'json-workload-smoke',
+	mounts: [],
+	runtime_stack_mounts: [],
+	runtime_overlays: [],
+	secret_env: [],
+	staged_files: [],
+	before: [],
+	steps: [{ type: 'php', code: 'return array("ok" => true);' }],
+	after: [],
+	metadata: { fixture: 'json-workload-smoke', source_path: jsonWorkloadPath, source_entry: 'wp-codebox/run-fuzz-suite' },
+});
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
-assert.deepEqual(jsonWorkloadInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/json-workload-smoke.workload.json'] }]);
+assert.deepEqual(jsonWorkloadInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: [`path=${jsonWorkloadPath}`] }]);
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].required, true);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].metadata.semantic_key, 'fuzz.suite_result');
 assert.equal(jsonWorkloadInput.metadata.artifacts.expected[0].required, true);
 
+const wooDbApiWorkloadPath = path.join(tempWorkloadDir, 'rest-db-query-profile.workload.json');
+fs.writeFileSync(wooDbApiWorkloadPath, `${JSON.stringify({
+	id: 'rest-db-query-profile',
+	run: [
+		{ type: 'php', code: 'return array("loaded" => true);' },
+		{ type: 'rest-db-query-profiler', 'metric-prefix': 'rest_db_query_profile', sampleLimit: 50 },
+	],
+	metadata: { runner: 'wp-codebox', workload: 'rest-db-query-profile' },
+})}\n`, 'utf8');
 const wooDbApiFixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/woo-db-api-rest-query-profile-fuzz.json'), 'utf8'));
+wooDbApiFixture.workload.workload.path = wooDbApiWorkloadPath;
+wooDbApiFixture.workload.cases[0].intent.execute.path = wooDbApiWorkloadPath;
 const wooDbApiInput = wpCodeboxFuzzSuiteInput({ id: 'woo-db-api-rest-query-profile-run', homeboyFuzzWorkload: wooDbApiFixture.workload });
 assert.equal(wooDbApiInput.cases[0].id, 'rest-db-query-profile:default');
 assert.deepEqual(wooDbApiInput.cases[0].target, { kind: 'runtime', id: 'wordpress.run-workload', entrypoint: 'wordpress.run-workload' });
-assert.deepEqual(wooDbApiInput.cases[0].input, { args: ['path=${package.root}/bench/rest-db-query-profile.workload.json'] });
-assert.deepEqual(wooDbApiInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/rest-db-query-profile.workload.json'] }]);
+assert.equal(wooDbApiInput.cases[0].input.schema, DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA);
+assert.deepEqual(wooDbApiInput.cases[0].input.steps, [
+	{ type: 'php', code: 'return array("loaded" => true);' },
+	{ type: 'rest-db-query-profiler', 'metric-prefix': 'rest_db_query_profile', sampleLimit: 50 },
+]);
+assert.deepEqual(wooDbApiInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: [`path=${wooDbApiWorkloadPath}`] }]);
 const wooDbApiSummary = normalizeWpCodeboxFuzzSuiteResult(wooDbApiFixture.result);
 assert.equal(wooDbApiSummary.hotspot_summary.items[0].value, 12);
 assert.equal(wooDbApiSummary.observation_set.observations[0].fingerprint, 'select-products');
