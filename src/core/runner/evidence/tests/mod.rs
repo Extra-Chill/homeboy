@@ -18,7 +18,7 @@ use super::tokens::{
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact, runner_artifact_token,
     RemoteArtifactToken,
 };
-use super::util::fuzz_run_id_from_command;
+use super::util::{fuzz_run_id_from_command, runner_exec_run_label};
 
 fn ssh_runner() -> Runner {
     Runner {
@@ -126,6 +126,7 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
             &job,
             &[],
             &json!({"exit_code":0,"output":{"command":"bench"}}),
+            None,
         )
         .expect("mirror job");
         assert_eq!(run.kind, "runner-exec");
@@ -138,6 +139,109 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
         assert_eq!(
             run.metadata_json["lab"]["remote_job"]["id"].as_str(),
             Some(job_id.to_string().as_str())
+        );
+    });
+}
+
+#[test]
+fn runner_exec_matrix_summary_run_names_come_from_command_domain() {
+    crate::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let job_id = Uuid::new_v4();
+        let job = Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status: JobStatus::Succeeded,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            started_at_ms: Some(1_700_000_000_000),
+            finished_at_ms: Some(1_700_000_001_000),
+            event_count: 0,
+            source_snapshot: None,
+            stale_reason: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+        };
+        let command = [
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "matrix".to_string(),
+            "summary".to_string(),
+            "--json".to_string(),
+        ];
+
+        let run = mirror_job_run(
+            &store,
+            &ssh_runner(),
+            "/srv/homeboy/static-site-importer",
+            &command,
+            &job,
+            &[],
+            &json!({"exit_code":0}),
+            None,
+        )
+        .expect("mirror job");
+
+        assert_eq!(runner_exec_run_label(&command), "trace-matrix-summary");
+        assert!(run.id.starts_with("runner-exec-trace-matrix-summary-lab-"));
+        assert!(!run.id.contains("woo-db-api-rest-query-profile"));
+        assert_eq!(
+            run.metadata_json["lab"]["run_label"].as_str(),
+            Some("trace-matrix-summary")
+        );
+    });
+}
+
+#[test]
+fn runner_exec_explicit_run_id_overrides_inferred_name() {
+    crate::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let job_id = Uuid::new_v4();
+        let job = Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status: JobStatus::Running,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            started_at_ms: Some(1_700_000_000_000),
+            finished_at_ms: None,
+            event_count: 0,
+            source_snapshot: None,
+            stale_reason: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+        };
+
+        let run = mirror_job_run(
+            &store,
+            &ssh_runner(),
+            "/srv/homeboy/static-site-importer",
+            &[
+                "homeboy".to_string(),
+                "runs".to_string(),
+                "list".to_string(),
+            ],
+            &job,
+            &[],
+            &json!({}),
+            Some("ssi-fixture-matrix-summary"),
+        )
+        .expect("mirror job");
+
+        assert_eq!(run.id, "ssi-fixture-matrix-summary");
+        assert_eq!(
+            run.metadata_json["lab"]["explicit_run_id"].as_str(),
+            Some("ssi-fixture-matrix-summary")
         );
     });
 }

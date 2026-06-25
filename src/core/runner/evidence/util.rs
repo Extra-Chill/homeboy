@@ -95,8 +95,65 @@ pub(super) fn job_status_as_run_status(status: JobStatus) -> &'static str {
     }
 }
 
-pub(crate) fn local_job_run_id(runner_id: &str, job_id: &str) -> String {
-    format!("runner-exec-{}-{}", sanitize_id_segment(runner_id), job_id)
+pub(crate) fn local_job_run_id(runner_id: &str, job_id: &str, label: &str) -> String {
+    format!(
+        "runner-exec-{}-{}-{}",
+        sanitize_id_segment(label).trim_matches('-'),
+        sanitize_id_segment(runner_id),
+        job_id
+    )
+}
+
+pub(crate) fn runner_exec_run_label(command: &[String]) -> String {
+    let mut tokens: Vec<String> = command
+        .iter()
+        .flat_map(|arg| {
+            if arg.contains("homeboy ") {
+                arg.split_whitespace().map(str::to_string).collect()
+            } else {
+                vec![arg.to_string()]
+            }
+        })
+        .collect();
+    if tokens.is_empty() {
+        return "generic".to_string();
+    }
+    if let Some(homeboy_pos) = tokens
+        .iter()
+        .position(|token| command_basename(token) == "homeboy")
+    {
+        tokens.drain(0..=homeboy_pos);
+    }
+    let mut parts = Vec::new();
+    for token in tokens {
+        if token == "--" || token.starts_with('-') {
+            break;
+        }
+        let part = command_basename(&token);
+        if part.is_empty() || matches!(part, "bash" | "sh" | "zsh" | "env") {
+            continue;
+        }
+        parts.push(part.to_string());
+        if parts.len() == 3 {
+            break;
+        }
+    }
+    let label = if parts.is_empty() {
+        "generic".to_string()
+    } else {
+        sanitize_id_segment(&parts.join("-"))
+            .trim_matches('-')
+            .to_string()
+    };
+    if label.is_empty() {
+        "generic".to_string()
+    } else {
+        label
+    }
+}
+
+fn command_basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
 }
 
 pub(super) fn sanitize_id_segment(value: &str) -> String {

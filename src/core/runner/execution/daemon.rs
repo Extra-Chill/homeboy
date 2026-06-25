@@ -18,7 +18,7 @@ use super::super::capabilities::{
 };
 use super::super::daemon_http_get::daemon_get;
 use super::super::evidence::{
-    local_job_run_id, mirror_daemon_evidence, mirror_daemon_job_progress,
+    local_job_run_id, mirror_daemon_evidence, mirror_daemon_job_progress, runner_exec_run_label,
 };
 use super::super::resource_metrics::RunnerResourceMetrics;
 use super::super::{Runner, RunnerCapabilityPreflight, RunnerJob, RunnerKind};
@@ -39,6 +39,7 @@ pub(super) fn exec_via_daemon(
     source_snapshot_override: Option<SourceSnapshot>,
     require_paths: Vec<String>,
     runner_workload: Option<RunnerWorkload>,
+    run_id: Option<String>,
     detach_after_handoff: bool,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
@@ -87,7 +88,8 @@ pub(super) fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
-    let persisted_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    let persisted_run_id =
+        persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref());
     if detach_after_handoff {
         return Ok(detached_handoff_output(
             runner,
@@ -144,7 +146,15 @@ pub(super) fn exec_via_daemon(
         exit_code,
     } = runner_job_result_fields(&events, job.status, &env, &secret_env_names);
 
-    let mirror = mirror_daemon_evidence(runner, &cwd, &command, &job, &events, &result)?;
+    let mirror = mirror_daemon_evidence(
+        runner,
+        &cwd,
+        &command,
+        &job,
+        &events,
+        &result,
+        run_id.as_deref(),
+    )?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
     let artifacts = job.artifacts.clone();
@@ -474,7 +484,7 @@ pub(super) fn lab_terminal_result_transport_error(
     err: Error,
 ) -> Error {
     let job_id = job.id.to_string();
-    let run_id = local_job_run_id(&runner.id, &job_id);
+    let run_id = local_job_run_id(&runner.id, &job_id, &runner_exec_run_label(command));
     let mut error = Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(
@@ -524,7 +534,7 @@ pub(super) fn daemon_job_wait_timeout(
     supports_cancellation: bool,
 ) -> Error {
     let job_id = job.id.to_string();
-    let mirrored = mirror_daemon_job_progress(runner, cwd, command, job, events);
+    let mirrored = mirror_daemon_job_progress(runner, cwd, command, job, events, None);
     let mirrored_run_id = mirrored.as_ref().ok().map(|run| run.id.clone());
     let timeout_hint = format!(
         "Set controller-side `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}` before invoking homeboy to change this wait budget, e.g. `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400 homeboy ...`; workload settings are applied inside the remote job and cannot extend the controller wait."

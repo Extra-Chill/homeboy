@@ -272,6 +272,7 @@ fn probe_agent_task_providers_on_runner(
             required_extensions,
             require_paths: Vec::new(),
             runner_workload: None,
+            run_id: None,
             detach_after_handoff: false,
         },
     )?;

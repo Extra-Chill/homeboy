@@ -493,6 +493,7 @@ fn run_runtime_overlay_install_step(
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: None,
+            run_id: None,
             detach_after_handoff: false,
         },
     )?;

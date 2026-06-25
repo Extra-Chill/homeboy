@@ -599,6 +599,25 @@ fn runner_exec_raw_command_parses_before_trailing_command() {
 }
 
 #[test]
+fn runner_exec_run_id_parses_before_trailing_command() {
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "exec",
+        "homeboy-lab",
+        "--run-id",
+        "ssi-fixture-matrix-summary",
+        "--cwd",
+        "/home/user/Developer",
+        "homeboy",
+        "trace",
+        "matrix",
+        "summary",
+    ])
+    .expect("runner exec --run-id should parse before the trailing remote command");
+}
+
+#[test]
 fn runner_env_rejects_legacy_show_values_flag() {
     assert!(
         Cli::try_parse_from(["homeboy", "runner", "env", "homeboy-lab", "--show-values"]).is_err(),

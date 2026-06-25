@@ -93,6 +93,7 @@ pub struct RunnerExecOptions {
     pub required_extensions: Vec<String>,
     pub require_paths: Vec<String>,
     pub runner_workload: Option<RunnerWorkload>,
+    pub run_id: Option<String>,
     pub detach_after_handoff: bool,
 }
 
@@ -346,6 +347,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 Some(plan.source_snapshot),
                 options.require_paths,
                 options.runner_workload,
+                options.run_id,
                 options.detach_after_handoff,
             )
         }
@@ -363,6 +365,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 Some(plan.source_snapshot),
                 options.require_paths,
                 options.runner_workload,
+                options.run_id,
                 options.detach_after_handoff,
             )
         }
