@@ -211,11 +211,19 @@ const performanceEvidenceResult = normalizeWordPressFuzzResult({
 				execution: {
 					result: {
 						json: {
-							metrics: {
-								query_count: 2,
-								query_time_ms: 6,
-								top_queries: [{ shape: 'SELECT option_value FROM wp_options WHERE option_name = ?', count: 2 }],
-							},
+							executions: [
+								{
+									result: {
+										json: {
+											metrics: {
+												query_count: 2,
+												query_time_ms: 6,
+												top_queries: [{ shape: 'SELECT option_value FROM wp_options WHERE option_name = ?', count: 2 }],
+											},
+										},
+									},
+								},
+							],
 						},
 					},
 				},

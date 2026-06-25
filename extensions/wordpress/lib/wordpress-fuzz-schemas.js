@@ -361,6 +361,7 @@ function normalizePerformanceBudget(input) {
 }
 
 function normalizeCasePerformanceMetrics(result) {
+	const executionResults = nestedExecutionResultJsons(result);
 	const sources = [
 		result,
 		result.metrics,
@@ -368,6 +369,8 @@ function normalizeCasePerformanceMetrics(result) {
 		result.metadata?.metrics,
 		result.metadata?.execution?.result?.json,
 		result.metadata?.execution?.result?.json?.metrics,
+		...executionResults,
+		...executionResults.map((entry) => entry?.metrics),
 		result.db_query || result.dbQuery,
 		result.memory,
 		result.admin_browser || result.adminBrowser,
@@ -413,7 +416,8 @@ function normalizeMetricReasons(result, metrics) {
 
 function normalizeCasePerformanceSummaries(result) {
 	const executionJson = result.metadata?.execution?.result?.json;
-	const querySources = [result.db_query || result.dbQuery, result.metrics, result.performance_metrics || result.performanceMetrics, result.metadata?.metrics, executionJson, executionJson?.metrics];
+	const executionResults = nestedExecutionResultJsons(result);
+	const querySources = [result.db_query || result.dbQuery, result.metrics, result.performance_metrics || result.performanceMetrics, result.metadata?.metrics, executionJson, executionJson?.metrics, ...executionResults, ...executionResults.map((entry) => entry?.metrics)];
 	const browser = result.admin_browser || result.adminBrowser || {};
 	const browserMetrics = result.browser_metrics || result.browserMetrics || browser.browserMetrics || {};
 	const networkMetrics = result.network_metrics || result.networkMetrics || browser.networkMetrics || {};
@@ -431,6 +435,14 @@ function normalizeCasePerformanceSummaries(result) {
 		summaries.browser_network = browserSummary;
 	}
 	return summaries;
+}
+
+function nestedExecutionResultJsons(result) {
+	const executions = result.metadata?.execution?.result?.json?.executions;
+	if (!Array.isArray(executions)) {
+		return [];
+	}
+	return executions.map((execution) => execution?.result?.json).filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry));
 }
 
 function normalizeBudgetFindings({ budget, metrics, subject }) {
