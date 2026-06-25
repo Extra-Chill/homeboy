@@ -97,6 +97,8 @@ pub enum AgentTaskControllerCommand {
     Init(AgentTaskControllerInitArgs),
     /// Initialize or resume a durable loop controller from a repo-authored JSON spec.
     FromSpec(AgentTaskControllerFromSpecArgs),
+    /// Validate an unwrapped materialized controller proof emitted by from-spec.
+    ValidateProof(AgentTaskControllerValidateProofArgs),
     /// Read a durable loop controller record.
     Status(AgentTaskControllerStatusArgs),
     /// List durable loop controller records.
@@ -148,6 +150,13 @@ pub struct AgentTaskControllerFromSpecArgs {
     /// Maximum controller actions to execute when --resume is supplied.
     #[arg(long = "max-actions", value_name = "N")]
     pub max_actions: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerValidateProofArgs {
+    /// Materialized controller proof JSON, @file, or - for stdin.
+    #[arg(value_name = "PROOF")]
+    pub proof: String,
 }
 
 #[derive(Args, Debug)]
@@ -649,6 +658,9 @@ fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             Ok((command_json_value(record)?, 0))
         }
         AgentTaskControllerCommand::FromSpec(spec_args) => controller_from_spec(spec_args),
+        AgentTaskControllerCommand::ValidateProof(proof_args) => {
+            controller_validate_proof(proof_args)
+        }
         AgentTaskControllerCommand::Status(status_args) => {
             let report = homeboy::core::agent_tasks::loop_controller::controller_status_report(
                 &status_args.loop_id,
@@ -673,6 +685,39 @@ fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             Ok((command_json_value(record)?, 0))
         }
     }
+}
+
+fn controller_validate_proof(args: AgentTaskControllerValidateProofArgs) -> CmdResult<Value> {
+    let proof = read_json_spec_value(&args.proof, "proof")?;
+    let Some(spec_value) = proof.get("spec") else {
+        return Err(Error::validation_invalid_argument(
+            "proof",
+            "proof validation input must be an unwrapped materialized controller spec",
+            Some(args.proof),
+            Some(vec!["materialized_spec_missing".to_string()]),
+        ));
+    };
+    let spec: AgentTaskRepoLoopSpec =
+        serde_json::from_value(spec_value.clone()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "proof.spec",
+                error.to_string(),
+                Some(args.proof.clone()),
+                Some(vec!["materialized_spec_invalid".to_string()]),
+            )
+        })?;
+
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-loop-controller-proof-validation/v1",
+            "valid": true,
+            "loop_id": spec.loop_id,
+            "phase": spec.phase,
+            "config_version": spec.config_version,
+            "diagnostics": [],
+        }),
+        0,
+    ))
 }
 
 fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> CmdResult<Value> {
@@ -1495,6 +1540,74 @@ mod tests {
                 .to_string_lossy()
                 .to_string()
         );
+    }
+
+    #[test]
+    fn validate_proof_accepts_unwrapped_materialized_spec() {
+        let proof = json!({
+            "schema": "homeboy/agent-task-loop-spec-materialization/v1",
+            "spec": minimal_loop_spec("proof-loop"),
+        });
+        let proof_file = tempfile::NamedTempFile::new().expect("proof file");
+        std::fs::write(
+            proof_file.path(),
+            serde_json::to_string(&proof).expect("proof json"),
+        )
+        .expect("write proof");
+
+        let (value, exit_code) = controller_validate_proof(AgentTaskControllerValidateProofArgs {
+            proof: format!("@{}", proof_file.path().display()),
+        })
+        .expect("proof validates");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["valid"], true);
+        assert_eq!(value["loop_id"], "proof-loop");
+    }
+
+    #[test]
+    fn validate_proof_rejects_wrapped_materialization_envelope() {
+        let proof = json!({
+            "data": {
+                "schema": "homeboy/agent-task-loop-spec-materialization/v1",
+                "spec": minimal_loop_spec("wrapped-proof-loop"),
+            }
+        });
+        let proof_file = tempfile::NamedTempFile::new().expect("proof file");
+        std::fs::write(
+            proof_file.path(),
+            serde_json::to_string(&proof).expect("proof json"),
+        )
+        .expect("write proof");
+
+        let error = controller_validate_proof(AgentTaskControllerValidateProofArgs {
+            proof: format!("@{}", proof_file.path().display()),
+        })
+        .expect_err("wrapped proof is rejected");
+
+        assert!(error
+            .to_string()
+            .contains("unwrapped materialized controller spec"));
+    }
+
+    fn minimal_loop_spec(loop_id: &str) -> Value {
+        json!({
+            "loop_id": loop_id,
+            "phase": "init",
+            "config_version": "v1",
+            "metadata": {},
+            "entities": [],
+            "agents": [],
+            "tools": [],
+            "abilities": [],
+            "workflows": [],
+            "artifacts": [],
+            "dependencies": [],
+            "gates": [],
+            "metrics": [],
+            "gate_bundles": [],
+            "actions": []
+        })
     }
 
     #[test]
