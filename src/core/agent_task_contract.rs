@@ -315,11 +315,11 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
     }
 }
 
-pub fn agent_task_request_required_fields() -> Vec<String> {
+fn agent_task_request_required_fields() -> Vec<String> {
     string_vec(&["schema", "task_id", "executor.backend", "instructions"])
 }
 
-pub fn agent_task_outcome_statuses() -> Vec<String> {
+fn agent_task_outcome_statuses() -> Vec<String> {
     enum_values(&[
         AgentTaskOutcomeStatus::Succeeded,
         AgentTaskOutcomeStatus::NoOp,
@@ -332,7 +332,7 @@ pub fn agent_task_outcome_statuses() -> Vec<String> {
     ])
 }
 
-pub fn agent_task_failure_classifications() -> Vec<String> {
+fn agent_task_failure_classifications() -> Vec<String> {
     enum_values(&[
         AgentTaskFailureClassification::Provider,
         AgentTaskFailureClassification::Transient,
@@ -345,7 +345,7 @@ pub fn agent_task_failure_classifications() -> Vec<String> {
     ])
 }
 
-pub fn agent_task_redacted_metadata_keys() -> Vec<String> {
+fn agent_task_redacted_metadata_keys() -> Vec<String> {
     string_vec(&["secret_env_values", "secretEnvValues", "secrets"])
 }
 

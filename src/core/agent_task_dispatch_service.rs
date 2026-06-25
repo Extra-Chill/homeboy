@@ -124,7 +124,7 @@ where
     dispatch_with_provider_catalog(request, executor, &catalog)
 }
 
-pub fn dispatch_with_provider_catalog<E>(
+fn dispatch_with_provider_catalog<E>(
     request: AgentTaskDispatchRequest,
     executor: E,
     catalog: &AgentTaskProviderCatalog,
@@ -280,7 +280,7 @@ fn config_default_backend() -> Option<String> {
 
 /// Resolution core that also takes the Homeboy-config default resolver so tests
 /// can drive deterministic source classification (#5685).
-pub fn resolve_dispatch_request_with_default_and_config(
+fn resolve_dispatch_request_with_default_and_config(
     command: AgentTaskDispatchCommand,
     default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
     config_default: impl FnOnce() -> Option<String>,
