@@ -2,6 +2,9 @@
 
 /* eslint-disable camelcase */
 
+/**
+ * External dependencies
+ */
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -117,7 +120,7 @@ function normalizeFixtureWorkloadMatrixResult(input = {}) {
 		const result = resultByFixture.get(fixture.id) || normalizeFixtureResult({ fixture_id: fixture.id, status: 'not_run' });
 		return typeof compareFixtureResult === 'function' ? normalizeFixtureResult({ ...result, comparison: compareFixtureResult(result, fixture, matrix) }) : result;
 	});
-	const diagnostics = fixtureResults.flatMap((result) => diagnosticPacketsForFixtureResult(result, { matrix }));
+	const diagnostics = dedupeDiagnosticPackets(fixtureResults.flatMap((result) => diagnosticPacketsForFixtureResult(result, { matrix })));
 	const grouped = groupDiagnosticPackets(diagnostics);
 
 	return {
@@ -269,10 +272,108 @@ function normalizeDiagnosticPacket(diagnostic, result, index) {
 		fixture_id: result.fixture_id || '',
 		path: raw.path || raw.source_path || result.fixture_path || '',
 		source_path: raw.source_path || raw.path || result.fixture_path || '',
+		selector: raw.selector || raw.context?.selector || raw.runtime_target_selector || '',
 		reason: message,
+		repair_mode: raw.repair_mode || raw.repairMode || raw.suggested_repair_class || '',
+		candidate_repo: raw.candidate_repo || raw.candidateRepo || raw.parser_owner || raw.owner || '',
 		artifact_refs: normalizeArray(raw.artifact_refs || raw.artifactRefs),
 		raw,
 	};
+}
+
+function dedupeDiagnosticPackets(diagnostics) {
+	const byKey = new Map();
+	for (const diagnostic of diagnostics) {
+		const key = diagnosticDedupeKey(diagnostic);
+		if (!key) {
+			byKey.set(`packet:${byKey.size}`, diagnostic);
+			continue;
+		}
+
+		const existing = byKey.get(key);
+		byKey.set(key, existing ? mergeDuplicateDiagnosticPacket(existing, diagnostic) : diagnostic);
+	}
+	return Array.from(byKey.values());
+}
+
+function diagnosticDedupeKey(diagnostic) {
+	const reason = firstString([diagnostic.reason, diagnostic.raw?.reason, diagnostic.raw?.message, diagnostic.raw?.code]);
+	if (!reason) {
+		return '';
+	}
+
+	const locator = firstString([
+		diagnostic.selector,
+		diagnostic.raw?.selector,
+		diagnostic.raw?.context?.selector,
+		diagnostic.raw?.runtime_target_selector,
+		diagnostic.source_path,
+		diagnostic.path,
+	]);
+	if (!locator) {
+		return '';
+	}
+
+	return [
+		diagnostic.fixture_id || '',
+		diagnostic.source_path || diagnostic.path || '',
+		diagnostic.path || diagnostic.source_path || '',
+		locator,
+		reason,
+	].map((value) => String(value || '').trim().toLowerCase()).join('\u0000');
+}
+
+function mergeDuplicateDiagnosticPacket(left, right) {
+	const canonical = diagnosticCanonicalScore(right) > diagnosticCanonicalScore(left) ? right : left;
+	const duplicate = canonical === left ? right : left;
+	return {
+		...canonical,
+		artifact_refs: dedupeArtifactRefs([...normalizeArray(left.artifact_refs), ...normalizeArray(right.artifact_refs)]),
+		duplicate_diagnostic_ids: Array.from(new Set([
+			...normalizeArray(left.duplicate_diagnostic_ids),
+			...normalizeArray(right.duplicate_diagnostic_ids),
+			duplicate.id,
+		].filter(Boolean))),
+	};
+}
+
+function diagnosticCanonicalScore(diagnostic) {
+	const kind = String(diagnostic.kind || '').trim();
+	const reason = String(diagnostic.reason || diagnostic.raw?.reason || '').trim();
+	let score = severityScore(diagnostic.severity) * 100;
+	if (kind && kind !== 'diagnostic') {
+		score += 10;
+	}
+	if (kind && reason && compactSlug(kind) !== compactSlug(reason)) {
+		score += 5;
+	}
+	if (diagnostic.repair_mode) {
+		score += 3;
+	}
+	if (diagnostic.candidate_repo) {
+		score += 2;
+	}
+	if (diagnostic.group_key && diagnostic.raw?.group_key && diagnostic.group_key === diagnostic.raw.group_key) {
+		score += 1;
+	}
+	return score;
+}
+
+function severityScore(severity) {
+	return { error: 3, fatal: 3, warning: 2, warn: 2, notice: 1, info: 1 }[String(severity || '').toLowerCase()] || 0;
+}
+
+function dedupeArtifactRefs(refs) {
+	const seen = new Set();
+	const deduped = [];
+	for (const ref of refs) {
+		const key = JSON.stringify(ref || null);
+		if (!seen.has(key)) {
+			seen.add(key);
+			deduped.push(ref);
+		}
+	}
+	return deduped;
 }
 
 function normalizeFixture(input) {
@@ -634,6 +735,10 @@ function artifactRef(artifact_id, filePath, kind) {
 
 function slug(value) {
 	return String(value || 'fixture').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'fixture';
+}
+
+function compactSlug(value) {
+	return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 module.exports = {
