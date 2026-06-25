@@ -233,6 +233,33 @@ fn local_package_rig_check_loads_without_installing_source() {
 }
 
 #[test]
+fn local_package_rig_check_with_id_ignores_unselected_sibling_rigs() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    fs::write(package.path().join("marker.txt"), "ok\n").expect("marker");
+    write_rig(
+        package.path(),
+        "local-alpha",
+        r#"{
+            "id": "local-alpha",
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "marker exists", "file": "${package.root}/marker.txt" }
+                ]
+            }
+        }"#,
+    );
+    let sibling_dir = package.path().join("rigs/broken-sibling");
+    fs::create_dir_all(&sibling_dir).expect("sibling rig dir");
+    fs::write(sibling_dir.join("rig.json"), "{ definitely not json").expect("sibling rig json");
+
+    let rig = load_local_source(package.path().to_str().unwrap(), Some("local-alpha"))
+        .expect("load selected local package rig");
+
+    assert_eq!(rig.id, "local-alpha");
+}
+
+#[test]
 fn local_direct_rig_json_check_resolves_package_root() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
