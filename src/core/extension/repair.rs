@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use super::execution::run_setup;
 use super::lifecycle::{
-    derive_id_from_url, is_git_url, rename_dir, resolve_cloned_extension, slugify_id,
-    write_source_metadata,
+    derive_id_from_url, install_linked_shared_scripts, is_git_url, rename_dir,
+    resolve_cloned_extension, slugify_id, write_source_metadata,
 };
 use super::manifest::ExtensionManifest;
 
@@ -140,6 +140,8 @@ fn replace_from_path(
     let source_revision = git::short_head_revision(&source);
     let staged_link = extension_dir.with_file_name(format!(".replace-link-tmp-{}", extension_id));
     clean_replace_temp(&staged_link)?;
+
+    install_linked_shared_scripts(&source, &extension_dir, None)?;
 
     create_symlink(&source, &staged_link)?;
     let backup_dir = extension_dir.with_file_name(format!(".replace-backup-tmp-{}", extension_id));
@@ -596,6 +598,45 @@ mod tests {
 
             let extension = load_extension("swift").expect("load relinked extension");
             assert_eq!(extension.version, "2.0.0");
+        });
+    }
+
+    #[test]
+    fn relink_materializes_shared_agent_runtimes_from_repo_root() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let new_source = home.join("new-source");
+            write_extension_fixture(&old_source, "swift");
+            write_extension_fixture_with_version(
+                &new_source.join("agent-runtimes"),
+                "swift",
+                "2.0.0",
+            );
+
+            let runtime_file = new_source.join("agent-runtimes/swift/lib/runner.js");
+            fs::create_dir_all(runtime_file.parent().expect("runtime parent"))
+                .expect("runtime dir");
+            fs::write(&runtime_file, "fresh runtime\n").expect("runtime file");
+
+            let materialized = home.join(".config/homeboy/agent-runtimes/swift/lib/runner.js");
+            fs::create_dir_all(materialized.parent().expect("materialized parent"))
+                .expect("materialized runtime dir");
+            fs::write(&materialized, "stale runtime\n").expect("stale runtime");
+
+            install(&old_source.join("swift").to_string_lossy(), Some("swift"))
+                .expect("install linked extension");
+
+            relink(
+                "swift",
+                &new_source.join("agent-runtimes/swift").to_string_lossy(),
+            )
+            .expect("relink should refresh shared agent runtimes");
+
+            assert_eq!(
+                fs::read_to_string(&materialized).expect("materialized runtime"),
+                "fresh runtime\n"
+            );
         });
     }
 

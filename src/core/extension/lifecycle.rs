@@ -357,7 +357,7 @@ fn install_shared_ai_runtimes_from_root(source_root: &Path) -> Result<()> {
     copy_dir_recursive(&shared_ai_runtimes, &target)
 }
 
-fn install_linked_shared_scripts(
+pub(crate) fn install_linked_shared_scripts(
     source: &Path,
     extension_dir: &Path,
     source_root: Option<&Path>,
@@ -366,8 +366,14 @@ fn install_linked_shared_scripts(
         return install_shared_scripts_from_root(source_root, extension_dir);
     }
 
-    if let Some(parent) = source.parent() {
-        install_shared_scripts_from_root(parent, extension_dir)?;
+    for parent in source.ancestors().skip(1) {
+        if parent.join("scripts").is_dir()
+            || parent.join("agent-runtimes").is_dir()
+            || parent.join("ai-runtimes").is_dir()
+        {
+            install_shared_scripts_from_root(parent, extension_dir)?;
+            break;
+        }
     }
     Ok(())
 }
