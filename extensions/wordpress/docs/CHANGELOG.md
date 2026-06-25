@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.16.0] - 2026-06-25
+
+### Added
+- consume Codebox hotspot artifacts
+
 ## [3.15.0] - 2026-06-25
 
 ### Added
