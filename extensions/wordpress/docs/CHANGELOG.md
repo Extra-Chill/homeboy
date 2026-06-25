@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.14.4] - 2026-06-25
+
+### Fixed
+- dedupe fixture matrix diagnostics
+
 ## [3.14.3] - 2026-06-25
 
 ### Changed
