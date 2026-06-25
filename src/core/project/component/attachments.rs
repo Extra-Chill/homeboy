@@ -27,6 +27,15 @@ pub fn set_component_attachments(
     project_id: &str,
     components: Vec<ProjectComponentAttachment>,
 ) -> Result<Vec<String>> {
+    crate::core::config::with_config_lock(|| {
+        set_component_attachments_unlocked(project_id, components)
+    })
+}
+
+fn set_component_attachments_unlocked(
+    project_id: &str,
+    components: Vec<ProjectComponentAttachment>,
+) -> Result<Vec<String>> {
     if components.is_empty() {
         return Err(Error::validation_invalid_argument(
             "components",
@@ -59,6 +68,10 @@ pub fn set_component_attachments(
 }
 
 pub fn remove_components(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
+    crate::core::config::with_config_lock(|| remove_components_unlocked(project_id, component_ids))
+}
+
+fn remove_components_unlocked(project_id: &str, component_ids: Vec<String>) -> Result<Vec<String>> {
     if component_ids.is_empty() {
         return Err(Error::validation_invalid_argument(
             "componentIds",
@@ -94,6 +107,10 @@ pub fn remove_components(project_id: &str, component_ids: Vec<String>) -> Result
 }
 
 pub fn clear_component_attachments(project_id: &str) -> Result<Vec<String>> {
+    crate::core::config::with_config_lock(|| clear_component_attachments_unlocked(project_id))
+}
+
+fn clear_component_attachments_unlocked(project_id: &str) -> Result<Vec<String>> {
     let mut project = load(project_id)?;
     project.components.clear();
     save(&project)?;
@@ -101,6 +118,16 @@ pub fn clear_component_attachments(project_id: &str) -> Result<Vec<String>> {
 }
 
 pub fn attach_component_path(project_id: &str, component_id: &str, local_path: &str) -> Result<()> {
+    crate::core::config::with_config_lock(|| {
+        attach_component_path_unlocked(project_id, component_id, local_path)
+    })
+}
+
+fn attach_component_path_unlocked(
+    project_id: &str,
+    component_id: &str,
+    local_path: &str,
+) -> Result<()> {
     let mut project = load(project_id)?;
 
     let is_update = project.components.iter().any(|c| c.id == component_id);
@@ -178,6 +205,15 @@ fn preserve_remote_path_on_reattach(
 }
 
 pub fn attach_discovered_component_path(project_id: &str, local_path: &Path) -> Result<String> {
+    crate::core::config::with_config_lock(|| {
+        attach_discovered_component_path_unlocked(project_id, local_path)
+    })
+}
+
+fn attach_discovered_component_path_unlocked(
+    project_id: &str,
+    local_path: &Path,
+) -> Result<String> {
     let inferred_id = infer_attached_component_id(local_path)?;
 
     // When the inferred ID doesn't match any existing project component, check
@@ -192,7 +228,7 @@ pub fn attach_discovered_component_path(project_id: &str, local_path: &Path) -> 
         find_prefix_match(&project, &inferred_id).unwrap_or(inferred_id)
     };
 
-    attach_component_path(project_id, &component_id, &local_path.to_string_lossy())?;
+    attach_component_path_unlocked(project_id, &component_id, &local_path.to_string_lossy())?;
     Ok(component_id)
 }
 
@@ -244,6 +280,9 @@ fn find_prefix_match(project: &Project, inferred_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_isolated_home;
+    use std::fs;
+    use std::sync::{Arc, Barrier};
 
     fn project_with_components(ids: &[&str]) -> Project {
         let mut project = Project::default();
@@ -305,5 +344,46 @@ mod tests {
     fn find_prefix_match_no_components() {
         let project = project_with_components(&[]);
         assert_eq!(find_prefix_match(&project, "anything-v1"), None);
+    }
+
+    #[test]
+    fn concurrent_attach_discovered_component_path_preserves_all_writes() {
+        with_isolated_home(|home| {
+            let project = Project {
+                id: "site".to_string(),
+                ..Default::default()
+            };
+            save(&project).expect("save project");
+
+            let repo_a = home.path().join("component-a");
+            let repo_b = home.path().join("component-b");
+            fs::create_dir_all(&repo_a).expect("repo a");
+            fs::create_dir_all(&repo_b).expect("repo b");
+            fs::write(repo_a.join("homeboy.json"), r#"{"id":"component-a"}"#)
+                .expect("component a config");
+            fs::write(repo_b.join("homeboy.json"), r#"{"id":"component-b"}"#)
+                .expect("component b config");
+
+            let barrier = Arc::new(Barrier::new(2));
+            let handles: Vec<_> = [repo_a, repo_b]
+                .into_iter()
+                .map(|repo| {
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        attach_discovered_component_path("site", &repo)
+                            .expect("concurrent attach succeeds");
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().expect("attach thread");
+            }
+
+            let mut ids = project_component_ids(&load("site").expect("load project"));
+            ids.sort();
+            assert_eq!(ids, vec!["component-a", "component-b"]);
+        });
     }
 }
