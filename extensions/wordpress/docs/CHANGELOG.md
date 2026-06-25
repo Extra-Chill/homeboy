@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.14.2] - 2026-06-25
+
+### Changed
+- Normalize Codebox executor events
+
 ## [3.14.1] - 2026-06-25
 
 ### Changed
