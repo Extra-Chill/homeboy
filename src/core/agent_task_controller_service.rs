@@ -25,9 +25,12 @@ use crate::core::agent_task_loop_controller::{
 use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use crate::core::agent_task_service::{self, AgentTaskRunResult};
 use crate::core::git::{pr_find, pr_view, PrFindOptions, PrState};
+use crate::core::paths;
 use crate::core::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus};
 use crate::core::{Error, Result};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 /// Schema for the apply-event report envelope.
@@ -170,6 +173,8 @@ pub struct AgentTaskRepoLoopSpecWorkflow {
     pub metrics: Vec<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub inputs: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub execution: Value,
 }
 
 /// Artifact contract declared by a repo loop spec.
@@ -602,8 +607,16 @@ fn compile_loop_spec_workflow(
     spec: &AgentTaskRepoLoopSpec,
     workflow: &AgentTaskRepoLoopSpecWorkflow,
 ) -> Result<AgentTaskLoopPolicyAction> {
-    let request = workflow_dispatch_request(spec, workflow)?;
     let dedupe_key = format!("workflow:{}", workflow.workflow_id);
+    if workflow.execution.get("kind").and_then(Value::as_str) == Some("command") {
+        return Ok(AgentTaskLoopPolicyAction::RunCommand {
+            dedupe_key,
+            entity_id: None,
+            request: workflow_command_request(workflow),
+        });
+    }
+
+    let request = workflow_dispatch_request(spec, workflow)?;
     if workflow.entity_ids.is_empty() {
         Ok(AgentTaskLoopPolicyAction::SpawnTask {
             dedupe_key,
@@ -617,6 +630,16 @@ fn compile_loop_spec_workflow(
             request_template: request,
         })
     }
+}
+
+fn workflow_command_request(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
+    serde_json::json!({
+        "mode": "command",
+        "workflow_id": workflow.workflow_id,
+        "consumes": workflow.inputs.get("consumes").cloned().unwrap_or(Value::Null),
+        "artifacts": workflow.artifacts,
+        "execution": workflow.execution,
+    })
 }
 
 fn workflow_dispatch_request(
@@ -1085,6 +1108,11 @@ where
             executor,
             dispatch,
         ),
+        AgentTaskLoopPolicyAction::RunCommand {
+            dedupe_key,
+            entity_id,
+            request,
+        } => execute_run_command_action(record, action, dedupe_key, entity_id.as_deref(), request),
         AgentTaskLoopPolicyAction::FanOut {
             dedupe_key,
             entity_ids,
@@ -1341,6 +1369,203 @@ where
             ]),
         )),
     }
+}
+
+fn execute_run_command_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    dedupe_key: &str,
+    entity_id: Option<&str>,
+    request: &Value,
+) -> Result<(Value, i32)> {
+    let execution = request.get("execution").unwrap_or(&Value::Null);
+    let command = required_string(execution, "command")?;
+    let args = execution
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|args| {
+            args.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let required_artifacts = request
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .map(|artifacts| {
+            artifacts
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let io_dir = loop_action_io_dir(&record.loop_id, &action.action_id)?;
+    fs::create_dir_all(&io_dir).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let input_path = io_dir.join("input.json");
+    let output_path = io_dir.join("output.json");
+    let input = serde_json::json!({
+        "schema": "homeboy/agent-task-loop-command-input/v1",
+        "loop_id": record.loop_id,
+        "action_id": action.action_id,
+        "dedupe_key": dedupe_key,
+        "entity_id": entity_id,
+        "request": request,
+        "controller": &*record,
+    });
+    write_json_file(&input_path, &input)?;
+
+    let mut process = Command::new(&command);
+    process.args(&args);
+    if let Some(cwd) = execution
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+    {
+        process.current_dir(cwd);
+    }
+    process.env("HOMEBOY_LOOP_ACTION_INPUT", &input_path);
+    process.env("HOMEBOY_LOOP_ACTION_OUTPUT", &output_path);
+    process.env("HOMEBOY_LOOP_ID", &record.loop_id);
+    process.env("HOMEBOY_LOOP_ACTION_ID", &action.action_id);
+    process.env("HOMEBOY_LOOP_ACTION_DEDUPE_KEY", dedupe_key);
+
+    let output = process
+        .output()
+        .map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let exit_code = output.status.code().unwrap_or(1);
+    let result = if output_path.exists() {
+        read_json_file(&output_path)?
+    } else {
+        serde_json::json!({})
+    };
+    let artifacts = result.get("artifacts").cloned().unwrap_or(Value::Null);
+    let missing = missing_required_artifacts(&required_artifacts, &artifacts);
+    let command_success = exit_code == 0 && missing.is_empty();
+    let effective_exit_code = if command_success { 0 } else { 1 };
+
+    if command_success {
+        record_run_command_outputs(record, action, dedupe_key, entity_id, request, &artifacts)?;
+    }
+
+    Ok((
+        serde_json::json!({
+            "mode": "run_command",
+            "command": command,
+            "args": args,
+            "input_path": input_path,
+            "output_path": output_path,
+            "exit_code": exit_code,
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+            "missing_artifacts": missing,
+            "result": result,
+        }),
+        effective_exit_code,
+    ))
+}
+
+fn loop_action_io_dir(loop_id: &str, action_id: &str) -> Result<PathBuf> {
+    Ok(paths::homeboy_data()?
+        .join("agent-task-loop-actions")
+        .join(sanitize_loop_action_id(loop_id))
+        .join(action_id))
+}
+
+fn sanitize_loop_action_id(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn write_json_file(path: &PathBuf, value: &Value) -> Result<()> {
+    let payload = serde_json::to_string_pretty(value)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    fs::write(path, format!("{payload}\n"))
+        .map_err(|error| Error::internal_io(error.to_string(), None))
+}
+
+fn read_json_file(path: &PathBuf) -> Result<Value> {
+    let payload =
+        fs::read_to_string(path).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    serde_json::from_str(&payload).map_err(|error| Error::internal_json(error.to_string(), None))
+}
+
+fn missing_required_artifacts(required: &[String], artifacts: &Value) -> Vec<String> {
+    required
+        .iter()
+        .filter(|artifact| artifacts.get(artifact.as_str()).is_none_or(Value::is_null))
+        .cloned()
+        .collect()
+}
+
+fn record_run_command_outputs(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    dedupe_key: &str,
+    entity_id: Option<&str>,
+    request: &Value,
+    artifacts: &Value,
+) -> Result<()> {
+    let run_id = format!("{}:{}", record.loop_id, action.action_id);
+    let artifact_refs = artifact_refs_from_command_result(artifacts);
+    if let Some(entity_id) = entity_id {
+        if let Some(entity) = record.entities.get_mut(entity_id) {
+            entity.artifact_refs.extend(artifact_refs.clone());
+        }
+    }
+    if !record
+        .task_lineage
+        .iter()
+        .any(|lineage| lineage.run_id == run_id)
+    {
+        record.task_lineage.push(AgentTaskLoopTaskLineage {
+            run_id: run_id.clone(),
+            task_id: None,
+            parent_run_id: None,
+            parent_task_id: None,
+            entity_id: entity_id.map(str::to_string),
+            dedupe_key: Some(dedupe_key.to_string()),
+            artifact_refs,
+            inputs: request.clone(),
+            outputs: serde_json::json!({ "artifacts": artifacts }),
+        });
+    }
+    Ok(())
+}
+
+fn artifact_refs_from_command_result(artifacts: &Value) -> Vec<AgentTaskLoopArtifactRef> {
+    let Some(object) = artifacts.as_object() else {
+        return Vec::new();
+    };
+    object
+        .iter()
+        .map(|(artifact_id, artifact)| {
+            let uri = artifact
+                .get("artifact_url")
+                .or_else(|| artifact.get("url"))
+                .or_else(|| artifact.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or(artifact_id)
+                .to_string();
+            AgentTaskLoopArtifactRef {
+                uri,
+                kind: artifact
+                    .get("schema")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                label: Some(artifact_id.clone()),
+            }
+        })
+        .collect()
 }
 
 fn execute_fan_out_action<E, D>(
@@ -2460,6 +2685,7 @@ mod tests {
                     gates: vec!["quality".to_string()],
                     metrics: vec!["visual-parity".to_string()],
                     inputs: json!({ "finding_key": "abc" }),
+                    execution: Value::Null,
                 }],
                 artifacts: vec![AgentTaskRepoLoopSpecArtifact {
                     artifact_id: "patch".to_string(),
@@ -2592,6 +2818,7 @@ mod tests {
                     gates: Vec::new(),
                     metrics: Vec::new(),
                     inputs: Value::Null,
+                    execution: Value::Null,
                 }],
                 artifacts: Vec::new(),
                 dependencies: Vec::new(),
@@ -2611,6 +2838,84 @@ mod tests {
             assert!(error
                 .message
                 .contains("references an undeclared contract id"));
+        });
+    }
+
+    #[test]
+    fn run_command_workflow_executes_deterministic_artifact_action() {
+        with_isolated_home(|_| {
+            let spec = AgentTaskRepoLoopSpec {
+                schema: None,
+                loop_id: "repo-loop-command".to_string(),
+                phase: "init".to_string(),
+                config_version: "v1".to_string(),
+                metadata: Value::Null,
+                entities: Vec::new(),
+                agents: Vec::new(),
+                tools: Vec::new(),
+                abilities: Vec::new(),
+                workflows: vec![AgentTaskRepoLoopSpecWorkflow {
+                    workflow_id: "deterministic-validation".to_string(),
+                    agent_id: None,
+                    prompt: None,
+                    tasks: vec!["Run deterministic validation.".to_string()],
+                    entity_ids: Vec::new(),
+                    tools: Vec::new(),
+                    abilities: Vec::new(),
+                    artifacts: vec!["validation_result".to_string()],
+                    dependencies: Vec::new(),
+                    gates: Vec::new(),
+                    metrics: Vec::new(),
+                    inputs: Value::Null,
+                    execution: json!({
+                        "kind": "command",
+                        "command": "/bin/sh",
+                        "args": ["-c", "printf '%s\n' '{\"artifacts\":{\"validation_result\":{\"schema\":\"example/ValidationResult/v1\",\"artifact_url\":\"artifact://validation-result\"}}}' > \"$HOMEBOY_LOOP_ACTION_OUTPUT\""]
+                    }),
+                }],
+                artifacts: vec![AgentTaskRepoLoopSpecArtifact {
+                    artifact_id: "validation_result".to_string(),
+                    kind: "example/ValidationResult/v1".to_string(),
+                    description: None,
+                    required: true,
+                }],
+                dependencies: Vec::new(),
+                gates: Vec::new(),
+                metrics: Vec::new(),
+                gate_bundles: Vec::new(),
+                policy: None,
+                phases: Vec::new(),
+                actions: Vec::new(),
+                initial_event: None,
+            };
+
+            let initialized = init_from_spec(ControllerFromSpecRequest { spec }).expect("init");
+            match &initialized.actions[0].action {
+                AgentTaskLoopPolicyAction::RunCommand { request, .. } => {
+                    assert_eq!(request["execution"]["kind"], "command");
+                }
+                other => panic!("expected run_command action, got {other:?}"),
+            }
+
+            let result = run_next(
+                "repo-loop-command",
+                CapturingExecutor::default(),
+                &CapturingDispatchHook::default(),
+            )
+            .expect("run command action");
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.status.as_deref(), Some("completed"));
+            assert_eq!(
+                result.value.execution.as_ref().unwrap()["result"]["artifacts"]
+                    ["validation_result"]["schema"],
+                "example/ValidationResult/v1"
+            );
+            assert_eq!(result.value.controller.task_lineage.len(), 1);
+            assert_eq!(
+                result.value.controller.task_lineage[0].outputs["artifacts"]["validation_result"]
+                    ["artifact_url"],
+                "artifact://validation-result"
+            );
         });
     }
 
@@ -3039,6 +3344,7 @@ mod tests {
                     gates: vec!["quality".to_string()],
                     metrics: vec!["coverage".to_string()],
                     inputs: json!({ "scope": "changed findings" }),
+                    execution: Value::Null,
                 }],
                 artifacts: vec![AgentTaskRepoLoopSpecArtifact {
                     artifact_id: "candidate-patch".to_string(),

@@ -203,6 +203,13 @@ pub enum AgentTaskLoopPolicyAction {
         #[serde(default, skip_serializing_if = "Value::is_null")]
         request: Value,
     },
+    RunCommand {
+        dedupe_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        request: Value,
+    },
     FanOut {
         dedupe_key: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1691,6 +1698,7 @@ fn controllers_root() -> Result<PathBuf> {
 fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { dedupe_key, .. }
+        | AgentTaskLoopPolicyAction::RunCommand { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::FanOut { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::SpawnController { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::SpawnSubloop { dedupe_key, .. }
@@ -1735,7 +1743,8 @@ fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<String> {
 
 fn action_runner_request(action: &AgentTaskLoopPolicyAction) -> Option<&Value> {
     match action {
-        AgentTaskLoopPolicyAction::SpawnTask { request, .. } => Some(request),
+        AgentTaskLoopPolicyAction::SpawnTask { request, .. }
+        | AgentTaskLoopPolicyAction::RunCommand { request, .. } => Some(request),
         AgentTaskLoopPolicyAction::FanOut {
             request_template, ..
         }
@@ -1801,6 +1810,7 @@ fn jsonpath_match_is_truthy(value: &Value) -> bool {
 fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { entity_id, .. }
+        | AgentTaskLoopPolicyAction::RunCommand { entity_id, .. }
         | AgentTaskLoopPolicyAction::SpawnController { entity_id, .. }
         | AgentTaskLoopPolicyAction::SpawnSubloop { entity_id, .. }
         | AgentTaskLoopPolicyAction::WaitForController { entity_id, .. }
@@ -1815,6 +1825,7 @@ fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<String> {
 fn action_name(action: &AgentTaskLoopPolicyAction) -> &'static str {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { .. } => "spawn_task",
+        AgentTaskLoopPolicyAction::RunCommand { .. } => "run_command",
         AgentTaskLoopPolicyAction::FanOut { .. } => "fan_out",
         AgentTaskLoopPolicyAction::SpawnController { .. } => "spawn_controller",
         AgentTaskLoopPolicyAction::SpawnSubloop { .. } => "spawn_subloop",
