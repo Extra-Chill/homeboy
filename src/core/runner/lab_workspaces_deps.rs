@@ -478,6 +478,7 @@ pub(super) fn bootstrap_source_cli_node_dependencies(
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: None,
+            run_id: None,
             detach_after_handoff: false,
         },
     )?;

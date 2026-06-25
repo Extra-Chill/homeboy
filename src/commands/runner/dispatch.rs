@@ -139,6 +139,7 @@ pub fn run(
             script_file,
             env,
             dry_run,
+            run_id,
             raw: _,
             command,
         } => map_execution(exec(
@@ -151,6 +152,7 @@ pub fn run(
             script_file,
             env,
             dry_run,
+            run_id,
             command,
         )),
         RunnerCommand::Env { id } => map_env(env_mod::env(&id)),
@@ -207,6 +209,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             script_file,
             env,
             dry_run,
+            run_id,
             raw: true,
             command,
         } => run_raw_exec(
@@ -219,6 +222,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             script_file,
             env,
             dry_run,
+            run_id,
             command,
         ),
         command => {
@@ -243,6 +247,7 @@ fn run_raw_exec(
     script_file: Option<String>,
     env: Vec<String>,
     dry_run: bool,
+    run_id: Option<String>,
     command: Vec<String>,
 ) -> JsonCommandRun {
     match exec(
@@ -255,6 +260,7 @@ fn run_raw_exec(
         script_file,
         env,
         dry_run,
+        run_id,
         command,
     ) {
         Ok((output, exit_code)) => raw_exec_command_run(output, exit_code),

@@ -527,6 +527,7 @@ homeboy runner remove <id>
 homeboy runner exec <runner-id> -- <command...>
 homeboy runner exec <runner-id> --project <project-id> --cwd /runner/workspace/project -- <command...>
 homeboy runner exec <runner-id> --ssh --cwd /runner/workspace/project -- <command...>
+homeboy runner exec <runner-id> --run-id ssi-fixture-matrix-summary -- <command...>
 homeboy runner exec <runner-id> --cwd /runner/workspace/project --require-path /runner/workspace/project -- <command...>
 homeboy runner env <runner-id>
 homeboy runner env <runner-id> --show-values
@@ -541,6 +542,7 @@ Path rules:
 - Omitting `--cwd` on an SSH runner uses the runner `workspace_root`.
 - `--require-path <path>` preflights one or more runner-side paths before execution. Use it when a command references a lab worktree path so missing controller-only paths fail with a structured `require_path` error instead of an empty command failure.
 - `--project <id>` feeds the runner trust policy project allowlist check.
+- `--run-id <id>` sets the persisted controller-side runner-exec run id for ad hoc evidence commands. When omitted, Homeboy derives a run id prefix from the command domain, such as `trace-matrix-summary`.
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
 - Diagnostic SSH output serializes as `mode: "diagnostic_ssh"` and does not include job/event evidence.
 - Raw SSH execution remains intentionally explicit and should not be used as production Lab/offload evidence; use connected daemon or reverse broker execution for job/event/artifact-compatible output.

@@ -317,6 +317,7 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
                 runner_workload: Some(workload),
+                run_id: None,
                 detach_after_handoff: false,
             },
             |_plan| {
@@ -357,6 +358,7 @@ fn test_exec_runs_local_runner_command() {
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
                 runner_workload: None,
+                run_id: None,
                 detach_after_handoff: false,
             },
         )
@@ -413,6 +415,7 @@ fn test_exec_does_not_leak_ambient_process_env() {
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
                 runner_workload: None,
+                run_id: None,
                 detach_after_handoff: false,
             },
         )
@@ -449,6 +452,7 @@ fn test_exec_preserves_explicit_request_env() {
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
                 runner_workload: None,
+                run_id: None,
                 detach_after_handoff: false,
             },
         )
@@ -493,6 +497,7 @@ fn test_exec_rejects_missing_required_local_runner_path() {
                 required_extensions: Vec::new(),
                 require_paths: vec![missing.display().to_string()],
                 runner_workload: None,
+                run_id: None,
                 detach_after_handoff: false,
             },
         )
@@ -536,6 +541,7 @@ fn test_exec_reports_required_path_diagnostics() {
                 required_extensions: Vec::new(),
                 require_paths: vec![required_path.display().to_string()],
                 runner_workload: None,
+                run_id: None,
                 detach_after_handoff: false,
             },
         )
@@ -590,6 +596,7 @@ fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
                 runner_workload: None,
+                run_id: None,
                 detach_after_handoff: false,
             },
         )
@@ -628,6 +635,7 @@ fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
         required_extensions: Vec::new(),
         require_paths: Vec::new(),
         runner_workload: None,
+        run_id: None,
         detach_after_handoff: false,
     };
 

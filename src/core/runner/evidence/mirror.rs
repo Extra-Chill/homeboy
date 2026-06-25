@@ -16,8 +16,8 @@ use super::detail::{
 };
 use super::tokens::is_retrievable_runner_artifact;
 use super::util::{
-    job_status_as_run_status, local_job_run_id, ms_to_rfc3339, result_summary, runner_metadata,
-    source_snapshot_from_result,
+    job_status_as_run_status, local_job_run_id, ms_to_rfc3339, result_summary,
+    runner_exec_run_label, runner_metadata, source_snapshot_from_result,
 };
 
 #[derive(Debug)]
@@ -39,9 +39,10 @@ pub fn mirror_daemon_evidence(
     job: &Job,
     events: &[JobEvent],
     result: &Value,
+    run_id: Option<&str>,
 ) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
-    let local_job_run = mirror_job_run(&store, runner, cwd, command, job, events, result)?;
+    let local_job_run = mirror_job_run(&store, runner, cwd, command, job, events, result, run_id)?;
     let remote_runs = mirror_remote_observation_runs(&store, runner, job, result)?;
     let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
     let primary_run = primary_mirrored_run(&remote_runs).unwrap_or(local_job_run);
@@ -59,9 +60,10 @@ pub fn mirror_reverse_broker_evidence(
     job: &Job,
     events: &[JobEvent],
     result: &Value,
+    run_id: Option<&str>,
 ) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
-    let mut run = mirror_job_run(&store, runner, cwd, command, job, events, result)?;
+    let mut run = mirror_job_run(&store, runner, cwd, command, job, events, result, run_id)?;
     let artifacts = mirror_reverse_broker_artifacts(&store, runner, broker_url, &run.id, job)?;
 
     let mut metadata = run.metadata_json.clone();
@@ -93,9 +95,19 @@ pub fn mirror_daemon_job_progress(
     command: &[String],
     job: &Job,
     events: &[JobEvent],
+    run_id: Option<&str>,
 ) -> Result<RunRecord> {
     let store = ObservationStore::open_initialized()?;
-    mirror_job_run(&store, runner, cwd, command, job, events, &json!({}))
+    mirror_job_run(
+        &store,
+        runner,
+        cwd,
+        command,
+        job,
+        events,
+        &json!({}),
+        run_id,
+    )
 }
 
 pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRecord>>> {
@@ -116,7 +128,7 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         .as_ref()
         .map(|command| vec![command.clone()])
         .unwrap_or_default();
-    mirror_job_run(&store, &runner, cwd, &command, &job, &events, &result)?;
+    mirror_job_run(&store, &runner, cwd, &command, &job, &events, &result, None)?;
     Ok(Some(mirror_remote_observation_runs(
         &store, &runner, &job, &result,
     )?))
@@ -240,9 +252,13 @@ pub(super) fn mirror_job_run(
     job: &Job,
     events: &[JobEvent],
     result: &Value,
+    run_id: Option<&str>,
 ) -> Result<RunRecord> {
+    let inferred_label = runner_exec_run_label(command);
     let run = RunRecord {
-        id: local_job_run_id(&runner.id, &job.id.to_string()),
+        id: run_id
+            .map(str::to_string)
+            .unwrap_or_else(|| local_job_run_id(&runner.id, &job.id.to_string(), &inferred_label)),
         kind: "runner-exec".to_string(),
         component_id: None,
         started_at: ms_to_rfc3339(job.started_at_ms.unwrap_or(job.created_at_ms)),
@@ -260,6 +276,8 @@ pub(super) fn mirror_job_run(
                 "remote_events": events,
                 "result_summary": result_summary(result),
                 "source_snapshot": source_snapshot_from_result(result),
+                "run_label": inferred_label,
+                "explicit_run_id": run_id,
             }
         }),
     };

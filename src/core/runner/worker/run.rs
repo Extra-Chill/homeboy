@@ -285,6 +285,7 @@ fn run_once_output(
             required_extensions: claim.request.required_extensions(),
             require_paths: claim.request.require_paths.clone(),
             runner_workload: claim.request.runner_workload.clone(),
+            run_id: None,
             detach_after_handoff: false,
         },
         || {

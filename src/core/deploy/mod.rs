@@ -38,7 +38,7 @@ use crate::core::project;
 /// and SSH context resolution, keeping those details encapsulated.
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
     let project = project::load(project_id)?;
-    project::validate_component_local_paths(&project)?;
+    project::validate_deploy_component_local_paths(&project, &config.component_ids)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
     orchestration::deploy_components(config, &project, &ctx, &base_path)
 }
@@ -306,7 +306,7 @@ mod tests {
             let err = run("site", &deploy_config()).expect_err("missing local_path should block");
 
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
-            assert!(err.message.contains("component local_path blockers"));
+            assert!(err.message.contains("missing local_path"));
             assert!(err.hints.iter().any(|hint| {
                 hint.message.contains(
                     "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist",

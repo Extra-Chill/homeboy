@@ -39,6 +39,7 @@ fn test_runner_policy_denies_raw_ssh_exec_by_default() {
         required_extensions: Vec::new(),
         require_paths: Vec::new(),
         runner_workload: None,
+        run_id: None,
         detach_after_handoff: false,
     };
 
@@ -75,6 +76,7 @@ fn test_runner_policy_enforces_projects_commands_workspace_and_artifacts() {
         required_extensions: Vec::new(),
         require_paths: Vec::new(),
         runner_workload: None,
+        run_id: None,
         detach_after_handoff: false,
     };
     validate_runner_policy(

@@ -492,30 +492,7 @@ where
     )
 }
 
-pub fn resume_deterministic_loop<H>(
-    spec: DeterministicLoopSpec,
-    identity: DeterministicLoopRunIdentity,
-    resume_from: DeterministicLoopState,
-    hooks: &mut H,
-) -> Result<DeterministicLoopState>
-where
-    H: DeterministicLoopHooks,
-{
-    let mut sink = NoopDeterministicLoopEventSink;
-    let cancellation = NeverCancelDeterministicLoop;
-    run_deterministic_loop_with_runtime(
-        spec,
-        identity,
-        hooks,
-        DeterministicLoopRunOptions {
-            resume_from: Some(resume_from),
-        },
-        &mut sink,
-        &cancellation,
-    )
-}
-
-pub fn run_deterministic_loop_with_runtime<H, S, C>(
+fn run_deterministic_loop_with_runtime<H, S, C>(
     spec: DeterministicLoopSpec,
     identity: DeterministicLoopRunIdentity,
     hooks: &mut H,
@@ -679,7 +656,7 @@ where
     Ok(state)
 }
 
-pub fn validate_deterministic_loop_result(
+fn validate_deterministic_loop_result(
     state: &DeterministicLoopState,
     spec: &DeterministicLoopSpec,
 ) -> Result<()> {
