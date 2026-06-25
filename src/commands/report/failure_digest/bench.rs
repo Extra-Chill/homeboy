@@ -22,6 +22,9 @@ pub(super) fn render_bench_section(out: &mut String, output_dir: &Path, run_url:
 
     let _ = writeln!(out, "### Bench: {}", component);
     let _ = writeln!(out, "**Status:** {}\n", status.to_uppercase());
+    if let Some(execution_state) = bench_execution_state(&data) {
+        let _ = writeln!(out, "**Execution state:** `{}`\n", execution_state);
+    }
 
     if let Some(message) = string_value(&error, "message") {
         out.push_str("**Summary**\n");
@@ -68,6 +71,18 @@ fn render_bench_summary(out: &mut String, data: &Map<String, Value>) {
         let _ = writeln!(out, "- `{}` (`{}`): {}", scenario, metric, rows.join("; "));
     }
     out.push('\n');
+}
+
+fn bench_execution_state(data: &Map<String, Value>) -> Option<String> {
+    string_value(data, "execution_state")
+        .or_else(|| string_value(&object_value(data, "summary"), "execution_state"))
+        .or_else(|| string_value(&object_value(data, "matrix"), "execution_state"))
+        .or_else(|| {
+            string_value(
+                &object_value(data, "agent_task_aggregate"),
+                "execution_state",
+            )
+        })
 }
 
 fn render_budget_findings(out: &mut String, data: &Map<String, Value>) {
