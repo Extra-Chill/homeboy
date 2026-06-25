@@ -25,6 +25,7 @@ use super::drift::{RunsDriftArgs, RunsDriftOutput};
 use super::evidence::RunsEvidenceOutput;
 use super::findings;
 use super::findings::{RunsFindingOutput, RunsFindingsOutput};
+use super::fuzz_compare::RunsFuzzCompareArgs;
 use super::gh_actions::GhActionsImportOutput;
 use super::hotspots::{RunsHotspotsArgs, RunsHotspotsOutput};
 use super::latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
@@ -32,6 +33,7 @@ use super::loop_sync::{RunsLoopSyncArgs, RunsLoopSyncOutput};
 use super::query::{RunsQueryArgs, RunsQueryOutput};
 use super::reconcile::{RunsReconcileArgs, RunsReconcileOutput};
 use super::refs::{RunsRefsArgs, RunsRefsOutput};
+use crate::commands::fuzz::FuzzCompareOutput;
 
 pub(super) const DEFAULT_LIMIT: i64 = 20;
 
@@ -65,6 +67,8 @@ pub(super) enum RunsCommand {
     Compare(RunsCompareArgs),
     /// Compare two persisted benchmark runs by exact run id; canonical replacement for `bench compare`
     BenchCompare(RunsBenchCompareArgs),
+    /// Compare two persisted fuzz runs by exact run id
+    FuzzCompare(RunsFuzzCompareArgs),
     /// Aggregate hotspot rankings across persisted fuzz run artifacts
     Hotspots(RunsHotspotsArgs),
     /// Mark orphaned running observation records stale
@@ -154,6 +158,7 @@ pub enum RunsOutput {
     Finding(RunsFindingOutput),
     LatestFinding(RunsLatestFindingOutput),
     BenchCompare(BenchCompareOutput),
+    FuzzCompare(FuzzCompareOutput),
     Hotspots(RunsHotspotsOutput),
     Reconcile(RunsReconcileOutput),
     Export(RunsExportOutput),

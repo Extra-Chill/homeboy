@@ -10,13 +10,14 @@ mod types;
 mod types_extra;
 mod workloads;
 
+pub(crate) use compare::compare_envelopes;
 pub use dispatch::run;
 pub use types::{
-    FuzzArgs, FuzzCampaignContract, FuzzContractOutput, FuzzCoverageCompletenessOutput,
-    FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput, FuzzDiscoverSummary,
-    FuzzExecutionOutput, FuzzGateEvaluation, FuzzListOutput, FuzzOutput, FuzzPlanOutput,
-    FuzzReplayEnv, FuzzReplayOutput, FuzzReportOutput, FuzzRunArgs, FuzzRunOutput,
-    FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
+    FuzzArgs, FuzzCampaignContract, FuzzCompareHotspotPolicy, FuzzCompareOutput,
+    FuzzContractOutput, FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput,
+    FuzzDiscoverOutput, FuzzDiscoverSummary, FuzzExecutionOutput, FuzzGateEvaluation,
+    FuzzListOutput, FuzzOutput, FuzzPlanOutput, FuzzReplayEnv, FuzzReplayOutput, FuzzReportOutput,
+    FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
 };
 
 #[cfg(test)]

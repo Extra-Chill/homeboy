@@ -22,6 +22,7 @@ mod distribution;
 mod drift;
 mod evidence;
 mod findings;
+mod fuzz_compare;
 mod gh_actions;
 mod handlers;
 mod hotspots;

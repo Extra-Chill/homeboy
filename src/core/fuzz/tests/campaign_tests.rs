@@ -27,8 +27,10 @@ fn campaign_serializes_seeds_coverage_findings_artifacts_thresholds_and_provenan
                 target_id: Some("target-1".to_string()),
                 label: None,
                 tags: Vec::new(),
+                source_refs: Vec::new(),
             }],
             metadata: Value::Null,
+            source_refs: Vec::new(),
             extra: BTreeMap::new(),
         }],
         workloads: vec![FuzzWorkload {
@@ -160,6 +162,7 @@ fn campaign_serializes_seeds_coverage_findings_artifacts_thresholds_and_provenan
             seed_id: Some("seed-1".to_string()),
             fingerprint: Some("abc123".to_string()),
             artifact_ids: vec!["artifact-1".to_string()],
+            source_refs: Vec::new(),
             metadata: Value::Null,
             extra: BTreeMap::new(),
         }],

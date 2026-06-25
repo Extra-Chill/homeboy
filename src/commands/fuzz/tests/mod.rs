@@ -2,8 +2,8 @@
 
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use super::execution::{
-    default_runner_contract, fuzz_campaign_contract, fuzz_evidence_followups,
-    fuzz_run_artifact_validation_error, fuzz_run_outcome, fuzz_runner_env,
+    default_runner_contract, fuzz_artifact_ref_validation, fuzz_campaign_contract,
+    fuzz_evidence_followups, fuzz_run_artifact_validation_error, fuzz_run_outcome, fuzz_runner_env,
     persist_fuzz_run_evidence, FuzzRunEvidenceInput,
 };
 use super::planning::plan_inventory_selection;

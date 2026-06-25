@@ -164,7 +164,7 @@ pub fn canonical_operation_family(kind: &str) -> Option<FuzzOperationFamily> {
         "list" => Some(FuzzOperationFamily::List),
         "search" => Some(FuzzOperationFamily::Search),
         "navigate" => Some(FuzzOperationFamily::Navigate),
-        "render" | "block_render" => Some(FuzzOperationFamily::Render),
+        "render" => Some(FuzzOperationFamily::Render),
         "query" => Some(FuzzOperationFamily::Query),
         "load" => Some(FuzzOperationFamily::Load),
         "submit" => Some(FuzzOperationFamily::Submit),

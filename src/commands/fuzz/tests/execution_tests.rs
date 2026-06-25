@@ -26,7 +26,9 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");
+        let artifacts_dir = home.path().join("fuzz-artifacts");
         std::fs::write(&results_path, "{}").expect("results file");
+        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
 
         let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
             run_id: args.run_id.as_deref(),
@@ -39,8 +41,10 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             success: true,
             args: &args,
             results_path: &results_path,
+            artifacts_dir: &artifacts_dir,
             results: None,
             results_error: None,
+            missing_artifact_refs: &[],
         })
         .expect("persist fuzz run")
         .expect("run record");
@@ -63,10 +67,22 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             .unwrap_or_default()
             .contains("homeboy fuzz run component-a"));
         let artifacts = store.list_artifacts("proof-1").expect("artifacts");
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].kind, "fuzz_results");
-        assert_eq!(artifacts[0].artifact_type, "file");
-        assert!(std::path::Path::new(&artifacts[0].path).is_file());
+        assert_eq!(artifacts.len(), 2);
+        let results_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "fuzz_results")
+            .expect("fuzz results artifact");
+        assert_eq!(results_artifact.artifact_type, "file");
+        assert!(std::path::Path::new(&results_artifact.path).is_file());
+        let dir_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "fuzz_artifacts")
+            .expect("fuzz artifacts directory");
+        assert_eq!(dir_artifact.artifact_type, "directory");
+        assert_eq!(
+            dir_artifact.metadata_json["source"],
+            "HOMEBOY_FUZZ_ARTIFACTS_DIR"
+        );
     });
 }
 
@@ -76,7 +92,9 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
         let mut args = fuzz_run_args_with_run_id("ignored");
         args.run_id = None;
         let results_path = home.path().join("fuzz-results.json");
+        let artifacts_dir = home.path().join("fuzz-artifacts");
         std::fs::write(&results_path, "{}").expect("results file");
+        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
 
         let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
             run_id: args.run_id.as_deref(),
@@ -89,8 +107,10 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             success: true,
             args: &args,
             results_path: &results_path,
+            artifacts_dir: &artifacts_dir,
             results: None,
             results_error: None,
+            missing_artifact_refs: &[],
         })
         .expect("persist fuzz run")
         .expect("run record");
@@ -103,7 +123,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
                 .list_artifacts(&persisted.id)
                 .expect("artifacts")
                 .len(),
-            1
+            2
         );
     });
 }
@@ -141,6 +161,7 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
         seed_id: None,
         fingerprint: None,
         artifact_ids: Vec::new(),
+        source_refs: Vec::new(),
         metadata: serde_json::Value::Null,
         extra: std::collections::BTreeMap::new(),
     }];
@@ -281,11 +302,13 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");
+        let artifacts_dir = home.path().join("fuzz-artifacts");
         std::fs::write(
             &results_path,
             r#"{"schema":"unsupported/fuzz-result/v1","id":"raw-output"}"#,
         )
         .expect("results file");
+        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
 
         let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
             run_id: args.run_id.as_deref(),
@@ -298,10 +321,12 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             success: false,
             args: &args,
             results_path: &results_path,
+            artifacts_dir: &artifacts_dir,
             results: None,
             results_error: Some(
                 "fuzz results schema must be homeboy/fuzz-campaign/v1, got unsupported/fuzz-result/v1",
             ),
+            missing_artifact_refs: &[],
         })
         .expect("persist fuzz run")
         .expect("run record");
@@ -321,12 +346,61 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
         let artifacts = store
             .list_artifacts("proof-bad-results")
             .expect("artifacts");
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].kind, "fuzz_results");
-        assert_eq!(artifacts[0].mime.as_deref(), Some("application/json"));
-        assert!(std::path::Path::new(&artifacts[0].path).is_file());
-        let raw = std::fs::read_to_string(&artifacts[0].path).expect("raw artifact");
+        let results_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "fuzz_results")
+            .expect("fuzz results artifact");
+        assert_eq!(results_artifact.mime.as_deref(), Some("application/json"));
+        assert!(std::path::Path::new(&results_artifact.path).is_file());
+        let raw = std::fs::read_to_string(&results_artifact.path).expect("raw artifact");
         assert!(raw.contains("unsupported/fuzz-result/v1"));
+    });
+}
+
+#[test]
+fn fuzz_artifact_ref_validation_reports_missing_local_refs() {
+    with_isolated_home(|home| {
+        let artifacts_dir = home.path().join("fuzz-artifacts");
+        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
+        std::fs::write(artifacts_dir.join("present.json"), "{}").expect("present artifact");
+        let mut campaign = empty_fuzz_campaign();
+        campaign.artifacts.push(homeboy::core::fuzz::FuzzArtifact {
+            schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+            id: "case-log".to_string(),
+            kind: "case_log".to_string(),
+            artifact: Some(homeboy::core::artifact_contract::ArtifactContract {
+                schema: homeboy::core::artifact_contract::ARTIFACT_CONTRACT_SCHEMA.to_string(),
+                kind: "case_log".to_string(),
+                artifact_type: "file".to_string(),
+                path: Some("missing.json".to_string()),
+                url: None,
+                public_url: None,
+                role: None,
+                label: None,
+                semantic_key: None,
+                size_bytes: None,
+                sha256: None,
+                metadata: serde_json::Value::Null,
+                extra: std::collections::BTreeMap::new(),
+            }),
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        });
+        campaign.metadata = serde_json::json!({
+            "artifact_refs": ["present.json", "also-missing.json", "https://example.test/remote.json"]
+        });
+
+        let validation = fuzz_artifact_ref_validation(Some(&campaign), &artifacts_dir);
+
+        assert_eq!(
+            validation.missing_refs,
+            vec!["also-missing.json".to_string(), "missing.json".to_string()]
+        );
+        assert!(validation
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("HOMEBOY_FUZZ_ARTIFACTS_DIR"));
     });
 }
 
