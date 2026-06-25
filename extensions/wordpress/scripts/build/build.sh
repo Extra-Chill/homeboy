@@ -475,13 +475,28 @@ build_nested_packages() {
 
     local nested_packages=()
 
-    # Find directories with package.json (excluding node_modules)
+    # Find source-owned package.json files. Composer/vendor trees can contain
+    # dependency fixtures with package.json files; those are not component
+    # frontend packages and must not be built as part of the plugin artifact.
     while IFS= read -r -d '' pkg_dir; do
-        # Skip root package.json and node_modules
-        if [ "$pkg_dir" != "." ] && [[ ! "$pkg_dir" =~ node_modules ]]; then
+        # Skip root package.json and dependency/vendor trees.
+        if [ "$pkg_dir" != "." ] \
+            && [[ ! "$pkg_dir" =~ (^|/)node_modules($|/) ]] \
+            && [[ ! "$pkg_dir" =~ (^|/)vendor($|/) ]] \
+            && [[ ! "$pkg_dir" =~ (^|/)vendor_prefixed($|/) ]] \
+            && [[ ! "$pkg_dir" =~ (^|/)vendor-prefixed($|/) ]] \
+            && [[ ! "$pkg_dir" =~ (^|/)vendor_scoped($|/) ]] \
+            && [[ ! "$pkg_dir" =~ (^|/)vendor-scoped($|/) ]]; then
             nested_packages+=("$pkg_dir")
         fi
-    done < <(find . -name "package.json" -not -path "*/node_modules/*" -exec dirname {} \; | sed 's|^\./||' | sort -u | while read -r dir; do
+    done < <(find . -name "package.json" \
+        -not -path "*/node_modules/*" \
+        -not -path "*/vendor/*" \
+        -not -path "*/vendor_prefixed/*" \
+        -not -path "*/vendor-prefixed/*" \
+        -not -path "*/vendor_scoped/*" \
+        -not -path "*/vendor-scoped/*" \
+        -exec dirname {} \; | sed 's|^\./||' | sort -u | while read -r dir; do
         if [ -n "$dir" ]; then
             printf '%s\0' "$dir"
         fi

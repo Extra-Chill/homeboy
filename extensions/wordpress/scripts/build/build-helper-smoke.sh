@@ -169,4 +169,19 @@ run_build "$ignored_dir" "$ignored_log"
 assert_contains "$ignored_log" "install --no-audit --no-fund"
 assert_not_contains "$ignored_log" "ci --no-audit --no-fund"
 
+# Case 3: vendored dependency fixtures are ignored by nested frontend builds.
+vendor_fixture_dir="${TMP_DIR}/vendor-fixture"
+vendor_fixture_log="${TMP_DIR}/vendor-fixture-npm.log"
+make_lockfile_component "$vendor_fixture_dir"
+mkdir -p "${vendor_fixture_dir}/vendor/example/fixture"
+cat > "${vendor_fixture_dir}/vendor/example/fixture/package.json" <<'JSON'
+{
+  "scripts": {
+    "build": "node should-not-run.js"
+  }
+}
+JSON
+run_build "$vendor_fixture_dir" "$vendor_fixture_log"
+assert_not_contains "$vendor_fixture_log" "should-not-run.js"
+
 echo "WordPress build helper smoke passed."
