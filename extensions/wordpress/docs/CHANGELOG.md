@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.32] - 2026-06-25
+
+### Changed
+- Read nested workload execution metrics
+
 ## [3.13.31] - 2026-06-25
 
 ### Changed
