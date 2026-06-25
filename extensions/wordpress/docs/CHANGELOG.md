@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.35] - 2026-06-25
+
+### Changed
+- Normalize bench scenario profiler metrics
+
 ## [3.13.34] - 2026-06-25
 
 ### Changed
