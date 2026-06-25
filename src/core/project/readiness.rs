@@ -113,7 +113,7 @@ pub fn validate_component_local_path(project: &Project, component_id: &str) -> R
     Err(err)
 }
 
-fn component_local_path_blockers(project: &Project) -> Vec<String> {
+pub(crate) fn component_local_path_blockers(project: &Project) -> Vec<String> {
     project
         .components
         .iter()
