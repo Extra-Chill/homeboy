@@ -271,8 +271,8 @@ function homeboyFuzzWorkloadPlanCases(manifest = {}) {
 function homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry = {}, manifest = {}, index = 0) {
 	const caseId = entry.case_id || entry.caseId || entry.id || `${manifest.id || 'fuzz-workload'}:${index}`;
 	const artifacts = normalizeHomeboyFuzzCaseArtifacts(entry, manifest);
-	const command = entry.command || entry.target?.entrypoint || entry.target?.id;
-	const input = homeboyFuzzRuntimeCommandInput(entry.input);
+	const command = homeboyFuzzPlanCaseRuntimeCommand(entry);
+	const input = homeboyFuzzPlanCaseRuntimeInput(entry, manifest, caseId);
 	return stripUndefined({
 		id: caseId,
 		case_id: caseId,
@@ -302,15 +302,46 @@ function homeboyFuzzWorkloadPlanCasePhases(entry = {}, manifest = {}, artifacts 
 	const setup = typeof activation === 'string' && activation.trim() !== ''
 		? [wpCodeboxPluginActivationStep(activation)]
 		: undefined;
-	const command = entry.command || entry.target?.entrypoint || entry.target?.id;
+	const command = homeboyFuzzPlanCaseRuntimeCommand(entry);
+	const runtimeInput = homeboyFuzzPlanCaseRuntimeInput(entry, manifest, entry.case_id || entry.caseId || entry.id);
 	const action = typeof command === 'string' && command.trim() !== ''
-		? [{ command, args: homeboyFuzzCommandArgs(entry.input) }]
+		? [{ command, args: homeboyFuzzRuntimeCommandArgs(runtimeInput) }]
 		: [];
 	const assert = artifacts
 		.map((artifact) => artifact.name)
 		.filter(Boolean)
 		.map((artifact) => ({ command: 'wordpress.collect-workload-result', args: [`artifact=${artifact}`] }));
 	return stripUndefined({ setup, action, assert: assert.length > 0 ? assert : undefined });
+}
+
+function homeboyFuzzRuntimeCommandArgs(input) {
+	return Array.isArray(input?.args) ? input.args : homeboyFuzzCommandArgs(input);
+}
+
+function homeboyFuzzPlanCaseRuntimeCommand(entry = {}) {
+	return entry.command || entry.target?.entrypoint || entry.target?.id || 'wordpress.run-fuzz-case';
+}
+
+function homeboyFuzzPlanCaseRuntimeInput(entry = {}, manifest = {}, caseId) {
+	if (objectOrUndefined(entry.input)) {
+		return homeboyFuzzRuntimeCommandInput(entry.input);
+	}
+	return stripUndefined({
+		case_id: caseId,
+		target_id: entry.target_id,
+		surface_id: entry.surface_id,
+		intent: entry.intent,
+		operation_id: entry.operation_id || entry.operationId,
+		operation: objectOrUndefined(entry.operation),
+		seed: entry.seed || manifest.seed,
+		skip_reasons: nonEmptyArray(entry.skip_reasons || entry.skipReasons),
+		destructive_reasons: nonEmptyArray(entry.destructive_reasons || entry.destructiveReasons),
+	});
+}
+
+function nonEmptyArray(value) {
+	const normalized = normalizeArray(value);
+	return normalized.length > 0 ? normalized : undefined;
 }
 
 function homeboyFuzzCommandArgs(input) {
@@ -798,13 +829,32 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 
 function requiredPublicCommandsForRequest(request = {}, requiredPlanContracts = {}) {
 	const ability = request.executor?.config?.runtime_task?.ability || request.ability;
+	const input = request.executor?.config?.runtime_task?.input || request.input || {};
 	if (ability === DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY) {
 		return ['run-wordpress-workload'];
 	}
 	if (ability === DEFAULT_FUZZ_SUITE_ABILITY) {
-		return ['run-fuzz-suite'];
+		return unique([
+			'run-fuzz-suite',
+			...normalizeArray(requiredPlanContracts.commands),
+			...(suiteInputRequiresWorkloadCommand(input) ? ['run-wordpress-workload'] : []),
+		]);
 	}
-	return requiredPlanContracts.commands?.length > 0 ? requiredPlanContracts.commands : [...WP_CODEBOX_PUBLIC_CLI_COMMANDS];
+	return requiredPlanContracts.commands?.length > 0 ? unique(requiredPlanContracts.commands) : [...WP_CODEBOX_PUBLIC_CLI_COMMANDS];
+}
+
+function suiteInputRequiresWorkloadCommand(input = {}) {
+	return normalizeArray(input.cases).some((testCase) => {
+		const commands = normalizeArray(testCase.phases?.action).map((step) => step?.command).filter(Boolean);
+		return testCase.metadata?.source_plan_case === true
+			|| testCase.target?.entrypoint === 'wordpress.run-fuzz-case'
+			|| commands.includes('wordpress.run-fuzz-case')
+			|| commands.includes('wordpress.run-workload');
+	});
+}
+
+function unique(values) {
+	return [...new Set(normalizeArray(values).filter(Boolean))].sort();
 }
 
 function normalizeWpCodeboxPublicFuzzCapabilities(input = {}) {
@@ -1020,11 +1070,33 @@ function normalizeCodeboxFuzzObservationSet(source = {}, context = {}) {
 			...normalizeArray(source?.resources || source?.resource_measurements || source?.resourceMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'resource', ...entry } : entry),
 			...normalizeArray(source?.timings || source?.timing_measurements || source?.timingMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'timing', ...entry } : entry),
 			...normalizeArray(source?.counters || source?.counter_measurements || source?.counterMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'counter', ...entry } : entry),
+			...wordpressFuzzResultCaseObservations(source?.wordpress_fuzz_result || source?.wordpressFuzzResult || source?.normalized_result || source?.normalizedResult),
 		],
 		metadata: stripUndefined({
 			wp_codebox_result_schema: source?.schema,
 		}),
 	}, { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id });
+}
+
+function wordpressFuzzResultCaseObservations(result = {}) {
+	return normalizeArray(result?.cases).flatMap((testCase) => {
+		const common = {
+			case_id: testCase.id || testCase.case_id || testCase.caseId,
+			target_id: testCase.target_id || testCase.targetId || testCase.surface_id || testCase.surfaceId,
+			operation_id: testCase.operation_id || testCase.operationId,
+		};
+		return [
+			...objectMetricObservations(testCase.db_query || testCase.dbQuery, { ...common, family: 'query', subject: 'db_query' }),
+			...objectMetricObservations(testCase.performance_metrics || testCase.performanceMetrics, { ...common, family: 'timing', subject: 'performance' }),
+		];
+	});
+}
+
+function objectMetricObservations(metrics, defaults = {}) {
+	if (!objectOrUndefined(metrics)) {
+		return [];
+	}
+	return Object.entries(metrics).flatMap(([metric, value]) => Number.isFinite(Number(value)) ? [{ ...defaults, metric, value }] : []);
 }
 
 function wpCodeboxFuzzContractFailures({ source = {}, result = {}, context = {}, artifacts = [], coverageSummary, normalizedResult }) {

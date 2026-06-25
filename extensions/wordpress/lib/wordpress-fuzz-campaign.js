@@ -17,6 +17,7 @@ const {
 	buildWordPressPerformanceObservation,
 } = require('./wordpress-performance-observation-aggregate');
 const {
+	DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
@@ -27,6 +28,7 @@ const HOMEBOY_FUZZ_WORKLOAD_SCHEMA = 'homeboy/fuzz-workload/v1';
 const WORDPRESS_FUZZ_PLAN_RESULT_GAP_REPORT_SCHEMA = 'homeboy/wordpress-fuzz-plan-result-gap-report/v1';
 
 function compileWordPressFuzzCampaign(input = {}, options = {}) {
+	const production = Boolean(input.production || options.production || input.production_campaign || options.production_campaign);
 	const discovery = normalizeWordPressRuntimeSurfaceDiscovery(
 		input.discovery || input.surfaceDiscovery || input.surface_discovery || input,
 		{
@@ -54,8 +56,10 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 			...(objectOrUndefined(input.metadata) || {}),
 			...(objectOrUndefined(options.metadata) || {}),
 			campaign_schema: WORDPRESS_FUZZ_CAMPAIGN_SCHEMA,
+			production_campaign: production || undefined,
 		},
 		artifacts: input.artifacts || options.artifacts,
+		production,
 	});
 	const suiteInput = wpCodeboxFuzzSuiteInput({
 		...(objectOrUndefined(options.suiteInput) || objectOrUndefined(options.suite_input) || {}),
@@ -69,6 +73,8 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 			...(objectOrUndefined(input.suite_input?.metadata) || objectOrUndefined(input.suiteInput?.metadata) || {}),
 			coverage_manifest: coverageManifest,
 			aggregation_hooks: campaignAggregationHooks(),
+			production_campaign: production || undefined,
+			output_requirements: production ? productionOutputRequirements() : undefined,
 		},
 	});
 	const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
@@ -76,6 +82,7 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 		...(objectOrUndefined(input.task_request || input.taskRequest) || {}),
 		taskId: input.task_id || input.taskId || options.taskId || options.task_id || `${plan.id}-wp-codebox-fuzz-suite`,
 		input: suiteInput,
+		artifactDeclarations: productionArtifactDeclarations(production),
 	});
 
 	return {
@@ -115,7 +122,7 @@ function buildWordPressFuzzCampaignWorkload(input = {}) {
 				cases: arrayOf(target.cases).map((testCase) => wordpressFuzzPlanCaseToRuntimeCase(testCase, target)),
 			})),
 		},
-		artifacts: input.artifacts || defaultCampaignArtifacts(),
+		artifacts: input.artifacts || defaultCampaignArtifacts({ production: input.production }),
 		metadata: {
 			...(objectOrUndefined(input.metadata) || {}),
 			coverage_manifest: input.coverageManifest || input.coverage_manifest,
@@ -171,14 +178,35 @@ function campaignAggregationHooks() {
 	};
 }
 
-function defaultCampaignArtifacts() {
+function defaultCampaignArtifacts(options = {}) {
+	return defaultCampaignArtifactsWithOptions(options);
+}
+
+function defaultCampaignArtifactsWithOptions(options = {}) {
+	const hotspotRequired = Boolean(options.production);
 	return {
 		expected: [
 			{ name: 'wordpress_fuzz_result', role: 'normalized_fuzz_result', semantic_key: 'fuzz.result.normalized', required: true },
 			{ name: 'wordpress_fuzz_coverage', role: 'coverage', semantic_key: 'fuzz.coverage', required: true },
+			{ name: 'wordpress_fuzz_hotspots', role: 'hotspot_summary', semantic_key: 'fuzz.hotspot.summary', required: hotspotRequired },
 			{ name: 'wordpress_performance_observation', role: 'fuzz_report', semantic_key: 'fuzz.performance', required: false },
 		],
 	};
+}
+
+function productionOutputRequirements() {
+	return {
+		required_artifact_keys: ['fuzz.coverage', 'fuzz.hotspot.summary'],
+	};
+}
+
+function productionArtifactDeclarations(production = false) {
+	if (!production) {
+		return undefined;
+	}
+	return DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS.map((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary'
+		? { ...artifact, required: true }
+		: artifact);
 }
 
 function aggregateWordPressFuzzCampaignResult(input = {}) {

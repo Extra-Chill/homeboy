@@ -119,15 +119,20 @@ const runtimeDiscovery = normalizeWordPressRuntimeSurfaceDiscovery({
 		{ type: 'role', role: 'editor' },
 		{ type: 'media', name: 'attachment' },
 		{ type: 'db_query', query: 'SELECT ID FROM wp_posts' },
+		{ type: 'wp_cli_command', command: 'wp option list' },
 	],
 });
 assert.deepEqual(runtimeDiscovery.surfaces.map((surface) => surface.type), ['admin_page', 'ajax_action', 'db_table', 'rest_route']);
-assert.deepEqual(runtimeDiscovery.unsupported_surfaces.map((surface) => surface.type), ['cron_event', 'db_query', 'hook', 'media', 'option', 'role']);
+assert.deepEqual(runtimeDiscovery.unsupported_surfaces.map((surface) => surface.type), ['cron_event', 'db_query', 'hook', 'media', 'option', 'role', 'wp_cli_command']);
 assert.equal(runtimeDiscovery.unsupported_surfaces.every((surface) => surface.executable === false && surface.coverage_counted === false), true);
 assert.equal(runtimeDiscovery.diagnostics.every((diagnostic) => diagnostic.code === 'wordpress_surface_discovered_without_executable_runtime_collector'), true);
 const runtimePlan = buildWordPressFuzzPlanFromSurfaces(runtimeDiscovery);
 assert.deepEqual(runtimePlan.targets.map((target) => target.type), ['admin-page', 'ajax-action', 'database-table', 'rest-route']);
 assert.equal(runtimePlan.targets.find((target) => target.type === 'ajax-action').cases[0].intent, 'exercise-ajax-action');
+
+const wpCliRuntimeDiscovery = normalizeWordPressRuntimeSurfaceDiscovery({ wp_cli_commands: [{ command: 'wp cron event list' }] });
+assert.equal(wpCliRuntimeDiscovery.unsupported_surfaces[0].id, 'wp-cli:wp cron event list');
+assert.equal(wpCliRuntimeDiscovery.diagnostics[0].surface.type, 'wp_cli_command');
 
 const nestedPlan = buildWordPressFuzzPlanFromSurfaces({
 	hooks: {

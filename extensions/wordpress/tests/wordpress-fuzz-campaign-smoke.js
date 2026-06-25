@@ -88,4 +88,17 @@ const readOnlyCampaign = compileWordPressFuzzCampaign({
 });
 assert.equal(readOnlyCampaign.plan.metadata.mutation_mode, 'read_only');
 
+const productionCampaign = compileWordPressFuzzCampaign({
+	id: 'production-campaign',
+	production: true,
+	surfaces: [
+		{ id: 'rest:production', type: 'rest_route', route: '/wp/v2/posts', method: 'GET' },
+	],
+});
+assert.equal(productionCampaign.workload.metadata.production_campaign, true);
+assert.equal(productionCampaign.wp_codebox.input.metadata.production_campaign, true);
+assert.deepEqual(productionCampaign.wp_codebox.input.metadata.output_requirements.required_artifact_keys, ['fuzz.coverage', 'fuzz.hotspot.summary']);
+assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').required, true);
+assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').required, true);
+
 console.log('wordpress fuzz campaign smoke passed');
