@@ -29,6 +29,7 @@ const {
 	preflightWpCodeboxFuzzCapabilityContract,
 	runWpCodeboxPublicFuzzOperation,
 	runWpCodeboxFuzzSuite,
+	wordpressFuzzPostprocessBinding,
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
 } = require('../lib/wp-codebox-fuzz-run');
@@ -798,6 +799,58 @@ runWpCodeboxFuzzSuite({
 	assert(hotspotArtifactMissing.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_output_artifacts_missing'));
 	assert(hotspotArtifactMissing.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_output_artifact_schemas_missing'));
 	assert(hotspotArtifactMissing.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_hotspot_artifact_missing'));
+	const productionPostprocessRequest = wpCodeboxFuzzSuiteTaskRequest({
+		taskId: 'production-postprocess-suite-task',
+		artifactDeclarations: [],
+		input: wpCodeboxFuzzSuiteInput({
+			id: 'production-postprocess-suite',
+			metadata: {
+				production_campaign: true,
+				postprocess_binding: wordpressFuzzPostprocessBinding(),
+			},
+		}),
+	});
+	const productionPostprocessObserved = normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			wordpress_fuzz_result: {
+				schema: 'wordpress-fuzz-result/v1',
+				status: 'passed',
+				cases: [{ id: 'production-postprocess-case', status: 'passed' }],
+			},
+			artifacts: {
+				coverage: { path: 'coverage.json', semantic_key: 'fuzz.coverage' },
+				gap_report: {
+					path: 'gap-report.json',
+					semantic_key: 'fuzz.coverage.gap_report',
+					payload: { schema: 'homeboy/wordpress-fuzz-coverage-gap-report/v1', gaps: [] },
+				},
+				hotspot_summary: {
+					path: 'wordpress-hotspots.json',
+					schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+					payload: { schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA, db: [{ table: 'wp_posts', operation: 'SELECT', metric: 'query_count', count: 1 }] },
+				},
+			},
+		},
+	}, { request: productionPostprocessRequest });
+	assert.equal(productionPostprocessObserved.succeeded, true);
+	assert.equal(productionPostprocessObserved.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_postprocess_outputs_missing'), false);
+	const productionPostprocessMissing = normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			cases: [{ id: 'production-postprocess-case', status: 'passed' }],
+			artifacts: { coverage: { path: 'coverage.json', semantic_key: 'fuzz.coverage' } },
+		},
+	}, { request: productionPostprocessRequest });
+	assert.equal(productionPostprocessMissing.succeeded, false);
+	assert.deepEqual(
+		productionPostprocessMissing.failures.find((failure) => failure.code === 'wp_codebox_fuzz_required_postprocess_outputs_missing').missing_outputs,
+		['fuzz.hotspot.summary', 'fuzz.coverage.gap_report', 'fuzz.hotspot.codebox']
+	);
 	const requiredOutputMissing = normalizeWpCodeboxFuzzSuiteResult({
 		json: {
 			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,

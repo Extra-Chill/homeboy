@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 
 const {
+	WORDPRESS_FUZZ_POSTPROCESS_BINDING_SCHEMA,
 	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
 } = require('../lib/wp-codebox-fuzz-run');
 
@@ -102,11 +103,25 @@ const productionCampaign = compileWordPressFuzzCampaign({
 assert.equal(productionCampaign.workload.metadata.production_campaign, true);
 assert.equal(productionCampaign.wp_codebox.input.metadata.production_campaign, true);
 assert.deepEqual(productionCampaign.wp_codebox.input.metadata.output_requirements.required_artifact_keys, ['fuzz.coverage', 'fuzz.hotspot.summary']);
+assert.deepEqual(productionCampaign.wp_codebox.input.metadata.output_requirements.required_postprocess_outputs, ['fuzz.coverage', 'fuzz.hotspot.summary', 'fuzz.coverage.gap_report', 'fuzz.hotspot.codebox']);
 assert.deepEqual(productionCampaign.wp_codebox.input.metadata.output_requirements.required_artifact_schemas, [WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA]);
-assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').name, 'wordpress-hotspots');
+assert.equal(productionCampaign.wp_codebox.input.metadata.output_requirements.production_campaign, true);
+assert.equal(productionCampaign.wp_codebox.input.metadata.postprocess_binding.schema, WORDPRESS_FUZZ_POSTPROCESS_BINDING_SCHEMA);
+assert.equal(productionCampaign.workload.postprocess_binding.schema, WORDPRESS_FUZZ_POSTPROCESS_BINDING_SCHEMA);
+assert.equal(productionCampaign.workload.metadata.postprocess_binding.schema, WORDPRESS_FUZZ_POSTPROCESS_BINDING_SCHEMA);
+assert.deepEqual(
+	productionCampaign.wp_codebox.input.metadata.postprocess_binding.outputs.map((artifact) => artifact.semantic_key).sort(),
+	['fuzz.coverage', 'fuzz.coverage.gap_report', 'fuzz.hotspot.codebox', 'fuzz.hotspot.summary'].sort()
+);
+assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').name, 'homeboy-hotspot-summary');
 assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').required, true);
+assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.codebox').name, 'wordpress-hotspots');
+assert.equal(productionCampaign.workload.artifacts.expected.find((artifact) => artifact.semantic_key === 'fuzz.coverage.gap_report').name, 'wordpress-fuzz-gap-report');
 assert.equal(productionCampaign.wp_codebox.task_request.expected_artifacts.includes('wordpress-hotspots'), true);
+assert.equal(productionCampaign.wp_codebox.task_request.expected_artifacts.includes('homeboy-hotspot-summary'), true);
+assert.equal(productionCampaign.wp_codebox.task_request.expected_artifacts.includes('wordpress-fuzz-gap-report'), true);
 assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').required, true);
-assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary').schema, WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA);
+assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.hotspot.codebox').schema, WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA);
+assert.equal(productionCampaign.wp_codebox.task_request.artifact_declarations.find((artifact) => artifact.semantic_key === 'fuzz.coverage.gap_report').required, true);
 
 console.log('wordpress fuzz campaign smoke passed');
