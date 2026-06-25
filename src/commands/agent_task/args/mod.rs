@@ -578,8 +578,16 @@ pub struct StatusArgs {
 
     /// Emit the full verbose payload (all artifact/evidence refs) instead of the
     /// default compact, recovery-first summary.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
+
+    /// Emit the durable pollable run-status bridge DTO.
+    #[arg(long)]
+    pub bridge: bool,
+
+    /// With --bridge, include only normalized events after this cursor.
+    #[arg(long = "since-cursor", value_name = "CURSOR", requires = "bridge")]
+    pub since_cursor: Option<u64>,
 }
 
 #[derive(Args, Debug)]

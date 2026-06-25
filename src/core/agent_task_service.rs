@@ -961,6 +961,13 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     agent_task_lifecycle::status(run_id)
 }
 
+pub fn run_status(
+    run_id: &str,
+    since_cursor: Option<u64>,
+) -> Result<agent_task_lifecycle::AgentTaskRunStatus> {
+    agent_task_lifecycle::run_status(run_id, since_cursor)
+}
+
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
     agent_task_lifecycle::logs(run_id)
 }

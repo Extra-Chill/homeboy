@@ -49,11 +49,15 @@ fn submit_run_status_reports_terminal_state() {
         let (_, run_exit_code) = run_submitted(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
             full: false,
+            bridge: false,
+            since_cursor: None,
         })
         .expect("run completed");
         let (status_json, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
             full: true,
+            bridge: false,
+            since_cursor: None,
         })
         .expect("status loaded");
         let record: AgentTaskRunRecord = serde_json::from_value(status_json).expect("record");
@@ -76,11 +80,15 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         let (status_value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
             full: false,
+            bridge: false,
+            since_cursor: None,
         })
         .expect("status loaded");
         let (logs_value, _) = logs(StatusArgs {
             run_id: run_id.to_string(),
             full: false,
+            bridge: false,
+            since_cursor: None,
         })
         .expect("logs loaded");
         let (review_value, _) = review::review(ReviewArgs {

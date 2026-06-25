@@ -334,6 +334,8 @@ mod tests {
             command: AgentTaskCommand::Status(StatusArgs {
                 run_id: "run-1".to_string(),
                 full: false,
+                bridge: false,
+                since_cursor: None,
             }),
         };
 

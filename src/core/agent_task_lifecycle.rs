@@ -32,6 +32,8 @@ use lifecycle_store as store;
 mod schemas {
     pub(super) const RUN: &str = "homeboy/agent-task-run/v1";
     pub(super) const RUN_LOG: &str = "homeboy/agent-task-run-log/v1";
+    pub(super) const EVENT: &str = "homeboy/agent-task-event/v1";
+    pub(super) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v1";
     pub(super) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
 }
 
@@ -233,6 +235,44 @@ pub struct AgentTaskRunLog {
     pub schema: String,
     pub run_id: String,
     pub events: Vec<AgentTaskProgressEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub normalized_events: Vec<AgentTaskEventEnvelope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskEventEnvelope {
+    pub schema: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub sequence: u64,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub status: AgentTaskState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub progress: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<AgentTaskArtifactRef>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRunStatus {
+    pub schema: String,
+    pub run_id: String,
+    pub plan_id: String,
+    pub state: AgentTaskRunState,
+    pub submitted_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    pub totals: AgentTaskAggregateTotals,
+    pub latest_event_cursor: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<AgentTaskArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub normalized_events: Vec<AgentTaskEventEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1155,6 +1195,42 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
+pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
+    let record = status(run_id)?;
+    let (events, artifact_refs) = match store::read_aggregate(&record.run_id) {
+        Ok(aggregate) => {
+            let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
+            (aggregate.events, refs)
+        }
+        Err(_) => (queued_events(&record.tasks), record.artifact_refs.clone()),
+    };
+    let normalized_events = normalize_progress_events(&record.run_id, &events, &artifact_refs);
+    let latest_event_cursor = normalized_events
+        .last()
+        .map(|event| event.sequence)
+        .unwrap_or(0);
+    let cursor = since_cursor.unwrap_or(0);
+    let normalized_events = normalized_events
+        .into_iter()
+        .filter(|event| event.sequence > cursor)
+        .collect();
+
+    Ok(AgentTaskRunStatus {
+        schema: schemas::RUN_STATUS.to_string(),
+        run_id: record.run_id,
+        plan_id: record.plan_id,
+        state: record.state,
+        submitted_at: record.submitted_at,
+        updated_at: record.updated_at,
+        totals: record
+            .totals
+            .unwrap_or_else(|| totals_for_tasks(&record.tasks)),
+        latest_event_cursor,
+        artifact_refs: record.artifact_refs,
+        normalized_events,
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn write_run_record_for_test(record: &AgentTaskRunRecord) -> Result<()> {
     store::write_record(record)
@@ -1273,13 +1349,19 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
     let run_id = sanitize_run_id(run_id);
     let record = store::read_record(&run_id)?;
-    let events = store::read_aggregate(&run_id)
-        .map(|aggregate| aggregate.events)
-        .unwrap_or_else(|_| queued_events(&record.tasks));
+    let (events, artifact_refs) = match store::read_aggregate(&run_id) {
+        Ok(aggregate) => {
+            let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
+            (aggregate.events, refs)
+        }
+        Err(_) => (queued_events(&record.tasks), record.artifact_refs.clone()),
+    };
+    let normalized_events = normalize_progress_events(&run_id, &events, &artifact_refs);
     Ok(AgentTaskRunLog {
         schema: schemas::RUN_LOG.to_string(),
         run_id,
         events,
+        normalized_events,
     })
 }
 
@@ -1547,6 +1629,54 @@ fn queued_events(tasks: &[AgentTaskRunTask]) -> Vec<AgentTaskProgressEvent> {
             state: task.state,
             attempt: 1,
             message: Some("task submitted".to_string()),
+        })
+        .collect()
+}
+
+fn totals_for_tasks(tasks: &[AgentTaskRunTask]) -> AgentTaskAggregateTotals {
+    let mut totals = AgentTaskAggregateTotals::default();
+    for task in tasks {
+        match task.state {
+            AgentTaskState::Queued => totals.queued += 1,
+            AgentTaskState::Running => totals.running += 1,
+            AgentTaskState::Blocked => totals.blocked += 1,
+            AgentTaskState::Skipped => totals.skipped += 1,
+            AgentTaskState::Succeeded => totals.succeeded += 1,
+            AgentTaskState::Failed => totals.failed += 1,
+            AgentTaskState::Cancelled => totals.cancelled += 1,
+            AgentTaskState::TimedOut => totals.timed_out += 1,
+        }
+    }
+    totals
+}
+
+fn normalize_progress_events(
+    run_id: &str,
+    events: &[AgentTaskProgressEvent],
+    artifact_refs: &[AgentTaskArtifactRef],
+) -> Vec<AgentTaskEventEnvelope> {
+    events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| AgentTaskEventEnvelope {
+            schema: schemas::EVENT.to_string(),
+            run_id: run_id.to_string(),
+            task_id: event.task_id.clone(),
+            sequence: (index + 1) as u64,
+            event_type: "agent_task.state_changed".to_string(),
+            status: event.state,
+            message: event.message.clone(),
+            progress: json!({
+                "attempt": event.attempt,
+            }),
+            artifact_refs: artifact_refs
+                .iter()
+                .filter(|artifact_ref| artifact_ref.task_id == event.task_id)
+                .cloned()
+                .collect(),
+            metadata: json!({
+                "source_schema": AGENT_TASK_AGGREGATE_SCHEMA,
+            }),
         })
         .collect()
 }
@@ -3328,6 +3458,217 @@ mod tests {
                 .map(|r| r.kind.as_str())
                 .collect();
             assert_eq!(kinds, vec!["patch", "transcript"]);
+        });
+    }
+
+    #[test]
+    fn run_status_reports_queued_state_with_derived_totals() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-status-queued")).expect("submitted");
+
+            let status = run_status("run-status-queued", None).expect("run status");
+
+            assert_eq!(status.schema, "homeboy/agent-task-run-status/v1");
+            assert_eq!(status.state, AgentTaskRunState::Queued);
+            assert_eq!(status.totals.queued, 1);
+            assert_eq!(status.latest_event_cursor, 1);
+            assert_eq!(status.normalized_events.len(), 1);
+            assert_eq!(status.normalized_events[0].status, AgentTaskState::Queued);
+        });
+    }
+
+    #[test]
+    fn run_status_reports_running_state_with_derived_totals() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-status-running")).expect("submitted");
+            mark_running("run-status-running").expect("marked running");
+
+            let status = run_status("run-status-running", None).expect("run status");
+
+            assert_eq!(status.state, AgentTaskRunState::Running);
+            assert_eq!(status.totals.running, 1);
+            assert_eq!(status.latest_event_cursor, 1);
+            assert_eq!(status.normalized_events[0].status, AgentTaskState::Running);
+        });
+    }
+
+    #[test]
+    fn run_status_reports_succeeded_aggregate_and_cursor_filtered_events() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            let aggregate = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::Succeeded,
+                totals: AgentTaskAggregateTotals {
+                    queued: 1,
+                    succeeded: 1,
+                    ..AgentTaskAggregateTotals::default()
+                },
+                outcomes: vec![outcome_with_refs(
+                    "task-a",
+                    vec![artifact_ref_artifact(
+                        "patch",
+                        "patch",
+                        None,
+                        Some("/tmp/patch.diff"),
+                    )],
+                    Vec::new(),
+                )],
+                events: vec![
+                    AgentTaskProgressEvent {
+                        task_id: "task-a".to_string(),
+                        state: AgentTaskState::Running,
+                        attempt: 1,
+                        message: None,
+                    },
+                    AgentTaskProgressEvent {
+                        task_id: "task-a".to_string(),
+                        state: AgentTaskState::Succeeded,
+                        attempt: 1,
+                        message: Some("ok".to_string()),
+                    },
+                ],
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            };
+            record_completed_run(&plan, &aggregate, Some("run-status-succeeded"))
+                .expect("recorded");
+
+            let status = run_status("run-status-succeeded", Some(1)).expect("run status");
+
+            assert_eq!(status.state, AgentTaskRunState::Succeeded);
+            assert_eq!(status.totals.succeeded, 1);
+            assert_eq!(status.latest_event_cursor, 2);
+            assert_eq!(status.normalized_events.len(), 1);
+            assert_eq!(status.normalized_events[0].sequence, 2);
+            assert_eq!(
+                status.normalized_events[0].status,
+                AgentTaskState::Succeeded
+            );
+            assert_eq!(status.artifact_refs.len(), 1);
+        });
+    }
+
+    #[test]
+    fn run_status_reports_failedish_aggregate_states() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            let partial = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::PartialFailure,
+                totals: AgentTaskAggregateTotals {
+                    queued: 1,
+                    succeeded: 1,
+                    failed: 1,
+                    ..AgentTaskAggregateTotals::default()
+                },
+                outcomes: vec![outcome_with_refs("task-a", Vec::new(), Vec::new())],
+                events: vec![AgentTaskProgressEvent {
+                    task_id: "task-a".to_string(),
+                    state: AgentTaskState::Failed,
+                    attempt: 1,
+                    message: Some("failed".to_string()),
+                }],
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            };
+            record_completed_run(&plan, &partial, Some("run-status-partial"))
+                .expect("partial recorded");
+            let partial_status = run_status("run-status-partial", None).expect("partial status");
+            assert_eq!(partial_status.state, AgentTaskRunState::PartialFailure);
+            assert_eq!(partial_status.totals.failed, 1);
+
+            let mut failed = partial.clone();
+            failed.status = AgentTaskAggregateStatus::Failed;
+            record_completed_run(&plan, &failed, Some("run-status-failed"))
+                .expect("failed recorded");
+            let failed_status = run_status("run-status-failed", None).expect("failed status");
+            assert_eq!(failed_status.state, AgentTaskRunState::Failed);
+            assert_eq!(
+                failed_status.normalized_events[0].status,
+                AgentTaskState::Failed
+            );
+        });
+    }
+
+    #[test]
+    fn logs_include_normalized_event_envelopes() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            let aggregate = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::Succeeded,
+                totals: AgentTaskAggregateTotals {
+                    queued: 1,
+                    succeeded: 1,
+                    ..AgentTaskAggregateTotals::default()
+                },
+                outcomes: vec![outcome_with_refs(
+                    "task-a",
+                    vec![artifact_ref_artifact(
+                        "patch",
+                        "patch",
+                        None,
+                        Some("/tmp/patch.diff"),
+                    )],
+                    Vec::new(),
+                )],
+                events: vec![
+                    AgentTaskProgressEvent {
+                        task_id: "task-a".to_string(),
+                        state: AgentTaskState::Running,
+                        attempt: 1,
+                        message: None,
+                    },
+                    AgentTaskProgressEvent {
+                        task_id: "task-a".to_string(),
+                        state: AgentTaskState::Succeeded,
+                        attempt: 1,
+                        message: Some("ok".to_string()),
+                    },
+                ],
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            };
+            record_completed_run(&plan, &aggregate, Some("run-event-envelope")).expect("recorded");
+
+            let log = logs("run-event-envelope").expect("logs");
+
+            assert_eq!(log.normalized_events.len(), 2);
+            assert_eq!(
+                log.normalized_events[0].schema,
+                "homeboy/agent-task-event/v1"
+            );
+            assert_eq!(log.normalized_events[0].run_id, "run-event-envelope");
+            assert_eq!(log.normalized_events[0].task_id, "task-a");
+            assert_eq!(log.normalized_events[0].sequence, 1);
+            assert_eq!(
+                log.normalized_events[0].event_type,
+                "agent_task.state_changed"
+            );
+            assert_eq!(log.normalized_events[0].status, AgentTaskState::Running);
+            assert_eq!(log.normalized_events[0].progress["attempt"], json!(1));
+            assert_eq!(log.normalized_events[1].message.as_deref(), Some("ok"));
+            assert_eq!(log.normalized_events[1].artifact_refs.len(), 1);
+            assert_eq!(
+                log.normalized_events[1].artifact_refs[0].uri,
+                "/tmp/patch.diff"
+            );
+
+            let serialized = serde_json::to_value(&log.normalized_events[1]).expect("event json");
+            assert_eq!(serialized["type"], "agent_task.state_changed");
+            assert_eq!(serialized["status"], "succeeded");
         });
     }
 
