@@ -752,7 +752,6 @@
         "structural::src/core/code_audit/mod.rs::GodFile",
         "structural::src/core/component/inventory.rs::GodFile",
         "structural::src/core/component/inventory.rs::HighItemCount",
-        "structural::src/core/component/mod.rs::GodFile",
         "structural::src/core/deterministic_loop.rs::HighItemCount",
         "structural::src/core/extension/trace/report.rs::HighItemCount",
         "structural::src/core/git/github_types.rs::HighItemCount",
