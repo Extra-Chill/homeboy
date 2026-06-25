@@ -87,6 +87,46 @@ async function main() {
 		assert.equal(result.summary.groups.opaque_problem, 1);
 		assert.equal(result.fixtures[1].comparison.comparable, 'beta-case');
 
+		const deduped = normalizeFixtureWorkloadMatrixResult({
+			matrix,
+			results: [
+				{
+					fixture_id: 'alpha-case',
+					status: 'failed',
+					diagnostics: [
+						{
+							id: 'specific-packet',
+							kind: 'specific_rule',
+							category: 'specific_owner',
+							group_key: 'specific_owner',
+							severity: 'warning',
+							path: 'fixture/index.html',
+							source_path: 'fixture/index.html',
+							selector: '.target',
+							reason: 'same underlying source issue',
+							repair_mode: 'source-repair',
+						},
+						{
+							id: 'wrapper-packet',
+							kind: 'same-underlying-source-issue',
+							category: 'wrapper_owner',
+							group_key: 'wrapper_owner',
+							severity: 'warning',
+							path: 'fixture/index.html',
+							source_path: 'fixture/index.html',
+							selector: '.target',
+							reason: 'same underlying source issue',
+						},
+					],
+				},
+				{ fixture_id: 'beta-case', status: 'passed', diagnostics: [] },
+			],
+		});
+		assert.equal(deduped.summary.diagnostic_count, 1);
+		assert.equal(deduped.summary.groups.specific_owner, 1);
+		assert.equal(deduped.diagnostics[0].id, 'specific-packet');
+		assert.deepEqual(deduped.diagnostics[0].duplicate_diagnostic_ids, ['wrapper-packet']);
+
 		const outputDirectory = path.join(root, 'artifacts');
 		const written = writeFixtureWorkloadMatrixArtifacts({ outputDirectory, matrix, result });
 		assert.equal(written.artifact_refs.length, 4);
