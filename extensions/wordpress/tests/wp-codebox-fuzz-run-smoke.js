@@ -230,10 +230,17 @@ assert.equal(jsonWorkloadInput.cases[0].artifacts[0].metadata.semantic_key, 'fuz
 assert.equal(jsonWorkloadInput.metadata.artifacts.expected[0].required, true);
 
 const wooDbApiWorkloadPath = path.join(tempWorkloadDir, 'rest-db-query-profile.workload.json');
+fs.mkdirSync(path.join(tempWorkloadDir, 'bench'), { recursive: true });
+fs.writeFileSync(path.join(tempWorkloadDir, 'bench', 'generated-rest-request-cases.php'), `<?php
+return function (): array {
+	return array('metadata' => array('generated_rest_request_cases_loaded' => true));
+};
+`, 'utf8');
 fs.writeFileSync(wooDbApiWorkloadPath, `${JSON.stringify({
 	id: 'rest-db-query-profile',
 	run: [
 		{ type: 'php', code: 'return array("loaded" => true);' },
+		{ type: 'php', file: 'bench/generated-rest-request-cases.php' },
 		{ type: 'rest-db-query-profiler', 'metric-prefix': 'rest_db_query_profile', sampleLimit: 50 },
 	],
 	metadata: { runner: 'wp-codebox', workload: 'rest-db-query-profile' },
@@ -247,6 +254,14 @@ assert.deepEqual(wooDbApiInput.cases[0].target, { kind: 'runtime', id: 'wordpres
 assert.equal(wooDbApiInput.cases[0].input.schema, DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA);
 assert.deepEqual(wooDbApiInput.cases[0].input.steps, [
 	{ type: 'php', code: 'return array("loaded" => true);' },
+	{
+		type: 'php',
+		code: `$wp_codebox_embedded_callable = (function () {\nreturn function (): array {\n\treturn array('metadata' => array('generated_rest_request_cases_loaded' => true));\n};\n})(); return is_callable($wp_codebox_embedded_callable) ? $wp_codebox_embedded_callable() : $wp_codebox_embedded_callable;`,
+		metadata: {
+			source_file: path.join(tempWorkloadDir, 'bench', 'generated-rest-request-cases.php'),
+			embedded_source_file: true,
+		},
+	},
 	{ type: 'rest-db-query-profiler', 'metric-prefix': 'rest_db_query_profile', sampleLimit: 50 },
 ]);
 assert.deepEqual(wooDbApiInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: [`path=${wooDbApiWorkloadPath}`] }]);

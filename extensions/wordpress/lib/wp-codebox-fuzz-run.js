@@ -408,7 +408,7 @@ function homeboyFuzzWorkloadRunInputFromFile(workloadPath, options = {}) {
 	} catch (_error) {
 		return undefined;
 	}
-	const steps = normalizeWordPressWorkloadSteps(source.run || source.steps);
+	const steps = normalizeWordPressWorkloadSteps(source.run || source.steps, { sourceFilePath: filePath });
 	if (steps.length === 0) {
 		return undefined;
 	}
@@ -547,13 +547,17 @@ function wpCodeboxWordPressWorkloadRunInput(options = {}) {
 	});
 }
 
-function normalizeWordPressWorkloadSteps(steps) {
-	return normalizeArray(steps).map(normalizeWordPressWorkloadStep).filter(Boolean);
+function normalizeWordPressWorkloadSteps(steps, options = {}) {
+	return normalizeArray(steps).map((step) => normalizeWordPressWorkloadStep(step, options)).filter(Boolean);
 }
 
-function normalizeWordPressWorkloadStep(step) {
+function normalizeWordPressWorkloadStep(step, options = {}) {
 	if (!objectOrUndefined(step)) {
 		return undefined;
+	}
+	const embeddedStep = embedSourcePhpWorkloadStep(step, options);
+	if (embeddedStep) {
+		return embeddedStep;
 	}
 	if (!isArtifactPostprocessCommand(step.command || step.type || step.name)) {
 		return step;
@@ -574,6 +578,58 @@ function normalizeWordPressWorkloadStep(step) {
 			contract: 'homeboy/artifact-postprocess/v1',
 		}),
 	});
+}
+
+function embedSourcePhpWorkloadStep(step, options = {}) {
+	if (step.type !== 'php' || typeof step.file !== 'string' || step.file.trim() === '' || typeof step.code === 'string') {
+		return undefined;
+	}
+	const sourceFile = resolveSourceWorkloadStepFile(step.file, options.sourceFilePath);
+	if (!sourceFile) {
+		return undefined;
+	}
+	const source = fs.readFileSync(sourceFile, 'utf8');
+	return stripUndefined({
+		...step,
+		file: undefined,
+		code: phpCallableSourceWrapper(source),
+		metadata: stripUndefined({
+			...(objectOrUndefined(step.metadata) || {}),
+			source_file: sourceFile,
+			embedded_source_file: true,
+		}),
+	});
+}
+
+function resolveSourceWorkloadStepFile(file, sourceFilePath) {
+	const requested = String(file || '').trim();
+	if (!requested || path.isAbsolute(requested) || requested.split(/[\\/]+/).includes('..')) {
+		return undefined;
+	}
+	const sourcePath = typeof sourceFilePath === 'string' && path.isAbsolute(sourceFilePath) ? sourceFilePath : undefined;
+	if (!sourcePath) {
+		return undefined;
+	}
+	const sourceDirectory = path.dirname(sourcePath);
+	const candidates = [
+		path.resolve(sourceDirectory, requested),
+		path.resolve(path.dirname(sourceDirectory), requested),
+	];
+	for (const candidate of candidates) {
+		if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+			return candidate;
+		}
+	}
+	return undefined;
+}
+
+function phpCallableSourceWrapper(source) {
+	const body = String(source || '')
+		.replace(/^\uFEFF/, '')
+		.replace(/^\s*<\?php\s*/, '')
+		.replace(/\?>\s*$/, '')
+		.trim();
+	return `$wp_codebox_embedded_callable = (function () {\n${body}\n})(); return is_callable($wp_codebox_embedded_callable) ? $wp_codebox_embedded_callable() : $wp_codebox_embedded_callable;`;
 }
 
 function isArtifactPostprocessCommand(value) {
