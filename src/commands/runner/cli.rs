@@ -253,6 +253,11 @@ pub(super) enum RunnerCommand {
         #[arg(long = "run-id")]
         run_id: Option<String>,
 
+        /// File or directory path produced by the runner command to persist as a run artifact.
+        /// Relative paths are resolved from the runner exec cwd. Repeat for multiple artifacts.
+        #[arg(long = "artifact", value_name = "PATH")]
+        artifact_outputs: Vec<String>,
+
         /// Print remote stdout/stderr directly instead of the structured JSON envelope.
         /// Use global --output to still write the full structured envelope to a file.
         #[arg(long)]

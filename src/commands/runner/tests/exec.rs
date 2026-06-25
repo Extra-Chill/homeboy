@@ -1,10 +1,11 @@
 use super::super::dispatch::raw_exec_command_run;
 use super::super::exec::{
-    prepare_runner_exec_command, prepare_runner_exec_env, read_bounded, read_runner_exec_script,
-    RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
+    exec, prepare_runner_exec_command, prepare_runner_exec_env, read_bounded,
+    read_runner_exec_script, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
 use super::super::types::RUNNER_EXEC_SCRIPT_ENV;
 
+use homeboy::core::observation::{NewRunRecord, ObservationStore};
 use homeboy::core::runners::{self as runner, RunnerExecOutput};
 
 #[test]
@@ -117,4 +118,84 @@ fn env_parser_injects_script_body_without_shell_quoting() {
 
     assert_eq!(env["GREETING"], "hello world");
     assert_eq!(env[RUNNER_EXEC_SCRIPT_ENV], "echo \"$GREETING\"");
+}
+
+#[test]
+fn runner_exec_promotes_declared_artifacts_to_run_store() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        runner::create(
+            &format!(
+                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                workspace.path().display()
+            ),
+            false,
+        )
+        .expect("create local runner");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec lab-local".to_string())
+                    .cwd_path(workspace.path())
+                    .metadata(serde_json::json!({}))
+                    .build(),
+            )
+            .expect("run");
+
+        let (_output, exit_code) = exec(
+            "lab-local",
+            Some(workspace.path().display().to_string()),
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            false,
+            Some(run.id.clone()),
+            vec!["out.txt".to_string(), "reports".to_string()],
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf hello > out.txt && mkdir reports && printf '{}' > reports/result.json"
+                    .to_string(),
+            ],
+        )
+        .expect("runner exec");
+
+        assert_eq!(exit_code, 0);
+        let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].kind, "out_txt");
+        assert_eq!(artifacts[0].artifact_type, "file");
+        assert!(std::path::Path::new(&artifacts[0].path).is_file());
+        assert_eq!(artifacts[1].kind, "reports");
+        assert_eq!(artifacts[1].artifact_type, "directory");
+        assert!(std::path::Path::new(&artifacts[1].path)
+            .join("result.json")
+            .is_file());
+    });
+}
+
+#[test]
+fn runner_exec_rejects_artifacts_without_run_id() {
+    let err = exec(
+        "lab-local",
+        None,
+        None,
+        false,
+        false,
+        Vec::new(),
+        None,
+        Vec::new(),
+        false,
+        None,
+        vec!["out.txt".to_string()],
+        vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
+    )
+    .expect_err("artifact requires run id");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert_eq!(err.details["field"], "run_id");
 }
