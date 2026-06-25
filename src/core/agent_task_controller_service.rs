@@ -1604,6 +1604,7 @@ fn merge_request_input_artifacts(request: &mut Value, artifacts: &serde_json::Ma
     for (artifact_id, artifact) in artifacts {
         artifact_inputs.insert(artifact_id.clone(), artifact.clone());
     }
+    insert_artifact_aliases(inputs, artifacts);
 }
 
 fn merge_dispatch_context_artifacts(
@@ -1649,6 +1650,21 @@ fn merge_runtime_execution_input_artifacts(
     };
     for (artifact_id, artifact) in artifacts {
         artifact_inputs.insert(artifact_id.clone(), artifact.clone());
+    }
+    insert_artifact_aliases(runtime_input, artifacts);
+}
+
+fn insert_artifact_aliases(
+    inputs: &mut serde_json::Map<String, Value>,
+    artifacts: &serde_json::Map<String, Value>,
+) {
+    for (artifact_id, artifact) in artifacts {
+        let should_insert = inputs
+            .get(artifact_id)
+            .is_none_or(|value| value.is_null() || value.as_str() == Some(""));
+        if should_insert {
+            inputs.insert(artifact_id.clone(), artifact.clone());
+        }
     }
 }
 
@@ -3340,8 +3356,17 @@ mod tests {
                 "Demo"
             );
             assert_eq!(
+                context["inputs"]["concept_packet"]["payload"]["title"],
+                "Demo"
+            );
+            assert_eq!(
                 context["runtime_execution"]["input"]["input"]["artifacts"]["concept_packet"]
                     ["payload"]["title"],
+                "Demo"
+            );
+            assert_eq!(
+                context["runtime_execution"]["input"]["input"]["concept_packet"]["payload"]
+                    ["title"],
                 "Demo"
             );
         });
@@ -3410,6 +3435,10 @@ mod tests {
             assert_eq!(
                 input["request"]["inputs"]["artifacts"]["static_site_candidate"]["files"][0]
                     ["path"],
+                "index.html"
+            );
+            assert_eq!(
+                input["request"]["inputs"]["static_site_candidate"]["files"][0]["path"],
                 "index.html"
             );
         });
