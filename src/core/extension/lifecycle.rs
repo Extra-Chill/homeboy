@@ -335,7 +335,12 @@ fn install_shared_scripts_from_root(source_root: &Path, extension_dir: &Path) ->
 }
 
 fn install_shared_ai_runtimes_from_root(source_root: &Path) -> Result<()> {
-    let shared_ai_runtimes = source_root.join("ai-runtimes");
+    let shared_ai_runtimes = source_root.join("agent-runtimes");
+    let shared_ai_runtimes = if shared_ai_runtimes.is_dir() {
+        shared_ai_runtimes
+    } else {
+        source_root.join("ai-runtimes")
+    };
     if !shared_ai_runtimes.is_dir() {
         return Ok(());
     }
@@ -1255,6 +1260,38 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/extensions/scripts/lib/test-result-adapters.sh")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn linked_monorepo_install_replaces_shared_agent_runtimes() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "wordpress");
+
+            let runtime_file = source.join("agent-runtimes/custom-runtime/lib/runner.js");
+            fs::create_dir_all(runtime_file.parent().expect("runtime parent"))
+                .expect("runtime dir");
+            fs::write(&runtime_file, "fresh runtime\n").expect("runtime file");
+
+            let materialized =
+                home.join(".config/homeboy/agent-runtimes/custom-runtime/lib/runner.js");
+            fs::create_dir_all(materialized.parent().expect("materialized parent"))
+                .expect("materialized runtime dir");
+            fs::write(&materialized, "stale runtime\n").expect("stale runtime");
+
+            install(
+                &source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            assert_eq!(
+                fs::read_to_string(&materialized).expect("materialized runtime"),
+                "fresh runtime\n"
+            );
         });
     }
 
