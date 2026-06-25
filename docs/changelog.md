@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.260.2] - 2026-06-25
+
+### Changed
+- extract command-safety-manifest derivation into command_contract (#4255)
+- reduce install_test.rs top-level item count under threshold (#6345)
+
 ## [0.260.1] - 2026-06-25
 
 ### Fixed
