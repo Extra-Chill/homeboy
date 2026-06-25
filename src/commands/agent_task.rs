@@ -15,7 +15,7 @@ use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use homeboy::core::agent_tasks::secrets as agent_task_secrets;
 use homeboy::core::agent_tasks::service as agent_task_service;
-use homeboy::core::config;
+use homeboy::core::{config, Error};
 
 use super::agent_task_dispatch::{dispatch_with_executor, run as dispatch, DispatchArgs};
 use super::{CmdResult, GlobalArgs};
@@ -136,6 +136,18 @@ pub struct AgentTaskControllerFromSpecArgs {
     /// Execute pending actions after applying the spec.
     #[arg(long)]
     pub resume: bool,
+
+    /// Explicit controller run inputs JSON, @file, or - for stdin.
+    #[arg(long, value_name = "JSON")]
+    pub inputs: Option<String>,
+
+    /// Policy result JSON, @file, or - for stdin. May be repeated.
+    #[arg(long = "policy-result", value_name = "JSON")]
+    pub policy_results: Vec<String>,
+
+    /// Maximum controller actions to execute when --resume is supplied.
+    #[arg(long = "max-actions", value_name = "N")]
+    pub max_actions: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -674,23 +686,174 @@ fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> CmdResult<Valu
         )
     })?;
     apply_from_spec_dispatch_defaults(&mut spec, &args.spec);
+    apply_from_spec_run_inputs(&mut spec, args.inputs.as_deref())?;
+    apply_from_spec_policy_results(&mut spec, &args.policy_results)?;
+    let materialization = serde_json::json!({
+        "schema": "homeboy/agent-task-loop-spec-materialization/v1",
+        "spec": spec.clone(),
+    });
     let report = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?;
     if !args.resume {
         return Ok((command_json_value(report)?, 0));
     }
 
-    let (resume_report, exit_code) = controller_resume_with_executor(
+    let (resume_report, exit_code) = controller_resume_with_executor_limit(
         report.loop_id.clone(),
         ExtensionProviderAgentTaskExecutor::discover(),
+        args.max_actions,
     )?;
+    let status = agent_task_controller_service::status(&report.loop_id)?;
+    let results = resume_report
+        .get("results")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let stopped_reason = if exit_code != 0 {
+        "action_failed"
+    } else if args.max_actions.is_some_and(|max_actions| {
+        results
+            .as_array()
+            .is_some_and(|items| items.len() >= max_actions)
+    }) {
+        "max_actions"
+    } else {
+        "idle"
+    };
     Ok((
         serde_json::json!({
-            "schema": "homeboy/agent-task-loop-controller-from-spec-and-resume-result/v1",
+            "schema": "homeboy/agent-task-loop-controller-run-from-spec-result/v1",
+            "loop_id": report.loop_id,
+            "max_actions": args.max_actions,
+            "stopped_reason": stopped_reason,
+            "materialization": materialization,
             "from_spec": report,
             "resume": resume_report,
+            "results": results,
+            "status": status,
         }),
         exit_code,
     ))
+}
+
+fn apply_from_spec_run_inputs(
+    spec: &mut AgentTaskRepoLoopSpec,
+    inputs_arg: Option<&str>,
+) -> homeboy::core::Result<()> {
+    let Some(inputs_arg) = inputs_arg else {
+        return Ok(());
+    };
+    let run_inputs = read_json_spec_value(inputs_arg, "inputs")?;
+    let explicit_inputs = run_inputs
+        .get("inputs")
+        .cloned()
+        .or_else(|| (!run_inputs.get("metadata").is_some()).then_some(run_inputs.clone()));
+
+    if let Some(Value::Object(inputs)) = explicit_inputs {
+        if let Some(loop_id) = inputs.get("loop_id").and_then(Value::as_str) {
+            spec.loop_id = loop_id.to_string();
+        }
+        for workflow in &mut spec.workflows {
+            merge_json_object(&mut workflow.inputs, &Value::Object(inputs.clone()));
+        }
+    }
+
+    if let Some(metadata) = run_inputs.get("metadata") {
+        merge_json_object(&mut spec.metadata, metadata);
+    }
+
+    Ok(())
+}
+
+fn apply_from_spec_policy_results(
+    spec: &mut AgentTaskRepoLoopSpec,
+    policy_result_args: &[String],
+) -> homeboy::core::Result<()> {
+    for policy_result_arg in policy_result_args {
+        let policy_result = read_json_spec_value(policy_result_arg, "policy-result")?;
+        let Some(policy_id) = policy_result.get("policy_id").and_then(Value::as_str) else {
+            return Err(Error::validation_invalid_argument(
+                "policy-result.policy_id",
+                "policy result requires a string policy_id",
+                None,
+                None,
+            ));
+        };
+        for workflow in &mut spec.workflows {
+            ensure_json_object(&mut workflow.inputs);
+            if let Some(policy_inputs) = policy_result.get("policy_inputs") {
+                set_nested_object_key(
+                    &mut workflow.inputs,
+                    &["policy_inputs", policy_id],
+                    policy_inputs.clone(),
+                );
+            }
+            if let Some(policy_results) = policy_result.get("policy_results") {
+                set_nested_object_key(
+                    &mut workflow.inputs,
+                    &["policy_results", policy_id],
+                    policy_results.clone(),
+                );
+            }
+        }
+        set_nested_object_key(
+            &mut spec.metadata,
+            &["policy_materialization", policy_id],
+            serde_json::json!({
+                "policy_inputs": policy_result.get("policy_inputs").cloned().unwrap_or_else(|| serde_json::json!({})),
+                "policy_results": policy_result.get("policy_results").cloned().unwrap_or_else(|| serde_json::json!({})),
+                "provenance": policy_result.get("provenance").cloned().unwrap_or_else(|| serde_json::json!({})),
+            }),
+        );
+    }
+    Ok(())
+}
+
+fn read_json_spec_value(spec: &str, argument: &str) -> homeboy::core::Result<Value> {
+    let raw = config::read_json_spec_to_string(spec)?;
+    serde_json::from_str(&raw).map_err(|error| {
+        Error::validation_invalid_argument(
+            argument,
+            error.to_string(),
+            Some(spec.to_string()),
+            None,
+        )
+    })
+}
+
+fn merge_json_object(target: &mut Value, source: &Value) {
+    let Value::Object(source) = source else {
+        return;
+    };
+    ensure_json_object(target);
+    let Value::Object(target) = target else {
+        return;
+    };
+    for (key, value) in source {
+        target.insert(key.clone(), value.clone());
+    }
+}
+
+fn ensure_json_object(value: &mut Value) {
+    if !value.is_object() {
+        *value = serde_json::json!({});
+    }
+}
+
+fn set_nested_object_key(target: &mut Value, path: &[&str], value: Value) {
+    ensure_json_object(target);
+    let mut current = target;
+    for key in &path[..path.len().saturating_sub(1)] {
+        ensure_json_object(current);
+        let Value::Object(object) = current else {
+            return;
+        };
+        current = object
+            .entry((*key).to_string())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    ensure_json_object(current);
+    if let (Value::Object(object), Some(last)) = (current, path.last()) {
+        object.insert((*last).to_string(), value);
+    }
 }
 
 fn apply_from_spec_dispatch_defaults(spec: &mut AgentTaskRepoLoopSpec, spec_arg: &str) {
@@ -879,6 +1042,50 @@ where
     };
     let result = agent_task_controller_service::resume(&loop_id, executor, &dispatch)?;
     Ok((command_json_value(result.value)?, result.exit_code))
+}
+
+fn controller_resume_with_executor_limit<E>(
+    loop_id: String,
+    executor: E,
+    max_actions: Option<usize>,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let Some(max_actions) = max_actions else {
+        return controller_resume_with_executor(loop_id, executor);
+    };
+    let dispatch = CliDispatchHook {
+        executor: executor.clone(),
+    };
+    let mut results = Vec::new();
+    let mut exit_code = 0;
+    for _ in 0..max_actions {
+        let action_result =
+            agent_task_controller_service::run_next(&loop_id, executor.clone(), &dispatch)?;
+        let claimed = action_result.value.claimed;
+        exit_code = action_result.exit_code;
+        results.push(serde_json::to_value(action_result.value).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("controller resume result".to_string()),
+            )
+        })?);
+        if !claimed || exit_code != 0 {
+            break;
+        }
+    }
+    let controller = agent_task_controller_service::status(&loop_id)?;
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-loop-controller-resume-result/v1",
+            "loop_id": controller.loop_id,
+            "claimed": results.iter().any(|result| result.get("claimed").and_then(Value::as_bool).unwrap_or(false)),
+            "results": results,
+            "controller": controller,
+        }),
+        exit_code,
+    ))
 }
 
 fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
