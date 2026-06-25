@@ -267,7 +267,13 @@ homeboy trace my-project checkout-flow --overlay experiment.patch
 homeboy runs list
 homeboy runs show <run-id>
 homeboy runs artifacts <run-id>
+homeboy runs evidence <run-id>
 ```
+
+Runner, static HTML, and matrix workflows should turn stdout into persisted
+artifacts before sharing evidence. See
+[`docs/operators/artifact-loop-runner-matrix.md`](docs/operators/artifact-loop-runner-matrix.md)
+for the generic artifact loop and examples.
 
 ### Local Dev Rigs And Stacks
 

@@ -21,6 +21,7 @@ repository.
 
 - [Release-gate proof: canonical non-local command path](operators/release-gate-proof-path.md) - The one documented `homeboy review` proof path for agents, why local-hot bypass flags are debugging aids (not proof), and how to repair stale runners or missing secrets instead of running locally
 - [Controller to runner reverse-runner setup](operators/controller-runner-reverse-runner.md) - Setup, smoke evidence, and troubleshooting for the gated reverse-runner path tracked by #2993 and #2950
+- [Artifact loop for runner and matrix workflows](operators/artifact-loop-runner-matrix.md) - How to make runner, static HTML, and matrix outputs reviewable through persisted run artifacts
 
 ## CLI
 
