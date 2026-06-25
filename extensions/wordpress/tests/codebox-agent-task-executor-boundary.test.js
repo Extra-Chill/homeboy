@@ -12,6 +12,7 @@ const {
   artifactResultEnvelopeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
   codeboxRunAgentTaskInvocation,
+  normalizeCodeboxAgentTaskEvents,
   normalizeCodeboxPublicResultEnvelope,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
@@ -905,6 +906,85 @@ assert.deepEqual(
   ['codebox.required_typed_artifacts_invalid']
 );
 assert.match(placeholderArtifactOutcome.summary, /invalid required typed artifacts: concept_packet/);
+
+const eventNormalizerRequest = {
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'codebox-events-task-1',
+  group_key: 'codebox-events-group',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Normalize Codebox event artifacts.',
+  inputs: {},
+};
+const eventNormalizerArtifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-events-'));
+const eventFile = path.join(eventNormalizerArtifactRoot, 'events.json');
+const missingEventFile = path.join(eventNormalizerArtifactRoot, 'missing-events.json');
+fs.writeFileSync(eventFile, `${JSON.stringify({
+  events: [
+    {
+      schema: 'wp-codebox/fanout-worker-event/v1',
+      id: 'worker-b-started',
+      name: 'worker.started',
+      worker_id: 'worker-b',
+      sequence: 1,
+      created_at: '2026-06-25T10:00:02.000Z',
+    },
+    {
+      schema: 'wp-codebox/fanout-worker-event/v1',
+      id: 'worker-a-started',
+      name: 'worker.started',
+      worker_id: 'worker-a',
+      sequence: 1,
+      created_at: '2026-06-25T10:00:01.000Z',
+      artifact_refs: [{ kind: 'codebox-worker-log', path: 'artifacts/worker-a.log' }],
+    },
+  ],
+}, null, 2)}\n`);
+const normalizedCodeboxEvents = normalizeCodeboxAgentTaskEvents(eventNormalizerRequest, {
+  events_file: eventFile,
+  result_path: missingEventFile,
+  stdout: JSON.stringify([{
+    schema: 'wp-codebox/fanout-worker-event/v1',
+    id: 'worker-a-failed',
+    name: 'worker.failed',
+    status: 'failed',
+    worker_id: 'worker-a',
+    sequence: 2,
+    created_at: '2026-06-25T10:00:03.000Z',
+    diagnostics: [{ class: 'worker.timeout', message: 'Worker timed out.', data: { timeout_ms: 30000 } }],
+  }]),
+});
+assert.deepEqual(normalizedCodeboxEvents.events.map((event) => event.event_id), [
+  'worker-a-started',
+  'worker-b-started',
+  'worker-a-failed',
+]);
+assert.deepEqual(normalizedCodeboxEvents.events.map((event) => event.sequence), [1, 2, 3]);
+assert.equal(normalizedCodeboxEvents.events[0].schema, 'homeboy/agent-task-event/v1');
+assert.equal(normalizedCodeboxEvents.events[0].task_id, eventNormalizerRequest.task_id);
+assert.equal(normalizedCodeboxEvents.events[0].worker_id, 'worker-a');
+assert.equal(normalizedCodeboxEvents.events[0].artifacts[0].path, 'artifacts/worker-a.log');
+assert.equal(normalizedCodeboxEvents.events[2].status, 'failed');
+assert.equal(normalizedCodeboxEvents.events[2].diagnostics[0].class, 'worker.timeout');
+assert.equal(normalizedCodeboxEvents.diagnostics[0].class, 'codebox.events_file_missing');
+const eventOutcome = agentTaskOutcomeFromCodeboxResult(eventNormalizerRequest, {
+  success: false,
+  status: 'timeout',
+  summary: 'One fanout worker timed out.',
+  events_file: eventFile,
+  result_path: missingEventFile,
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifact_refs: [{ kind: 'codebox-result', path: 'artifacts/result.json' }],
+    result: { outputs: {} },
+  },
+});
+assert.equal(eventOutcome.status, 'timeout');
+assert.equal(eventOutcome.events.length, 2);
+assert.equal(eventOutcome.events[0].artifacts[0].path, 'artifacts/worker-a.log');
+assert.equal(eventOutcome.artifacts.some((artifact) => artifact.path === 'artifacts/result.json'), true);
+assert.equal(eventOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.events_file_missing'), true);
+assert.equal(eventOutcome.metadata.normalized_events.length, 2);
 
 const missingTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   schema: 'homeboy/agent-task-request/v1',
