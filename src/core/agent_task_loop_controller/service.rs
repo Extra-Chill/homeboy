@@ -25,7 +25,7 @@ pub fn controller_status_diagnostics(
     })
 }
 
-fn controller_status_diagnostics_with<F>(
+pub(crate) fn controller_status_diagnostics_with<F>(
     record: &AgentTaskLoopControllerRecord,
     now: DateTime<Utc>,
     mut run_exists: F,

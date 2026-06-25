@@ -1,8 +1,9 @@
 #![cfg(test)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::apply::{
     run_provider_command, AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
