@@ -736,8 +736,6 @@
         "structural::src/commands/runs/gh_actions.rs::HighItemCount",
         "structural::src/commands::DirectorySprawl",
         "structural::src/core/agent_task_controller_service/artifacts.rs::HighItemCount",
-        "structural::src/core/agent_task_controller_service/tests.rs::GodFile",
-        "structural::src/core/agent_task_controller_service/tests.rs::HighItemCount",
         "structural::src/core/agent_task_provider.rs::GodFile",
         "structural::src/core/agent_task_provider.rs::HighItemCount",
         "structural::src/core/agent_task_schedule.rs::HighItemCount",
