@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.29] - 2026-06-25
+
+### Changed
+- Embed source PHP workload files
+
 ## [3.13.28] - 2026-06-25
 
 ### Changed
