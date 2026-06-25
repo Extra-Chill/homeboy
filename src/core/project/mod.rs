@@ -34,6 +34,7 @@ pub use pins::{
     add_pin, list_pins, remove_pin, rename_pin, update_pin, PinUpdateOptions, ProjectPinChange,
     ProjectPinListItem, ProjectPinOutput,
 };
+pub(crate) use readiness::component_local_path_blockers;
 pub use readiness::{
     calculate_deploy_readiness, validate_component_local_path, validate_component_local_paths,
     validate_deploy_component_local_paths,
