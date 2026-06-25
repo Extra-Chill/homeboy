@@ -255,6 +255,40 @@ fn bench_json() -> &'static str {
     }"#
 }
 
+fn bench_matrix_json() -> &'static str {
+    r#"{
+        "success": false,
+        "data": {
+            "command": "bench.matrix",
+            "component": "studio",
+            "summary": {
+                "passed": false,
+                "execution_state": "executed_with_findings",
+                "cells": 2,
+                "succeeded": 1,
+                "failed": 1
+            },
+            "cells": [{
+                "index": 0,
+                "settings": {"clients": "10"},
+                "passed": true,
+                "execution_state": "executed_clean",
+                "status": "pass",
+                "exit_code": 0,
+                "metrics": []
+            },{
+                "index": 1,
+                "settings": {"clients": "100"},
+                "passed": false,
+                "execution_state": "executed_with_findings",
+                "status": "fail",
+                "exit_code": 1,
+                "metrics": []
+            }]
+        }
+    }"#
+}
+
 #[test]
 fn renders_lint_failure_digest_from_fixture() {
     let guard = tmp_dir("lint");
@@ -507,6 +541,45 @@ fn error_statuses_render_command_sections_and_classify_as_failures() {
         .contains("- Full test log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
     assert!(markdown
         .contains("- Full audit log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
+}
+
+#[test]
+fn matrix_execution_states_render_quality_findings_separately_from_execution_failure() {
+    let guard = tmp_dir("matrix-execution-state");
+    let dir = guard.path();
+    write_file(dir, "bench.json", bench_matrix_json());
+
+    let markdown = render(dir, r#"{"bench":"executed_with_findings"}"#, false, false);
+
+    assert!(markdown.contains("### Bench: studio"));
+    assert!(markdown.contains("**Execution state:** `executed_with_findings`"));
+    assert!(markdown.contains("- Human-needed failed commands:"));
+    assert!(markdown.contains("  - `bench`"));
+    assert!(!markdown.contains("Execution state:** `execution_failed`"));
+}
+
+#[test]
+fn execution_failed_state_remains_human_needed_without_quality_findings() {
+    let guard = tmp_dir("matrix-execution-failed");
+    let dir = guard.path();
+    write_file(
+        dir,
+        "bench.json",
+        r#"{
+            "success": false,
+            "data": {
+                "command": "bench.matrix",
+                "component": "studio",
+                "summary": {"execution_state": "execution_failed"}
+            }
+        }"#,
+    );
+
+    let markdown = render(dir, r#"{"bench":"execution_failed"}"#, false, false);
+
+    assert!(markdown.contains("**Execution state:** `execution_failed`"));
+    assert!(markdown.contains("- Human-needed failed commands:"));
+    assert!(markdown.contains("  - `bench`"));
 }
 
 #[test]

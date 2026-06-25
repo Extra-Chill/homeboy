@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use clap::Args;
 use serde::Serialize;
 
+use homeboy::core::agent_tasks::AgentTaskMatrixExecutionState;
 use homeboy::core::extension::bench::{BenchCommandOutput, BenchScenario};
 use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 
@@ -54,6 +55,7 @@ pub struct BenchSettingsMatrixCellOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     pub passed: bool,
+    pub execution_state: AgentTaskMatrixExecutionState,
     pub status: String,
     pub exit_code: i32,
     pub metrics: Vec<BenchSettingsMatrixMetricSample>,
@@ -71,6 +73,7 @@ pub struct BenchSettingsMatrixMetricSample {
 #[derive(Serialize)]
 pub struct BenchSettingsMatrixSummary {
     pub passed: bool,
+    pub execution_state: AgentTaskMatrixExecutionState,
     pub cells: usize,
     pub succeeded: usize,
     pub failed: usize,
@@ -125,6 +128,7 @@ pub(super) fn run_settings_matrix(
         .collect::<Vec<_>>();
     let succeeded = outputs.iter().filter(|cell| cell.passed).count();
     let failed = outputs.len().saturating_sub(succeeded);
+    let execution_state = settings_matrix_execution_state(&outputs);
     let component = run_args
         .comp
         .id()
@@ -146,6 +150,7 @@ pub(super) fn run_settings_matrix(
         axes,
         summary: BenchSettingsMatrixSummary {
             passed: failed == 0,
+            execution_state,
             cells: outputs.len(),
             succeeded,
             failed,
@@ -175,10 +180,54 @@ fn cell_output(
         settings,
         run_id: extract_run_id(&hints),
         passed: output.passed,
+        execution_state: bench_cell_execution_state(&output, exit_code),
         status: output.status,
         exit_code,
         metrics,
         hints,
+    }
+}
+
+fn bench_cell_execution_state(
+    output: &BenchCommandOutput,
+    exit_code: i32,
+) -> AgentTaskMatrixExecutionState {
+    if output.failure.is_some()
+        || (exit_code != 0 && output.budget_findings.is_empty() && output.gate_failures.is_empty())
+    {
+        return AgentTaskMatrixExecutionState::ExecutionFailed;
+    }
+
+    if !output.passed || !output.budget_findings.is_empty() || !output.gate_failures.is_empty() {
+        return AgentTaskMatrixExecutionState::ExecutedWithFindings;
+    }
+
+    AgentTaskMatrixExecutionState::ExecutedClean
+}
+
+fn settings_matrix_execution_state(
+    cells: &[BenchSettingsMatrixCellOutput],
+) -> AgentTaskMatrixExecutionState {
+    let mut saw_clean = false;
+    let mut saw_not_run = false;
+    for cell in cells {
+        match cell.execution_state {
+            AgentTaskMatrixExecutionState::ExecutionFailed => {
+                return AgentTaskMatrixExecutionState::ExecutionFailed;
+            }
+            AgentTaskMatrixExecutionState::ExecutedWithFindings => {
+                return AgentTaskMatrixExecutionState::ExecutedWithFindings;
+            }
+            AgentTaskMatrixExecutionState::ExecutedClean => saw_clean = true,
+            AgentTaskMatrixExecutionState::NotRun => saw_not_run = true,
+        }
+    }
+
+    match (saw_clean, saw_not_run) {
+        (true, false) => AgentTaskMatrixExecutionState::ExecutedClean,
+        (false, true) => AgentTaskMatrixExecutionState::NotRun,
+        (true, true) => AgentTaskMatrixExecutionState::NotRun,
+        (false, false) => AgentTaskMatrixExecutionState::NotRun,
     }
 }
 
@@ -257,6 +306,7 @@ fn settings_matrix_parent_metadata(
         "schema": "homeboy/bench-settings-matrix-run/v1",
         "command": "bench.matrix",
         "passed": passed,
+        "execution_state": settings_matrix_execution_state(cells),
         "axes": axes,
         "cells": cells,
         "child_run_ids": child_run_ids,
@@ -537,8 +587,10 @@ mod tests {
         assert_eq!(metadata["schema"], "homeboy/bench-settings-matrix-run/v1");
         assert_eq!(metadata["command"], "bench.matrix");
         assert_eq!(metadata["passed"], true);
+        assert_eq!(metadata["execution_state"], "executed_clean");
         assert_eq!(metadata["axes"][0]["name"], "clients");
         assert_eq!(metadata["cells"][0]["run_id"], "run-a");
+        assert_eq!(metadata["cells"][0]["execution_state"], "executed_clean");
         assert_eq!(metadata["child_run_ids"][1], "run-b");
         assert_eq!(
             metadata["inspect"]["show_children"][0],
@@ -595,6 +647,10 @@ mod tests {
             assert_eq!(run.rig_id.as_deref(), Some("studio"));
             assert_eq!(run.metadata_json["child_run_ids"][0], "run-a");
             assert_eq!(run.metadata_json["cells"][1]["status"], "fail");
+            assert_eq!(
+                run.metadata_json["cells"][1]["execution_state"],
+                "executed_with_findings"
+            );
         });
     }
 
@@ -618,6 +674,11 @@ mod tests {
             settings,
             run_id: run_id.map(str::to_string),
             passed,
+            execution_state: if passed {
+                AgentTaskMatrixExecutionState::ExecutedClean
+            } else {
+                AgentTaskMatrixExecutionState::ExecutedWithFindings
+            },
             status: if passed { "pass" } else { "fail" }.to_string(),
             exit_code: if passed { 0 } else { 1 },
             metrics: Vec::new(),
