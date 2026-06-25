@@ -36,6 +36,7 @@ pub use pins::{
 };
 pub use readiness::{
     calculate_deploy_readiness, validate_component_local_path, validate_component_local_paths,
+    validate_deploy_component_local_paths,
 };
 pub use report::{
     build_components_output, build_create_output, build_delete_output, build_init_output,
