@@ -2,6 +2,7 @@ use crate::core::error::{Error, Result};
 use crate::core::git;
 
 use super::context::load_component;
+use super::planning_semver::release_monorepo_context;
 use super::types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseBumpPolicyOptions,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan, ReleaseOptions, ReleasePlan,
@@ -64,7 +65,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         },
     )?;
 
-    let monorepo = git::MonorepoContext::detect(&component.local_path, &input.component_id);
+    let monorepo = release_monorepo_context(&component, &input.component_id);
     let resolved_bump = if input.pipeline.head {
         None
     } else {
