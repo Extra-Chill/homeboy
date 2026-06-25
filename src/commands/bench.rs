@@ -747,7 +747,8 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
         args.setting_args.setting.clone(),
         args.setting_args.setting_json.clone(),
     );
-    resolve_options.extension_overrides = args.extension_override.extensions.clone();
+    resolve_options.extension_overrides =
+        effective_extension_overrides(&args.extension_override.extensions, rig_spec.as_deref());
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
     warn_unknown_setting_keys(&ctx, &args.setting_args);
@@ -790,6 +791,26 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
     let output = output?;
 
     Ok((BenchOutput::List(output), 0))
+}
+
+fn effective_extension_overrides(
+    explicit_overrides: &[String],
+    rig_spec: Option<&rig::RigSpec>,
+) -> Vec<String> {
+    if !explicit_overrides.is_empty() {
+        return explicit_overrides.to_vec();
+    }
+
+    let Some(spec) = rig_spec else {
+        return Vec::new();
+    };
+
+    let workload_extension_ids =
+        rig::extension_ids_for_workloads(spec, rig::RigWorkloadKind::Bench);
+    match workload_extension_ids.as_slice() {
+        [extension_id] => vec![extension_id.clone()],
+        _ => Vec::new(),
+    }
 }
 
 type ListRigContext = rig::RigSourceContext;

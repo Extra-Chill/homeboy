@@ -20,7 +20,7 @@ pub fn run_bench_list_workflow(
     run_dir: &RunDir,
 ) -> Result<BenchListWorkflowResult> {
     let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
-    if component.has_script(ExtensionCapability::Bench) {
+    if component.has_script(ExtensionCapability::Bench) && args.extra_workloads.is_empty() {
         let list_env = bench_component_script_list_env(&args)?;
         let source_path = crate::core::extension::component_script::source_path(
             component,

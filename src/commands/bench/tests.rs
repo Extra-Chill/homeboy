@@ -182,6 +182,61 @@ fn write_rig(home: &TempDir, rig_id: &str, component_id: &str, path: &std::path:
     write_rig_with_profiles(home, rig_id, component_id, path, "{}");
 }
 
+fn write_rig_with_component_script(
+    home: &TempDir,
+    rig_id: &str,
+    component_id: &str,
+    path: &std::path::Path,
+) {
+    let script_path = path.join("native-bench.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
+{
+  "component_id": "$HOMEBOY_COMPONENT_ID",
+  "iterations": ${HOMEBOY_BENCH_ITERATIONS:-0},
+  "scenarios": [
+    { "id": "native-script", "iterations": ${HOMEBOY_BENCH_ITERATIONS:-0}, "metrics": {} }
+  ]
+}
+JSON
+"#,
+    )
+    .expect("write native bench script");
+
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod script");
+    }
+
+    let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+    fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+    fs::write(
+        rig_dir.join(format!("{}.json", rig_id)),
+        format!(
+            r#"{{
+                    "components": {{
+                        "{component_id}": {{
+                            "path": "{}",
+                            "scripts": {{ "bench": ["./native-bench.sh"] }}
+                        }}
+                    }},
+                    "bench": {{ "default_component": "{component_id}" }},
+                    "bench_workloads": {{ "fixture-bench": [
+                        {{ "path": "${{components.{component_id}.path}}/rig-extra.bench.js" }}
+                    ] }}
+                }}"#,
+            path.display()
+        ),
+    )
+    .expect("write rig");
+}
+
 fn write_rig_with_profiles(
     home: &TempDir,
     rig_id: &str,
@@ -370,6 +425,27 @@ fn run_list_uses_rig_default_component_and_workloads() {
                 assert_eq!(result.component, "studio");
                 assert_eq!(result.component_id, "studio");
                 assert_eq!(result.count, 2);
+                assert_eq!(result.scenarios[0].id, "rig-extra");
+            }
+            _ => panic!("expected list output"),
+        }
+    });
+}
+
+#[test]
+fn run_list_prefers_rig_workloads_over_component_bench_script() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_rig_with_component_script(home, "studio-bfb", "studio", component_dir.path());
+
+        let (output, exit_code) = run_list(&list_args(None, vec!["studio-bfb".to_string()]))
+            .expect("rig bench list should use rig workloads");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::List(result) => {
+                assert_eq!(result.count, 1);
                 assert_eq!(result.scenarios[0].id, "rig-extra");
             }
             _ => panic!("expected list output"),
@@ -805,6 +881,31 @@ fn rig_bench_component_expands_extension_settings() {
             .and_then(|value| value.as_str()),
         Some(expected_mount_source.as_str())
     );
+}
+
+#[test]
+fn run_prefers_rig_workloads_over_component_bench_script() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_rig_with_component_script(home, "studio-bfb", "studio", component_dir.path());
+
+        let (output, exit_code) = run(
+            run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
+            &GlobalArgs {},
+        )
+        .expect("rig bench should use rig workloads");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::Single(result) => {
+                let scenarios = result.results.expect("results").scenarios;
+                assert_eq!(scenarios.len(), 1);
+                assert_eq!(scenarios[0].id, "rig-extra");
+            }
+            _ => panic!("expected single output"),
+        }
+    });
 }
 
 #[test]
