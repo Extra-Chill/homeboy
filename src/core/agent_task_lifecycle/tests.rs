@@ -1402,6 +1402,91 @@ fn status_filters_empty_uri_artifact_refs() {
     });
 }
 
+#[test]
+fn run_status_reports_bridge_envelope_and_cursor_filtered_events() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.events = vec![
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Running,
+                attempt: 1,
+                message: Some("started".to_string()),
+            },
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Succeeded,
+                attempt: 1,
+                message: Some("ok".to_string()),
+            },
+        ];
+        aggregate.outcomes[0].artifacts = vec![artifact_ref_artifact(
+            "bundle",
+            "artifact-bundle",
+            Some("file:///tmp/bundle.json"),
+            None,
+        )];
+
+        record_completed_run(&plan, &aggregate, Some("run-status-bridge")).expect("recorded");
+
+        let status = run_status("run-status-bridge", Some(1)).expect("bridge status");
+
+        assert_eq!(status.schema, schemas::RUN_STATUS);
+        assert_eq!(status.state, AgentTaskRunState::Succeeded);
+        assert_eq!(status.latest_event_cursor, 2);
+        assert_eq!(status.normalized_events.len(), 1);
+        assert_eq!(status.normalized_events[0].sequence, 2);
+        assert_eq!(status.normalized_events[0].schema, schemas::EVENT);
+        assert_eq!(
+            status.normalized_events[0].event_type,
+            "agent_task.state_changed"
+        );
+        assert_eq!(status.normalized_events[0].artifact_refs.len(), 1);
+        assert_eq!(status.artifact_refs[0].kind, "artifact-bundle");
+    });
+}
+
+#[test]
+fn logs_include_normalized_event_envelopes() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.events = vec![
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Running,
+                attempt: 1,
+                message: Some("started".to_string()),
+            },
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Succeeded,
+                attempt: 1,
+                message: Some("ok".to_string()),
+            },
+        ];
+        aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
+            kind: "transcript".to_string(),
+            uri: "file:///tmp/transcript.json".to_string(),
+            label: Some("Transcript".to_string()),
+        }];
+
+        record_completed_run(&plan, &aggregate, Some("run-event-envelope")).expect("recorded");
+
+        let log = logs("run-event-envelope").expect("logs");
+
+        assert_eq!(log.normalized_events.len(), 2);
+        assert_eq!(log.normalized_events[0].schema, schemas::EVENT);
+        assert_eq!(log.normalized_events[0].run_id, "run-event-envelope");
+        assert_eq!(log.normalized_events[0].task_id, "task-a");
+        assert_eq!(log.normalized_events[0].sequence, 1);
+        assert_eq!(log.normalized_events[0].status, AgentTaskState::Running);
+        assert_eq!(log.normalized_events[1].message.as_deref(), Some("ok"));
+        assert_eq!(log.normalized_events[1].artifact_refs.len(), 1);
+    });
+}
+
 fn test_plan() -> AgentTaskPlan {
     AgentTaskPlan::new(
         "plan-a",

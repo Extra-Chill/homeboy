@@ -3,6 +3,8 @@ use super::*;
 pub(crate) mod schemas {
     pub(crate) const RUN: &str = "homeboy/agent-task-run/v1";
     pub(crate) const RUN_LOG: &str = "homeboy/agent-task-run-log/v1";
+    pub(crate) const EVENT: &str = "homeboy/agent-task-event/v1";
+    pub(crate) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v1";
     pub(crate) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
 }
 
@@ -204,6 +206,44 @@ pub struct AgentTaskRunLog {
     pub schema: String,
     pub run_id: String,
     pub events: Vec<AgentTaskProgressEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub normalized_events: Vec<AgentTaskEventEnvelope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskEventEnvelope {
+    pub schema: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub sequence: u64,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub status: AgentTaskState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub progress: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<AgentTaskArtifactRef>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRunStatus {
+    pub schema: String,
+    pub run_id: String,
+    pub plan_id: String,
+    pub state: AgentTaskRunState,
+    pub submitted_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    pub totals: AgentTaskAggregateTotals,
+    pub latest_event_cursor: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<AgentTaskArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub normalized_events: Vec<AgentTaskEventEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -576,9 +576,17 @@ pub struct StatusArgs {
     /// Durable run id returned by `agent-task submit` or `agent-task run-plan --record-run-id`.
     pub run_id: String,
 
+    /// Emit the bridge-friendly durable run status envelope.
+    #[arg(long)]
+    pub bridge: bool,
+
+    /// Return only bridge events after this cursor.
+    #[arg(long, value_name = "CURSOR", requires = "bridge")]
+    pub since_cursor: Option<u64>,
+
     /// Emit the full verbose payload (all artifact/evidence refs) instead of the
     /// default compact, recovery-first summary.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
 }
 

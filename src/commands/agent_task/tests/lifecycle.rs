@@ -48,18 +48,35 @@ fn submit_run_status_reports_terminal_state() {
         .expect("submitted");
         let (_, run_exit_code) = run_submitted(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
+            bridge: false,
+            since_cursor: None,
             full: false,
         })
         .expect("run completed");
         let (status_json, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
+            bridge: false,
+            since_cursor: None,
             full: true,
         })
         .expect("status loaded");
+        let (bridge_status_json, bridge_status_exit_code) = status(StatusArgs {
+            run_id: "run-cli-terminal".to_string(),
+            bridge: true,
+            since_cursor: Some(0),
+            full: false,
+        })
+        .expect("bridge status loaded");
         let record: AgentTaskRunRecord = serde_json::from_value(status_json).expect("record");
 
         assert_eq!(run_exit_code, 1);
         assert_eq!(status_exit_code, 0);
+        assert_eq!(bridge_status_exit_code, 0);
+        assert_eq!(
+            bridge_status_json["schema"],
+            "homeboy/agent-task-run-status/v1"
+        );
+        assert!(bridge_status_json["normalized_events"].is_array());
         assert_eq!(record.state, AgentTaskRunState::Failed);
         assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
         assert_eq!(record.totals.expect("totals").failed, 1);
@@ -75,11 +92,15 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
 
         let (status_value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
+            bridge: false,
+            since_cursor: None,
             full: false,
         })
         .expect("status loaded");
         let (logs_value, _) = logs(StatusArgs {
             run_id: run_id.to_string(),
+            bridge: false,
+            since_cursor: None,
             full: false,
         })
         .expect("logs loaded");

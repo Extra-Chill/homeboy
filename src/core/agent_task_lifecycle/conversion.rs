@@ -214,6 +214,54 @@ pub(crate) fn queued_events(tasks: &[AgentTaskRunTask]) -> Vec<AgentTaskProgress
         .collect()
 }
 
+pub(crate) fn totals_for_tasks(tasks: &[AgentTaskRunTask]) -> AgentTaskAggregateTotals {
+    let mut totals = AgentTaskAggregateTotals::default();
+    for task in tasks {
+        match task.state {
+            AgentTaskState::Queued => totals.queued += 1,
+            AgentTaskState::Running => totals.running += 1,
+            AgentTaskState::Blocked => totals.blocked += 1,
+            AgentTaskState::Skipped => totals.skipped += 1,
+            AgentTaskState::Succeeded => totals.succeeded += 1,
+            AgentTaskState::Failed => totals.failed += 1,
+            AgentTaskState::Cancelled => totals.cancelled += 1,
+            AgentTaskState::TimedOut => totals.timed_out += 1,
+        }
+    }
+    totals
+}
+
+pub(crate) fn normalize_progress_events(
+    run_id: &str,
+    events: &[AgentTaskProgressEvent],
+    artifact_refs: &[AgentTaskArtifactRef],
+) -> Vec<AgentTaskEventEnvelope> {
+    events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| AgentTaskEventEnvelope {
+            schema: schemas::EVENT.to_string(),
+            run_id: run_id.to_string(),
+            task_id: event.task_id.clone(),
+            sequence: (index + 1) as u64,
+            event_type: "agent_task.state_changed".to_string(),
+            status: event.state,
+            message: event.message.clone(),
+            progress: json!({
+                "attempt": event.attempt,
+            }),
+            artifact_refs: artifact_refs
+                .iter()
+                .filter(|artifact_ref| artifact_ref.task_id == event.task_id)
+                .cloned()
+                .collect(),
+            metadata: json!({
+                "source_schema": AGENT_TASK_AGGREGATE_SCHEMA,
+            }),
+        })
+        .collect()
+}
+
 pub(crate) fn artifact_refs_for_outcomes(
     outcomes: &[AgentTaskOutcome],
 ) -> Vec<AgentTaskArtifactRef> {
