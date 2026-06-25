@@ -221,15 +221,19 @@ const performanceEvidenceResult = normalizeWordPressFuzzResult({
 								{
 									result: {
 										json: {
-											artifacts: {
-												'rest-db-query-profile': {
-													summary: {
-														query_count: 2,
-														total_time_ms: 6,
+											scenarios: [
+												{
+													artifacts: {
+														'rest-db-query-profile': {
+															summary: {
+																query_count: 2,
+																total_time_ms: 6,
+															},
+															cases: [{ path: '/wc/store/products', summary: { query_count: 2 } }],
+														},
 													},
-													cases: [{ path: '/wc/store/products', summary: { query_count: 2 } }],
 												},
-											},
+											],
 										},
 									},
 								},

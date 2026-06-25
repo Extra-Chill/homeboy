@@ -451,21 +451,32 @@ function nestedExecutionResultJsons(result) {
 
 function nestedExecutionDbQuerySummary(result) {
 	for (const entry of nestedExecutionResultJsons(result)) {
-		const artifacts = entry.artifacts;
-		if (!artifacts || typeof artifacts !== 'object' || Array.isArray(artifacts)) {
-			continue;
-		}
-		const profile = artifacts['rest-db-query-profile'] || artifacts.rest_db_query_profile || artifacts.restDbQueryProfile;
-		const summary = profile?.summary;
-		if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
-			return {
-				...summary,
-				query_time_ms: summary.query_time_ms ?? summary.queryTimeMs ?? summary.total_time_ms ?? summary.totalTimeMs,
-				top_queries: summary.top_queries ?? summary.topQueries ?? profile.cases,
-			};
+		for (const artifacts of nestedExecutionArtifactSources(entry)) {
+			const profile = artifacts['rest-db-query-profile'] || artifacts.rest_db_query_profile || artifacts.restDbQueryProfile;
+			const summary = profile?.summary;
+			if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
+				return {
+					...summary,
+					query_time_ms: summary.query_time_ms ?? summary.queryTimeMs ?? summary.total_time_ms ?? summary.totalTimeMs,
+					top_queries: summary.top_queries ?? summary.topQueries ?? profile.cases,
+				};
+			}
 		}
 	}
 	return null;
+}
+
+function nestedExecutionArtifactSources(entry) {
+	const sources = [];
+	if (entry?.artifacts && typeof entry.artifacts === 'object' && !Array.isArray(entry.artifacts)) {
+		sources.push(entry.artifacts);
+	}
+	for (const scenario of Array.isArray(entry?.scenarios) ? entry.scenarios : []) {
+		if (scenario?.artifacts && typeof scenario.artifacts === 'object' && !Array.isArray(scenario.artifacts)) {
+			sources.push(scenario.artifacts);
+		}
+	}
+	return sources;
 }
 
 function normalizeBudgetFindings({ budget, metrics, subject }) {
