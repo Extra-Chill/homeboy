@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.15.0] - 2026-06-25
+
+### Added
+- adapt fuzz plan cases to Codebox workloads
+
 ## [3.14.4] - 2026-06-25
 
 ### Fixed
