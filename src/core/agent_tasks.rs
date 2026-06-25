@@ -232,9 +232,10 @@ pub mod lifecycle {
         aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run, list_records,
         load_plan, logs, mark_resuming, mark_running, record_completed_run,
         record_pre_dispatch_failure, record_promotion, record_remote_dispatch_failure,
-        record_run_aggregate, retry, run_record_exists, status, submit_plan, AgentTaskArtifactRef,
-        AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
-        AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
+        record_run_aggregate, retry, run_record_exists, run_status, status, submit_plan,
+        AgentTaskArtifactRef, AgentTaskEventEnvelope, AgentTaskPreDispatchFailure,
+        AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
+        AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus,
         AgentTaskRunTask,
     };
 }
@@ -344,9 +345,9 @@ pub mod service {
     pub use super::super::agent_task_service::{
         aggregate_exit_code, artifacts, cancel, discover_runs, logs, normalize_plan_workspaces,
         promotion_source, read_plan, resume, retry, run_cook, run_loaded_plan, run_next,
-        run_submitted, status, submit_plan_spec, AgentTaskCookAttemptReport, AgentTaskCookReport,
-        AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands, AgentTaskDiscoveryCounts,
-        AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport, AgentTaskDiscoveryRun,
-        AgentTaskRetryServiceResult, AgentTaskRunResult,
+        run_status, run_submitted, status, submit_plan_spec, AgentTaskCookAttemptReport,
+        AgentTaskCookReport, AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands,
+        AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport,
+        AgentTaskDiscoveryRun, AgentTaskRetryServiceResult, AgentTaskRunResult,
     };
 }

@@ -172,6 +172,42 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
+pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
+    let record = status(run_id)?;
+    let (events, artifact_refs) = match store::read_aggregate(&record.run_id) {
+        Ok(aggregate) => {
+            let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
+            (aggregate.events, refs)
+        }
+        Err(_) => (queued_events(&record.tasks), record.artifact_refs.clone()),
+    };
+    let normalized_events = normalize_progress_events(&record.run_id, &events, &artifact_refs);
+    let latest_event_cursor = normalized_events
+        .last()
+        .map(|event| event.sequence)
+        .unwrap_or(0);
+    let cursor = since_cursor.unwrap_or(0);
+    let normalized_events = normalized_events
+        .into_iter()
+        .filter(|event| event.sequence > cursor)
+        .collect();
+
+    Ok(AgentTaskRunStatus {
+        schema: schemas::RUN_STATUS.to_string(),
+        run_id: record.run_id,
+        plan_id: record.plan_id,
+        state: record.state,
+        submitted_at: record.submitted_at,
+        updated_at: record.updated_at,
+        totals: record
+            .totals
+            .unwrap_or_else(|| totals_for_tasks(&record.tasks)),
+        latest_event_cursor,
+        artifact_refs: record.artifact_refs,
+        normalized_events,
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn write_run_record_for_test(record: &AgentTaskRunRecord) -> Result<()> {
     store::write_record(record)
@@ -244,13 +280,19 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
     let run_id = sanitize_run_id(run_id);
     let record = store::read_record(&run_id)?;
-    let events = store::read_aggregate(&run_id)
-        .map(|aggregate| aggregate.events)
-        .unwrap_or_else(|_| queued_events(&record.tasks));
+    let (events, artifact_refs) = match store::read_aggregate(&run_id) {
+        Ok(aggregate) => {
+            let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
+            (aggregate.events, refs)
+        }
+        Err(_) => (queued_events(&record.tasks), record.artifact_refs.clone()),
+    };
+    let normalized_events = normalize_progress_events(&run_id, &events, &artifact_refs);
     Ok(AgentTaskRunLog {
         schema: schemas::RUN_LOG.to_string(),
         run_id,
         events,
+        normalized_events,
     })
 }
 

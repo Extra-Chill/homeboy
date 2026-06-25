@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::core::agent_task::{AgentTaskRequest, AgentTaskWorkspaceMode};
 use crate::core::agent_task_lifecycle::{
-    self, AgentTaskRunArtifacts, AgentTaskRunLog, AgentTaskRunRecord,
+    self, AgentTaskRunArtifacts, AgentTaskRunLog, AgentTaskRunRecord, AgentTaskRunStatus,
 };
 use crate::core::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
@@ -126,6 +126,10 @@ pub struct AgentTaskRetryServiceResult {
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     agent_task_lifecycle::status(run_id)
+}
+
+pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
+    agent_task_lifecycle::run_status(run_id, since_cursor)
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {

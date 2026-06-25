@@ -22,6 +22,14 @@ use super::args::{CancelArgs, StatusArgs};
 const COMPACT_REF_LIMIT: usize = 12;
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
+    if args.bridge {
+        let bridge_status = agent_task_service::run_status(&args.run_id, args.since_cursor)?;
+        return Ok((
+            serde_json::to_value(bridge_status).unwrap_or(Value::Null),
+            0,
+        ));
+    }
+
     let record = agent_task_service::status(&args.run_id)?;
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
