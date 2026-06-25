@@ -1,14 +1,18 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 
 use homeboy::core::observation::runs_service::{
     self, PersistedArtifactCleanupOptions, RunnerDownloadCleanupOptions,
 };
 use homeboy::core::observation::ArtifactRecord;
+use homeboy::core::observation::ObservationStore;
+use homeboy::core::runners::{self as runner, Runner, RunnerKind};
+use homeboy::core::{server, Error};
 
 use super::types::{
-    RunsArtifactCleanupDownloadsArgs, RunsArtifactCleanupDownloadsOutput,
-    RunsArtifactCleanupPersistedArgs, RunsArtifactCleanupPersistedOutput, RunsArtifactGetOutput,
-    RunsOutput,
+    RunsArtifactAttachArgs, RunsArtifactAttachOutput, RunsArtifactCleanupDownloadsArgs,
+    RunsArtifactCleanupDownloadsOutput, RunsArtifactCleanupPersistedArgs,
+    RunsArtifactCleanupPersistedOutput, RunsArtifactGetOutput, RunsOutput,
 };
 use super::CmdResult;
 
@@ -27,6 +31,204 @@ pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsO
         }),
         0,
     ))
+}
+
+pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    runs_service::require_run(&store, &args.run_id)?;
+    validate_artifact_name(&args.name)?;
+    let runner = runner::load(&args.runner)?;
+    validate_runner_artifact_path(&runner, &args.path)?;
+
+    let source_path = copy_runner_artifact_source(&runner, &args.path)?;
+    let artifact = store.record_artifact_with_metadata(
+        &args.run_id,
+        &args.name,
+        &source_path,
+        serde_json::json!({
+            "source": "runner_path_attach",
+            "runner_id": runner.id,
+            "runner_path": args.path,
+        }),
+    )?;
+    if source_path != PathBuf::from(&args.path) {
+        let _ = fs::remove_file(&source_path);
+    }
+
+    Ok((
+        RunsOutput::ArtifactAttach(RunsArtifactAttachOutput {
+            command: "runs.artifact.attach",
+            run_id: args.run_id,
+            runner_id: args.runner,
+            source_path: args.path,
+            artifact,
+        }),
+        0,
+    ))
+}
+
+fn validate_artifact_name(name: &str) -> homeboy::core::Result<()> {
+    if name.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "name",
+            "artifact name must not be empty",
+            Some(name.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runner_artifact_path(runner: &Runner, path: &str) -> homeboy::core::Result<()> {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "runner artifact attach requires an absolute runner-side path",
+            Some(path.to_string()),
+            None,
+        ));
+    }
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "runner artifact attach path must not contain parent directory components",
+            Some(path.to_string()),
+            None,
+        ));
+    }
+
+    let roots = allowed_runner_artifact_roots(runner)?;
+    if roots.iter().any(|root| path_is_within_root(path, root)) {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "path",
+        "runner artifact path must be under an allowed runner workspace/output root",
+        Some(path.to_string()),
+        Some(vec![format!("Allowed roots: {}", roots.join(", "))]),
+    ))
+}
+
+fn allowed_runner_artifact_roots(runner: &Runner) -> homeboy::core::Result<Vec<String>> {
+    let mut roots = Vec::new();
+    if let Some(root) = runner.workspace_root.as_deref() {
+        roots.push(normalize_root(root));
+    }
+    roots.extend(
+        runner
+            .policy
+            .workspace_roots
+            .iter()
+            .map(|root| normalize_root(root)),
+    );
+    if let Some(root) = runner.env.get("HOMEBOY_ARTIFACT_ROOT") {
+        roots.push(normalize_root(root));
+    }
+    if runner.kind == RunnerKind::Local {
+        roots.push(normalize_root(
+            &homeboy::core::artifact_root()?.display().to_string(),
+        ));
+    }
+    roots.sort();
+    roots.dedup();
+    roots.retain(|root| Path::new(root).is_absolute());
+    if roots.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "runner has no configured workspace/output roots for artifact attach",
+            Some(runner.id.clone()),
+            Some(vec![
+                "Set the runner workspace_root, policy.workspace_roots, or HOMEBOY_ARTIFACT_ROOT."
+                    .to_string(),
+            ]),
+        ));
+    }
+    Ok(roots)
+}
+
+fn normalize_root(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn path_is_within_root(path: &str, root: &str) -> bool {
+    let root = normalize_root(root);
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn copy_runner_artifact_source(runner: &Runner, path: &str) -> homeboy::core::Result<PathBuf> {
+    match runner.kind {
+        RunnerKind::Local => {
+            let source = PathBuf::from(path);
+            let metadata = fs::metadata(&source).map_err(|err| {
+                Error::internal_io(err.to_string(), Some(format!("read artifact {path}")))
+            })?;
+            if !metadata.is_file() {
+                return Err(Error::validation_invalid_argument(
+                    "path",
+                    "runner artifact attach currently supports files",
+                    Some(path.to_string()),
+                    None,
+                ));
+            }
+            Ok(source)
+        }
+        RunnerKind::Ssh => {
+            let server_id = runner.server_id.as_deref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "runner",
+                    "SSH runner is missing server_id",
+                    Some(runner.id.clone()),
+                    None,
+                )
+            })?;
+            let temp_path = attach_download_path(&runner.id, path)?;
+            if let Some(parent) = temp_path.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    Error::internal_io(
+                        err.to_string(),
+                        Some(format!("create {}", parent.display())),
+                    )
+                })?;
+            }
+            let server = server::load(server_id)?;
+            let client = server::SshClient::from_server(&server, server_id)?;
+            let output = client.download_file(path, &temp_path.display().to_string());
+            if !output.success {
+                return Err(Error::validation_invalid_argument(
+                    "path",
+                    format!(
+                        "failed to download runner artifact: {}",
+                        output.stderr.trim()
+                    ),
+                    Some(path.to_string()),
+                    None,
+                ));
+            }
+            Ok(temp_path)
+        }
+    }
+}
+
+fn attach_download_path(runner_id: &str, path: &str) -> homeboy::core::Result<PathBuf> {
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("artifact");
+    Ok(homeboy::core::artifact_root()?
+        .join("runner-attach")
+        .join(runner_id)
+        .join(format!("{}-{file_name}", uuid::Uuid::new_v4())))
 }
 
 pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<RunsOutput> {
@@ -98,6 +300,139 @@ mod tests {
     fn artifact_root_test_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn attach_records_local_runner_file_under_workspace_root() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
+            let workspace = home.path().join("runner-workspace");
+            fs::create_dir_all(&workspace).expect("workspace");
+            let source = workspace.join("report.json");
+            fs::write(&source, br#"{"ok":true}"#).expect("source");
+
+            runner::create(
+                &format!(
+                    r#"{{"id":"issue-6403-local","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.display()
+                ),
+                false,
+            )
+            .expect("runner");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("runner-exec")
+                        .command("homeboy runner exec issue-6403-local")
+                        .metadata(serde_json::json!({ "issue": 6403 }))
+                        .build(),
+                )
+                .expect("run");
+
+            let output = attach(RunsArtifactAttachArgs {
+                run_id: run.id.clone(),
+                runner: "issue-6403-local".to_string(),
+                path: source.display().to_string(),
+                name: "runner-report".to_string(),
+            })
+            .expect("attach")
+            .0;
+            let RunsOutput::ArtifactAttach(output) = output else {
+                panic!("unexpected output");
+            };
+
+            assert_eq!(output.command, "runs.artifact.attach");
+            assert_eq!(output.run_id, run.id);
+            assert_eq!(output.artifact.kind, "runner-report");
+            assert_eq!(
+                output.artifact.metadata_json["runner_id"],
+                "issue-6403-local"
+            );
+            assert_eq!(
+                output.artifact.metadata_json["runner_path"],
+                source.display().to_string()
+            );
+            assert!(PathBuf::from(&output.artifact.path).exists());
+            let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].id, output.artifact.id);
+        });
+    }
+
+    #[test]
+    fn attach_rejects_local_path_outside_allowed_roots() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let workspace = home.path().join("runner-workspace");
+            let outside = home.path().join("outside.txt");
+            fs::create_dir_all(&workspace).expect("workspace");
+            fs::write(&outside, b"outside").expect("outside");
+            runner::create(
+                &format!(
+                    r#"{{"id":"issue-6403-guard","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.display()
+                ),
+                false,
+            )
+            .expect("runner");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("runner-exec").build())
+                .expect("run");
+
+            let result = attach(RunsArtifactAttachArgs {
+                run_id: run.id,
+                runner: "issue-6403-guard".to_string(),
+                path: outside.display().to_string(),
+                name: "outside".to_string(),
+            });
+            let Err(err) = result else {
+                panic!("outside path should fail");
+            };
+
+            assert!(err
+                .to_string()
+                .contains("allowed runner workspace/output root"));
+        });
+    }
+
+    #[test]
+    fn attach_rejects_parent_dir_components() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let workspace = home.path().join("runner-workspace");
+            fs::create_dir_all(&workspace).expect("workspace");
+            runner::create(
+                &format!(
+                    r#"{{"id":"issue-6403-parent","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.display()
+                ),
+                false,
+            )
+            .expect("runner");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("runner-exec").build())
+                .expect("run");
+
+            let result = attach(RunsArtifactAttachArgs {
+                run_id: run.id,
+                runner: "issue-6403-parent".to_string(),
+                path: workspace.join("../outside.txt").display().to_string(),
+                name: "outside".to_string(),
+            });
+            let Err(err) = result else {
+                panic!("parent-dir path should fail");
+            };
+
+            assert!(err.to_string().contains("parent directory"));
+        });
     }
 
     #[test]

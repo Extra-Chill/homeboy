@@ -300,6 +300,11 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "default output is a non-mutating cleanup plan; pass --apply to delete artifacts";
             metadata.dangerous_flags = vec!["--apply"];
         }
+        ["runs", "artifact", "attach"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "copies an existing runner-side file into the persisted local artifact store and records it against a run";
+        }
         ["agent-task", "promote"] => {
             metadata.mutates = true;
             metadata.dry_run_flag = Some("--dry-run");

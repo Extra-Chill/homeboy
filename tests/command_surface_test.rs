@@ -366,6 +366,7 @@ fn mutating_safety_manifest_entries_advertise_apply_or_are_allowlisted() {
         "project remove".to_string(),
         "project rename".to_string(),
         "project set".to_string(),
+        "runs artifact attach".to_string(),
         "runs import".to_string(),
         "server connect".to_string(),
         "server create".to_string(),
