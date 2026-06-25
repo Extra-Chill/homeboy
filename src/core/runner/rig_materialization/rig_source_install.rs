@@ -79,6 +79,7 @@ fn exec_runner_rig_sources_command(
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: None,
+            run_id: None,
             detach_after_handoff: false,
         },
     )
