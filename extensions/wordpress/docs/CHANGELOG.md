@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.13.33] - 2026-06-25
+
+### Changed
+- Normalize workload profiler artifact metrics
+
 ## [3.13.32] - 2026-06-25
 
 ### Changed
