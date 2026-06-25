@@ -270,6 +270,19 @@ assert.equal(wooDbApiSummary.hotspot_summary.items[0].value, 12);
 assert.equal(wooDbApiSummary.observation_set.observations[0].fingerprint, 'select-products');
 assert.equal(wooDbApiSummary.observation_set.observations[1].metric, 'duration_ms');
 
+const structuredResultSummary = normalizeWpCodeboxFuzzSuiteResult({
+	schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+	status: 'passed',
+	cases: [{ id: 'runtime-case', status: 'passed', success: true, metadata: { input: { id: 'runtime-workload' } } }],
+	coverage_summary: { skipped_count: 0 },
+}, { request: { artifact_declarations: DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS } });
+assert.equal(structuredResultSummary.status, 'passed');
+assert.deepEqual(structuredResultSummary.failures, []);
+assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'wp-codebox-fuzz-suite-result'), true);
+assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'case-log'), true);
+assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'replay-data'), true);
+assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'coverage-summary'), true);
+
 const genericPrimitiveManifest = {
 	schema: 'homeboy/fuzz-workload/v1',
 	id: 'generic-primitive-smoke',

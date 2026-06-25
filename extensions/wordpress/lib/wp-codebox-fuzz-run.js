@@ -1122,7 +1122,49 @@ function normalizeWpCodeboxFuzzArtifacts(source = {}, result = {}) {
 	appendCaseArtifacts(artifacts, source?.wordpress_fuzz_result?.cases || source?.wordpressFuzzResult?.cases, 'fuzz_case');
 	appendCaseArtifacts(artifacts, source?.failures || source?.errors || source?.failed_cases || source?.failedCases, 'failing_case');
 	appendCaseArtifacts(artifacts, source?.repro_cases || source?.reproCases || source?.reproductions, 'repro_case');
+	if (artifacts.length === 0) {
+		appendStructuredFuzzArtifacts(artifacts, source);
+	}
 	return dedupeArtifacts(artifacts.map(normalizeFuzzArtifact).filter(Boolean));
+}
+
+function appendStructuredFuzzArtifacts(artifacts, source = {}) {
+	const cases = normalizeArray(source?.cases || source?.fuzz_cases || source?.fuzzCases);
+	if (cases.length === 0) {
+		return;
+	}
+	if (source?.schema || source?.status) {
+		artifacts.push({
+			name: 'wp-codebox-fuzz-suite-result',
+			role: 'fuzz_report',
+			semantic_key: 'fuzz.result.normalized',
+			content: source,
+			metadata: { schema: source?.schema || WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA },
+		});
+	}
+	if (cases.length > 0) {
+		artifacts.push({
+			name: 'case-log',
+			role: 'case_log',
+			semantic_key: 'fuzz.case.log',
+			content: cases,
+		});
+		artifacts.push({
+			name: 'replay-data',
+			role: 'replay_data',
+			semantic_key: 'fuzz.replay.data',
+			content: cases.map((entry) => stripUndefined({ id: entry.id || entry.case_id || entry.caseId, target: objectOrUndefined(entry.target), input: objectOrUndefined(entry.metadata?.input || entry.input) })),
+		});
+	}
+	const coverageSummary = normalizeCoverageSummary(source?.coverage_summary || source?.coverageSummary || source?.coverage?.summary);
+	if (coverageSummary) {
+		artifacts.push({
+			name: 'coverage-summary',
+			role: 'coverage_summary',
+			semantic_key: 'fuzz.coverage.summary',
+			content: coverageSummary,
+		});
+	}
 }
 
 function fuzzArtifactRefsFromSource(source = {}, result = {}) {
