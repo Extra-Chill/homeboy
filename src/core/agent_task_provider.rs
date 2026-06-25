@@ -304,7 +304,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             .executor
             .required_capabilities
             .iter()
-            .filter(|capability| !provider.capabilities.contains(capability))
+            .filter(|capability| !provider_satisfies_capability(provider, capability))
             .cloned()
             .collect();
         if !missing_capabilities.is_empty() {
@@ -324,6 +324,13 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
 
         run_provider_command(&request, provider)
     }
+}
+
+fn provider_satisfies_capability(provider: &AgentTaskExecutorProvider, capability: &str) -> bool {
+    provider.capabilities.iter().any(|provided| {
+        provided == capability
+            || (capability.starts_with("ability:") && provided == "ability_execution")
+    })
 }
 
 fn run_fixture_provider(request: &AgentTaskRequest) -> AgentTaskOutcome {
@@ -1288,6 +1295,29 @@ mod tests {
         assert_eq!(
             aggregate.outcomes[0].diagnostics[0].data["missing_capabilities"],
             json!(["workspace_write"])
+        );
+    }
+
+    #[test]
+    fn scheduler_accepts_generic_ability_execution_capability() {
+        let command = format!(
+            "node {}",
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'ok',outputs:{ability:'runtime-package/run'}}));")
+        );
+        let (mut request, mut provider) = request("task-ability-capability", command);
+        request.executor.required_capabilities = vec!["ability:runtime-package/run".to_string()];
+        provider.capabilities.push("ability_execution".to_string());
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]));
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-ability-capability", vec![request]));
+
+        assert_eq!(aggregate.totals.succeeded, 1);
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Succeeded
         );
     }
 
