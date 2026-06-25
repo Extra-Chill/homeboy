@@ -243,6 +243,18 @@ fn fuzz_run_parses_generic_contract_flags() {
 }
 
 #[test]
+fn fuzz_doctor_parses_extension_id() {
+    let cli = FuzzCli::parse_from(["fuzz", "doctor", "--extension", "runtime-a"]);
+
+    match cli.args.command {
+        Some(FuzzCommand::Doctor(doctor)) => {
+            assert_eq!(doctor.extension_id, "runtime-a");
+        }
+        _ => panic!("expected fuzz doctor command"),
+    }
+}
+
+#[test]
 fn fuzz_validate_accepts_case_log_artifact() {
     let dir = tempfile::tempdir().expect("temp dir");
     let results_file = dir.path().join("fuzz-results.json");
