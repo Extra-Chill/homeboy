@@ -220,6 +220,7 @@ function normalizeFuzzCaseResult(result, index) {
 	const metrics = normalizeCasePerformanceMetrics(result);
 	const budgetFindings = normalizeBudgetFindings({ budget, metrics, subject: result.id || `case-${index + 1}` });
 	const status = normalizeCaseStatus(result.status, budgetFindings);
+	const dbQuery = result.db_query || result.dbQuery || nestedExecutionDbQuerySummary(result) || null;
 	if (!CASE_STATUSES.has(status)) {
 		throw new Error(`Unsupported WordPress fuzz case status: ${status}`);
 	}
@@ -238,7 +239,7 @@ function normalizeFuzzCaseResult(result, index) {
 		destructive_reason: result.destructive_reason || result.destructiveReason || null,
 		destructive_reasons: normalizeReasonCodes(result.destructive_reasons || result.destructiveReasons || result.destructive_reason || result.destructiveReason),
 		role_boundary: result.role_boundary || result.roleBoundary || null,
-		db_query: result.db_query || result.dbQuery || null,
+		db_query: dbQuery,
 		admin_browser: result.admin_browser || result.adminBrowser || null,
 		http_guardrail: result.http_guardrail || result.httpGuardrail || null,
 		duration_ms: Number.isFinite(result.duration_ms) ? result.duration_ms : result.durationMs || null,
@@ -362,11 +363,13 @@ function normalizePerformanceBudget(input) {
 
 function normalizeCasePerformanceMetrics(result) {
 	const executionResults = nestedExecutionResultJsons(result);
+	const dbQuerySummary = nestedExecutionDbQuerySummary(result);
 	const sources = [
 		result,
 		result.metrics,
 		result.performance_metrics || result.performanceMetrics,
 		result.metadata?.metrics,
+		dbQuerySummary,
 		result.metadata?.execution?.result?.json,
 		result.metadata?.execution?.result?.json?.metrics,
 		...executionResults,
@@ -417,7 +420,8 @@ function normalizeMetricReasons(result, metrics) {
 function normalizeCasePerformanceSummaries(result) {
 	const executionJson = result.metadata?.execution?.result?.json;
 	const executionResults = nestedExecutionResultJsons(result);
-	const querySources = [result.db_query || result.dbQuery, result.metrics, result.performance_metrics || result.performanceMetrics, result.metadata?.metrics, executionJson, executionJson?.metrics, ...executionResults, ...executionResults.map((entry) => entry?.metrics)];
+	const dbQuerySummary = nestedExecutionDbQuerySummary(result);
+	const querySources = [result.db_query || result.dbQuery, dbQuerySummary, result.metrics, result.performance_metrics || result.performanceMetrics, result.metadata?.metrics, executionJson, executionJson?.metrics, ...executionResults, ...executionResults.map((entry) => entry?.metrics)];
 	const browser = result.admin_browser || result.adminBrowser || {};
 	const browserMetrics = result.browser_metrics || result.browserMetrics || browser.browserMetrics || {};
 	const networkMetrics = result.network_metrics || result.networkMetrics || browser.networkMetrics || {};
@@ -443,6 +447,25 @@ function nestedExecutionResultJsons(result) {
 		return [];
 	}
 	return executions.map((execution) => execution?.result?.json).filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry));
+}
+
+function nestedExecutionDbQuerySummary(result) {
+	for (const entry of nestedExecutionResultJsons(result)) {
+		const artifacts = entry.artifacts;
+		if (!artifacts || typeof artifacts !== 'object' || Array.isArray(artifacts)) {
+			continue;
+		}
+		const profile = artifacts['rest-db-query-profile'] || artifacts.rest_db_query_profile || artifacts.restDbQueryProfile;
+		const summary = profile?.summary;
+		if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
+			return {
+				...summary,
+				query_time_ms: summary.query_time_ms ?? summary.queryTimeMs ?? summary.total_time_ms ?? summary.totalTimeMs,
+				top_queries: summary.top_queries ?? summary.topQueries ?? profile.cases,
+			};
+		}
+	}
+	return null;
 }
 
 function normalizeBudgetFindings({ budget, metrics, subject }) {

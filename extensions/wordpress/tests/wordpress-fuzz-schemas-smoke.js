@@ -215,10 +215,14 @@ const performanceEvidenceResult = normalizeWordPressFuzzResult({
 								{
 									result: {
 										json: {
-											metrics: {
-												query_count: 2,
-												query_time_ms: 6,
-												top_queries: [{ shape: 'SELECT option_value FROM wp_options WHERE option_name = ?', count: 2 }],
+											artifacts: {
+												'rest-db-query-profile': {
+													summary: {
+														query_count: 2,
+														total_time_ms: 6,
+													},
+													cases: [{ path: '/wc/store/products', summary: { query_count: 2 } }],
+												},
 											},
 										},
 									},
@@ -247,7 +251,8 @@ assert.equal(performanceEvidenceResult.cases[2].performance_metric_reasons.query
 assert.equal(performanceEvidenceResult.cases[2].performance_metric_reasons.query_count.source_key, 'queryCount');
 assert.equal(performanceEvidenceResult.cases[3].performance_metrics.query_count, 2);
 assert.equal(performanceEvidenceResult.cases[3].performance_metrics.query_time_ms, 6);
-assert.deepEqual(performanceEvidenceResult.cases[3].performance_summaries.top_queries, [{ shape: 'SELECT option_value FROM wp_options WHERE option_name = ?', count: 2 }]);
+assert.equal(performanceEvidenceResult.cases[3].db_query.query_count, 2);
+assert.deepEqual(performanceEvidenceResult.cases[3].performance_summaries.top_queries, [{ path: '/wc/store/products', summary: { query_count: 2 } }]);
 assert.deepEqual(performanceEvidenceResult.cases[0].performance_summaries.top_queries, [{ shape: 'SELECT * FROM wp_posts WHERE ID = ?', count: 4 }]);
 assert.deepEqual(performanceEvidenceResult.cases[0].performance_summaries.top_tables, [{ table: 'wp_posts', count: 5 }]);
 assert.equal(performanceEvidenceResult.cases[0].performance_summaries.browser_network.failed_request_count, 1);
