@@ -494,6 +494,7 @@ fn run_runtime_overlay_install_step(
             require_paths: Vec::new(),
             runner_workload: None,
             detach_after_handoff: false,
+            run_label: None,
         },
     )?;
     if exit_code == 0 {

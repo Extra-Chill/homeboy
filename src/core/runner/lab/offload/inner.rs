@@ -656,6 +656,7 @@ pub(crate) fn run_lab_offload_inner(
             require_paths: Vec::new(),
             runner_workload: Some(runner_workload),
             detach_after_handoff: request.detach_after_handoff,
+            run_label: None,
         },
     );
     overhead.record(LabOffloadPhase::RemoteExec, remote_exec_started.elapsed());

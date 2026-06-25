@@ -32,6 +32,77 @@ pub struct RunnerJobLogSnapshot {
     pub events: Vec<JobEvent>,
 }
 
+/// Fallback run-label token used when a command yields no usable domain token
+/// (for example an all-flags argv). Kept deliberately generic so the
+/// core-agnostic audit gate never sees an ecosystem literal.
+pub(crate) const RUNNER_EXEC_DEFAULT_RUN_LABEL: &str = "exec";
+
+/// Derive a domain-specific run label for a `runner exec` job.
+///
+/// When the caller supplies an explicit label it wins (after sanitizing); a
+/// blank/whitespace-only explicit label is treated as absent. Otherwise the
+/// label is derived from the command being executed \u2014 the basename of the
+/// first meaningful (non flag-looking) token \u2014 so persisted runs reflect
+/// the command domain instead of inheriting an unrelated workload name from an
+/// adjacent invocation. The derivation is purely data-driven: it reads the
+/// command argv the runner already received and never matches
+/// ecosystem-specific literals, keeping homeboy core agnostic.
+pub(crate) fn derive_runner_exec_run_label(command: &[String], explicit: Option<&str>) -> String {
+    if let Some(label) = explicit
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(sanitize_run_label_token)
+        .filter(|label| !label.is_empty())
+    {
+        return label;
+    }
+
+    command
+        .iter()
+        .map(|token| token.trim())
+        .find(|token| !token.is_empty() && !token.starts_with('-'))
+        .map(command_domain_token)
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| RUNNER_EXEC_DEFAULT_RUN_LABEL.to_string())
+}
+
+/// Reduce a command token to its domain stem: take the final path segment (so
+/// `/usr/bin/foo` and `foo` collapse to `foo`), strip any trailing extension,
+/// then sanitize into a slug-safe label.
+fn command_domain_token(token: &str) -> String {
+    let basename = token
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(token);
+    let stem = basename
+        .split_once('.')
+        .map(|(stem, _)| stem)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(basename);
+    sanitize_run_label_token(stem)
+}
+
+/// Collapse a token into a lowercase, slug-safe label: ASCII alphanumerics are
+/// preserved, every other run of characters becomes a single `-`, and leading
+/// and trailing separators are trimmed.
+fn sanitize_run_label_token(token: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_separator = false;
+    for ch in token.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_separator = false;
+            slug.extend(ch.to_lowercase());
+        } else {
+            pending_separator = true;
+        }
+    }
+    slug
+}
+
 pub fn mirror_daemon_evidence(
     runner: &Runner,
     cwd: &str,
@@ -39,9 +110,11 @@ pub fn mirror_daemon_evidence(
     job: &Job,
     events: &[JobEvent],
     result: &Value,
+    run_label: Option<&str>,
 ) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
-    let local_job_run = mirror_job_run(&store, runner, cwd, command, job, events, result)?;
+    let local_job_run =
+        mirror_job_run(&store, runner, cwd, command, job, events, result, run_label)?;
     let remote_runs = mirror_remote_observation_runs(&store, runner, job, result)?;
     let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
     let primary_run = primary_mirrored_run(&remote_runs).unwrap_or(local_job_run);
@@ -59,9 +132,10 @@ pub fn mirror_reverse_broker_evidence(
     job: &Job,
     events: &[JobEvent],
     result: &Value,
+    run_label: Option<&str>,
 ) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
-    let mut run = mirror_job_run(&store, runner, cwd, command, job, events, result)?;
+    let mut run = mirror_job_run(&store, runner, cwd, command, job, events, result, run_label)?;
     let artifacts = mirror_reverse_broker_artifacts(&store, runner, broker_url, &run.id, job)?;
 
     let mut metadata = run.metadata_json.clone();
@@ -93,9 +167,19 @@ pub fn mirror_daemon_job_progress(
     command: &[String],
     job: &Job,
     events: &[JobEvent],
+    run_label: Option<&str>,
 ) -> Result<RunRecord> {
     let store = ObservationStore::open_initialized()?;
-    mirror_job_run(&store, runner, cwd, command, job, events, &json!({}))
+    mirror_job_run(
+        &store,
+        runner,
+        cwd,
+        command,
+        job,
+        events,
+        &json!({}),
+        run_label,
+    )
 }
 
 pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRecord>>> {
@@ -116,7 +200,7 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         .as_ref()
         .map(|command| vec![command.clone()])
         .unwrap_or_default();
-    mirror_job_run(&store, &runner, cwd, &command, &job, &events, &result)?;
+    mirror_job_run(&store, &runner, cwd, &command, &job, &events, &result, None)?;
     Ok(Some(mirror_remote_observation_runs(
         &store, &runner, &job, &result,
     )?))
@@ -240,7 +324,9 @@ pub(super) fn mirror_job_run(
     job: &Job,
     events: &[JobEvent],
     result: &Value,
+    run_label: Option<&str>,
 ) -> Result<RunRecord> {
+    let run_label = derive_runner_exec_run_label(command, run_label);
     let run = RunRecord {
         id: local_job_run_id(&runner.id, &job.id.to_string()),
         kind: "runner-exec".to_string(),
@@ -254,6 +340,7 @@ pub(super) fn mirror_job_run(
         git_sha: None,
         rig_id: None,
         metadata_json: json!({
+            "run_label": run_label,
             "lab": {
                 "runner": runner_metadata(runner),
                 "remote_job": job,
@@ -453,4 +540,79 @@ fn mirrored_reverse_patch_result(
         );
     }
     Ok(Some(patched))
+}
+
+#[cfg(test)]
+mod run_label_tests {
+    use super::{derive_runner_exec_run_label, RUNNER_EXEC_DEFAULT_RUN_LABEL};
+
+    fn argv(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|token| token.to_string()).collect()
+    }
+
+    #[test]
+    fn derives_run_label_from_command_domain_when_no_explicit_label() {
+        let command = argv(&["psql", "--no-align", "-c", "select 1"]);
+        assert_eq!(derive_runner_exec_run_label(&command, None), "psql");
+    }
+
+    #[test]
+    fn derives_run_label_from_executable_basename_and_strips_extension() {
+        let command = argv(&["/usr/local/bin/profile.sh", "--matrix"]);
+        assert_eq!(derive_runner_exec_run_label(&command, None), "profile");
+    }
+
+    #[test]
+    fn skips_leading_flags_when_deriving_run_label() {
+        // Leading flag-looking tokens are not a command domain; the first
+        // meaningful token wins so evidence reflects what actually ran.
+        let command = argv(&["--login", "diagnose", "system"]);
+        assert_eq!(derive_runner_exec_run_label(&command, None), "diagnose");
+    }
+
+    #[test]
+    fn explicit_label_is_used_and_sanitized() {
+        let command = argv(&["psql", "-c", "select 1"]);
+        assert_eq!(
+            derive_runner_exec_run_label(&command, Some("DB Query Profile")),
+            "db-query-profile"
+        );
+    }
+
+    #[test]
+    fn blank_explicit_label_falls_back_to_command_derivation() {
+        let command = argv(&["bench", "--iterations", "10"]);
+        assert_eq!(derive_runner_exec_run_label(&command, Some("   ")), "bench");
+    }
+
+    #[test]
+    fn unrelated_prior_workload_name_is_not_reused_as_a_generic_fallback() {
+        // A stale workload-family name from an adjacent invocation must never be
+        // inherited: with no explicit label the run label comes from the command
+        // itself, and an all-flags command falls back to a generic token rather
+        // than any workload-specific name (#6362).
+        let stale_workload = "woo-db-api-rest-query-profile-20240101";
+        let command = argv(&["status"]);
+        let derived = derive_runner_exec_run_label(&command, None);
+        assert_eq!(derived, "status");
+        assert_ne!(derived, stale_workload);
+
+        let all_flags = argv(&["--verbose", "--json"]);
+        assert_eq!(
+            derive_runner_exec_run_label(&all_flags, None),
+            RUNNER_EXEC_DEFAULT_RUN_LABEL
+        );
+        assert_ne!(
+            derive_runner_exec_run_label(&all_flags, None),
+            stale_workload
+        );
+    }
+
+    #[test]
+    fn empty_command_falls_back_to_generic_default_label() {
+        assert_eq!(
+            derive_runner_exec_run_label(&[], None),
+            RUNNER_EXEC_DEFAULT_RUN_LABEL
+        );
+    }
 }

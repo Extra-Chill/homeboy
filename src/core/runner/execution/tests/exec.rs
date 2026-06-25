@@ -318,6 +318,7 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
                 require_paths: Vec::new(),
                 runner_workload: Some(workload),
                 detach_after_handoff: false,
+                run_label: None,
             },
             |_plan| {
                 Ok(ProcessOutput {
@@ -358,6 +359,7 @@ fn test_exec_runs_local_runner_command() {
                 require_paths: Vec::new(),
                 runner_workload: None,
                 detach_after_handoff: false,
+                run_label: None,
             },
         )
         .expect("exec local runner");
@@ -414,6 +416,7 @@ fn test_exec_does_not_leak_ambient_process_env() {
                 require_paths: Vec::new(),
                 runner_workload: None,
                 detach_after_handoff: false,
+                run_label: None,
             },
         )
         .expect("exec local runner");
@@ -450,6 +453,7 @@ fn test_exec_preserves_explicit_request_env() {
                 require_paths: Vec::new(),
                 runner_workload: None,
                 detach_after_handoff: false,
+                run_label: None,
             },
         )
         .expect("exec local runner");
@@ -494,6 +498,7 @@ fn test_exec_rejects_missing_required_local_runner_path() {
                 require_paths: vec![missing.display().to_string()],
                 runner_workload: None,
                 detach_after_handoff: false,
+                run_label: None,
             },
         )
         .expect_err("missing required path rejects before command");
@@ -537,6 +542,7 @@ fn test_exec_reports_required_path_diagnostics() {
                 require_paths: vec![required_path.display().to_string()],
                 runner_workload: None,
                 detach_after_handoff: false,
+                run_label: None,
             },
         )
         .expect("exec with required path");
@@ -591,6 +597,7 @@ fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
                 require_paths: Vec::new(),
                 runner_workload: None,
                 detach_after_handoff: false,
+                run_label: None,
             },
         )
         .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
@@ -629,6 +636,7 @@ fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
         require_paths: Vec::new(),
         runner_workload: None,
         detach_after_handoff: false,
+        run_label: None,
     };
 
     assert!(should_force_diagnostic_ssh(&ssh_runner(), &options));

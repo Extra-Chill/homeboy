@@ -94,6 +94,10 @@ pub struct RunnerExecOptions {
     pub require_paths: Vec<String>,
     pub runner_workload: Option<RunnerWorkload>,
     pub detach_after_handoff: bool,
+    /// Explicit run label for ad hoc evidence commands. When omitted the
+    /// persisted run label is derived from the command being executed instead of
+    /// inheriting an unrelated workload name (#6362).
+    pub run_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -347,6 +351,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.require_paths,
                 options.runner_workload,
                 options.detach_after_handoff,
+                options.run_label,
             )
         }
         RunnerTransport::ReverseBroker(handle) => {
@@ -364,6 +369,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.require_paths,
                 options.runner_workload,
                 options.detach_after_handoff,
+                options.run_label,
             )
         }
         RunnerTransport::Local => exec_local(plan),

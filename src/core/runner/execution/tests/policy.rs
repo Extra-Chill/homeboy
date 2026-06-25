@@ -40,6 +40,7 @@ fn test_runner_policy_denies_raw_ssh_exec_by_default() {
         require_paths: Vec::new(),
         runner_workload: None,
         detach_after_handoff: false,
+        run_label: None,
     };
 
     let err = validate_runner_policy(&runner, "/srv/homeboy/project", policy_request(&options))
@@ -76,6 +77,7 @@ fn test_runner_policy_enforces_projects_commands_workspace_and_artifacts() {
         require_paths: Vec::new(),
         runner_workload: None,
         detach_after_handoff: false,
+        run_label: None,
     };
     validate_runner_policy(
         &runner,

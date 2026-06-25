@@ -286,6 +286,7 @@ fn run_once_output(
             require_paths: claim.request.require_paths.clone(),
             runner_workload: claim.request.runner_workload.clone(),
             detach_after_handoff: false,
+            run_label: None,
         },
         || {
             if cancel_seen || last_cancel_poll.elapsed() < BROKER_CANCEL_POLL_INTERVAL {

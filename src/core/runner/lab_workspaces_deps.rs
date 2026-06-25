@@ -479,6 +479,7 @@ pub(super) fn bootstrap_source_cli_node_dependencies(
             require_paths: Vec::new(),
             runner_workload: None,
             detach_after_handoff: false,
+            run_label: None,
         },
     )?;
     if exit_code == 0 {

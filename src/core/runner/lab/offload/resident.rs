@@ -147,6 +147,7 @@ pub(crate) fn run_runner_resident_lab_offload(
             require_paths: Vec::new(),
             runner_workload: None,
             detach_after_handoff: false,
+            run_label: None,
         },
     )?;
     exec_timer.finish();
@@ -241,6 +242,7 @@ pub(crate) fn refresh_managed_runner_sources(
                 require_paths: Vec::new(),
                 runner_workload: None,
                 detach_after_handoff: false,
+                run_label: None,
             },
         )?;
         if exit_code != 0 {

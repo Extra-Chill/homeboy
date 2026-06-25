@@ -158,6 +158,7 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
         require_paths: Vec::new(),
         runner_workload: None,
         detach_after_handoff: false,
+        run_label: None,
     }
 }
 

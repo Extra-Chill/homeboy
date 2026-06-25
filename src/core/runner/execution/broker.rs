@@ -31,6 +31,7 @@ pub(super) fn exec_via_reverse_broker(
     require_paths: Vec<String>,
     runner_workload: Option<RunnerWorkload>,
     detach_after_handoff: bool,
+    run_label: Option<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -80,7 +81,8 @@ pub(super) fn exec_via_reverse_broker(
             Some("parse reverse broker job".to_string()),
         )
     })?;
-    let persisted_run_id = persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    let persisted_run_id =
+        persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_label.as_deref());
     if detach_after_handoff {
         return Ok(detached_handoff_output(
             runner,
@@ -140,8 +142,16 @@ pub(super) fn exec_via_reverse_broker(
         &redaction_secret_env_names,
     );
 
-    let mirror =
-        mirror_reverse_broker_evidence(runner, broker_url, &cwd, &command, &job, &events, &result)?;
+    let mirror = mirror_reverse_broker_evidence(
+        runner,
+        broker_url,
+        &cwd,
+        &command,
+        &job,
+        &events,
+        &result,
+        run_label.as_deref(),
+    )?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
     let artifacts = job.artifacts.clone();

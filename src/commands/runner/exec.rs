@@ -18,6 +18,7 @@ pub(super) fn exec(
     require_paths: Vec<String>,
     script_file: Option<String>,
     env: Vec<String>,
+    run_label: Option<String>,
     dry_run: bool,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
@@ -65,6 +66,7 @@ pub(super) fn exec(
             require_paths,
             runner_workload: None,
             detach_after_handoff: false,
+            run_label,
         },
     )
 }

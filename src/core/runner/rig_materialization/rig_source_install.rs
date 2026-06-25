@@ -80,6 +80,7 @@ fn exec_runner_rig_sources_command(
             require_paths: Vec::new(),
             runner_workload: None,
             detach_after_handoff: false,
+            run_label: None,
         },
     )
 }

@@ -230,6 +230,7 @@ pub(super) fn sync_lab_offload_rigs(
                 require_paths: Vec::new(),
                 runner_workload: None,
                 detach_after_handoff: false,
+                run_label: None,
             },
         )?;
 

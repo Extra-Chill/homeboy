@@ -245,6 +245,13 @@ pub(super) enum RunnerCommand {
         #[arg(long = "env")]
         env: Vec<String>,
 
+        /// Explicit run label recorded with the persisted evidence run for this
+        /// ad hoc command. When omitted, the run label is derived from the
+        /// command being executed instead of inheriting an unrelated workload
+        /// name from an adjacent invocation.
+        #[arg(long = "run-label")]
+        run_label: Option<String>,
+
         /// Build the runner exec plan without executing it.
         #[arg(long)]
         dry_run: bool,
