@@ -577,7 +577,8 @@ fn run_component_with_rig_context(
         args.setting_args.setting.clone(),
         args.setting_args.setting_json.clone(),
     );
-    resolve_options.extension_overrides = args.extension_override.extensions.clone();
+    resolve_options.extension_overrides =
+        super::effective_extension_overrides(&args.extension_override.extensions, rig_spec);
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
     super::warn_unknown_setting_keys(&ctx, &args.setting_args);

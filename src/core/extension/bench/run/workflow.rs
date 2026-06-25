@@ -103,7 +103,7 @@ pub fn run_main_bench_workflow(
         })?;
     }
 
-    if component.has_script(ExtensionCapability::Bench) {
+    if component.has_script(ExtensionCapability::Bench) && args.extra_workloads.is_empty() {
         clear_responsiveness_file(run_dir)?;
         let component_env = bench_component_script_env(&args, run_dir)?;
         let script_output =
