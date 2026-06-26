@@ -464,6 +464,70 @@ fn test_exec_preserves_explicit_request_env() {
 }
 
 #[test]
+fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
+    crate::test_support::with_isolated_home(|_| {
+        super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+            .expect("create local runner");
+
+        let (output, exit_code) = exec(
+            "lab-local",
+            RunnerExecOptions {
+                cwd: None,
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf '%s|%s|%s|%s' \"$HOMEBOY_ACTIVE_RUN_ID\" \"$HOMEBOY_RUN_ID\" \"$HOMEBOY_BENCH_RUN_ID\" \"${WORKFLOW_BENCH_RUN_ID-unset}\"".to_string(),
+                ],
+                env: HashMap::from([
+                    (
+                        "HOMEBOY_ACTIVE_RUN_ID".to_string(),
+                        "ambient-active".to_string(),
+                    ),
+                    ("HOMEBOY_RUN_ID".to_string(), "ambient-homeboy".to_string()),
+                    (
+                        "HOMEBOY_BENCH_RUN_ID".to_string(),
+                        "ambient-bench".to_string(),
+                    ),
+                    (
+                        "WORKFLOW_BENCH_RUN_ID".to_string(),
+                        "ambient-workflow".to_string(),
+                    ),
+                ]),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: Vec::new(),
+                runner_workload: None,
+                run_id: Some("explicit-run".to_string()),
+                detach_after_handoff: false,
+            },
+        )
+        .expect("exec local runner");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            output.stdout,
+            "explicit-run|explicit-run|explicit-run|unset"
+        );
+        let hints = output
+            .diagnostics
+            .expect("run-id diagnostics")
+            .hints
+            .join("\n");
+        assert!(hints.contains("runner exec --run-id took precedence"));
+        assert!(hints.contains("HOMEBOY_ACTIVE_RUN_ID"));
+        assert!(hints.contains("HOMEBOY_RUN_ID"));
+        assert!(hints.contains("HOMEBOY_BENCH_RUN_ID"));
+        assert!(hints.contains("WORKFLOW_BENCH_RUN_ID"));
+    });
+}
+
+#[test]
 fn test_exec_rejects_missing_required_local_runner_path() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
