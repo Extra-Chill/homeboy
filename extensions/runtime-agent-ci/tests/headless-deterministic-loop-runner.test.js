@@ -72,6 +72,11 @@ assert.equal(twoRevolution.tasks[0].loop_policy.iterations[0].repair.required, t
 assert.equal(twoRevolution.tasks[0].loop_policy.iterations[0].repair.next_task_id, 'repair-2');
 assert.equal(twoRevolution.tasks[0].loop_policy.iterations[1].candidate_task_id, 'repair-2');
 assert.equal(twoRevolution.tasks[0].loop_policy.iterations[1].accepted, true);
+assert.equal(twoRevolution.tasks[0].loop_result.schema, 'homeboy/headless-loop-result-envelope/v1');
+assert.equal(twoRevolution.tasks[0].loop_result.mode, 'count');
+assert.equal(twoRevolution.tasks[0].loop_result.revolutions, 2);
+assert.equal(twoRevolution.loop_result.schema, 'homeboy/headless-loop-result-envelope/v1');
+assert.equal(twoRevolution.loop_result.revolutions, 2);
 assert.equal(twoRevolution.tasks[0].outcome.metadata.headless_loop_policy_status.iteration_count, 2);
 assert.equal(twoRevolution.tasks[0].results.scenarios[0].metadata.completion_outcome_satisfied, true);
 assert.equal(twoRevolution.fanout.records[0].status, 'completed');
@@ -107,6 +112,40 @@ assert.equal(boundedFailure.tasks[0].loop_policy.status, 'failed');
 assert.equal(boundedFailure.tasks[0].loop_policy.stop_reason, 'max_revolutions_reached');
 assert.equal(boundedFailure.tasks[0].loop_policy.iteration_count, 2);
 
+let durationCalls = 0;
+const durationBounded = await runHeadlessDeterministicLoop({
+  spec: {
+    ...baseSpec,
+    task_id: 'duration-bounded',
+    workload_id: 'duration-bounded',
+    loop_policy: {
+      mode: 'duration',
+      duration_ms: 60_000,
+      max_synchronous_revolutions: 2,
+      accepted_statuses: ['succeeded'],
+      continue_conditions: [{ outcome_status: 'failed' }],
+      repair_task_template: {
+        task_id: 'duration-retry-{{iteration}}',
+        workload_id: 'duration-retry-{{iteration}}',
+      },
+    },
+  },
+  runtime,
+  validate: false,
+  now: () => 1000,
+  execute: ({ request }) => {
+    durationCalls += 1;
+    return outcome(request, 'failed', 'Still failing inside duration window.');
+  },
+});
+
+assert.equal(durationCalls, 2);
+assert.equal(durationBounded.status, 'failed');
+assert.equal(durationBounded.tasks[0].loop_policy.mode, 'duration');
+assert.equal(durationBounded.tasks[0].loop_policy.stop_reason, 'max_synchronous_revolutions_reached');
+assert.equal(durationBounded.tasks[0].loop_result.mode, 'duration');
+assert.equal(durationBounded.tasks[0].loop_result.duration_ms, 60_000);
+
 await assert.rejects(
   () => runHeadlessDeterministicLoop({
     spec: {
@@ -124,34 +163,72 @@ await assert.rejects(
     validate: false,
     execute: ({ request }) => outcome(request, 'failed', 'Still failing.'),
   }),
-  /Headless duration and indefinite loop policies require a durable submit\/poll implementation/
+  /require max_synchronous_revolutions/
 );
 
 let expiredHeadlessCalls = 0;
+const expiredDeadline = await runHeadlessDeterministicLoop({
+  spec: {
+    ...baseSpec,
+    task_id: 'expired-headless-deadline',
+    workload_id: 'expired-headless-deadline',
+    loop_policy: {
+      mode: 'duration',
+      deadline_at: 2000,
+      max_synchronous_revolutions: 2,
+      accepted_statuses: ['succeeded'],
+    },
+  },
+  runtime,
+  validate: false,
+  now: () => 2000,
+  execute: ({ request }) => {
+    expiredHeadlessCalls += 1;
+    return outcome(request, 'succeeded', 'Should not run.');
+  },
+});
+assert.equal(expiredHeadlessCalls, 0);
+assert.equal(expiredDeadline.status, 'failed');
+assert.equal(expiredDeadline.tasks[0].loop_policy.stop_reason, 'deadline_reached');
+assert.equal(expiredDeadline.tasks[0].loop_policy.iteration_count, 0);
+
 await assert.rejects(
   () => runHeadlessDeterministicLoop({
     spec: {
       ...baseSpec,
-      task_id: 'expired-headless-deadline',
-      workload_id: 'expired-headless-deadline',
-      loop_policy: {
-        mode: 'duration',
-        deadline_at: 2000,
-        max_synchronous_revolutions: 2,
-        accepted_statuses: ['succeeded'],
-      },
+      task_id: 'until-stopped-without-durable-runtime',
+      workload_id: 'until-stopped-without-durable-runtime',
+      loop_policy: { mode: 'until_stopped' },
     },
     runtime,
     validate: false,
-    now: () => 2000,
-    execute: ({ request }) => {
-      expiredHeadlessCalls += 1;
-      return outcome(request, 'succeeded', 'Should not run.');
-    },
+    execute: ({ request }) => outcome(request, 'succeeded', 'Should not run.'),
   }),
-  /Headless duration and indefinite loop policies require a durable submit\/poll implementation/
+  /require durable loop runtime capability/
 );
-assert.equal(expiredHeadlessCalls, 0);
+
+const durableSubmissions = [];
+const untilStoppedCheckpoint = await runHeadlessDeterministicLoop({
+  spec: {
+    ...baseSpec,
+    task_id: 'until-stopped-durable',
+    workload_id: 'until-stopped-durable',
+    loop_policy: { mode: 'until_stopped' },
+  },
+  runtime: { ...runtime, capabilities: ['durable_headless_loop'] },
+  validate: false,
+  submitIteration: ({ request, iteration }) => {
+    durableSubmissions.push({ task_id: request.task_id, iteration });
+    return { token: `durable-${iteration}` };
+  },
+  pollIteration: () => ({ status: 'running' }),
+});
+assert.equal(untilStoppedCheckpoint.status, 'checkpointed');
+assert.deepEqual(durableSubmissions, [{ task_id: 'until-stopped-durable', iteration: 1 }]);
+assert.equal(untilStoppedCheckpoint.tasks[0].loop_policy.status, 'checkpointed');
+assert.equal(untilStoppedCheckpoint.tasks[0].loop_policy.mode, 'until_stopped');
+assert.equal(untilStoppedCheckpoint.tasks[0].loop_policy.state.checkpoints.at(-1).type, 'submitted');
+assert.equal(untilStoppedCheckpoint.tasks[0].loop_result.mode, 'until_stopped');
 
 const multiTaskExecutionOrder = [];
 const multiTask = await runHeadlessDeterministicLoop({

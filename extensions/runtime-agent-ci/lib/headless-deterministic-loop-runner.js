@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { createDurableDeterministicLoop } = require('./deterministic-loop-runner');
 const {
   buildGenericAgentLoopRequest,
   runGenericAgentLoop,
@@ -68,6 +69,7 @@ async function runHeadlessDeterministicLoop(options = {}) {
   finalResults = taskResults.at(-1)?.results || null;
 
   const completedAt = new Date().toISOString();
+  const artifactPaths = runtimeAgentArtifactPaths({ ...options, ...spec });
   const result = {
     schema: 'homeboy/headless-deterministic-loop-result/v1',
     loop_id: loopId(spec),
@@ -75,6 +77,14 @@ async function runHeadlessDeterministicLoop(options = {}) {
     dry_run: dryRun,
     started_at: startedAt,
     completed_at: completedAt,
+    loop_result: aggregateLoopResultEnvelope({
+      loopId: loopId(spec),
+      status: loopStatus(taskResults),
+      startedAt,
+      completedAt,
+      tasks: taskResults,
+      artifactPaths,
+    }),
     runtime: { id: runtime.id, backend: runtime.executor.backend },
     tasks: taskResults,
     outcome: finalOutcome,
@@ -114,7 +124,6 @@ function executeHeadlessTask(options = {}) {
   pushEvent(events, 'task_planned', { task_id: request.task_id, backend: request.executor.backend });
 
   const loopPolicy = normalizeLoopPolicy(plan);
-  assertHeadlessPolicyModeSupported(loopPolicy, options);
 
   if (dryRun) {
     finalOutcome = dryRunOutcome(request);
@@ -122,7 +131,11 @@ function executeHeadlessTask(options = {}) {
     pushEvent(events, 'task_dry_run', { task_id: request.task_id });
   } else if (loopPolicy.enabled) {
     pushEvent(events, 'task_policy_started', { task_id: request.task_id, max_iterations: loopPolicy.max_iterations });
-    const result = runHeadlessPolicyLoop({
+    const policyRunner = shouldUseDurableHeadlessPolicyLoop(loopPolicy, { ...options, runtime })
+      ? runHeadlessDurablePolicyLoop
+      : runHeadlessPolicyLoop;
+    assertHeadlessPolicyModeSupported(loopPolicy, { ...options, runtime, durable: policyRunner === runHeadlessDurablePolicyLoop });
+    const result = policyRunner({
       ...options,
       plan,
       request,
@@ -166,13 +179,14 @@ function executeHeadlessTask(options = {}) {
     outcome: finalOutcome,
     results: finalResults,
     loop: finalLoop,
+    loop_result: finalLoop?.loop_result || null,
     loop_policy: finalLoop?.policy_status || null,
     state: finalLoop?.state || null,
   };
   return {
     id: request.task_id,
     task_index: task.task_index,
-    status: ['succeeded', 'no_op'].includes(finalOutcome?.status) ? 'completed' : 'failed',
+    status: ['succeeded', 'no_op', 'checkpointed'].includes(finalOutcome?.status) ? 'completed' : 'failed',
     outcome: finalOutcome,
     task_result: taskResult,
   };
@@ -207,6 +221,8 @@ function runHeadlessPolicyLoop(options = {}) {
   const iterationRecords = [];
   let latestAccepted = false;
   let stopReason = '';
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
 
   const loop = runGenericDeterministicLoop({
     loopId: `${baseRequest.task_id}-headless-policy`,
@@ -310,7 +326,7 @@ function runHeadlessPolicyLoop(options = {}) {
         return { stop: true, reason: stopReason };
       }
       if (context.iteration >= loopPolicy.max_iterations) {
-        stopReason = 'max_revolutions_reached';
+        stopReason = loopPolicyCapStopReason(loopPolicy);
         return { stop: true, reason: stopReason };
       }
       return { stop: false };
@@ -334,11 +350,153 @@ function runHeadlessPolicyLoop(options = {}) {
     max_iterations: loopPolicy.max_iterations,
     max_revolutions: loopPolicy.max_revolutions,
     mode: loopPolicy.mode,
+    duration_ms: loopPolicy.duration_ms,
+    deadline_at: loopPolicy.deadline_at,
     iteration_count: iterationRecords.length,
     accepted: latestAccepted,
     iterations: iterationRecords,
   };
   loop.policy_status = policyStatus;
+  loop.loop_result = taskLoopResultEnvelope({
+    loop,
+    loopPolicy,
+    policyStatus,
+    startedAt,
+    startedAtMs,
+    artifactPaths: runtimeAgentArtifactPaths(options),
+  });
+  return {
+    request: baseRequest,
+    outcome: policyOutcome(baseRequest, policyStatus),
+    results: policyResults(baseRequest, policyStatus),
+    assertion: null,
+    loop,
+  };
+}
+
+function runHeadlessDurablePolicyLoop(options = {}) {
+  const loopPolicy = requiredObject(options.loopPolicy || options.loop_policy, 'loopPolicy');
+  const basePlan = requiredObject(options.plan, 'plan');
+  const baseRequest = requiredObject(options.request, 'request');
+  const iterationRecords = [];
+  let latestAccepted = false;
+  let stopReason = '';
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
+  const durableLoop = createDurableDeterministicLoop({
+    loopId: `${baseRequest.task_id}-headless-policy`,
+    mode: loopPolicy.mode,
+    maxRevolutions: loopPolicy.max_revolutions,
+    durationMs: loopPolicy.duration_ms,
+    deadlineAt: loopPolicy.deadline_at,
+    now: options.now,
+    state: {
+      request: baseRequest,
+      plan: basePlan,
+      repair_required: false,
+      failure_summary: '',
+    },
+    buildIteration: ({ iteration, state }) => {
+      const candidatePlan = iteration === 1 || !state.repair_required
+        ? basePlan
+        : materializeRepairPlan(loopPolicy.repair_task_template, basePlan, { iteration, state, baseRequest });
+      const candidateRequest = buildRequestForPlan(candidatePlan, options);
+      return {
+        schema: 'homeboy/headless-loop-policy-iteration-task/v1',
+        iteration,
+        candidate_plan: candidatePlan,
+        candidate_request: candidateRequest,
+      };
+    },
+    submitIteration: ({ iteration, attempt, input, state, iterations }) => options.submitIteration({
+      ...options,
+      iteration,
+      attempt,
+      task: input,
+      input,
+      state,
+      iterations,
+      request: input.candidate_request,
+      runtime: options.runtime,
+    }),
+    pollIteration: ({ iteration, attempt, input, token, submitted, state, iterations }) => options.pollIteration({
+      ...options,
+      iteration,
+      attempt,
+      task: input,
+      input,
+      token,
+      submitted,
+      state,
+      iterations,
+      request: input.candidate_request,
+      runtime: options.runtime,
+    }),
+    reconcile: ({ state, input, outcome }) => {
+      const accepted = policyAcceptsResult(outcome, loopPolicy);
+      const failureSummary = accepted ? '' : failureSummaryForResult(outcome);
+      const record = {
+        schema: 'homeboy/headless-loop-policy-iteration/v1',
+        loop_id: `${baseRequest.task_id}-headless-policy`,
+        iteration: input.iteration,
+        candidate_task_id: input.candidate_request.task_id,
+        validation_task_id: '',
+        accepted,
+        result: compactOutcome(outcome),
+        repair: { required: false },
+      };
+      iterationRecords.push(record);
+      latestAccepted = accepted;
+      return {
+        ...state,
+        latest_result: outcome,
+        latest_policy_iteration: record,
+        repair_required: false,
+        failure_summary: failureSummary,
+        accepted,
+        policy_iterations: iterationRecords,
+      };
+    },
+    stopCriteria: () => {
+      if (latestAccepted) {
+        stopReason = 'accepted';
+        return { stop: true, reason: stopReason };
+      }
+      return { stop: false };
+    },
+  });
+  const durableState = durableLoop.resume(options.loopState || options.loop_state || basePlan.loop_state || {});
+  const policyStatus = {
+    schema: 'homeboy/headless-loop-policy-status/v1',
+    status: durableState.done ? (latestAccepted ? 'succeeded' : 'failed') : 'checkpointed',
+    stop_reason: stopReason || durableState.stop_reason || durableState.checkpoints?.at(-1)?.type || 'checkpointed',
+    max_iterations: loopPolicy.max_iterations,
+    max_revolutions: loopPolicy.max_revolutions,
+    mode: loopPolicy.mode,
+    duration_ms: loopPolicy.duration_ms,
+    deadline_at: loopPolicy.deadline_at,
+    iteration_count: iterationRecords.length,
+    accepted: latestAccepted,
+    durable: true,
+    state: durableState,
+    iterations: iterationRecords,
+  };
+  const loop = {
+    schema: 'homeboy/headless-durable-loop-policy-output/v1',
+    loop_id: `${baseRequest.task_id}-headless-policy`,
+    status: policyStatus.status,
+    state: durableState,
+    iterations: durableState.iterations || [],
+    policy_status: policyStatus,
+  };
+  loop.loop_result = taskLoopResultEnvelope({
+    loop,
+    loopPolicy,
+    policyStatus,
+    startedAt,
+    startedAtMs,
+    artifactPaths: runtimeAgentArtifactPaths(options),
+  });
   return {
     request: baseRequest,
     outcome: policyOutcome(baseRequest, policyStatus),
@@ -405,10 +563,83 @@ function assertHeadlessPolicyModeSupported(loopPolicy, options = {}) {
   if (!loopPolicy.enabled || loopPolicy.mode === 'count') {
     return;
   }
-  if (typeof options.submitIteration === 'function' && typeof options.pollIteration === 'function') {
-    throw new Error('Headless durable duration and indefinite loop policies are not implemented yet; submit/poll support must route through createDurableDeterministicLoop before enabling this mode.');
+  if (options.durable === true) {
+    return;
   }
-  throw new Error('Headless duration and indefinite loop policies require a durable submit/poll implementation. Use count mode for synchronous headless loops.');
+  if (loopPolicy.mode === 'duration' || loopPolicy.mode === 'deadline') {
+    if (loopPolicy.max_synchronous_revolutions > 0) {
+      return;
+    }
+    throw new Error('Headless synchronous duration and deadline loop policies require max_synchronous_revolutions so they can checkpoint instead of running without a deterministic cap.');
+  }
+  throw new Error('Headless indefinite and until_stopped loop policies require durable loop runtime capability plus submit/poll checkpoint support.');
+}
+
+function shouldUseDurableHeadlessPolicyLoop(loopPolicy, options = {}) {
+  if (!['indefinite', 'until_stopped'].includes(loopPolicy.mode)) {
+    return false;
+  }
+  return typeof options.submitIteration === 'function'
+    && typeof options.pollIteration === 'function'
+    && runtimeHasDurableLoopCapability(options.runtime);
+}
+
+function runtimeHasDurableLoopCapability(runtime = {}) {
+  const capabilities = new Set(normalizeArray(runtime.capabilities));
+  for (const capability of normalizeArray(runtime.manifest?.capabilities)) {
+    capabilities.add(capability);
+  }
+  for (const executor of normalizeArray(runtime.manifest?.agent_task_executors)) {
+    for (const capability of normalizeArray(executor.capabilities)) {
+      capabilities.add(capability);
+    }
+  }
+  return ['durable_headless_loop', 'durable_loop', 'agent_task_durable_loop'].some((capability) => capabilities.has(capability));
+}
+
+function loopPolicyCapStopReason(loopPolicy) {
+  return loopPolicy.mode === 'count' ? 'max_revolutions_reached' : 'max_synchronous_revolutions_reached';
+}
+
+function taskLoopResultEnvelope({ loop, loopPolicy, policyStatus, startedAt, startedAtMs, artifactPaths }) {
+  const completedAtMs = Date.now();
+  return {
+    schema: 'homeboy/headless-loop-result-envelope/v1',
+    loop_id: loop.loop_id,
+    mode: loopPolicy.mode,
+    status: policyStatus.status,
+    revolutions: policyStatus.iteration_count,
+    stop_reason: policyStatus.stop_reason,
+    started_at: startedAt,
+    completed_at: new Date(completedAtMs).toISOString(),
+    elapsed_ms: Math.max(0, completedAtMs - startedAtMs),
+    duration_ms: loopPolicy.duration_ms,
+    deadline_at: loopPolicy.deadline_at,
+    max_revolutions: loopPolicy.max_revolutions,
+    max_synchronous_revolutions: loopPolicy.max_synchronous_revolutions,
+    artifact_paths: artifactPaths,
+  };
+}
+
+function aggregateLoopResultEnvelope({ loopId, status, startedAt, completedAt, tasks, artifactPaths }) {
+  return {
+    schema: 'homeboy/headless-loop-result-envelope/v1',
+    loop_id: loopId,
+    status,
+    mode: aggregateMode(tasks),
+    revolutions: tasks.reduce((total, task) => total + (task.loop_policy?.iteration_count || 0), 0),
+    stop_reason: tasks.at(-1)?.loop_policy?.stop_reason || '',
+    started_at: startedAt,
+    completed_at: completedAt,
+    duration_ms: tasks.at(-1)?.loop_policy?.duration_ms || 0,
+    deadline_at: tasks.at(-1)?.loop_policy?.deadline_at || 0,
+    artifact_paths: artifactPaths,
+  };
+}
+
+function aggregateMode(tasks) {
+  const modes = [...new Set(tasks.map((task) => task.loop_policy?.mode).filter(Boolean))];
+  return modes.length === 1 ? modes[0] : (modes.length > 1 ? 'mixed' : 'single');
 }
 
 function buildRequestForPlan(plan, options) {
@@ -615,6 +846,12 @@ function validationPolicyForPlan(plan, policy = {}) {
 }
 
 function loopStatus(taskResults) {
+  if (taskResults.some((entry) => entry.outcome?.status === 'failed')) {
+    return 'failed';
+  }
+  if (taskResults.some((entry) => entry.outcome?.status === 'checkpointed')) {
+    return 'checkpointed';
+  }
   return taskResults.every((entry) => ['succeeded', 'no_op'].includes(entry.outcome?.status)) ? 'succeeded' : 'failed';
 }
 
