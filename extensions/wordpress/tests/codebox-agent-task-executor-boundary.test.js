@@ -75,10 +75,7 @@ assert.equal(provider.agent_fanout_adapter.ownership.executor_adapter, 'homeboy-
 assert.equal(provider.agent_fanout_adapter.ownership.sandbox_worker_runtime, 'wp-codebox');
 assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'provider-credential-boundary'), true);
 assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'agent-fanout-request' && requirement.schema === 'wp-codebox/agent-fanout-request/v1'), true);
-assert.deepEqual(provider.deprecated_compatibility_aliases, [
-  legacyRuntimePackageAbilityAlias('agents/run-runtime-package'),
-  legacyRuntimePackageAbilityAlias('runtime-package/run'),
-]);
+assert.equal(Object.hasOwn(provider, 'deprecated_compatibility_aliases'), false);
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
 assert.equal(provider.provider_runtime_invocation.abilities.workspaceCommand, 'wp-codebox/runner-workspace-command');
@@ -257,6 +254,7 @@ assert.equal(runtime.agent_task_executors[0].id, provider.id);
 assert.equal(runtime.agent_task_executors[0].backend, provider.backend);
 assert.equal(runtime.agent_task_executors[0].runtime_id, provider.runtime_id);
 assert.equal(runtime.agent_task_executors[0].integration_contract, provider.integration_contract);
+assert.equal(Object.hasOwn(runtime.agent_task_executors[0], 'deprecated_compatibility_aliases'), false);
 assert.equal(runtime.agent_task_executors[0].upstream_primitive_requirements.some((requirement) => requirement.id === 'run-agent-task' && requirement.schema === 'wp-codebox/run-agent-task/v1'), true);
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.deepEqual(provider.runner_readiness, [{

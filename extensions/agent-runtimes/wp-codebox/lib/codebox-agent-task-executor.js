@@ -87,13 +87,6 @@ const RUNTIME_PACKAGE_ABILITY_ALIASES = new Set([
   ...LEGACY_RUNTIME_PACKAGE_ABILITIES,
 ]);
 const LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE = 'legacy-runtime-package-ability-alias';
-const LEGACY_RUNTIME_PACKAGE_ABILITY_DEPRECATIONS = Array.from(LEGACY_RUNTIME_PACKAGE_ABILITIES).map((ability) => ({
-  schema: 'wp-codebox/deprecated-compatibility-alias/v1',
-  alias: ability,
-  replacement: WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY,
-  quarantine: LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE,
-  status: 'deprecated',
-}));
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -201,7 +194,6 @@ function providerContract(options = {}) {
     provider_runtime_invocation: providerRuntimeInvocationContract(),
     agent_fanout_adapter: wpCodeboxAgentFanoutAdapterContract(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
-    deprecated_compatibility_aliases: LEGACY_RUNTIME_PACKAGE_ABILITY_DEPRECATIONS,
     upstream_primitive_requirements: WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
     status: 'active',
     integration_contract: 'homeboy-wordpress-agent-task/v1',
