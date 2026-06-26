@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.17.5] - 2026-06-26
+
+### Changed
+- Forward WP Codebox settings to fuzz runner
+
 ## [3.17.4] - 2026-06-26
 
 ### Changed
