@@ -234,16 +234,217 @@ pub(super) fn execution_with_request_workflow_artifacts(
     execution: Value,
     request: &Value,
 ) -> Value {
-    let Some(workflow_artifacts) = request
+    let runtime_bundle = runtime_bundle_evidence(request, &execution);
+    let workflow_artifacts = request
         .get("workflow_artifacts")
         .and_then(Value::as_array)
-        .filter(|artifacts| !artifacts.is_empty())
-    else {
+        .filter(|artifacts| !artifacts.is_empty());
+
+    if workflow_artifacts.is_none() && runtime_bundle.is_none() {
         return execution;
-    };
+    }
+
     let mut execution = execution.as_object().cloned().unwrap_or_default();
-    merge_workflow_artifacts(&mut execution, workflow_artifacts);
+    if let Some(workflow_artifacts) = workflow_artifacts {
+        merge_workflow_artifacts(&mut execution, workflow_artifacts);
+    }
+    if let Some(runtime_bundle) = runtime_bundle {
+        execution.insert("runtime_bundle".to_string(), runtime_bundle);
+    }
     Value::Object(execution)
+}
+
+fn runtime_bundle_evidence(request: &Value, execution: &Value) -> Option<Value> {
+    let configured = runtime_bundle_configurations(request);
+    let observed = runtime_bundle_observations(execution);
+    if configured.is_empty() && observed.is_empty() {
+        return None;
+    }
+
+    let mut evidence = serde_json::Map::new();
+    if !configured.is_empty() {
+        evidence.insert(
+            "configured".to_string(),
+            serde_json::json!({ "tasks": configured }),
+        );
+    }
+    if !observed.is_empty() {
+        evidence.insert(
+            "observed".to_string(),
+            serde_json::json!({ "results": observed }),
+        );
+    }
+    Some(Value::Object(evidence))
+}
+
+fn runtime_bundle_configurations(value: &Value) -> Vec<Value> {
+    let mut tasks = Vec::new();
+    collect_runtime_bundle_configurations(value, &mut tasks, 0);
+    tasks
+}
+
+fn collect_runtime_bundle_configurations(value: &Value, tasks: &mut Vec<Value>, depth: usize) {
+    if depth > 12 {
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            if let Some(runtime_task) = object.get("runtime_task") {
+                push_runtime_bundle_configuration(runtime_task, tasks);
+            }
+            push_runtime_bundle_configuration(value, tasks);
+            for child in object.values() {
+                collect_runtime_bundle_configurations(child, tasks, depth + 1);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                collect_runtime_bundle_configurations(child, tasks, depth + 1);
+            }
+        }
+        Value::String(raw) => {
+            let trimmed = raw.trim_start();
+            if (trimmed.starts_with('{') || trimmed.starts_with('[')) && raw.len() < 128 * 1024 {
+                if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+                    collect_runtime_bundle_configurations(&parsed, tasks, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_runtime_bundle_configuration(runtime_task: &Value, tasks: &mut Vec<Value>) {
+    let Some(object) = runtime_task.as_object() else {
+        return;
+    };
+    let ability = object.get("ability").and_then(Value::as_str);
+    let kind = object.get("kind").and_then(Value::as_str);
+    let input = object.get("input");
+    let is_bundle = kind == Some("bundle")
+        || ability.is_some_and(|ability| ability.contains("runtime-package/"))
+        || input.and_then(|input| input.get("package")).is_some();
+    if !is_bundle {
+        return;
+    }
+
+    let mut task = serde_json::Map::new();
+    if let Some(ability) = ability {
+        task.insert("ability".to_string(), Value::String(ability.to_string()));
+    }
+    if let Some(kind) = kind {
+        task.insert("kind".to_string(), Value::String(kind.to_string()));
+    }
+    if let Some(input) = input {
+        let budgets = runtime_budget_fields(input);
+        if !budgets.is_empty() {
+            task.insert("budgets".to_string(), Value::Object(budgets));
+        }
+    }
+    let task = Value::Object(task);
+    if !tasks.iter().any(|existing| existing == &task) {
+        tasks.push(task);
+    }
+}
+
+fn runtime_budget_fields(value: &Value) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    collect_runtime_budget_fields(value, &mut fields, 0);
+    fields
+}
+
+fn collect_runtime_budget_fields(
+    value: &Value,
+    fields: &mut serde_json::Map<String, Value>,
+    depth: usize,
+) {
+    if depth > 8 {
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if is_runtime_budget_key(key) && !child.is_null() {
+                    fields.entry(key.clone()).or_insert_with(|| child.clone());
+                }
+                collect_runtime_budget_fields(child, fields, depth + 1);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                collect_runtime_budget_fields(child, fields, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_runtime_budget_key(key: &str) -> bool {
+    key == "time_budget_ms"
+        || key == "step_budget"
+        || key == "wait_budget_ms"
+        || key == "drain_budget_ms"
+        || key == "wait_timeout_ms"
+        || key == "drain_timeout_ms"
+}
+
+fn runtime_bundle_observations(value: &Value) -> Vec<Value> {
+    let mut observations = Vec::new();
+    collect_runtime_bundle_observations(value, &mut observations, 0);
+    observations
+}
+
+fn collect_runtime_bundle_observations(value: &Value, observations: &mut Vec<Value>, depth: usize) {
+    if depth > 16 {
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            let mut observed = serde_json::Map::new();
+            for (key, child) in object {
+                if is_runtime_observation_key(key) && !child.is_null() {
+                    observed.insert(key.clone(), child.clone());
+                }
+            }
+            if !observed.is_empty() {
+                let observed = Value::Object(observed);
+                if !observations.iter().any(|existing| existing == &observed) {
+                    observations.push(observed);
+                }
+            }
+            for child in object.values() {
+                collect_runtime_bundle_observations(child, observations, depth + 1);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                collect_runtime_bundle_observations(child, observations, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_runtime_observation_key(key: &str) -> bool {
+    matches!(
+        key,
+        "wait_result"
+            | "job_status"
+            | "steps_drained"
+            | "actions_drained"
+            | "drained_steps"
+            | "drained_actions"
+            | "elapsed_ms"
+            | "elapsed_time_ms"
+            | "wall_time_ms"
+            | "wall_time"
+            | "completion_outcome"
+            | "completion_status"
+            | "terminal_state"
+            | "error_type"
+            | "classification"
+            | "error_classification"
+    )
 }
 
 fn matching_completed_workflow_artifacts(
