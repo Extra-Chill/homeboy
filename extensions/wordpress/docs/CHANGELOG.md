@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.17.1] - 2026-06-26
+
+### Fixed
+- Fix direct fuzz postprocess input lookup
+- Fix direct WP Codebox fuzz execution
+
 ## [3.17.0] - 2026-06-26
 
 ### Added
