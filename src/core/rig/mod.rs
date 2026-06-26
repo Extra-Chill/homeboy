@@ -21,6 +21,7 @@ pub mod app;
 pub mod artifact_index;
 pub mod capabilities;
 pub mod check;
+pub mod component_resolution;
 mod discovery;
 pub mod expand;
 pub mod install;
@@ -44,6 +45,7 @@ pub use artifact_index::{
     RigRunArtifactRef, RigRunFailedStepRef,
 };
 pub use capabilities::{evaluate_requirements, plan_requirement_checks, RigRequirementCheckPlan};
+pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
 pub use install::{
     discover_rigs, discover_stacks, install, read_source_metadata, read_stack_source_metadata,
     DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata,
