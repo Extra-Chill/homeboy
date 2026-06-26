@@ -254,19 +254,26 @@ fn collect_evidence_refs(
         &mut refs,
         ControllerRunEvidenceRef {
             kind: "run_evidence".to_string(),
-            uri: format!("homeboy agent-task controller status {loop_id} --json"),
+            uri: format!("homeboy agent-task controller status {loop_id}"),
             label: Some("persisted controller run evidence".to_string()),
         },
     );
 
     if let Some(action) = failed_action {
         // Runner job logs.
+        let runner_id = find_all_strings(action, &["runner_id"])
+            .into_iter()
+            .next()
+            .or_else(|| find_all_strings(status, &["runner_id"]).into_iter().next());
         for job_id in find_all_strings(action, &["runner_job_id", "job_id"]) {
             push_ref(
                 &mut refs,
                 ControllerRunEvidenceRef {
                     kind: "runner_job_log".to_string(),
-                    uri: format!("homeboy logs runner-job {job_id}"),
+                    uri: runner_id
+                        .as_ref()
+                        .map(|runner_id| format!("homeboy runner job logs {runner_id} {job_id}"))
+                        .unwrap_or_else(|| format!("runner-job://{job_id}")),
                     label: Some(format!("runner job {job_id} log")),
                 },
             );
@@ -278,7 +285,7 @@ fn collect_evidence_refs(
                 &mut refs,
                 ControllerRunEvidenceRef {
                     kind: "run_evidence".to_string(),
-                    uri: format!("homeboy agent-task show {run_id} --json"),
+                    uri: format!("homeboy agent-task status {run_id} --full"),
                     label: Some(format!("agent-task run {run_id} evidence")),
                 },
             );
@@ -362,17 +369,19 @@ fn next_command(loop_id: &str, owner: OwnerSurface, action_status: Option<&str>)
         .unwrap_or(false)
     {
         return format!(
-            "homeboy agent-task controller status {loop_id} --json  # resolve the runner block, then re-run with --resume"
+            "homeboy agent-task controller status {loop_id}  # resolve the runner block, then re-run with --resume"
         );
     }
     match owner {
         OwnerSurface::LabRunner => {
-            format!("homeboy runner status  # then `homeboy agent-task controller status {loop_id} --json`")
+            format!(
+                "homeboy runner status  # then `homeboy agent-task controller status {loop_id}`"
+            )
         }
         OwnerSurface::WpCodebox | OwnerSurface::WordPressRuntime | OwnerSurface::ProviderPlugin => {
-            format!("homeboy agent-task controller status {loop_id} --json  # inspect provider/runtime evidence refs above")
+            format!("homeboy agent-task controller status {loop_id}  # inspect provider/runtime evidence refs above")
         }
-        _ => format!("homeboy agent-task controller status {loop_id} --json"),
+        _ => format!("homeboy agent-task controller status {loop_id}"),
     }
 }
 
