@@ -301,6 +301,27 @@ process.stdout.write(JSON.stringify({
   assert.equal(stderrArtifact.kind, 'runtime-stderr');
   assert.equal(fs.readFileSync(stderrArtifact.path, 'utf8').includes(lateSentinel), true, 'full provider stderr is preserved as an artifact');
 
+  const sharedArtifactDir = path.join(tmpRoot, 'shared-artifacts');
+  const sharedArtifactsRun = genericLoopRunner.runGenericAgentLoop({
+    runtime: {
+      id: 'manifest-shared-artifact-runtime',
+      executor: {
+        backend: 'node-fixture',
+        invocation: {
+          command: process.execPath,
+          argv: [noisyExecutorPath],
+          cwd: tmpRoot,
+          stdin: 'request_json',
+          stdout: 'outcome_json',
+        },
+      },
+    },
+    plan: { ...plan, workload_id: 'shared-artifact-paths' },
+    validationPolicy: { success_completion_outcomes: ['done'] },
+    artifact_paths: { run_dir: sharedArtifactDir },
+  });
+  assert.equal(sharedArtifactsRun.outcome.metadata.runtime_invocation_result.stderr_artifact.path, path.join(sharedArtifactDir, 'shared-artifact-paths-runtime-stderr.txt'));
+
   const hugePayloadSentinel = 'WHOLESALE_RESULT_PAYLOAD_SENTINEL';
   const stdoutSummary = genericLoopRunner.genericAgentLoopStdoutSummary({
     outcome: {

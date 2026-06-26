@@ -4,6 +4,41 @@
   "name": "WP Codebox",
   "version": "1.2.0",
   "description": "WP Codebox agent runtime for Homeboy agent tasks.",
+  "deprecated_runtime_aliases": [
+    {
+      "schema": "homeboy/deprecated-runtime-alias/v1",
+      "alias": "codebox",
+      "replacement": "wp-codebox",
+      "quarantine": "legacy-runtime-id-alias",
+      "status": "deprecated"
+    }
+  ],
+  "tool_profiles": {
+    "workspace_iteration": {
+      "id": "workspace_iteration",
+      "capability_bundles": ["workspace_readwrite"],
+      "tool_presets": ["runner_workspace"]
+    },
+    "workspace_publication": {
+      "id": "workspace_publication",
+      "capability_bundles": ["worktree_pr_iteration"],
+      "tool_presets": ["runner_workspace", "publication"]
+    }
+  },
+  "workload_profiles": {
+    "workspace_iteration": {
+      "id": "workspace_iteration",
+      "tool_profile": "workspace_iteration"
+    },
+    "workspace_publication": {
+      "id": "workspace_publication",
+      "tool_profile": "workspace_publication",
+      "controller_loop_proof": {
+        "preview_required": true,
+        "publication_required": true
+      }
+    }
+  },
   "agent_loop": {
     "outcome_adapter": {
       "module": "agent-runtimes/wp-codebox/lib/runtime-agent-outcome-adapter.js",

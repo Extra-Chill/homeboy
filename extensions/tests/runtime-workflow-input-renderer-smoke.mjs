@@ -83,6 +83,23 @@ assert.equal(objectProfileRendered.runtime_profile, 'object-profile');
 assert.deepEqual(objectProfileRendered.runtime_requirements.runtime_mounts, runtimeMounts);
 assert.deepEqual(objectProfileRendered.workflow_inputs.runtime_profiles['object-profile'].runtime_mounts, runtimeMounts);
 
+const namedToolProfileRendered = renderRuntimeWorkflowInputs({
+	runtime: 'wp-codebox',
+	runtime_profile: 'example-runtime',
+	runtime_profiles: {
+		'example-runtime': { id: 'example-runtime' },
+	},
+	workload_profile: 'workspace_publication',
+});
+assert.equal(namedToolProfileRendered.workload_profile, 'workspace_publication');
+assert.deepEqual(namedToolProfileRendered.tool_profile.publication_tools, [
+	'publication_prepare',
+	'publication_publish',
+	'publication_status',
+]);
+assert.equal(namedToolProfileRendered.tool_profile.provider_runtime_invocation.operations.workspacePublish, true);
+assert.deepEqual(namedToolProfileRendered.workflow_inputs.sandbox_tool_policy.publication_tools, namedToolProfileRendered.tool_profile.publication_tools);
+
 const cliResult = spawnSync(process.execPath, [
 	path.join(rootDir, 'runtime-agent-ci', 'scripts', 'render-runtime-workflow-inputs.cjs'),
 	'--runtime', 'codebox',

@@ -4,18 +4,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const DEFAULT_RUNTIME_ID = 'local-shell';
-const RUNTIME_ID_ALIASES = {
-	codebox: 'wp-codebox',
-};
-const RUNTIME_ID_ALIAS_DEPRECATIONS = {
-	codebox: {
-		schema: 'homeboy/deprecated-runtime-alias/v1',
-		alias: 'codebox',
-		replacement: 'wp-codebox',
-		quarantine: 'legacy-runtime-id-alias',
-		status: 'deprecated',
-	},
-};
 
 function repoRootFromHere() {
 	return path.resolve(__dirname, '..', '..');
@@ -96,21 +84,21 @@ function isRuntimeManifest(manifest) {
 	);
 }
 
-function normalizeRuntimeId(runtimeId = DEFAULT_RUNTIME_ID) {
+function normalizeRuntimeId(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 	const id = runtimeId || DEFAULT_RUNTIME_ID;
-	return RUNTIME_ID_ALIASES[id] || id;
+	return runtimeAliasMap(options.registry || runtimeRegistry(options))[id]?.replacement || id;
 }
 
-function runtimeIdAliasDeprecation(runtimeId = DEFAULT_RUNTIME_ID) {
+function runtimeIdAliasDeprecation(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 	const id = runtimeId || DEFAULT_RUNTIME_ID;
-	return RUNTIME_ID_ALIAS_DEPRECATIONS[id] || null;
+	return runtimeAliasMap(options.registry || runtimeRegistry(options))[id] || null;
 }
 
 function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 	const requestedId = runtimeId || DEFAULT_RUNTIME_ID;
-	const id = normalizeRuntimeId(runtimeId);
-	const aliasDeprecation = runtimeIdAliasDeprecation(runtimeId);
 	const registry = options.registry || runtimeRegistry(options);
+	const id = normalizeRuntimeId(runtimeId, { ...options, registry });
+	const aliasDeprecation = runtimeIdAliasDeprecation(runtimeId, { ...options, registry });
 	const manifest = registry[id];
 	if (!manifest) {
 		throw new Error(`Unsupported agent_runtime: ${id}. Registered runtimes: ${Object.keys(registry).sort().join(', ') || '(none)'}.`);
@@ -137,6 +125,43 @@ function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 		buildCommands: normalizeCommands(materialization.build_commands || []),
 		paths: resolvePaths(materialization.paths || {}, workspace, options.env || process.env),
 		executor: resolveExecutor(manifest, options.repoRoot || repoRootFromHere(), options),
+	};
+}
+
+function runtimeAliasMap(registry = {}) {
+	const aliases = {};
+	for (const manifest of Object.values(registry)) {
+		for (const alias of manifestRuntimeAliases(manifest)) {
+			aliases[alias.alias] = alias;
+		}
+	}
+	return aliases;
+}
+
+function manifestRuntimeAliases(manifest = {}) {
+	return normalizeAliasEntries(manifest.runtime_aliases || manifest.deprecated_runtime_aliases || manifest.aliases, manifest.id);
+}
+
+function normalizeAliasEntries(entries, replacement) {
+	if (!entries || typeof entries !== 'object') {
+		return [];
+	}
+	if (!Array.isArray(entries)) {
+		return Object.entries(entries).map(([alias, value]) => normalizeAliasEntry({ alias, ...(typeof value === 'object' && value ? value : { replacement: value }) }, replacement)).filter(Boolean);
+	}
+	return entries.map((entry) => normalizeAliasEntry(entry, replacement)).filter(Boolean);
+}
+
+function normalizeAliasEntry(entry, replacement) {
+	if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.alias !== 'string' || entry.alias.trim() === '') {
+		return null;
+	}
+	return {
+		schema: entry.schema || 'homeboy/deprecated-runtime-alias/v1',
+		alias: entry.alias.trim(),
+		replacement: firstString(entry.replacement, entry.runtime_id, replacement),
+		quarantine: entry.quarantine || 'legacy-runtime-id-alias',
+		status: entry.status || 'deprecated',
 	};
 }
 
@@ -421,7 +446,7 @@ function executorScriptArg(provider) {
 
 module.exports = {
 	DEFAULT_RUNTIME_ID,
-	RUNTIME_ID_ALIAS_DEPRECATIONS,
+	manifestRuntimeAliases,
 	normalizeRuntimeId,
 	runtimeIdAliasDeprecation,
 	resolveRuntimeProvider,

@@ -5,6 +5,7 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
+const { runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
 
 const PLAN_SCHEMA = 'homeboy/fanout-reconcile-plan/v1';
 const RUN_SCHEMA = 'homeboy/fanout-reconcile-run/v1';
@@ -97,9 +98,10 @@ async function executeFanoutReconcileRun(input) {
     ...(input.include_summary === false ? {} : { summary: plan.summary }),
     ...(input.base_run || {}),
   };
+  const artifactPaths = runtimeAgentArtifactPaths(input);
   const writeRun = (run) => {
-    if (input.runs_output_path) {
-      writeJson(input.runs_output_path, run);
+    if (artifactPaths.fanout_run) {
+      writeJson(artifactPaths.fanout_run, run);
     }
   };
   const writeIncompleteRun = () => {

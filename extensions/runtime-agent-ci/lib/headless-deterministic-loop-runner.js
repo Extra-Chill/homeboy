@@ -14,6 +14,7 @@ const {
 } = require('./loop-policy');
 const { executeFanoutReconcileRun } = require('./fanout-reconcile-runner');
 const { resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
+const { runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
 
 async function runHeadlessDeterministicLoop(options = {}) {
   const spec = requiredObject(options.spec || options.config || options.plan, 'spec');
@@ -31,6 +32,7 @@ async function runHeadlessDeterministicLoop(options = {}) {
   pushEvent(events, 'loop_started', { loop_id: loopId(spec), task_count: tasks.length, dry_run: dryRun });
 
   const fanoutRun = await executeFanoutReconcileRun({
+    artifact_paths: runtimeAgentArtifactPaths({ ...options, ...spec }),
     plan: {
       schema: 'homeboy/headless-deterministic-loop-task-plan/v1',
       summary: { task_count: tasks.length },
@@ -177,23 +179,23 @@ function executeHeadlessTask(options = {}) {
 }
 
 function writeHeadlessDeterministicLoopArtifacts(options = {}) {
-  if (options.loopResultFile || options.loop_result_file) {
-    writeJsonFile(options.loopResultFile || options.loop_result_file, options.result);
+  const artifactPaths = runtimeAgentArtifactPaths(options);
+  if (artifactPaths.loop_result) {
+    writeJsonFile(artifactPaths.loop_result, options.result);
   }
-  if (options.eventsFile || options.events_file) {
-    writeJsonFile(options.eventsFile || options.events_file, options.result?.events || []);
+  if (artifactPaths.events) {
+    writeJsonFile(artifactPaths.events, options.result?.events || []);
   }
-  if (options.loopPolicyFile || options.loop_policy_file) {
-    writeJsonFile(options.loopPolicyFile || options.loop_policy_file, policyArtifact(options.result));
+  if (artifactPaths.loop_policy) {
+    writeJsonFile(artifactPaths.loop_policy, policyArtifact(options.result));
   }
-  if (options.statusFile || options.status_file) {
-    writeJsonFile(options.statusFile || options.status_file, statusArtifact(options.result));
+  if (artifactPaths.status) {
+    writeJsonFile(artifactPaths.status, statusArtifact(options.result));
   }
   writeGenericAgentLoopArtifacts({
     outcome: options.result?.outcome,
     results: options.result?.results,
-    outcomeFile: options.outcomeFile || options.outcome_file,
-    resultsFile: options.resultsFile || options.results_file,
+    artifact_paths: artifactPaths,
   });
 }
 

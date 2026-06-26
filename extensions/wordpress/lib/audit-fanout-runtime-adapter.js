@@ -12,7 +12,6 @@ const { spawn, spawnSync } = require('node:child_process');
  * Internal dependencies
  */
 const {
-  DEFAULT_RUNTIME_ID,
   resolveRuntimeProvider,
 } = require('../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
@@ -28,7 +27,7 @@ function auditFanoutRuntimeId(options = {}) {
     || options.agentRuntime
     || options.agent_runtime
     || process.env.AGENT_RUNTIME
-    || DEFAULT_RUNTIME_ID;
+    || '';
 }
 
 function auditFanoutRuntimeProvider(options = {}) {
@@ -41,25 +40,23 @@ function auditFanoutRuntimeProvider(options = {}) {
 }
 
 function auditFanoutRuntimeInvocation(options = {}) {
-  const runtimeProvider = options.runtimeProviderObject || options.runtime_provider_object || auditFanoutRuntimeProvider(options);
   const explicitCommand = options.command || options.runtime_command;
   const explicitArgs = options.args || options.runtime_args || [];
+  const runtimeId = auditFanoutRuntimeId(options);
 
   if (explicitCommand) {
     return {
-      runtime: runtimeProvider,
+      runtime: runtimeId ? (options.runtimeProviderObject || options.runtime_provider_object || auditFanoutRuntimeProvider(options)) : null,
       command: explicitCommand,
       args: explicitArgs,
     };
   }
 
-  if (runtimeProvider.id === DEFAULT_RUNTIME_ID) {
-    return {
-      runtime: runtimeProvider,
-      command: 'wp-codebox',
-      args: explicitArgs,
-    };
+  if (!runtimeId) {
+    throw new Error('audit fanout runtime requires explicit runtime=wp-codebox or an explicit command/runtime_command.');
   }
+
+  const runtimeProvider = options.runtimeProviderObject || options.runtime_provider_object || auditFanoutRuntimeProvider(options);
 
   if (runtimeProvider.executor?.path) {
     return {
@@ -69,11 +66,7 @@ function auditFanoutRuntimeInvocation(options = {}) {
     };
   }
 
-  return {
-    runtime: runtimeProvider,
-    command: runtimeProvider.executor?.backend || runtimeProvider.id,
-    args: explicitArgs,
-  };
+  throw new Error('audit fanout runtime requires an explicit command/runtime_command or a runtime with an executor path, for example runtime=wp-codebox.');
 }
 
 function auditFanoutRuntimeEnv(taskRequest, requestJson, options = {}) {
