@@ -16,6 +16,16 @@ use crate::core::engine::execution_context::{self, ResolveOptions};
 use crate::core::extension::ExtensionCapability;
 use std::collections::BTreeSet;
 
+use super::spec::{
+    CommandLabSupportSummary, AGENT_TASK_AUTH_STATUS_LAB_LABEL,
+    AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL, AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
+    AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL, AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
+    AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL,
+    AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL, AUDIT_LAB_LABEL, BENCH_LAB_LABEL,
+    COMMAND_SPECS, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL,
+    RIG_CHECK_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
+};
+
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
 
 /// Routing-policy flags shared by every Lab command representation
@@ -302,35 +312,6 @@ pub(crate) const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 pub(crate) const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
 const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
-const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
-const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
-    "agent-task controller from-spec --resume/run-from-spec/materialize";
-const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
-const AGENT_TASK_STATUS_LAB_LABEL: &str =
-    "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
-const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
-const AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL: &str = "agent-task fanout run-plan";
-const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
-const AGENT_TASK_FANOUT_STATUS_LAB_LABEL: &str = "agent-task fanout status/artifacts";
-const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
-pub(crate) const LINT_LAB_LABEL: &str = "lint";
-pub(crate) const TEST_LAB_LABEL: &str = "test";
-pub(crate) const AUDIT_LAB_LABEL: &str = "audit";
-pub(crate) const REVIEW_LAB_LABEL: &str = "review";
-pub(crate) const BENCH_LAB_LABEL: &str = "bench";
-pub(crate) const FUZZ_LAB_LABEL: &str = "fuzz";
-pub(crate) const TRACE_LAB_LABEL: &str = "trace";
-const REFACTOR_LAB_LABEL: &str = "refactor";
-pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
-pub(crate) const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
-pub(crate) const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
-pub(crate) const TUNNEL_SERVICE_START_LAB_LABEL: &str = "tunnel service start";
-
-struct LabSupportedCommandSummary {
-    contract_labels: &'static [&'static str],
-    message_label: &'static str,
-    hint_label: &'static str,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabRunnerSupportSummary {
@@ -339,118 +320,14 @@ pub struct LabRunnerSupportSummary {
     pub hint: String,
 }
 
-const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
-    LabSupportedCommandSummary {
-        contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
-        message_label: "agent-task cook/run-plan",
-        hint_label: "agent-task cook/run-plan",
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[
-            AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
-            AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
-        ],
-        message_label: "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
-        hint_label: "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
-        message_label: "agent-task retry --run",
-        hint_label: "agent-task retry --run",
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[AGENT_TASK_STATUS_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL],
-        message_label:
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
-        hint_label:
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[
-            AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
-            AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
-            AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
-        ],
-        message_label: "agent-task fanout run-plan/submit-batch/status/artifacts",
-        hint_label: "agent-task fanout run-plan/submit-batch/status/artifacts",
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[AGENT_TASK_AUTH_STATUS_LAB_LABEL],
-        message_label: AGENT_TASK_AUTH_STATUS_LAB_LABEL,
-        hint_label: AGENT_TASK_AUTH_STATUS_LAB_LABEL,
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[LINT_LAB_LABEL],
-        message_label: LINT_LAB_LABEL,
-        hint_label: LINT_LAB_LABEL,
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[TEST_LAB_LABEL],
-        message_label: TEST_LAB_LABEL,
-        hint_label: TEST_LAB_LABEL,
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[AUDIT_LAB_LABEL],
-        message_label: AUDIT_LAB_LABEL,
-        hint_label: AUDIT_LAB_LABEL,
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[REVIEW_LAB_LABEL],
-        message_label: REVIEW_LAB_LABEL,
-        hint_label: REVIEW_LAB_LABEL,
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[BENCH_LAB_LABEL],
-        message_label: BENCH_LAB_LABEL,
-        hint_label: "bench run",
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[FUZZ_LAB_LABEL],
-        message_label: FUZZ_LAB_LABEL,
-        hint_label: "fuzz run",
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[TRACE_LAB_LABEL],
-        message_label: TRACE_LAB_LABEL,
-        hint_label: TRACE_LAB_LABEL,
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[REFACTOR_LAB_LABEL],
-        message_label: "refactor source runs",
-        hint_label: "refactor source runs",
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[RIG_CHECK_LAB_LABEL],
-        message_label: RIG_CHECK_LAB_LABEL,
-        hint_label: RIG_CHECK_LAB_LABEL,
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL],
-        message_label: TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
-        hint_label: TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[TUNNEL_SERVICE_EXPOSE_LAB_LABEL],
-        message_label: TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
-        hint_label: TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
-    },
-    LabSupportedCommandSummary {
-        contract_labels: &[TUNNEL_SERVICE_START_LAB_LABEL],
-        message_label: TUNNEL_SERVICE_START_LAB_LABEL,
-        hint_label: TUNNEL_SERVICE_START_LAB_LABEL,
-    },
-];
-
 pub fn lab_runner_supported_labels() -> Vec<&'static str> {
-    LAB_SUPPORTED_COMMAND_SUMMARIES
-        .iter()
+    lab_support_summaries()
         .map(|summary| summary.message_label)
         .collect()
 }
 
 pub fn lab_runner_supported_contract_labels() -> Vec<&'static str> {
-    LAB_SUPPORTED_COMMAND_SUMMARIES
-        .iter()
+    lab_support_summaries()
         .flat_map(|summary| summary.contract_labels.iter().copied())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -458,9 +335,7 @@ pub fn lab_runner_supported_contract_labels() -> Vec<&'static str> {
 }
 
 pub fn lab_runner_supports_contract_label(contract_label: &str) -> bool {
-    LAB_SUPPORTED_COMMAND_SUMMARIES
-        .iter()
-        .any(|summary| summary.contract_labels.contains(&contract_label))
+    lab_support_summaries().any(|summary| summary.contract_labels.contains(&contract_label))
 }
 
 pub fn lab_runner_support_summary() -> LabRunnerSupportSummary {
@@ -486,10 +361,15 @@ pub fn lab_runner_unsupported_hint() -> String {
 }
 
 fn lab_runner_supported_hint_labels() -> Vec<&'static str> {
-    LAB_SUPPORTED_COMMAND_SUMMARIES
-        .iter()
+    lab_support_summaries()
         .map(|summary| summary.hint_label)
         .collect()
+}
+
+fn lab_support_summaries() -> impl Iterator<Item = &'static CommandLabSupportSummary> {
+    COMMAND_SPECS
+        .iter()
+        .flat_map(|spec| spec.lab_support_summary.iter())
 }
 
 #[cfg(test)]
