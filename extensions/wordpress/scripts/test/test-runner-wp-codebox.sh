@@ -53,6 +53,51 @@ else
     PLUGIN_SLUG="$(basename "$PLUGIN_PATH")"
 fi
 
+settings_json="${HOMEBOY_SETTINGS_JSON:-}"
+[ -n "$settings_json" ] || settings_json="{}"
+
+WP_CODEBOX_SOURCE_ROOT=""
+WP_CODEBOX_SOURCE_SUBPATH=""
+WP_CODEBOX_PLUGIN_SOURCE_PATH="$PLUGIN_PATH"
+if [ "$settings_json" != "{}" ]; then
+    WP_CODEBOX_SOURCE_ROOT=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_source_root // empty' 2>/dev/null || true)
+    WP_CODEBOX_SOURCE_SUBPATH=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_source_subpath // empty' 2>/dev/null || true)
+fi
+if [ -z "$WP_CODEBOX_SOURCE_ROOT" ] && [ -n "${HOMEBOY_SETTINGS_WP_CODEBOX_SOURCE_ROOT:-}" ]; then
+    WP_CODEBOX_SOURCE_ROOT="$HOMEBOY_SETTINGS_WP_CODEBOX_SOURCE_ROOT"
+fi
+if [ -z "$WP_CODEBOX_SOURCE_SUBPATH" ] && [ -n "${HOMEBOY_SETTINGS_WP_CODEBOX_SOURCE_SUBPATH:-}" ]; then
+    WP_CODEBOX_SOURCE_SUBPATH="$HOMEBOY_SETTINGS_WP_CODEBOX_SOURCE_SUBPATH"
+fi
+if [ -n "$WP_CODEBOX_SOURCE_ROOT" ]; then
+    if [[ "$WP_CODEBOX_SOURCE_ROOT" != /* ]] || [ ! -d "$WP_CODEBOX_SOURCE_ROOT" ]; then
+        echo "Error: wp_codebox_source_root must be an absolute existing directory." >&2
+        FAILED_STEP="WP Codebox source root setup"
+        exit 1
+    fi
+    if [ -z "$WP_CODEBOX_SOURCE_SUBPATH" ]; then
+        if [[ "$PLUGIN_PATH" = "$WP_CODEBOX_SOURCE_ROOT"/* ]]; then
+            WP_CODEBOX_SOURCE_SUBPATH="${PLUGIN_PATH#"$WP_CODEBOX_SOURCE_ROOT/"}"
+        else
+            echo "Error: wp_codebox_source_subpath is required when wp_codebox_source_root is not an ancestor of HOMEBOY_COMPONENT_PATH." >&2
+            FAILED_STEP="WP Codebox source root setup"
+            exit 1
+        fi
+    fi
+    if [[ "$WP_CODEBOX_SOURCE_SUBPATH" = /* ]] || [[ "$WP_CODEBOX_SOURCE_SUBPATH" == *..* ]]; then
+        echo "Error: wp_codebox_source_subpath must be a relative path under wp_codebox_source_root." >&2
+        FAILED_STEP="WP Codebox source root setup"
+        exit 1
+    fi
+    WP_CODEBOX_PLUGIN_SOURCE_PATH="${WP_CODEBOX_SOURCE_ROOT%/}/${WP_CODEBOX_SOURCE_SUBPATH}"
+    if [ ! -d "$WP_CODEBOX_PLUGIN_SOURCE_PATH" ]; then
+        echo "Error: wp_codebox_source_root/wp_codebox_source_subpath does not exist: $WP_CODEBOX_PLUGIN_SOURCE_PATH" >&2
+        FAILED_STEP="WP Codebox source root setup"
+        exit 1
+    fi
+    PLUGIN_PATH="$WP_CODEBOX_PLUGIN_SOURCE_PATH"
+fi
+
 detect_network_plugin_header() {
     local main_file
     for main_file in "${PLUGIN_PATH}"/*.php; do
@@ -220,12 +265,12 @@ WP_CODEBOX_BIN="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")" 
     exit 1
 }
 
-settings_json="${HOMEBOY_SETTINGS_JSON:-}"
-[ -n "$settings_json" ] || settings_json="{}"
-
-WP_CODEBOX_CORE_MODULE="${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"
+WP_CODEBOX_CORE_MODULE="${HOMEBOY_SETTINGS_WP_CODEBOX_CORE_MODULE:-}"
 if [ -z "$WP_CODEBOX_CORE_MODULE" ] && [ "$settings_json" != "{}" ]; then
     WP_CODEBOX_CORE_MODULE=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_core_module // empty' 2>/dev/null || true)
+fi
+if [ -z "$WP_CODEBOX_CORE_MODULE" ]; then
+    WP_CODEBOX_CORE_MODULE="${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"
 fi
 if [ -n "$WP_CODEBOX_CORE_MODULE" ]; then
     export HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE"
@@ -742,6 +787,7 @@ if [ -n "$SELECTED_TEST_FILE" ]; then
 fi
 
 MOUNTS_JSON="[]"
+EXTRA_PLUGINS_JSON="[]"
 homeboy_wp_codebox_add_recipe_mount() {
     local source="$1"
     local target="$2"
@@ -749,7 +795,15 @@ homeboy_wp_codebox_add_recipe_mount() {
     MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$source" --arg target "$target" --arg mode "$mode" '$mounts + [{source: $source, target: $target, mode: $mode}]')
 }
 
-homeboy_wp_codebox_add_recipe_mount "${PLUGIN_PATH}" "/wordpress/wp-content/plugins/${PLUGIN_SLUG}"
+if [ -n "$WP_CODEBOX_SOURCE_ROOT" ]; then
+    EXTRA_PLUGINS_JSON=$(jq -nc \
+        --arg source "$WP_CODEBOX_SOURCE_ROOT" \
+        --arg sourceSubpath "$WP_CODEBOX_SOURCE_SUBPATH" \
+        --arg slug "$PLUGIN_SLUG" \
+        '[{source: $source, sourceRoot: $source, sourceSubpath: $sourceSubpath, slug: $slug, activate: false}]')
+else
+    homeboy_wp_codebox_add_recipe_mount "${PLUGIN_PATH}" "/wordpress/wp-content/plugins/${PLUGIN_SLUG}"
+fi
 
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
@@ -873,6 +927,7 @@ wp_codebox_command=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
 
 jq -n \
     --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
+    --argjson extraPlugins "$EXTRA_PLUGINS_JSON" \
     --argjson mounts "$MOUNTS_JSON" \
     --arg pluginSlug "$PLUGIN_SLUG" \
     --arg selectedTestFile "$SELECTED_TEST_FILE_REL" \
@@ -887,6 +942,7 @@ jq -n \
     --arg multisite "$WP_CODEBOX_MULTISITE" \
     --argjson diagnostics "$WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON" \
     '({
+        extra_plugins: $extraPlugins,
         mounts: $mounts,
         pluginSlug: $pluginSlug,
         selectedTestFile: $selectedTestFile,
