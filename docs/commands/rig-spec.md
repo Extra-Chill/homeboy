@@ -36,6 +36,7 @@ For git sources, `repo.git//subpath` clones the repository root but discovers sp
 | `services` | object | No | Map of service ID to `ServiceSpec`. |
 | `symlinks` | array | No | List of `SymlinkSpec` entries. |
 | `shared_paths` | array | No | List of dependency paths the rig may borrow from another checkout. |
+| `package_dependencies` | array | No | Install-time package-relative paths that must materialize with the package, for nested package imports that cross the selected package root. |
 | `resources` | object | No | Resource declarations used by active-run leases. |
 | `pipeline` | object | No | Map of pipeline name to `PipelineStep[]`. |
 | `bench` | object | No | Rig-pinned benchmark component/default-baseline settings. |
@@ -92,6 +93,25 @@ Example:
 ```
 
 The installed rig keeps the base `pipeline.check` and `components.app.branch`, while replacing `components.app.path`.
+
+## Package Dependencies
+
+Nested package rigs can declare sibling files/directories that must travel with
+the selected package when Lab materializes the package source. Entries are
+resolved relative to the selected package root, must be relative paths, must
+exist, and must stay inside the package source repository root.
+
+```jsonc
+{
+  "id": "static-site-importer-fixture-matrix",
+  "package_dependencies": ["../../shared/wp-codebox"]
+}
+```
+
+When this rig is installed from `WordPress/static-site-importer`, Homeboy records
+the repository root as the source root and keeps the package path at
+`WordPress/static-site-importer`, so imports such as
+`../../../shared/wp-codebox/recipe.mjs` keep resolving on Lab.
 
 ## `ComponentSpec`
 
