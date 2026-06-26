@@ -17,6 +17,7 @@ use crate::core::extension::ExtensionCapability;
 use std::collections::BTreeSet;
 
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
+pub const RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
 
 /// Routing-policy flags shared by every Lab command representation
 /// (`LabCommandContract`, `LabRoutePlan`, `LabOffloadCommand`). These four
@@ -214,6 +215,67 @@ pub struct RunnerWorkloadArtifactRef {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerHandoffEnvelope {
+    pub schema: String,
+    pub status: String,
+    pub execution_location: String,
+    pub runner_id: String,
+    pub job_id: String,
+    pub durable_run_id: Option<String>,
+    pub persisted_run_id: Option<String>,
+    pub mirror_run_id: Option<String>,
+    pub remote_cwd: String,
+    pub follow_commands: RunnerHandoffFollowCommands,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerHandoffFollowCommands {
+    pub job_logs: String,
+    pub job_cancel: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<String>,
+}
+
+impl RunnerHandoffEnvelope {
+    pub fn detached_lab_offload(
+        runner_id: &str,
+        job_id: &str,
+        remote_cwd: String,
+        mirror_run_id: Option<String>,
+    ) -> Self {
+        let follow_commands = RunnerHandoffFollowCommands {
+            job_logs: format!("homeboy runner job logs {runner_id} {job_id} --follow"),
+            job_cancel: format!("homeboy runner job cancel {runner_id} {job_id}"),
+            status: mirror_run_id
+                .as_ref()
+                .map(|run_id| format!("homeboy agent-task status {run_id}")),
+            logs: mirror_run_id
+                .as_ref()
+                .map(|run_id| format!("homeboy agent-task logs {run_id}")),
+            artifacts: mirror_run_id
+                .as_ref()
+                .map(|run_id| format!("homeboy agent-task artifacts {run_id}")),
+        };
+        Self {
+            schema: RUNNER_HANDOFF_ENVELOPE_SCHEMA.to_string(),
+            status: "handoff_complete".to_string(),
+            execution_location: format!("runner:{runner_id}"),
+            runner_id: runner_id.to_string(),
+            job_id: job_id.to_string(),
+            durable_run_id: mirror_run_id.clone(),
+            persisted_run_id: mirror_run_id.clone(),
+            mirror_run_id,
+            remote_cwd,
+            follow_commands,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
