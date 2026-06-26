@@ -11,7 +11,8 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 
 use super::super::jobs::format_job_event;
 use super::super::status::{
-    declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
+    declared_run_followups_for_legacy, declared_runtime_diagnostics,
+    declared_runtime_source_diagnostics, declared_tool_diagnostics,
     runner_artifact_feature_diagnostics, runner_status_operator_commands,
 };
 
@@ -268,6 +269,45 @@ fn unknown_runtime_declaration_does_not_emit_wp_specific_guidance() {
     assert!(serialized.contains("other-runtime"));
     assert!(!serialized.contains("wp-codebox"));
     assert!(!serialized.contains("HOMEBOY_WP_CODEBOX"));
+}
+
+#[test]
+fn declared_bench_followups_preserve_existing_status_guidance() {
+    let followups = declared_run_followups_for_legacy("managed_followups", Some("bench"), None);
+    let serialized = serde_json::to_string(&followups).expect("serialize followups");
+
+    assert!(serialized.contains("latest_bench_run"));
+    assert!(serialized.contains("homeboy runs latest-run --kind bench"));
+    assert!(serialized.contains("homeboy runs refs --kind bench --limit 10"));
+    assert!(serialized.contains("homeboy runs artifacts <run-id>"));
+    assert!(!serialized.contains("latest_fuzz_run"));
+    assert!(!serialized.contains("homeboy runs refs --kind fuzz --limit 10"));
+}
+
+#[test]
+fn declared_fuzz_followups_preserve_existing_status_guidance() {
+    let followups = declared_run_followups_for_legacy("managed_followups", Some("fuzz"), None);
+    let serialized = serde_json::to_string(&followups).expect("serialize followups");
+
+    assert!(serialized.contains("latest_fuzz_run"));
+    assert!(serialized.contains("homeboy runs latest-run --kind fuzz"));
+    assert!(serialized.contains("homeboy runs refs --kind fuzz --limit 10"));
+    assert!(serialized.contains("homeboy runs evidence <run-id>"));
+    assert!(!serialized.contains("latest_bench_run"));
+    assert!(!serialized.contains("homeboy runs refs --kind bench --limit 10"));
+}
+
+#[test]
+fn unknown_workload_does_not_emit_declared_bench_or_fuzz_followups() {
+    let followups = declared_run_followups_for_legacy("managed_followups", Some("unknown"), None);
+    let serialized = serde_json::to_string(&followups).expect("serialize followups");
+
+    assert!(serialized.contains("recent_runs"));
+    assert!(serialized.contains("run_artifacts"));
+    assert!(!serialized.contains("latest_bench_run"));
+    assert!(!serialized.contains("latest_fuzz_run"));
+    assert!(!serialized.contains("--kind bench"));
+    assert!(!serialized.contains("--kind fuzz"));
 }
 
 #[test]

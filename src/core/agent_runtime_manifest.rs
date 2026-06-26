@@ -192,6 +192,10 @@ pub struct AgentRuntimeDiagnosticFollowup {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
     pub command_script: String,
     pub purpose: String,
 }
