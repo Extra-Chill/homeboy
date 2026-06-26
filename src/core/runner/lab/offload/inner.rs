@@ -652,11 +652,7 @@ pub(crate) fn run_lab_offload_inner(
             required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
             runner_workload: Some(runner_workload),
-            run_id: if request.detach_after_handoff {
-                agent_task_run_id.clone()
-            } else {
-                None
-            },
+            run_id: agent_task_run_id.clone(),
             detach_after_handoff: request.detach_after_handoff,
         },
     );

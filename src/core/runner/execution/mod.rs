@@ -434,6 +434,17 @@ fn apply_explicit_runner_exec_run_id_env(
     })
 }
 
+fn runner_exec_request_metadata(run_id: Option<&str>, transport: &str) -> Value {
+    let mut metadata = serde_json::json!({
+        "transport": transport,
+    });
+    if let Some(run_id) = run_id.filter(|id| !id.trim().is_empty()) {
+        metadata["durable_run_id"] = serde_json::json!(run_id);
+        metadata["run_id"] = serde_json::json!(run_id);
+    }
+    metadata
+}
+
 fn ambient_env_is_present(name: &str) -> bool {
     std::env::var_os(name).is_some()
 }
