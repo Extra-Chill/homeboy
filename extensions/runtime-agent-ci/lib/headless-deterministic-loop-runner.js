@@ -297,7 +297,11 @@ function executeControllerExecution(options = {}) {
 function defaultExecuteControllerExecution(options = {}) {
   const controllerExecution = requiredObject(options.controllerExecution || options.controller_execution, 'controllerExecution');
   const cwd = options.request?.cwd || resolveControllerCwd(options.plan || {}, options);
-  const env = { ...process.env, ...controllerExecution.env };
+  const env = {
+    ...process.env,
+    HOMEBOY_EXTENSIONS_PATH: options.extensionPath || options.extension_path || options.repoRoot || process.env.HOMEBOY_EXTENSIONS_PATH || '',
+    ...controllerExecution.env,
+  };
   for (const command of controllerExecution.prepare) {
     runControllerCommand(command, { cwd, env });
   }
