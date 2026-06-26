@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const COMMAND_GATE_DEFAULT_TIMEOUT_SECONDS: u64 = 300;
+const RUN_COMMAND_DEFAULT_TIMEOUT_SECONDS: u64 = 900;
 const COMMAND_GATE_OUTPUT_CAP_BYTES: usize = 64 * 1024;
 
 pub(super) fn execute_controller_action<E, D>(
@@ -573,6 +574,11 @@ fn execute_run_command_action(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let timeout_seconds = execution
+        .get("timeout_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(RUN_COMMAND_DEFAULT_TIMEOUT_SECONDS);
 
     let io_dir = loop_action_io_dir(&record.loop_id, &action.action_id)?;
     fs::create_dir_all(&io_dir).map_err(|error| Error::internal_io(error.to_string(), None))?;
@@ -604,10 +610,9 @@ fn execute_run_command_action(
     process.env("HOMEBOY_LOOP_ACTION_ID", &action.action_id);
     process.env("HOMEBOY_LOOP_ACTION_DEDUPE_KEY", dedupe_key);
 
-    let output = process
-        .output()
-        .map_err(|error| Error::internal_io(error.to_string(), None))?;
-    let exit_code = output.status.code().unwrap_or(1);
+    process.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = run_controller_command_with_timeout(process, &command, timeout_seconds)?;
+    let exit_code = output.exit_code.unwrap_or(1);
     let result = if output_path.exists() {
         read_json_file(&output_path)?
     } else {
@@ -629,14 +634,116 @@ fn execute_run_command_action(
             "args": args,
             "input_path": input_path,
             "output_path": output_path,
+            "timeout_seconds": timeout_seconds,
+            "timed_out": output.timed_out,
             "exit_code": exit_code,
-            "stdout": String::from_utf8_lossy(&output.stdout),
-            "stderr": String::from_utf8_lossy(&output.stderr),
+            "signal": output.signal,
+            "stdout": String::from_utf8_lossy(&output.stdout.bytes),
+            "stderr": String::from_utf8_lossy(&output.stderr.bytes),
+            "stdout_bytes": output.stdout.total_bytes,
+            "stderr_bytes": output.stderr.total_bytes,
+            "stdout_stored_bytes": output.stdout.bytes.len(),
+            "stderr_stored_bytes": output.stderr.bytes.len(),
+            "stdout_truncated": output.stdout.truncated,
+            "stderr_truncated": output.stderr.truncated,
             "missing_artifacts": missing,
             "result": result,
         }),
         effective_exit_code,
     ))
+}
+
+struct ControllerCommandOutput {
+    exit_code: Option<i32>,
+    signal: Option<String>,
+    timed_out: bool,
+    stdout: CappedCommandOutput,
+    stderr: CappedCommandOutput,
+}
+
+fn run_controller_command_with_timeout(
+    mut process: Command,
+    command: &str,
+    timeout_seconds: u64,
+) -> Result<ControllerCommandOutput> {
+    configure_controller_command_process_group(&mut process);
+    let mut child = process.spawn().map_err(|error| {
+        Error::internal_io(
+            format!("failed to execute controller command '{command}': {error}"),
+            None,
+        )
+    })?;
+    let stdout = child.stdout.take().map(read_capped_command_output);
+    let stderr = child.stderr.take().map(read_capped_command_output);
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut timed_out = false;
+    let exit_status = loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            Error::internal_io(
+                format!("failed to poll controller command '{command}': {error}"),
+                None,
+            )
+        })? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            kill_controller_command_process_group(&mut child);
+            break child.wait().map_err(|error| {
+                Error::internal_io(
+                    format!("failed to reap timed out controller command '{command}': {error}"),
+                    None,
+                )
+            })?;
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    Ok(ControllerCommandOutput {
+        exit_code: exit_status.code(),
+        signal: exit_status_signal(&exit_status),
+        timed_out,
+        stdout: collect_capped_command_output(stdout, command, "stdout")?,
+        stderr: collect_capped_command_output(stderr, command, "stderr")?,
+    })
+}
+
+#[cfg(unix)]
+fn configure_controller_command_process_group(process: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    process.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_controller_command_process_group(_process: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_controller_command_process_group(child: &mut std::process::Child) {
+    let pid = child.id();
+    if pid > i32::MAX as u32 {
+        let _ = child.kill();
+        return;
+    }
+    let pgid = -(pid as i32);
+    unsafe {
+        libc::kill(pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_controller_command_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn exit_status_signal(status: &std::process::ExitStatus) -> Option<String> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal().map(|signal| signal.to_string())
+}
+
+#[cfg(not(unix))]
+fn exit_status_signal(_status: &std::process::ExitStatus) -> Option<String> {
+    None
 }
 
 fn loop_action_io_dir(loop_id: &str, action_id: &str) -> Result<PathBuf> {
@@ -991,15 +1098,17 @@ where
             ))
         }
         "dispatch" => {
-            let (value, exit_code) = dispatch.dispatch(request)?;
+            let request =
+                request_with_controller_dispatch_identity(record, action, dedupe_key, request);
+            let (value, exit_code) = dispatch.dispatch(&request)?;
             if let Some(run_id) = value.get("run_id").and_then(Value::as_str) {
-                record_controller_spawn(record, action, dedupe_key, entity_id, run_id, request)?;
+                record_controller_spawn(record, action, dedupe_key, entity_id, run_id, &request)?;
                 record_controller_result_evidence(record, entity_id, run_id, &value)?;
             }
             Ok((
                 execution_with_request_workflow_artifacts(
                     serde_json::json!({ "mode": mode, "result": value }),
-                    request,
+                    &request,
                 ),
                 exit_code,
             ))
@@ -1013,6 +1122,41 @@ where
             ]),
         )),
     }
+}
+
+fn request_with_controller_dispatch_identity(
+    record: &AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    dedupe_key: &str,
+    request: &Value,
+) -> Value {
+    let mut request = request.clone();
+    let identity = sanitize_loop_action_id(&format!(
+        "{}-{}-{}",
+        record.loop_id, action.action_id, dedupe_key
+    ));
+    let run_id = format!("controller-{identity}");
+    let task_id = format!("controller-task-{identity}");
+
+    if let Some(dispatch) = request.get_mut("dispatch").and_then(Value::as_object_mut) {
+        dispatch
+            .entry("run_id".to_string())
+            .or_insert_with(|| Value::String(run_id));
+        dispatch
+            .entry("task_id".to_string())
+            .or_insert_with(|| Value::String(task_id));
+        return request;
+    }
+
+    if let Some(object) = request.as_object_mut() {
+        object
+            .entry("run_id".to_string())
+            .or_insert_with(|| Value::String(run_id));
+        object
+            .entry("task_id".to_string())
+            .or_insert_with(|| Value::String(task_id));
+    }
+    request
 }
 
 pub(super) fn execute_fan_out_action<E, D>(

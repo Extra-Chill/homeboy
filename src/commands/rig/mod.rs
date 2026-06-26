@@ -642,8 +642,9 @@ mod tests {
 
     #[test]
     fn sync_is_runner_source_management() {
-        let cli = TestCli::try_parse_from(["homeboy", "sync", "static-site-importer-fixture-matrix"])
-            .expect("rig sync should parse");
+        let cli =
+            TestCli::try_parse_from(["homeboy", "sync", "static-site-importer-fixture-matrix"])
+                .expect("rig sync should parse");
 
         assert!(cli.rig.is_runner_source_management_command());
     }

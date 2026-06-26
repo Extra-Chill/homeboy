@@ -505,6 +505,7 @@ impl BatchCookSpec {
             secret_env: self.secret_env.clone(),
             concurrency: self.concurrency,
             run_id: Some(self.run_id()),
+            task_id: None,
             core: DispatchCoreInputs {
                 tasks_json: None,
                 provider_config: self.provider_config.clone(),
