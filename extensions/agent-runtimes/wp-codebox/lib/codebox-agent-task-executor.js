@@ -80,7 +80,12 @@ const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const AGENT_TASK_EVENT_SCHEMA = 'homeboy/agent-task-event/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 const WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY = 'wp-codebox/run-runtime-package';
+const NEUTRAL_RUNTIME_PACKAGE_ABILITIES = new Set(['homeboy/run-runtime-package']);
 const LEGACY_RUNTIME_PACKAGE_ABILITIES = new Set(['agents/run-runtime-package', 'runtime-package/run']);
+const RUNTIME_PACKAGE_ABILITY_ALIASES = new Set([
+  ...NEUTRAL_RUNTIME_PACKAGE_ABILITIES,
+  ...LEGACY_RUNTIME_PACKAGE_ABILITIES,
+]);
 const LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE = 'legacy-runtime-package-ability-alias';
 const LEGACY_RUNTIME_PACKAGE_ABILITY_DEPRECATIONS = Array.from(LEGACY_RUNTIME_PACKAGE_ABILITIES).map((ability) => ({
   schema: 'wp-codebox/deprecated-compatibility-alias/v1',
@@ -909,7 +914,7 @@ function genericAbilityRuntimeTask(request, config, inputs) {
   const input = runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared);
   const normalizedAbility = normalizeRuntimeTaskAbilityForCodebox(ability);
   const abilityNormalization = runtimeTaskAbilityNormalization({ requestedAbility: ability, normalizedAbility });
-  if (LEGACY_RUNTIME_PACKAGE_ABILITIES.has(ability) || normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
+  if (RUNTIME_PACKAGE_ABILITY_ALIASES.has(ability) || normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
     return {
       ability: normalizedAbility,
       ...(abilityNormalization ? { ability_normalization: abilityNormalization } : {}),
@@ -920,7 +925,7 @@ function genericAbilityRuntimeTask(request, config, inputs) {
 }
 
 function normalizeRuntimeTaskAbilityForCodebox(ability) {
-  return LEGACY_RUNTIME_PACKAGE_ABILITIES.has(ability) ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : ability;
+  return RUNTIME_PACKAGE_ABILITY_ALIASES.has(ability) ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : ability;
 }
 
 function runtimePackageTaskInputForCodebox(input) {
