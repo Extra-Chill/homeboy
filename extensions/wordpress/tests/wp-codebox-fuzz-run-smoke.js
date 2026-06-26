@@ -971,6 +971,41 @@ runWpCodeboxFuzzSuite({
 }).then((summary) => {
 	assert.equal(summary.succeeded, true);
 	assert.equal(summary.artifacts.some((artifact) => artifact.name === 'case-log'), true);
+	const stagedHelperDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-staged-helper-'));
+	fs.mkdirSync(path.join(stagedHelperDir, 'bench'));
+	fs.mkdirSync(path.join(stagedHelperDir, 'tools'));
+	const stagedWorkloadPath = path.join(stagedHelperDir, 'bench', 'coverage-gap-report.workload.json');
+	const stagedHelperPath = path.join(stagedHelperDir, 'tools', 'artifact-helper.mjs');
+	fs.writeFileSync(stagedHelperPath, 'export {};\n', 'utf8');
+	const stagedHelperInput = wpCodeboxFuzzSuiteInput({
+		id: 'staged-helper-suite',
+		cases: [{
+			id: 'staged-helper-case',
+			target: { kind: 'runtime', id: 'wordpress.run-workload', entrypoint: 'wordpress.run-workload' },
+			input: wpCodeboxWordPressWorkloadRunInput({
+				id: 'staged-helper-workload',
+				packageRoot: stagedHelperDir,
+				steps: [{ command: 'artifact-postprocess', args: { helper: stagedHelperPath, action: 'coverage-gap-report', input: { path: '${artifacts.root}' }, output: { path: 'coverage/gaps.json' } } }],
+				metadata: { source_path: stagedWorkloadPath },
+			}),
+		}],
+	});
+	return runWpCodeboxFuzzSuite({
+		taskId: 'public-cli-staged-helper-run',
+		input: stagedHelperInput,
+		wpCodeboxBin: '/custom/direct-wp-codebox',
+		runtimeRequirements: { extra_plugins: [{ slug: 'sample-plugin', source: stagedHelperDir, loadAs: 'plugin' }] },
+		runPublicCli: ({ args }) => {
+			if (args.includes('--help')) return { status: 0, stdout: 'usage' };
+			const publicCliInput = JSON.parse(fs.readFileSync(args[2], 'utf8'));
+			const stagedFiles = publicCliInput.cases[0].input.staged_files;
+			assert.equal(publicCliInput.cases[0].input.steps[0].helperPath, 'tools/artifact-helper.mjs');
+			assert.deepEqual(stagedFiles, [{ source: stagedHelperPath, target: '/wordpress/wp-content/plugins/sample-plugin/tools/artifact-helper.mjs' }]);
+			return { status: 0, stdout: JSON.stringify({ schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA, status: 'passed', summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 } }) };
+		},
+	}).finally(() => fs.rmSync(stagedHelperDir, { recursive: true, force: true }));
+}).then((summary) => {
+	assert.equal(summary.succeeded, true);
 	const largeCliDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-large-codebox-cli-'));
 	const largeCli = path.join(largeCliDir, 'wp-codebox-large-output.cjs');
 	fs.writeFileSync(largeCli, `
