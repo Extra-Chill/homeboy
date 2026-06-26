@@ -139,9 +139,11 @@ pub(crate) fn prepare_runner_process(
         env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
     }
     if runner.kind == RunnerKind::Local {
-        env.extend(resolve_runner_secret_env_for_command(
+        env.extend(resolve_runner_secret_env_for_plan(
             &runner.secret_env,
-            &request.secret_env_names,
+            &crate::core::secret_env_plan::SecretEnvPlan::from_secret_env_names(
+                request.secret_env_names.iter().cloned(),
+            ),
             &env,
         )?);
         normalize_runner_command_env(&mut env);
@@ -236,9 +238,11 @@ pub(crate) fn prepare_daemon_local_process(
 
     let mut env = runner.env.clone();
     env.extend(request.env);
-    env.extend(resolve_runner_secret_env_for_command(
+    env.extend(resolve_runner_secret_env_for_plan(
         &runner.secret_env,
-        &request.secret_env_names,
+        &crate::core::secret_env_plan::SecretEnvPlan::from_secret_env_names(
+            request.secret_env_names.iter().cloned(),
+        ),
         &env,
     )?);
     normalize_runner_command_env(&mut env);
