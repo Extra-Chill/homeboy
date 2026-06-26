@@ -925,7 +925,7 @@ pub(super) fn compile_loop_spec_workflow(
         return Ok(AgentTaskLoopPolicyAction::RunCommand {
             dedupe_key,
             entity_id: None,
-            request: workflow_command_request(workflow),
+            request: workflow_command_request(spec, workflow),
         });
     }
 
@@ -953,13 +953,31 @@ pub(super) fn compile_loop_spec_workflow(
     }
 }
 
-fn workflow_command_request(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
+fn workflow_command_request(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Value {
+    let mut execution = workflow.runtime_execution.clone();
+    if execution.get("cwd").and_then(Value::as_str).is_none() {
+        if let Some(cwd) = spec
+            .metadata
+            .get("dispatch_defaults")
+            .and_then(Value::as_object)
+            .and_then(|defaults| defaults.get("cwd"))
+            .and_then(Value::as_str)
+            .filter(|cwd| !cwd.is_empty())
+        {
+            if let Value::Object(execution) = &mut execution {
+                execution.insert("cwd".to_string(), Value::String(cwd.to_string()));
+            }
+        }
+    }
     serde_json::json!({
         "mode": "command",
         "workflow_id": workflow.workflow_id,
         "consumes": workflow.inputs.get("consumes").cloned().unwrap_or(Value::Null),
         "artifacts": workflow.artifacts,
-        "execution": workflow.runtime_execution,
+        "execution": execution,
         "runtime_execution": workflow.runtime_execution,
         "inputs": workflow.inputs,
     })
