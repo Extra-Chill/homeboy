@@ -636,6 +636,7 @@ pub(crate) fn run_lab_offload_inner(
     // The remaining pre-dispatch checks (secret-env, provider, path translation)
     // are still runner setup overhead before the workload executes.
     let pre_dispatch_started = std::time::Instant::now();
+    preflight_lab_secret_env_handoff(runner_id, Some(&runner), &env, &secret_env_handoff)?;
     preflight_agent_task_runner_secret_env_plan(
         runner_id,
         &runner,

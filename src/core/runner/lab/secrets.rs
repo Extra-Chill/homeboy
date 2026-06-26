@@ -33,6 +33,7 @@ const LAB_SECRET_ENV_HANDOFF_SCHEMA: &str = "homeboy/lab-secret-env-handoff/v1";
 pub(super) struct LabSecretEnvHandoffPlan {
     pub(super) env_delta: HashMap<String, String>,
     pub(super) diagnostics: serde_json::Value,
+    pub(super) entries: Vec<SecretEnvHandoffEntry>,
     pub(super) secret_env_plan: SecretEnvPlan,
     pub(super) secret_env_names: Vec<String>,
     pub(super) runner_deferred_secret_env: Vec<String>,
@@ -87,6 +88,7 @@ pub(super) fn build_lab_secret_env_handoff_plan(
     Ok(LabSecretEnvHandoffPlan {
         env_delta,
         diagnostics,
+        entries,
         secret_env_plan,
         secret_env_names,
         runner_deferred_secret_env,
@@ -386,6 +388,74 @@ pub(super) fn preflight_agent_task_runner_secret_env_plan(
         );
     }
     Err(error)
+}
+
+pub(super) fn preflight_lab_secret_env_handoff(
+    runner_id: &str,
+    runner: Option<&Runner>,
+    env: &HashMap<String, String>,
+    handoff: &LabSecretEnvHandoffPlan,
+) -> Result<()> {
+    let mut missing = Vec::new();
+    for entry in &handoff.entries {
+        let configured = match entry.owner.as_str() {
+            "controller" => env.contains_key(&entry.name),
+            "runner" => runner
+                .map(|runner| runner.secret_env.contains_key(&entry.name))
+                .unwrap_or(true),
+            _ => true,
+        };
+        if configured {
+            continue;
+        }
+
+        let mut missing_entry = entry.clone();
+        missing_entry.status = "missing".to_string();
+        missing_entry.remediation = Some(secret_env_handoff_remediation(entry));
+        missing.push(missing_entry);
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let names = missing
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut error = Error::validation_invalid_argument(
+        "secret-env",
+        format!(
+            "missing required Lab secret env before dispatch on runner `{}`: {}",
+            runner_id, names
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![
+            "Configure controller-forwarded secrets in the controller environment or Homeboy agent-task secret config before Lab dispatch.".to_string(),
+            "Configure runner-deferred secrets with the selected runner secret_env references before Lab dispatch.".to_string(),
+            "Use `homeboy runner env <runner>` to inspect redacted runner secret_env refs without printing values.".to_string(),
+        ]),
+    );
+    if let serde_json::Value::Object(details) = &mut error.details {
+        details.insert(
+            "missing_required_secret_env_handoff".to_string(),
+            serde_json::to_value(&missing).unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        );
+        details.insert(
+            "secret_env_handoff".to_string(),
+            handoff.diagnostics.clone(),
+        );
+    }
+    Err(error)
+}
+
+fn secret_env_handoff_remediation(entry: &SecretEnvHandoffEntry) -> String {
+    match entry.owner.as_str() {
+        "controller" => "Configure this secret in the controller environment or Homeboy agent-task secret config so Lab can forward it without exposing the value.".to_string(),
+        "runner" => "Configure this name in the selected runner secret_env references before Lab dispatch.".to_string(),
+        _ => "Configure the required secret env name before Lab dispatch.".to_string(),
+    }
 }
 
 fn declared_agent_task_controller_secret_env(args: &[String]) -> Vec<String> {
@@ -1084,6 +1154,78 @@ mod tests {
             .as_deref()
             .expect("remediation")
             .contains("runner secret_env references"));
+    }
+
+    #[test]
+    fn preflight_lab_secret_env_handoff_reports_missing_runner_deferred_secret() {
+        let args = vec![
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "preview-client".to_string(),
+            "start".to_string(),
+            "--ingress".to_string(),
+            "https://preview-broker.example.test".to_string(),
+            "--token-env=HOMEBOY_RUNNER_PREFLIGHT_TOKEN".to_string(),
+        ];
+        let handoff = build_lab_secret_env_handoff_plan(&args, HashMap::new()).expect("handoff");
+        let runner = fixture_runner(HashMap::new());
+
+        let err =
+            preflight_lab_secret_env_handoff("lab-a", Some(&runner), &HashMap::new(), &handoff)
+                .expect_err("missing runner-deferred secret should fail before dispatch");
+
+        assert!(err.message.contains("HOMEBOY_RUNNER_PREFLIGHT_TOKEN"));
+        let rendered = err.details.to_string();
+        assert!(rendered.contains("runner-deferred secrets"));
+        assert!(rendered.contains("runner secret_env references"));
+        assert!(rendered.contains("\"status\":\"missing\""));
+    }
+
+    #[test]
+    fn preflight_lab_secret_env_handoff_preserves_unknown_runner_side_status() {
+        let args = vec![
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "preview-client".to_string(),
+            "start".to_string(),
+            "--ingress".to_string(),
+            "https://preview-broker.example.test".to_string(),
+            "--token-env=HOMEBOY_UNKNOWN_RUNNER_TOKEN".to_string(),
+        ];
+        let handoff = build_lab_secret_env_handoff_plan(&args, HashMap::new()).expect("handoff");
+
+        preflight_lab_secret_env_handoff("lab-a", None, &HashMap::new(), &handoff)
+            .expect("unknown runner-side secret status should remain runner-deferred");
+    }
+
+    #[test]
+    fn preflight_lab_secret_env_handoff_reports_redacted_controller_forwarded_secret() {
+        let args = vec![
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "compare".to_string(),
+            "woocommerce-gateway-stripe".to_string(),
+            "real-wallet".to_string(),
+            "--secret-env=HOMEBOY_CONTROLLER_PREFLIGHT_SECRET".to_string(),
+        ];
+        std::env::set_var(
+            "HOMEBOY_CONTROLLER_PREFLIGHT_SECRET",
+            "controller-secret-value-must-not-leak",
+        );
+        let handoff = build_lab_secret_env_handoff_plan(&args, HashMap::new()).expect("handoff");
+        let runner = fixture_runner(HashMap::new());
+
+        let err =
+            preflight_lab_secret_env_handoff("lab-a", Some(&runner), &HashMap::new(), &handoff)
+                .expect_err("missing forwarded controller secret should fail before dispatch");
+
+        let rendered = err.details.to_string();
+        assert!(rendered.contains("HOMEBOY_CONTROLLER_PREFLIGHT_SECRET"));
+        assert!(rendered.contains("controller-forwarded secrets"));
+        assert!(rendered.contains("controller environment"));
+        assert!(!rendered.contains("controller-secret-value-must-not-leak"));
+
+        std::env::remove_var("HOMEBOY_CONTROLLER_PREFLIGHT_SECRET");
     }
 
     #[test]
