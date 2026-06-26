@@ -15,6 +15,7 @@ const {
 const { runtimeAgentCiTaskExecutorConfig } = require('./runtime-agent-ci-plan');
 const { evaluateGatePlan } = require('./gate-plan-evaluator');
 const { assertLoopSuccess, loopEvidence, loopIteration, loopRun } = require('./loop-lifecycle.cjs');
+const { runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
 
 const DEFAULT_STDIO_SUMMARY_BYTES = 8192;
 
@@ -351,12 +352,12 @@ function handleRuntimeInvocationStderr(stderr, options = {}) {
 }
 
 function persistRuntimeInvocationStderr(content, options = {}) {
-  const artifactDir = runtimeArtifactDir(options);
+  const artifactDir = runtimeAgentArtifactPaths(options).run_dir;
   if (!artifactDir) {
     return null;
   }
   const taskId = options.request?.task_id || options.plan?.workload_id || options.plan?.task_id || 'runtime-agent-task';
-  const filePath = path.join(artifactDir, `${safeFileSegment(taskId)}-runtime-stderr.txt`);
+  const filePath = runtimeAgentArtifactPaths({ ...options, stderrFile: options.stderrFile || options.stderr_file }).stderr || path.join(artifactDir, `${safeFileSegment(taskId)}-runtime-stderr.txt`);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
   return {
@@ -364,19 +365,6 @@ function persistRuntimeInvocationStderr(content, options = {}) {
     path: filePath,
     bytes: Buffer.byteLength(content),
   };
-}
-
-function runtimeArtifactDir(options = {}) {
-  return firstString(
-    options.stderrArtifactDir,
-    options.stderr_artifact_dir,
-    options.plan?.artifacts_path,
-    options.plan?.artifacts,
-    options.env?.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR,
-    options.env?.HOMEBOY_RUNTIME_AGENT_ARTIFACTS,
-    process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR,
-    process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS,
-  );
 }
 
 function boundedText(value, maxBytes = DEFAULT_STDIO_SUMMARY_BYTES) {
@@ -736,11 +724,12 @@ function validateGenericAgentLoopOutcomeContract(options = {}) {
 }
 
 function writeGenericAgentLoopArtifacts(options = {}) {
-  if (options.outcomeFile) {
-    writeJsonFile(options.outcomeFile, options.outcome);
+  const artifactPaths = runtimeAgentArtifactPaths(options);
+  if (artifactPaths.outcome) {
+    writeJsonFile(artifactPaths.outcome, options.outcome);
   }
-  if (options.resultsFile) {
-    writeJsonFile(options.resultsFile, options.results);
+  if (artifactPaths.results) {
+    writeJsonFile(artifactPaths.results, options.results);
   }
 }
 

@@ -18,6 +18,7 @@
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js",
     "./agent-task-to-review-runner": "./lib/agent-task-to-review-runner.js",
     "./runtime-workflow-inputs": "./lib/runtime-workflow-inputs.cjs",
+    "./artifact-paths": "./lib/artifact-paths.cjs",
     "./loop-lifecycle": "./lib/loop-lifecycle.cjs",
     "./workspace-publication-lifecycle": "./lib/workspace-publication-lifecycle.cjs"
   },

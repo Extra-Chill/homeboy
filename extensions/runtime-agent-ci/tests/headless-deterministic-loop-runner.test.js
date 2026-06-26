@@ -224,6 +224,15 @@ try {
   assert.equal(statusArtifact.schema, 'homeboy/headless-deterministic-loop-status/v1');
   assert.equal(statusArtifact.status, 'succeeded');
   assert.equal(loopResultArtifact.schema, 'homeboy/headless-deterministic-loop-result/v1');
+
+  const sharedRunDir = path.join(tmpRoot, 'shared-run');
+  writeHeadlessDeterministicLoopArtifacts({
+    result: twoRevolution,
+    artifact_paths: { run_dir: sharedRunDir },
+  });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'events.json'), 'utf8'))[0].type, 'loop_started');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'status.json'), 'utf8')).status, 'succeeded');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'results.json'), 'utf8')).scenarios[0].id, 'build-site');
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 }
