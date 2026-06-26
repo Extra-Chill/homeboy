@@ -94,6 +94,22 @@ pub struct RunnerWorkspaceSyncOutput {
     pub validation_dependencies: Vec<RunnerValidationDependencySyncOutput>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceListOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    pub runner_id: String,
+    pub workspace_root: String,
+    pub lab_workspaces_root: String,
+    pub workspaces: Vec<RunnerWorkspaceListEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceListEntry {
+    pub remote_path: String,
+    pub exec_command: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerWorkspaceCurrentSummary {
     pub local_path: String,

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::core::engine::temp;
 use crate::core::error::{Error, Result};
@@ -14,10 +14,12 @@ use super::snapshot::{
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
-    DEFAULT_EXCLUDES,
+    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{deterministic_remote_path, git_output, validate_absolute_path};
+use crate::core::engine::shell;
+use crate::core::server::{self, SshClient};
 
 pub fn sync_workspace(
     runner_id: &str,
@@ -198,6 +200,125 @@ pub fn sync_workspace(
             ))
         }
     }
+}
+
+pub fn list_workspaces(runner_id: &str, limit: usize) -> Result<(RunnerWorkspaceListOutput, i32)> {
+    let runner = load(runner_id)?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner workspace list requires workspace_root",
+            Some(runner.id.clone()),
+            Some(vec![
+                "Set runner.workspace_root to the remote workspace directory.".to_string(),
+            ]),
+        )
+    })?;
+    validate_absolute_path("workspace_root", workspace_root)?;
+    let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    let remote_paths = match runner.kind {
+        RunnerKind::Local => list_local_lab_workspaces(Path::new(&lab_workspaces_root), limit)?,
+        RunnerKind::Ssh => list_ssh_lab_workspaces(&runner, &lab_workspaces_root, limit)?,
+    };
+    let workspaces = remote_paths
+        .into_iter()
+        .map(|remote_path| RunnerWorkspaceListEntry {
+            exec_command: format!(
+                "homeboy runner exec {} --cwd {} -- <command>",
+                shell_arg(&runner.id),
+                shell_arg(&remote_path)
+            ),
+            remote_path,
+        })
+        .collect();
+
+    Ok((
+        RunnerWorkspaceListOutput {
+            variant: "workspace_list",
+            command: "runner.workspace.list",
+            runner_id: runner.id,
+            workspace_root: workspace_root.to_string(),
+            lab_workspaces_root,
+            workspaces,
+        },
+        0,
+    ))
+}
+
+fn list_local_lab_workspaces(root: &Path, limit: usize) -> Result<Vec<String>> {
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut entries = std::fs::read_dir(root)
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some("list runner workspaces".to_string()))
+        })?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_dir() {
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok());
+            Some((entry.path(), modified))
+        })
+        .collect::<Vec<(PathBuf, Option<std::time::SystemTime>)>>();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(entries
+        .into_iter()
+        .take(limit)
+        .map(|(path, _)| path.display().to_string())
+        .collect())
+}
+
+fn list_ssh_lab_workspaces(
+    runner: &super::super::Runner,
+    lab_workspaces_root: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let server_id = runner.server_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "server_id",
+            "SSH runner workspace list requires server_id",
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    let server = server::load(server_id)?;
+    let mut client = SshClient::from_server(&server, server_id)?;
+    client.env.extend(runner.env.clone());
+    let command = format!(
+        "root={}; if [ -d \"$root\" ]; then ls -1td \"$root\"/*/ 2>/dev/null | sed 's#/$##'; fi",
+        shell::quote_arg(lab_workspaces_root)
+    );
+    let output = client.execute(&command);
+    if output.exit_code != 0 {
+        return Err(Error::internal_unexpected(format!(
+            "runner workspace list failed on {server_id}: {}",
+            output.stderr.trim()
+        )));
+    }
+    let paths = output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Ok(paths.into_iter().take(limit).collect())
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn workspace_lease(

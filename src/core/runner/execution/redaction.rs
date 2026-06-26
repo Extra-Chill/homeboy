@@ -120,19 +120,53 @@ pub(super) fn runner_exec_diagnostics(
     source_snapshot: Option<&SourceSnapshot>,
     required_paths: &[String],
 ) -> Option<RunnerExecDiagnostics> {
-    if required_paths.is_empty() {
+    if required_paths.is_empty()
+        && source_snapshot
+            .and_then(|snapshot| snapshot.remote_path.as_ref())
+            .is_none()
+    {
         return None;
+    }
+    let mut hints = Vec::new();
+    if let Some(remote_path) = source_snapshot.and_then(|snapshot| snapshot.remote_path.as_ref()) {
+        hints.push(format!(
+            "Reuse this runner workspace with `homeboy runner exec {} --cwd {} -- <command>`.",
+            shell_arg(&runner.id),
+            shell_arg(remote_path)
+        ));
+        hints.push(format!(
+            "Discover recent runner workspaces with `homeboy runner workspace list {}`.",
+            shell_arg(&runner.id)
+        ));
+    }
+    if !required_paths.is_empty() {
+        hints.push(
+            "Use the generated _lab_workspaces/... snapshot path when the controller worktree path was synced into a lab snapshot."
+                .to_string(),
+        );
+        hints.push(
+            "Use --require-path to preflight paths that a command will reference before running it."
+                .to_string(),
+        );
     }
 
     Some(RunnerExecDiagnostics {
         runner_workspace_root: runner.workspace_root.clone(),
-        source_snapshot_remote_path: source_snapshot.and_then(|snapshot| snapshot.remote_path.clone()),
+        source_snapshot_remote_path: source_snapshot
+            .and_then(|snapshot| snapshot.remote_path.clone()),
         required_paths: required_paths.to_vec(),
-        hints: vec![
-            "Use the generated _lab_workspaces/... snapshot path when the controller worktree path was synced into a lab snapshot.".to_string(),
-            "Use --require-path to preflight paths that a command will reference before running it.".to_string(),
-        ],
+        hints,
     })
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub(super) fn runner_result(

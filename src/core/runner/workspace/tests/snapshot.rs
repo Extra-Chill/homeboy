@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::core::runner::workspace::snapshot::{
     snapshot_archive_command, snapshot_install_command,
 };
-use crate::core::runner::workspace::sync::sync_workspace;
+use crate::core::runner::workspace::sync::{list_workspaces, sync_workspace};
 use crate::core::runner::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::core::runner::workspace::util::git_output;
 
@@ -237,6 +237,54 @@ fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
         assert!(second_remote_path.join("Cargo.toml").exists());
         assert!(!second_remote_path.join("sentinel.txt").exists());
         assert!(remote_path.join("sentinel.txt").exists());
+    });
+}
+
+#[test]
+fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::write(source.path().join("Cargo.toml"), "[package]\nname='app'\n").expect("manifest");
+
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-list","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (sync, _) = sync_workspace(
+            "lab-local-list",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        )
+        .expect("sync workspace");
+
+        let (list, exit_code) = list_workspaces("lab-local-list", 10).expect("list workspaces");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(list.command, "runner.workspace.list");
+        assert_eq!(
+            list.lab_workspaces_root,
+            format!("{}/_lab_workspaces", runner_root.path().display())
+        );
+        assert_eq!(list.workspaces.len(), 1);
+        assert_eq!(list.workspaces[0].remote_path, sync.remote_path);
+        assert!(list.workspaces[0]
+            .exec_command
+            .contains("homeboy runner exec lab-local-list --cwd"));
+        assert!(list.workspaces[0].exec_command.contains("-- <command>"));
     });
 }
 
