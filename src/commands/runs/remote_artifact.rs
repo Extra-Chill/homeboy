@@ -1,5 +1,7 @@
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use homeboy::core::engine::shell;
 use homeboy::core::observation::runs_service::{
@@ -13,7 +15,8 @@ use homeboy::core::{server, Error};
 use super::types::{
     RunsArtifactAttachArgs, RunsArtifactAttachOutput, RunsArtifactCleanupDownloadsArgs,
     RunsArtifactCleanupDownloadsOutput, RunsArtifactCleanupPersistedArgs,
-    RunsArtifactCleanupPersistedOutput, RunsArtifactGetOutput, RunsOutput,
+    RunsArtifactCleanupPersistedOutput, RunsArtifactGetOutput, RunsArtifactPreviewArgs,
+    RunsArtifactPreviewOutput, RunsOutput,
 };
 use super::CmdResult;
 
@@ -75,6 +78,100 @@ pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
         }),
         0,
     ))
+}
+
+pub fn preview(args: RunsArtifactPreviewArgs) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
+    if artifact.artifact_type != "directory" {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "artifact {} is {}, not a previewable directory",
+                artifact.id, artifact.artifact_type
+            ),
+            Some(artifact.id),
+            Some(vec![
+                "Run `homeboy runs artifacts <run-id>` to find directory artifacts.".to_string(),
+            ]),
+        ));
+    }
+
+    let artifact_path = PathBuf::from(&artifact.path);
+    if !artifact_path.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "artifact {} directory is missing or unreadable at {}",
+                artifact.id,
+                artifact_path.display()
+            ),
+            Some(artifact.id),
+            None,
+        ));
+    }
+
+    let port = args.port.map(Ok).unwrap_or_else(available_port)?;
+    let base_url = format!("http://127.0.0.1:{port}/");
+    let port_arg = port.to_string();
+    let directory_arg = artifact_path.display().to_string();
+    let child = Command::new("python3")
+        .args([
+            "-m",
+            "http.server",
+            &port_arg,
+            "--bind",
+            "127.0.0.1",
+            "--directory",
+            &directory_arg,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("start python3 static artifact preview server".to_string()),
+            )
+        })?;
+    let process_id = child.id();
+    drop(child);
+
+    let entrypoints = homeboy::core::artifacts::html_preview_entrypoints(&artifact)
+        .into_iter()
+        .map(|mut entrypoint| {
+            entrypoint.public_url = reqwest::Url::parse(&base_url)
+                .ok()
+                .and_then(|url| url.join(&entrypoint.path).ok())
+                .map(|url| url.to_string());
+            entrypoint
+        })
+        .collect();
+
+    Ok((
+        RunsOutput::ArtifactPreview(RunsArtifactPreviewOutput {
+            command: "runs.artifact.preview",
+            run_id: args.run_id,
+            artifact_id: artifact.id,
+            artifact_path: artifact_path.display().to_string(),
+            base_url,
+            process_id,
+            entrypoints,
+            stop_hint: format!("Stop preview server with `kill {process_id}`."),
+        }),
+        0,
+    ))
+}
+
+fn available_port() -> homeboy::core::Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|err| {
+        Error::internal_io(err.to_string(), Some("reserve preview port".to_string()))
+    })?;
+    let port = listener.local_addr().map_err(|err| {
+        Error::internal_io(err.to_string(), Some("read preview port".to_string()))
+    })?;
+    Ok(port.port())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,7 +521,7 @@ mod tests {
     use std::fs;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    use homeboy::core::observation::{NewRunRecord, ObservationStore};
+    use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
 
     use super::*;
@@ -633,6 +730,100 @@ mod tests {
             };
 
             assert!(err.to_string().contains("parent directory"));
+        });
+    }
+
+    #[test]
+    fn preview_serves_directory_artifact_and_surfaces_entrypoints() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("runner-exec").build())
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("finish run");
+            let site = home.path().join("site");
+            fs::create_dir_all(site.join("case-a")).expect("site");
+            fs::write(site.join("index.html"), b"<html>Home</html>").expect("index");
+            fs::write(site.join("case-a/index.html"), b"<html>Case</html>").expect("case");
+            let artifact = store
+                .record_directory_artifact_with_metadata(
+                    &run.id,
+                    "generated_site",
+                    &site,
+                    serde_json::json!({
+                        "entrypoints": [{
+                            "path": "index.html",
+                            "label": "Open generated homepage",
+                            "mime_type": "text/html"
+                        }]
+                    }),
+                )
+                .expect("artifact");
+
+            let output = preview(RunsArtifactPreviewArgs {
+                run_id: run.id.clone(),
+                artifact_id: artifact.id.clone(),
+                port: None,
+            })
+            .expect("preview")
+            .0;
+            let RunsOutput::ArtifactPreview(output) = output else {
+                panic!("unexpected output");
+            };
+            unsafe {
+                libc::kill(output.process_id as i32, libc::SIGTERM);
+            }
+
+            assert_eq!(output.command, "runs.artifact.preview");
+            assert_eq!(output.run_id, run.id);
+            assert_eq!(output.artifact_id, artifact.id);
+            assert!(output.base_url.starts_with("http://127.0.0.1:"));
+            assert!(output.stop_hint.contains(&output.process_id.to_string()));
+            assert!(output.entrypoints.iter().any(|entrypoint| {
+                entrypoint.path == "index.html"
+                    && entrypoint.public_url.as_deref()
+                        == Some(format!("{}index.html", output.base_url).as_str())
+            }));
+            assert!(output
+                .entrypoints
+                .iter()
+                .any(|entrypoint| entrypoint.path == "case-a/index.html"));
+        });
+    }
+
+    #[test]
+    fn preview_rejects_file_artifacts() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("runner-exec").build())
+                .expect("run");
+            let file = home.path().join("summary.html");
+            fs::write(&file, b"<html></html>").expect("file");
+            let artifact = store
+                .record_artifact(&run.id, "summary", &file)
+                .expect("artifact");
+
+            let result = preview(RunsArtifactPreviewArgs {
+                run_id: run.id,
+                artifact_id: artifact.id,
+                port: None,
+            });
+            let Err(err) = result else {
+                panic!("file artifact should fail");
+            };
+
+            assert!(err.to_string().contains("not a previewable directory"));
         });
     }
 
