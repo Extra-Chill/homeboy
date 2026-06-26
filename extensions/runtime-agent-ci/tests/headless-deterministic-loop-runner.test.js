@@ -278,6 +278,7 @@ const controllerBacked = await runHeadlessDeterministicLoop({
       policy_result: '.ci/controller-policy.json',
       output: '.ci/controller-result.json',
       max_actions: 42,
+      reconcile_stale: true,
       prepare: [{ argv: ['node', '.github/scripts/build-homeboy-controller-run-inputs.mjs'] }],
     },
   },
@@ -303,6 +304,7 @@ assert.equal(controllerBacked.status, 'succeeded');
 assert.equal(controllerBacked.tasks[0].request.schema, 'homeboy/headless-controller-execution-request/v1');
 assert.equal(controllerBacked.tasks[0].request.executor, undefined, 'controller tasks do not create runtime-package executor requests');
 assert.equal(controllerBacked.tasks[0].outcome.metadata.controller_execution.max_actions, 42);
+assert.equal(controllerBacked.tasks[0].outcome.metadata.controller_execution.reconcile_stale, true);
 assert.equal(controllerBacked.tasks[0].outcome.metadata.controller_result.loop_id, 'controller-backed-loop');
 assert.equal(controllerRequest.controller_execution.spec, '.github/homeboy/controllers/static-site-generation-loop.controller.json');
 

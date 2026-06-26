@@ -238,16 +238,16 @@ function normalizeControllerExecution(value) {
   }
   return {
     schema: value.schema || 'homeboy/headless-controller-execution/v1',
-    spec,
-    inputs: stringValue(value.inputs || value.inputs_path || value.inputsPath),
-    policy_result: stringValue(value.policy_result || value.policyResult || value.policy_result_path || value.policyResultPath),
-    output: stringValue(value.output || value.output_path || value.outputPath),
-    max_actions: positiveInteger(value.max_actions || value.maxActions) || 100,
-    reconcile_stale: booleanValue(value.reconcile_stale ?? value.reconcileStale),
-    replace: booleanValue(value.replace),
-    fork: booleanValue(value.fork),
-    resume_existing: booleanValue(value.resume_existing ?? value.resumeExisting),
-    prepare: normalizeArray(value.prepare || value.prepare_commands || value.prepareCommands),
+		spec,
+		inputs: stringValue(value.inputs || value.inputs_path || value.inputsPath),
+		policy_result: stringValue(value.policy_result || value.policyResult || value.policy_result_path || value.policyResultPath),
+		output: stringValue(value.output || value.output_path || value.outputPath),
+		max_actions: positiveInteger(value.max_actions || value.maxActions) || 100,
+		reconcile_stale: booleanValue(value.reconcile_stale ?? value.reconcileStale ?? process.env.HOMEBOY_CONTROLLER_RECONCILE_STALE),
+		replace: booleanValue(value.replace),
+		fork: booleanValue(value.fork),
+		resume_existing: booleanValue(value.resume_existing ?? value.resumeExisting),
+		prepare: normalizeArray(value.prepare || value.prepare_commands || value.prepareCommands),
     env: optionalObject(value.env),
     metadata: optionalObject(value.metadata),
   };
@@ -1073,7 +1073,11 @@ function positiveInteger(value) {
 }
 
 function booleanValue(value) {
-  return value === true || value === 'true';
+  if (value === true) {
+    return true;
+  }
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(normalized);
 }
 
 function optionalObject(value) {

@@ -140,6 +140,8 @@ assert.equal(artifactResultEnvelope.evidenceRefs.length, 2);
 assert.equal(artifactResultEnvelope.evidenceRefs[0].uri, 'artifacts/run-1');
 assert.deepEqual(typedArtifactsFromCodeboxResult({ artifact_result: artifactResultEnvelope }).review.payload, { ok: true });
 assert.deepEqual(normalizeCodeboxPublicResultEnvelope({ artifact_result: artifactResultEnvelope }).outputs, {});
+assert.deepEqual(typedArtifactsFromCodeboxResult({ outputs: { artifact_result: artifactResultEnvelope } }).review.payload, { ok: true });
+assert.equal(normalizeCodeboxPublicResultEnvelope({ outputs: { artifact_result: artifactResultEnvelope } }).artifact_result.schema, 'wp-codebox/artifact-result-envelope/v1');
 const privateRuntimeShapeRequest = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'private-runtime-shape-boundary',
@@ -860,6 +862,32 @@ assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.en
   concept_packet: 'outputs.typed_artifacts.concept_packet.payload',
 });
 
+const controllerClientContextRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'controller-client-context-runtime-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Run a controller workflow with hydrated runtime task input in client context.',
+  dispatch: {
+    client_context: JSON.stringify({
+      inputs: {
+        runtime_task: {
+          ability: 'runtime-package/run',
+          input: {
+            package: { slug: 'static-site-agent', source: 'bundles/static-site-agent' },
+            input: {
+              concept_packet: { payload: { title: 'Concept' } },
+              design_packet: { payload: { design_system: 'Editorial' } },
+            },
+          },
+        },
+      },
+    }),
+  },
+});
+assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.input.input.concept_packet.payload.title, 'Concept');
+assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.input.input.design_packet.payload.design_system, 'Editorial');
+
 const legacyRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'legacy-runtime-package-task-1',
@@ -1006,6 +1034,9 @@ restoreEnv('WP_CODEBOX_AGENTS_API_PATH', previousAgentsApiPath);
 restoreEnv('WP_CODEBOX_DATA_MACHINE_PATH', previousDataMachinePath);
 restoreEnv('WP_CODEBOX_DATA_MACHINE_CODE_PATH', previousDataMachineCodePath);
 assert.deepEqual(runtimePackageEnvSubstrateTaskInput.component_contracts, []);
+assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.agents_api, workspaceRoot);
+assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.agent_runtime, workspaceRoot);
+assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.data_machine_code, workspaceRoot);
 
 const explicitLegacyRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',

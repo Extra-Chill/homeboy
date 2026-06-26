@@ -325,6 +325,7 @@ function artifactResultEnvelopeFromCodeboxResult(result, options = {}) {
   const candidates = [
     result,
     result?.artifact_result,
+    result?.outputs?.artifact_result,
   ];
   return candidates.map(normalizeArtifactResultEnvelope).find(Boolean) || null;
 }
