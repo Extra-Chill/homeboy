@@ -42,7 +42,7 @@ impl RigArgs {
     pub fn is_runner_source_management_command(&self) -> bool {
         matches!(
             self.command,
-            RigCommand::Install { .. } | RigCommand::Sources { .. }
+            RigCommand::Install { .. } | RigCommand::Sync { .. } | RigCommand::Sources { .. }
         )
     }
 
@@ -638,6 +638,14 @@ mod tests {
             panic!("expected rig sources command");
         };
         assert!(command.is_none());
+    }
+
+    #[test]
+    fn sync_is_runner_source_management() {
+        let cli = TestCli::try_parse_from(["homeboy", "sync", "static-site-importer-fixture-matrix"])
+            .expect("rig sync should parse");
+
+        assert!(cli.rig.is_runner_source_management_command());
     }
 
     #[test]
