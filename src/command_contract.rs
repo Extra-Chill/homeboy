@@ -26,8 +26,8 @@ mod spec;
 pub use lab::{
     lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
     lab_runner_supports_contract_label, lab_runner_unsupported_hint,
-    lab_runner_unsupported_message, CommandPortabilityContract, LabCommandContract,
-    LabCommandPortability, LabCommandRequiredTool, LabCommandRouteContract,
+    lab_runner_unsupported_message, AgentTaskDispatchIdentity, CommandPortabilityContract,
+    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabCommandRouteContract,
     LabLocalExecutionPolicy, LabLocalHotPolicy, LabRoutingPolicy, LabRunnerSupportSummary,
     LabSelectedRunnerFallbackPolicy, LabSourcePathMode, LabWorkspaceModePolicy,
     RunnerHandoffEnvelope, RunnerHandoffFollowCommands, RunnerWorkload, RunnerWorkloadArtifactRef,
