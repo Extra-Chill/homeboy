@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const {
   buildGenericAgentLoopRequest,
   runGenericAgentLoop,
@@ -103,6 +104,41 @@ function executeHeadlessTask(options = {}) {
   let finalOutcome = null;
   let finalResults = null;
   let finalLoop = null;
+  const controllerExecution = normalizeControllerExecution(plan.controller_execution || plan.controllerExecution || plan.controller);
+  if (controllerExecution) {
+    const request = buildControllerExecutionRequest(plan, controllerExecution, { repoRoot });
+    pushEvent(events, 'task_planned', { task_id: request.task_id, backend: 'homeboy-controller' });
+    if (dryRun) {
+      finalOutcome = dryRunOutcome(request);
+      finalResults = dryRunResults(request);
+      pushEvent(events, 'task_dry_run', { task_id: request.task_id });
+    } else {
+      pushEvent(events, 'task_started', { task_id: request.task_id });
+      const result = executeControllerExecution({ ...options, plan, request, controllerExecution, repoRoot });
+      finalOutcome = result.outcome;
+      finalResults = result.results;
+      finalLoop = result.loop;
+      pushEvent(events, 'task_completed', { task_id: request.task_id, status: result.outcome.status });
+    }
+
+    const taskResult = {
+      task_id: request.task_id,
+      request,
+      outcome: finalOutcome,
+      results: finalResults,
+      loop: finalLoop,
+      loop_policy: finalLoop?.policy_status || null,
+      state: finalLoop?.state || null,
+    };
+    return {
+      id: request.task_id,
+      task_index: task.task_index,
+      status: ['succeeded', 'no_op'].includes(finalOutcome?.status) ? 'completed' : 'failed',
+      outcome: finalOutcome,
+      task_result: taskResult,
+    };
+  }
+
   const request = buildGenericAgentLoopRequest({
     plan,
     runtime,
@@ -176,6 +212,160 @@ function executeHeadlessTask(options = {}) {
     outcome: finalOutcome,
     task_result: taskResult,
   };
+}
+
+function normalizeControllerExecution(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const spec = stringValue(value.spec || value.spec_path || value.specPath || value.controller_spec || value.controllerSpec || value.path);
+  if (!spec) {
+    return null;
+  }
+  return {
+    schema: value.schema || 'homeboy/headless-controller-execution/v1',
+    spec,
+    inputs: stringValue(value.inputs || value.inputs_path || value.inputsPath),
+    policy_result: stringValue(value.policy_result || value.policyResult || value.policy_result_path || value.policyResultPath),
+    output: stringValue(value.output || value.output_path || value.outputPath),
+    max_actions: positiveInteger(value.max_actions || value.maxActions) || 100,
+    prepare: normalizeArray(value.prepare || value.prepare_commands || value.prepareCommands),
+    env: optionalObject(value.env),
+    metadata: optionalObject(value.metadata),
+  };
+}
+
+function buildControllerExecutionRequest(plan, controllerExecution, options = {}) {
+  const taskId = plan.task_id || plan.workload_id || 'headless-controller';
+  const cwd = resolveControllerCwd(plan, options);
+  return {
+    schema: 'homeboy/headless-controller-execution-request/v1',
+    task_id: String(taskId),
+    group_key: plan.group_key || plan.workload_id || '',
+    instructions: plan.prompt || plan.workload_label || 'Run Homeboy controller task.',
+    workspace: compactObject({ repository: plan.target_repo, path: plan.component_path }),
+    controller_execution: controllerExecution,
+    cwd,
+    artifact_declarations: normalizeArray(plan.artifact_declarations),
+    expected_artifacts: expectedArtifactsFromPlan(plan),
+  };
+}
+
+function executeControllerExecution(options = {}) {
+  const request = requiredObject(options.request, 'request');
+  const controllerExecution = requiredObject(options.controllerExecution || options.controller_execution, 'controllerExecution');
+  const executeController = options.executeController || options.execute_controller || defaultExecuteControllerExecution;
+  const result = executeController({ ...options, request, controllerExecution });
+  const status = result?.status === 'succeeded' || result?.success === true ? 'succeeded' : 'failed';
+  const summary = result?.summary || (status === 'succeeded' ? 'Homeboy controller execution succeeded.' : 'Homeboy controller execution failed.');
+  const outcome = {
+    schema: 'homeboy/agent-task-outcome/v1',
+    task_id: request.task_id,
+    status,
+    summary,
+    metadata: {
+      controller_execution: controllerExecution,
+      controller_result: result?.result || result || {},
+      results: result?.results || controllerResultsScenario(request, status, result),
+    },
+  };
+  return {
+    outcome,
+    results: outcome.metadata.results,
+    loop: null,
+  };
+}
+
+function defaultExecuteControllerExecution(options = {}) {
+  const controllerExecution = requiredObject(options.controllerExecution || options.controller_execution, 'controllerExecution');
+  const cwd = options.request?.cwd || resolveControllerCwd(options.plan || {}, options);
+  const env = { ...process.env, ...controllerExecution.env };
+  for (const command of controllerExecution.prepare) {
+    runControllerCommand(command, { cwd, env });
+  }
+  const homeboyBin = options.homeboyBin || options.homeboy_bin || process.env.HOMEBOY_BIN || 'homeboy';
+  const args = ['agent-task', 'controller', 'run-from-spec', specArg(controllerExecution.spec), '--max-actions', String(controllerExecution.max_actions)];
+  if (controllerExecution.inputs) {
+    args.push('--inputs', specArg(controllerExecution.inputs));
+  }
+  if (controllerExecution.policy_result) {
+    args.push('--policy-result', specArg(controllerExecution.policy_result));
+  }
+  if (controllerExecution.output) {
+    args.push('--output', controllerExecution.output);
+  }
+  const run = spawnSync(homeboyBin, args, { cwd, env, encoding: 'utf8' });
+  if (run.status !== 0) {
+    return {
+      status: 'failed',
+      summary: `Homeboy controller exited with status ${run.status}.`,
+      command: [homeboyBin, ...args],
+      stdout: run.stdout || '',
+      stderr: run.stderr || '',
+    };
+  }
+  const parsed = controllerExecution.output ? readJsonOrNull(path.resolve(cwd, controllerExecution.output)) : null;
+  return {
+    status: 'succeeded',
+    summary: 'Homeboy controller execution succeeded.',
+    command: [homeboyBin, ...args],
+    stdout: run.stdout || '',
+    stderr: run.stderr || '',
+    result: parsed,
+  };
+}
+
+function resolveControllerCwd(plan = {}, options = {}) {
+  const componentPath = stringValue(plan.component_path || plan.componentPath || plan.workspace?.path);
+  const base = options.workloadRoot || options.workload_root || process.cwd();
+  if (!componentPath || componentPath === '.') {
+    return base;
+  }
+  return path.isAbsolute(componentPath) ? componentPath : path.resolve(base, componentPath);
+}
+
+function runControllerCommand(command, options = {}) {
+  const normalized = Array.isArray(command) ? { argv: command } : command;
+  if (!normalized || typeof normalized !== 'object' || !Array.isArray(normalized.argv) || normalized.argv.length === 0) {
+    throw new Error('controller_execution prepare commands must include a non-empty argv array.');
+  }
+  const [bin, ...args] = normalized.argv;
+  const run = spawnSync(bin, args, {
+    cwd: normalized.cwd ? path.resolve(options.cwd || process.cwd(), normalized.cwd) : options.cwd,
+    env: { ...(options.env || process.env), ...optionalObject(normalized.env) },
+    encoding: 'utf8',
+  });
+  if (run.status !== 0) {
+    throw new Error(`controller_execution prepare command failed: ${[bin, ...args].join(' ')}\n${run.stderr || run.stdout || ''}`);
+  }
+}
+
+function specArg(value) {
+  return value.startsWith('@') ? value : `@${value}`;
+}
+
+function controllerResultsScenario(request, status, result) {
+  return {
+    scenarios: [{
+      id: request.task_id,
+      metrics: { homeboy_controller_execution_mean: status === 'succeeded' ? 1 : 0 },
+      metadata: {
+        job_status: status,
+        success_status: status,
+        completion_outcome: status,
+        completion_outcome_satisfied: status === 'succeeded',
+        controller_result_status: result?.status || '',
+      },
+    }],
+  };
+}
+
+function readJsonOrNull(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 function writeHeadlessDeterministicLoopArtifacts(options = {}) {
@@ -627,12 +817,29 @@ function optionalObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
+function compactObject(value) {
+  return Object.fromEntries(Object.entries(value || {}).filter(([, entry]) => entry !== undefined && entry !== null && entry !== ''));
+}
+
 function optionalNullableObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function stringValue(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : '';
+}
+
+function expectedArtifactsFromPlan(plan) {
+  const declared = normalizeArray(plan.artifact_declarations)
+    .filter((artifact) => artifact && typeof artifact === 'object' && artifact.required === true && artifact.name)
+    .map((artifact) => artifact.name);
+  return normalizeArray(plan.expected_artifacts || plan.expectedArtifacts).length > 0
+    ? normalizeArray(plan.expected_artifacts || plan.expectedArtifacts)
+    : declared;
 }
 
 function pushEvent(events, type, data = {}) {
