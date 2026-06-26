@@ -2,8 +2,8 @@ use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
 
 use homeboy::core::runners::{
-    self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOutput,
+    self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput,
+    RunnerWorkspacePruneOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
 };
 
 use super::CmdResult;
@@ -14,6 +14,7 @@ pub enum RunnerWorkspaceOutput {
     List(RunnerWorkspaceListOutput),
     Sync(RunnerWorkspaceSyncOutput),
     Apply(RunnerWorkspaceApplyOutput),
+    Prune(RunnerWorkspacePruneOutput),
 }
 
 #[derive(Subcommand)]
@@ -53,6 +54,23 @@ pub(super) enum RunnerWorkspaceCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Preview or remove orphaned runner-side Lab workspaces
+    Prune {
+        /// Runner ID
+        runner_id: String,
+
+        /// Delete the previewed orphaned workspaces. Without this flag, the command is a dry run.
+        #[arg(long)]
+        apply: bool,
+
+        /// Minimum workspace age before it can be considered orphaned.
+        #[arg(long, default_value_t = 24)]
+        min_age_hours: u64,
+
+        /// Maximum number of orphan candidates to report or remove.
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -80,6 +98,20 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             runner::apply_workspace_patch(runner::RunnerWorkspaceApplyOptions { input, force })
                 .map(|(output, exit_code)| (RunnerWorkspaceOutput::Apply(output), exit_code))
         }
+        RunnerWorkspaceCommand::Prune {
+            runner_id,
+            apply,
+            min_age_hours,
+            limit,
+        } => runner::prune_workspaces(
+            &runner_id,
+            runner::RunnerWorkspacePruneOptions {
+                apply,
+                min_age_hours,
+                limit,
+            },
+        )
+        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Prune(output), exit_code)),
     }
 }
 
