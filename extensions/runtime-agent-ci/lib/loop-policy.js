@@ -85,7 +85,7 @@ function inferredMode({ maxRevolutions, durationMs, deadlineAt }) {
 }
 
 function normalizeMode(value) {
-  return ['count', 'duration', 'indefinite'].includes(value) ? value : 'indefinite';
+  return ['count', 'duration', 'deadline', 'indefinite', 'until_stopped'].includes(value) ? value : 'indefinite';
 }
 
 function normalizeDeadline(value) {
