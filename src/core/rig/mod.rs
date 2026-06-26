@@ -91,7 +91,8 @@ pub use workloads::{
 };
 
 use crate::core::error::{Error, Result};
-use crate::core::paths;
+use crate::core::extension::bench::parsing::{RigPackageEvidence, RigPackageFreshness};
+use crate::core::{git, paths};
 use discovery::discover_rigs_for_install;
 use std::collections::HashMap;
 use std::fs;
@@ -119,6 +120,84 @@ pub(crate) fn local_package_root(id: &str) -> Option<PathBuf> {
     LOCAL_PACKAGE_ROOTS
         .get()
         .and_then(|roots| roots.lock().ok()?.get(id).cloned())
+}
+
+pub fn package_evidence(id: &str) -> Option<RigPackageEvidence> {
+    let metadata = read_source_metadata(id)?;
+    Some(package_evidence_from_metadata(id, metadata))
+}
+
+fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigPackageEvidence {
+    let package_root = metadata.package_path.clone();
+    let source_root = metadata
+        .source_root
+        .clone()
+        .unwrap_or_else(|| metadata.package_path.clone());
+    let current_source_revision = git::short_head_revision_at(Path::new(&source_root));
+    let root_present = Path::new(&source_root).is_dir();
+    let (freshness, freshness_message) = if !root_present {
+        (
+            RigPackageFreshness::Missing,
+            Some("installed rig package source path is missing".to_string()),
+        )
+    } else if let (Some(installed), Some(current)) = (
+        metadata.source_revision.as_deref(),
+        current_source_revision.as_deref(),
+    ) {
+        if installed == current {
+            (RigPackageFreshness::Verified, None)
+        } else {
+            (
+                RigPackageFreshness::Stale,
+                Some(format!(
+                    "installed source revision {installed} differs from current source revision {current}"
+                )),
+            )
+        }
+    } else {
+        (
+            RigPackageFreshness::Unknown,
+            Some(
+                "source freshness could not be verified because a git revision was unavailable"
+                    .to_string(),
+            ),
+        )
+    };
+    let freshness_verified = freshness == RigPackageFreshness::Verified;
+    let refresh_command = (!freshness_verified).then(|| {
+        format!(
+            "homeboy rig install {} --id {} --reinstall",
+            shell_arg(&metadata.source),
+            shell_arg(id)
+        )
+    });
+
+    RigPackageEvidence {
+        rig_id: id.to_string(),
+        package_root,
+        source: metadata.source,
+        source_root: Some(source_root),
+        rig_path: Some(metadata.rig_path),
+        discovery_path: metadata.discovery_path,
+        installed_source_revision: metadata.source_revision,
+        current_source_revision,
+        linked: metadata.linked,
+        materialized: metadata.materialized,
+        freshness,
+        freshness_verified,
+        freshness_message,
+        refresh_command,
+    }
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Byte-compare the contents of two files.

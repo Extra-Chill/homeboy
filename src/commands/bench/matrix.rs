@@ -652,6 +652,9 @@ fn run_component_with_rig_context(
             rig_id: rig_id.clone(),
             shared_state: shared_state_override.or_else(|| args.shared_state.clone()),
             extra_workloads,
+            rig_package: rig_id
+                .as_deref()
+                .and_then(homeboy::core::rig::package_evidence),
             invocation_requirements,
         },
         &run_dir,

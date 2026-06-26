@@ -182,6 +182,44 @@ fn write_rig(home: &TempDir, rig_id: &str, component_id: &str, path: &std::path:
     write_rig_with_profiles(home, rig_id, component_id, path, "{}");
 }
 
+fn install_rig_package(
+    home: &TempDir,
+    rig_id: &str,
+    component_id: &str,
+    path: &std::path::Path,
+) -> std::path::PathBuf {
+    let package_root = home.path().join(format!("{rig_id}-package"));
+    let rig_dir = package_root.join("rigs").join(rig_id);
+    let workload_dir = package_root.join("workloads");
+    fs::create_dir_all(&rig_dir).expect("mkdir package rig");
+    fs::create_dir_all(&workload_dir).expect("mkdir package workloads");
+    fs::write(workload_dir.join("package-extra.bench.js"), "// fixture\n")
+        .expect("write package workload");
+    fs::write(
+        rig_dir.join("rig.json"),
+        format!(
+            r#"{{
+                    "components": {{
+                        "{component_id}": {{
+                            "path": "{}",
+                            "extensions": {{ "fixture-bench": {{}} }}
+                        }}
+                    }},
+                    "bench": {{ "default_component": "{component_id}" }},
+                    "bench_workloads": {{ "fixture-bench": [
+                        {{ "path": "${{package.root}}/workloads/package-extra.bench.js" }}
+                    ] }}
+                }}"#,
+            path.display()
+        ),
+    )
+    .expect("write package rig");
+
+    homeboy::core::rig::install(package_root.to_string_lossy().as_ref(), Some(rig_id), false)
+        .expect("install rig package");
+    package_root
+}
+
 fn write_rig_with_component_script(
     home: &TempDir,
     rig_id: &str,
@@ -428,6 +466,73 @@ fn run_list_uses_rig_default_component_and_workloads() {
                 assert_eq!(result.scenarios[0].id, "rig-extra");
             }
             _ => panic!("expected list output"),
+        }
+    });
+}
+
+#[test]
+fn run_list_serializes_installed_rig_package_evidence() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        let package_root = install_rig_package(home, "studio-bfb", "studio", component_dir.path());
+
+        let (output, exit_code) = run_list(&list_args(None, vec!["studio-bfb".to_string()]))
+            .expect("rig bench list should run");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::List(result) => {
+                let package_root = package_root.to_string_lossy().to_string();
+                assert_eq!(result.scenarios[0].id, "package-extra");
+                let evidence = result.rig_package.expect("rig package evidence");
+                assert_eq!(evidence.rig_id, "studio-bfb");
+                assert_eq!(evidence.package_root, package_root);
+                assert_eq!(evidence.source, package_root);
+                assert!(!evidence.freshness_verified);
+                assert_eq!(
+                    evidence.freshness,
+                    homeboy::core::extension::bench::parsing::RigPackageFreshness::Unknown
+                );
+                assert!(evidence
+                    .refresh_command
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("homeboy rig install"));
+            }
+            _ => panic!("expected list output"),
+        }
+    });
+}
+
+#[test]
+fn single_rig_run_records_installed_rig_package_evidence_in_metadata() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        let package_root = install_rig_package(home, "studio-bfb", "studio", component_dir.path());
+
+        let (output, exit_code) = run(
+            run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
+            &GlobalArgs {},
+        )
+        .expect("rig bench should run");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::Single(result) => {
+                let package_root = package_root.to_string_lossy().to_string();
+                let metadata = result
+                    .results
+                    .expect("bench results")
+                    .run_metadata
+                    .expect("run metadata");
+                let evidence = metadata.rig_package.expect("rig package evidence");
+                assert_eq!(evidence.package_root, package_root);
+                assert_eq!(evidence.rig_id, "studio-bfb");
+                assert_eq!(evidence.source_root.as_deref(), Some(package_root.as_str()));
+            }
+            _ => panic!("expected single output"),
         }
     });
 }

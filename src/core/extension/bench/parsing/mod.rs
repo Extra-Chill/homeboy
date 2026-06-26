@@ -83,6 +83,7 @@ pub use super::result_types::{
     BenchMemory, BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchMetrics,
     BenchProvenance, BenchProvenanceLink, BenchResults, BenchRunExecution, BenchRunMetadata,
     BenchRunSnapshot, BenchRunnerMetadata, BenchScenario, BenchWorkloadMetadata, RegressionTest,
+    RigPackageEvidence, RigPackageFreshness,
 };
 
 /// Read and parse a `$HOMEBOY_BENCH_RESULTS_FILE` written by an extension.

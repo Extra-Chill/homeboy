@@ -793,6 +793,9 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
             passthrough_args,
             scenario_ids: args.scenario_ids.clone(),
             extra_workloads,
+            rig_package: rig_context
+                .as_ref()
+                .and_then(|context| rig::package_evidence(&context.spec.id)),
         },
         &run_dir,
     );
