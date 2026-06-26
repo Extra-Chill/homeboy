@@ -340,6 +340,16 @@ read `active_runner_jobs`, `runner_job`, `workspace_leases`, `runner_result`,
 `mutation_artifacts`, `artifact_ref`, and `handoff` so direct SSH and reverse
 broker implementations stay hidden behind the same lifecycle vocabulary.
 
+Connected daemon status also reports stale runtime-path signals. When the daemon
+started with configured `HOMEBOY_*_COMPONENT_PATH`, `HOMEBOY_*_PLUGIN_PATH`,
+`HOMEBOY_*_PROVIDER_PATH`, or `HOMEBOY_*_RUNTIME_PATH` values, `/version`
+captures start-time fingerprints and compares them with the current on-disk
+paths. `homeboy runner status <runner-id>` surfaces those differences in
+`stale_daemon.stale_runtime_paths`, and surfaces runner config path changes in
+`stale_daemon.changed_runtime_paths`. This is intentionally read-only: refresh a
+development runner with `homeboy runner disconnect <runner-id>` followed by
+`homeboy runner connect <runner-id>` after rebuilding runner-side runtime code.
+
 ```json
 {
   "success": true,

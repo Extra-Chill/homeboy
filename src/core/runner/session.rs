@@ -447,8 +447,29 @@ pub struct RunnerStaleDaemonWarning {
     pub session_homeboy_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_homeboy_build_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_runtime_paths: Vec<RunnerStaleRuntimePath>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_runtime_paths: Vec<RunnerChangedRuntimePath>,
     pub message: String,
     pub recovery_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerStaleRuntimePath {
+    pub env: String,
+    pub path: String,
+    pub loaded_fingerprint: String,
+    pub current_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerChangedRuntimePath {
+    pub env: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_path: Option<String>,
 }
 
 impl RunnerStaleDaemonWarning {
@@ -465,12 +486,32 @@ impl RunnerStaleDaemonWarning {
             session_homeboy_build_identity,
             current_homeboy_build_identity,
             message: "connected runner daemon was started by a different Homeboy build than the configured runner executable; run recovery_commands in order to restart the active daemon".to_string(),
+            stale_runtime_paths: Vec::new(),
+            changed_runtime_paths: Vec::new(),
             recovery_commands: vec![
                 format!("homeboy runner refresh-homeboy {} --ref main --reconnect", runner_id),
                 format!("homeboy runner disconnect {}", runner_id),
                 format!("homeboy runner connect {}", runner_id),
             ],
         }
+    }
+
+    pub fn with_runtime_paths(
+        mut self,
+        runner_id: &str,
+        stale_runtime_paths: Vec<RunnerStaleRuntimePath>,
+        changed_runtime_paths: Vec<RunnerChangedRuntimePath>,
+    ) -> Self {
+        self.stale_runtime_paths = stale_runtime_paths;
+        self.changed_runtime_paths = changed_runtime_paths;
+        if !self.stale_runtime_paths.is_empty() || !self.changed_runtime_paths.is_empty() {
+            self.message = "connected runner daemon runtime paths are stale; run recovery_commands in order to restart the active daemon after runner-side rebuilds or path changes".to_string();
+            self.recovery_commands = vec![
+                format!("homeboy runner disconnect {}", runner_id),
+                format!("homeboy runner connect {}", runner_id),
+            ];
+        }
+        self
     }
 }
 
