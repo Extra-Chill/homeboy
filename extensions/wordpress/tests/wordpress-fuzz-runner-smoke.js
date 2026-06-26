@@ -116,7 +116,10 @@ const executedResult = buildWordPressFuzzRunnerResult({
 			schema: 'wp-codebox/fuzz-suite-result/v1',
 			suite: { id: 'generic-wordpress-plan' },
 			status: 'succeeded',
-			artifactRefs: [{ path: 'artifacts/replay.json', kind: 'replay' }],
+			artifactRefs: [
+				{ path: 'artifacts/replay.json', kind: 'replay' },
+				{ name: 'result-envelope', role: 'result_envelope', content: { status: 'succeeded' } },
+			],
 		},
 	},
 });
@@ -124,6 +127,7 @@ const executedResult = buildWordPressFuzzRunnerResult({
 assert.equal(executedResult.status, 'succeeded');
 assert.equal(executedResult.succeeded, true);
 assert.equal(executedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'artifacts/replay.json');
+assert.equal(executedResult.homeboy_fuzz_campaign.artifacts.some((artifact) => artifact.id === 'result-envelope' && artifact.kind === 'result_envelope'), true);
 assert.equal(executedResult.observation.status, 'succeeded');
 
 const mutatingPlanResult = buildWordPressFuzzRunnerResult({
@@ -357,7 +361,7 @@ const dispatchPromise = runWordPressFuzzRunnerResult({
 	assert.equal(dispatchedResult.succeeded, true);
 	assert.equal(dispatchedResult.wp_codebox_result.request_id, 'dispatch-run');
 	assert.equal(dispatchedResult.wp_codebox_result.coverage_summary.surface_count, 1);
-	assert.deepEqual(dispatchedResult.wp_codebox_result.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage']);
+	assert.deepEqual(dispatchedResult.wp_codebox_result.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'result_envelope']);
 	assert.equal(dispatchedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].semantic_key, 'fuzz.report');
 	assert.equal(dispatchedResult.homeboy_fuzz_campaign.metadata.artifact_refs[1].semantic_key, 'fuzz.coverage');
 });
