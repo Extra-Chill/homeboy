@@ -4,7 +4,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { runDeterministicLoop } = require('./deterministic-loop-runner');
-const { runBoundedProductionLoop } = require('./bounded-production-loop-runner');
 const { validateControllerLoopProof } = require('./controller-loop-proof-validator');
 const {
   CONTINUE,
@@ -98,15 +97,18 @@ function runGenericAgentLoop(options = {}) {
     validationPolicy,
   });
   const results = materializeGenericAgentLoopResults(outcome, { ...options, runtime });
-  const productionProof = buildBoundedProductionProof({ request, outcome, plan: options.plan || {}, validationPolicy });
-  const controllerProofValidation = validateControllerLoopProof({
+  const controllerProofRequested = options.controllerProof === true || options.controller_proof === true;
+  const productionProof = controllerProofRequested ? buildBoundedProductionProof({ request, outcome, plan: options.plan || {}, validationPolicy }) : null;
+  const controllerProofValidation = controllerProofRequested ? validateControllerLoopProof({
     spec: buildControllerLoopProofSpec({ request, plan: options.plan || {}, validationPolicy }),
     proof: productionProof,
     policy: controllerProofPolicy(validationPolicy, options.plan || {}),
-  });
-  attachFullRunProofValidation(results, { productionProof, controllerProofValidation });
+  }) : null;
+  if (controllerProofRequested) {
+    attachFullRunProofValidation(results, { productionProof, controllerProofValidation });
+  }
   const assertion = options.validate === false ? null : assertGenericAgentLoopOutcome(results, validationPolicy);
-  if (options.validate !== false && !controllerProofValidation.valid) {
+  if (options.validate !== false && controllerProofRequested && !controllerProofValidation.valid) {
     throw new Error(`controller loop proof validation failed: ${controllerProofValidation.failures.map((item) => item.message).join('; ')}`);
   }
   return { request, outcome, results, assertion, loop, productionProof, controllerProofValidation };
@@ -541,6 +543,7 @@ function assertGenericAgentLoopOutcome(results, validationPolicy = {}) {
 }
 
 function buildBoundedProductionProof(options = {}) {
+  const { runBoundedProductionLoop } = require('./bounded-production-loop-runner');
   const request = requiredObject(options.request, 'request');
   const outcome = requiredObject(options.outcome, 'outcome');
   const plan = optionalObject(options.plan);
@@ -973,6 +976,9 @@ module.exports = {
   assertGenericAgentLoopOutcome,
   assertGenericAgentLoopRuntimeContract,
   buildGenericAgentLoopRequest,
+  buildBoundedProductionProof,
+  buildControllerLoopProofSpec,
+  controllerProofPolicy,
   materializeGenericAgentLoopResults,
   genericAgentLoopStdoutSummary,
   runGenericAgentLoop,
