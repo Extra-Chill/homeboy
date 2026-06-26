@@ -13,6 +13,7 @@ pub struct CommandSpec {
     pub name: &'static str,
     pub json_family: CommandJsonFamily,
     pub docs_slug: Option<&'static str>,
+    pub safety: CommandSafetySpec,
     pub output_notes: &'static str,
     pub lab_supported: bool,
     pub lab_notes: &'static str,
@@ -26,6 +27,27 @@ pub struct CommandLabSupportSummary {
     pub contract_labels: &'static [&'static str],
     pub message_label: &'static str,
     pub hint_label: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSafetySpec {
+    pub mutates: bool,
+    pub operator: bool,
+    pub dry_run_flag: Option<&'static str>,
+    pub risk_exemption: Option<&'static str>,
+    pub dangerous_flags: &'static [&'static str],
+}
+
+impl CommandSafetySpec {
+    pub const fn read_only() -> Self {
+        Self {
+            mutates: false,
+            operator: false,
+            dry_run_flag: None,
+            risk_exemption: None,
+            dangerous_flags: &[],
+        }
+    }
 }
 
 pub const DEFAULT_LAB_UNSUPPORTED_NOTES: &str =
@@ -77,10 +99,34 @@ const fn command_spec(name: &'static str, json_family: CommandJsonFamily) -> Com
         name,
         json_family,
         docs_slug: Some(name),
+        safety: CommandSafetySpec::read_only(),
         output_notes: "standard CLI output contract",
         lab_supported: false,
         lab_notes: DEFAULT_LAB_UNSUPPORTED_NOTES,
         lab_support_summary: &[],
+    }
+}
+
+const fn command_spec_with_safety(
+    name: &'static str,
+    json_family: CommandJsonFamily,
+    safety: CommandSafetySpec,
+) -> CommandSpec {
+    CommandSpec {
+        safety,
+        ..command_spec(name, json_family)
+    }
+}
+
+const fn command_spec_with_output_notes_and_safety(
+    name: &'static str,
+    json_family: CommandJsonFamily,
+    output_notes: &'static str,
+    safety: CommandSafetySpec,
+) -> CommandSpec {
+    CommandSpec {
+        safety,
+        ..command_spec_with_output_notes(name, json_family, output_notes)
     }
 }
 
@@ -266,6 +312,55 @@ const TUNNEL_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     },
 ];
 
+const DEPLOY_DANGEROUS_FLAGS: &[&str] = &["--head", "--force"];
+const RELEASE_DANGEROUS_FLAGS: &[&str] = &[
+    "--apply",
+    "--deploy",
+    "--recover",
+    "--retag",
+    "--head",
+    "--skip-checks",
+    "--force-lower-bump",
+];
+const UPGRADE_DANGEROUS_FLAGS: &[&str] = &["--force", "--upgrade-runner"];
+const LINT_DANGEROUS_FLAGS: &[&str] = &["--fix", "--force"];
+const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
+const TRIAGE_DANGEROUS_FLAGS: &[&str] = &["--auto-merge"];
+const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write", "--commit"];
+
+const fn mutating_safety() -> CommandSafetySpec {
+    CommandSafetySpec {
+        mutates: true,
+        operator: false,
+        dry_run_flag: None,
+        risk_exemption: None,
+        dangerous_flags: &[],
+    }
+}
+
+const fn operator_safety(
+    dry_run_flag: Option<&'static str>,
+    dangerous_flags: &'static [&'static str],
+) -> CommandSafetySpec {
+    CommandSafetySpec {
+        mutates: true,
+        operator: true,
+        dry_run_flag,
+        risk_exemption: None,
+        dangerous_flags,
+    }
+}
+
+const fn guarded_safety(dangerous_flags: &'static [&'static str]) -> CommandSafetySpec {
+    CommandSafetySpec {
+        mutates: false,
+        operator: false,
+        dry_run_flag: None,
+        risk_exemption: None,
+        dangerous_flags,
+    }
+}
+
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     lab_command_spec_with_summary(
         "agent-task",
@@ -294,21 +389,27 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "portable Lab offload is available for fuzz runs",
         FUZZ_LAB_SUPPORT,
     ),
-    lab_command_spec_with_output_notes_and_summary(
-        "trace",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for trace runs",
-        "runs trace workflows and records observation artifacts unless using read-only subcommands",
-        TRACE_LAB_SUPPORT,
-    ),
+    CommandSpec {
+        safety: mutating_safety(),
+        ..lab_command_spec_with_output_notes_and_summary(
+            "trace",
+            CommandJsonFamily::Quality,
+            "portable Lab offload is available for trace runs",
+            "runs trace workflows and records observation artifacts unless using read-only subcommands",
+            TRACE_LAB_SUPPORT,
+        )
+    },
     command_spec("observe", CommandJsonFamily::Quality),
-    lab_command_spec_with_output_notes_and_summary(
-        "lint",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for changed-scope lint runs",
-        "runs lint workflows; pass --fix to apply auto-fixable findings in place",
-        LINT_LAB_SUPPORT,
-    ),
+    CommandSpec {
+        safety: guarded_safety(LINT_DANGEROUS_FLAGS),
+        ..lab_command_spec_with_output_notes_and_summary(
+            "lint",
+            CommandJsonFamily::Quality,
+            "portable Lab offload is available for changed-scope lint runs",
+            "runs lint workflows; pass --fix to apply auto-fixable findings in place",
+            LINT_LAB_SUPPORT,
+        )
+    },
     command_spec("db", CommandJsonFamily::Ops),
     command_spec("deps", CommandJsonFamily::Ops),
     command_spec("ci", CommandJsonFamily::Ops),
@@ -316,8 +417,16 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("file", CommandJsonFamily::Ops),
     command_spec("fleet", CommandJsonFamily::Ops),
     command_spec("logs", CommandJsonFamily::Ops),
-    command_spec("triage", CommandJsonFamily::Ops),
-    command_spec("deploy", CommandJsonFamily::Ops),
+    command_spec_with_safety(
+        "triage",
+        CommandJsonFamily::Ops,
+        operator_safety(None, TRIAGE_DANGEROUS_FLAGS),
+    ),
+    command_spec_with_safety(
+        "deploy",
+        CommandJsonFamily::Ops,
+        operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS),
+    ),
     command_spec("component", CommandJsonFamily::Workspace),
     command_spec("config", CommandJsonFamily::Workspace),
     command_spec("daemon", CommandJsonFamily::Ops),
@@ -326,20 +435,28 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("docs", CommandJsonFamily::Workspace),
     manifest_command_spec(),
     command_spec("changelog", CommandJsonFamily::Workspace),
-    command_spec_with_output_notes(
+    command_spec_with_output_notes_and_safety(
         "cleanup",
         CommandJsonFamily::Workspace,
         "cleanup subcommands report plans by default and require --apply for removals",
+        CommandSafetySpec {
+            mutates: true,
+            operator: false,
+            dry_run_flag: None,
+            risk_exemption: None,
+            dangerous_flags: CLEANUP_DANGEROUS_FLAGS,
+        },
     ),
     command_spec("git", CommandJsonFamily::Ops),
     command_spec("issues", CommandJsonFamily::Ops),
     command_spec("version", CommandJsonFamily::Workspace),
     command_spec("build", CommandJsonFamily::Workspace),
     command_spec("changes", CommandJsonFamily::Workspace),
-    command_spec_with_output_notes(
+    command_spec_with_output_notes_and_safety(
         "release",
         CommandJsonFamily::Workspace,
         "release execution mutates git tags/releases and may deploy; use --dry-run to plan and --apply for risky modes",
+        operator_safety(Some("--dry-run"), RELEASE_DANGEROUS_FLAGS),
     ),
     command_spec("report", CommandJsonFamily::Workspace),
     lab_command_spec_with_summary(
@@ -355,13 +472,22 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         AUDIT_LAB_SUPPORT,
     ),
     command_spec("audit-baseline", CommandJsonFamily::Quality),
-    lab_command_spec_with_output_notes_and_summary(
-        "refactor",
-        CommandJsonFamily::Workspace,
-        "portable Lab offload is available for refactor source runs",
-        "refactor subcommands can rewrite source files; use planning/dry-run modes where available",
-        REFACTOR_LAB_SUPPORT,
-    ),
+    CommandSpec {
+        safety: CommandSafetySpec {
+            mutates: true,
+            operator: false,
+            dry_run_flag: None,
+            risk_exemption: None,
+            dangerous_flags: REFACTOR_DANGEROUS_FLAGS,
+        },
+        ..lab_command_spec_with_output_notes_and_summary(
+            "refactor",
+            CommandJsonFamily::Workspace,
+            "portable Lab offload is available for refactor source runs",
+            "refactor subcommands can rewrite source files; use planning/dry-run modes where available",
+            REFACTOR_LAB_SUPPORT,
+        )
+    },
     command_spec("refs", CommandJsonFamily::Workspace),
     lab_command_spec_with_summary(
         "rig",
@@ -381,18 +507,20 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("runs", CommandJsonFamily::Workspace),
     command_spec("self", CommandJsonFamily::Ops),
     command_spec("stack", CommandJsonFamily::Workspace),
-    command_spec_with_output_notes(
+    command_spec_with_output_notes_and_safety(
         "undo",
         CommandJsonFamily::Workspace,
         "restores files from the latest or selected undo snapshot",
+        mutating_safety(),
     ),
     command_spec("auth", CommandJsonFamily::Ops),
     command_spec("api", CommandJsonFamily::Ops),
     command_spec("http", CommandJsonFamily::Ops),
-    command_spec_with_output_notes(
+    command_spec_with_output_notes_and_safety(
         "upgrade",
         CommandJsonFamily::Ops,
         "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used",
+        operator_safety(None, UPGRADE_DANGEROUS_FLAGS),
     ),
 ];
 
