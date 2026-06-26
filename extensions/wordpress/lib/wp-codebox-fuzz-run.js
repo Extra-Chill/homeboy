@@ -1771,7 +1771,7 @@ function validateWordPressFuzzPostprocessOutputs({ source = {}, context = {}, ar
 
 function isProductionPostprocessRequired(source = {}, context = {}) {
 	const metadata = objectOrUndefined(source.metadata) || {};
-	const requestInput = context.request?.inputs?.ability_input || context.request?.executor?.config?.runtime_task?.input || {};
+	const requestInput = context.request?.input || context.request?.inputs?.ability_input || context.request?.executor?.config?.runtime_task?.input || {};
 	const inputMetadata = objectOrUndefined(requestInput.metadata) || {};
 	return Boolean(
 		metadata.production_campaign
@@ -1783,7 +1783,7 @@ function isProductionPostprocessRequired(source = {}, context = {}) {
 	);
 }
 
-function requiredPostprocessOutputsMissing({ artifacts = [], derivedArtifacts = {}, hotspotSummary, normalizedResult } = {}) {
+function requiredPostprocessOutputsMissing({ artifacts = [], derivedArtifacts = {}, hotspotSummary } = {}) {
 	const checks = [
 		['fuzz.coverage', hasArtifactSemanticKey(artifacts, 'fuzz.coverage')],
 		['fuzz.hotspot.summary', Boolean(hotspotSummary?.items?.length > 0) || hasArtifactSemanticKey(artifacts, 'fuzz.hotspot.summary') || hasArtifactSchema(artifacts, WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA)],
