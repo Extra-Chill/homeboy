@@ -292,6 +292,66 @@ fn runner_exec_promotes_offloaded_artifacts_from_runner_path() {
 }
 
 #[test]
+fn runner_exec_promotes_offloaded_directory_artifacts_from_runner_path() {
+    homeboy::test_support::with_isolated_home(|home| {
+        let artifact_root = home.path().join("artifacts");
+        homeboy::core::set_artifact_root_override(Some(artifact_root));
+        let workspace = tempfile::tempdir().expect("workspace");
+        let site = workspace.path().join("site");
+        std::fs::create_dir_all(&site).expect("create site");
+        std::fs::write(site.join("index.html"), "<h1>Preview</h1>").expect("write index");
+        server::create(
+            r#"{"id":"local-ssh","host":"localhost","user":"user"}"#,
+            false,
+        )
+        .expect("create local ssh server");
+        runner::create(
+            &format!(
+                r#"{{"id":"local-ssh","kind":"ssh","server_id":"local-ssh","workspace_root":"{}"}}"#,
+                workspace.path().display()
+            ),
+            false,
+        )
+        .expect("create ssh runner");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec lab-ssh".to_string())
+                    .cwd_path(workspace.path())
+                    .metadata(serde_json::json!({}))
+                    .build(),
+            )
+            .expect("run");
+        let output = runner_exec_output(
+            "local-ssh",
+            RunnerExecMode::ReverseBroker,
+            &workspace.path().display().to_string(),
+        );
+
+        promote_runner_exec_artifacts(&run.id, &output, &["site".to_string()])
+            .expect("promote offloaded directory artifact");
+
+        let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].kind, "site");
+        assert_eq!(artifacts[0].artifact_type, "directory");
+        assert_eq!(artifacts[0].metadata_json["source"], "runner_path_attach");
+        assert_eq!(artifacts[0].metadata_json["runner_id"], "local-ssh");
+        assert_eq!(
+            artifacts[0].metadata_json["runner_path"],
+            site.display().to_string()
+        );
+        assert!(std::path::Path::new(&artifacts[0].path)
+            .join("index.html")
+            .is_file());
+        let entrypoints = homeboy::core::artifacts::html_preview_entrypoints(&artifacts[0]);
+        assert_eq!(entrypoints.len(), 1);
+        assert_eq!(entrypoints[0].path, "index.html");
+    });
+}
+
+#[test]
 fn runner_exec_rejects_artifacts_without_run_id() {
     let err = exec(
         "lab-local",
