@@ -105,7 +105,7 @@ pub fn route_after_parse(
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             capture_patch: capture_mutation_patch,
             mutation_flag,
-            timeout: None,
+            timeout: lab_route_dispatch_timeout(&cli.command),
             active_run_id: active_run_id.as_deref(),
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
@@ -140,6 +140,10 @@ pub fn route_after_parse(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration> {
+    matches!(command, Commands::Trace(_)).then(lab_routing::lab_trace_dispatch_timeout)
 }
 
 /// Insert one env pair into the overrides, recording the key as secret when
@@ -717,8 +721,7 @@ mod tests {
     use tempfile::tempdir;
 
     struct EnvGuard {
-        name: &'static str,
-        previous: Option<String>,
+        previous: Vec<(&'static str, Option<String>)>,
         _guard: MutexGuard<'static, ()>,
     }
 
@@ -729,22 +732,24 @@ mod tests {
 
     impl EnvGuard {
         fn set(name: &'static str, value: &str) -> Self {
-            let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-            let previous = std::env::var(name).ok();
-            std::env::set_var(name, value);
-            Self {
-                name,
-                previous,
-                _guard: guard,
-            }
+            Self::set_many(&[(name, Some(value))])
         }
 
         fn remove(name: &'static str) -> Self {
+            Self::set_many(&[(name, None)])
+        }
+
+        fn set_many(changes: &[(&'static str, Option<&str>)]) -> Self {
             let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-            let previous = std::env::var(name).ok();
-            std::env::remove_var(name);
+            let mut previous = Vec::with_capacity(changes.len());
+            for (name, value) in changes {
+                previous.push((*name, std::env::var(name).ok()));
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
             Self {
-                name,
                 previous,
                 _guard: guard,
             }
@@ -758,9 +763,11 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
+            for (name, previous) in self.previous.iter().rev() {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
             }
         }
     }
@@ -1039,6 +1046,18 @@ mod tests {
     }
 
     #[test]
+    fn lab_route_dispatch_timeout_plumbs_core_timeout() {
+        let trace_cli = Cli::parse_from(["homeboy", "trace", "list"]);
+        let lint_cli = Cli::parse_from(["homeboy", "lint"]);
+
+        assert_eq!(
+            lab_route_dispatch_timeout(&trace_cli.command),
+            Some(lab_routing::lab_trace_dispatch_timeout())
+        );
+        assert_eq!(lab_route_dispatch_timeout(&lint_cli.command), None);
+    }
+
+    #[test]
     fn offloaded_stdout_write_preserves_bytes_for_output_file() {
         let dir = tempdir().unwrap();
         let output_path = dir.path().join("out.json");
@@ -1119,9 +1138,11 @@ mod tests {
     fn linked_local_rig_check_stays_local_without_runner() {
         // Scope the offload-metadata env var so a parallel test that sets it
         // (process-global) cannot leak into this local/no-runner assertion.
-        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let temp_home = tempdir().expect("temp home");
-        let _home = EnvGuard::set("HOME", temp_home.path().to_str().expect("home path"));
+        let _env = EnvGuard::set_many(&[
+            (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+            ("HOME", Some(temp_home.path().to_str().expect("home path"))),
+        ]);
         write_rig_source_metadata(temp_home.path(), "linked-local", true);
         let normalized = vec![
             "homeboy".to_string(),
@@ -1856,6 +1877,7 @@ mod tests {
     fn rewrite_ad_hoc_lab_workspace_adds_path_for_pathless_lint() {
         let dir = tempdir().unwrap();
         let _cwd = CwdGuard::set(dir.path());
+        let cwd = std::env::current_dir().expect("current dir");
         let cli = Cli::parse_from(["homeboy", "lint"]);
         let normalized = vec!["homeboy".to_string(), "lint".to_string()];
 
@@ -1868,7 +1890,7 @@ mod tests {
                 "homeboy".to_string(),
                 "lint".to_string(),
                 "--path".to_string(),
-                dir.path().to_string_lossy().to_string(),
+                cwd.to_string_lossy().to_string(),
             ]
         );
     }
@@ -1877,6 +1899,7 @@ mod tests {
     fn rewrite_ad_hoc_lab_workspace_inserts_path_before_passthrough() {
         let dir = tempdir().unwrap();
         let _cwd = CwdGuard::set(dir.path());
+        let cwd = std::env::current_dir().expect("current dir");
         let cli = Cli::parse_from(["homeboy", "test", "--", "--filter", "ExampleTest"]);
         let normalized = vec![
             "homeboy".to_string(),
@@ -1895,7 +1918,7 @@ mod tests {
                 "homeboy".to_string(),
                 "test".to_string(),
                 "--path".to_string(),
-                dir.path().to_string_lossy().to_string(),
+                cwd.to_string_lossy().to_string(),
                 "--".to_string(),
                 "--filter".to_string(),
                 "ExampleTest".to_string(),
