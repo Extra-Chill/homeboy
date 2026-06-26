@@ -49,6 +49,7 @@ const WORDPRESS_FUZZ_OBSERVATION_SCHEMA = 'homeboy/wordpress-fuzz-observation/v1
 const DEFAULT_FUZZ_SUITE_ABILITY = 'wp-codebox/run-fuzz-suite';
 const DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY = 'wp-codebox/run-wordpress-workload';
 const DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA = 'wp-codebox/wordpress-workload-run/v1';
+const DEFAULT_PUBLIC_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
 const DEFAULT_WP_CODEBOX_PUBLIC_CLI_BIN = 'wp';
 const WP_CODEBOX_PUBLIC_CLI_COMMANDS = WP_CODEBOX_FUZZ_PUBLIC_COMMANDS;
 const ARTIFACT_POSTPROCESS_COMMAND = 'homeboy.artifact-postprocess';
@@ -1042,7 +1043,7 @@ function runWpCodeboxPublicCliCommand(args, options = {}) {
 		encoding: 'utf8',
 		env: { ...process.env, ...(options.env || {}) },
 		cwd: options.cwd,
-		maxBuffer: options.maxBuffer || 1024 * 1024 * 10,
+		maxBuffer: options.maxBuffer || options.max_buffer || DEFAULT_PUBLIC_CLI_MAX_BUFFER_BYTES,
 	});
 	return normalizeCliResult(result);
 }

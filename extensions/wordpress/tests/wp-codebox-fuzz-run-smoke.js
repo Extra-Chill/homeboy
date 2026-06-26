@@ -955,6 +955,30 @@ runWpCodeboxFuzzSuite({
 }).then((summary) => {
 	assert.equal(summary.succeeded, true);
 	assert.equal(summary.artifacts.some((artifact) => artifact.name === 'case-log'), true);
+	const largeCliDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-large-codebox-cli-'));
+	const largeCli = path.join(largeCliDir, 'wp-codebox-large-output.cjs');
+	fs.writeFileSync(largeCli, `
+const args = process.argv.slice(2);
+if (args.includes('--help')) {
+  process.stdout.write('usage');
+  process.exit(0);
+}
+process.stdout.write(JSON.stringify({
+  schema: ${JSON.stringify(WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA)},
+  status: 'passed',
+  summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+  cases: [{ id: 'large-output-case', status: 'passed' }],
+  metadata: { large: 'x'.repeat(11 * 1024 * 1024) }
+}));
+`, 'utf8');
+	return runWpCodeboxFuzzSuite({
+		taskId: 'public-cli-large-output-run',
+		input,
+		wpCodeboxBin: largeCli,
+	}).finally(() => fs.rmSync(largeCliDir, { recursive: true, force: true }));
+}).then((summary) => {
+	assert.equal(summary.succeeded, true);
+	assert.equal(summary.result_schema, WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA);
 	assert.deepEqual(detectWpCodeboxPublicFuzzCapabilities({ publicCliCapabilities: { commands: { 'run-wordpress-workload': true } } }).commands, {
 		'run-fuzz-suite': false,
 		'run-wordpress-workload': true,
