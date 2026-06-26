@@ -8,6 +8,7 @@ use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runners::{self, RunnerExecOptions};
 use homeboy::core::Error;
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::commands::utils::output::write_output_file;
 
@@ -372,7 +373,25 @@ fn run_rig_source_management_on_runner(
 ) -> homeboy::core::Result<(String, String, i32)> {
     let runner = runners::load(runner_id)?;
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
-    let command = runner_rig_source_management_command(homeboy_path, normalized_args);
+    let mut command = runner_rig_source_management_command(homeboy_path, normalized_args);
+    let mut translated_remote_root = runner.workspace_root.clone().unwrap_or_default();
+    let local_cwd = std::env::current_dir().ok();
+    if let Some(local_cwd) = local_cwd.as_deref() {
+        if command_contains_path_prefix(&command, local_cwd) {
+            let (synced, sync_exit_code) = runners::sync_workspace(
+                runner_id,
+                runners::RunnerWorkspaceSyncOptions {
+                    path: local_cwd.display().to_string(),
+                    mode: runners::RunnerWorkspaceSyncMode::Snapshot,
+                    ..Default::default()
+                },
+            )?;
+            if sync_exit_code == 0 {
+                command = translate_command_path_prefix(&command, local_cwd, &synced.remote_path);
+                translated_remote_root = synced.remote_path;
+            }
+        }
+    }
 
     // Remote-execution preflight before dispatching caller-derived argv to the
     // runner (#5093):
@@ -382,14 +401,13 @@ fn run_rig_source_management_on_runner(
     // 2. Capability parity: validate the runner can run the forwarded `homeboy`
     //    binary before execution starts (enforced by `runners::exec` against the
     //    supplied `RunnerCapabilityPreflight`).
-    let remote_cwd = runner.workspace_root.clone().unwrap_or_default();
-    if let Ok(local_cwd) = std::env::current_dir() {
+    if let Some(local_cwd) = local_cwd.as_deref() {
         runners::preflight_remote_argv_path_translation(
             "Rig source management",
             runner_id,
             &command,
-            &local_cwd,
-            &remote_cwd,
+            local_cwd,
+            &translated_remote_root,
         )?;
     }
     let required_commands: Vec<String> = command
@@ -431,6 +449,32 @@ fn run_rig_source_management_on_runner(
     }
 
     Ok((output.stdout, output.stderr, exit_code))
+}
+
+fn command_contains_path_prefix(command: &[String], local_root: &Path) -> bool {
+    let local_root = local_root.display().to_string();
+    let local_root = local_root.trim_end_matches('/');
+    !local_root.is_empty() && command.iter().any(|arg| arg.contains(local_root))
+}
+
+fn translate_command_path_prefix(
+    command: &[String],
+    local_root: &Path,
+    remote_root: &str,
+) -> Vec<String> {
+    let local_root = local_root.display().to_string();
+    let local_root = local_root.trim_end_matches('/');
+    let remote_root = remote_root.trim_end_matches('/');
+    command
+        .iter()
+        .map(|arg| {
+            if local_root.is_empty() || remote_root.is_empty() {
+                arg.clone()
+            } else {
+                arg.replace(local_root, remote_root)
+            }
+        })
+        .collect()
 }
 
 fn runner_rig_source_management_command(
@@ -1024,6 +1068,27 @@ mod tests {
                 "sources".to_string(),
                 "list".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn runner_rig_source_management_translates_local_subdir_paths() {
+        let command = vec![
+            "/runner/bin/homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            "/Users/chubes/Developer/homeboy-rigs@run/WordPress/static-site-importer".to_string(),
+        ];
+
+        let translated = translate_command_path_prefix(
+            &command,
+            std::path::Path::new("/Users/chubes/Developer/homeboy-rigs@run"),
+            "/home/chubes/Developer/_lab_workspaces/homeboy-rigs-run-abc",
+        );
+
+        assert_eq!(
+            translated[3],
+            "/home/chubes/Developer/_lab_workspaces/homeboy-rigs-run-abc/WordPress/static-site-importer"
         );
     }
 
