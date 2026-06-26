@@ -2,6 +2,15 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.18.1] - 2026-06-26
+
+### Changed
+- Resolve WP Codebox identity once
+- dedupe support result helpers
+
+### Fixed
+- defer codex refresh to provider runtime
+
 ## [3.18.0] - 2026-06-26
 
 ### Added
