@@ -112,6 +112,54 @@ mod install_flows {
     }
 
     #[test]
+    fn reinstall_replaces_broken_owned_stack_link() {
+        let _home = HomeGuard::new();
+        let stale_package = tempfile::tempdir().expect("stale package");
+        write_rig(stale_package.path(), "studio", &minimal_rig("studio"));
+        write_stack(stale_package.path(), "studio-combined", "studio");
+        install(stale_package.path().to_str().unwrap(), None, false).expect("install stale");
+        fs::remove_dir_all(stale_package.path()).expect("remove stale source");
+
+        let package = tempfile::tempdir().expect("package");
+        write_rig(package.path(), "studio", &minimal_rig("studio"));
+        let stack_path = write_stack(package.path(), "studio-combined", "studio");
+
+        let result = install(package.path().to_str().unwrap(), None, false)
+            .expect("reinstall replaces broken stack link");
+
+        assert_eq!(result.installed_stacks.len(), 1);
+        let installed = crate::core::paths::stack_config("studio-combined").expect("stack path");
+        assert!(installed.exists());
+        #[cfg(unix)]
+        assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
+    }
+
+    #[test]
+    fn reinstall_replaces_same_id_legacy_rig_schema() {
+        let _home = HomeGuard::new();
+        let config = crate::core::paths::rig_config("legacy-rig").expect("rig path");
+        fs::create_dir_all(config.parent().expect("rig dir")).expect("rig dir");
+        fs::write(
+            &config,
+            r#"{
+                "id": "legacy-rig",
+                "bench_workloads": { "app": ["legacy-string-workload.mjs"] }
+            }"#,
+        )
+        .expect("legacy rig config");
+
+        let package = tempfile::tempdir().expect("package");
+        let rig_path = write_rig(package.path(), "legacy-rig", &minimal_rig("legacy-rig"));
+
+        let result = install(package.path().to_str().unwrap(), None, false)
+            .expect("reinstall replaces same-id legacy schema");
+
+        assert_eq!(result.installed.len(), 1);
+        #[cfg(unix)]
+        assert_eq!(fs::read_link(&config).expect("symlink"), rig_path);
+    }
+
+    #[test]
     fn install_git_source_subpath_records_nested_package_root() {
         let _home = HomeGuard::new();
         let repo = tempfile::tempdir().expect("repo");
