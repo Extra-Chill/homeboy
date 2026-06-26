@@ -61,6 +61,7 @@ pub(super) fn exec_via_daemon(
         "source_snapshot": source_snapshot.clone(),
         "require_paths": require_paths.clone(),
         "runner_workload": runner_workload,
+        "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon"),
     });
     let (status_code, response_body) = daemon_loopback_post_json(local_url, "/exec", &payload)
         .map_err(|err| daemon_exec_loopback_transport_error(&runner.id, err))?;

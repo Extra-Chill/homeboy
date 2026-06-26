@@ -36,7 +36,7 @@ fn timeout_mirrors_remote_job_without_cancelling() {
             "runner daemon job",
             true,
         );
-        let run_id = format!("runner-exec-lab-{job_id}");
+        let run_id = format!("runner-exec-bench-lab-{job_id}");
 
         assert!(err.message.contains("runner daemon job"));
         assert!(err.message.contains(job_id.to_string().as_str()));
@@ -236,6 +236,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
         });
         let broker_url = format!("http://{addr}");
 
+        let stable_run_id = "agent-task-run-123";
         let (output, exit_code) = exec_via_reverse_broker(
             &ssh_runner(),
             &broker_url,
@@ -248,7 +249,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
             None,
             Vec::new(),
             None,
-            None,
+            Some(stable_run_id.to_string()),
             true,
         )
         .expect("reverse broker detached exec");
@@ -257,7 +258,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
         assert_eq!(output.mode, RunnerExecMode::ReverseBroker);
         let job_id = output.job_id.as_deref().expect("job id");
         let mirror_run_id = output.mirror_run_id.as_deref().expect("mirror run id");
-        assert_eq!(mirror_run_id, format!("runner-exec-test-lab-{job_id}"));
+        assert_eq!(mirror_run_id, stable_run_id);
         assert_eq!(
             output
                 .runner_result
@@ -278,6 +279,20 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
         assert_eq!(stdout["persisted_run_id"].as_str(), Some(mirror_run_id));
         assert_eq!(stdout["mirror_run_id"].as_str(), Some(mirror_run_id));
         assert_eq!(stdout["job_id"].as_str(), Some(job_id));
+
+        let jobs: Value = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("client")
+            .get(format!("{broker_url}/jobs"))
+            .send()
+            .expect("jobs response")
+            .json()
+            .expect("jobs json");
+        assert_eq!(
+            jobs["data"]["body"]["active_runner_jobs"][0]["durable_run_id"].as_str(),
+            Some(stable_run_id)
+        );
 
         let store = crate::core::observation::ObservationStore::open_initialized()
             .expect("observation store");

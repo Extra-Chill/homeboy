@@ -68,6 +68,10 @@ pub(crate) fn run_runner_resident_lab_offload(
         request.normalized_args,
         remote_output_file.as_deref(),
     );
+    let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
+    let (remapped_args, agent_task_run_id) =
+        ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())
+            .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
     let mut command = vec![homeboy_path.to_string()];
     if remote_output_file.is_some() && !args_contain_output_file(request.normalized_args) {
         command.push("--output".to_string());
@@ -146,7 +150,7 @@ pub(crate) fn run_runner_resident_lab_offload(
             required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
             runner_workload: None,
-            run_id: None,
+            run_id: agent_task_run_id,
             detach_after_handoff: false,
         },
     )?;
