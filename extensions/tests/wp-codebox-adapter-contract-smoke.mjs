@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -52,8 +54,42 @@ assert.deepEqual(cliDescriptor.commands, {
 });
 assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_BIN: '/usr/local/bin/wp-codebox' } }), '/usr/local/bin/wp-codebox');
 assert.equal(wpCodeboxBin({ settings: { wp_codebox_bin: '/settings/wp-codebox' } }), '/settings/wp-codebox');
-assert.equal(wpCodeboxBin({ executable: '' }), undefined);
 assert.deepEqual(wpCodeboxCommand('/tmp/wp-codebox.mjs'), { command: process.execPath, args: ['/tmp/wp-codebox.mjs'] });
+
+const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'homeboy-wp-codebox-bin-'));
+try {
+	assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'empty-managed') }, executable: '' }), undefined);
+
+	const runtimeComponent = path.join(fixtureRoot, 'packages', 'wordpress-plugin');
+	const runtimeCli = path.join(fixtureRoot, 'packages', 'cli', 'dist', 'index.js');
+	mkdirSync(runtimeComponent, { recursive: true });
+	mkdirSync(path.dirname(runtimeCli), { recursive: true });
+	writeFileSync(runtimeCli, '#!/usr/bin/env node\n');
+	chmodSync(runtimeCli, 0o755);
+	assert.equal(
+		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, executable: '' }),
+		runtimeCli
+	);
+	assert.equal(
+		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wp_codebox_bin: '/path/default/wp-codebox', executable: '', preferPackagedRuntime: true }),
+		runtimeCli
+	);
+	assert.equal(
+		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wp_codebox_bin: '/path/explicit/wp-codebox', executable: '' }),
+		'/path/explicit/wp-codebox'
+	);
+
+	const managedCli = path.join(fixtureRoot, 'managed', 'source', 'packages', 'cli', 'dist', 'index.js');
+	mkdirSync(path.dirname(managedCli), { recursive: true });
+	writeFileSync(managedCli, '#!/usr/bin/env node\n');
+	chmodSync(managedCli, 0o755);
+	assert.equal(
+		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed') }, executable: '' }),
+		managedCli
+	);
+} finally {
+	rmSync(fixtureRoot, { recursive: true, force: true });
+}
 
 const invocationContract = wpCodeboxProviderRuntimeInvocationContract();
 assert.equal(invocationContract.schema, 'wp-codebox/provider-runtime-invocation-contract/v1');
