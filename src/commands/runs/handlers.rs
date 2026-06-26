@@ -18,8 +18,8 @@ use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
     RunDetail, RunsArtifactArgs, RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactGetOutput,
-    RunsArtifactsOutput, RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput,
-    RunsShowOutput,
+    RunsArtifactsOutput, RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
+    RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsShowOutput,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -173,6 +173,155 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
         }),
         0,
     ))
+}
+
+pub fn env(run_id: &str) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    let run = runs_service::require_run(&store, run_id)?;
+    let Some(envelope) = run.metadata_json.get("env_resolution").cloned() else {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("run `{run_id}` does not contain Lab environment provenance metadata"),
+            Some(run_id.to_string()),
+            Some(vec![
+                "Environment provenance is recorded for Lab-offloaded runs that include `homeboy/env-resolution/v1` metadata.".to_string(),
+                "Run `homeboy runs show <run-id> --json` to inspect available metadata keys.".to_string(),
+            ]),
+        ));
+    };
+
+    let schema = envelope
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if schema != "homeboy/env-resolution/v1" {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("run `{run_id}` contains unsupported environment provenance schema `{schema}`"),
+            Some(run_id.to_string()),
+            Some(vec![
+                "Expected `homeboy/env-resolution/v1`.".to_string(),
+                "Run `homeboy runs show <run-id> --json` to inspect the raw metadata shape."
+                    .to_string(),
+            ]),
+        ));
+    }
+
+    let values_redacted = envelope
+        .get("values_redacted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !values_redacted {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("run `{run_id}` environment provenance is not marked redacted"),
+            Some(run_id.to_string()),
+            Some(vec![
+                "Homeboy refuses to print unredacted environment provenance.".to_string(),
+                "Capture a fresh Lab run with `homeboy/env-resolution/v1` redacted provenance metadata.".to_string(),
+            ]),
+        ));
+    }
+    let keys = envelope
+        .get("keys")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(env_key_output)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let summary = RunsEnvSummary {
+        key_count: keys.len(),
+        secret_key_count: keys
+            .iter()
+            .filter(|entry| entry.classification == "secret")
+            .count(),
+        public_key_count: keys
+            .iter()
+            .filter(|entry| entry.classification == "public")
+            .count(),
+        shadowed_key_count: keys
+            .iter()
+            .filter(|entry| !entry.shadowed_source_layers.is_empty())
+            .count(),
+    };
+
+    Ok((
+        RunsOutput::Env(RunsEnvOutput {
+            command: "runs.env",
+            run_id: run_id.to_string(),
+            schema: schema.to_string(),
+            values_redacted,
+            summary,
+            keys,
+        }),
+        0,
+    ))
+}
+
+fn env_key_output(value: &Value) -> Option<RunsEnvKeyOutput> {
+    Some(RunsEnvKeyOutput {
+        key: value.get("key")?.as_str()?.to_string(),
+        classification: value
+            .get("classification")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        value_status: value
+            .get("value_status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        value_preview: value
+            .get("value_preview")
+            .and_then(Value::as_str)
+            .unwrap_or("<redacted>")
+            .to_string(),
+        winning_source_layer: value
+            .get("winning_source_layer")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        shadowed_source_layers: value
+            .get("shadowed_source_layers")
+            .and_then(Value::as_array)
+            .map(|layers| {
+                layers
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        source_layers: value
+            .get("source_layers")
+            .and_then(Value::as_array)
+            .map(|layers| layers.iter().filter_map(env_source_layer_output).collect())
+            .unwrap_or_default(),
+    })
+}
+
+fn env_source_layer_output(value: &Value) -> Option<RunsEnvSourceLayerOutput> {
+    Some(RunsEnvSourceLayerOutput {
+        source: value.get("source")?.as_str()?.to_string(),
+        status: value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        classification: value
+            .get("classification")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        value_status: value
+            .get("value_status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+    })
 }
 
 pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
