@@ -5,8 +5,10 @@ use homeboy::core::agent_runtime_manifest::{
     AgentRuntimeDiagnosticsContract, AgentRuntimeRuntimeDiagnosticDeclaration,
     AgentRuntimeSourceConsistencyDiagnostic, AgentRuntimeToolDiagnosticDeclaration,
 };
-use homeboy::core::runner::RunnerActiveJobState;
-use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, RunnerTunnelMode};
+use homeboy::core::runners::{
+    self as runner, RunnerActiveJobState, RunnerAvailability, RunnerSession, RunnerStatusReport,
+    RunnerTunnelMode,
+};
 
 use super::super::CmdResult;
 use super::types::{
@@ -105,6 +107,14 @@ fn selected_lab_runner_status(
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
         connected: status.connected,
+        availability: RunnerAvailability::from_status_parts(
+            runner_id,
+            status.connected,
+            status.stale_daemon.is_some(),
+            status.active_job_count,
+            &status.active_job_state,
+            runner_config.settings.concurrency_limit,
+        ),
         status,
     }))
 }
