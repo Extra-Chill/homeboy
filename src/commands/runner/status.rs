@@ -109,6 +109,7 @@ fn lab_runner_homeboy_output(
     let version_drift = active_daemon_version
         .as_ref()
         .is_some_and(|version| version != &controller_version);
+    let stale_daemon = status.stale_daemon.as_ref();
     LabRunnerHomeboyOutput {
         controller_version,
         controller_build_identity,
@@ -118,10 +119,13 @@ fn lab_runner_homeboy_output(
             .session
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone()),
-        stale_daemon: status
-            .stale_daemon
-            .as_ref()
-            .and_then(|warning| serde_json::to_value(warning).ok()),
+        job_command_binary_version: stale_daemon
+            .map(|warning| warning.job_command_binary_version.clone()),
+        job_command_binary_build_identity: stale_daemon
+            .and_then(|warning| warning.job_command_binary_build_identity.clone()),
+        stale_daemon_severity: stale_daemon.map(|warning| warning.severity.to_string()),
+        stale_daemon_refresh_command: stale_daemon.map(|warning| warning.refresh_command.clone()),
+        stale_daemon: stale_daemon.and_then(|warning| serde_json::to_value(warning).ok()),
         version_drift,
         command_availability_checks: lab_command_availability_checks(configured_executable),
         artifact_features: runner_artifact_feature_diagnostics(
@@ -368,6 +372,20 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
             report.runner_id, report.stale_runner_job_count
         ));
     }
+    if let Some(warning) = report.stale_daemon.as_ref() {
+        let active_daemon = warning
+            .active_daemon_control_plane_build_identity
+            .as_deref()
+            .unwrap_or(&warning.active_daemon_control_plane_version);
+        let job_binary = warning
+            .job_command_binary_build_identity
+            .as_deref()
+            .unwrap_or(&warning.job_command_binary_version);
+        hints.push(format!(
+            "Runner `{}` stale daemon severity={}: active daemon control plane is `{active_daemon}`, but the job command binary is `{job_binary}`. Refresh with `{}` before using runner/Lab status as version evidence.",
+            report.runner_id, warning.severity, warning.refresh_command
+        ));
+    }
     match session.mode {
         RunnerTunnelMode::DirectSsh => {
             if report.active_job_count > 0 {
@@ -484,5 +502,100 @@ pub(super) fn runner_status_operator_commands(
         }
     }
 
+    if let Some(warning) = report.stale_daemon.as_ref() {
+        commands.push(RunnerOperatorCommand {
+            scope: "daemon_refresh",
+            runner_id: report.runner_id.clone(),
+            job_id: None,
+            command: warning.refresh_command.clone(),
+            description: "Restart the active runner daemon so the control plane uses the configured job command binary.".to_string(),
+        });
+    }
+
     commands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy::core::runner::{
+        RunnerActiveJobState, RunnerSessionRole, RunnerStaleDaemonWarning,
+    };
+    use homeboy::core::runners::{RunnerSessionState, RunnerTunnelMode};
+
+    #[test]
+    fn stale_daemon_status_hint_labels_control_plane_and_job_binary() {
+        let report = stale_daemon_report();
+
+        let hints = runner_status_operator_hints(&report);
+        let commands = runner_status_operator_commands(&report);
+
+        let hint = hints
+            .iter()
+            .find(|hint| hint.contains("stale daemon"))
+            .expect("stale daemon hint");
+        assert!(hint.contains("severity=warning"));
+        assert!(hint.contains("active daemon control plane"));
+        assert!(hint.contains("homeboy 0.259.0+daemon"));
+        assert!(hint.contains("job command binary"));
+        assert!(hint.contains("homeboy 0.262.0+binary"));
+        assert!(hint.contains(
+            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
+        ));
+
+        let refresh = commands
+            .iter()
+            .find(|command| command.scope == "daemon_refresh")
+            .expect("daemon refresh command");
+        assert_eq!(
+            refresh.command,
+            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
+        );
+        assert!(refresh
+            .description
+            .contains("configured job command binary"));
+    }
+
+    fn stale_daemon_report() -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: Some(RunnerSession {
+                runner_id: "homeboy-lab".to_string(),
+                mode: RunnerTunnelMode::DirectSsh,
+                role: RunnerSessionRole::Controller,
+                server_id: Some("lab-server".to_string()),
+                controller_id: None,
+                broker_url: None,
+                remote_daemon_address: Some("127.0.0.1:7331".to_string()),
+                local_port: Some(7331),
+                local_url: Some("http://127.0.0.1:7331".to_string()),
+                tunnel_pid: Some(12345),
+                remote_daemon_pid: Some(23456),
+                homeboy_version: "homeboy 0.259.0".to_string(),
+                homeboy_build_identity: Some("homeboy 0.259.0+daemon".to_string()),
+                connected_at: "2026-06-26T00:00:00Z".to_string(),
+                worker_identity: None,
+                worker_pid: None,
+                last_seen_at: None,
+            }),
+            stale_daemon: Some(RunnerStaleDaemonWarning::new(
+                "homeboy-lab",
+                "homeboy 0.259.0".to_string(),
+                "homeboy 0.262.0".to_string(),
+                Some("homeboy 0.259.0+daemon".to_string()),
+                Some("homeboy 0.262.0+binary".to_string()),
+            )),
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            session_path: "/tmp/homeboy-lab.json".to_string(),
+        }
+    }
 }

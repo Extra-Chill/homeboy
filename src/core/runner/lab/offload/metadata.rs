@@ -83,12 +83,17 @@ pub(crate) fn lab_runner_homeboy_metadata(
         format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
         format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
     ];
+    let stale_daemon = status.stale_daemon.as_ref();
     serde_json::json!({
         "schema": "homeboy/lab-runner-homeboy/v1",
         "runner_id": runner_id,
         "configured_executable": configured_executable,
         "active_daemon_version": status.session.as_ref().map(|session| session.homeboy_version.clone()),
         "active_daemon_build_identity": status.session.as_ref().and_then(|session| session.homeboy_build_identity.clone()),
+        "job_command_binary_version": stale_daemon.map(|warning| warning.job_command_binary_version.clone()),
+        "job_command_binary_build_identity": stale_daemon.and_then(|warning| warning.job_command_binary_build_identity.clone()),
+        "stale_daemon_severity": stale_daemon.map(|warning| warning.severity),
+        "stale_daemon_refresh_command": stale_daemon.map(|warning| warning.refresh_command.clone()),
         "stale_daemon": status.stale_daemon,
         "refresh_commands": refresh_commands,
         "upgrade_command": format!("homeboy upgrade --force --upgrade-runner {}", shell::quote_arg(runner_id)),
@@ -227,7 +232,7 @@ pub(crate) fn stale_runner_homeboy_error(
     Error::validation_invalid_argument(
         "runner",
         format!(
-            "Lab offload refused runner `{runner_id}` because its active daemon Homeboy/runtime differs from the configured runner executable `{configured_executable}`. Active daemon: {active_daemon}; configured runtime: {current_homeboy}. {drift_message} Stale runner runtimes can return malformed or misleading provider output; reconnect the runner before retrying."
+            "Lab offload refused runner `{runner_id}` because its active daemon control plane differs from the configured job command binary `{configured_executable}`. Active daemon control plane: {active_daemon}; job command binary: {current_homeboy}. {drift_message} Stale runner runtimes can return malformed or misleading provider output; reconnect the runner before retrying."
         ),
         Some(runner_id.to_string()),
         Some(vec![

@@ -313,8 +313,10 @@ fn connected_runner_not_ready_reason(
     if let Some(warning) = status.stale_daemon.as_ref() {
         let restart = stale_daemon_repair_command(runner_id, status);
         return Some(format!(
-            "connected runner `{runner_id}` daemon is stale: connected daemon reports {}, but the configured runner executable reports {}; stale runner runtimes can return malformed or misleading provider output; restart the active daemon with `{restart}`",
-            warning.session_homeboy_version, warning.current_homeboy_version
+            "connected runner `{runner_id}` daemon is stale (severity={}): active daemon control plane reports {}, but the job command binary reports {}; stale runner runtimes can return malformed or misleading provider output; refresh with `{restart}`",
+            warning.severity,
+            warning.active_daemon_control_plane_version,
+            warning.job_command_binary_version
         ));
     }
 

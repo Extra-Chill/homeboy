@@ -310,10 +310,12 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
     assert!(err
         .message
         .contains("/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof"));
-    assert!(err.message.contains("Active daemon: homeboy 0.0.0+test"));
     assert!(err
         .message
-        .contains("configured runtime: homeboy 0.229.11+new"));
+        .contains("Active daemon control plane: homeboy 0.0.0+test"));
+    assert!(err
+        .message
+        .contains("job command binary: homeboy 0.229.11+new"));
     assert!(err
         .message
         .contains("malformed or misleading provider output"));
@@ -348,6 +350,37 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
     );
     assert_eq!(
         metadata["stale_daemon"]["current_homeboy_build_identity"],
+        "homeboy 0.229.11+new"
+    );
+    assert_eq!(metadata["stale_daemon"]["severity"], "warning");
+    assert_eq!(
+        metadata["stale_daemon"]["active_daemon_control_plane_version"],
+        "homeboy 0.228.0"
+    );
+    assert_eq!(
+        metadata["stale_daemon"]["job_command_binary_version"],
+        "homeboy 0.229.11"
+    );
+    assert_eq!(
+        metadata["stale_daemon"]["active_daemon_control_plane_build_identity"],
+        "homeboy 0.228.0+old"
+    );
+    assert_eq!(
+        metadata["stale_daemon"]["job_command_binary_build_identity"],
+        "homeboy 0.229.11+new"
+    );
+    assert_eq!(
+        metadata["stale_daemon"]["refresh_command"],
+        "homeboy runner disconnect lab && homeboy runner connect lab"
+    );
+    assert_eq!(metadata["stale_daemon_severity"], "warning");
+    assert_eq!(
+        metadata["stale_daemon_refresh_command"],
+        "homeboy runner disconnect lab && homeboy runner connect lab"
+    );
+    assert_eq!(metadata["job_command_binary_version"], "homeboy 0.229.11");
+    assert_eq!(
+        metadata["job_command_binary_build_identity"],
         "homeboy 0.229.11+new"
     );
     assert_eq!(
