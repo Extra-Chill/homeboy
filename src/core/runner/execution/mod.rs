@@ -193,6 +193,14 @@ pub struct RunnerExecDiagnostics {
     pub hints: Vec<String>,
 }
 
+const RUNNER_EXEC_RUN_ID_ENV_NAMES: &[&str] = &[
+    crate::core::observation::ACTIVE_RUN_ID_ENV,
+    "HOMEBOY_RUN_ID",
+    "HOMEBOY_BENCH_RUN_ID",
+];
+
+const RUNNER_EXEC_SCRUBBED_RUN_ID_ENV_NAMES: &[&str] = &["WORKFLOW_BENCH_RUN_ID"];
+
 #[derive(Debug, Clone)]
 pub(crate) struct RunnerProcessRequest {
     pub runner_id: String,
@@ -255,7 +263,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         options.capability_preflight.as_ref(),
         &options.secret_env_names,
     );
-    let plan = prepare_runner_process(RunnerProcessRequest {
+    let mut plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
         runner: None,
         cwd: options.cwd.clone(),
@@ -269,6 +277,8 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         require_paths: options.require_paths.clone(),
         validate_require_paths_on_host: false,
     })?;
+    let run_id_hint =
+        apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref());
     let runner = plan.runner.clone();
     let cwd = plan.cwd.clone();
     let request_env = plan.env.clone();
@@ -332,7 +342,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         }
         connected = status(runner_id)?;
     }
-    match select_runner_transport(&runner, Some(&connected), false) {
+    let result = match select_runner_transport(&runner, Some(&connected), false) {
         RunnerTransport::DirectDaemon(handle) => {
             run_capability_preflight(&runner)?;
             exec_via_daemon(
@@ -386,7 +396,60 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 "SSH execution is intended for MVP diagnostics and must be explicit.".to_string(),
             ]),
         )),
+    };
+    result.map(|(mut output, exit_code)| {
+        append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
+        (output, exit_code)
+    })
+}
+
+fn apply_explicit_runner_exec_run_id_env(
+    env: &mut HashMap<String, String>,
+    run_id: Option<&str>,
+) -> Option<String> {
+    let run_id = run_id?;
+    let mut ignored = Vec::new();
+
+    for name in RUNNER_EXEC_RUN_ID_ENV_NAMES {
+        if env.get(*name).is_some_and(|value| value != run_id) || ambient_env_is_present(name) {
+            ignored.push(*name);
+        }
+        env.insert((*name).to_string(), run_id.to_string());
     }
+
+    for name in RUNNER_EXEC_SCRUBBED_RUN_ID_ENV_NAMES {
+        if env.remove(*name).is_some() || ambient_env_is_present(name) {
+            ignored.push(*name);
+        }
+    }
+
+    ignored.sort_unstable();
+    ignored.dedup();
+    (!ignored.is_empty()).then(|| {
+        format!(
+            "runner exec --run-id took precedence; ignored ambient/conflicting run-id env: {}.",
+            ignored.join(", ")
+        )
+    })
+}
+
+fn ambient_env_is_present(name: &str) -> bool {
+    std::env::var_os(name).is_some()
+}
+
+fn append_runner_exec_diagnostic_hint(output: &mut RunnerExecOutput, hint: Option<String>) {
+    let Some(hint) = hint else {
+        return;
+    };
+    let diagnostics = output
+        .diagnostics
+        .get_or_insert_with(|| RunnerExecDiagnostics {
+            runner_workspace_root: None,
+            source_snapshot_remote_path: None,
+            required_paths: Vec::new(),
+            hints: Vec::new(),
+        });
+    diagnostics.hints.push(hint);
 }
 
 fn should_force_diagnostic_ssh(runner: &Runner, options: &RunnerExecOptions) -> bool {
