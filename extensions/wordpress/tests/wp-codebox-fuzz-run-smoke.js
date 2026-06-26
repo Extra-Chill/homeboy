@@ -976,6 +976,8 @@ runWpCodeboxFuzzSuite({
 	fs.mkdirSync(path.join(stagedHelperDir, 'tools'));
 	const stagedWorkloadPath = path.join(stagedHelperDir, 'bench', 'coverage-gap-report.workload.json');
 	const stagedHelperPath = path.join(stagedHelperDir, 'tools', 'artifact-helper.mjs');
+	const stagedArtifactRoot = path.join(stagedHelperDir, 'artifacts');
+	fs.mkdirSync(stagedArtifactRoot);
 	fs.writeFileSync(stagedHelperPath, 'export {};\n', 'utf8');
 	const stagedHelperInput = wpCodeboxFuzzSuiteInput({
 		id: 'staged-helper-suite',
@@ -995,11 +997,15 @@ runWpCodeboxFuzzSuite({
 		input: stagedHelperInput,
 		wpCodeboxBin: '/custom/direct-wp-codebox',
 		runtimeRequirements: { extra_plugins: [{ slug: 'sample-plugin', source: stagedHelperDir, loadAs: 'plugin' }] },
+		env: { HOMEBOY_ARTIFACT_ROOT: stagedArtifactRoot },
 		runPublicCli: ({ args }) => {
 			if (args.includes('--help')) return { status: 0, stdout: 'usage' };
 			const publicCliInput = JSON.parse(fs.readFileSync(args[2], 'utf8'));
+			const workload = publicCliInput.cases[0].input;
 			const stagedFiles = publicCliInput.cases[0].input.staged_files;
-			assert.equal(publicCliInput.cases[0].input.steps[0].helperPath, 'tools/artifact-helper.mjs');
+			assert.equal(workload.steps[0].helperPath, 'tools/artifact-helper.mjs');
+			assert.equal(workload.steps[0].inputArtifactRoot, '/tmp/wp-codebox-artifacts');
+			assert.deepEqual(workload.mounts, [{ source: stagedArtifactRoot, target: '/tmp/wp-codebox-artifacts', mode: 'readwrite' }]);
 			assert.deepEqual(stagedFiles, [{ source: stagedHelperPath, target: '/wordpress/wp-content/plugins/sample-plugin/tools/artifact-helper.mjs' }]);
 			return { status: 0, stdout: JSON.stringify({ schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA, status: 'passed', summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 } }) };
 		},

@@ -867,7 +867,7 @@ async function runWpCodeboxPublicFuzzOperation(options = {}) {
 
 function wpCodeboxPublicCliInput(request = {}, options = {}) {
 	const runtimeRequirements = objectOrUndefined(wpCodeboxFuzzRequestRuntimeRequirements(request));
-	const input = stageArtifactPostprocessHelpers(wpCodeboxFuzzRequestInput(request, options), runtimeRequirements);
+	const input = stageArtifactPostprocessHelpers(wpCodeboxFuzzRequestInput(request, options), runtimeRequirements, options);
 	return {
 		...input,
 		metadata: {
@@ -878,8 +878,10 @@ function wpCodeboxPublicCliInput(request = {}, options = {}) {
 	};
 }
 
-function stageArtifactPostprocessHelpers(input = {}, runtimeRequirements = {}) {
+function stageArtifactPostprocessHelpers(input = {}, runtimeRequirements = {}, options = {}) {
 	const pluginSlug = wpCodeboxRuntimePluginSlug(runtimeRequirements);
+	const artifactRoot = wpCodeboxArtifactPostprocessRoot(options);
+	const runtimeArtifactRoot = '/tmp/wp-codebox-artifacts';
 	if (!pluginSlug || !Array.isArray(input.cases)) {
 		return input;
 	}
@@ -892,8 +894,16 @@ function stageArtifactPostprocessHelpers(input = {}, runtimeRequirements = {}) {
 		const sourcePath = workload.metadata?.source_path || workload.metadata?.sourcePath;
 		const packageRoot = typeof sourcePath === 'string' ? packageRootFromWorkloadPath(sourcePath) : undefined;
 		const stagedFiles = [...normalizeArray(workload.staged_files || workload.stagedFiles)];
+		const mounts = [...normalizeArray(workload.mounts)];
 		for (const phase of ['before', 'steps', 'after']) {
 			for (const step of normalizeArray(workload[phase])) {
+				if ((step?.inputArtifactRoot === '${artifacts.root}' || step?.inputArtifactRoot === '{{artifacts.root}}') && artifactRoot) {
+					step.inputArtifactRoot = runtimeArtifactRoot;
+					if (!mounts.some((entry) => objectOrUndefined(entry)?.source === artifactRoot && objectOrUndefined(entry)?.target === runtimeArtifactRoot)) {
+						mounts.push({ source: artifactRoot, target: runtimeArtifactRoot, mode: 'readwrite' });
+						changed = true;
+					}
+				}
 				const helperPath = typeof step?.helperPath === 'string' ? step.helperPath : undefined;
 				if (!helperPath || !packageRoot || path.isAbsolute(helperPath) || helperPath.split(/[\\/]+/).includes('..')) {
 					continue;
@@ -909,13 +919,34 @@ function stageArtifactPostprocessHelpers(input = {}, runtimeRequirements = {}) {
 				}
 			}
 		}
-		if (stagedFiles.length === normalizeArray(workload.staged_files || workload.stagedFiles).length) {
+		if (stagedFiles.length === normalizeArray(workload.staged_files || workload.stagedFiles).length && mounts.length === normalizeArray(workload.mounts).length) {
 			return fuzzCase;
 		}
 		changed = true;
-		return { ...fuzzCase, input: { ...workload, staged_files: stagedFiles, stagedFiles: undefined } };
+		return { ...fuzzCase, input: { ...workload, mounts, staged_files: stagedFiles, stagedFiles: undefined } };
 	});
 	return changed ? { ...input, cases } : input;
+}
+
+function wpCodeboxArtifactPostprocessRoot(options = {}) {
+	const env = { ...process.env, ...(options.env || {}) };
+	const candidates = [
+		options.artifactsRoot,
+		options.artifactRoot,
+		options.artifacts_root,
+		options.artifact_root,
+		env.HOMEBOY_ARTIFACT_ROOT,
+		env.HOMEBOY_ARTIFACT_DIR,
+		env.HOMEBOY_ARTIFACTS_DIR,
+		env.HOMEBOY_RUN_ARTIFACT_ROOT,
+		env.HOMEBOY_RUN_ARTIFACT_DIR,
+	];
+	for (const candidate of candidates) {
+		if (typeof candidate === 'string' && candidate.trim() && fs.existsSync(candidate)) {
+			return path.resolve(candidate);
+		}
+	}
+	return undefined;
 }
 
 function wpCodeboxRuntimePluginSlug(runtimeRequirements = {}) {
