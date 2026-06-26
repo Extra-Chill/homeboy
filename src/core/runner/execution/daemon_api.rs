@@ -12,6 +12,10 @@ use super::super::{load, status, RunnerTunnelMode};
 #[allow(unused_imports)]
 use super::*;
 
+fn unsupported_daemon_api_method(method: &str) -> Error {
+    Error::internal_unexpected(format!("unsupported daemon API method {method}"))
+}
+
 pub(crate) fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a Value> {
     data.get("body")
         .ok_or_else(|| Error::internal_unexpected(format!("{context} missing canonical data.body")))
@@ -47,9 +51,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
         return match method {
             "GET" => daemon_get(&client, local_url, path),
             "POST" => daemon_post(&client, local_url, path),
-            _ => Err(Error::internal_unexpected(format!(
-                "unsupported daemon API method {method}"
-            ))),
+            _ => Err(unsupported_daemon_api_method(method)),
         };
     }
     if session.mode == RunnerTunnelMode::Reverse {
@@ -80,9 +82,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
                 "query reverse runner broker",
                 broker_token.as_deref(),
             ),
-            _ => Err(Error::internal_unexpected(format!(
-                "unsupported daemon API method {method}"
-            ))),
+            _ => Err(unsupported_daemon_api_method(method)),
         };
     }
     Err(Error::validation_invalid_argument(

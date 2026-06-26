@@ -85,13 +85,7 @@ fn validate_runner_extension(
             )?;
             let refreshed = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
             if refreshed.success {
-                validate_runner_extension_ready(
-                    runner_id,
-                    homeboy_path,
-                    extension_id,
-                    &refreshed.stdout,
-                )?;
-                validate_runner_extension_revision(
+                validate_runner_extension_parity_status(
                     runner_id,
                     homeboy_path,
                     extension_id,
@@ -117,6 +111,20 @@ fn validate_runner_extension(
         &output.stderr,
         &output.stdout,
     ))
+}
+
+/// Runs the full readiness + source-revision parity validation against a single
+/// `extension show` stdout payload. Both the initial preflight and the
+/// post-sync refresh re-check the same two parity invariants against their
+/// respective stdout, so they share this helper.
+fn validate_runner_extension_parity_status(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    remote_stdout: &str,
+) -> Result<()> {
+    validate_runner_extension_ready(runner_id, homeboy_path, extension_id, remote_stdout)?;
+    validate_runner_extension_revision(runner_id, homeboy_path, extension_id, remote_stdout)
 }
 
 fn show_runner_extension(
