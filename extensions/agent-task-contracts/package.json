@@ -5,6 +5,7 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./agent-task-provider-contract": "./agent-task-provider-contract.js",
     "./agent-task-runner-contract": "./agent-task-runner-contract.js",
     "./generic-agent-task-plan": "./generic-agent-task-plan.js"
   },

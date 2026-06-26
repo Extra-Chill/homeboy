@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const genericFiles = [
 	'docs/agent-runtime-package-contract.md',
-	'runtime-agent-ci/lib/agent-task-provider-contract.js',
-	'runtime-agent-ci/lib/agent-task-runner-contract.js',
+	'agent-task-contracts/agent-task-provider-contract.js',
+	'agent-task-contracts/agent-task-runner-contract.js',
 	'tests/fixtures/agent-runtime-manifest.json',
 ];
 const domainTerms = /WordPress|WP Codebox|Data Machine|WPSG|wp-site-generator|datamachine|wordpress|site-generator|site generator/;
