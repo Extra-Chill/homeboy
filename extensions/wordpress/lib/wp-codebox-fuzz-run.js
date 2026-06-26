@@ -1611,7 +1611,31 @@ function normalizeWpCodeboxFuzzArtifacts(source = {}, result = {}) {
 	if (artifacts.length === 0) {
 		appendStructuredFuzzArtifacts(artifacts, source);
 	}
+	appendInlineResultEnvelopeArtifact(artifacts, source);
 	return dedupeArtifacts(artifacts.map(normalizeFuzzArtifact).filter(Boolean));
+}
+
+function appendInlineResultEnvelopeArtifact(artifacts, source = {}) {
+	if (!objectOrUndefined(source) || !source.schema || hasFuzzArtifactRole(artifacts, 'result_envelope')) {
+		return;
+	}
+	artifacts.push({
+		name: 'result-envelope',
+		role: 'result_envelope',
+		semantic_key: 'fuzz.result.envelope',
+		content: source,
+		metadata: { schema: source.schema },
+	});
+}
+
+function hasFuzzArtifactRole(artifacts = [], role) {
+	return normalizeArray(artifacts).some((artifact) => {
+		if (!objectOrUndefined(artifact)) {
+			return false;
+		}
+		const identity = fuzzArtifactIdentity(artifact);
+		return identity.role === role;
+	});
 }
 
 function appendStructuredFuzzArtifacts(artifacts, source = {}) {
