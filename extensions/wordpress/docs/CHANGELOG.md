@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.17.7] - 2026-06-26
+
+### Fixed
+- emit fuzz result envelope artifact
+- expand workload template paths
+
 ## [3.17.6] - 2026-06-26
 
 ### Fixed
