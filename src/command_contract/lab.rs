@@ -100,132 +100,138 @@ impl CommandPortabilityContract {
     }
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
-pub enum LabCommandPortability {
-    Portable,
-    LocalOnly(&'static str),
-}
+mod portability_enums {
+    #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+    pub enum LabCommandPortability {
+        Portable,
+        LocalOnly(&'static str),
+    }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
-pub enum LabSourcePathMode {
-    CwdOrPathFlag,
-    RunnerResident,
-}
+    #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+    pub enum LabSourcePathMode {
+        CwdOrPathFlag,
+        RunnerResident,
+    }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
-pub enum LabWorkspaceModePolicy {
-    ChangedSinceGitElseSnapshot,
-    Git,
-    GitCheckoutRequired,
-    RunnerResident,
-}
+    #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+    pub enum LabWorkspaceModePolicy {
+        ChangedSinceGitElseSnapshot,
+        Git,
+        GitCheckoutRequired,
+        RunnerResident,
+    }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
-pub enum LabCommandRequiredTool {
-    Playwright,
+    #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+    pub enum LabCommandRequiredTool {
+        Playwright,
+    }
 }
+pub use portability_enums::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkload {
-    pub schema: String,
-    pub workload_id: String,
-    pub kind: RunnerWorkloadKind,
-    pub workspace_mappings: RunnerWorkloadWorkspaceMappings,
-    pub required_capabilities: Vec<RunnerWorkloadCapability>,
-    pub required_secrets: RunnerWorkloadSecrets,
-    pub required_extensions: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_extension_revisions: Vec<RunnerWorkloadExtensionRevision>,
-    pub mutation_policy: RunnerWorkloadMutationPolicy,
-    pub assignment: RunnerWorkloadAssignment,
-    pub state: RunnerWorkloadState,
-    pub result_refs: RunnerWorkloadResultRefs,
-}
+mod runner_workload_types {
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkload {
+        pub schema: String,
+        pub workload_id: String,
+        pub kind: RunnerWorkloadKind,
+        pub workspace_mappings: RunnerWorkloadWorkspaceMappings,
+        pub required_capabilities: Vec<RunnerWorkloadCapability>,
+        pub required_secrets: RunnerWorkloadSecrets,
+        pub required_extensions: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub required_extension_revisions: Vec<RunnerWorkloadExtensionRevision>,
+        pub mutation_policy: RunnerWorkloadMutationPolicy,
+        pub assignment: RunnerWorkloadAssignment,
+        pub state: RunnerWorkloadState,
+        pub result_refs: RunnerWorkloadResultRefs,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadExtensionRevision {
-    pub extension_id: String,
-    pub source_revision: String,
-}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadExtensionRevision {
+        pub extension_id: String,
+        pub source_revision: String,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadKind {
-    pub command_label: String,
-    pub command_family: RunnerWorkloadCommandFamily,
-}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadKind {
+        pub command_label: String,
+        pub command_family: RunnerWorkloadCommandFamily,
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerWorkloadCommandFamily {
-    AgentTask,
-    Quality,
-    Workspace,
-    Service,
-    Unknown,
-}
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerWorkloadCommandFamily {
+        AgentTask,
+        Quality,
+        Workspace,
+        Service,
+        Unknown,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadWorkspaceMappings {
-    pub source_path_mode: String,
-    pub workspace_mode_policy: String,
-    pub mapping_ref: Option<String>,
-}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadWorkspaceMappings {
+        pub source_path_mode: String,
+        pub workspace_mode_policy: String,
+        pub mapping_ref: Option<String>,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadCapability {
-    pub name: String,
-    pub required: bool,
-}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadCapability {
+        pub name: String,
+        pub required: bool,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadSecrets {
-    pub categories: Vec<String>,
-}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadSecrets {
+        pub categories: Vec<String>,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadMutationPolicy {
-    pub capture_patch: bool,
-    pub mutation_flag: Option<String>,
-    pub allow_dirty_lab_workspace: bool,
-}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadMutationPolicy {
+        pub capture_patch: bool,
+        pub mutation_flag: Option<String>,
+        pub allow_dirty_lab_workspace: bool,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadAssignment {
-    pub runner_id: Option<String>,
-    pub runner_mode: Option<String>,
-    pub source: Option<String>,
-}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadAssignment {
+        pub runner_id: Option<String>,
+        pub runner_mode: Option<String>,
+        pub source: Option<String>,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadState {
-    pub status: String,
-    pub remote_workspace: Option<String>,
-    pub fallback_reason: Option<String>,
-}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadState {
+        pub status: String,
+        pub remote_workspace: Option<String>,
+        pub fallback_reason: Option<String>,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadResultRefs {
-    pub plan_id: String,
-    pub proof_id: Option<String>,
-    pub workspace_mapping_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mirror_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<RunnerWorkloadArtifactRef>,
-}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadResultRefs {
+        pub plan_id: String,
+        pub proof_id: Option<String>,
+        pub workspace_mapping_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub job_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub mirror_run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub artifacts: Vec<RunnerWorkloadArtifactRef>,
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RunnerWorkloadArtifactRef {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadArtifactRef {
+        pub id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub url: Option<String>,
+    }
 }
+pub use runner_workload_types::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunnerHandoffEnvelope {
@@ -309,29 +315,32 @@ impl RunnerHandoffEnvelope {
     }
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "mode")]
-pub enum LabLocalExecutionPolicy {
-    Allow {
-        local_hot: LabLocalHotPolicy,
-        selected_runner_fallback: LabSelectedRunnerFallbackPolicy,
-    },
-    Deny,
-}
+mod local_execution_enums {
+    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case", tag = "mode")]
+    pub enum LabLocalExecutionPolicy {
+        Allow {
+            local_hot: LabLocalHotPolicy,
+            selected_runner_fallback: LabSelectedRunnerFallbackPolicy,
+        },
+        Deny,
+    }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LabLocalHotPolicy {
-    RequireRemoteWhenDefaultRunnerExists,
-    AllowControllerOverride,
-}
+    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum LabLocalHotPolicy {
+        RequireRemoteWhenDefaultRunnerExists,
+        AllowControllerOverride,
+    }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LabSelectedRunnerFallbackPolicy {
-    Deny,
-    AllowControllerFallback,
+    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum LabSelectedRunnerFallbackPolicy {
+        Deny,
+        AllowControllerFallback,
+    }
 }
+pub use local_execution_enums::*;
 
 impl Default for LabLocalExecutionPolicy {
     fn default() -> Self {
@@ -403,71 +412,76 @@ pub struct LabRunnerSupportSummary {
     pub hint: String,
 }
 
-pub fn lab_runner_supported_labels() -> Vec<&'static str> {
-    lab_support_summaries()
-        .map(|summary| summary.message_label)
-        .collect()
-}
+mod runner_support {
+    use super::*;
 
-pub fn lab_runner_supported_contract_labels() -> Vec<&'static str> {
-    lab_support_summaries()
-        .flat_map(|summary| summary.contract_labels.iter().copied())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
+    pub fn lab_runner_supported_labels() -> Vec<&'static str> {
+        lab_support_summaries()
+            .map(|summary| summary.message_label)
+            .collect()
+    }
 
-pub fn lab_runner_supports_contract_label(contract_label: &str) -> bool {
-    lab_support_summaries().any(|summary| summary.contract_labels.contains(&contract_label))
-}
+    pub fn lab_runner_supported_contract_labels() -> Vec<&'static str> {
+        lab_support_summaries()
+            .flat_map(|summary| summary.contract_labels.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
 
-pub fn lab_runner_support_summary() -> LabRunnerSupportSummary {
-    let supported_labels = lab_runner_supported_labels();
-    let hint_labels = lab_runner_supported_hint_labels();
+    pub fn lab_runner_supports_contract_label(contract_label: &str) -> bool {
+        lab_support_summaries().any(|summary| summary.contract_labels.contains(&contract_label))
+    }
 
-    LabRunnerSupportSummary {
-        unsupported_message: format!(
-            "--runner is only supported for commands with portable Lab offload support: {}",
-            human_join(&supported_labels)
-        ),
-        hint: format!("Current Lab offload support: {}.", human_join(&hint_labels)),
-        supported_labels,
+    pub fn lab_runner_support_summary() -> LabRunnerSupportSummary {
+        let supported_labels = lab_runner_supported_labels();
+        let hint_labels = lab_runner_supported_hint_labels();
+
+        LabRunnerSupportSummary {
+            unsupported_message: format!(
+                "--runner is only supported for commands with portable Lab offload support: {}",
+                human_join(&supported_labels)
+            ),
+            hint: format!("Current Lab offload support: {}.", human_join(&hint_labels)),
+            supported_labels,
+        }
+    }
+
+    pub fn lab_runner_unsupported_message() -> String {
+        lab_runner_support_summary().unsupported_message
+    }
+
+    pub fn lab_runner_unsupported_hint() -> String {
+        lab_runner_support_summary().hint
+    }
+
+    fn lab_runner_supported_hint_labels() -> Vec<&'static str> {
+        lab_support_summaries()
+            .map(|summary| summary.hint_label)
+            .collect()
+    }
+
+    fn lab_support_summaries() -> impl Iterator<Item = &'static CommandLabSupportSummary> {
+        COMMAND_SPECS
+            .iter()
+            .flat_map(|spec| spec.lab_support_summary.iter())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lab_runner_summary_covers_contract_label(contract_label: &str) -> bool {
+        lab_runner_supports_contract_label(contract_label)
+    }
+
+    fn human_join(labels: &[&str]) -> String {
+        match labels {
+            [] => String::new(),
+            [label] => (*label).to_string(),
+            [first, second] => format!("{first} and {second}"),
+            [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+        }
     }
 }
-
-pub fn lab_runner_unsupported_message() -> String {
-    lab_runner_support_summary().unsupported_message
-}
-
-pub fn lab_runner_unsupported_hint() -> String {
-    lab_runner_support_summary().hint
-}
-
-fn lab_runner_supported_hint_labels() -> Vec<&'static str> {
-    lab_support_summaries()
-        .map(|summary| summary.hint_label)
-        .collect()
-}
-
-fn lab_support_summaries() -> impl Iterator<Item = &'static CommandLabSupportSummary> {
-    COMMAND_SPECS
-        .iter()
-        .flat_map(|spec| spec.lab_support_summary.iter())
-}
-
-#[cfg(test)]
-fn lab_runner_summary_covers_contract_label(contract_label: &str) -> bool {
-    lab_runner_supports_contract_label(contract_label)
-}
-
-fn human_join(labels: &[&str]) -> String {
-    match labels {
-        [] => String::new(),
-        [label] => (*label).to_string(),
-        [first, second] => format!("{first} and {second}"),
-        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
-    }
-}
+pub use runner_support::*;
 
 impl Commands {
     pub fn lab_contract(&self) -> Option<LabCommandContract> {
@@ -628,84 +642,93 @@ impl Commands {
     }
 }
 
-/// The loop-controller spec-materialization family always lays down a real git
-/// checkout of the target workspace so the controller can apply patch artifacts
-/// across actions. This holds regardless of dispatch backend, so it is decided
-/// purely from the parsed command shape (not provider resolution).
-fn agent_task_controller_materializes_worktree(command: &agent_task::AgentTaskCommand) -> bool {
-    matches!(
-        command,
-        agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
-            command: agent_task::AgentTaskControllerCommand::FromSpec(
-                agent_task::AgentTaskControllerFromSpecArgs { resume: true, .. },
-            ) | agent_task::AgentTaskControllerCommand::RunFromSpec(_)
-                | agent_task::AgentTaskControllerCommand::Materialize(_),
-        })
-    )
-}
+mod agent_task_checkout {
+    use super::*;
 
-fn agent_task_provider_requires_cwd_git_checkout(command: &agent_task::AgentTaskCommand) -> bool {
-    agent_task_provider_requires_cwd_git_checkout_with(
-        command,
-        || default_backend().ok().flatten(),
-        provider_requires_cwd_git_checkout,
-    )
-}
+    /// The loop-controller spec-materialization family always lays down a real git
+    /// checkout of the target workspace so the controller can apply patch artifacts
+    /// across actions. This holds regardless of dispatch backend, so it is decided
+    /// purely from the parsed command shape (not provider resolution).
+    pub(crate) fn agent_task_controller_materializes_worktree(
+        command: &agent_task::AgentTaskCommand,
+    ) -> bool {
+        matches!(
+            command,
+            agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
+                command: agent_task::AgentTaskControllerCommand::FromSpec(
+                    agent_task::AgentTaskControllerFromSpecArgs { resume: true, .. },
+                ) | agent_task::AgentTaskControllerCommand::RunFromSpec(_)
+                    | agent_task::AgentTaskControllerCommand::Materialize(_),
+            })
+        )
+    }
 
-fn agent_task_provider_requires_cwd_git_checkout_with(
-    command: &agent_task::AgentTaskCommand,
-    default_backend: impl FnOnce() -> Option<String>,
-    provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
-) -> bool {
-    match command {
-        agent_task::AgentTaskCommand::Cook(agent_task::AgentTaskCookArgs {
-            dispatch: args,
-            ..
-        }) => {
-            let has_workspace = args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
-                || args
-                    .workspace
+    pub(crate) fn agent_task_provider_requires_cwd_git_checkout(
+        command: &agent_task::AgentTaskCommand,
+    ) -> bool {
+        agent_task_provider_requires_cwd_git_checkout_with(
+            command,
+            || default_backend().ok().flatten(),
+            provider_requires_cwd_git_checkout,
+        )
+    }
+
+    pub(crate) fn agent_task_provider_requires_cwd_git_checkout_with(
+        command: &agent_task::AgentTaskCommand,
+        default_backend: impl FnOnce() -> Option<String>,
+        provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
+    ) -> bool {
+        match command {
+            agent_task::AgentTaskCommand::Cook(agent_task::AgentTaskCookArgs {
+                dispatch: args,
+                ..
+            }) => {
+                let has_workspace = args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
+                    || args
+                        .workspace
+                        .as_ref()
+                        .is_some_and(|workspace| !workspace.trim().is_empty());
+                if !has_workspace {
+                    return false;
+                }
+                let backend = args.backend.clone().or_else(default_backend);
+                backend.as_ref().is_some_and(|backend| {
+                    provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
+                }) || args
+                    .backend
                     .as_ref()
-                    .is_some_and(|workspace| !workspace.trim().is_empty());
-            if !has_workspace {
-                return false;
+                    .is_some_and(|backend| !backend.trim().is_empty())
             }
-            let backend = args.backend.clone().or_else(default_backend);
-            backend.as_ref().is_some_and(|backend| {
-                provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
-            }) || args
-                .backend
-                .as_ref()
-                .is_some_and(|backend| !backend.trim().is_empty())
+            agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
+                command:
+                    agent_task::AgentTaskControllerCommand::FromSpec(
+                        agent_task::AgentTaskControllerFromSpecArgs {
+                            resume: true,
+                            dispatch_backend,
+                            dispatch_selector,
+                            ..
+                        },
+                    )
+                    | agent_task::AgentTaskControllerCommand::RunFromSpec(
+                        agent_task::AgentTaskControllerRunFromSpecArgs {
+                            dispatch_backend,
+                            dispatch_selector,
+                            ..
+                        },
+                    ),
+            }) => {
+                let backend = dispatch_backend.clone().or_else(default_backend);
+                backend.as_ref().is_some_and(|backend| {
+                    provider_requires_cwd_git_checkout(backend, dispatch_selector.as_deref())
+                }) || dispatch_backend
+                    .as_ref()
+                    .is_some_and(|backend| !backend.trim().is_empty())
+            }
+            _ => false,
         }
-        agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
-            command:
-                agent_task::AgentTaskControllerCommand::FromSpec(
-                    agent_task::AgentTaskControllerFromSpecArgs {
-                        resume: true,
-                        dispatch_backend,
-                        dispatch_selector,
-                        ..
-                    },
-                )
-                | agent_task::AgentTaskControllerCommand::RunFromSpec(
-                    agent_task::AgentTaskControllerRunFromSpecArgs {
-                        dispatch_backend,
-                        dispatch_selector,
-                        ..
-                    },
-                ),
-        }) => {
-            let backend = dispatch_backend.clone().or_else(default_backend);
-            backend.as_ref().is_some_and(|backend| {
-                provider_requires_cwd_git_checkout(backend, dispatch_selector.as_deref())
-            }) || dispatch_backend
-                .as_ref()
-                .is_some_and(|backend| !backend.trim().is_empty())
-        }
-        _ => false,
     }
 }
+pub(crate) use agent_task_checkout::*;
 
 pub(super) fn apply_lab_contract_to_descriptor(
     descriptor: &mut CommandDescriptor,
@@ -936,79 +959,84 @@ impl Commands {
     }
 }
 
-fn agent_task_lab_extension_ids(
-    args: &agent_task::AgentTaskArgs,
-) -> crate::core::Result<Vec<String>> {
-    let agent_task::AgentTaskCommand::RunPlan(run_plan) = &args.command else {
-        return Ok(Vec::new());
-    };
-    if run_plan.plan.trim() == "-" {
-        return Ok(Vec::new());
+mod extension_ids {
+    use super::*;
+
+    pub(crate) fn agent_task_lab_extension_ids(
+        args: &agent_task::AgentTaskArgs,
+    ) -> crate::core::Result<Vec<String>> {
+        let agent_task::AgentTaskCommand::RunPlan(run_plan) = &args.command else {
+            return Ok(Vec::new());
+        };
+        if run_plan.plan.trim() == "-" {
+            return Ok(Vec::new());
+        }
+
+        let plan = crate::core::agent_tasks::service::read_plan(&run_plan.plan)?;
+        Ok(crate::core::agent_tasks::required_extension_ids_for_plan(
+            &plan,
+        ))
     }
 
-    let plan = crate::core::agent_tasks::service::read_plan(&run_plan.plan)?;
-    Ok(crate::core::agent_tasks::required_extension_ids_for_plan(
-        &plan,
-    ))
-}
+    pub(crate) fn test_lab_extension_ids(
+        args: &crate::commands::test::TestArgs,
+    ) -> crate::core::Result<Vec<String>> {
+        let resolve_for = |capability: Option<ExtensionCapability>| {
+            execution_context::resolve(&ResolveOptions {
+                component_id: args.comp.component.clone(),
+                path_override: args.comp.path.clone(),
+                capability,
+                settings_overrides: args.setting_args.setting.clone(),
+                settings_json_overrides: args.setting_args.setting_json.clone(),
+                extension_overrides: args.extension_override.extensions.clone(),
+            })
+        };
 
-fn test_lab_extension_ids(
-    args: &crate::commands::test::TestArgs,
-) -> crate::core::Result<Vec<String>> {
-    let resolve_for = |capability: Option<ExtensionCapability>| {
-        execution_context::resolve(&ResolveOptions {
-            component_id: args.comp.component.clone(),
-            path_override: args.comp.path.clone(),
-            capability,
-            settings_overrides: args.setting_args.setting.clone(),
-            settings_json_overrides: args.setting_args.setting_json.clone(),
-            extension_overrides: args.extension_override.extensions.clone(),
-        })
-    };
+        let source_context = resolve_for(None)?;
 
-    let source_context = resolve_for(None)?;
+        if !args.drift
+            && args.ci_job.is_none()
+            && source_context
+                .component
+                .has_script(ExtensionCapability::Test)
+        {
+            return Ok(Vec::new());
+        }
 
-    if !args.drift
-        && args.ci_job.is_none()
-        && source_context
+        let context = resolve_for(Some(ExtensionCapability::Test))?;
+
+        Ok(context.extension_id.into_iter().collect())
+    }
+
+    pub(crate) fn review_lab_extension_ids(
+        args: &crate::commands::review::ReviewArgs,
+    ) -> crate::core::Result<Vec<String>> {
+        let resolve_for = |capability: Option<ExtensionCapability>| {
+            execution_context::resolve(&ResolveOptions {
+                component_id: args.comp.component.clone(),
+                path_override: args.comp.path.clone(),
+                capability,
+                settings_overrides: Vec::new(),
+                settings_json_overrides: Vec::new(),
+                extension_overrides: args.extension_override.extensions.clone(),
+            })
+        };
+
+        let source_context = resolve_for(None)?;
+
+        if source_context
             .component
             .has_script(ExtensionCapability::Test)
-    {
-        return Ok(Vec::new());
+        {
+            return Ok(Vec::new());
+        }
+
+        let context = resolve_for(Some(ExtensionCapability::Test))?;
+
+        Ok(context.extension_id.into_iter().collect())
     }
-
-    let context = resolve_for(Some(ExtensionCapability::Test))?;
-
-    Ok(context.extension_id.into_iter().collect())
 }
-
-fn review_lab_extension_ids(
-    args: &crate::commands::review::ReviewArgs,
-) -> crate::core::Result<Vec<String>> {
-    let resolve_for = |capability: Option<ExtensionCapability>| {
-        execution_context::resolve(&ResolveOptions {
-            component_id: args.comp.component.clone(),
-            path_override: args.comp.path.clone(),
-            capability,
-            settings_overrides: Vec::new(),
-            settings_json_overrides: Vec::new(),
-            extension_overrides: args.extension_override.extensions.clone(),
-        })
-    };
-
-    let source_context = resolve_for(None)?;
-
-    if source_context
-        .component
-        .has_script(ExtensionCapability::Test)
-    {
-        return Ok(Vec::new());
-    }
-
-    let context = resolve_for(Some(ExtensionCapability::Test))?;
-
-    Ok(context.extension_id.into_iter().collect())
-}
+pub(crate) use extension_ids::*;
 
 #[cfg(test)]
 #[path = "../../tests/command_contract/lab_test.rs"]
