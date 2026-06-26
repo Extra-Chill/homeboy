@@ -38,8 +38,8 @@ if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; t
     source "$WRITE_TEST_RESULTS_HELPER"
 fi
 
-ADAPTERS_HELPER="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-${SCRIPT_DIR}/../lib/test-result-adapters.sh}"
-# shellcheck source=../lib/test-result-adapters.sh
+ADAPTERS_HELPER="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-${SCRIPT_DIR}/../../../scripts/lib/test-result-adapters.sh}"
+# shellcheck source=../../../scripts/lib/test-result-adapters.sh
 source "$ADAPTERS_HELPER"
 WP_CODEBOX_ADAPTERS_HELPER="${HOMEBOY_WP_CODEBOX_TEST_RESULT_ADAPTERS:-${SCRIPT_DIR}/../../../agent-runtimes/wp-codebox/scripts/lib/test-result-adapters.sh}"
 if [ -f "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
