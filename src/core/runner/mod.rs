@@ -116,11 +116,11 @@ pub use offload_metadata::{
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerArtifactRef, RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport,
-    RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerLifecycleOwner, RunnerMutationArtifacts,
-    RunnerNamedWorkspaceLease, RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState,
-    RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
-    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
+    RunnerArtifactRef, RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport,
+    RunnerDisconnectReport, RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerLifecycleOwner,
+    RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerResult, RunnerSession,
+    RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath,
+    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
@@ -339,6 +339,7 @@ pub fn resolve_default_lab_runner() -> Result<Option<String>> {
                 id: runner.id,
                 mode,
                 connected: status.connected,
+                capacity: runner.settings.concurrency_limit,
                 stale_daemon: status.stale_daemon.is_some(),
                 active_jobs: status.active_jobs.len(),
                 active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
@@ -353,6 +354,7 @@ struct DefaultLabRunnerCandidate {
     id: String,
     mode: RunnerTunnelMode,
     connected: bool,
+    capacity: Option<usize>,
     stale_daemon: bool,
     active_jobs: usize,
     active_jobs_available: bool,
@@ -366,6 +368,22 @@ struct DefaultLabRunnerReadiness {
 }
 
 impl DefaultLabRunnerCandidate {
+    #[cfg(test)]
+    fn availability(&self) -> RunnerAvailability {
+        RunnerAvailability::from_status_parts(
+            self.id.clone(),
+            self.connected,
+            self.stale_daemon,
+            self.active_jobs,
+            if self.active_jobs_available {
+                &RunnerActiveJobState::Available
+            } else {
+                &RunnerActiveJobState::Unavailable
+            },
+            self.capacity,
+        )
+    }
+
     fn readiness(&self) -> DefaultLabRunnerReadiness {
         if !self.capabilities_ready || self.stale_daemon {
             return DefaultLabRunnerReadiness {
@@ -755,6 +773,7 @@ mod tests {
             id: id.to_string(),
             mode,
             connected,
+            capacity: None,
             stale_daemon: false,
             active_jobs: 0,
             active_jobs_available: true,
@@ -1312,6 +1331,64 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
+    fn runner_availability_reports_unavailable_runner_reasons() {
+        let mut unavailable = default_lab_candidate("lab-a", RunnerTunnelMode::Reverse, false);
+        unavailable.active_jobs_available = false;
+
+        assert_eq!(
+            unavailable.availability(),
+            RunnerAvailability {
+                runner_id: "lab-a".to_string(),
+                connected: false,
+                accepts_jobs: false,
+                active_job_count: 0,
+                capacity: None,
+                reasons: vec![
+                    "not_connected".to_string(),
+                    "active_jobs_unavailable".to_string()
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn runner_availability_reports_busy_runner_at_capacity() {
+        let mut busy = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        busy.capacity = Some(2);
+        busy.active_jobs = 2;
+
+        assert_eq!(
+            busy.availability(),
+            RunnerAvailability {
+                runner_id: "lab-a".to_string(),
+                connected: true,
+                accepts_jobs: false,
+                active_job_count: 2,
+                capacity: Some(2),
+                reasons: vec!["capacity_reached".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn runner_availability_reports_ambiguous_unknown_capacity() {
+        let mut ambiguous = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        ambiguous.active_jobs = 1;
+
+        assert_eq!(
+            ambiguous.availability(),
+            RunnerAvailability {
+                runner_id: "lab-a".to_string(),
+                connected: true,
+                accepts_jobs: false,
+                active_job_count: 1,
+                capacity: None,
+                reasons: vec!["capacity_unknown".to_string()],
+            }
+        );
     }
 
     #[test]

@@ -87,6 +87,65 @@ pub enum RunnerActiveJobSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerAvailability {
+    pub runner_id: String,
+    pub connected: bool,
+    pub accepts_jobs: bool,
+    pub active_job_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
+
+impl RunnerAvailability {
+    pub fn from_status_parts(
+        runner_id: impl Into<String>,
+        connected: bool,
+        stale_daemon: bool,
+        active_job_count: usize,
+        active_job_state: &RunnerActiveJobState,
+        capacity: Option<usize>,
+    ) -> Self {
+        let mut reasons = Vec::new();
+        if !connected {
+            reasons.push("not_connected".to_string());
+        }
+        if stale_daemon {
+            reasons.push("stale_daemon".to_string());
+        }
+        if *active_job_state != RunnerActiveJobState::Available {
+            reasons.push(
+                match active_job_state {
+                    RunnerActiveJobState::Unavailable => "active_jobs_unavailable",
+                    RunnerActiveJobState::NotQueried => "active_jobs_not_queried",
+                    RunnerActiveJobState::Available => unreachable!(),
+                }
+                .to_string(),
+            );
+        }
+        match capacity {
+            Some(capacity) if active_job_count >= capacity => {
+                reasons.push("capacity_reached".to_string());
+            }
+            None if active_job_count > 0 => {
+                reasons.push("capacity_unknown".to_string());
+            }
+            _ => {}
+        }
+        let accepts_jobs = reasons.is_empty();
+        Self {
+            runner_id: runner_id.into(),
+            connected,
+            accepts_jobs,
+            active_job_count,
+            capacity,
+            reasons,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerActiveJobError {
     pub code: String,
     pub message: String,

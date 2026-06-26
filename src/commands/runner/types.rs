@@ -3,8 +3,8 @@ use serde_json::Value;
 
 use homeboy::core::api_jobs::{Job, JobEvent};
 use homeboy::core::runners::{
-    ReverseRunnerWorkerOutput, Runner, RunnerConnectReport, RunnerDisconnectReport,
-    RunnerExecOutput, RunnerStatusReport,
+    ReverseRunnerWorkerOutput, Runner, RunnerAvailability, RunnerConnectReport,
+    RunnerDisconnectReport, RunnerExecOutput, RunnerStatusReport,
 };
 use homeboy::core::EntityCrudOutput;
 
@@ -67,6 +67,7 @@ pub struct LabSelectedRunnerOutput {
     pub workspace_root: Option<String>,
     pub readiness_state: String,
     pub connected: bool,
+    pub availability: RunnerAvailability,
     pub status: RunnerStatusReport,
 }
 
