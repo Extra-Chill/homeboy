@@ -242,6 +242,7 @@ pub(super) fn runner_artifact_feature_diagnostics(
 fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
     let runner_arg = shell_arg(runner_id);
     vec![
+        format!("homeboy runner refresh-homeboy {runner_arg} --ref main --reconnect"),
         format!("homeboy runner disconnect {runner_arg}"),
         format!("homeboy runner connect {runner_arg}"),
     ]
@@ -294,6 +295,11 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
             label: "doctor",
             command: format!("homeboy runner doctor {runner_arg} --scope lab-offload"),
             purpose: "Probe runner tools, workspace writability, artifact storage, and Lab offload readiness.",
+        },
+        LabFollowup {
+            label: "refresh_homeboy",
+            command: format!("homeboy runner refresh-homeboy {runner_arg} --ref main --reconnect"),
+            purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.",
         },
         LabFollowup {
             label: "env",

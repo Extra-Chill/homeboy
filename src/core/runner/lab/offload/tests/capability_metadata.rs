@@ -257,6 +257,7 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
     assert_eq!(
         metadata["refresh_commands"],
         serde_json::json!([
+            "homeboy runner refresh-homeboy 'homeboy lab' --ref main --reconnect",
             "homeboy runner disconnect 'homeboy lab'",
             "homeboy runner connect 'homeboy lab'"
         ])
@@ -320,12 +321,11 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
     let tried = err.details["tried"].as_array().expect("tried hints");
     assert!(tried
         .iter()
-        .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
-            "homeboy runner disconnect 'homeboy lab' && homeboy runner connect 'homeboy lab'"
-        ))));
-    assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
-        |hint| hint.contains("homeboy upgrade --force --upgrade-runner 'homeboy lab'")
-    )));
+        .any(|hint| hint.as_str().is_some_and(|hint| hint
+            .contains("homeboy runner refresh-homeboy 'homeboy lab' --ref main --reconnect"))));
+    assert!(tried.iter().any(|hint| hint
+        .as_str()
+        .is_some_and(|hint| hint.contains("refresh or select a clean runner binary"))));
 }
 
 #[test]
@@ -353,6 +353,7 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
     assert_eq!(
         metadata["refresh_commands"],
         serde_json::json!([
+            "homeboy runner refresh-homeboy lab --ref main --reconnect",
             "homeboy runner disconnect lab",
             "homeboy runner connect lab"
         ])

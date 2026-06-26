@@ -26,6 +26,7 @@ mod daemon_http_get;
 mod evidence;
 mod execution;
 mod git_dependency_materialization;
+mod homeboy_refresh;
 mod lab;
 mod lab_apply;
 mod lab_args;
@@ -93,6 +94,10 @@ pub use execution::{
 pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
     RunnerGitDependencyMaterializationOutput,
+};
+pub use homeboy_refresh::{
+    plan_homeboy_binary_refresh, refresh_homeboy_binary, HomeboyBinaryRefreshMode,
+    HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan,
 };
 pub use lab::{
     execute_lab_offload, LabJobOverrides, LabLocalExecutionPolicy, LabOffloadCommand,

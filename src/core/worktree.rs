@@ -1086,7 +1086,10 @@ mod tests {
 
             assert_eq!(output.rows[0].status, WorktreeQueueCreateStatus::Created);
             let record = resolve("homeboy@cook-one").expect("queued worktree record");
-            assert_eq!(record.worktree_path, worktree_path.display().to_string());
+            assert_eq!(
+                std::fs::canonicalize(&record.worktree_path).unwrap(),
+                std::fs::canonicalize(&worktree_path).unwrap()
+            );
             assert_eq!(record.branch, "cook/one");
             assert_eq!(record.base_ref, "origin/main");
             assert_eq!(

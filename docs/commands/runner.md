@@ -140,6 +140,31 @@ It does not upgrade binaries, rewrite runner paths, or refresh Sample Runtime ca
 those remain explicit operator actions because they can be expensive or depend
 on environment-specific paths.
 
+### `refresh-homeboy`
+
+```sh
+homeboy runner refresh-homeboy <runner-id> --ref main --reconnect
+homeboy runner refresh-homeboy <runner-id> --source https://github.com/Extra-Chill/homeboy.git --ref <branch-or-sha>
+homeboy runner refresh-homeboy <runner-id> --select /path/to/homeboy --reconnect
+homeboy runner refresh-homeboy <runner-id> --ref <branch-or-sha> --dry-run
+```
+
+Builds or selects the Homeboy binary used by runner/Lab job execution without
+mutating a runner's primary checkout. Materialize mode clones/fetches the
+Homeboy source into a managed runner-side cache under the runner workspace root
+unless `--target-dir` is supplied, hard-resets that isolated checkout to the
+requested ref, builds `target/release/homeboy`, probes `self identity`, and then
+updates the runner `homeboy_path` to the clean binary. Select mode skips the
+build and probes the exact binary passed to `--select` before updating
+`homeboy_path`.
+
+Use `--reconnect` when the active daemon/session should be refreshed immediately.
+Without it, the JSON output includes follow-up `disconnect`, `connect`, and
+`status` commands so operators can restart a session at the right time. `runner
+status` also reports controller, configured executable, active daemon version,
+build identity, drift signals, and refresh commands under
+`selected_lab_runner.runner_homeboy`.
+
 Pass one or more `--require-tool <command>` values when a provider or job path
 knows it needs additional runner-side commands before starting expensive work.
 Doctor resolves each command on the runner `PATH` and reports missing requested

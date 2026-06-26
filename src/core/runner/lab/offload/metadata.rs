@@ -80,6 +80,10 @@ pub(crate) fn lab_runner_homeboy_metadata(
     status: &RunnerStatusReport,
 ) -> serde_json::Value {
     let refresh_commands = vec![
+        format!(
+            "homeboy runner refresh-homeboy {} --ref main --reconnect",
+            shell::quote_arg(runner_id)
+        ),
         format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
         format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
     ];
@@ -232,7 +236,7 @@ pub(crate) fn stale_runner_homeboy_error(
         Some(runner_id.to_string()),
         Some(vec![
             format!("Reconnect runner `{runner_id}` before retrying Lab offload: {refresh}"),
-            format!("If the runner binary itself is stale, upgrade it with `homeboy upgrade --force --upgrade-runner {}`.", shell::quote_arg(runner_id)),
+            format!("If the runner binary itself is stale, refresh or select a clean runner binary with `homeboy runner refresh-homeboy {} --ref main --reconnect`.", shell::quote_arg(runner_id)),
             "Use --force-hot --allow-local-hot only if you intentionally want to bypass Lab offload and run locally.".to_string(),
         ]),
     )
@@ -251,6 +255,10 @@ pub(crate) fn runner_homeboy_refresh_commands(
         return commands;
     }
     vec![
+        format!(
+            "homeboy runner refresh-homeboy {} --ref main --reconnect",
+            shell::quote_arg(runner_id)
+        ),
         format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
         format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
     ]
