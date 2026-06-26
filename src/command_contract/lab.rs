@@ -559,7 +559,9 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
+                        command:
+                            agent_task::AgentTaskFanoutCommand::RunPlan(_)
+                            | agent_task::AgentTaskFanoutCommand::CookBatch(_),
                     }),
             }) => LabCommandContract::portable(
                 AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
