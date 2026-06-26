@@ -829,6 +829,7 @@ pub(crate) fn run_lab_offload_inner(
         request.normalized_args,
         &exec_output.stdout,
         output_file_content.as_deref(),
+        exec_output.job_events.as_deref(),
     )?;
 
     let mut stderr = String::new();

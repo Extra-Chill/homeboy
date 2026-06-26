@@ -136,3 +136,56 @@ fn reverse_worker_result_mirrors_file_artifact_bytes() {
         Some("d29ya2VyIGFydGlmYWN0IGJ5dGVz")
     );
 }
+
+#[test]
+fn reverse_worker_result_attaches_typed_agent_task_lifecycle_event() {
+    let result = remote_runner_result_from_exec_output(
+        RunnerExecOutput {
+            variant: "exec",
+            command: "runner.exec",
+            runner_id: "lab-default".to_string(),
+            dry_run: false,
+            mode: RunnerExecMode::Local,
+            argv: vec!["homeboy".to_string(), "agent-task".to_string()],
+            remote_cwd: "/srv/workspace".to_string(),
+            exit_code: 0,
+            stdout: concat!(
+                "runner chatter\n",
+                "{\"success\":true,\"data\":{",
+                "\"schema\":\"homeboy/agent-task-aggregate/v1\",",
+                "\"plan_id\":\"plan-typed\",",
+                "\"status\":\"succeeded\",",
+                "\"totals\":{\"skipped\":0,\"succeeded\":1,\"failed\":0},",
+                "\"outcomes\":[]}}"
+            )
+            .to_string(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            runner_job: None,
+            job_id: Some("job-typed".to_string()),
+            job_events: None,
+            mirror_run_id: Some("run-typed".to_string()),
+            patch: None,
+            mutation_artifacts: None,
+            artifacts: Vec::new(),
+            metrics: None,
+            capture: None,
+            runner_result: None,
+            handoff: None,
+            diagnostics: None,
+        },
+        0,
+        None,
+    );
+
+    let event = &result.data.as_ref().expect("data")["agent_task_lifecycle_event"];
+    assert_eq!(
+        event["schema"],
+        "homeboy/agent-task-run-plan-lifecycle-event/v1"
+    );
+    assert_eq!(event["identity"]["runner_id"], "lab-default");
+    assert_eq!(event["identity"]["runner_job_id"], "job-typed");
+    assert_eq!(event["identity"]["run_id"], "run-typed");
+    assert_eq!(event["aggregate"]["plan_id"], "plan-typed");
+}

@@ -1,9 +1,11 @@
 use base64::Engine;
 use serde_json::json;
 
+use crate::command_contract::AgentTaskDispatchIdentity;
 use crate::core::api_jobs::{
     Job, JobArtifactMetadata, RemoteRunnerJobRequest, RemoteRunnerJobResult,
 };
+use crate::core::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_output;
 
 use super::super::capabilities::RunnerCapabilityPreflight;
 use super::types::{ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
@@ -28,6 +30,25 @@ pub(super) fn remote_runner_result_from_exec_output(
     }
     if let Some(mirror_run_id) = exec_output.mirror_run_id.clone() {
         data["mirror_run_id"] = json!(mirror_run_id);
+    }
+    if let Some(lifecycle_event) = agent_task_run_plan_lifecycle_event_from_output(
+        AgentTaskDispatchIdentity {
+            runner_id: exec_output.runner_id.clone(),
+            runner_job_id: exec_output.job_id.clone().unwrap_or_default(),
+            persisted_run_id: exec_output.mirror_run_id.clone(),
+            run_id: exec_output.mirror_run_id.clone(),
+            handoff_id: exec_output
+                .job_id
+                .as_ref()
+                .map(|job_id| format!("runner:{}:job:{job_id}", exec_output.runner_id)),
+        },
+        &exec_output.stdout,
+    )
+    .ok()
+    .flatten()
+    {
+        data["agent_task_lifecycle_event"] =
+            serde_json::to_value(lifecycle_event).unwrap_or(serde_json::Value::Null);
     }
     if let Some(runner_workload) = runner_workload {
         data["runner_workload"] =

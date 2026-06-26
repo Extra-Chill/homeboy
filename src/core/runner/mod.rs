@@ -10,6 +10,7 @@ use crate::core::error::{Error, Result};
 use crate::core::output::{BatchResult, CreateOutput, CreateResult, MergeOutput, MergeResult};
 use crate::core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSettings, ServerRunner};
 
+mod agent_task_lifecycle_event;
 mod apply;
 mod broker_auth;
 mod broker_http;
