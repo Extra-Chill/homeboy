@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::thread;
@@ -16,9 +17,9 @@ use crate::core::server::{self, Server, ServerAuthMode, SshClient};
 
 use super::session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerSession,
-    RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
-    RunnerTunnelMode,
+    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStatusReport, RunnerTunnelMode,
 };
 use super::{broker_auth, broker_http};
 use super::{load, Runner, RunnerKind};
@@ -29,6 +30,7 @@ const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 mod connection_daemon;
 use connection_daemon::{connect_remote_daemon, daemon_http_version, versions_match};
 use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
+use connection_daemon::{daemon_http_runtime_loaded_paths, daemon_http_runtime_stale_paths};
 
 use super::daemon_http_get::daemon_get;
 
@@ -498,19 +500,76 @@ fn stale_daemon_warning(
         .and_then(|local_url| daemon_http_identity(local_url).ok())
         .filter(|identity| !identity.trim().is_empty());
     let session_identity = daemon_identity.or_else(|| session.homeboy_build_identity.clone());
+    let stale_runtime_paths = session
+        .local_url
+        .as_deref()
+        .and_then(|local_url| daemon_http_runtime_stale_paths(local_url).ok())
+        .unwrap_or_default();
+    let changed_runtime_paths = session
+        .local_url
+        .as_deref()
+        .and_then(|local_url| daemon_http_runtime_loaded_paths(local_url).ok())
+        .map(|loaded| changed_runtime_paths(&runner.env, &loaded))
+        .unwrap_or_default();
     if versions_match(&observed_session_version, &current_version)
         && versions_match(&session.homeboy_version, &current_version)
         && identities_match(session_identity.as_deref(), Some(&current_identity.display))
+        && stale_runtime_paths.is_empty()
+        && changed_runtime_paths.is_empty()
     {
         return None;
     }
-    Some(RunnerStaleDaemonWarning::new(
-        &runner.id,
-        observed_session_version,
-        current_version,
-        session_identity,
-        Some(current_identity.display),
-    ))
+    Some(
+        RunnerStaleDaemonWarning::new(
+            &runner.id,
+            observed_session_version,
+            current_version,
+            session_identity,
+            Some(current_identity.display),
+        )
+        .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths),
+    )
+}
+
+fn changed_runtime_paths(
+    runner_env: &std::collections::HashMap<String, String>,
+    loaded_paths: &BTreeMap<String, String>,
+) -> Vec<RunnerChangedRuntimePath> {
+    let current_paths: BTreeMap<String, String> = runner_env
+        .iter()
+        .filter(|(name, value)| is_runtime_path_env(name) && !value.trim().is_empty())
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let mut names: std::collections::BTreeSet<String> = loaded_paths.keys().cloned().collect();
+    names.extend(current_paths.keys().cloned());
+    names
+        .into_iter()
+        .filter_map(|env| {
+            let loaded_path = loaded_paths.get(&env).cloned();
+            let configured_path = current_paths.get(&env).cloned();
+            if loaded_path == configured_path {
+                None
+            } else {
+                Some(RunnerChangedRuntimePath {
+                    env,
+                    loaded_path,
+                    configured_path,
+                })
+            }
+        })
+        .collect()
+}
+
+fn is_runtime_path_env(name: &str) -> bool {
+    name.starts_with("HOMEBOY_")
+        && [
+            "_COMPONENT_PATH",
+            "_PLUGIN_PATH",
+            "_PROVIDER_PATH",
+            "_RUNTIME_PATH",
+        ]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
 }
 
 pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
@@ -1101,8 +1160,10 @@ pub(super) fn terminate_pid(pid: u32) {
 mod tests {
     use std::collections::HashMap;
 
+    use super::super::session::RunnerStaleRuntimePath;
     use super::connection_daemon::{
-        daemon_identity_from_body, daemon_version_from_body, versions_match,
+        daemon_identity_from_body, daemon_runtime_loaded_paths_from_body,
+        daemon_runtime_stale_paths_from_body, daemon_version_from_body, versions_match,
     };
     use super::*;
     use crate::test_support;
@@ -1201,6 +1262,87 @@ mod tests {
             warning.recovery_commands,
             vec![
                 "homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect".to_string(),
+                "homeboy runner disconnect homeboy-lab".to_string(),
+                "homeboy runner connect homeboy-lab".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_daemon_runtime_stale_paths_from_version_body() {
+        let paths = daemon_runtime_stale_paths_from_body(&serde_json::json!({
+            "version": "0.228.13",
+            "runtime_paths": {
+                "stale": [{
+                    "env": "HOMEBOY_WP_CODEBOX_COMPONENT_PATH",
+                    "path": "/home/chubes/Developer/wp-codebox",
+                    "loaded_fingerprint": "files=10",
+                    "current_fingerprint": "files=11"
+                }]
+            }
+        }));
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].env, "HOMEBOY_WP_CODEBOX_COMPONENT_PATH");
+        assert_eq!(paths[0].loaded_fingerprint, "files=10");
+        assert_eq!(paths[0].current_fingerprint, "files=11");
+    }
+
+    #[test]
+    fn changed_runtime_paths_reports_runner_config_changes_since_daemon_start() {
+        let mut runner_env = HashMap::new();
+        runner_env.insert(
+            "HOMEBOY_WP_CODEBOX_COMPONENT_PATH".to_string(),
+            "/home/chubes/Developer/wp-codebox@new".to_string(),
+        );
+        let loaded = daemon_runtime_loaded_paths_from_body(&serde_json::json!({
+            "runtime_paths": {
+                "loaded": [{
+                    "env": "HOMEBOY_WP_CODEBOX_COMPONENT_PATH",
+                    "path": "/home/chubes/Developer/wp-codebox@old",
+                    "fingerprint": "files=10"
+                }]
+            }
+        }));
+
+        let changed = changed_runtime_paths(&runner_env, &loaded);
+
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].env, "HOMEBOY_WP_CODEBOX_COMPONENT_PATH");
+        assert_eq!(
+            changed[0].loaded_path.as_deref(),
+            Some("/home/chubes/Developer/wp-codebox@old")
+        );
+        assert_eq!(
+            changed[0].configured_path.as_deref(),
+            Some("/home/chubes/Developer/wp-codebox@new")
+        );
+    }
+
+    #[test]
+    fn runtime_path_warning_uses_rebuild_specific_message() {
+        let warning = RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "0.228.13".to_string(),
+            "0.228.13".to_string(),
+            Some("homeboy 0.228.13+same".to_string()),
+            Some("homeboy 0.228.13+same".to_string()),
+        )
+        .with_runtime_paths(
+            "homeboy-lab",
+            vec![RunnerStaleRuntimePath {
+                env: "HOMEBOY_WP_CODEBOX_COMPONENT_PATH".to_string(),
+                path: "/home/chubes/Developer/wp-codebox".to_string(),
+                loaded_fingerprint: "files=10".to_string(),
+                current_fingerprint: "files=11".to_string(),
+            }],
+            Vec::new(),
+        );
+
+        assert!(warning.message.contains("runner-side rebuilds"));
+        assert_eq!(
+            warning.recovery_commands,
+            vec![
                 "homeboy runner disconnect homeboy-lab".to_string(),
                 "homeboy runner connect homeboy-lab".to_string(),
             ]
