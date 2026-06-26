@@ -247,7 +247,9 @@ fn parse_identity(stdout: &str) -> Result<Value> {
             None,
         ));
     }
-    serde_json::from_str(trimmed).map_err(|err| {
+    let json_start = trimmed.rfind("\n{").map(|index| index + 1).unwrap_or(0);
+    let payload = &trimmed[json_start..];
+    serde_json::from_str(payload).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("parse runner Homeboy identity output".to_string()),
@@ -384,5 +386,15 @@ mod tests {
             default_target_dir("/runner/ws/", "origin/main"),
             "/runner/ws/_homeboy_binaries/homeboy-origin-main"
         );
+    }
+
+    #[test]
+    fn parse_identity_reads_final_pretty_json_after_command_output() {
+        let identity = parse_identity(
+            "HEAD is now at abc123 fix runner\n{\n  \"success\": true,\n  \"data\": {\n    \"version\": \"0.263.0\"\n  }\n}\n",
+        )
+        .expect("identity parses");
+
+        assert_eq!(identity["data"]["version"], "0.263.0");
     }
 }
