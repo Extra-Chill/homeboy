@@ -2,6 +2,20 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.17.8] - 2026-06-26
+
+### Fixed
+- pass codebox bench source roots
+- pass fuzz artifact roots to codebox
+- mount postprocess artifact roots
+- stage postprocess helpers
+- relativize postprocess helpers
+- preserve normalized postprocess steps
+- compact fuzz runner stdout
+- map artifact postprocess workloads
+- allow large codebox fuzz output
+- expose campaign artifacts
+
 ## [3.17.7] - 2026-06-26
 
 ### Fixed
