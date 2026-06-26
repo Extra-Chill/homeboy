@@ -245,17 +245,24 @@ fn queue_or_reuse_worktrees(
     args: &AgentTaskFanoutCookBatchArgs,
     branches: &[(String, String)],
 ) -> Result<worktree::WorktreeQueueCreateOutput> {
-    if args.dry_run {
-        return worktree::queue_create(worktree::WorktreeQueueCreateOptions {
+    let queue_create = |create_branches: Vec<String>, dry_run: bool| {
+        worktree::queue_create(worktree::WorktreeQueueCreateOptions {
             repo: args.repo.clone(),
-            branches: branches.iter().map(|(branch, _)| branch.clone()).collect(),
+            branches: create_branches,
             from: args.from.clone(),
             task_url: None,
             task_ref: None,
-            dry_run: true,
+            dry_run,
             retry_after_seconds: 30,
             dmc_bin: args.dmc_bin.clone(),
-        });
+        })
+    };
+
+    if args.dry_run {
+        return queue_create(
+            branches.iter().map(|(branch, _)| branch.clone()).collect(),
+            true,
+        );
     }
 
     let mut reused = Vec::new();
@@ -281,16 +288,7 @@ fn queue_or_reuse_worktrees(
         }
     }
 
-    let created = worktree::queue_create(worktree::WorktreeQueueCreateOptions {
-        repo: args.repo.clone(),
-        branches: to_create,
-        from: args.from.clone(),
-        task_url: None,
-        task_ref: None,
-        dry_run: false,
-        retry_after_seconds: 30,
-        dmc_bin: args.dmc_bin.clone(),
-    })?;
+    let created = queue_create(to_create, false)?;
     let mut rows = Vec::new();
     for (branch, handle) in branches {
         if let Some(row) = reused.iter().find(|row| row.handle == *handle) {

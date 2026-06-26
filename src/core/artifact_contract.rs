@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -50,9 +51,7 @@ pub struct ArtifactContract {
 
 impl ArtifactContract {
     pub fn from_value(value: Value) -> Result<Self, String> {
-        let mut artifact: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
-        artifact.normalize()?;
-        Ok(artifact)
+        contract_from_value(value, Self::normalize)
     }
 
     pub fn from_record(record: &ArtifactRecord) -> Self {
@@ -103,9 +102,12 @@ impl ArtifactContract {
     }
 
     fn normalize(&mut self) -> Result<(), String> {
-        self.schema = trim_or_default(&self.schema, ARTIFACT_CONTRACT_SCHEMA);
-        require_schema(&self.schema, ARTIFACT_CONTRACT_SCHEMA, "artifact contract")?;
-        self.kind = required_trimmed("kind", &self.kind)?;
+        normalize_schema_and_kind(
+            &mut self.schema,
+            &mut self.kind,
+            ARTIFACT_CONTRACT_SCHEMA,
+            "artifact contract",
+        )?;
         self.artifact_type = trim_or_default(&self.artifact_type, "file");
         self.path = normalize_optional_string(self.path.take());
         self.url = normalize_optional_string(self.url.take());
@@ -166,15 +168,16 @@ pub struct EvidenceContract {
 
 impl EvidenceContract {
     pub fn from_value(value: Value) -> Result<Self, String> {
-        let mut evidence: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
-        evidence.normalize()?;
-        Ok(evidence)
+        contract_from_value(value, Self::normalize)
     }
 
     fn normalize(&mut self) -> Result<(), String> {
-        self.schema = trim_or_default(&self.schema, EVIDENCE_CONTRACT_SCHEMA);
-        require_schema(&self.schema, EVIDENCE_CONTRACT_SCHEMA, "evidence contract")?;
-        self.kind = required_trimmed("kind", &self.kind)?;
+        normalize_schema_and_kind(
+            &mut self.schema,
+            &mut self.kind,
+            EVIDENCE_CONTRACT_SCHEMA,
+            "evidence contract",
+        )?;
         self.target = required_trimmed("target", &self.target)?;
         self.label = trim_or_default(&self.label, &self.kind);
         self.role = normalize_optional_string(self.role.take());
@@ -184,6 +187,28 @@ impl EvidenceContract {
         }
         Ok(())
     }
+}
+
+fn normalize_schema_and_kind(
+    schema: &mut String,
+    kind: &mut String,
+    expected_schema: &str,
+    label: &str,
+) -> Result<(), String> {
+    *schema = trim_or_default(schema, expected_schema);
+    require_schema(schema, expected_schema, label)?;
+    *kind = required_trimmed("kind", kind)?;
+    Ok(())
+}
+
+fn contract_from_value<T, F>(value: Value, normalize: F) -> Result<T, String>
+where
+    T: DeserializeOwned,
+    F: FnOnce(&mut T) -> Result<(), String>,
+{
+    let mut contract: T = serde_json::from_value(value).map_err(|err| err.to_string())?;
+    normalize(&mut contract)?;
+    Ok(contract)
 }
 
 fn artifact_contract_schema() -> String {

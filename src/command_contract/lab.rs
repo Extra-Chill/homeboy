@@ -955,14 +955,18 @@ fn agent_task_lab_extension_ids(
 fn test_lab_extension_ids(
     args: &crate::commands::test::TestArgs,
 ) -> crate::core::Result<Vec<String>> {
-    let source_context = execution_context::resolve(&ResolveOptions {
-        component_id: args.comp.component.clone(),
-        path_override: args.comp.path.clone(),
-        capability: None,
-        settings_overrides: args.setting_args.setting.clone(),
-        settings_json_overrides: args.setting_args.setting_json.clone(),
-        extension_overrides: args.extension_override.extensions.clone(),
-    })?;
+    let resolve_for = |capability: Option<ExtensionCapability>| {
+        execution_context::resolve(&ResolveOptions {
+            component_id: args.comp.component.clone(),
+            path_override: args.comp.path.clone(),
+            capability,
+            settings_overrides: args.setting_args.setting.clone(),
+            settings_json_overrides: args.setting_args.setting_json.clone(),
+            extension_overrides: args.extension_override.extensions.clone(),
+        })
+    };
+
+    let source_context = resolve_for(None)?;
 
     if !args.drift
         && args.ci_job.is_none()
@@ -973,14 +977,7 @@ fn test_lab_extension_ids(
         return Ok(Vec::new());
     }
 
-    let context = execution_context::resolve(&ResolveOptions {
-        component_id: args.comp.component.clone(),
-        path_override: args.comp.path.clone(),
-        capability: Some(ExtensionCapability::Test),
-        settings_overrides: args.setting_args.setting.clone(),
-        settings_json_overrides: args.setting_args.setting_json.clone(),
-        extension_overrides: args.extension_override.extensions.clone(),
-    })?;
+    let context = resolve_for(Some(ExtensionCapability::Test))?;
 
     Ok(context.extension_id.into_iter().collect())
 }
@@ -988,14 +985,18 @@ fn test_lab_extension_ids(
 fn review_lab_extension_ids(
     args: &crate::commands::review::ReviewArgs,
 ) -> crate::core::Result<Vec<String>> {
-    let source_context = execution_context::resolve(&ResolveOptions {
-        component_id: args.comp.component.clone(),
-        path_override: args.comp.path.clone(),
-        capability: None,
-        settings_overrides: Vec::new(),
-        settings_json_overrides: Vec::new(),
-        extension_overrides: args.extension_override.extensions.clone(),
-    })?;
+    let resolve_for = |capability: Option<ExtensionCapability>| {
+        execution_context::resolve(&ResolveOptions {
+            component_id: args.comp.component.clone(),
+            path_override: args.comp.path.clone(),
+            capability,
+            settings_overrides: Vec::new(),
+            settings_json_overrides: Vec::new(),
+            extension_overrides: args.extension_override.extensions.clone(),
+        })
+    };
+
+    let source_context = resolve_for(None)?;
 
     if source_context
         .component
@@ -1004,14 +1005,7 @@ fn review_lab_extension_ids(
         return Ok(Vec::new());
     }
 
-    let context = execution_context::resolve(&ResolveOptions {
-        component_id: args.comp.component.clone(),
-        path_override: args.comp.path.clone(),
-        capability: Some(ExtensionCapability::Test),
-        settings_overrides: Vec::new(),
-        settings_json_overrides: Vec::new(),
-        extension_overrides: args.extension_override.extensions.clone(),
-    })?;
+    let context = resolve_for(Some(ExtensionCapability::Test))?;
 
     Ok(context.extension_id.into_iter().collect())
 }
