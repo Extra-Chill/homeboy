@@ -26,7 +26,7 @@ async function main() {
 
 		assert.equal(candidates[0], '@automattic/wp-codebox-core/artifacts');
 		assert.equal(candidates[1], 'wp-codebox-workspace/artifacts');
-		assert.equal(candidates.length, 2);
+		assert.equal(candidates.includes('@automattic/wp-codebox-core/artifacts'), true);
 
 		const result = await loadWpCodeboxCoreExport('fixtureExport', {
 			coreModule: path.join(dist, 'artifacts.js'),

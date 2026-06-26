@@ -28,10 +28,13 @@ const {
 } = require('./wordpress-fuzz-runtime-task');
 
 const {
-	homeboySettings,
 	wpCodeboxCommand,
 	wpCodeboxPluginStateStep,
 } = require('./wp-codebox-recipe-helper');
+const {
+	resolveWpCodeboxIdentity,
+	wpCodeboxIdentityMismatchDiagnostics,
+} = require('./wp-codebox-resolver');
 const {
 	WP_CODEBOX_FUZZ_PUBLIC_ABILITIES,
 	WP_CODEBOX_FUZZ_PUBLIC_COMMANDS,
@@ -880,11 +883,11 @@ function wpCodeboxPublicCliInput(request = {}, options = {}) {
 
 function stageArtifactPostprocessHelpers(input = {}, runtimeRequirements = {}, options = {}) {
 	const pluginSlug = wpCodeboxRuntimePluginSlug(runtimeRequirements);
-	const artifactRoot = wpCodeboxArtifactPostprocessRoot(options);
 	const runtimeArtifactRoot = '/tmp/wp-codebox-artifacts';
 	if (!pluginSlug || !Array.isArray(input.cases)) {
 		return input;
 	}
+	const artifactRoot = wpCodeboxArtifactPostprocessRoot(options);
 	let changed = false;
 	const cases = input.cases.map((fuzzCase) => {
 		const workload = objectOrUndefined(fuzzCase?.input);
@@ -979,6 +982,8 @@ function detectWpCodeboxPublicFuzzCapabilities(options = {}) {
 
 function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 	const request = options.request || options.taskRequest || options.task_request || null;
+	const wpCodeboxIdentity = resolveWpCodeboxIdentity(options);
+	const identityDiagnostics = wpCodeboxIdentityMismatchDiagnostics(wpCodeboxIdentity);
 	const capabilities = detectWpCodeboxPublicFuzzCapabilities(options);
 	const manifest = wpCodeboxRuntimeContractManifest(options);
 	const wordpressRuntimeAbilities = objectOrUndefined(manifest.abilities?.wordpressRuntime) || {};
@@ -989,6 +994,13 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 	const requiredAbilities = { ...WP_CODEBOX_FUZZ_PUBLIC_ABILITIES };
 	const requiredCommands = requiredPublicCommandsForRequest(request, requiredPlanContracts);
 	const missingContracts = [];
+	for (const diagnostic of identityDiagnostics) {
+		missingContracts.push({
+			type: 'identity_mismatch',
+			message: diagnostic.message,
+			diagnostic,
+		});
+	}
 
 	for (const command of requiredCommands) {
 		if (capabilities.commands?.[command] !== true) {
@@ -1021,6 +1033,7 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 		status: missingContracts.length === 0 ? 'passed' : 'failed',
 		request_id: request?.task_id,
 		capabilities,
+		wp_codebox_identity: wpCodeboxIdentity,
 		required: {
 			commands: requiredCommands,
 			abilities: requiredAbilities,
@@ -1030,7 +1043,7 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 		missing_contracts: missingContracts,
 		diagnostics: missingContracts.map((contract) => ({
 			severity: 'error',
-			code: `wp_codebox_fuzz_missing_${contract.type}`,
+			code: contract.diagnostic?.code || `wp_codebox_fuzz_missing_${contract.type}`,
 			message: contract.message,
 			contract,
 		})),
@@ -1162,28 +1175,23 @@ function wpCodeboxCommandFromFuzzAbility(ability, options = {}) {
 }
 
 function wpCodeboxPublicCliBin(options = {}) {
+	if (options.wpCliBin || options.wp_cli_bin) {
+		return options.wpCliBin || options.wp_cli_bin;
+	}
 	const env = { ...process.env, ...(options.env || {}) };
-	const settings = homeboySettings(env);
-	return options.publicCliBin
-		|| options.public_cli_bin
-		|| options.wpCodeboxBin
-		|| options.wp_codebox_bin
-		|| env.HOMEBOY_WP_CODEBOX_BIN
-		|| env.WP_CODEBOX_BIN
-		|| env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
-		|| settings.wp_codebox_bin
-		|| settings.wpCodeboxBin
-		|| options.wpCliBin
-		|| options.wp_cli_bin
-		|| env.wpCliBin
-		|| env.wp_cli_bin
-		|| env.HOMEBOY_WP_CLI_BIN
-		|| env.WP_CLI_BIN
-		|| DEFAULT_WP_CODEBOX_PUBLIC_CLI_BIN;
+	if (env.wpCliBin || env.wp_cli_bin || env.HOMEBOY_WP_CLI_BIN || env.WP_CLI_BIN) {
+		return env.wpCliBin || env.wp_cli_bin || env.HOMEBOY_WP_CLI_BIN || env.WP_CLI_BIN;
+	}
+	const identity = resolveWpCodeboxIdentity(options);
+	return identity.selectionSource === 'default' ? DEFAULT_WP_CODEBOX_PUBLIC_CLI_BIN : identity.bin;
 }
 
 function wpCodeboxPublicCliInvocation(options = {}) {
+	const identity = resolveWpCodeboxIdentity(options);
 	const bin = wpCodeboxPublicCliBin(options);
+	if (bin === identity.bin) {
+		return identity.invocation;
+	}
 	const invocation = wpCodeboxCommand(bin);
 	const executable = path.basename(String(bin || '')).toLowerCase();
 	const usesWpCliNamespace = executable === 'wp' || executable === 'wp-cli' || executable === 'wp-cli.phar';
