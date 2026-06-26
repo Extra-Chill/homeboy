@@ -638,6 +638,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             tasks: Vec::new(),
             cwd: None,
             workspace: None,
+            workspace_materialization: Vec::new(),
             repo: Some(args.repo.clone()),
             task_url: Some(issue_url.clone()),
             backend: args.backend.clone(),
