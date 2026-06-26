@@ -234,6 +234,8 @@ pub enum AgentTaskCommand {
     Logs(StatusArgs),
     /// Lifecycle: list artifacts and evidence refs recorded for a completed run.
     Artifacts(StatusArgs),
+    /// Lifecycle: hydrate run evidence into a structured diagnostic report.
+    Diagnose(DiagnoseArgs),
     /// Lifecycle: mark a queued or stale-running durable agent-task run as cancelled.
     Cancel(CancelArgs),
     /// Lifecycle: resume a queued or stale-running durable run.
@@ -660,6 +662,12 @@ pub struct StatusArgs {
     /// default compact, recovery-first summary.
     #[arg(long, conflicts_with = "bridge")]
     pub full: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct DiagnoseArgs {
+    /// Durable run id returned by `agent-task submit` or `agent-task run-plan --record-run-id`.
+    pub run_id: String,
 }
 
 #[derive(Args, Debug)]
