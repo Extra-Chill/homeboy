@@ -333,6 +333,29 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         assert_eq!(output.job_id.as_deref(), Some(job_id.as_str()));
         assert_eq!(output.mirror_run_id.as_deref(), Some("agent-task-run-6454"));
         let json: Value = serde_json::from_str(&output.stdout).expect("handoff JSON");
+        let envelope: crate::command_contract::RunnerHandoffEnvelope =
+            serde_json::from_value(json.clone()).expect("typed handoff envelope");
+        assert_eq!(
+            envelope.schema,
+            crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
+        );
+        assert_eq!(envelope.status, "handoff_complete");
+        assert_eq!(envelope.execution_location, "runner:lab");
+        assert_eq!(envelope.runner_id, "lab");
+        assert_eq!(envelope.job_id, job_id);
+        assert_eq!(envelope.remote_cwd, "/srv/homeboy/project");
+        assert_eq!(
+            envelope.durable_run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
+        assert_eq!(
+            envelope.persisted_run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
+        assert_eq!(
+            envelope.mirror_run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
         assert_eq!(json["status"], "handoff_complete");
         assert_eq!(json["job_id"], job_id);
         assert_eq!(json["durable_run_id"], "agent-task-run-6454");
@@ -349,6 +372,38 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             format!("homeboy runner job logs lab {job_id} --follow")
         );
     });
+}
+
+#[test]
+fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
+    let envelope = crate::command_contract::RunnerHandoffEnvelope::detached_lab_offload(
+        "lab",
+        "job-123",
+        "/srv/homeboy/project".to_string(),
+        None,
+    );
+    let json = serde_json::to_value(&envelope).expect("serialize handoff envelope");
+
+    assert_eq!(
+        json["schema"],
+        crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
+    );
+    assert_eq!(json["status"], "handoff_complete");
+    assert_eq!(json["execution_location"], "runner:lab");
+    assert_eq!(json["durable_run_id"], Value::Null);
+    assert_eq!(json["persisted_run_id"], Value::Null);
+    assert_eq!(json["mirror_run_id"], Value::Null);
+    assert_eq!(
+        json["follow_commands"]["job_logs"],
+        "homeboy runner job logs lab job-123 --follow"
+    );
+    assert_eq!(
+        json["follow_commands"]["job_cancel"],
+        "homeboy runner job cancel lab job-123"
+    );
+    assert!(json["follow_commands"].get("status").is_none());
+    assert!(json["follow_commands"].get("logs").is_none());
+    assert!(json["follow_commands"].get("artifacts").is_none());
 }
 
 #[test]
