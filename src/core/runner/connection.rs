@@ -364,43 +364,46 @@ fn runner_jobs(
             "runner `{runner_id}` is connected but has no active-job status endpoint"
         )));
     };
-    let active_jobs: Vec<ActiveRunnerJobSummary> = serde_json::from_value(
-        body.get("active_runner_jobs")
+    let active_jobs = parse_runner_jobs(
+        &body,
+        "active_runner_jobs",
+        "parse active runner jobs",
+        runner_id,
+        source,
+    )?;
+    let stale_jobs = parse_runner_jobs(
+        &body,
+        "stale_runner_jobs",
+        "parse stale runner jobs",
+        runner_id,
+        source,
+    )?;
+    Ok((active_jobs, stale_jobs))
+}
+
+/// Parse a runner-jobs array (`key`) out of `body`, keep only jobs for
+/// `runner_id`, and tag each with its originating `source`.
+fn parse_runner_jobs(
+    body: &Value,
+    key: &str,
+    error_context: &str,
+    runner_id: &str,
+    source: RunnerJobSource,
+) -> Result<Vec<ActiveRunnerJobSummary>> {
+    let jobs: Vec<ActiveRunnerJobSummary> = serde_json::from_value(
+        body.get(key)
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new())),
     )
-    .map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse active runner jobs".to_string()),
-        )
-    })?;
-    let stale_jobs: Vec<ActiveRunnerJobSummary> = serde_json::from_value(
-        body.get("stale_runner_jobs")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-    )
-    .map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse stale runner jobs".to_string()))
-    })?;
-    Ok((
-        active_jobs
-            .into_iter()
-            .filter(|job| job.runner_id == runner_id)
-            .map(|mut job| {
-                job.source = source.to_string();
-                job
-            })
-            .collect(),
-        stale_jobs
-            .into_iter()
-            .filter(|job| job.runner_id == runner_id)
-            .map(|mut job| {
-                job.source = source.to_string();
-                job
-            })
-            .collect(),
-    ))
+    .map_err(|err| Error::internal_json(err.to_string(), Some(error_context.to_string())))?;
+    Ok(jobs
+        .into_iter()
+        .filter(|job| job.runner_id == runner_id)
+        .map(|mut job| {
+            job.source = source.to_string();
+            job
+        })
+        .collect())
 }
 
 pub fn reverse_broker_reconcile(runner_id: &str) -> Result<Value> {

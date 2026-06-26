@@ -141,16 +141,27 @@ pub fn route_after_parse(
     }
 }
 
+/// Insert one env pair into the overrides, recording the key as secret when
+/// the redaction policy considers the key sensitive or the value redacted.
+fn insert_lab_env_override(
+    overrides: &mut runners::LabJobOverrides,
+    policy: &RedactionPolicy,
+    name: String,
+    value: String,
+) {
+    if policy.is_sensitive_key(&name) || policy.redact_string(&value) != value {
+        overrides.secret_env_names.push(name.clone());
+    }
+    overrides.env.insert(name, value);
+}
+
 fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverrides> {
     let mut overrides = runners::LabJobOverrides::default();
     let policy = RedactionPolicy::default();
 
     for raw in &cli.runner_env {
         let (name, value) = parse_lab_env_pair("runner-env", raw)?;
-        if policy.is_sensitive_key(&name) || policy.redact_string(&value) != value {
-            overrides.secret_env_names.push(name.clone());
-        }
-        overrides.env.insert(name, value);
+        insert_lab_env_override(&mut overrides, &policy, name, value);
     }
 
     if let Some(raw_json) = cli.lab_env_json.as_deref() {
@@ -184,10 +195,7 @@ fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverride
                     ));
                 }
             };
-            if policy.is_sensitive_key(&name) || policy.redact_string(&value) != value {
-                overrides.secret_env_names.push(name.clone());
-            }
-            overrides.env.insert(name, value);
+            insert_lab_env_override(&mut overrides, &policy, name, value);
         }
     }
 
