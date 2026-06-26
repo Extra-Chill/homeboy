@@ -33,11 +33,15 @@ if (process.argv[2] !== 'recipe-run' || recipeIndex < 0) {
 const recipe = JSON.parse(fs.readFileSync(process.argv[recipeIndex + 1], 'utf8'));
 const extraPlugins = recipe.inputs.extraPlugins || recipe.inputs.extra_plugins || [];
 const plugin = extraPlugins.find((entry) => entry.slug === 'prepare-steps-fixture');
-if (!plugin || !fs.existsSync(plugin.source + '/includes/react-admin/feature-config.php')) {
+if (!plugin || !plugin.sourceSubpath || !fs.existsSync(plugin.source + '/' + plugin.sourceSubpath + '/includes/react-admin/feature-config.php')) {
   process.stderr.write('generated feature config missing before wp-codebox launch\\n');
   process.exit(8);
 }
-if (!fs.existsSync(plugin.source + '/../../packages/php/monorepo-plugin/composer.json')) {
+if (plugin.source !== plugin.sourceRoot || plugin.sourceSubpath !== 'plugins/prepare-steps-fixture') {
+  process.stderr.write('monorepo source root/subpath missing from plugin recipe input\\n');
+  process.exit(10);
+}
+if (!fs.existsSync(plugin.source + '/packages/php/monorepo-plugin/composer.json')) {
   process.stderr.write('monorepo composer path repository missing from plugin source context\\n');
   process.exit(9);
 }
