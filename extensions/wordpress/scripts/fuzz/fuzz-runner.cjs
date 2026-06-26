@@ -37,6 +37,9 @@ async function main() {
 	const result = await buildRunnerResult(env);
 	writeHomeboyFuzzResultsFile(env.resultsFile, result.homeboy_fuzz_campaign);
 	process.stdout.write(`${JSON.stringify(fuzzRunnerStdoutSummary(result), null, 2)}\n`);
+	if (!result.succeeded) {
+		process.exitCode = 1;
+	}
 }
 
 function fuzzRunnerStdoutSummary(result = {}) {

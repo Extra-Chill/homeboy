@@ -4,6 +4,14 @@
 
 This helper is the planner/reconciler side of the audit fanout boundary, not a runtime provider. Runtime packages, provider names, credentials, WordPress setup, sandbox recipes, and provider task schemas stay behind the `audit-fanout-runtime-provider` interface. The current audit fanout implementation is the quarantined WP Codebox lane, which maps grouped audit findings to `wp-codebox/task-input/v1` requests and executes them through Codebox-owned task runner contracts.
 
+For Codebox-backed product workflows, the product-facing path is Homeboy's
+durable `agent-task` scheduler/fanout plan. Homeboy Extensions is only the
+adapter: it projects Homeboy task metadata, workspace, artifact declarations,
+provider/model, secret-env names, progress/evidence callbacks, and optional
+`wp-codebox/agent-fanout-request/v1` payloads into WP Codebox-owned sandbox
+contracts. It does not own queue state, retries, PR/review policy, or
+Studio-specific assumptions.
+
 ## Plan
 
 ```bash

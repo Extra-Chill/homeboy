@@ -47,6 +47,7 @@ const {
 } = require('./codebox-runtime-profile');
 const {
   WP_CODEBOX_BACKEND,
+  WP_CODEBOX_AGENT_FANOUT_REQUEST_SCHEMA,
   WP_CODEBOX_PROVIDER_ID,
   WP_CODEBOX_PROVIDER_LABEL,
   WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES,
@@ -57,6 +58,7 @@ const {
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
   WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   WP_CODEBOX_WORKSPACE_MOUNT_KIND,
+  wpCodeboxAgentFanoutAdapterContract,
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationEntry,
 } = require('./wp-codebox-adapter-contract');
@@ -192,6 +194,7 @@ function providerContract(options = {}) {
     provider_preflight: runtimeProviderPreflight(),
     provider_credential_boundary: providerCredentialBoundary(),
     provider_runtime_invocation: providerRuntimeInvocationContract(),
+    agent_fanout_adapter: wpCodeboxAgentFanoutAdapterContract(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
     deprecated_compatibility_aliases: LEGACY_RUNTIME_PACKAGE_ABILITY_DEPRECATIONS,
     upstream_primitive_requirements: WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
@@ -362,6 +365,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const agent = firstValue(config.agent, runtimeOptions.agent, '');
   const abilityRequirements = runtimeAbilityRequirements(runtimeTask, request, config, inputs, runtimeOptions);
   const providerRuntimeInvocation = providerRuntimeInvocationFromConfig(config, inputs, runtimeOptions);
+  const codeboxFanoutRequest = codeboxFanoutRequestFromAgentTaskRequest(request, config, inputs, runtimeOptions);
   const explicitSecretEnv = [
     ...(plannedSecretEnv.length > 0 ? plannedSecretEnv : normalizeArray(request.executor?.secret_env)),
     ...normalizeArray(config.secret_env),
@@ -407,6 +411,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     ability_requirements: abilityRequirements,
     callback_data: firstDefined(inputs.callback_data, inputs.callbackData, config.callback_data, config.callbackData, runtimeOptions.callbackData),
     provider_runtime_invocation: providerRuntimeInvocation,
+    ...(codeboxFanoutRequest ? { fanout_request: codeboxFanoutRequest } : {}),
     ability_tools: firstDefined(inputs.ability_tools, inputs.abilityTools, config.ability_tools, config.abilityTools, runtimeOptions.abilityTools, []),
     structured_artifacts: structuredArtifacts,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
@@ -463,6 +468,65 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     agent_bundle: agentBundle,
     parent_request: request,
   };
+}
+
+function codeboxFanoutRequestFromAgentTaskRequest(request, config = {}, inputs = {}, runtimeOptions = {}) {
+  const source = firstObject(
+    inputs.codebox_fanout_request,
+    inputs.codeboxFanoutRequest,
+    inputs.fanout_request,
+    inputs.fanoutRequest,
+    config.codebox_fanout_request,
+    config.codeboxFanoutRequest,
+    config.fanout_request,
+    config.fanoutRequest,
+    runtimeOptions.codeboxFanoutRequest,
+    runtimeOptions.fanoutRequest
+  );
+  if (!source) {
+    return null;
+  }
+  const workers = normalizeArray(source.workers).map((worker, index) => {
+    const metadata = firstObject(worker.metadata) || {};
+    return withoutUndefinedValues({
+      ...worker,
+      id: firstValue(worker.id, worker.worker_id, `${request.task_id}-worker-${index + 1}`),
+      goal: firstValue(worker.goal, worker.task, request.instructions),
+      agent: firstValue(worker.agent, source.agent, config.agent, runtimeOptions.agent),
+      dependsOn: normalizeArray(firstValue(worker.dependsOn, worker.depends_on)),
+      artifactNamespace: firstValue(worker.artifactNamespace, worker.artifact_namespace, `${request.task_id}/${index + 1}`),
+      metadata: {
+        ...metadata,
+        homeboy_task_id: request.task_id,
+        parent_plan_id: request.parent_plan_id,
+        group_key: request.group_key,
+      },
+    });
+  });
+
+  return withoutUndefinedValues({
+    ...source,
+    schema: WP_CODEBOX_AGENT_FANOUT_REQUEST_SCHEMA,
+    workers,
+    agent: firstValue(source.agent, config.agent, runtimeOptions.agent),
+    orchestrator: {
+      ...(firstObject(source.orchestrator) || {}),
+      agent_task_id: request.task_id,
+      parent_plan_id: request.parent_plan_id,
+      group_key: request.group_key,
+      provider: firstValue(config.provider, runtimeOptions.provider),
+      model: firstValue(request.executor?.model, config.model, runtimeOptions.model),
+      secret_env_names: normalizeArray(request.executor?.secret_env),
+    },
+    metadata: {
+      ...(firstObject(source.metadata) || {}),
+      homeboy_agent_task: {
+        task_id: request.task_id,
+        parent_plan_id: request.parent_plan_id,
+        group_key: request.group_key,
+      },
+    },
+  });
 }
 
 function expectedArtifactsForCodeboxTask(request, artifactDeclarations = []) {
@@ -1929,6 +1993,10 @@ function firstValue(...candidates) {
   return candidates.find((candidate) => candidate !== undefined && candidate !== null && candidate !== '');
 }
 
+function withoutUndefinedValues(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
 function recipeConfigFromAgentTaskRequest(request, config, inputs, runtimeOptions = {}) {
   const explicit = firstObject(
     inputs.recipe,
@@ -3289,7 +3357,9 @@ module.exports = {
   AGENT_TASK_EVENT_SCHEMA,
   providerContract,
   providerRuntimeInvocationContract,
+  wpCodeboxAgentFanoutAdapterContract,
   codeboxTaskRequestFromAgentTaskRequest,
+  codeboxFanoutRequestFromAgentTaskRequest,
   reconcileRunSummaryWithPublicEnvelope,
   normalizeCodeboxAgentTaskEvents,
   agentTaskOutcomeFromCodeboxResult,
