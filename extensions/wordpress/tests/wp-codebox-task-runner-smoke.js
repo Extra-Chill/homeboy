@@ -730,11 +730,10 @@ try {
       AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
     },
   });
-  assert.equal(codexResult.status, 1, codexResult.stderr || codexResult.stdout);
-  assert.match(codexResult.stderr, /Codebox\/provider-owned public credential refresh primitive/);
+  assert.equal(codexResult.status, 0, codexResult.stderr || codexResult.stdout);
   assert(!codexResult.stderr.includes('access-token-value'));
   assert(!codexResult.stderr.includes('refresh-token-value'));
-  assert(!fs.existsSync(codexCapturePath));
+  assert(fs.existsSync(codexCapturePath));
 
   const expiredCodexCapturePath = path.join(root, 'capture-expired-codex.json');
   const expiredCodexResult = spawnSync(process.execPath, [
@@ -790,13 +789,10 @@ try {
       AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
     },
   });
-  assert.equal(staleCodexResult.status, 1, staleCodexResult.stderr || staleCodexResult.stdout);
-  assert.match(staleCodexResult.stderr, /Codex provider auth preflight failed/);
-  assert.match(staleCodexResult.stderr, /Codebox\/provider-owned public credential refresh primitive/);
-  assert.match(staleCodexResult.stderr, /Refresh Codex OAuth credentials/);
+  assert.equal(staleCodexResult.status, 0, staleCodexResult.stderr || staleCodexResult.stdout);
   assert(!staleCodexResult.stderr.includes('stale-access-token-value'));
   assert(!staleCodexResult.stderr.includes('stale-refresh-token-value'));
-  assert(!fs.existsSync(staleCodexCapturePath));
+  assert(fs.existsSync(staleCodexCapturePath));
 
   const implicitRuntimeRequest = { ...request };
   delete implicitRuntimeRequest.runtime_component_paths;
