@@ -458,45 +458,7 @@ fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
 }
 
 pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
-    let mut followups = vec![
-        LabFollowup {
-            label: "recent_runs".to_string(),
-            command: "homeboy runs list --limit 5".to_string(),
-            purpose: "Find recent persisted run records before digging into runner state."
-                .to_string(),
-        },
-        LabFollowup {
-            label: "latest_bench_run".to_string(),
-            command: "homeboy runs latest-run --kind bench".to_string(),
-            purpose: "Resolve the latest benchmark run id for evidence inspection.".to_string(),
-        },
-        LabFollowup {
-            label: "latest_fuzz_run".to_string(),
-            command: "homeboy runs latest-run --kind fuzz".to_string(),
-            purpose: "Resolve the latest fuzz run id for evidence inspection.".to_string(),
-        },
-        LabFollowup {
-            label: "run_artifacts".to_string(),
-            command: "homeboy runs artifacts <run-id>".to_string(),
-            purpose: "List recorded run artifacts through Homeboy.".to_string(),
-        },
-        LabFollowup {
-            label: "run_evidence".to_string(),
-            command: "homeboy runs evidence <run-id>".to_string(),
-            purpose: "Show stable evidence summary and reviewer-facing commands for one run."
-                .to_string(),
-        },
-        LabFollowup {
-            label: "run_refs".to_string(),
-            command: "homeboy runs refs --kind bench --limit 10".to_string(),
-            purpose: "List recent benchmark run and artifact refs.".to_string(),
-        },
-        LabFollowup {
-            label: "fuzz_run_refs".to_string(),
-            command: "homeboy runs refs --kind fuzz --limit 10".to_string(),
-            purpose: "List recent fuzz run and artifact refs.".to_string(),
-        },
-    ];
+    let mut followups = declared_run_followups_for_legacy("managed_followups", None, runner_id);
     let Some(runner_id) = runner_id else {
         return followups;
     };
@@ -537,6 +499,7 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
     ]);
     followups.extend(declared_followups_for_legacy(
         "managed_followups",
+        None,
         Some(runner_id),
     ));
     if let Ok(path) = std::env::current_dir() {
@@ -552,13 +515,111 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
     followups
 }
 
-fn declared_followups_for_legacy(legacy_output: &str, runner_id: Option<&str>) -> Vec<LabFollowup> {
+pub(crate) fn declared_run_followups_for_legacy(
+    legacy_output: &str,
+    run_kind: Option<&str>,
+    _runner_id: Option<&str>,
+) -> Vec<LabFollowup> {
+    default_run_followup_declarations()
+        .iter()
+        .filter(|followup| followup_matches(followup, legacy_output, run_kind))
+        .map(declared_run_followup)
+        .collect()
+}
+
+fn declared_followups_for_legacy(
+    legacy_output: &str,
+    run_kind: Option<&str>,
+    runner_id: Option<&str>,
+) -> Vec<LabFollowup> {
     declared_diagnostics_contracts()
         .iter()
         .flat_map(|contract| contract.followups.iter())
-        .filter(|followup| followup.legacy_output.as_deref() == Some(legacy_output))
+        .filter(|followup| followup_matches(followup, legacy_output, run_kind))
         .map(|followup| declared_followup(followup, runner_id))
         .collect()
+}
+
+fn followup_matches(
+    followup: &AgentRuntimeDiagnosticFollowup,
+    legacy_output: &str,
+    run_kind: Option<&str>,
+) -> bool {
+    if followup.legacy_output.as_deref() != Some(legacy_output) {
+        return false;
+    }
+    let declared_kind = followup
+        .run_kind
+        .as_deref()
+        .or(followup.workload.as_deref());
+    match (run_kind, declared_kind) {
+        (None, _) => true,
+        (Some(_), None) => true,
+        (Some(run_kind), Some(declared_kind)) => run_kind == declared_kind,
+    }
+}
+
+fn default_run_followup_declarations() -> Vec<AgentRuntimeDiagnosticFollowup> {
+    vec![
+        run_followup(
+            "recent_runs",
+            None,
+            "homeboy runs list --limit 5",
+            "Find recent persisted run records before digging into runner state.",
+        ),
+        run_followup(
+            "latest_bench_run",
+            Some("bench"),
+            "homeboy runs latest-run --kind bench",
+            "Resolve the latest benchmark run id for evidence inspection.",
+        ),
+        run_followup(
+            "latest_fuzz_run",
+            Some("fuzz"),
+            "homeboy runs latest-run --kind fuzz",
+            "Resolve the latest fuzz run id for evidence inspection.",
+        ),
+        run_followup(
+            "run_artifacts",
+            None,
+            "homeboy runs artifacts <run-id>",
+            "List recorded run artifacts through Homeboy.",
+        ),
+        run_followup(
+            "run_evidence",
+            None,
+            "homeboy runs evidence <run-id>",
+            "Show stable evidence summary and reviewer-facing commands for one run.",
+        ),
+        run_followup(
+            "run_refs",
+            Some("bench"),
+            "homeboy runs refs --kind bench --limit 10",
+            "List recent benchmark run and artifact refs.",
+        ),
+        run_followup(
+            "fuzz_run_refs",
+            Some("fuzz"),
+            "homeboy runs refs --kind fuzz --limit 10",
+            "List recent fuzz run and artifact refs.",
+        ),
+    ]
+}
+
+fn run_followup(
+    label: &str,
+    run_kind: Option<&str>,
+    command_script: &str,
+    purpose: &str,
+) -> AgentRuntimeDiagnosticFollowup {
+    AgentRuntimeDiagnosticFollowup {
+        label: label.to_string(),
+        legacy_output: Some("managed_followups".to_string()),
+        run_kind: run_kind.map(str::to_string),
+        workload: None,
+        command_script: command_script.to_string(),
+        purpose: purpose.to_string(),
+    }
 }
 
 fn declared_followup(
@@ -568,6 +629,14 @@ fn declared_followup(
     LabFollowup {
         label: declaration.label.clone(),
         command: diagnostic_command(runner_id, &declaration.command_script),
+        purpose: declaration.purpose.clone(),
+    }
+}
+
+fn declared_run_followup(declaration: &AgentRuntimeDiagnosticFollowup) -> LabFollowup {
+    LabFollowup {
+        label: declaration.label.clone(),
+        command: declaration.command_script.clone(),
         purpose: declaration.purpose.clone(),
     }
 }
