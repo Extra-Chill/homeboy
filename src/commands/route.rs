@@ -491,6 +491,10 @@ fn runner_rig_source_management_command(
         if arg == "--allow-local-fallback"
             || arg == "--allow-dirty-lab-workspace"
             || arg == "--allow-local-hot"
+            || arg == "--lab-only"
+            || arg == "--no-local-execution"
+            || arg == "--force-hot"
+            || arg == "--detach-after-handoff"
         {
             continue;
         }
@@ -1058,6 +1062,9 @@ mod tests {
             "homeboy-lab".to_string(),
             "--output=./sources.json".to_string(),
             "--allow-local-fallback".to_string(),
+            "--lab-only".to_string(),
+            "--force-hot".to_string(),
+            "--detach-after-handoff".to_string(),
         ];
 
         assert_eq!(
