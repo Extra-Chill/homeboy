@@ -7,7 +7,7 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 use super::super::jobs::format_job_event;
 use super::super::status::{
     runner_artifact_feature_diagnostics, runner_status_operator_commands,
-    wp_codebox_tool_diagnostics,
+    wp_codebox_runtime_diagnostics, wp_codebox_runtime_output, wp_codebox_tool_diagnostics,
 };
 
 #[test]
@@ -161,6 +161,73 @@ fn wp_codebox_diagnostics_distinguish_configured_managed_and_effective() {
     assert!(diagnostics
         .diagnostic_command
         .contains("effective_source=%s"));
+}
+
+#[test]
+fn wp_codebox_runtime_reports_package_paths_probe_and_mixed_source_warnings() {
+    let runtime = wp_codebox_runtime_output(
+        Some("homeboy-lab"),
+        &BTreeMap::from([
+            (
+                "HOMEBOY_WP_CODEBOX_BIN".to_string(),
+                "/stale/wp-codebox/packages/cli/dist/index.js".to_string(),
+            ),
+            (
+                "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
+                "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+            ),
+            (
+                "HOMEBOY_WP_CODEBOX_CORE_MODULE".to_string(),
+                "/other/wp-codebox/packages/core/dist/index.js".to_string(),
+            ),
+        ]),
+    );
+
+    assert_eq!(runtime.tool, "wp-codebox");
+    assert_eq!(
+        runtime.managed_cache_source,
+        "/home/chubes/.cache/homeboy/wp-codebox/source"
+    );
+    assert_eq!(
+        runtime.playground_package.package,
+        "@automattic/wp-codebox-playground"
+    );
+    assert_eq!(
+        runtime.playground_package.expected_path,
+        "/home/chubes/.cache/homeboy/wp-codebox/source/packages/playground"
+    );
+    assert_eq!(runtime.core_package.package, "@automattic/wp-codebox-core");
+    assert_eq!(
+        runtime.core_package.expected_path,
+        "/other/wp-codebox/packages/core/dist/index.js"
+    );
+    assert_eq!(runtime.source_git_sha.source, "runtime_probe_command");
+    assert_eq!(runtime.dist_build_freshness.source, "runtime_probe_command");
+    assert!(runtime
+        .runtime_probe_command
+        .contains("@automattic/wp-codebox-playground"));
+    assert!(runtime
+        .runtime_probe_command
+        .contains("dist_build_freshness=%s"));
+    assert!(runtime
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.id == "wp_codebox.mixed_cli_source"));
+    assert!(runtime
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.id == "wp_codebox.mixed_core_source"));
+}
+
+#[test]
+fn wp_codebox_runtime_diagnostics_accept_single_managed_checkout() {
+    let diagnostics = wp_codebox_runtime_diagnostics(
+        Some("/cache/wp-codebox/source/packages/cli/dist/index.js"),
+        "/cache/wp-codebox/source",
+        "/cache/wp-codebox/source/packages/core/dist/index.js",
+    );
+
+    assert!(diagnostics.is_empty());
 }
 
 #[test]
