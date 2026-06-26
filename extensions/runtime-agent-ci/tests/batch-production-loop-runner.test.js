@@ -6,6 +6,8 @@ const {
   BATCH_PRODUCTION_LOOP_EVIDENCE_SCHEMA,
   BATCH_PRODUCTION_LOOP_RESULT_SCHEMA,
   BATCH_PRODUCTION_LOOP_WAVE_SCHEMA,
+  batchProductionGroup,
+  batchProductionTaskRequest,
   runBatchProductionLoop,
 } = require('../lib/batch-production-loop-runner');
 
@@ -13,6 +15,13 @@ const {
   assert.equal(BATCH_PRODUCTION_LOOP_RESULT_SCHEMA, 'homeboy/batch-production-loop-result/v1');
   assert.equal(BATCH_PRODUCTION_LOOP_WAVE_SCHEMA, 'homeboy/batch-production-loop-wave/v1');
   assert.equal(BATCH_PRODUCTION_LOOP_EVIDENCE_SCHEMA, 'homeboy/batch-production-loop-evidence/v1');
+  assert.deepEqual(batchProductionGroup({ key: 'wpsg:theme' }, 0), { key: 'wpsg:theme' });
+  assert.deepEqual(batchProductionTaskRequest({ key: 'wpsg:theme' }, 2), {
+    schema: 'homeboy/batch-production-loop-task-request/v1',
+    group: { key: 'wpsg:theme' },
+    group_index: 2,
+    group_key: 'wpsg:theme',
+  });
 
   const successful = await runBatchProductionLoop({
     loopId: 'successful-batch',

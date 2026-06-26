@@ -9,6 +9,7 @@ const {
   FANOUT_RECONCILE_RUN_STATUSES,
   executeFanoutReconcileRun,
 } = require('./fanout-reconcile-runner');
+const { normalizeHostRecordStatus, providerStatusSucceeded } = require('./runtime-status.cjs');
 const DEFAULT_MAX_ITERATIONS = 3;
 
 async function runBatchProductionLoop(options = {}) {
@@ -178,7 +179,7 @@ async function executeGroups(context) {
     plan: {
       schema: 'homeboy/batch-production-loop-wave-plan/v1',
       summary: { group_count: context.groups.length, task_count: context.groups.length },
-      task_requests: context.groups.map((group, index) => ({ group, group_index: index, group_key: groupKey(group, index) })),
+      task_requests: context.groups.map((group, index) => batchProductionTaskRequest(group, index)),
     },
     concurrency: context.concurrency,
     task_id: (task) => task.group_key,
@@ -204,7 +205,7 @@ async function executeGroups(context) {
         return failedGroupOutcome(task.group, task.group_index, error);
       }
     },
-    is_record_successful: (record) => record.success === true,
+    is_record_successful: (record) => normalizeHostRecordStatus(record) === 'completed',
     classify_outcome: (record) => record.outcome,
     include_reconciliation: false,
   });
@@ -214,6 +215,24 @@ async function executeGroups(context) {
 function resolveExecuteGroup(options) {
   const execution = optionalObject(options.execution || options.executor);
   return requiredFunction(options.executeGroup || options.execute_group || execution.executeGroup || execution.execute_group || execution.runGroup || execution.run_group, 'executeGroup');
+}
+
+function batchProductionGroup(input = {}, index = 0) {
+  const group = optionalObject(input);
+  return {
+    ...group,
+    key: groupKey(group, index),
+  };
+}
+
+function batchProductionTaskRequest(group = {}, index = 0) {
+  const normalizedGroup = batchProductionGroup(group, index);
+  return {
+    schema: 'homeboy/batch-production-loop-task-request/v1',
+    group: normalizedGroup,
+    group_index: index,
+    group_key: normalizedGroup.key,
+  };
 }
 
 async function applyFanoutPolicy(fanoutPolicy, context) {
@@ -245,7 +264,7 @@ function defaultReconcileWave({ groupOutcomes }) {
 
 function defaultClassifyGroupOutcome(outcome) {
   const status = outcome?.status || outcome?.state || '';
-  const success = outcome?.success === true || ['accepted', 'completed', 'passed', 'succeeded'].includes(status);
+  const success = outcome?.success === true || providerStatusSucceeded(status);
   return {
     success,
     status: status || (success ? 'completed' : 'failed'),
@@ -397,5 +416,7 @@ module.exports = {
   DEFAULT_CONCURRENCY,
   FANOUT_RECONCILE_RECORD_STATUSES,
   FANOUT_RECONCILE_RUN_STATUSES,
+  batchProductionGroup,
+  batchProductionTaskRequest,
   runBatchProductionLoop,
 };

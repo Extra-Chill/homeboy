@@ -6,6 +6,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
+const { normalizeHostRecordStatus, normalizeHostRunStatus } = require('./runtime-status.cjs');
 
 const PLAN_SCHEMA = 'homeboy/fanout-reconcile-plan/v1';
 const RUN_SCHEMA = 'homeboy/fanout-reconcile-run/v1';
@@ -109,7 +110,7 @@ async function executeFanoutReconcileRun(input) {
     writeRun({
       ...baseRun,
       records,
-      status: 'incomplete',
+      status: normalizeHostRunStatus('incomplete'),
       current_group: firstRunningGroup(running),
       current_groups: runningGroups(running),
     });
@@ -118,7 +119,7 @@ async function executeFanoutReconcileRun(input) {
   writeRun({
     ...baseRun,
     records,
-    status: 'incomplete',
+    status: normalizeHostRunStatus('incomplete'),
     current_group: null,
   });
 
@@ -175,7 +176,7 @@ async function executeFanoutReconcileRun(input) {
     records,
     outcomes,
     ...(input.include_reconciliation === false ? {} : { reconciliation }),
-    status: records.every(isRecordSuccessful) ? 'completed' : 'failed',
+    status: normalizeHostRunStatus({ success: records.every(isRecordSuccessful) }),
   };
 
   writeRun(run);
@@ -241,20 +242,7 @@ function normalizeFanoutRecord(record) {
 }
 
 function normalizeFanoutRecordStatus(record) {
-  const status = text(record.status);
-  if (FANOUT_RECONCILE_RECORD_STATUSES.includes(status)) {
-    return status;
-  }
-  if (record.success === true || FANOUT_RECONCILE_SUCCESS_STATUSES.includes(status)) {
-    return 'completed';
-  }
-
-  const outcomeStatus = text(record.outcome?.status || record.outcome_status || record.provider_status);
-  if (FANOUT_RECONCILE_SUCCESS_STATUSES.includes(outcomeStatus)) {
-    return 'completed';
-  }
-
-  return 'failed';
+  return normalizeHostRecordStatus(record);
 }
 
 function errorMessage(error) {

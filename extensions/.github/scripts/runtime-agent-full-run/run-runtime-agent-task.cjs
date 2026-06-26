@@ -12,7 +12,7 @@ const path = require('node:path');
 /**
  * Internal dependencies
  */
-const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
+const { resolveRuntimeProvider, runtimeIdFromOptions } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const {
   genericAgentLoopStdoutSummary,
   runGenericAgentLoop,
@@ -39,7 +39,7 @@ try {
   const configPath = readConfigPath();
   const config = readJson(configPath);
   const controllerLoopProofPolicy = resolveControllerLoopProofPolicy(config);
-  const runtime = resolveRuntimeProvider(config.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || DEFAULT_RUNTIME_ID, { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd(), executor: config.executor || {} });
+  const runtime = resolveRuntimeProvider(runtimeIdFromOptions({ runtime_id: config.runtime_id || config.runtime }, process.env), { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd(), executor: config.executor || {} });
   const result = runGenericAgentLoop({
     plan: config,
     runtime,

@@ -60,7 +60,14 @@ const codeboxRequest = buildGenericAgentLoopRequest({
 assert.equal(codeboxRequest.executor.backend, 'codebox');
 assert.equal(codeboxRequest.executor.config.provider, 'codex');
 assert.equal(codeboxRequest.executor.config.model, 'gpt-5.5');
-assert.deepEqual(codeboxRequest.executor.secret_env, providerDefaultSecretEnv('codex'));
+assert.deepEqual(codeboxRequest.executor.secret_env, []);
+assert.deepEqual(providerDefaultSecretEnv('codex', {
+  executor: {
+    provider_defaults: {
+      codex: { secret_env: ['CODEX_TOKEN'] },
+    },
+  },
+}), ['CODEX_TOKEN']);
 
 const explicitSecretEnvSpec = materializeHeadlessProductionLoopSpec(baseSpec, {
   provider: 'codex',
