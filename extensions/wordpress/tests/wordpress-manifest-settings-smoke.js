@@ -15,4 +15,12 @@ assert.ok(
 	'wordpress manifest declares wp_codebox_bin so --setting wp_codebox_bin is accepted'
 );
 
+const fuzzEnv = new Set(manifest.fuzz.env);
+for (const envKey of ['HOMEBOY_SETTINGS_JSON', 'HOMEBOY_SETTINGS_WP_CODEBOX_BIN', 'HOMEBOY_WP_CODEBOX_BIN', 'WP_CODEBOX_BIN']) {
+	assert.ok(
+		fuzzEnv.has(envKey),
+		`wordpress fuzz runner forwards ${envKey} so WP Codebox binary settings reach offloaded runs`
+	);
+}
+
 console.log('wordpress manifest settings smoke passed');
