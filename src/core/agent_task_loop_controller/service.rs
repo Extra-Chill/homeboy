@@ -2,6 +2,7 @@ use super::*;
 use crate::core::{agent_task_lifecycle, paths, Error, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
@@ -37,6 +38,7 @@ where
     let mut stale_pending_action_count = 0;
     let mut orphaned_pending_action_count = 0;
     let acceptance_gates = acceptance_gate_diagnostics(record);
+    let failed_child_actions = failed_child_action_diagnostics(record);
     let missing_acceptance_gate_count = acceptance_gates
         .iter()
         .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Missing)
@@ -104,15 +106,238 @@ where
         stale_pending_threshold_seconds: STALE_PENDING_ACTION_SECONDS,
         summary: AgentTaskLoopControllerDiagnosticSummary {
             pending_action_count: pending_actions.len(),
+            failed_child_action_count: failed_child_actions.len(),
             stale_pending_action_count,
             orphaned_pending_action_count,
             acceptance_gate_count: acceptance_gates.len(),
             missing_acceptance_gate_count,
             failed_acceptance_gate_count,
         },
+        failed_child_actions,
         pending_actions,
         acceptance_gates,
     })
+}
+
+fn failed_child_action_diagnostics(
+    record: &AgentTaskLoopControllerRecord,
+) -> Vec<AgentTaskLoopFailedChildActionDiagnostic> {
+    record
+        .next_actions
+        .iter()
+        .filter(|action| {
+            matches!(
+                action.status,
+                AgentTaskLoopActionStatus::Failed
+                    | AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+                    | AgentTaskLoopActionStatus::BlockedRemoteMaterialization
+                    | AgentTaskLoopActionStatus::BlockedLocalFallbackDenied
+            )
+        })
+        .map(|action| failed_child_action_diagnostic(record, action))
+        .collect()
+}
+
+fn failed_child_action_diagnostic(
+    record: &AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+) -> AgentTaskLoopFailedChildActionDiagnostic {
+    let child_run_id = action_referenced_run_id(action, record);
+    let child_run = child_run_id
+        .as_deref()
+        .and_then(|run_id| agent_task_lifecycle::status(run_id).ok());
+    let child_run_status = child_run
+        .as_ref()
+        .map(|run| format!("{:?}", run.state).to_ascii_lowercase());
+    let aggregate = child_run_id.as_deref().and_then(load_child_aggregate_value);
+    let top_diagnostic = action
+        .diagnostics
+        .first()
+        .map(|diagnostic| diagnostic.message.clone())
+        .or_else(|| aggregate.as_ref().and_then(first_diagnostic_message))
+        .unwrap_or_else(|| "controller child action failed".to_string());
+    let hydrated_root_cause = child_run
+        .as_ref()
+        .and_then(root_cause_from_run_evidence)
+        .or_else(|| aggregate.as_ref().and_then(root_cause_from_aggregate))
+        .filter(|message| message != &top_diagnostic);
+    let evidence_refs = child_run
+        .as_ref()
+        .map(evidence_refs_from_run)
+        .unwrap_or_default();
+    let owner_surface = classify_failed_child_owner(
+        hydrated_root_cause.as_deref().unwrap_or(&top_diagnostic),
+        &evidence_refs,
+    );
+    let next_command = child_run_id
+        .as_ref()
+        .map(|run_id| format!("homeboy agent-task status {run_id} --full"))
+        .unwrap_or_else(|| {
+            format!(
+                "homeboy agent-task controller run {} --action-id {}",
+                record.loop_id, action.action_id
+            )
+        });
+
+    AgentTaskLoopFailedChildActionDiagnostic {
+        action_id: action.action_id.clone(),
+        dedupe_key: action.dedupe_key.clone(),
+        child_run_id,
+        child_run_status,
+        top_diagnostic,
+        hydrated_root_cause,
+        owner_surface,
+        next_command,
+        evidence_refs,
+    }
+}
+
+fn load_child_aggregate_value(run_id: &str) -> Option<Value> {
+    let (raw, _) = agent_task_lifecycle::aggregate_source(run_id).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn evidence_refs_from_run(
+    run: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Vec<AgentTaskLoopFailedChildEvidenceRef> {
+    let mut refs = Vec::new();
+    for artifact in &run.artifact_refs {
+        push_failed_child_evidence_ref(
+            &mut refs,
+            AgentTaskLoopFailedChildEvidenceRef {
+                kind: artifact.kind.clone(),
+                uri: artifact.uri.clone(),
+                label: artifact.label.clone(),
+            },
+        );
+    }
+    if let Some(executor) = &run.latest_executor_evidence {
+        for evidence in executor.refs() {
+            push_failed_child_evidence_ref(
+                &mut refs,
+                AgentTaskLoopFailedChildEvidenceRef {
+                    kind: evidence.kind,
+                    uri: evidence.uri,
+                    label: evidence.label,
+                },
+            );
+        }
+    }
+    refs
+}
+
+fn root_cause_from_run_evidence(run: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<String> {
+    let executor = run.latest_executor_evidence.as_ref()?;
+    executor.refs().iter().find_map(|evidence| {
+        let path = evidence.uri.strip_prefix("file://")?;
+        let raw = fs::read_to_string(path).ok()?;
+        let value: Value = serde_json::from_str(&raw).ok()?;
+        root_cause_from_aggregate(&value)
+    })
+}
+
+fn push_failed_child_evidence_ref(
+    refs: &mut Vec<AgentTaskLoopFailedChildEvidenceRef>,
+    reference: AgentTaskLoopFailedChildEvidenceRef,
+) {
+    if reference.uri.trim().is_empty() {
+        return;
+    }
+    if !refs
+        .iter()
+        .any(|existing| existing.kind == reference.kind && existing.uri == reference.uri)
+    {
+        refs.push(reference);
+    }
+}
+
+fn first_diagnostic_message(value: &Value) -> Option<String> {
+    collect_diagnostic_messages(value).into_iter().next()
+}
+
+fn root_cause_from_aggregate(value: &Value) -> Option<String> {
+    let diagnostics = collect_diagnostic_messages(value);
+    diagnostics
+        .iter()
+        .find(|message| is_root_cause_message(message))
+        .cloned()
+        .or_else(|| diagnostics.into_iter().next())
+}
+
+fn collect_diagnostic_messages(value: &Value) -> Vec<String> {
+    let mut messages = Vec::new();
+    collect_diagnostic_messages_into(value, &mut messages);
+    messages.dedup();
+    messages
+}
+
+fn collect_diagnostic_messages_into(value: &Value, messages: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(diagnostics)) = map.get("diagnostics") {
+                for diagnostic in diagnostics {
+                    if let Some(message) = diagnostic
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|message| !message.is_empty())
+                    {
+                        messages.push(message.to_string());
+                    }
+                }
+            }
+            for nested in map.values() {
+                collect_diagnostic_messages_into(nested, messages);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_diagnostic_messages_into(nested, messages);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_root_cause_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("runtime_task_ability_unavailable")
+        || lower.contains("root cause")
+        || lower.contains("php fatal")
+        || lower.contains("fatal error")
+        || lower.contains("missing required")
+        || lower.contains("provider")
+        || lower.contains("credential")
+        || lower.contains("secret")
+}
+
+fn classify_failed_child_owner(
+    diagnostic: &str,
+    evidence_refs: &[AgentTaskLoopFailedChildEvidenceRef],
+) -> String {
+    let lower = diagnostic.to_ascii_lowercase();
+    if lower.contains("runtime_task_ability_unavailable") || lower.contains("ability unavailable") {
+        "wp_codebox".to_string()
+    } else if lower.contains("credential") || lower.contains("secret") || lower.contains("token") {
+        "provider_credentials".to_string()
+    } else if lower.contains("repo spec")
+        || lower.contains("spec")
+        || lower.contains("invalid input")
+    {
+        "repo_spec".to_string()
+    } else if lower.contains("artifact") {
+        "workload_artifacts".to_string()
+    } else if lower.contains("codebox")
+        || evidence_refs
+            .iter()
+            .any(|reference| reference.uri.to_ascii_lowercase().contains("codebox"))
+    {
+        "wp_codebox".to_string()
+    } else if lower.contains("provider") {
+        "provider".to_string()
+    } else {
+        "homeboy".to_string()
+    }
 }
 
 fn acceptance_gate_diagnostics(

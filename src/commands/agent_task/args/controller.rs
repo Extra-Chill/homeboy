@@ -18,6 +18,8 @@ pub enum AgentTaskControllerCommand {
     Plan(AgentTaskControllerPlanArgs),
     /// Read a durable loop controller record.
     Status(AgentTaskControllerStatusArgs),
+    /// Render the controller failure tree for failed child actions.
+    Diagnose(AgentTaskControllerStatusArgs),
     /// List durable loop controller records.
     List,
     /// Apply a generic external controller event.
