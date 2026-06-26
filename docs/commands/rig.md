@@ -80,6 +80,18 @@ is advisory only; use global `--force-hot` when the extra pressure is expected.
 services, leases, ports, and declared filesystem paths that are not portable
 through the current single-workspace runner snapshot.
 
+For command-only rigs, agents can ask Homeboy for a portable runner plan instead
+of materializing the rig locally:
+
+```sh
+homeboy --runner homeboy-lab rig up script-matrix --dry-run
+```
+
+The plan emits equivalent `homeboy runner exec <runner-id> ...` commands for each
+`kind: "command"` step. It refuses rigs with services, declared resources,
+symlinks, shared paths, or typed pipeline steps so local service stacks still stay
+on the local `rig up` path.
+
 The pipeline can start services, run typed `git` / `build` / `extension` / `stack` steps, apply idempotent local patches, create symlinks/shared paths, and run checks.
 
 ### `check`

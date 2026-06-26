@@ -15,6 +15,7 @@ pub enum RigCommandOutput {
     List(RigListOutput),
     Show(RigShowOutput),
     Up(RigUpOutput),
+    UpPlan(RigUpPlanOutput),
     Check(RigCheckOutput),
     Down(RigDownOutput),
     Repair(RigRepairOutput),
@@ -69,6 +70,27 @@ pub struct RigUpOutput {
     pub command: &'static str,
     #[serde(flatten)]
     pub report: rig::UpReport,
+}
+
+#[derive(Serialize)]
+pub struct RigUpPlanOutput {
+    pub command: &'static str,
+    pub rig_id: String,
+    pub runner_id: String,
+    pub portable: bool,
+    pub steps: Vec<RigUpPlanStep>,
+    pub commands: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct RigUpPlanStep {
+    pub label: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    pub runner_exec_command: String,
 }
 
 #[derive(Serialize)]
