@@ -4,6 +4,7 @@ use homeboy::cli_surface::{
     current_command_safety_manifest, current_command_surface, Cli, CommandSafetyEntry,
     CommandSafetyManifest, Commands,
 };
+use homeboy::command_contract::{CommandJsonFamily, COMMAND_SPECS};
 use std::collections::BTreeSet;
 use std::fs;
 use std::sync::OnceLock;
@@ -299,6 +300,47 @@ fn command_safety_manifest_docs_paths_match_command_docs() {
             command_doc_manifest_path(path).is_file(),
             "visible top-level command `{}` advertises `{path}` in the safety manifest, but that file is missing",
             entry.name
+        );
+    }
+}
+
+#[test]
+fn command_specs_drive_top_level_manifest_metadata() {
+    let manifest = command_safety_manifest();
+
+    for spec in COMMAND_SPECS {
+        let entry = manifest
+            .commands
+            .iter()
+            .find(|entry| entry.name == spec.name)
+            .unwrap_or_else(|| panic!("command spec `{}` missing from safety manifest", spec.name));
+
+        assert_eq!(
+            entry.output.structured,
+            spec.json_family != CommandJsonFamily::RawOnly,
+            "top-level manifest output structure drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.output.notes, spec.output_notes,
+            "top-level manifest output notes drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.lab.supported, spec.lab_supported,
+            "top-level manifest Lab support drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.lab.notes, spec.lab_notes,
+            "top-level manifest Lab notes drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.docs.path,
+            spec.docs_path(),
+            "top-level manifest docs path drifted from CommandSpec for `{}`",
+            spec.name
         );
     }
 }
