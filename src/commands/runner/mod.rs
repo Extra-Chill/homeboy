@@ -23,5 +23,5 @@ mod tests;
 
 pub use cli::RunnerArgs;
 pub use dispatch::{run, run_command_output};
-pub(crate) use status::wp_codebox_tool_diagnostics;
+pub(crate) use status::declared_tool_diagnostics_for_legacy;
 pub use types::RunnerToolDiagnostics;
