@@ -18,7 +18,7 @@ use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::agent_tasks::{
     AgentTaskExecutor, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
 };
-use crate::core::secret_env_plan::SecretEnvPlan;
+use crate::core::secret_env_plan::{SecretEnvHandoffEntry, SecretEnvPlan};
 use crate::core::{config, Error, Result};
 
 use super::super::Runner;
@@ -57,9 +57,17 @@ pub(super) fn build_lab_secret_env_handoff_plan(
     runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&tunnel_secret_env));
     runner_deferred_secret_env.sort();
     runner_deferred_secret_env.dedup();
+    let entries = lab_secret_env_handoff_entries(
+        &env_delta,
+        &runner_deferred_secret_env,
+        &agent_task_secret_env,
+        &trace_secret_env,
+        &tunnel_secret_env,
+    );
 
     let diagnostics = serde_json::json!({
         "schema": LAB_SECRET_ENV_HANDOFF_SCHEMA,
+        "entries": entries,
         "secret_env_plan": secret_env_plan.redacted(),
         "final_env_delta": redacted_env_delta_metadata(&env_delta),
         "secret_env_names": secret_env_names.clone(),
@@ -99,6 +107,75 @@ fn redacted_env_delta_metadata(env_delta: &HashMap<String, String>) -> Vec<serde
             })
         })
         .collect()
+}
+
+fn lab_secret_env_handoff_entries(
+    env_delta: &HashMap<String, String>,
+    runner_deferred_secret_env: &[String],
+    agent_task_secret_env: &serde_json::Value,
+    trace_secret_env: &serde_json::Value,
+    tunnel_secret_env: &serde_json::Value,
+) -> Vec<SecretEnvHandoffEntry> {
+    let mut names = env_delta.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    let mut entries = names
+        .into_iter()
+        .map(|name| SecretEnvHandoffEntry {
+            source: secret_env_source_for_name(&name, &[agent_task_secret_env, trace_secret_env])
+                .unwrap_or_else(|| "env-delta".to_string()),
+            name,
+            owner: "controller".to_string(),
+            destination: "runner".to_string(),
+            status: "forwarded".to_string(),
+            remediation: None,
+        })
+        .collect::<Vec<_>>();
+
+    for name in runner_deferred_secret_env {
+        if env_delta.contains_key(name) {
+            continue;
+        }
+        entries.push(SecretEnvHandoffEntry {
+            source: secret_env_source_for_name(name, &[agent_task_secret_env, tunnel_secret_env])
+                .unwrap_or_else(|| "runner".to_string()),
+            name: name.clone(),
+            owner: "runner".to_string(),
+            destination: "runner".to_string(),
+            status: "deferred".to_string(),
+            remediation: Some(
+                "Configure the selected runner secret_env references for the declared names before Lab dispatch."
+                    .to_string(),
+            ),
+        });
+    }
+
+    entries
+}
+
+fn secret_env_source_for_name(
+    name: &str,
+    metadata_values: &[&serde_json::Value],
+) -> Option<String> {
+    metadata_values.iter().find_map(|metadata| {
+        ["secret_env", "runner_deferred_secret_env"]
+            .into_iter()
+            .find_map(|field| secret_env_source_for_name_in_field(name, metadata, field))
+    })
+}
+
+fn secret_env_source_for_name_in_field(
+    name: &str,
+    metadata: &serde_json::Value,
+    field: &str,
+) -> Option<String> {
+    metadata
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|item| item.get("name").and_then(serde_json::Value::as_str) == Some(name))
+        .and_then(|item| item.get("source").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
 }
 
 fn runner_deferred_secret_env_names(metadata: &serde_json::Value) -> Vec<String> {
@@ -936,6 +1013,29 @@ mod tests {
         assert!(rendered.contains("HOMEBOY_PUBLIC_CONTEXT"));
         assert!(!rendered.contains("trace-secret-value"));
         assert!(!rendered.contains("still-redacted-in-diagnostics"));
+        let entries: Vec<SecretEnvHandoffEntry> =
+            serde_json::from_value(plan.diagnostics["entries"].clone()).expect("typed entries");
+        assert_eq!(
+            entries,
+            vec![
+                SecretEnvHandoffEntry {
+                    name: "HOMEBOY_PUBLIC_CONTEXT".to_string(),
+                    owner: "controller".to_string(),
+                    source: "env-delta".to_string(),
+                    destination: "runner".to_string(),
+                    status: "forwarded".to_string(),
+                    remediation: None,
+                },
+                SecretEnvHandoffEntry {
+                    name: "HOMEBOY_TRACE_HANDOFF_SECRET_TEST".to_string(),
+                    owner: "controller".to_string(),
+                    source: "env".to_string(),
+                    destination: "runner".to_string(),
+                    status: "forwarded".to_string(),
+                    remediation: None,
+                },
+            ]
+        );
 
         std::env::remove_var("HOMEBOY_TRACE_HANDOFF_SECRET_TEST");
     }
@@ -971,6 +1071,19 @@ mod tests {
             plan.diagnostics["runner_deferred_secret_env"][0]["required"],
             true
         );
+        let entries: Vec<SecretEnvHandoffEntry> =
+            serde_json::from_value(plan.diagnostics["entries"].clone()).expect("typed entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "HOMEBOY_RUNNER_PREVIEW_TOKEN");
+        assert_eq!(entries[0].owner, "runner");
+        assert_eq!(entries[0].source, "runner");
+        assert_eq!(entries[0].destination, "runner");
+        assert_eq!(entries[0].status, "deferred");
+        assert!(entries[0]
+            .remediation
+            .as_deref()
+            .expect("remediation")
+            .contains("runner secret_env references"));
     }
 
     #[test]

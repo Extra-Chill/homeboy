@@ -5,22 +5,27 @@
 //! references, and a prominent risk-flag section (#4398). The full verbose
 //! payload is available behind `--full`.
 
+use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use homeboy::core::agent_task_service as agent_task_service_direct;
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
-use homeboy::core::agent_tasks::AgentTaskOutcomeStatus;
-use homeboy::core::redaction::RedactionPolicy;
+use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
+use homeboy::core::redaction::{self, RedactionPolicy};
 
 use super::super::CmdResult;
-use super::args::{CancelArgs, DiagnoseArgs, StatusArgs};
+use super::args::{CancelArgs, DiagnoseArgs, EvidenceArgs, StatusArgs};
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
 /// aggregate cannot flood recovery output. Overflow is reported as an
 /// `omitted` count rather than dropped silently.
 const COMPACT_REF_LIMIT: usize = 12;
+const EVIDENCE_TEXT_LIMIT: usize = 16 * 1024;
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     if args.bridge {
@@ -132,6 +137,64 @@ pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
     Ok((serde_json::to_value(artifacts).unwrap_or(Value::Null), 0))
 }
 
+pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
+    let artifacts = agent_task_service::artifacts(&args.run_id)?;
+    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
+    let failed_tasks = failed_task_statuses(aggregate.as_ref());
+    let plan = agent_task_lifecycle::load_plan(&args.run_id).ok();
+
+    let mut hydrated = Vec::new();
+    for (evidence_ref, task_id) in
+        evidence_refs_with_tasks(&artifacts.evidence_refs, aggregate.as_ref())
+    {
+        if args
+            .kind
+            .as_deref()
+            .is_some_and(|kind| evidence_ref.kind != kind)
+        {
+            continue;
+        }
+        if args
+            .task
+            .as_deref()
+            .is_some_and(|task| task_id.as_deref() != Some(task))
+        {
+            continue;
+        }
+        if args.failure_only
+            && !task_id
+                .as_deref()
+                .is_some_and(|task| failed_tasks.contains_key(task))
+        {
+            continue;
+        }
+
+        hydrated.push(hydrate_evidence_ref(
+            &args.run_id,
+            &evidence_ref,
+            task_id.as_deref(),
+            plan.as_ref(),
+            aggregate.as_ref(),
+        ));
+    }
+
+    Ok((
+        serde_json::to_value(AgentTaskEvidenceReport {
+            schema: "homeboy/agent-task-evidence/v1",
+            run_id: args.run_id,
+            filters: AgentTaskEvidenceFilters {
+                kind: args.kind,
+                task: args.task,
+                failure_only: args.failure_only,
+            },
+            count: hydrated.len(),
+            evidence: hydrated,
+        })
+        .unwrap_or(Value::Null),
+        0,
+    ))
+}
+
 pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let record = agent_task_service::status(&args.run_id)?;
     let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
@@ -194,6 +257,328 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     surface_cancellation_recovery(&mut value);
     Ok((value, 0))
+}
+
+#[derive(Serialize)]
+struct AgentTaskEvidenceReport {
+    schema: &'static str,
+    run_id: String,
+    filters: AgentTaskEvidenceFilters,
+    count: usize,
+    evidence: Vec<HydratedEvidence>,
+}
+
+#[derive(Serialize)]
+struct AgentTaskEvidenceFilters {
+    kind: Option<String>,
+    task: Option<String>,
+    failure_only: bool,
+}
+
+#[derive(Serialize)]
+struct HydratedEvidence {
+    kind: String,
+    label: Option<String>,
+    task_id: Option<String>,
+    source: String,
+    status: String,
+    truncated: bool,
+    bytes_read: Option<usize>,
+    omitted_bytes: Option<u64>,
+    content: Value,
+    error: Option<String>,
+}
+
+fn hydrate_evidence_ref(
+    run_id: &str,
+    evidence_ref: &AgentTaskEvidenceRef,
+    task_id: Option<&str>,
+    plan: Option<&AgentTaskPlan>,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> HydratedEvidence {
+    let hydrated = if evidence_ref.uri.starts_with("homeboy://agent-task/") {
+        hydrate_homeboy_evidence_ref(run_id, &evidence_ref.uri, task_id, plan, aggregate)
+    } else if evidence_ref.uri.starts_with("file://") {
+        hydrate_file_evidence_ref(&evidence_ref.uri)
+    } else {
+        Ok(HydratedContent {
+            source: "unsupported".to_string(),
+            truncated: false,
+            bytes_read: None,
+            omitted_bytes: None,
+            content: json!({
+                "summary": "Evidence ref is recorded but this URI scheme is not hydratable by agent-task evidence yet.",
+            }),
+        })
+    };
+
+    match hydrated {
+        Ok(content) => HydratedEvidence {
+            kind: evidence_ref.kind.clone(),
+            label: evidence_ref.label.clone(),
+            task_id: task_id.map(str::to_string),
+            source: content.source,
+            status: "ok".to_string(),
+            truncated: content.truncated,
+            bytes_read: content.bytes_read,
+            omitted_bytes: content.omitted_bytes,
+            content: redaction::redact_json(&content.content),
+            error: None,
+        },
+        Err(error) => HydratedEvidence {
+            kind: evidence_ref.kind.clone(),
+            label: evidence_ref.label.clone(),
+            task_id: task_id.map(str::to_string),
+            source: "error".to_string(),
+            status: "error".to_string(),
+            truncated: false,
+            bytes_read: None,
+            omitted_bytes: None,
+            content: Value::Null,
+            error: Some(redaction::redact_string(&error.message)),
+        },
+    }
+}
+
+struct HydratedContent {
+    source: String,
+    truncated: bool,
+    bytes_read: Option<usize>,
+    omitted_bytes: Option<u64>,
+    content: Value,
+}
+
+fn hydrate_homeboy_evidence_ref(
+    run_id: &str,
+    uri: &str,
+    task_id: Option<&str>,
+    plan: Option<&AgentTaskPlan>,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> homeboy::core::Result<HydratedContent> {
+    let parsed = parse_agent_task_homeboy_uri(uri)?;
+    if parsed.run_id != run_id {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            format!(
+                "evidence ref points at run {} but command is hydrating run {run_id}",
+                parsed.run_id
+            ),
+            Some(uri.to_string()),
+            None,
+        ));
+    }
+
+    let content = match parsed.section.as_str() {
+        "plan" => match (plan, task_id.or(parsed.task.as_deref())) {
+            (Some(plan), Some(task_id)) => plan
+                .tasks
+                .iter()
+                .find(|task| task.task_id == task_id)
+                .map(|task| json!(task))
+                .unwrap_or_else(|| json!({ "missing_task": task_id })),
+            (Some(plan), None) => json!(plan),
+            (None, _) => json!({ "summary": "plan is not available for this run" }),
+        },
+        "aggregate" => match (aggregate, parsed.outcome.as_deref().or(task_id)) {
+            (Some(aggregate), Some(task_id)) => aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == task_id)
+                .map(|outcome| json!(outcome))
+                .unwrap_or_else(|| json!({ "missing_outcome": task_id })),
+            (Some(aggregate), None) => json!(aggregate),
+            (None, _) => json!({ "summary": "aggregate is not available for this run" }),
+        },
+        "artifacts" => match (aggregate, task_id.or(parsed.task.as_deref())) {
+            (Some(aggregate), Some(task_id)) => aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == task_id)
+                .map(|outcome| {
+                    json!({
+                        "task_id": outcome.task_id,
+                        "status": outcome.status,
+                        "summary": outcome.summary,
+                        "artifacts": outcome.artifacts,
+                        "typed_artifacts": outcome.typed_artifacts,
+                        "evidence_refs": outcome.evidence_refs,
+                        "diagnostics": outcome.diagnostics,
+                    })
+                })
+                .unwrap_or_else(|| json!({ "missing_outcome": task_id })),
+            _ => json!({ "summary": "outcome artifacts are not available for this run" }),
+        },
+        "logs" => serde_json::to_value(agent_task_service::logs(run_id)?)
+            .unwrap_or_else(|_| json!({ "summary": "logs could not be serialized" })),
+        "status" => serde_json::to_value(agent_task_service::status(run_id)?)
+            .unwrap_or_else(|_| json!({ "summary": "status could not be serialized" })),
+        section => json!({
+            "summary": format!("homeboy agent-task evidence does not hydrate section '{section}' yet"),
+        }),
+    };
+
+    Ok(HydratedContent {
+        source: "homeboy".to_string(),
+        truncated: false,
+        bytes_read: None,
+        omitted_bytes: None,
+        content,
+    })
+}
+
+fn hydrate_file_evidence_ref(uri: &str) -> homeboy::core::Result<HydratedContent> {
+    let path = file_uri_path(uri)?;
+    let metadata = fs::metadata(&path)
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    if !metadata.is_file() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            "file evidence ref does not point at a regular file",
+            None,
+            None,
+        ));
+    }
+
+    let bytes = fs::read(&path)
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let truncated = bytes.len() > EVIDENCE_TEXT_LIMIT;
+    let visible = &bytes[..bytes.len().min(EVIDENCE_TEXT_LIMIT)];
+    let text = String::from_utf8_lossy(visible);
+    let redacted_text = redaction::redact_string(&text);
+    let content = serde_json::from_str::<Value>(&redacted_text)
+        .map(|value| json!({ "format": "json", "value": value }))
+        .unwrap_or_else(|_| json!({ "format": "text", "text": redacted_text }));
+
+    Ok(HydratedContent {
+        source: "file".to_string(),
+        truncated,
+        bytes_read: Some(visible.len()),
+        omitted_bytes: truncated.then_some(bytes.len().saturating_sub(EVIDENCE_TEXT_LIMIT) as u64),
+        content,
+    })
+}
+
+fn file_uri_path(uri: &str) -> homeboy::core::Result<PathBuf> {
+    let raw = uri.strip_prefix("file://").ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            "file evidence ref must start with file://",
+            Some(uri.to_string()),
+            None,
+        )
+    })?;
+    if raw.is_empty() || raw.contains('\0') {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            "file evidence ref path is empty or invalid",
+            Some(uri.to_string()),
+            None,
+        ));
+    }
+    Ok(Path::new(raw).to_path_buf())
+}
+
+struct ParsedAgentTaskUri {
+    run_id: String,
+    section: String,
+    task: Option<String>,
+    outcome: Option<String>,
+}
+
+fn parse_agent_task_homeboy_uri(uri: &str) -> homeboy::core::Result<ParsedAgentTaskUri> {
+    let rest = uri
+        .strip_prefix("homeboy://agent-task/run/")
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "evidence_ref",
+                "unsupported homeboy agent-task evidence ref",
+                Some(uri.to_string()),
+                None,
+            )
+        })?;
+    let (path, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let mut parts = path.split('/');
+    let run_id = parts.next().unwrap_or_default();
+    let section = parts.next().unwrap_or_default();
+    if run_id.is_empty() || section.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            "homeboy agent-task evidence ref must include run id and section",
+            Some(uri.to_string()),
+            None,
+        ));
+    }
+
+    Ok(ParsedAgentTaskUri {
+        run_id: run_id.to_string(),
+        section: section.to_string(),
+        task: fragment_value(fragment, "task"),
+        outcome: fragment_value(fragment, "outcome"),
+    })
+}
+
+fn fragment_value(fragment: &str, key: &str) -> Option<String> {
+    fragment.split('&').find_map(|part| {
+        let (candidate, value) = part.split_once('=')?;
+        (candidate == key && !value.trim().is_empty()).then(|| value.to_string())
+    })
+}
+
+fn evidence_ref_task_id(evidence_ref: &AgentTaskEvidenceRef) -> Option<String> {
+    parse_agent_task_homeboy_uri(&evidence_ref.uri)
+        .ok()
+        .and_then(|parsed| parsed.task.or(parsed.outcome))
+}
+
+fn failed_task_statuses(
+    aggregate: Option<&AgentTaskAggregate>,
+) -> HashMap<String, AgentTaskOutcomeStatus> {
+    aggregate
+        .into_iter()
+        .flat_map(|aggregate| aggregate.outcomes.iter())
+        .filter(|outcome| {
+            matches!(
+                outcome.status,
+                AgentTaskOutcomeStatus::Failed
+                    | AgentTaskOutcomeStatus::ProviderError
+                    | AgentTaskOutcomeStatus::Timeout
+                    | AgentTaskOutcomeStatus::UnableToRemediate
+            )
+        })
+        .map(|outcome| (outcome.task_id.clone(), outcome.status.clone()))
+        .collect()
+}
+
+fn evidence_refs_with_tasks(
+    refs: &[AgentTaskEvidenceRef],
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Vec<(AgentTaskEvidenceRef, Option<String>)> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    if let Some(aggregate) = aggregate {
+        for outcome in &aggregate.outcomes {
+            for evidence_ref in &outcome.evidence_refs {
+                if seen.insert((evidence_ref.kind.clone(), evidence_ref.uri.clone())) {
+                    entries.push((evidence_ref.clone(), Some(outcome.task_id.clone())));
+                }
+            }
+            if let Some(workflow) = &outcome.workflow {
+                for step in &workflow.steps {
+                    for evidence_ref in &step.artifact_refs {
+                        if seen.insert((evidence_ref.kind.clone(), evidence_ref.uri.clone())) {
+                            entries.push((evidence_ref.clone(), Some(outcome.task_id.clone())));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for evidence_ref in refs {
+        if seen.insert((evidence_ref.kind.clone(), evidence_ref.uri.clone())) {
+            entries.push((evidence_ref.clone(), evidence_ref_task_id(evidence_ref)));
+        }
+    }
+    entries
 }
 
 /// Hoist live-cancellation recovery details to the top level of the cancel

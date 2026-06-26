@@ -129,6 +129,18 @@ fn controller_action_label(action: &Value) -> Option<&str> {
 }
 
 fn controller_last_failure<'a>(payload: &'a Value, controller: &'a Value) -> Option<String> {
+    if let Some(summary) = first_failed_child_action(payload) {
+        let diagnostic = string_value(summary, &["hydrated_root_cause"])
+            .or_else(|| string_value(summary, &["top_diagnostic"]))?;
+        let action_id = string_value(summary, &["action_id"]);
+        let child_run_id = string_value(summary, &["child_run_id"]);
+        return Some(match (action_id, child_run_id) {
+            (Some(action_id), Some(run_id)) => format!("{action_id} ({run_id}): {diagnostic}"),
+            (Some(action_id), None) => format!("{action_id}: {diagnostic}"),
+            _ => diagnostic.to_string(),
+        });
+    }
+
     if let Some(summary) = value_at(payload, &["failure_summary"])
         .or_else(|| last_failure_summary(payload, &["results"]))
         .or_else(|| last_failure_summary(payload, &["resume", "results"]))
@@ -166,6 +178,13 @@ fn controller_last_failure<'a>(payload: &'a Value, controller: &'a Value) -> Opt
                 None => diagnostic.to_string(),
             })
         })
+}
+
+fn first_failed_child_action(payload: &Value) -> Option<&Value> {
+    value_at(payload, &["diagnostics", "failed_child_actions"])
+        .and_then(Value::as_array)
+        .or_else(|| value_at(payload, &["failed_child_actions"]).and_then(Value::as_array))?
+        .first()
 }
 
 fn last_failure_summary<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -229,6 +248,12 @@ fn collect_controller_artifact_lines(value: &Value, path: &[&str], artifacts: &m
 }
 
 fn first_controller_recovery_command(payload: &Value) -> Option<&str> {
+    if let Some(command) = first_failed_child_action(payload)
+        .and_then(|action| string_value(action, &["next_command"]))
+    {
+        return Some(command);
+    }
+
     value_at(payload, &["diagnostics", "pending_actions"])
         .and_then(Value::as_array)
         .or_else(|| {

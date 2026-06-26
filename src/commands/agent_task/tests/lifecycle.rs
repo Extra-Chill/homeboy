@@ -123,6 +123,55 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
 }
 
 #[test]
+fn evidence_command_hydrates_homeboy_and_file_refs_with_filters_and_redaction() {
+    with_isolated_home(|home| {
+        let file_path = home.path().join("executor-result.json");
+        std::fs::write(
+            &file_path,
+            r#"{"message":"failed","api_key":"super-secret","details":"useful"}"#,
+        )
+        .expect("write evidence file");
+        let run_id = "run-cli-evidence";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            EvidenceFixtureExecutor {
+                run_id: run_id.to_string(),
+                file_uri: format!("file://{}", file_path.display()),
+            },
+        )
+        .expect("run completed");
+
+        let (value, exit_code) = evidence(EvidenceArgs {
+            run_id: run_id.to_string(),
+            kind: None,
+            task: Some("task-a".to_string()),
+            failure_only: true,
+        })
+        .expect("evidence loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["schema"], "homeboy/agent-task-evidence/v1");
+        assert_eq!(value["count"], 4);
+        let entries = value["evidence"].as_array().expect("evidence array");
+        let file_entry = entries
+            .iter()
+            .find(|entry| entry["kind"] == "executor-result")
+            .expect("file evidence");
+        assert_eq!(file_entry["source"], "file");
+        assert_eq!(file_entry["content"]["format"], "json");
+        assert_eq!(file_entry["content"]["value"]["api_key"], "[REDACTED]");
+        assert_eq!(file_entry["content"]["value"]["details"], "useful");
+        let aggregate_entry = entries
+            .iter()
+            .find(|entry| entry["kind"] == "executor-normalized-output")
+            .expect("homeboy evidence");
+        assert_eq!(aggregate_entry["source"], "homeboy");
+        assert_eq!(aggregate_entry["content"]["status"], "failed");
+    });
+}
+
+#[test]
 fn diagnose_hydrates_executor_result_evidence_root_cause() {
     with_temp_home(|| {
         let evidence_dir = tempfile::tempdir().expect("evidence dir");
@@ -181,6 +230,80 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             "homeboy agent-task status run-cli-diagnose-evidence --full"
         );
     });
+}
+
+#[test]
+fn evidence_command_truncates_large_file_evidence() {
+    with_isolated_home(|home| {
+        let file_path = home.path().join("large.log");
+        std::fs::write(&file_path, "x".repeat(20 * 1024)).expect("write evidence file");
+        let run_id = "run-cli-evidence-truncated";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            EvidenceFixtureExecutor {
+                run_id: run_id.to_string(),
+                file_uri: format!("file://{}", file_path.display()),
+            },
+        )
+        .expect("run completed");
+
+        let (value, _) = evidence(EvidenceArgs {
+            run_id: run_id.to_string(),
+            kind: Some("executor-result".to_string()),
+            task: Some("task-a".to_string()),
+            failure_only: false,
+        })
+        .expect("evidence loaded");
+
+        assert_eq!(value["count"], 1);
+        assert_eq!(value["evidence"][0]["truncated"], true);
+        assert_eq!(value["evidence"][0]["bytes_read"], 16 * 1024);
+        assert_eq!(value["evidence"][0]["omitted_bytes"], 4 * 1024);
+    });
+}
+
+struct EvidenceFixtureExecutor {
+    run_id: String,
+    file_uri: String,
+}
+
+impl AgentTaskExecutorAdapter for EvidenceFixtureExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id.clone(),
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: Some("failed with evidence".to_string()),
+            failure_classification: Some(AgentTaskFailureClassification::Provider),
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: vec![
+                AgentTaskEvidenceRef {
+                    kind: "executor-result".to_string(),
+                    uri: self.file_uri.clone(),
+                    label: Some("Executor result".to_string()),
+                },
+                AgentTaskEvidenceRef {
+                    kind: "executor-normalized-output".to_string(),
+                    uri: format!(
+                        "homeboy://agent-task/run/{}/aggregate#outcome={}",
+                        self.run_id, request.task_id
+                    ),
+                    label: Some("Normalized output".to_string()),
+                },
+            ],
+            diagnostics: Vec::new(),
+            outputs: json!({ "api_key": "super-secret", "result": "failed" }),
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
 }
 
 #[test]

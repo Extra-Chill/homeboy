@@ -341,6 +341,20 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         );
         assert_eq!(envelope.status, "handoff_complete");
         assert_eq!(envelope.execution_location, "runner:lab");
+        assert_eq!(envelope.identity.runner_id, "lab");
+        assert_eq!(envelope.identity.runner_job_id, job_id);
+        assert_eq!(
+            envelope.identity.persisted_run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
+        assert_eq!(
+            envelope.identity.run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
+        assert_eq!(
+            envelope.identity.handoff_id.as_deref(),
+            Some(format!("runner:lab:job:{job_id}").as_str())
+        );
         assert_eq!(envelope.runner_id, "lab");
         assert_eq!(envelope.job_id, job_id);
         assert_eq!(envelope.remote_cwd, "/srv/homeboy/project");
@@ -357,6 +371,14 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             Some("agent-task-run-6454")
         );
         assert_eq!(json["status"], "handoff_complete");
+        assert_eq!(json["identity"]["runner_id"], "lab");
+        assert_eq!(json["identity"]["runner_job_id"], job_id);
+        assert_eq!(json["identity"]["persisted_run_id"], "agent-task-run-6454");
+        assert_eq!(json["identity"]["run_id"], "agent-task-run-6454");
+        assert_eq!(
+            json["identity"]["handoff_id"],
+            format!("runner:lab:job:{job_id}")
+        );
         assert_eq!(json["job_id"], job_id);
         assert_eq!(json["durable_run_id"], "agent-task-run-6454");
         assert_eq!(
@@ -390,6 +412,11 @@ fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
     );
     assert_eq!(json["status"], "handoff_complete");
     assert_eq!(json["execution_location"], "runner:lab");
+    assert_eq!(json["identity"]["runner_id"], "lab");
+    assert_eq!(json["identity"]["runner_job_id"], "job-123");
+    assert_eq!(json["identity"]["handoff_id"], "runner:lab:job:job-123");
+    assert!(json["identity"].get("persisted_run_id").is_none());
+    assert!(json["identity"].get("run_id").is_none());
     assert_eq!(json["durable_run_id"], Value::Null);
     assert_eq!(json["persisted_run_id"], Value::Null);
     assert_eq!(json["mirror_run_id"], Value::Null);

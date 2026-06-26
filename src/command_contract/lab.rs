@@ -232,6 +232,8 @@ pub struct RunnerHandoffEnvelope {
     pub schema: String,
     pub status: String,
     pub execution_location: String,
+    #[serde(default)]
+    pub identity: AgentTaskDispatchIdentity,
     pub runner_id: String,
     pub job_id: String,
     pub durable_run_id: Option<String>,
@@ -239,6 +241,18 @@ pub struct RunnerHandoffEnvelope {
     pub mirror_run_id: Option<String>,
     pub remote_cwd: String,
     pub follow_commands: RunnerHandoffFollowCommands,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentTaskDispatchIdentity {
+    pub runner_id: String,
+    pub runner_job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -277,6 +291,13 @@ impl RunnerHandoffEnvelope {
             schema: RUNNER_HANDOFF_ENVELOPE_SCHEMA.to_string(),
             status: "handoff_complete".to_string(),
             execution_location: format!("runner:{runner_id}"),
+            identity: AgentTaskDispatchIdentity {
+                runner_id: runner_id.to_string(),
+                runner_job_id: job_id.to_string(),
+                persisted_run_id: mirror_run_id.clone(),
+                run_id: mirror_run_id.clone(),
+                handoff_id: Some(format!("runner:{runner_id}:job:{job_id}")),
+            },
             runner_id: runner_id.to_string(),
             job_id: job_id.to_string(),
             durable_run_id: mirror_run_id.clone(),
@@ -558,6 +579,7 @@ impl Commands {
                     | agent_task::AgentTaskCommand::RunNext
                     | agent_task::AgentTaskCommand::Logs(_)
                     | agent_task::AgentTaskCommand::Artifacts(_)
+                    | agent_task::AgentTaskCommand::Evidence(_)
                     | agent_task::AgentTaskCommand::Review(_)
                     // Discovery commands (list/active/latest) are runner-resident
                     // reads too: a freshly-offloaded Lab run's durable record
