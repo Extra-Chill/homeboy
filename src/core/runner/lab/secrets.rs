@@ -18,6 +18,7 @@ use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::agent_tasks::{
     AgentTaskExecutor, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
 };
+use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::{config, Error, Result};
 
 use super::super::Runner;
@@ -32,6 +33,7 @@ const LAB_SECRET_ENV_HANDOFF_SCHEMA: &str = "homeboy/lab-secret-env-handoff/v1";
 pub(super) struct LabSecretEnvHandoffPlan {
     pub(super) env_delta: HashMap<String, String>,
     pub(super) diagnostics: serde_json::Value,
+    pub(super) secret_env_plan: SecretEnvPlan,
     pub(super) secret_env_names: Vec<String>,
     pub(super) runner_deferred_secret_env: Vec<String>,
 }
@@ -48,6 +50,7 @@ pub(super) fn build_lab_secret_env_handoff_plan(
     secret_env_names.extend(declared_tunnel_secret_env(args));
     secret_env_names.sort();
     secret_env_names.dedup();
+    let secret_env_plan = SecretEnvPlan::from_secret_env_names(secret_env_names.clone());
 
     let mut runner_deferred_secret_env = Vec::new();
     runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&agent_task_secret_env));
@@ -57,6 +60,7 @@ pub(super) fn build_lab_secret_env_handoff_plan(
 
     let diagnostics = serde_json::json!({
         "schema": LAB_SECRET_ENV_HANDOFF_SCHEMA,
+        "secret_env_plan": secret_env_plan.redacted(),
         "final_env_delta": redacted_env_delta_metadata(&env_delta),
         "secret_env_names": secret_env_names.clone(),
         "runner_deferred_secret_env": runner_deferred_secret_env
@@ -75,6 +79,7 @@ pub(super) fn build_lab_secret_env_handoff_plan(
     Ok(LabSecretEnvHandoffPlan {
         env_delta,
         diagnostics,
+        secret_env_plan,
         secret_env_names,
         runner_deferred_secret_env,
     })
@@ -237,16 +242,18 @@ fn declared_agent_task_secret_env_for_handoff(args: &[String]) -> Result<Vec<Str
     Ok(names)
 }
 
-pub(super) fn preflight_agent_task_runner_secret_env(
+pub(super) fn preflight_agent_task_runner_secret_env_plan(
     runner_id: &str,
     runner: &Runner,
     args: &[String],
     env: &HashMap<String, String>,
+    secret_env_plan: &SecretEnvPlan,
 ) -> Result<()> {
     let tasks = declared_agent_task_run_plan_secret_env_by_task(args);
     if tasks.is_empty() {
         return Ok(());
     }
+    let required_names = secret_env_plan.secret_env_names();
 
     // Dedupe missing env names while preserving first-seen order so the
     // operator-facing message lists each name exactly once, even when several
@@ -255,6 +262,9 @@ pub(super) fn preflight_agent_task_runner_secret_env(
     let mut required_by_tasks: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     for task in &tasks {
         for name in &task.secret_env {
+            if !required_names.contains(name) {
+                continue;
+            }
             if env.contains_key(name)
                 || runner.secret_env.contains_key(name)
                 || task.secret_sources.contains(name)
@@ -964,6 +974,65 @@ mod tests {
     }
 
     #[test]
+    fn lab_secret_env_handoff_plan_carries_canonical_secret_env_plan() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan_path = temp.path().join("plan.json");
+        std::fs::write(
+            &plan_path,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "canonical-secret-env-plan",
+                "tasks": [
+                    {
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "runner-owned",
+                        "executor": {
+                            "backend": "example",
+                            "secret_env": ["HOMEBOY_CANONICAL_RUNNER_SECRET_TEST"]
+                        },
+                        "instructions": "Use runner-owned credentials."
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write plan");
+
+        let handoff = build_lab_secret_env_handoff_plan(&run_plan_args(&plan_path), HashMap::new())
+            .expect("handoff plan");
+
+        assert_eq!(
+            handoff.secret_env_plan.secret_env_names(),
+            handoff.secret_env_names
+        );
+        assert_eq!(
+            handoff.diagnostics["secret_env_plan"]["schema"].as_str(),
+            Some(crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA)
+        );
+        assert_eq!(
+            handoff.runner_deferred_secret_env,
+            vec!["HOMEBOY_CANONICAL_RUNNER_SECRET_TEST".to_string()]
+        );
+        let runner = fixture_runner(HashMap::from([(
+            "HOMEBOY_CANONICAL_RUNNER_SECRET_TEST".to_string(),
+            RunnerSecretEnvRef {
+                env: Some("HOMEBOY_CANONICAL_RUNNER_SECRET_TEST".to_string()),
+                file: None,
+                secret: None,
+            },
+        )]));
+
+        preflight_agent_task_runner_secret_env_plan(
+            "lab-a",
+            &runner,
+            &run_plan_args(&plan_path),
+            &handoff.env_delta,
+            &handoff.secret_env_plan,
+        )
+        .expect("preflight consumes handoff secret env plan");
+    }
+
+    #[test]
     fn declared_tunnel_secret_env_reads_preview_client_default_and_override() {
         assert_eq!(
             declared_tunnel_secret_env(&[
@@ -1575,11 +1644,14 @@ mod tests {
         .expect("write plan");
 
         let runner = fixture_runner(HashMap::new());
-        let err = preflight_agent_task_runner_secret_env(
+        let args = run_plan_args(&plan_path);
+        let secret_env_plan = secret_env_plan_from_args(&args);
+        let err = preflight_agent_task_runner_secret_env_plan(
             "lab-a",
             &runner,
-            &run_plan_args(&plan_path),
+            &args,
             &HashMap::new(),
+            &secret_env_plan,
         )
         .expect_err("missing runner secret refs should fail before dispatch");
 
@@ -1621,11 +1693,14 @@ mod tests {
             },
         )]));
 
-        preflight_agent_task_runner_secret_env(
+        let args = run_plan_args(&plan_path);
+        let secret_env_plan = secret_env_plan_from_args(&args);
+        preflight_agent_task_runner_secret_env_plan(
             "lab-a",
             &runner,
-            &run_plan_args(&plan_path),
+            &args,
             &HashMap::new(),
+            &secret_env_plan,
         )
         .expect("configured runner secret refs should pass");
     }
@@ -1661,8 +1736,16 @@ mod tests {
             "redacted-test-value".to_string(),
         )]);
 
-        preflight_agent_task_runner_secret_env("lab-a", &runner, &run_plan_args(&plan_path), &env)
-            .expect("request-injected secret env should pass");
+        let args = run_plan_args(&plan_path);
+        let secret_env_plan = secret_env_plan_from_args(&args);
+        preflight_agent_task_runner_secret_env_plan(
+            "lab-a",
+            &runner,
+            &args,
+            &env,
+            &secret_env_plan,
+        )
+        .expect("request-injected secret env should pass");
     }
 
     #[test]
@@ -1718,11 +1801,14 @@ mod tests {
         .expect("write plan");
 
         let runner = fixture_runner(HashMap::new());
-        let err = preflight_agent_task_runner_secret_env(
+        let args = run_plan_args(&plan_path);
+        let secret_env_plan = secret_env_plan_from_args(&args);
+        let err = preflight_agent_task_runner_secret_env_plan(
             "lab-a",
             &runner,
-            &run_plan_args(&plan_path),
+            &args,
             &HashMap::new(),
+            &secret_env_plan,
         )
         .expect_err("missing runner secret refs should fail before dispatch");
 
@@ -1780,6 +1866,10 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             "--plan".to_string(),
             format!("@{}", plan_path.display()),
         ]
+    }
+
+    fn secret_env_plan_from_args(args: &[String]) -> SecretEnvPlan {
+        SecretEnvPlan::from_secret_env_names(declared_agent_task_run_plan_secret_env(args))
     }
 
     fn fixture_runner(secret_env: HashMap<String, RunnerSecretEnvRef>) -> Runner {

@@ -597,18 +597,19 @@ pub(crate) fn run_lab_offload_inner(
     for (name, value) in &request.job_overrides.env {
         env.insert(name.clone(), value.clone());
     }
-    let mut secret_env_names = secret_env_handoff.secret_env_names;
+    let mut secret_env_names = secret_env_handoff.secret_env_plan.secret_env_names();
     secret_env_names.extend(request.job_overrides.secret_env_names.clone());
     secret_env_names.sort();
     secret_env_names.dedup();
     // The remaining pre-dispatch checks (secret-env, provider, path translation)
     // are still runner setup overhead before the workload executes.
     let pre_dispatch_started = std::time::Instant::now();
-    preflight_agent_task_runner_secret_env(
+    preflight_agent_task_runner_secret_env_plan(
         runner_id,
         &runner,
         &changed_since_preflight.args,
         &env,
+        &secret_env_handoff.secret_env_plan,
     )?;
     preflight_agent_task_provider_on_runner(
         runner_id,
