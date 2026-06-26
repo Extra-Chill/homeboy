@@ -1070,7 +1070,7 @@ fn init_from_spec_compiles_workflow_fan_out_items_into_deduped_dispatch_action()
 }
 
 #[test]
-fn init_from_spec_rejects_dynamic_artifact_fan_out_until_artifact_expansion_exists() {
+fn init_from_spec_compiles_dynamic_artifact_fan_out_for_controller_expansion() {
     with_isolated_home(|_| {
         let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
             "loop_id": "repo-loop-artifact-fan-out",
@@ -1087,15 +1087,32 @@ fn init_from_spec_rejects_dynamic_artifact_fan_out_until_artifact_expansion_exis
         }))
         .expect("spec deserializes");
 
-        let error = init_from_spec(ControllerFromSpecRequest { spec })
-            .expect_err("dynamic artifact fan-out needs controller artifact expansion");
+        let report = init_from_spec(ControllerFromSpecRequest { spec })
+            .expect("dynamic artifact fan-out compiles for controller expansion");
 
-        let message = error.to_string();
-        assert!(message.contains("workflows[].fan_out"), "{message}");
-        assert!(
-            message.contains("artifact-to-entity expansion"),
-            "{message}"
-        );
+        assert_eq!(report.actions.len(), 1);
+        match &report.actions[0].action {
+            AgentTaskLoopPolicyAction::FanOut {
+                dynamic_artifact,
+                group_by,
+                requires_non_empty,
+                entity_ids,
+                ..
+            } => {
+                assert_eq!(entity_ids, &Vec::<String>::new());
+                assert_eq!(dynamic_artifact.as_deref(), Some("finding_group"));
+                assert_eq!(
+                    group_by,
+                    &vec![
+                        "owner_repo".to_string(),
+                        "root_cause".to_string(),
+                        "group_id".to_string()
+                    ]
+                );
+                assert!(*requires_non_empty);
+            }
+            other => panic!("expected dynamic fan_out workflow action, got {other:?}"),
+        }
     });
 }
 
@@ -1800,6 +1817,9 @@ fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
             AgentTaskLoopPolicyAction::FanOut {
                 dedupe_key: "workflow:empty".to_string(),
                 entity_ids: Vec::new(),
+                dynamic_artifact: None,
+                group_by: Vec::new(),
+                requires_non_empty: false,
                 max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
                 fail_fast: true,
                 request_template: json!({ "mode": "dispatch" }),
@@ -1839,6 +1859,89 @@ fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
 }
 
 #[test]
+fn run_next_expands_dynamic_artifact_fan_out_groups() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-dynamic-fanout".to_string(),
+            phase: "iterator".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        record.task_lineage.push(AgentTaskLoopTaskLineage {
+            run_id: "finding-packets-run".to_string(),
+            task_id: Some("finding-packets".to_string()),
+            parent_run_id: None,
+            parent_task_id: None,
+            entity_id: None,
+            dedupe_key: Some("workflow:finding-packets".to_string()),
+            artifact_refs: Vec::new(),
+            inputs: Value::Null,
+            outputs: json!({
+                "artifacts": {
+                    "finding_group": {
+                        "artifact_id": "finding_group",
+                        "kind": "wp-site-generator/FindingGroup/v1",
+                        "payload": {
+                            "groups": [
+                                { "owner_repo": "blocks-engine", "root_cause": "php-transformer", "group_id": "alpha" },
+                                { "owner_repo": "static-site-importer", "root_cause": "importer", "group_id": "beta" }
+                            ]
+                        }
+                    }
+                }
+            }),
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::FanOut {
+                dedupe_key: "workflow:iterator".to_string(),
+                entity_ids: Vec::new(),
+                dynamic_artifact: Some("finding_group".to_string()),
+                group_by: vec![
+                    "owner_repo".to_string(),
+                    "root_cause".to_string(),
+                    "group_id".to_string(),
+                ],
+                requires_non_empty: true,
+                max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
+                fail_fast: true,
+                request_template: json!({ "mode": "dispatch" }),
+            },
+            "iterate finding groups",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let dispatch = CapturingDispatchHook::default();
+        let result = run_next(
+            "loop-service-dynamic-fanout",
+            CapturingExecutor::default(),
+            &dispatch,
+        )
+        .expect("dynamic fan-out action executed");
+
+        assert_eq!(result.exit_code, 0);
+        let execution = result.value.execution.as_ref().expect("execution");
+        assert_eq!(execution["item_count"], json!(2));
+        assert_eq!(execution["dynamic_artifact"], json!("finding_group"));
+        let observed = dispatch
+            .observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0]["entity_id"], json!("finding_group:alpha"));
+        assert_eq!(observed[1]["entity_id"], json!("finding_group:beta"));
+
+        let loaded =
+            controller::load_controller("loop-service-dynamic-fanout").expect("controller loaded");
+        assert_eq!(
+            loaded.terminal_outcomes[0].status,
+            AgentTaskLoopTerminalStatus::Passed
+        );
+        assert_eq!(loaded.terminal_outcomes[0].details["item_count"], json!(2));
+    });
+}
+
+#[test]
 fn fan_out_stops_after_max_items() {
     with_isolated_home(|_| {
         let mut record = init(ControllerInitRequest {
@@ -1856,6 +1959,9 @@ fn fan_out_stops_after_max_items() {
                     "candidate:second".to_string(),
                     "candidate:third".to_string(),
                 ],
+                dynamic_artifact: None,
+                group_by: Vec::new(),
+                requires_non_empty: false,
                 max_items: 2,
                 fail_fast: true,
                 request_template: json!({ "mode": "dispatch" }),
@@ -1909,6 +2015,9 @@ fn fan_out_fail_fast_stops_after_first_failure() {
                     "candidate:first".to_string(),
                     "candidate:second".to_string(),
                 ],
+                dynamic_artifact: None,
+                group_by: Vec::new(),
+                requires_non_empty: false,
                 max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
                 fail_fast: true,
                 request_template: json!({ "mode": "dispatch" }),
@@ -1960,6 +2069,9 @@ fn fan_out_indexes_each_child_task_evidence_on_its_entity() {
             AgentTaskLoopPolicyAction::FanOut {
                 dedupe_key: "candidate:review".to_string(),
                 entity_ids: vec![first.clone(), second.clone()],
+                dynamic_artifact: None,
+                group_by: Vec::new(),
+                requires_non_empty: false,
                 max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
                 fail_fast: true,
                 request_template: json!({

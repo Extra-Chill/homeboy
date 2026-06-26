@@ -297,7 +297,7 @@ fn append_string_array(ids: &mut Vec<String>, value: Option<&Value>) {
     );
 }
 
-fn find_controller_artifact(
+pub(super) fn find_controller_artifact(
     record: &AgentTaskLoopControllerRecord,
     artifact_id: &str,
 ) -> Option<Value> {

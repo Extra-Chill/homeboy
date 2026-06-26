@@ -400,6 +400,9 @@ where
         AgentTaskLoopPolicyAction::FanOut {
             dedupe_key,
             entity_ids,
+            dynamic_artifact,
+            group_by,
+            requires_non_empty,
             max_items,
             fail_fast,
             request_template,
@@ -408,6 +411,9 @@ where
             action,
             dedupe_key,
             entity_ids,
+            dynamic_artifact.as_deref(),
+            group_by,
+            *requires_non_empty,
             *max_items,
             *fail_fast,
             request_template,
@@ -1164,6 +1170,9 @@ pub(super) fn execute_fan_out_action<E, D>(
     action: &AgentTaskLoopPolicyActionRecord,
     dedupe_key: &str,
     entity_ids: &[String],
+    dynamic_artifact: Option<&str>,
+    group_by: &[String],
+    requires_non_empty: bool,
     max_items: usize,
     fail_fast: bool,
     request_template: &Value,
@@ -1174,16 +1183,25 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
-    if entity_ids.is_empty() {
+    let expanded_entity_ids = if entity_ids.is_empty() {
+        dynamic_artifact
+            .map(|artifact| dynamic_fan_out_entity_ids(record, artifact, group_by))
+            .unwrap_or_default()
+    } else {
+        entity_ids.to_vec()
+    };
+
+    if expanded_entity_ids.is_empty() {
+        let exit_code = if requires_non_empty { 1 } else { 0 };
         return Ok((
-            serde_json::json!({ "mode": "fan_out", "item_count": 0, "total_item_count": 0, "max_items": max_items, "fail_fast": fail_fast, "concurrency": 1, "results": [] }),
-            0,
+            serde_json::json!({ "mode": "fan_out", "item_count": 0, "total_item_count": 0, "max_items": max_items, "fail_fast": fail_fast, "concurrency": 1, "dynamic_artifact": dynamic_artifact, "requires_non_empty": requires_non_empty, "results": [] }),
+            exit_code,
         ));
     }
 
     let mut results = Vec::new();
     let mut exit_code = 0;
-    for entity_id in entity_ids.iter().take(max_items) {
+    for entity_id in expanded_entity_ids.iter().take(max_items) {
         let request = materialize_fan_out_request(request_template, entity_id);
         let child_dedupe_key = format!("{dedupe_key}:{entity_id}");
         let child_action = AgentTaskLoopPolicyActionRecord {
@@ -1218,9 +1236,84 @@ where
     }
     let item_count = results.len();
     Ok((
-        serde_json::json!({ "mode": "fan_out", "item_count": item_count, "total_item_count": entity_ids.len(), "max_items": max_items, "fail_fast": fail_fast, "concurrency": 1, "truncated": item_count < entity_ids.len(), "results": results }),
+        serde_json::json!({ "mode": "fan_out", "item_count": item_count, "total_item_count": expanded_entity_ids.len(), "max_items": max_items, "fail_fast": fail_fast, "concurrency": 1, "dynamic_artifact": dynamic_artifact, "requires_non_empty": requires_non_empty, "truncated": item_count < expanded_entity_ids.len(), "results": results }),
         exit_code,
     ))
+}
+
+fn dynamic_fan_out_entity_ids(
+    record: &AgentTaskLoopControllerRecord,
+    artifact_id: &str,
+    group_by: &[String],
+) -> Vec<String> {
+    let Some(artifact) = find_controller_artifact(record, artifact_id) else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    collect_fan_out_items(&artifact, &mut items);
+    let mut entity_ids = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let entity_id = fan_out_entity_id(artifact_id, item, group_by)
+            .unwrap_or_else(|| format!("{artifact_id}:{}", index + 1));
+        if !entity_ids.contains(&entity_id) {
+            entity_ids.push(entity_id);
+        }
+    }
+    entity_ids
+}
+
+fn collect_fan_out_items(value: &Value, items: &mut Vec<Value>) {
+    if let Some(array) = value.as_array() {
+        items.extend(array.iter().cloned());
+        return;
+    }
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for key in ["groups", "items", "records", "artifacts"] {
+        if let Some(array) = object.get(key).and_then(Value::as_array) {
+            items.extend(array.iter().cloned());
+            return;
+        }
+    }
+    if let Some(payload) = object.get("payload") {
+        collect_fan_out_items(payload, items);
+        return;
+    }
+    if object.contains_key("group_id") || object.contains_key("id") {
+        items.push(value.clone());
+    }
+}
+
+fn fan_out_entity_id(artifact_id: &str, item: &Value, group_by: &[String]) -> Option<String> {
+    if let Some(value) = item.as_str().filter(|value| !value.is_empty()) {
+        return Some(value.to_string());
+    }
+    let object = item.as_object()?;
+    for key in ["entity_id", "group_id", "id", "key", "name"] {
+        if let Some(value) = object
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(format!("{artifact_id}:{value}"));
+        }
+    }
+    if !group_by.is_empty() {
+        let values = group_by
+            .iter()
+            .filter_map(|key| {
+                object
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+            })
+            .collect::<Vec<_>>();
+        if values.len() == group_by.len() {
+            return Some(format!("{artifact_id}:{}", values.join(":")));
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]

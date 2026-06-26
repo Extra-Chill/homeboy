@@ -43,6 +43,12 @@ pub enum AgentTaskLoopPolicyAction {
         dedupe_key: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         entity_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic_artifact: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        group_by: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        requires_non_empty: bool,
         #[serde(
             default = "default_fan_out_max_items",
             skip_serializing_if = "is_default_fan_out_max_items"

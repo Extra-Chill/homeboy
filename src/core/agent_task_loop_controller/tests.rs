@@ -548,6 +548,9 @@ fn policy_transitions_can_match_structured_event_jsonpath() {
             actions: vec![AgentTaskLoopPolicyAction::FanOut {
                 dedupe_key: "validation:run-1:actionable-findings".to_string(),
                 entity_ids: vec!["finding:a".to_string()],
+                dynamic_artifact: None,
+                group_by: Vec::new(),
+                requires_non_empty: false,
                 max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
                 fail_fast: true,
                 request_template: json!({ "kind": "repair" }),
@@ -666,6 +669,9 @@ fn runner_policy_blocks_remote_materialization_failures() {
     let action = AgentTaskLoopPolicyAction::FanOut {
         dedupe_key: "fanout:lab".to_string(),
         entity_ids: vec!["finding:1".to_string()],
+        dynamic_artifact: None,
+        group_by: Vec::new(),
+        requires_non_empty: false,
         max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
         fail_fast: true,
         request_template: json!({
