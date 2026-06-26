@@ -1,8 +1,7 @@
 # PR quality pipeline.
 #
-# Homeboy Action owns the CI DAG so command failures aggregate instead of
-# skipping later quality checks. Ordinary PR quality gates use the action-provided
-# Homeboy binary instead of compiling a release binary on every pull request.
+# Keep these checks direct in this repository so PRs do not depend on an extra
+# reusable-workflow planning job before actionable Audit/Lint/Test checks exist.
 
 name: CI
 
@@ -23,13 +22,55 @@ permissions:
 
 jobs:
   homeboy:
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
-    with:
-      component: homeboy
-      commands: audit,lint,test
-      differential-gating: true
-      # Autofix is explicitly disabled on PRs: an on-failure autofix push
-      # lands a bot commit mid-review and supersedes in-flight CI runs,
-      # which reads as a spurious failure (see #3819). Require manual fixes.
-      autofix: 'false'
-    secrets: inherit
+    name: homeboy / ${{ matrix.title }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - command: audit
+            title: Audit
+            section_key: audit
+            section_title: Audit
+          - command: lint
+            title: Lint
+            section_key: lint
+            section_title: Lint
+          - command: test
+            title: Test
+            section_key: test
+            section_title: Test
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Check out Homeboy Action
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: v2
+          path: .homeboy-action
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: ./.homeboy-action
+        with:
+          component: homeboy
+          commands: ${{ matrix.command }}
+          expected-commands: audit,lint,test
+          differential-gating: true
+          # Autofix is explicitly disabled on PRs: an on-failure autofix push
+          # lands a bot commit mid-review and supersedes in-flight CI runs,
+          # which reads as a spurious failure (see #3819). Require manual fixes.
+          autofix: 'false'
+          app-token: ${{ steps.app-token.outputs.token || github.token }}
+          comment-section-key: ${{ matrix.section_key }}
+          comment-section-title: ${{ matrix.section_title }}
