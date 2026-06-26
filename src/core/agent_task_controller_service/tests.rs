@@ -46,6 +46,9 @@ struct CountingFailingDispatchHook {
 }
 
 #[derive(Clone, Default)]
+struct RuntimeBudgetDispatchHook;
+
+#[derive(Clone, Default)]
 struct EvidenceExecutor;
 
 impl ControllerDispatchHook for CapturingDispatchHook {
@@ -167,6 +170,38 @@ impl ControllerDispatchHook for CountingFailingDispatchHook {
                 }]
             }),
             1,
+        ))
+    }
+}
+
+impl ControllerDispatchHook for RuntimeBudgetDispatchHook {
+    fn dispatch(&self, _request: &Value) -> Result<(Value, i32)> {
+        Ok((
+            json!({
+                "schema": "homeboy/test-generic-dispatch-result/v1",
+                "run_id": "generic-run-runtime-budget",
+                "aggregate": {
+                    "outcomes": [{
+                        "task_id": "task-runtime-bundle",
+                        "status": "succeeded",
+                        "outputs": {
+                            "provider_run_result": {
+                                "wait_result": {
+                                    "terminal_state": "timeout",
+                                    "steps_drained": 12,
+                                    "actions_drained": 7,
+                                    "elapsed_ms": 300123
+                                },
+                                "job_status": "running",
+                                "completion_outcome": "wait_budget_expired",
+                                "error_type": "runtime_wait_timeout",
+                                "classification": "runtime_incomplete"
+                            }
+                        }
+                    }]
+                }
+            }),
+            0,
         ))
     }
 }
@@ -2135,6 +2170,113 @@ fn resume_failed_action_result_includes_top_level_failure_summary() {
         assert_eq!(
             failed["execution"]["result"]["aggregate"]["outcomes"][0]["diagnostics"][0]["message"],
             failed["failure_summary"]["diagnostic"]
+        );
+    });
+}
+
+#[test]
+fn runtime_bundle_action_result_exposes_budgets_and_observed_wait_outcome() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-runtime-budget-evidence".to_string(),
+            phase: "generate".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        let workflow_context = json!({
+            "schema": "homeboy/repo-loop-workflow-context/v1",
+            "workflow_id": "bundle-generation",
+            "runtime_task": {
+                "kind": "bundle",
+                "ability": "runtime-package/run",
+                "input": {
+                    "package": { "source": "bundles/site-generator" },
+                    "time_budget_ms": 900000,
+                    "step_budget": 42,
+                    "input": {
+                        "wait_for_completion": true,
+                        "drain_budget_ms": 300000
+                    }
+                }
+            },
+            "plan": {
+                "schema": "homeboy/repo-loop-workflow-plan/v1",
+                "artifacts": [{
+                    "id": "generated_candidate",
+                    "artifact_type": "runtime-candidate",
+                    "data": {
+                        "kind": "runtime-candidate",
+                        "required": true
+                    }
+                }]
+            }
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "workflow:bundle-generation".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "dispatch",
+                    "run_id": "controller-service-runtime-budget",
+                    "dispatch": {
+                        "client_context": workflow_context.to_string()
+                    }
+                }),
+            },
+            "run runtime bundle",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let result = resume(
+            "loop-service-runtime-budget-evidence",
+            CapturingExecutor::default(),
+            &RuntimeBudgetDispatchHook,
+        )
+        .expect("controller resumed");
+
+        assert_eq!(result.exit_code, 1);
+        let failed = &result.value.results[0];
+        assert_eq!(failed["status"], json!("failed"));
+        assert_eq!(
+            failed["execution"]["runtime_bundle"]["configured"]["tasks"][0]["budgets"]
+                ["time_budget_ms"],
+            json!(900000)
+        );
+        assert_eq!(
+            failed["execution"]["runtime_bundle"]["configured"]["tasks"][0]["budgets"]
+                ["step_budget"],
+            json!(42)
+        );
+        assert_eq!(
+            failed["execution"]["runtime_bundle"]["configured"]["tasks"][0]["budgets"]
+                ["drain_budget_ms"],
+            json!(300000)
+        );
+        let observed = &failed["execution"]["runtime_bundle"]["observed"]["results"];
+        assert!(observed
+            .as_array()
+            .expect("observed results")
+            .iter()
+            .any(|entry| {
+                entry["wait_result"]["terminal_state"] == json!("timeout")
+                    && entry["wait_result"]["steps_drained"] == json!(12)
+                    && entry["wait_result"]["actions_drained"] == json!(7)
+                    && entry["wait_result"]["elapsed_ms"] == json!(300123)
+            }));
+        assert!(observed
+            .as_array()
+            .expect("observed results")
+            .iter()
+            .any(|entry| {
+                entry["job_status"] == json!("running")
+                    && entry["completion_outcome"] == json!("wait_budget_expired")
+                    && entry["error_type"] == json!("runtime_wait_timeout")
+                    && entry["classification"] == json!("runtime_incomplete")
+            }));
+        assert_eq!(
+            failed["execution"]["result"]["aggregate"]["outcomes"][0]["outputs"]
+                ["provider_run_result"]["wait_result"]["terminal_state"],
+            json!("timeout")
         );
     });
 }
