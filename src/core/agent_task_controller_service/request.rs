@@ -44,6 +44,7 @@ pub fn controller_request_dispatch_command(
         secret_env: optional_string_array(dispatch, "secret_env")?,
         concurrency: optional_usize(dispatch, "concurrency")?.unwrap_or(1),
         run_id: optional_string(dispatch, "run_id"),
+        task_id: optional_string(dispatch, "task_id"),
         core: DispatchCoreInputs {
             tasks_json: optional_string(dispatch, "tasks_json"),
             provider_config: optional_string(dispatch, "provider_config"),

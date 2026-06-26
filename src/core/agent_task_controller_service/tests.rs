@@ -507,6 +507,52 @@ fn execute_controller_action_fails_closed_for_unimplemented_runner_target() {
     });
 }
 
+#[test]
+fn execute_controller_dispatch_injects_action_scoped_identity() {
+    with_isolated_home(|_| {
+        let mut record = AgentTaskLoopControllerRecord::new("loop-dispatch-identity", "init", "v1");
+        let action = record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "workflow:store-idea".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "dispatch",
+                    "dispatch": {
+                        "prompt": "Produce a concept packet.",
+                        "repo": "wp-site-generator"
+                    }
+                }),
+            },
+            "repo loop workflow",
+        );
+        let dispatch = CapturingDispatchHook::default();
+
+        let result = execute_controller_action_with_runner_availability(
+            &mut record,
+            &action.action_id,
+            CapturingExecutor::default(),
+            &dispatch,
+            |_| unreachable!("dispatch action has no runner policy"),
+        )
+        .expect("dispatch action runs");
+
+        assert_eq!(result.exit_code, 0);
+        let observed = dispatch
+            .observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let request = observed.first().expect("observed dispatch request");
+        let run_id = request["dispatch"]["run_id"].as_str().expect("run id");
+        let task_id = request["dispatch"]["task_id"].as_str().expect("task id");
+        assert!(
+            run_id.starts_with("controller-loop-dispatch-identity-action-1-workflow_store-idea")
+        );
+        assert!(task_id
+            .starts_with("controller-task-loop-dispatch-identity-action-1-workflow_store-idea"));
+        assert_eq!(request["dispatch"]["repo"], "wp-site-generator");
+    });
+}
+
 fn test_plan() -> AgentTaskPlan {
     AgentTaskPlan::new(
         "controller-service-plan",
@@ -3464,6 +3510,149 @@ fn run_command_workflow_executes_deterministic_artifact_action() {
         )
         .expect("persisted artifact json");
         assert_eq!(persisted["schema"], "example/ValidationResult/v1");
+    });
+}
+
+#[test]
+fn run_command_workflow_times_out_instead_of_blocking_controller() {
+    with_isolated_home(|_| {
+        let spec = AgentTaskRepoLoopSpec {
+            schema: None,
+            loop_id: "repo-loop-command-timeout".to_string(),
+            phase: "init".to_string(),
+            config_version: "v1".to_string(),
+            metadata: Value::Null,
+            entities: Vec::new(),
+            agents: Vec::new(),
+            tools: Vec::new(),
+            abilities: Vec::new(),
+            workflows: vec![AgentTaskRepoLoopSpecWorkflow {
+                workflow_id: "deterministic-validation".to_string(),
+                agent_id: None,
+                prompt: None,
+                tasks: vec!["Run deterministic validation.".to_string()],
+                entity_ids: Vec::new(),
+                fan_out: None,
+                tools: Vec::new(),
+                abilities: Vec::new(),
+                artifacts: vec!["validation_result".to_string()],
+                consumes: Vec::new(),
+                emits: Vec::new(),
+                dependencies: Vec::new(),
+                gates: Vec::new(),
+                metrics: Vec::new(),
+                runtime_execution: json!({
+                    "kind": "command",
+                    "command": "/bin/sh",
+                    "args": ["-c", "sleep 5"],
+                    "timeout_seconds": 1
+                }),
+                inputs: Value::Null,
+            }],
+            artifacts: vec![AgentTaskRepoLoopSpecArtifact {
+                artifact_id: "validation_result".to_string(),
+                kind: "example/ValidationResult/v1".to_string(),
+                description: None,
+                required: true,
+            }],
+            artifact_graph: Vec::new(),
+            dependencies: Vec::new(),
+            gates: Vec::new(),
+            metrics: Vec::new(),
+            gate_bundles: Vec::new(),
+            policy: None,
+            phases: Vec::new(),
+            actions: Vec::new(),
+            initial_event: None,
+        };
+
+        init_from_spec(ControllerFromSpecRequest { spec }).expect("init");
+        let result = run_next(
+            "repo-loop-command-timeout",
+            CapturingExecutor::default(),
+            &CapturingDispatchHook::default(),
+        )
+        .expect("run command action");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status.as_deref(), Some("failed"));
+        let execution = result.value.execution.as_ref().expect("execution");
+        assert_eq!(execution["timed_out"].as_bool(), Some(true));
+        assert_eq!(execution["timeout_seconds"].as_u64(), Some(1));
+    });
+}
+
+#[test]
+fn run_command_workflow_timeout_kills_child_process_group() {
+    with_isolated_home(|_| {
+        let marker_dir = tempfile::tempdir().expect("marker tempdir");
+        let marker = marker_dir.path().join("orphan-marker");
+        let marker_arg = marker.to_string_lossy().into_owned();
+        let spec = AgentTaskRepoLoopSpec {
+            schema: None,
+            loop_id: "repo-loop-command-process-group-timeout".to_string(),
+            phase: "init".to_string(),
+            config_version: "v1".to_string(),
+            metadata: Value::Null,
+            entities: Vec::new(),
+            agents: Vec::new(),
+            tools: Vec::new(),
+            abilities: Vec::new(),
+            workflows: vec![AgentTaskRepoLoopSpecWorkflow {
+                workflow_id: "deterministic-validation".to_string(),
+                agent_id: None,
+                prompt: None,
+                tasks: vec!["Run deterministic validation.".to_string()],
+                entity_ids: Vec::new(),
+                fan_out: None,
+                tools: Vec::new(),
+                abilities: Vec::new(),
+                artifacts: vec!["validation_result".to_string()],
+                consumes: Vec::new(),
+                emits: Vec::new(),
+                dependencies: Vec::new(),
+                gates: Vec::new(),
+                metrics: Vec::new(),
+                runtime_execution: json!({
+                    "kind": "command",
+                    "command": "/bin/sh",
+                    "args": ["-c", "sleep 3 && touch \"$1\" & wait", "sh", marker_arg],
+                    "timeout_seconds": 1
+                }),
+                inputs: Value::Null,
+            }],
+            artifacts: vec![AgentTaskRepoLoopSpecArtifact {
+                artifact_id: "validation_result".to_string(),
+                kind: "example/ValidationResult/v1".to_string(),
+                description: None,
+                required: true,
+            }],
+            artifact_graph: Vec::new(),
+            dependencies: Vec::new(),
+            gates: Vec::new(),
+            metrics: Vec::new(),
+            gate_bundles: Vec::new(),
+            policy: None,
+            phases: Vec::new(),
+            actions: Vec::new(),
+            initial_event: None,
+        };
+
+        init_from_spec(ControllerFromSpecRequest { spec }).expect("init");
+        let result = run_next(
+            "repo-loop-command-process-group-timeout",
+            CapturingExecutor::default(),
+            &CapturingDispatchHook::default(),
+        )
+        .expect("run command action");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status.as_deref(), Some("failed"));
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        assert!(
+            !marker.exists(),
+            "timed-out command left an orphan child process"
+        );
     });
 }
 
