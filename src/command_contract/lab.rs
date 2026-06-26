@@ -576,6 +576,7 @@ impl Commands {
                     | agent_task::AgentTaskCommand::RunNext
                     | agent_task::AgentTaskCommand::Logs(_)
                     | agent_task::AgentTaskCommand::Artifacts(_)
+                    | agent_task::AgentTaskCommand::Evidence(_)
                     | agent_task::AgentTaskCommand::Review(_)
                     // Discovery commands (list/active/latest) are runner-resident
                     // reads too: a freshly-offloaded Lab run's durable record
