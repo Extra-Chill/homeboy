@@ -542,6 +542,21 @@ assert.deepEqual(customRuntimePolicyTaskInput.allowed_tools, [
 assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime, '/components/example-runtime');
 assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime_tools, '/components/example-tools');
 
+const previousRuntimeComponentEnv = process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT;
+process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT = '/components/wp-codebox-runtime-plugin';
+const envRuntimeComponentTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'env-runtime-component-task-1',
+  executor: { backend: 'codebox', config: { provider: 'codex' } },
+  instructions: 'Run with a runtime component supplied by the selected runner environment.',
+});
+if (previousRuntimeComponentEnv === undefined) {
+  delete process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT;
+} else {
+  process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT = previousRuntimeComponentEnv;
+}
+assert.equal(envRuntimeComponentTaskInput.runtime_component_paths.runtime, '/components/wp-codebox-runtime-plugin');
+
 const runtimeInvocationTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'generic-provider-runtime-invocation-task-1',

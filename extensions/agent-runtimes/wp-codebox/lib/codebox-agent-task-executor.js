@@ -1351,9 +1351,10 @@ function runtimeTaskAbilityNormalizationEvidence(runtimeTask = {}) {
 }
 
 function runtimeComponentPaths(config, options = {}) {
-  const runtimeComponents = config.runtime_components && typeof config.runtime_components === 'object'
-    ? config.runtime_components
-    : {};
+  const runtimeComponents = {
+    ...(config.runtime_components && typeof config.runtime_components === 'object' ? config.runtime_components : {}),
+    ...(process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT ? { runtime: process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT } : {}),
+  };
   const explicit = config.runtime_component_paths && typeof config.runtime_component_paths === 'object'
     ? config.runtime_component_paths
     : {};
