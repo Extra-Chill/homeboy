@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use crate::core::extension::trace::{TraceProbeConfig, TraceSpanMetadata};
 
 use super::{
-    TraceDependencySpec, TraceGuardrailSpec, TracePublicPreviewSpec, TraceVariantSpec, WorkloadSpec,
+    ArtifactPostprocessSpec, TraceDependencySpec, TraceGuardrailSpec, TracePublicPreviewSpec,
+    TraceVariantSpec, WorkloadSpec,
 };
 
 impl WorkloadSpec {
@@ -25,6 +26,10 @@ impl WorkloadSpec {
 
     pub fn named_leases(&self) -> &[String] {
         &self.named_leases
+    }
+
+    pub fn artifact_postprocess(&self) -> &[ArtifactPostprocessSpec] {
+        &self.artifact_postprocess
     }
 
     pub fn trace_phase_preset(&self, name: &str) -> Option<&[String]> {

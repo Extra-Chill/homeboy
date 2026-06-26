@@ -386,6 +386,7 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
         passthrough_args: Vec::new(),
         target_inventory: None,
         execution: None,
+        postprocess: Vec::new(),
         results: None,
         campaign_contract: fuzz_campaign_contract(None, None),
         runner_contract: FuzzRunnerContract {

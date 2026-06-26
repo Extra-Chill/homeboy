@@ -66,8 +66,8 @@ pub use source::{
     SkippedRigSourceStack, SkippedRigSourceUpdate,
 };
 pub use spec::{
-    AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, BenchSpec, CheckSpec,
-    ComponentSpec, DiscoverSpec, ExecutableRequirementSpec, FilesystemAssertionKind,
+    AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, ArtifactPostprocessSpec, BenchSpec,
+    CheckSpec, ComponentSpec, DiscoverSpec, ExecutableRequirementSpec, FilesystemAssertionKind,
     FilesystemAssertionSpec, NewerThanSpec, PatchOp, PipelineStep, RigRequirementsSpec,
     RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp,
     SymlinkSpec, TimeSource, TraceConfig, TraceDependencySpec, TraceExperimentArtifactSpec,
