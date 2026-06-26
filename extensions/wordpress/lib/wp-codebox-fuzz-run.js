@@ -518,6 +518,7 @@ function homeboyFuzzWorkloadRunInputFromFile(workloadPath, options = {}) {
 	} catch {
 		return undefined;
 	}
+	source = expandWorkloadTemplateTokens(source, { packageRoot: packageRootFromWorkloadPath(filePath), sourceFilePath: filePath });
 	const steps = normalizeWordPressWorkloadSteps(source.run || source.steps, { sourceFilePath: filePath });
 	if (steps.length === 0) {
 		return undefined;
@@ -533,6 +534,29 @@ function homeboyFuzzWorkloadRunInputFromFile(workloadPath, options = {}) {
 			source_entry: options.entry,
 		}),
 	});
+}
+
+function packageRootFromWorkloadPath(filePath) {
+	const parent = path.basename(path.dirname(filePath));
+	if (['bench', 'fuzz', 'manifests', 'tools'].includes(parent)) {
+		return path.dirname(path.dirname(filePath));
+	}
+	return path.dirname(filePath);
+}
+
+function expandWorkloadTemplateTokens(value, replacements = {}) {
+	if (typeof value === 'string') {
+		return value
+			.replaceAll('${package.root}', replacements.packageRoot || '')
+			.replaceAll('${source.file}', replacements.sourceFilePath || '');
+	}
+	if (Array.isArray(value)) {
+		return value.map((item) => expandWorkloadTemplateTokens(item, replacements));
+	}
+	if (objectOrUndefined(value)) {
+		return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expandWorkloadTemplateTokens(item, replacements)]));
+	}
+	return value;
 }
 
 function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, artifacts = []) {
