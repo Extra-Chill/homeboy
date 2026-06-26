@@ -67,6 +67,22 @@ select a backend; currently supported value: `wp-codebox`.
 Reusable WordPress/WooCommerce workload helpers live under `scripts/bench/lib/`.
 Workloads can require them from the WP Codebox-mounted extension path.
 
+### WP Codebox Browser Coverage Primitive
+
+`lib/wp-codebox-browser-coverage.js` provides the shared declaration shape for
+WP Codebox browser request-coverage workloads. The helper normalizes
+`homeboy/wordpress-wp-codebox-browser-coverage/v1` declarations with:
+
+- `component_id` for the Homeboy component under coverage.
+- `required_file` and `activation_file` for plugin/theme presence and activation.
+- `scenarios[]` with stable scenario ids and optional browser step files.
+- `profile` and `profile_metadata` for WP version, viewport, timeouts, inputs,
+  assumptions, and ownership metadata.
+- `trace_command` for the caller-owned trace entry point.
+
+This is a contract helper only. WP Codebox still owns recipe execution and
+browser artifact semantics; product rigs own their scenario files and setup code.
+
 ### Deterministic Expensive WooCommerce Shipping
 
 `/homeboy-extension/scripts/bench/lib/woocommerce-expensive-shipping.php`
