@@ -24,6 +24,8 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let failure = evidence_report::evidence_failure_summary(&run);
     let retention = evidence_report::evidence_retention(&artifact_root, &run.id);
     let evidence_links = evidence_report::evidence_links(&artifacts);
+    let agent_task_lifecycle_event =
+        evidence_report::evidence_agent_task_lifecycle_event(&run.metadata_json);
     let matrix_summary = evidence_report::evidence_matrix_summary(&run, &artifacts);
     let (evidence_manifest, evidence_manifest_errors) =
         evidence_report::evidence_manifest(&run, &artifacts);
@@ -50,6 +52,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
             failure,
             disk_budget,
             evidence_links,
+            agent_task_lifecycle_event,
             matrix_summary,
             evidence_manifest,
             evidence_manifest_errors,
@@ -158,7 +161,30 @@ mod tests {
                             }]
                         },
                         "scenario_metrics": [{"scenario_id":"cold","metrics":{"p95_ms":42.0}}],
-                        "resource_policy": {"hot_command":"bench"}
+                        "resource_policy": {"hot_command":"bench"},
+                        "lab": {
+                            "remote_events": [{
+                                "data": {
+                                    "data": {
+                                        "agent_task_lifecycle_event": {
+                                            "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+                                            "identity": {
+                                                "runner_id": "lab-default",
+                                                "runner_job_id": "job-1",
+                                                "run_id": "run-typed"
+                                            },
+                                            "aggregate": {
+                                                "schema": "homeboy/agent-task-aggregate/v1",
+                                                "plan_id": "plan-from-event",
+                                                "status": "succeeded",
+                                                "totals": {"skipped": 0, "succeeded": 1, "failed": 0},
+                                                "outcomes": []
+                                            }
+                                        }
+                                    }
+                                }
+                            }]
+                        }
                     }),
                 ))
                 .expect("run");
@@ -257,6 +283,13 @@ mod tests {
             assert_eq!(manifest.tracker_refs[0].id, "Extra-Chill/homeboy#123");
             assert_eq!(manifest.blocking_conditions[0].kind, "review_needed");
             assert!(output.evidence_manifest_errors.is_empty());
+            let lifecycle_event = output
+                .agent_task_lifecycle_event
+                .expect("agent task lifecycle event");
+            assert_eq!(
+                lifecycle_event["aggregate"]["plan_id"].as_str(),
+                Some("plan-from-event")
+            );
             assert!(
                 output.disk_budget.available_bytes.is_some()
                     || output.disk_budget.warning.is_some()

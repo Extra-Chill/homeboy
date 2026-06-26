@@ -21,10 +21,12 @@ use crate::core::agent_tasks::provider::{
 use crate::core::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan,
 };
-use crate::core::api_jobs::{JobEvent, JobEventKind};
+use crate::core::api_jobs::JobEvent;
+#[cfg(test)]
+use crate::core::api_jobs::JobEventKind;
 use crate::core::runner::agent_task_lifecycle_event::{
-    is_agent_task_run_plan_envelope, parse_offloaded_run_plan_envelope,
-    AgentTaskRunPlanLifecycleEvent, AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA,
+    agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,
+    parse_offloaded_run_plan_envelope,
 };
 use crate::core::{config, Error, Result};
 use serde::{Deserialize, Serialize};
@@ -114,7 +116,7 @@ pub(super) fn mirror_agent_task_run_plan_lifecycle(
     if plan_spec == "-" {
         return Ok(());
     }
-    let aggregate = match typed_agent_task_lifecycle_event_from_job_events(job_events) {
+    let aggregate = match agent_task_run_plan_lifecycle_event_from_job_events(job_events) {
         Some(event) => event.aggregate,
         None => {
             let envelope = parse_offloaded_run_plan_envelope(
@@ -145,36 +147,6 @@ pub(super) fn mirror_agent_task_run_plan_lifecycle(
     agent_task_lifecycle::mark_running(&run_id)?;
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(())
-}
-
-fn typed_agent_task_lifecycle_event_from_job_events(
-    job_events: Option<&[JobEvent]>,
-) -> Option<AgentTaskRunPlanLifecycleEvent> {
-    job_events?.iter().rev().find_map(|event| {
-        if event.kind != JobEventKind::Result && event.kind != JobEventKind::Progress {
-            return None;
-        }
-        typed_agent_task_lifecycle_event_from_value(event.data.as_ref()?)
-    })
-}
-
-fn typed_agent_task_lifecycle_event_from_value(
-    value: &serde_json::Value,
-) -> Option<AgentTaskRunPlanLifecycleEvent> {
-    if value.get("schema").and_then(serde_json::Value::as_str)
-        == Some(AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA)
-    {
-        return serde_json::from_value(value.clone()).ok();
-    }
-    if let Some(event) = value
-        .get("agent_task_lifecycle_event")
-        .and_then(typed_agent_task_lifecycle_event_from_value)
-    {
-        return Some(event);
-    }
-    value
-        .get("data")
-        .and_then(typed_agent_task_lifecycle_event_from_value)
 }
 
 fn agent_task_run_plan_lifecycle_output<'a>(
@@ -834,7 +806,7 @@ mod tests {
             })),
         }];
 
-        let event = typed_agent_task_lifecycle_event_from_job_events(Some(&events))
+        let event = agent_task_run_plan_lifecycle_event_from_job_events(Some(&events))
             .expect("typed lifecycle event");
 
         assert_eq!(event.identity.runner_id, "lab-default");

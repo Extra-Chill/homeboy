@@ -51,6 +51,8 @@ pub struct RunEvidenceReport<S: Serialize> {
     pub disk_budget: DiskBudget,
     pub evidence_links: Vec<EvidenceLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_task_lifecycle_event: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub matrix_summary: Option<GenericMatrixSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_manifest: Option<EvidenceManifest>,
@@ -161,6 +163,38 @@ pub fn evidence_metadata(metadata: &Value) -> EvidenceMetadata {
         ),
         runtime: pick_metadata(metadata, &["runtime", "runner", "ci_context", "rig_state"]),
     }
+}
+
+pub fn evidence_agent_task_lifecycle_event(metadata: &Value) -> Option<Value> {
+    agent_task_lifecycle_event_value(metadata).cloned()
+}
+
+fn agent_task_lifecycle_event_value(value: &Value) -> Option<&Value> {
+    if value.get("schema").and_then(Value::as_str)
+        == Some("homeboy/agent-task-run-plan-lifecycle-event/v1")
+    {
+        return Some(value);
+    }
+    if let Some(event) = value
+        .get("agent_task_lifecycle_event")
+        .and_then(agent_task_lifecycle_event_value)
+    {
+        return Some(event);
+    }
+    if let Some(event) = value.get("data").and_then(agent_task_lifecycle_event_value) {
+        return Some(event);
+    }
+    value
+        .get("lab")
+        .and_then(|lab| lab.get("remote_events"))
+        .and_then(Value::as_array)
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .filter_map(|event| event.get("data"))
+                .find_map(agent_task_lifecycle_event_value)
+        })
 }
 
 fn pick_metadata(metadata: &Value, keys: &[&str]) -> Value {
