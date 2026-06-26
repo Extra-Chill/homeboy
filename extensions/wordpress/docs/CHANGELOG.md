@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.17.0] - 2026-06-26
+
+### Added
+- bind fuzz proof outputs
+
 ## [3.16.0] - 2026-06-25
 
 ### Added
