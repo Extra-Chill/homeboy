@@ -1,5 +1,6 @@
 use crate::command_contract::AgentTaskDispatchIdentity;
 use crate::core::agent_tasks::scheduler::AgentTaskAggregate;
+use crate::core::api_jobs::{JobEvent, JobEventKind};
 use crate::core::{Error, Result};
 
 pub(crate) const AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA: &str =
@@ -82,4 +83,34 @@ pub(crate) fn is_agent_task_run_plan_envelope(value: &serde_json::Value) -> bool
             .get("data")
             .and_then(|data| data.get("plan_id"))
             .is_some()
+}
+
+pub(crate) fn agent_task_run_plan_lifecycle_event_from_job_events(
+    job_events: Option<&[JobEvent]>,
+) -> Option<AgentTaskRunPlanLifecycleEvent> {
+    job_events?.iter().rev().find_map(|event| {
+        if event.kind != JobEventKind::Result && event.kind != JobEventKind::Progress {
+            return None;
+        }
+        agent_task_run_plan_lifecycle_event_from_value(event.data.as_ref()?)
+    })
+}
+
+pub(crate) fn agent_task_run_plan_lifecycle_event_from_value(
+    value: &serde_json::Value,
+) -> Option<AgentTaskRunPlanLifecycleEvent> {
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        == Some(AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA)
+    {
+        return serde_json::from_value(value.clone()).ok();
+    }
+    if let Some(event) = value
+        .get("agent_task_lifecycle_event")
+        .and_then(agent_task_run_plan_lifecycle_event_from_value)
+    {
+        return Some(event);
+    }
+    value
+        .get("data")
+        .and_then(agent_task_run_plan_lifecycle_event_from_value)
 }

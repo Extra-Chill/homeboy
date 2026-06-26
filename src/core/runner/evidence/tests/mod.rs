@@ -4,7 +4,7 @@ use reqwest::header;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::core::api_jobs::{Job, JobArtifactMetadata, JobStatus};
+use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus};
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::runner::{Runner, RunnerKind};
 use crate::core::server::{RunnerPolicy, RunnerSettings};
@@ -118,13 +118,40 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
             claim_expires_at_ms: None,
             artifacts: Vec::new(),
         };
+        let lifecycle_event = json!({
+            "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+            "identity": {
+                "runner_id": "lab",
+                "runner_job_id": job_id.to_string(),
+                "run_id": "run-typed"
+            },
+            "aggregate": {
+                "schema": "homeboy/agent-task-aggregate/v1",
+                "plan_id": "plan-from-result",
+                "status": "succeeded",
+                "totals": {"skipped": 0, "succeeded": 1, "failed": 0},
+                "outcomes": []
+            }
+        });
+        let events = vec![JobEvent {
+            sequence: 1,
+            job_id,
+            kind: JobEventKind::Result,
+            timestamp_ms: 1_700_000_001_000,
+            message: None,
+            data: Some(json!({
+                "data": {
+                    "agent_task_lifecycle_event": lifecycle_event
+                }
+            })),
+        }];
         let run = mirror_job_run(
             &store,
             &ssh_runner(),
             "/srv/homeboy/project",
             &["homeboy".to_string(), "bench".to_string()],
             &job,
-            &[],
+            &events,
             &json!({"exit_code":0,"output":{"command":"bench"}}),
             None,
         )
@@ -139,6 +166,10 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
         assert_eq!(
             run.metadata_json["lab"]["remote_job"]["id"].as_str(),
             Some(job_id.to_string().as_str())
+        );
+        assert_eq!(
+            run.metadata_json["lab"]["agent_task_lifecycle_event"]["aggregate"]["plan_id"].as_str(),
+            Some("plan-from-result")
         );
     });
 }
