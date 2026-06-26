@@ -236,7 +236,8 @@ assert.deepEqual(jsonWorkloadInput.cases[0].input, {
 	after: [],
 	metadata: { fixture: 'json-workload-smoke', source_path: jsonWorkloadPath, source_entry: 'wp-codebox/run-fuzz-suite' },
 });
-assert.deepEqual(jsonWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(jsonWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.plugin-state', args: ['plugin-state-json={"activate":[{"plugin":"sample-plugin/sample-plugin.php"}],"deactivate":[],"report":true}'] }]);
+assert.equal(JSON.stringify(jsonWorkloadInput).includes('wordpress.ensure-plugin-active'), false);
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: [`path=${jsonWorkloadPath}`] }]);
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].required, true);
@@ -345,7 +346,7 @@ const genericPrimitiveManifest = {
 };
 const genericPrimitiveInput = wpCodeboxFuzzSuiteInput({ id: 'generic-primitive-run', homeboyFuzzWorkload: genericPrimitiveManifest });
 assert.equal(genericPrimitiveInput.cases[0].target.entrypoint, 'wordpress.fuzz-admin-pages');
-assert.deepEqual(genericPrimitiveInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(genericPrimitiveInput.cases[0].phases.setup, [{ command: 'wordpress.plugin-state', args: ['plugin-state-json={"activate":[{"plugin":"sample-plugin/sample-plugin.php"}],"deactivate":[],"report":true}'] }]);
 assert.deepEqual(genericPrimitiveInput.cases[0].phases.action, [{ command: 'wordpress.fuzz-admin-pages', args: ['safe_methods=GET', 'max_pages=80', 'enumerate_menus=true'] }]);
 assert.deepEqual(genericPrimitiveInput.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=admin_page_coverage'] }]);
 
@@ -395,7 +396,7 @@ assert.equal(planWorkloadInput.cases.length, 1);
 assert.equal(planWorkloadInput.cases[0].id, 'plan-workload-smoke:default');
 assert.equal(planWorkloadInput.cases[0].target.entrypoint, 'wordpress.inventory-rest-routes');
 assert.deepEqual(planWorkloadInput.cases[0].input, { args: ['plugin=sample-plugin/sample-plugin.php', 'namespaces=sample/v1,sample/v2', 'artifact=route_inventory'] });
-assert.deepEqual(planWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(planWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.plugin-state', args: ['plugin-state-json={"activate":[{"plugin":"sample-plugin/sample-plugin.php"}],"deactivate":[],"report":true}'] }]);
 assert.deepEqual(planWorkloadInput.cases[0].phases.action, [{
 	command: 'wordpress.inventory-rest-routes',
 	args: ['plugin=sample-plugin/sample-plugin.php', 'namespaces=sample/v1,sample/v2', 'artifact=route_inventory'],

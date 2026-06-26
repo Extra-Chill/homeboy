@@ -208,7 +208,8 @@ const jsonWorkloadResult = buildWordPressFuzzRunnerResult({
 
 assert.equal(jsonWorkloadResult.wp_codebox_input.cases.length, 1);
 assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].id, 'json-workload:default');
-assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.setup, [{ command: 'wordpress.plugin-state', args: ['plugin-state-json={"activate":[{"plugin":"sample-plugin/sample-plugin.php"}],"deactivate":[],"report":true}'] }]);
+assert.equal(JSON.stringify(jsonWorkloadResult.wp_codebox_input).includes('wordpress.ensure-plugin-active'), false);
 assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/json-workload.workload.json'] }]);
 assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
 assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].artifacts[0].required, true);
@@ -221,9 +222,9 @@ assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.extra_plugin
 	path: '/runner/components/sample-plugin/plugins/sample-plugin',
 	pluginFile: 'sample-plugin/sample-plugin.php',
 	loadAs: 'plugin',
-	activate: true,
-	metadata: { component: 'sample-plugin', rig_id: 'sample-rig' },
+	metadata: { component: 'sample-plugin', rig_id: 'sample-rig', activation: 'fuzz-suite-setup-step' },
 }]);
+assert.equal(jsonWorkloadResult.wp_codebox_runtime_requirements.extra_plugins[0].activate, undefined);
 assert.equal(
 	jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].source,
 	'/runner/components/sample-plugin/plugins/sample-plugin'

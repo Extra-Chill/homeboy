@@ -30,6 +30,7 @@ const {
 const {
 	homeboySettings,
 	wpCodeboxCommand,
+	wpCodeboxPluginStateStep,
 } = require('./wp-codebox-recipe-helper');
 const {
 	WP_CODEBOX_FUZZ_PUBLIC_ABILITIES,
@@ -556,7 +557,7 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 }
 
 function wpCodeboxPluginActivationStep(plugin) {
-	return { command: 'wordpress.wp-cli', args: [`command=plugin activate ${plugin}`] };
+	return wpCodeboxPluginStateStep({ activate: [plugin] });
 }
 
 function homeboyFuzzWorkloadCaseAction({ genericCommand, workloadPath, workloadDefinition, execute = {} } = {}) {

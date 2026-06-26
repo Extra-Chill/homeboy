@@ -54,7 +54,8 @@ assert.equal(suiteInput.cases[0].target.entrypoint, 'wordpress.run-workload');
 assert.equal(suiteInput.cases[0].input.schema, 'wp-codebox/wordpress-workload-run/v1');
 assert.equal(suiteInput.cases[0].input.steps[0].type, 'php');
 assert.equal(suiteInput.cases[0].input.metadata.source, 'inline');
-assert.deepEqual(suiteInput.cases[0].phases.setup, [{ command: 'wordpress.wp-cli', args: ['command=plugin activate example-plugin/example-plugin.php'] }]);
+assert.deepEqual(suiteInput.cases[0].phases.setup, [{ command: 'wordpress.plugin-state', args: ['plugin-state-json={"activate":[{"plugin":"example-plugin/example-plugin.php"}],"deactivate":[],"report":true}'] }]);
+assert.equal(JSON.stringify(suiteInput).includes('wordpress.ensure-plugin-active'), false);
 assert.deepEqual(suiteInput.cases[0].phases.action, [{ command: 'wordpress.run-workload' }]);
 
 const explicitOnly = buildWordPressRestDbQueryProfileWorkload({
