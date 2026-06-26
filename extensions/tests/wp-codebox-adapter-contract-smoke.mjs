@@ -25,6 +25,11 @@ const {
 	wpCodeboxProviderRuntimeOperationEntry,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-adapter-contract.js'));
 const {
+	WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
+	codeboxRunAgentTaskInvocation,
+	codeboxRunAgentTaskRequestFromTaskInput,
+} = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-run-agent-task-contract.js'));
+const {
 	wpCodeboxBin,
 	wpCodeboxCliDescriptor,
 	wpCodeboxCommand,
@@ -82,7 +87,8 @@ assert.deepEqual(wpCodeboxProviderRuntimeOperationConfig('toolCallTranscriptReco
 });
 
 assert.deepEqual(WP_CODEBOX_ROLE_ALIASES.artifact_roles.patch, ['codebox-patch']);
-assert.deepEqual(WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) => requirement.id), [
+const upstreamPrimitiveIds = WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) => requirement.id);
+for (const requiredPrimitiveId of [
 	'run-agent-task',
 	'provider-credential-boundary',
 	'runtime-profile',
@@ -91,7 +97,9 @@ assert.deepEqual(WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) =>
 	'artifact-result-envelope',
 	'artifact-apply-execution',
 	'preview-materialization',
-]);
+]) {
+	assert.ok(upstreamPrimitiveIds.includes(requiredPrimitiveId), `${requiredPrimitiveId} remains declared as an upstream primitive`);
+}
 assert.equal(
 	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
 	'consume_canonical_public_envelope_only'
@@ -101,5 +109,25 @@ assert.equal(
 	'delegate_contained_site_open_without_constructing_playground_urls'
 );
 assert.doesNotMatch(JSON.stringify(cliDescriptor), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
+
+const taskInput = {
+	schema: WP_CODEBOX_TASK_REQUEST_SCHEMA,
+	sandbox_session_id: 'task-123',
+	artifacts_path: '/tmp/artifacts',
+	provider: 'codex',
+};
+const request = codeboxRunAgentTaskRequestFromTaskInput(taskInput);
+assert.equal(request.schema, WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA);
+assert.equal(request.task_id, 'task-123');
+assert.equal(request.task_input, taskInput);
+
+assert.throws(
+	() => codeboxRunAgentTaskInvocation({
+		taskInput,
+		allowLegacyAgentTaskRunCompatibility: true,
+		runtimeProfile: { id: 'production' },
+	}),
+	/Production WP Codebox profiles require stable run-agent-task/
+);
 
 console.log('wp-codebox adapter contract smoke passed');

@@ -16,12 +16,18 @@ assert.equal(runtimePackage.wpCodeboxCliDescriptor().schema, 'wp-codebox/cli-des
 const stableConsumerExports = [
   '.',
   './codebox-agent-task-executor',
+  './codebox-artifact-contract',
   './codebox-run-agent-task-contract',
+  './codebox-runtime-profile',
+  './provider-credential-boundary',
+  './provider-outcome-normalizer',
   './wp-codebox-adapter-contract',
   './wp-codebox-adapter-descriptor',
+  './wp-codebox-runtime-contract-source',
 ];
 const forbidden = /datamachine|data machine|wp-site-generator|wpsg|site generator/i;
 for (const exportName of stableConsumerExports) {
+  assert.ok(packageJson.exports[exportName], `${exportName} stays exported for runtime consumers`);
   assert.doesNotMatch(JSON.stringify(packageJson.exports[exportName]), forbidden, `${exportName} export should stay on the WP Codebox runtime package contract`);
 }
 
