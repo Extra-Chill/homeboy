@@ -49,7 +49,7 @@ function buildConfig(env) {
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || '', true);
   const validationDependencies = validationPaths(workspace, providerPlugin, env.PROVIDER || '');
   const providerSecretEnvMapping = providerPlugin.provider_secret_env || {};
-  const providerBenchEnv = providerBenchEnvFromManifest(runtime, env.PROVIDER || '', env);
+  const providerBenchEnvNames = providerBenchEnvFromManifest(runtime, env.PROVIDER || '', env);
   for (const providerEnvName of Object.values(providerSecretEnvMapping)) {
     if (typeof providerEnvName !== 'string' || providerEnvName.length === 0) {
       continue;
@@ -57,9 +57,7 @@ function buildConfig(env) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(providerEnvName)) {
       throw new Error(`Invalid provider credential env name: ${providerEnvName}`);
     }
-    if (env[providerEnvName]) {
-      providerBenchEnv[providerEnvName] = env[providerEnvName];
-    }
+    providerBenchEnvNames.add(providerEnvName);
   }
 
   const runtimeTask = runtimeTaskFromEnv(env);
@@ -160,6 +158,12 @@ function buildConfig(env) {
     runtime_requirements: effectiveRuntimeProfile,
     github_token_env: 'HOMEBOY_GITHUB_APP_TOKEN',
     github_repository_token_env: 'GITHUB_TOKEN',
+    secret_env: uniqueStrings([
+      ...normalizeStringArray(runtimeConfig.secret_env),
+      'GITHUB_TOKEN',
+      'HOMEBOY_GITHUB_APP_TOKEN',
+      ...Array.from(providerBenchEnvNames),
+    ]),
     github_profile_id: env.GITHUB_PROFILE_ID || `${workloadId}-ci`,
     target_repo: targetRepo,
     context_repositories: normalizeContextRepositories(env.CONTEXT_REPOSITORIES || '[]'),
@@ -211,11 +215,8 @@ function buildConfig(env) {
     transcript_dir: runtimeProjection.transcript_dir,
     transcript_host_dir: runtimeProjection.transcript_host_dir,
     bench_env: {
-      GITHUB_TOKEN: env.GITHUB_REPOSITORY_TOKEN_VALUE || '',
-      HOMEBOY_GITHUB_APP_TOKEN: env.GITHUB_APP_TOKEN_VALUE || '',
       GITHUB_RUN_ID: env.GITHUB_RUN_ID_VALUE || '',
       GITHUB_RUN_ATTEMPT: env.GITHUB_RUN_ATTEMPT_VALUE || '',
-      ...providerBenchEnv,
     },
   };
 }
@@ -259,9 +260,7 @@ function providerBenchEnvFromManifest(runtime, provider, env) {
       }
     }
   }
-  return Object.fromEntries(Array.from(envNames)
-    .filter((name) => env[name])
-    .map((name) => [name, env[name]]));
+  return envNames;
 }
 
 function secretRequirementMatchesProvider(requirement, provider) {
@@ -277,6 +276,10 @@ function normalizeStringArray(value) {
     return [value];
   }
   return Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry.length > 0) : [];
+}
+
+function uniqueStrings(values) {
+  return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.length > 0))).sort();
 }
 
 function runtimeWorkloadFromEnv(env, fallbackId) {

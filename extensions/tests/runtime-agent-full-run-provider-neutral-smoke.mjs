@@ -51,10 +51,8 @@ const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-provider-neutral-b
 const runtime = resolveRuntimeProvider('wp-codebox', { workspace });
 assert.deepEqual(providerBenchEnvFromManifest(runtime, 'openai', {
   OPENAI_API_KEY: 'manifest-secret-value',
-}), {
-  OPENAI_API_KEY: 'manifest-secret-value',
-});
-assert.deepEqual(providerBenchEnvFromManifest(runtime, 'openai', {}), {});
+}), new Set(['OPENAI_API_KEY']));
+assert.deepEqual(providerBenchEnvFromManifest(runtime, 'openai', {}), new Set(['OPENAI_API_KEY']));
 
 const config = buildConfig({
   GITHUB_WORKSPACE: workspace,
@@ -78,7 +76,17 @@ const config = buildConfig({
 assert.deepEqual(config.provider_secret_env_mapping, {
   connectors_ai_openai_api_key: 'PROVIDER_SECRET_1',
 });
-assert.equal(config.bench_env.PROVIDER_SECRET_1, 'secret-value');
+assert.deepEqual(config.secret_env, [
+  'GITHUB_TOKEN',
+  'HOMEBOY_GITHUB_APP_TOKEN',
+  'PROVIDER_SECRET_1',
+]);
+assert.equal('PROVIDER_SECRET_1' in config.bench_env, false);
+assert.equal('OPENAI_API_KEY' in config.bench_env, false);
+assert.equal('GITHUB_TOKEN' in config.bench_env, false);
+assert.equal('HOMEBOY_GITHUB_APP_TOKEN' in config.bench_env, false);
+assert.equal(JSON.stringify(config).includes('secret-value'), false);
+assert.equal(JSON.stringify(config).includes('manifest-secret-value'), false);
 
 const neutralConfig = buildConfig({
   GITHUB_WORKSPACE: workspace,
@@ -99,5 +107,6 @@ const neutralConfig = buildConfig({
 
 assert.deepEqual(neutralConfig.provider_secret_env_mapping, {});
 assert.equal('OPENAI_API_KEY' in neutralConfig.bench_env, false);
+assert.deepEqual(neutralConfig.secret_env, ['GITHUB_TOKEN', 'HOMEBOY_GITHUB_APP_TOKEN']);
 
 console.log('runtime agent full-run provider-neutral smoke passed');

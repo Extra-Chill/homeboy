@@ -557,16 +557,9 @@ jobs:
           TOOL_RECORDERS: ${{ inputs.tool_recorders }}
           RUNNER_WORKSPACE_CONFIG: ${{ inputs.runner_workspace }}
           IGNORED_WORKSPACE_PATHS: ${{ inputs.ignored_workspace_paths }}
-          GITHUB_APP_TOKEN_VALUE: ${{ steps.app-token.outputs.token }}
-          GITHUB_REPOSITORY_TOKEN_VALUE: ${{ github.token }}
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-          PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
-          PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
-          PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
-          PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
-          PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
         run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/build-runner-config.cjs
 
       - name: Run runtime agent
