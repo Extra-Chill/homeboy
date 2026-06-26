@@ -23,6 +23,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             require_result_envelope: false,
             max_duration: None,
             gate_profile: FuzzGateProfileArg::Measurement,
+            expect_metric: vec![],
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");
@@ -43,6 +44,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
+            expected_metric_gates: &[],
             results_error: None,
             missing_artifact_refs: &[],
         })
@@ -109,6 +111,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
+            expected_metric_gates: &[],
             results_error: None,
             missing_artifact_refs: &[],
         })
@@ -168,6 +171,39 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
 
     let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
 
+    assert_eq!(outcome.status, "failed");
+    assert!(!outcome.success);
+    assert_eq!(outcome.exit_code, 1);
+}
+
+#[test]
+fn fuzz_run_expected_metric_gate_fails_when_observed_metric_differs() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.metadata = serde_json::json!({
+        "metrics": {
+            "side_effect_grouped_created_count": 25,
+            "simple_created": 25,
+            "grouped_created": 25,
+            "variation_created": 25
+        }
+    });
+    let expectations = vec![(
+        "side_effect_grouped_created_count".to_string(),
+        "2".to_string(),
+    )];
+
+    let gates = evaluate_expected_metric_gates(Some(&campaign), &expectations);
+    let error = fuzz_expected_metric_error(&gates).expect("expected metric failure");
+    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), Some(&error));
+
+    assert_eq!(gate_status(&gates), "failed");
+    assert!(gates.iter().any(|gate| {
+        gate.gate_id == "expected-metric-side_effect_grouped_created_count"
+            && gate.status == "failed"
+            && gate.observed == 25.0
+            && gate.expected == 2.0
+    }));
+    assert!(error.contains("side_effect_grouped_created_count expected 2 observed 25"));
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.success);
     assert_eq!(outcome.exit_code, 1);
@@ -377,6 +413,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             require_result_envelope: false,
             max_duration: None,
             gate_profile: FuzzGateProfileArg::Measurement,
+            expect_metric: vec![],
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");
@@ -401,6 +438,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
+            expected_metric_gates: &[],
             results_error: Some(
                 "fuzz results schema must be homeboy/fuzz-campaign/v1, got unsupported/fuzz-result/v1",
             ),

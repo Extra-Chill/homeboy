@@ -12,7 +12,9 @@ use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
-use super::report::{evaluate_fuzz_gates, fuzz_coverage_completeness};
+use super::report::{
+    evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status,
+};
 use super::types::{
     FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzExecutionOutput, FuzzRunArgs,
     FuzzRunOutput, FuzzRunnerContract, FuzzWorkloadOutput,
@@ -104,10 +106,14 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let artifact_ref_validation = fuzz_artifact_ref_validation(results.as_ref(), &artifacts_dir);
     let artifact_validation_error = fuzz_run_artifact_validation_error(&args, results.as_ref());
     let postprocess_error = fuzz_postprocess_error(&postprocess);
+    let expected_metric_gates =
+        evaluate_expected_metric_gates(results.as_ref(), &args.expect_metric);
+    let expected_metric_error = fuzz_expected_metric_error(&expected_metric_gates);
     let combined_results_error = results_error
         .as_deref()
         .or(postprocess_error.as_deref())
         .or(artifact_validation_error.as_deref())
+        .or(expected_metric_error.as_deref())
         .or(artifact_ref_validation.error.as_deref());
     let outcome = fuzz_run_outcome(
         runner_output.exit_code,
@@ -137,6 +143,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         results_path: &results_path,
         artifacts_dir: &artifacts_dir,
         results: results.as_ref(),
+        expected_metric_gates: &expected_metric_gates,
         results_error: combined_results_error,
         missing_artifact_refs: &artifact_ref_validation.missing_refs,
     })?;
@@ -156,13 +163,16 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             status,
             workload_id,
             workload_path,
-            run_id: args.run_id,
-            seed: args.seed,
+            run_id: args.run_id.clone(),
+            seed: args.seed.clone(),
             inventory_file: args
                 .inventory
+                .clone()
                 .map(|path| path.to_string_lossy().to_string()),
-            max_duration: args.max_duration,
-            passthrough_args: args.args,
+            max_duration: args.max_duration.clone(),
+            passthrough_args: args.args.clone(),
+            requested_settings: fuzz_requested_settings(&args),
+            gates: fuzz_run_gates(results.as_ref(), &expected_metric_gates),
             target_inventory: Some(target_inventory),
             execution: Some(FuzzExecutionOutput {
                 kind: "fuzz".to_string(),
@@ -228,6 +238,41 @@ pub(super) fn fuzz_run_artifact_validation_error(
             "strict fuzz artifact validation failed; missing required artifact(s): {}",
             missing.join(", ")
         )
+    })
+}
+
+pub(super) fn fuzz_expected_metric_error(
+    gates: &[super::types::FuzzGateEvaluation],
+) -> Option<String> {
+    let failed = gates
+        .iter()
+        .filter(|gate| gate.status != "passed")
+        .map(|gate| {
+            format!(
+                "{} expected {} observed {}",
+                gate.metric, gate.expected, gate.observed
+            )
+        })
+        .collect::<Vec<_>>();
+
+    (!failed.is_empty())
+        .then(|| format!("fuzz expected metric gate(s) failed: {}", failed.join("; ")))
+}
+
+fn fuzz_run_gates(
+    results: Option<&FuzzCampaign>,
+    expected_metric_gates: &[super::types::FuzzGateEvaluation],
+) -> Vec<super::types::FuzzGateEvaluation> {
+    let mut gates = results.map(evaluate_fuzz_gates).unwrap_or_default();
+    gates.extend(expected_metric_gates.iter().cloned());
+    gates
+}
+
+fn fuzz_requested_settings(args: &FuzzRunArgs) -> serde_json::Value {
+    serde_json::json!({
+        "setting": args.setting_args.setting,
+        "setting_json": args.setting_args.setting_json,
+        "expect_metric": args.expect_metric,
     })
 }
 
@@ -735,6 +780,7 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) results_path: &'a Path,
     pub(super) artifacts_dir: &'a Path,
     pub(super) results: Option<&'a FuzzCampaign>,
+    pub(super) expected_metric_gates: &'a [super::types::FuzzGateEvaluation],
     pub(super) results_error: Option<&'a str>,
     pub(super) missing_artifact_refs: &'a [String],
 }
@@ -759,11 +805,13 @@ pub(super) fn persist_fuzz_run_evidence(
         "exit_code": input.exit_code,
         "success": input.success,
         "status": input.status,
+        "requested_settings": fuzz_requested_settings(input.args),
         "campaign_id": input.results.map(|campaign| campaign.id.as_str()),
         "results_error": input.results_error,
         "missing_artifact_refs": input.missing_artifact_refs,
         "coverage_completeness": input.results.map(fuzz_coverage_completeness),
-        "gates": input.results.map(evaluate_fuzz_gates),
+        "gates": fuzz_run_gates(input.results, input.expected_metric_gates),
+        "gate_status": gate_status(&fuzz_run_gates(input.results, input.expected_metric_gates)),
     });
     let run = RunRecord {
         id: run_id.clone(),
@@ -965,6 +1013,12 @@ fn fuzz_run_command(
     }
     if args.require_result_envelope {
         parts.push("--require-result-envelope".to_string());
+    }
+    for (metric, expected) in &args.expect_metric {
+        parts.extend([
+            "--expect-metric".to_string(),
+            format!("{metric}={expected}"),
+        ]);
     }
     if !args.args.is_empty() {
         parts.push("--".to_string());
