@@ -86,6 +86,7 @@ where
                         .to_string(),
                     ),
                     failure_summary,
+                    runtime_evidence: controller_action_runtime_evidence(&execution),
                     execution: Some(execution),
                     controller: record.clone(),
                 },
@@ -133,6 +134,7 @@ where
                 failure_summary: Some(controller_action_failure_summary(
                     record, action, &execution,
                 )),
+                runtime_evidence: controller_action_runtime_evidence(&execution),
                 execution: Some(execution),
                 controller: record.clone(),
             },
@@ -172,6 +174,7 @@ where
                 failure_summary: Some(controller_action_failure_summary(
                     record, action, &execution,
                 )),
+                runtime_evidence: controller_action_runtime_evidence(&execution),
                 execution: Some(execution),
                 controller: record.clone(),
             },

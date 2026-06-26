@@ -829,6 +829,136 @@ where
     })
 }
 
+pub(super) fn controller_action_runtime_evidence(
+    execution: &Value,
+) -> Option<ControllerActionRuntimeEvidence> {
+    let mut evidence = ControllerActionRuntimeEvidence {
+        runtime_invocation_id: None,
+        provider_id: None,
+        runtime_id: None,
+        failure_classification: None,
+        phase: None,
+        artifact_refs: Vec::new(),
+        transcript_refs: Vec::new(),
+        result_refs: Vec::new(),
+        diagnostics_refs: Vec::new(),
+    };
+
+    collect_runtime_evidence(execution, &mut evidence);
+
+    (evidence.runtime_invocation_id.is_some()
+        || evidence.provider_id.is_some()
+        || evidence.runtime_id.is_some()
+        || evidence.failure_classification.is_some()
+        || evidence.phase.is_some()
+        || !evidence.artifact_refs.is_empty()
+        || !evidence.transcript_refs.is_empty()
+        || !evidence.result_refs.is_empty()
+        || !evidence.diagnostics_refs.is_empty())
+    .then_some(evidence)
+}
+
+fn collect_runtime_evidence(value: &Value, evidence: &mut ControllerActionRuntimeEvidence) {
+    match value {
+        Value::Object(object) => {
+            set_first_string(
+                &mut evidence.runtime_invocation_id,
+                object
+                    .get("runtime_invocation_id")
+                    .or_else(|| object.get("invocation_id"))
+                    .and_then(Value::as_str),
+            );
+            set_first_string(
+                &mut evidence.provider_id,
+                object
+                    .get("provider_id")
+                    .or_else(|| object.get("provider"))
+                    .and_then(Value::as_str),
+            );
+            set_first_string(
+                &mut evidence.runtime_id,
+                object.get("runtime_id").and_then(Value::as_str),
+            );
+            set_first_string(
+                &mut evidence.failure_classification,
+                object.get("failure_classification").and_then(Value::as_str),
+            );
+            set_first_string(
+                &mut evidence.phase,
+                object
+                    .get("phase")
+                    .or_else(|| object.get("failure_phase"))
+                    .and_then(Value::as_str),
+            );
+
+            if let Some(refs) = object.get("refs").and_then(Value::as_object) {
+                collect_ref_group(refs.get("artifact_bundles"), &mut evidence.artifact_refs);
+                collect_ref_group(refs.get("artifacts"), &mut evidence.artifact_refs);
+                collect_ref_group(refs.get("logs"), &mut evidence.artifact_refs);
+                collect_ref_group(refs.get("transcripts"), &mut evidence.transcript_refs);
+                collect_ref_group(refs.get("results"), &mut evidence.result_refs);
+                collect_ref_group(refs.get("diagnostics"), &mut evidence.diagnostics_refs);
+            }
+
+            collect_ref_field(object.get("artifact_bundle"), &mut evidence.artifact_refs);
+            collect_ref_field(
+                object.get("artifact_bundle_ref"),
+                &mut evidence.artifact_refs,
+            );
+            collect_ref_field(object.get("artifact_ref"), &mut evidence.artifact_refs);
+            collect_ref_field(object.get("artifact_path"), &mut evidence.artifact_refs);
+            collect_ref_field(object.get("transcript_ref"), &mut evidence.transcript_refs);
+            collect_ref_field(object.get("result_ref"), &mut evidence.result_refs);
+            collect_ref_field(
+                object.get("diagnostics_ref"),
+                &mut evidence.diagnostics_refs,
+            );
+
+            for child in object.values() {
+                collect_runtime_evidence(child, evidence);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_runtime_evidence(item, evidence);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn set_first_string(target: &mut Option<String>, value: Option<&str>) {
+    if target.is_none() {
+        if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+            *target = Some(value.to_string());
+        }
+    }
+}
+
+fn collect_ref_group(value: Option<&Value>, target: &mut Vec<Value>) {
+    match value {
+        Some(Value::Array(items)) => {
+            for item in items {
+                push_ref_once(target, item.clone());
+            }
+        }
+        Some(value) => push_ref_once(target, value.clone()),
+        None => {}
+    }
+}
+
+fn collect_ref_field(value: Option<&Value>, target: &mut Vec<Value>) {
+    if let Some(value) = value.filter(|value| !value.is_null()) {
+        push_ref_once(target, value.clone());
+    }
+}
+
+fn push_ref_once(target: &mut Vec<Value>, value: Value) {
+    if !target.iter().any(|existing| existing == &value) {
+        target.push(value);
+    }
+}
+
 pub(super) fn first_pending_action_id(record: &AgentTaskLoopControllerRecord) -> Option<String> {
     if !matches!(record.state, AgentTaskLoopControllerState::Running) {
         return None;

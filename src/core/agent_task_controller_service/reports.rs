@@ -117,8 +117,35 @@ pub struct ControllerActionReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_summary: Option<ControllerActionFailureSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_evidence: Option<ControllerActionRuntimeEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<Value>,
     pub controller: AgentTaskLoopControllerRecord,
+}
+
+/// Generic runtime evidence surfaced from runtime-backed controller action
+/// execution results. The controller preserves provider-neutral ids and refs
+/// already present in dispatch/runtime payloads without interpreting them.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerActionRuntimeEvidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_invocation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_classification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript_refs: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub result_refs: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics_refs: Vec<Value>,
 }
 
 /// Concise failed-action context for controller resume operators.

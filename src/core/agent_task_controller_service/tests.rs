@@ -81,6 +81,7 @@ impl ControllerDispatchHook for FailingDispatchHook {
                     "outcomes": [{
                         "task_id": "task-overlay-prepare",
                         "status": "failed",
+                        "failure_classification": "provider",
                         "diagnostics": [{
                             "class": "provider.runtime_overlay",
                             "message": "Recipe runtime overlay preparation failed: download php-scoper timed out after 60004ms",
@@ -88,7 +89,25 @@ impl ControllerDispatchHook for FailingDispatchHook {
                                 "provider": "synthetic-runtime",
                                 "phase": "runtime_overlay_preparation"
                             }
-                        }]
+                        }],
+                        "outputs": {
+                            "provider_run_result": {
+                                "status": "failed",
+                                "failure_classification": "provider",
+                                "metadata": {
+                                    "provider_id": "synthetic-runtime",
+                                    "runtime_id": "runtime-abc",
+                                    "runtime_invocation_id": "invocation-123",
+                                    "phase": "runtime_overlay_preparation"
+                                },
+                                "refs": {
+                                    "artifact_bundles": [{"id": "bundle-1", "path": "artifacts/bundle.zip"}],
+                                    "transcripts": [{"uri": "artifacts/transcript.ndjson"}],
+                                    "results": [{"uri": "artifacts/result.json"}],
+                                    "diagnostics": [{"uri": "artifacts/diagnostics.json"}]
+                                }
+                            }
+                        }
                     }]
                 }
             }),
@@ -2158,6 +2177,42 @@ fn resume_failed_action_result_includes_top_level_failure_summary() {
         assert_eq!(
             failed["failure_summary"]["provider"],
             json!("synthetic-runtime")
+        );
+        assert_eq!(
+            failed["runtime_evidence"]["runtime_invocation_id"],
+            json!("invocation-123")
+        );
+        assert_eq!(
+            failed["runtime_evidence"]["runtime_id"],
+            json!("runtime-abc")
+        );
+        assert_eq!(
+            failed["runtime_evidence"]["provider_id"],
+            json!("synthetic-runtime")
+        );
+        assert_eq!(
+            failed["runtime_evidence"]["failure_classification"],
+            json!("provider")
+        );
+        assert_eq!(
+            failed["runtime_evidence"]["phase"],
+            json!("runtime_overlay_preparation")
+        );
+        assert_eq!(
+            failed["runtime_evidence"]["artifact_refs"][0]["path"],
+            json!("artifacts/bundle.zip")
+        );
+        assert_eq!(
+            failed["runtime_evidence"]["transcript_refs"][0]["uri"],
+            json!("artifacts/transcript.ndjson")
+        );
+        assert_eq!(
+            failed["runtime_evidence"]["result_refs"][0]["uri"],
+            json!("artifacts/result.json")
+        );
+        assert_eq!(
+            failed["runtime_evidence"]["diagnostics_refs"][0]["uri"],
+            json!("artifacts/diagnostics.json")
         );
         assert_eq!(
             failed["failure_summary"]["failure_phase"],
