@@ -1207,6 +1207,57 @@ fn materialize_agent_task_specs_syncs_inline_and_file_tasks_json() {
 }
 
 #[test]
+fn materialize_agent_task_specs_rewrites_fanout_child_cwd_to_runner_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let controller = temp.path().join("homeboy@cook-one");
+    std::fs::create_dir_all(&controller).expect("controller workspace");
+    let mappings = vec![LabPathRemap {
+        local: controller.display().to_string(),
+        remote: "/runner/workspaces/homeboy@cook-one".to_string(),
+    }];
+    let fanout = serde_json::json!({
+        "schema": "homeboy/agent-task-batch-cook-fanout-plan/v1",
+        "fanout_id": "fanout/test",
+        "cooks": [{
+            "cook_id": "one",
+            "prompt": "fix it",
+            "cwd": controller,
+            "to_worktree": "homeboy@fix-one",
+            "head": "fix/one",
+            "verify": ["cargo test -p homeboy"]
+        }]
+    })
+    .to_string();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "fanout".to_string(),
+        "run-plan".to_string(),
+        "--input".to_string(),
+        fanout,
+    ];
+
+    let out = materialize_agent_task_specs_in_args(&args, &mappings, temp.path(), |_| {
+        Ok(None::<(String, &'static str)>)
+    })
+    .expect("materialize fanout input");
+    let rewritten: serde_json::Value = serde_json::from_str(&out.argv[5]).expect("rewritten json");
+
+    assert_eq!(
+        rewritten["cooks"][0]["cwd"],
+        serde_json::json!("/runner/workspaces/homeboy@cook-one")
+    );
+    assert_eq!(
+        rewritten["cooks"][0]["workspace_materialization"][0]["controller_path"],
+        serde_json::json!(temp.path().join("homeboy@cook-one").display().to_string())
+    );
+    assert_eq!(
+        rewritten["cooks"][0]["workspace_materialization"][0]["sync_status"],
+        serde_json::json!("materialized")
+    );
+}
+
+#[test]
 fn remap_path_settings_rewrites_local_path_values() {
     let mappings = vec![LabPathRemap {
         local: "/Users/user/Developer/tool-runner".to_string(),

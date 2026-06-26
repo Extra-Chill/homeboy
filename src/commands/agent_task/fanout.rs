@@ -55,6 +55,7 @@ fn submit_batch_cook_fanout(args: AgentTaskFanoutSubmitArgs) -> CmdResult<Value>
                 "run_id": cook.run_id(),
                 "worktree": cook.to_worktree,
                 "head": cook.head,
+                "workspace_materialization": cook.workspace_materialization,
                 "title": cook.title,
                 "command": cook_command(&plan, cook),
             })
@@ -131,6 +132,7 @@ fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
             "run_id": cook.run_id(),
             "worktree": cook.to_worktree,
             "head": cook.head,
+            "workspace_materialization": cook.workspace_materialization,
             "exit_code": exit_code,
             "result": value,
         }));
@@ -229,6 +231,8 @@ struct BatchCookSpec {
     cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    workspace_materialization: Vec<BatchCookWorkspaceMaterialization>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,6 +280,18 @@ struct BatchCookSpec {
     ai_tool: String,
     #[serde(default = "default_ai_used_for")]
     ai_used_for: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct BatchCookWorkspaceMaterialization {
+    field: String,
+    controller_path: String,
+    runner_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    ref_name: Option<String>,
+    sync_status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -402,19 +418,6 @@ fn default_cook_commit_message(cook: &BatchCookSpec) -> String {
     format!("fix: cook {target}")
 }
 
-fn client_context(plan: &BatchCookFanoutPlan, cook: &BatchCookSpec) -> String {
-    serde_json::json!({
-        "fanout": {
-            "id": plan.fanout_id,
-            "semantics": "batch_cook",
-            "cook_id": cook.cook_id,
-            "to_worktree": cook.to_worktree,
-            "head": cook.head,
-        }
-    })
-    .to_string()
-}
-
 fn merged_client_context(plan: &BatchCookFanoutPlan, cook: &BatchCookSpec) -> String {
     let mut context = serde_json::from_str::<Value>(cook.client_context.as_deref().unwrap_or("{}"))
         .unwrap_or(Value::Null);
@@ -430,6 +433,7 @@ fn merged_client_context(plan: &BatchCookFanoutPlan, cook: &BatchCookSpec) -> St
                 "cook_id": cook.cook_id,
                 "to_worktree": cook.to_worktree,
                 "head": cook.head,
+                "workspace_materialization": cook.workspace_materialization,
             }),
         );
     }
@@ -535,6 +539,15 @@ mod tests {
                         "cook_id": "5929-docs",
                         "prompt": "fix docs",
                         "repo": "homeboy",
+                        "cwd": "/runner/workspaces/homeboy@5929-docs",
+                        "workspace_materialization": [{
+                            "field": "cwd",
+                            "controller_path": "/Users/user/Developer/homeboy@5929-docs",
+                            "runner_path": "/runner/workspaces/homeboy@5929-docs",
+                            "branch": "fix/5929-docs",
+                            "ref": "fix/5929-docs",
+                            "sync_status": "materialized"
+                        }],
                         "to_worktree": "homeboy@fix-5929-docs",
                         "head": "fix/5929-docs",
                         "verify": ["homeboy test homeboy"]
@@ -563,6 +576,10 @@ mod tests {
         assert_eq!(invocation.options.to_worktree, "homeboy@fix-5929-docs");
         assert_eq!(invocation.options.head.as_deref(), Some("fix/5929-docs"));
         assert_eq!(
+            invocation.dispatch.cwd.as_deref(),
+            Some("/runner/workspaces/homeboy@5929-docs")
+        );
+        assert_eq!(
             invocation.dispatch.run_id.as_deref(),
             Some("cook-5929-docs")
         );
@@ -577,6 +594,13 @@ mod tests {
             .as_deref()
             .expect("client context")
             .contains("batch_cook"));
+        assert!(invocation
+            .dispatch
+            .core
+            .client_context
+            .as_deref()
+            .expect("client context")
+            .contains("/Users/user/Developer/homeboy@5929-docs"));
     }
 
     #[test]
