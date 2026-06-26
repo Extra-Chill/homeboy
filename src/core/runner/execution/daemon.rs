@@ -237,6 +237,9 @@ fn daemon_loopback_post_json(
     let body = serde_json::to_string(payload)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
     let mut stream = TcpStream::connect(address)?;
+    let timeout = Duration::from_secs(10);
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     write!(
         stream,
         "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -350,19 +353,26 @@ pub(super) fn detached_handoff_output(
         mirror_run_id.as_deref(),
         DaemonJobHandoffState::InFlight,
     );
+    let mut follow_commands = json!({
+        "job_logs": format!("homeboy runner job logs {} {} --follow", runner.id, job.id),
+        "job_cancel": format!("homeboy runner job cancel {} {}", runner.id, job.id),
+    });
+    if let Some(run_id) = mirror_run_id.as_deref() {
+        follow_commands["status"] = json!(format!("homeboy agent-task status {run_id}"));
+        follow_commands["logs"] = json!(format!("homeboy agent-task logs {run_id}"));
+        follow_commands["artifacts"] = json!(format!("homeboy agent-task artifacts {run_id}"));
+    }
     let stdout = serde_json::to_string_pretty(&json!({
         "schema": "homeboy/runner-exec-handoff/v1",
         "status": "handoff_complete",
         "execution_location": format!("runner:{}", runner.id),
         "runner_id": runner.id.clone(),
         "job_id": job_id,
+        "durable_run_id": mirror_run_id.as_deref(),
         "persisted_run_id": mirror_run_id.as_deref(),
         "mirror_run_id": mirror_run_id.as_deref(),
         "remote_cwd": cwd.clone(),
-        "follow_commands": {
-            "job_logs": format!("homeboy runner job logs {} {} --follow", runner.id, job.id),
-            "job_cancel": format!("homeboy runner job cancel {} {}", runner.id, job.id),
-        }
+        "follow_commands": follow_commands,
     }))
     .unwrap_or_else(|_| "{}".to_string());
     let transport = match mode {
