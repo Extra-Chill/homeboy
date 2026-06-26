@@ -11,6 +11,7 @@ const PLAN_SCHEMA = 'homeboy/fanout-reconcile-plan/v1';
 const RUN_SCHEMA = 'homeboy/fanout-reconcile-run/v1';
 const FANOUT_RECONCILE_RECORD_STATUSES = ['completed', 'failed', 'missing_record'];
 const FANOUT_RECONCILE_RUN_STATUSES = ['incomplete', 'completed', 'failed'];
+const FANOUT_RECONCILE_SUCCESS_STATUSES = ['completed', 'succeeded', 'no_op', 'success', 'passed', 'accepted'];
 const DEFAULT_CONCURRENCY = 3;
 
 function writeJson(filePath, value) {
@@ -138,6 +139,7 @@ async function executeFanoutReconcileRun(input) {
       .then(() => executeTaskRequest(taskRequest, input))
       .catch((error) => failedTaskRecord(taskRequest, id, error))
       .then((record) => {
+        record = normalizeFanoutRecord(record);
         records.push(record);
         records.sort((left, right) => taskOrder(left) - taskOrder(right));
         onProgress(progressEvent(record.status || (isRecordSuccessful(record) ? 'completed' : 'failed'), taskRequest, plan, record));
@@ -230,6 +232,31 @@ function failedTaskRecord(taskRequest, id, error) {
   };
 }
 
+function normalizeFanoutRecord(record) {
+  const normalized = record && typeof record === 'object' ? record : {};
+  return {
+    ...normalized,
+    status: normalizeFanoutRecordStatus(normalized),
+  };
+}
+
+function normalizeFanoutRecordStatus(record) {
+  const status = text(record.status);
+  if (FANOUT_RECONCILE_RECORD_STATUSES.includes(status)) {
+    return status;
+  }
+  if (record.success === true || FANOUT_RECONCILE_SUCCESS_STATUSES.includes(status)) {
+    return 'completed';
+  }
+
+  const outcomeStatus = text(record.outcome?.status || record.outcome_status || record.provider_status);
+  if (FANOUT_RECONCILE_SUCCESS_STATUSES.includes(outcomeStatus)) {
+    return 'completed';
+  }
+
+  return 'failed';
+}
+
 function errorMessage(error) {
   if (error && typeof error.message === 'string' && error.message.trim()) {
     return error.message;
@@ -280,11 +307,19 @@ function defaultProgressEvent(status, taskRequest, plan, record = null) {
   };
 }
 
+function text(value) {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  return String(value).trim();
+}
+
 module.exports = {
   PLAN_SCHEMA,
   RUN_SCHEMA,
   FANOUT_RECONCILE_PLAN_SCHEMA: PLAN_SCHEMA,
   FANOUT_RECONCILE_RECORD_STATUSES,
+  FANOUT_RECONCILE_SUCCESS_STATUSES,
   FANOUT_RECONCILE_RUN_SCHEMA: RUN_SCHEMA,
   FANOUT_RECONCILE_RUN_STATUSES,
   DEFAULT_CONCURRENCY,

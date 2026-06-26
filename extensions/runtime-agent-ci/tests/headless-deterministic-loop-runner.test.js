@@ -74,6 +74,8 @@ assert.equal(twoRevolution.tasks[0].loop_policy.iterations[1].candidate_task_id,
 assert.equal(twoRevolution.tasks[0].loop_policy.iterations[1].accepted, true);
 assert.equal(twoRevolution.tasks[0].outcome.metadata.headless_loop_policy_status.iteration_count, 2);
 assert.equal(twoRevolution.tasks[0].results.scenarios[0].metadata.completion_outcome_satisfied, true);
+assert.equal(twoRevolution.fanout.records[0].status, 'completed');
+assert.equal(twoRevolution.fanout.records[0].outcome_status, 'succeeded');
 
 let boundedCalls = 0;
 const boundedFailure = await runHeadlessDeterministicLoop({
@@ -184,7 +186,8 @@ const dryRun = await runHeadlessDeterministicLoop({
 assert.equal(dryRun.status, 'succeeded');
 assert.equal(dryRun.tasks[0].outcome.status, 'no_op');
 assert.equal(dryRun.fanout.status, 'completed');
-assert.equal(dryRun.fanout.records[0].status, 'no_op');
+assert.equal(dryRun.fanout.records[0].status, 'completed');
+assert.equal(dryRun.fanout.records[0].outcome_status, 'no_op');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-headless-loop-policy-'));
 try {
