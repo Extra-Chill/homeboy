@@ -238,13 +238,16 @@ function normalizeControllerExecution(value) {
   }
   return {
     schema: value.schema || 'homeboy/headless-controller-execution/v1',
-    spec,
-    inputs: stringValue(value.inputs || value.inputs_path || value.inputsPath),
-    policy_result: stringValue(value.policy_result || value.policyResult || value.policy_result_path || value.policyResultPath),
-    output: stringValue(value.output || value.output_path || value.outputPath),
-    max_actions: positiveInteger(value.max_actions || value.maxActions) || 100,
-    reconcile_stale: booleanValue(value.reconcile_stale || value.reconcileStale || process.env.HOMEBOY_CONTROLLER_RECONCILE_STALE),
-    prepare: normalizeArray(value.prepare || value.prepare_commands || value.prepareCommands),
+		spec,
+		inputs: stringValue(value.inputs || value.inputs_path || value.inputsPath),
+		policy_result: stringValue(value.policy_result || value.policyResult || value.policy_result_path || value.policyResultPath),
+		output: stringValue(value.output || value.output_path || value.outputPath),
+		max_actions: positiveInteger(value.max_actions || value.maxActions) || 100,
+		reconcile_stale: booleanValue(value.reconcile_stale ?? value.reconcileStale ?? process.env.HOMEBOY_CONTROLLER_RECONCILE_STALE),
+		replace: booleanValue(value.replace),
+		fork: booleanValue(value.fork),
+		resume_existing: booleanValue(value.resume_existing ?? value.resumeExisting),
+		prepare: normalizeArray(value.prepare || value.prepare_commands || value.prepareCommands),
     env: optionalObject(value.env),
     metadata: optionalObject(value.metadata),
   };
@@ -294,7 +297,11 @@ function executeControllerExecution(options = {}) {
 function defaultExecuteControllerExecution(options = {}) {
   const controllerExecution = requiredObject(options.controllerExecution || options.controller_execution, 'controllerExecution');
   const cwd = options.request?.cwd || resolveControllerCwd(options.plan || {}, options);
-  const env = { ...process.env, ...controllerExecution.env };
+  const env = {
+    ...process.env,
+    HOMEBOY_EXTENSIONS_PATH: options.extensionPath || options.extension_path || options.repoRoot || process.env.HOMEBOY_EXTENSIONS_PATH || '',
+    ...controllerExecution.env,
+  };
   for (const command of controllerExecution.prepare) {
     runControllerCommand(command, { cwd, env });
   }
@@ -309,9 +316,7 @@ function defaultExecuteControllerExecution(options = {}) {
   if (controllerExecution.output) {
     args.push('--output', controllerExecution.output);
   }
-  if (controllerExecution.reconcile_stale) {
-    args.push('--reconcile-stale');
-  }
+  args.push(...controllerExecutionRunModeArgs(controllerExecution));
   const run = spawnSync(homeboyBin, args, { cwd, env, encoding: 'utf8' });
   if (run.status !== 0) {
     return {
@@ -331,6 +336,19 @@ function defaultExecuteControllerExecution(options = {}) {
     stderr: run.stderr || '',
     result: parsed,
   };
+}
+
+function controllerExecutionRunModeArgs(controllerExecution) {
+  const modes = [
+    ['reconcile_stale', '--reconcile-stale'],
+    ['replace', '--replace'],
+    ['fork', '--fork'],
+    ['resume_existing', '--resume-existing'],
+  ].filter(([key]) => controllerExecution[key] === true);
+  if (modes.length > 1) {
+    throw new Error(`controller_execution run mode flags are mutually exclusive: ${modes.map(([, flag]) => flag).join(', ')}`);
+  }
+  return modes.map(([, flag]) => flag);
 }
 
 function resolveControllerCwd(plan = {}, options = {}) {

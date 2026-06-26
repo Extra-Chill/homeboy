@@ -20,6 +20,13 @@ const input = {
 	dependencyMounts: ['/wordpress/wp-content/plugins/dependency-one'],
 	multisite: true,
 	diagnosticsCapture: ['errors'],
+	extra_plugins: [{
+		source: '/tmp/fixture-monorepo',
+		sourceRoot: '/tmp/fixture-monorepo',
+		sourceSubpath: 'plugins/fixture-plugin',
+		slug: 'fixture-plugin',
+		activate: false,
+	}],
 	mounts: [{ source: '/tmp/fixture-plugin', target: '/wordpress/wp-content/plugins/fixture-plugin' }],
 };
 
@@ -34,6 +41,7 @@ assert.equal(result.status, 0, result.stderr);
 const recipe = JSON.parse(result.stdout);
 
 assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');
+assert.deepEqual(recipe.inputs.extra_plugins, input.extra_plugins);
 assert.equal(recipe.inputs.mounts[0].mode, 'readwrite');
 assert.deepEqual(recipe.workflow.steps, [{
 	command: 'fixture.wordpress.phpunit',

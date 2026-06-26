@@ -58,10 +58,12 @@ in this adapter so the follow-up swap can remove the fallback while preserving
 Homeboy caller contracts.
 
 Runtime-package ability aliases are quarantined compatibility only. New callers
-should invoke `wp-codebox/run-runtime-package`; legacy `agents/run-runtime-package`
-and `runtime-package/run` requests still normalize to that Codebox-owned ability
-and include `deprecated_compatibility_alias` metadata so controllers can warn and
-migrate without breaking active callers.
+should invoke `wp-codebox/run-runtime-package`; generic callers may use
+`homeboy/run-runtime-package`. The provider contract no longer advertises legacy
+`agents/run-runtime-package` or `runtime-package/run` aliases, but explicit legacy
+requests still normalize to the Codebox-owned ability and include
+`deprecated_compatibility_alias` metadata so controllers can warn and migrate
+without breaking active callers.
 
 Provider credentials stay outside adapter payloads. The adapter forwards
 `secret_env` names and a `provider_credential_boundary` descriptor, and rejects

@@ -75,10 +75,7 @@ assert.equal(provider.agent_fanout_adapter.ownership.executor_adapter, 'homeboy-
 assert.equal(provider.agent_fanout_adapter.ownership.sandbox_worker_runtime, 'wp-codebox');
 assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'provider-credential-boundary'), true);
 assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'agent-fanout-request' && requirement.schema === 'wp-codebox/agent-fanout-request/v1'), true);
-assert.deepEqual(provider.deprecated_compatibility_aliases, [
-  legacyRuntimePackageAbilityAlias('agents/run-runtime-package'),
-  legacyRuntimePackageAbilityAlias('runtime-package/run'),
-]);
+assert.equal(Object.hasOwn(provider, 'deprecated_compatibility_aliases'), false);
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
 assert.equal(provider.provider_runtime_invocation.abilities.workspaceCommand, 'wp-codebox/runner-workspace-command');
@@ -165,7 +162,31 @@ assert.equal(privateRuntimeShapeOutcome.status, 'failed');
 assert.equal(privateRuntimeShapeOutcome.failure_classification, 'execution_failed');
 assert.equal(privateRuntimeShapeOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.public_result_envelope_missing'), true);
 assert.equal(privateRuntimeShapeOutcome.outputs.reply, undefined);
+assert.equal(privateRuntimeShapeOutcome.metadata.dispatch_identity, undefined);
 assert.deepEqual(publicEnvelopeBoundaryDiagnostic({ run: { agentResult: { reply: 'private' } } }).data.private_shapes, ['run.agentResult']);
+const dispatchIdentityOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...privateRuntimeShapeRequest,
+  task_id: 'dispatch-identity-boundary',
+  inputs: {
+    dispatch_identity: {
+      source: 'agents-api',
+      dispatch_id: 'dispatch-123',
+      conversation_id: 'conversation-456',
+    },
+  },
+}, {
+  success: true,
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: { outputs: { reply: 'Public reply' } },
+  },
+});
+assert.deepEqual(dispatchIdentityOutcome.metadata.dispatch_identity, {
+  source: 'agents-api',
+  dispatch_id: 'dispatch-123',
+  conversation_id: 'conversation-456',
+});
 const publicRuntimeShapeOutcome = agentTaskOutcomeFromCodeboxResult(privateRuntimeShapeRequest, {
   success: true,
   run: {
@@ -235,6 +256,7 @@ assert.equal(runtime.agent_task_executors[0].id, provider.id);
 assert.equal(runtime.agent_task_executors[0].backend, provider.backend);
 assert.equal(runtime.agent_task_executors[0].runtime_id, provider.runtime_id);
 assert.equal(runtime.agent_task_executors[0].integration_contract, provider.integration_contract);
+assert.equal(Object.hasOwn(runtime.agent_task_executors[0], 'deprecated_compatibility_aliases'), false);
 assert.equal(runtime.agent_task_executors[0].upstream_primitive_requirements.some((requirement) => requirement.id === 'run-agent-task' && requirement.schema === 'wp-codebox/run-agent-task/v1'), true);
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.deepEqual(provider.runner_readiness, [{

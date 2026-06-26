@@ -87,13 +87,6 @@ const RUNTIME_PACKAGE_ABILITY_ALIASES = new Set([
   ...LEGACY_RUNTIME_PACKAGE_ABILITIES,
 ]);
 const LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE = 'legacy-runtime-package-ability-alias';
-const LEGACY_RUNTIME_PACKAGE_ABILITY_DEPRECATIONS = Array.from(LEGACY_RUNTIME_PACKAGE_ABILITIES).map((ability) => ({
-  schema: 'wp-codebox/deprecated-compatibility-alias/v1',
-  alias: ability,
-  replacement: WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY,
-  quarantine: LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE,
-  status: 'deprecated',
-}));
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -201,7 +194,6 @@ function providerContract(options = {}) {
     provider_runtime_invocation: providerRuntimeInvocationContract(),
     agent_fanout_adapter: wpCodeboxAgentFanoutAdapterContract(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
-    deprecated_compatibility_aliases: LEGACY_RUNTIME_PACKAGE_ABILITY_DEPRECATIONS,
     upstream_primitive_requirements: WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
     status: 'active',
     integration_contract: 'homeboy-wordpress-agent-task/v1',
@@ -461,8 +453,9 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
       runtime_bin: config.runtime_bin,
       wp_codebox_bin: config.wp_codebox_bin,
       wpCodeboxBin: config.wpCodeboxBin || runtimeOptions.wpCodeboxBin || defaults.wpCodeboxBin,
-      env: {},
+      env: process.env,
       executable: '',
+      preferPackagedRuntime: Boolean(process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT || process.env.WP_CODEBOX_RUNTIME_COMPONENT),
     }),
     wp: config.runtime_wordpress_version || config.wordpress_runtime_version || config.wordpress_version || config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || config.wp || runtimeOptions.wpCodeboxWordpressVersion || '',
     artifacts_path: config.artifacts || config.artifacts_path || runtimeOptions.artifacts || '',
@@ -3282,6 +3275,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   assertAgentTaskRequest(request);
   const publicResultEnvelope = codeboxPublicResultEnvelope(result, options);
   const envelopeOptions = { ...options, publicResultEnvelope };
+  const dispatchIdentity = agentTaskDispatchIdentityPassthrough(request, result);
   const normalizedEventEnvelope = normalizeCodeboxAgentTaskEvents(request, result, envelopeOptions);
   const runSummary = codeboxRunSummary(result, envelopeOptions);
   const recipeSummary = codeboxRecipeRunSummary(result, envelopeOptions);
@@ -3336,6 +3330,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary, envelopeOptions)),
       artifact_declarations: sanitizePublicMetadata(artifactDeclarationsMetadataFromRequest(request)),
       typed_artifacts: sanitizePublicMetadata(outputs.typed_artifacts || {}),
+      dispatch_identity: dispatchIdentity ? sanitizePublicMetadata(dispatchIdentity) : undefined,
       normalized_events: sanitizePublicMetadata(normalizedEventEnvelope.events),
       sandbox_policy: sanitizePublicMetadata({
         policy: result.task_input?.policy,
@@ -3351,6 +3346,33 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     outcome.failure_classification = 'execution_failed';
   }
   return outcomeWithOutputTypedArtifacts(outcomeWithNormalizedEvents(outcome, normalizedEventEnvelope.events), outputs);
+}
+
+function agentTaskDispatchIdentityPassthrough(request = {}, result = {}) {
+  return firstObject(
+    request.dispatch_identity,
+    request.dispatchIdentity,
+    request.inputs?.dispatch_identity,
+    request.inputs?.dispatchIdentity,
+    request.inputs?.input?.dispatch_identity,
+    request.inputs?.input?.dispatchIdentity,
+    request.inputs?.input?.metadata?.dispatch_identity,
+    request.inputs?.input?.metadata?.dispatchIdentity,
+    request.executor?.config?.runtime_task?.input?.dispatch_identity,
+    request.executor?.config?.runtime_task?.input?.dispatchIdentity,
+    request.executor?.config?.runtime_task?.input?.metadata?.dispatch_identity,
+    request.executor?.config?.runtime_task?.input?.metadata?.dispatchIdentity,
+    result.dispatch_identity,
+    result.dispatchIdentity,
+    result.metadata?.dispatch_identity,
+    result.metadata?.dispatchIdentity,
+    result.task_input?.dispatch_identity,
+    result.task_input?.dispatchIdentity,
+    result.task_input?.runtime_task?.input?.dispatch_identity,
+    result.task_input?.runtime_task?.input?.dispatchIdentity,
+    result.task_input?.runtime_task?.input?.metadata?.dispatch_identity,
+    result.task_input?.runtime_task?.input?.metadata?.dispatchIdentity,
+  );
 }
 
 function outcomeWithNormalizedEvents(outcome, events) {

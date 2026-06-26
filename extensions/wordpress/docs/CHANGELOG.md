@@ -2,6 +2,24 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.0] - 2026-06-26
+
+### Added
+- run WP Codebox browser coverage traces
+
+### Changed
+- Stop advertising legacy runtime package aliases
+- Echo dispatch identity in runtime outputs
+- Add canonical fuzz result envelope
+- Add WordPress fuzz manifest validator
+- Add WP Codebox browser coverage primitive
+
+### Fixed
+- fix(wp-codebox): normalize fanout runtime task abilities
+- honor runtime component env
+- default runtime package from profile
+- normalize neutral runtime package ability
+
 ## [3.18.1] - 2026-06-26
 
 ### Changed

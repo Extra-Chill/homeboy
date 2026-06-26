@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.22.1] - 2026-06-26
+
+### Changed
+- Remove generated local artifacts
+
 ## [1.22.0] - 2026-06-21
 
 ### Added
