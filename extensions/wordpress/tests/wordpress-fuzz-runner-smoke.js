@@ -416,18 +416,18 @@ assert.equal(
 assert.equal(
 	wpCodeboxCommand({
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: codeboxInstallRoot,
-		HOMEBOY_SETTINGS_WP_CODEBOX_BIN: '/stale/wp-codebox',
+		HOMEBOY_SETTINGS_WP_CODEBOX_BIN: '/settings/wp-codebox',
 	}),
-	cachedCodeboxBin,
-	'Homeboy-managed WP Codebox cache should beat stale persisted settings'
+	'/settings/wp-codebox',
+	'Explicit WP Codebox settings should override the Homeboy-managed cache'
 );
 assert.equal(
 	wpCodeboxCommand({
 		HOMEBOY_WP_CODEBOX_BIN: '/explicit/wp-codebox',
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: codeboxInstallRoot,
 	}),
-	cachedCodeboxBin,
-	'Homeboy-managed WP Codebox cache should beat stale ambient runner env'
+	'/explicit/wp-codebox',
+	'Explicit WP Codebox env should override the Homeboy-managed cache'
 );
 
 const cli = spawnSync(runnerPath, [], {

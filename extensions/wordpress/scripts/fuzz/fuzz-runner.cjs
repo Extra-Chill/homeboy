@@ -251,7 +251,7 @@ function discoverWpCodeboxBin(env) {
 }
 
 function wpCodeboxCommand(env) {
-	return discoverWpCodeboxBin(env) || env.HOMEBOY_WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || 'wp-codebox';
+	return env.HOMEBOY_WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || discoverWpCodeboxBin(env) || 'wp-codebox';
 }
 
 function parseJsonObject(value) {
