@@ -157,6 +157,19 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
                 }),
             ),
             variant_contract(
+                "artifact_preview",
+                json!({
+                    "command": "runs.artifact.preview",
+                    "run_id": "run-1",
+                    "artifact_id": "generated-site",
+                    "artifact_path": "/tmp/site",
+                    "base_url": "http://127.0.0.1:8080/",
+                    "process_id": 1234,
+                    "entrypoints": [],
+                    "stop_hint": "Stop preview server with `kill 1234`."
+                }),
+            ),
+            variant_contract(
                 "artifact_cleanup_downloads",
                 json!({
                     "command": "runs.artifact.cleanup-downloads",

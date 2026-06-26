@@ -153,6 +153,7 @@ pub enum RunsOutput {
     Artifacts(RunsArtifactsOutput),
     ArtifactAttach(RunsArtifactAttachOutput),
     ArtifactGet(RunsArtifactGetOutput),
+    ArtifactPreview(RunsArtifactPreviewOutput),
     ArtifactCleanupDownloads(RunsArtifactCleanupDownloadsOutput),
     ArtifactCleanupPersisted(RunsArtifactCleanupPersistedOutput),
     Findings(RunsFindingsOutput),
@@ -220,6 +221,8 @@ pub(super) enum RunsArtifactCommand {
     Attach(RunsArtifactAttachArgs),
     /// Copy a recorded file artifact to a local path
     Get(RunsArtifactGetArgs),
+    /// Serve a recorded directory artifact with a local static preview URL
+    Preview(RunsArtifactPreviewArgs),
     /// Plan or delete locally cached runner artifact downloads
     CleanupDownloads(RunsArtifactCleanupDownloadsArgs),
     /// Plan or delete persisted local run artifacts and their database records
@@ -272,6 +275,29 @@ pub struct RunsArtifactGetOutput {
     pub sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_ref: Option<RunnerArtifactRef>,
+}
+
+#[derive(Args, Clone)]
+pub struct RunsArtifactPreviewArgs {
+    /// Observation run id that owns the artifact
+    pub run_id: String,
+    /// Directory artifact id/path token from `homeboy runs artifacts <run-id>`
+    pub artifact_id: String,
+    /// Local loopback port. Defaults to an available ephemeral port.
+    #[arg(long)]
+    pub port: Option<u16>,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactPreviewOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub artifact_path: String,
+    pub base_url: String,
+    pub process_id: u32,
+    pub entrypoints: Vec<ArtifactPreviewEntrypoint>,
+    pub stop_hint: String,
 }
 
 #[derive(Args, Clone, Default)]
