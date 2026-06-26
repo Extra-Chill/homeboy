@@ -1,5 +1,21 @@
 'use strict';
 
+const PROVIDER_DEFAULT_SECRET_ENV = Object.freeze({
+  codex: [
+    'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+    'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+    'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
+  ],
+  openai: ['OPENAI_API_KEY'],
+  'claude-code': [
+    'AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN',
+    'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
+    'AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT',
+  ],
+});
+
 function materializeHeadlessProductionLoopSpec(spec = {}, options = {}) {
   const base = requiredObject(spec, 'spec');
   const overrides = runtimeOverrides(options);
@@ -35,19 +51,29 @@ function materializeLoopPolicy(policy = {}, revolutions = 0) {
 }
 
 function runtimeOverrides(options = {}) {
+  const provider = stringValue(options.provider);
   return cleanObject({
     runtime_id: stringValue(options.runtimeId || options.runtime_id || options.runtime),
     runtime_profile: stringValue(options.runtimeProfile || options.runtime_profile || options.profile),
     runtime_profiles: objectValue(options.runtimeProfiles || options.runtime_profiles),
-    provider: stringValue(options.provider),
+    provider,
     model: stringValue(options.model),
     provider_plugin_paths: arrayValue(options.providerPluginPaths || options.provider_plugin_paths),
     provider_plugins: arrayValue(options.providerPlugins || options.provider_plugins),
-    secret_env: arrayValue(options.secretEnv || options.secret_env),
+    secret_env: secretEnvOverrides(options, provider),
     runtime_env: objectValue(options.runtimeEnv || options.runtime_env),
     runtime_config_mounts: arrayValue(options.runtimeConfigMounts || options.runtime_config_mounts),
     runtime_state_mounts: arrayValue(options.runtimeStateMounts || options.runtime_state_mounts),
   });
+}
+
+function secretEnvOverrides(options = {}, provider = '') {
+  return arrayValue(options.secretEnv || options.secret_env) || providerDefaultSecretEnv(provider);
+}
+
+function providerDefaultSecretEnv(provider = '') {
+  const names = PROVIDER_DEFAULT_SECRET_ENV[String(provider || '').trim()];
+  return names ? [...names] : undefined;
 }
 
 function loopTasks(spec) {
@@ -135,4 +161,5 @@ module.exports = {
   materializeHeadlessProductionLoopSpec,
   parseJsonArray,
   parseJsonObject,
+  providerDefaultSecretEnv,
 };

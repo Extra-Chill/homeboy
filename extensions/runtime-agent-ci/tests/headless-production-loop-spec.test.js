@@ -2,7 +2,10 @@
 
 const assert = require('node:assert/strict');
 const { buildGenericAgentLoopRequest } = require('../lib/generic-agent-loop-runner');
-const { materializeHeadlessProductionLoopSpec } = require('../lib/headless-production-loop-spec');
+const {
+  materializeHeadlessProductionLoopSpec,
+  providerDefaultSecretEnv,
+} = require('../lib/headless-production-loop-spec');
 
 const baseSpec = {
   loop_id: 'generic-production-loop',
@@ -44,7 +47,6 @@ const codeboxSpec = materializeHeadlessProductionLoopSpec(baseSpec, {
   runtime_profiles: codeboxProfile,
   provider: 'codex',
   model: 'gpt-5.5',
-  secret_env: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
 });
 
 assert.equal(codeboxSpec.tasks[0].loop_policy.max_iterations, 4);
@@ -58,7 +60,13 @@ const codeboxRequest = buildGenericAgentLoopRequest({
 assert.equal(codeboxRequest.executor.backend, 'codebox');
 assert.equal(codeboxRequest.executor.config.provider, 'codex');
 assert.equal(codeboxRequest.executor.config.model, 'gpt-5.5');
-assert.deepEqual(codeboxRequest.executor.secret_env, ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN']);
+assert.deepEqual(codeboxRequest.executor.secret_env, providerDefaultSecretEnv('codex'));
+
+const explicitSecretEnvSpec = materializeHeadlessProductionLoopSpec(baseSpec, {
+  provider: 'codex',
+  secret_env: ['CUSTOM_CODEX_SECRET'],
+});
+assert.deepEqual(explicitSecretEnvSpec.tasks[0].secret_env, ['CUSTOM_CODEX_SECRET']);
 
 const swappedSpec = materializeHeadlessProductionLoopSpec(baseSpec, {
   revolutions: 2,
