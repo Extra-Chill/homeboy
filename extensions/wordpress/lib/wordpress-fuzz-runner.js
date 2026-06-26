@@ -36,6 +36,7 @@ function readWordPressFuzzRunnerEnv(env = process.env) {
 		seed: env.HOMEBOY_FUZZ_SEED,
 		maxDuration: env.HOMEBOY_FUZZ_MAX_DURATION,
 		resultsFile: env.HOMEBOY_FUZZ_RESULTS_FILE,
+		artifactRoot: env.HOMEBOY_ARTIFACT_ROOT || env.HOMEBOY_ARTIFACT_DIR || env.HOMEBOY_ARTIFACTS_DIR || env.HOMEBOY_RUN_ARTIFACT_ROOT || env.HOMEBOY_RUN_ARTIFACT_DIR,
 		wpCodeboxFuzzWorkloadRoot: env.WP_CODEBOX_FUZZ_WORKLOAD_ROOT,
 		wpCodeboxBin: env.HOMEBOY_WP_CODEBOX_BIN || env.WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN,
 		wpCliBin: env.HOMEBOY_WP_CLI_BIN || env.WP_CLI_BIN,
