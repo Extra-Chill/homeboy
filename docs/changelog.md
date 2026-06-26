@@ -4,6 +4,39 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.263.0] - 2026-06-26
+
+### Added
+- run artifact postprocess steps
+
+### Changed
+- refactor(agent-task): declare provider result contracts
+- retry Homeboy test check
+
+### Fixed
+- clarify agent-task provider preflight drift
+- surface rig package freshness evidence
+- return detached lab handoff output
+- summarize SSI matrix artifacts
+- enforce execution budgets
+- add lab homeboy binary refresh
+- route lab secret env through plan
+- scope matrix artifact summaries to run
+- capture offloaded exec artifacts
+- preview static artifacts
+- attach directory artifacts
+- prefer explicit exec run id
+- surface PR branch cleanup warnings
+- port from-spec loop primitives
+- Fix runner option parsing for artifact attach
+- plan portable command matrices
+- attach exec summary evidence
+- fix(agent-task): route fanout run-plan through Lab
+- surface runtime evidence refs
+- expose runtime bundle budgets
+- expose reusable workspaces
+- surface artifact capability diagnostics
+
 ## [0.262.0] - 2026-06-26
 
 ### Added

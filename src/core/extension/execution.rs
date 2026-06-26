@@ -6,11 +6,14 @@ use crate::core::error::{Error, Result};
 use crate::core::project::{self, Project};
 use crate::core::rig::toolchain;
 use crate::core::server::{
-    execute_local_command_in_dir, execute_local_command_interactive,
-    execute_local_command_passthrough, execute_local_command_stderr_passthrough, CommandOutput,
+    execute_local_command_in_dir, execute_local_command_in_dir_with_timeout,
+    execute_local_command_interactive, execute_local_command_passthrough,
+    execute_local_command_passthrough_with_timeout, execute_local_command_stderr_passthrough,
+    execute_local_command_stderr_passthrough_with_timeout, CommandOutput,
 };
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 mod action;
 mod readiness;
@@ -401,25 +404,39 @@ pub(crate) fn execute_capability_script(
     let current_dir = working_dir;
 
     if options.passthrough {
-        Ok(execute_local_command_passthrough(
-            &command,
-            current_dir,
-            env_opt,
-        ))
+        Ok(match options.timeout {
+            Some(timeout) => execute_local_command_passthrough_with_timeout(
+                &command,
+                current_dir,
+                env_opt,
+                timeout,
+            ),
+            None => execute_local_command_passthrough(&command, current_dir, env_opt),
+        })
     } else if options.stderr_passthrough {
-        Ok(execute_local_command_stderr_passthrough(
-            &command,
-            current_dir,
-            env_opt,
-        ))
+        Ok(match options.timeout {
+            Some(timeout) => execute_local_command_stderr_passthrough_with_timeout(
+                &command,
+                current_dir,
+                env_opt,
+                timeout,
+            ),
+            None => execute_local_command_stderr_passthrough(&command, current_dir, env_opt),
+        })
     } else {
-        Ok(execute_local_command_in_dir(&command, current_dir, env_opt))
+        Ok(match options.timeout {
+            Some(timeout) => {
+                execute_local_command_in_dir_with_timeout(&command, current_dir, env_opt, timeout)
+            }
+            None => execute_local_command_in_dir(&command, current_dir, env_opt),
+        })
     }
 }
 
 pub(crate) struct CapabilityScriptOptions {
     pub passthrough: bool,
     pub stderr_passthrough: bool,
+    pub timeout: Option<Duration>,
 }
 
 pub(crate) struct PreparedCapabilityRun {
@@ -1164,6 +1181,7 @@ mod tests {
             CapabilityScriptOptions {
                 passthrough: false,
                 stderr_passthrough: true,
+                timeout: None,
             },
         )
         .expect("script should run");
@@ -1171,5 +1189,30 @@ mod tests {
         assert!(output.success);
         assert_eq!(output.stdout, "{\"ok\":true}\n");
         assert_eq!(output.stderr, "progress turn=1\n");
+    }
+
+    #[test]
+    fn execute_capability_script_timeout_returns_partial_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = execute_capability_script(
+            dir.path(),
+            "unused.sh",
+            &[],
+            &[],
+            None,
+            Some("printf 'started\\n'; sleep 2"),
+            CapabilityScriptOptions {
+                passthrough: false,
+                stderr_passthrough: false,
+                timeout: Some(Duration::from_millis(50)),
+            },
+        )
+        .expect("script should run until timeout");
+
+        assert!(!output.success);
+        assert!(output.timed_out);
+        assert_eq!(output.exit_code, 124);
+        assert_eq!(output.stdout, "started\n");
+        assert!(output.stderr.contains("Homeboy command timed out"));
     }
 }

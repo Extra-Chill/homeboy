@@ -410,6 +410,13 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
     },
     PublicOutputVariantContract {
         command: "runner",
+        variant: "refresh_homeboy",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("refresh_homeboy"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "runner",
         variant: "exec",
         discriminator_field: Some("variant"),
         discriminator_value: Some("exec"),
@@ -441,6 +448,13 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         variant: "work",
         discriminator_field: Some("variant"),
         discriminator_value: Some("work"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "runner",
+        variant: "workspace_list",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("workspace_list"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {

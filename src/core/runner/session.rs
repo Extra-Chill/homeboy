@@ -462,6 +462,7 @@ impl RunnerStaleDaemonWarning {
             current_homeboy_build_identity,
             message: "connected runner daemon was started by a different Homeboy build than the configured runner executable; run recovery_commands in order to restart the active daemon".to_string(),
             recovery_commands: vec![
+                format!("homeboy runner refresh-homeboy {} --ref main --reconnect", runner_id),
                 format!("homeboy runner disconnect {}", runner_id),
                 format!("homeboy runner connect {}", runner_id),
             ],

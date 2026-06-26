@@ -26,6 +26,7 @@ mod daemon_http_get;
 mod evidence;
 mod execution;
 mod git_dependency_materialization;
+mod homeboy_refresh;
 mod lab;
 mod lab_apply;
 mod lab_args;
@@ -94,6 +95,10 @@ pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
     RunnerGitDependencyMaterializationOutput,
 };
+pub use homeboy_refresh::{
+    plan_homeboy_binary_refresh, refresh_homeboy_binary, HomeboyBinaryRefreshMode,
+    HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan,
+};
 pub use lab::{
     execute_lab_offload, LabJobOverrides, LabLocalExecutionPolicy, LabOffloadCommand,
     LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
@@ -121,7 +126,8 @@ pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerTransport};
 pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::{
-    sync_workspace, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceSyncMode,
+    list_workspaces, sync_workspace, ByteFileCounts, RunnerWorkspaceCurrentSummary,
+    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 

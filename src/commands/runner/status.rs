@@ -5,8 +5,9 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 
 use super::super::CmdResult;
 use super::types::{
-    LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerConnectionOutput,
-    RunnerExtra, RunnerOperatorCommand, RunnerOutput, RunnerToolDiagnostics,
+    LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
+    RunnerConnectionOutput, RunnerExtra, RunnerOperatorCommand, RunnerOutput,
+    RunnerToolDiagnostics,
 };
 
 pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
@@ -100,6 +101,7 @@ fn lab_runner_homeboy_output(
     status: &RunnerStatusReport,
 ) -> LabRunnerHomeboyOutput {
     let controller_version = env!("CARGO_PKG_VERSION").to_string();
+    let controller_build_identity = homeboy::core::build_identity::current().display;
     let active_daemon_version = status
         .session
         .as_ref()
@@ -109,6 +111,7 @@ fn lab_runner_homeboy_output(
         .is_some_and(|version| version != &controller_version);
     LabRunnerHomeboyOutput {
         controller_version,
+        controller_build_identity,
         configured_executable: configured_executable.to_string(),
         active_daemon_version,
         active_daemon_build_identity: status
@@ -121,6 +124,12 @@ fn lab_runner_homeboy_output(
             .and_then(|warning| serde_json::to_value(warning).ok()),
         version_drift,
         command_availability_checks: lab_command_availability_checks(configured_executable),
+        artifact_features: runner_artifact_feature_diagnostics(
+            runner_id,
+            configured_executable,
+            status,
+            version_drift,
+        ),
         refresh_commands: lab_runner_homeboy_refresh_commands(runner_id),
         upgrade_command: format!(
             "homeboy upgrade --force --upgrade-runner {}",
@@ -178,15 +187,62 @@ fn lab_command_availability_checks(homeboy_path: &str) -> Vec<String> {
     let binary = shell_arg(homeboy_path);
     vec![
         format!("{binary} --version"),
+        format!("{binary} runner exec --help"),
+        format!("{binary} runs artifact --help"),
         format!("{binary} fuzz --help"),
         format!("{binary} runs evidence --help"),
         format!("{binary} extension list"),
     ]
 }
 
+pub(super) fn runner_artifact_feature_diagnostics(
+    runner_id: &str,
+    homeboy_path: &str,
+    status: &RunnerStatusReport,
+    version_drift: bool,
+) -> RunnerArtifactFeatureDiagnostics {
+    let binary = shell_arg(homeboy_path);
+    let runner_arg = shell_arg(runner_id);
+    let mut hints = Vec::new();
+    if version_drift || status.stale_daemon.is_some() {
+        hints.push(format!(
+            "Runner `{runner_id}` reports Homeboy version/build drift. If artifact commands are missing on runner jobs, restart the active daemon with `homeboy runner disconnect {runner_arg}` then `homeboy runner connect {runner_arg}`."
+        ));
+    }
+    if status.connected
+        && status
+            .session
+            .as_ref()
+            .and_then(|session| session.local_url.as_ref())
+            .is_none()
+    {
+        hints.push(format!(
+            "Runner `{runner_id}` has no direct daemon URL in the active session; verify artifact command support through managed exec instead of assuming the controller binary matches the runner binary."
+        ));
+    }
+
+    RunnerArtifactFeatureDiagnostics {
+        required_features: vec!["runner_exec_artifact_output", "runs_artifact_attach"],
+        controller_commands: vec![
+            "homeboy runner exec <runner-id> --run-id <run-id> --artifact <path> -- <command>"
+                .to_string(),
+            "homeboy runs artifact attach <run-id> --runner <runner-id> --path <path> --name <name>"
+                .to_string(),
+        ],
+        runner_command_checks: vec![
+            format!("{binary} runner exec --help"),
+            format!("{binary} runs artifact attach --help"),
+            format!("homeboy runner exec {runner_arg} -- {binary} runner exec --help"),
+            format!("homeboy runner exec {runner_arg} -- {binary} runs artifact attach --help"),
+        ],
+        hints,
+    }
+}
+
 fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
     let runner_arg = shell_arg(runner_id);
     vec![
+        format!("homeboy runner refresh-homeboy {runner_arg} --ref main --reconnect"),
         format!("homeboy runner disconnect {runner_arg}"),
         format!("homeboy runner connect {runner_arg}"),
     ]
@@ -239,6 +295,11 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
             label: "doctor",
             command: format!("homeboy runner doctor {runner_arg} --scope lab-offload"),
             purpose: "Probe runner tools, workspace writability, artifact storage, and Lab offload readiness.",
+        },
+        LabFollowup {
+            label: "refresh_homeboy",
+            command: format!("homeboy runner refresh-homeboy {runner_arg} --ref main --reconnect"),
+            purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.",
         },
         LabFollowup {
             label: "env",

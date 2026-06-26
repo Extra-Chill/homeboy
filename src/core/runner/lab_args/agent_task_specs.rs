@@ -42,6 +42,8 @@ pub(in crate::core::runner) fn materialize_agent_task_specs_in_args<T>(
     mut sync_inline_json: impl FnMut(AgentTaskInlineJsonSpec<'_>) -> Result<Option<(String, T)>>,
 ) -> Result<AgentTaskSpecMaterialization<T>> {
     let remapped_args = remap_agent_task_plan_in_args(args, mappings, source_path)?;
+    let remapped_args =
+        remap_agent_task_fanout_input_in_args(&remapped_args, mappings, source_path)?;
     let remapped_args = inline_agent_task_prompt_files_in_args(&remapped_args, source_path)?;
     let (argv, workspace_entries) =
         materialize_inline_agent_task_json_specs_in_args(&remapped_args, |spec| {
@@ -51,6 +53,40 @@ pub(in crate::core::runner) fn materialize_agent_task_specs_in_args<T>(
     Ok(AgentTaskSpecMaterialization {
         argv,
         workspace_entries,
+    })
+}
+
+fn remap_agent_task_fanout_input_in_args(
+    args: &[String],
+    mappings: &[LabPathRemap],
+    source_path: &Path,
+) -> Result<Vec<String>> {
+    if !agent_task_subcommand_is(args, &["fanout", "run-plan"]) {
+        return Ok(args.to_vec());
+    }
+    let ordered = order_mappings_by_specificity(mappings);
+
+    try_rewrite_flag_value_args(args, |arg, iter, out| {
+        if arg == "--input" {
+            out.push(arg.to_string());
+            if let Some(spec) = iter.next() {
+                out.push(remap_agent_task_fanout_input_spec(
+                    spec,
+                    &ordered,
+                    source_path,
+                )?);
+            }
+            return Ok(());
+        }
+        if let Some(spec) = arg.strip_prefix("--input=") {
+            out.push(format!(
+                "--input={}",
+                remap_agent_task_fanout_input_spec(spec, &ordered, source_path)?
+            ));
+            return Ok(());
+        }
+        out.push(arg.to_string());
+        Ok(())
     })
 }
 
@@ -144,6 +180,98 @@ fn remap_agent_task_plan_spec(
             err.to_string(),
             Some("serialize remapped agent-task plan".to_string()),
         )
+    })
+}
+
+fn remap_agent_task_fanout_input_spec(
+    spec: &str,
+    mappings: &[&LabPathRemap],
+    source_path: &Path,
+) -> Result<String> {
+    if spec == "-" {
+        return Ok(spec.to_string());
+    }
+
+    let raw = read_agent_task_plan_spec_to_string(spec, source_path)?;
+    let mut value: Value = serde_json::from_str(&raw).map_err(|err| {
+        Error::validation_invalid_json(
+            err,
+            Some(format!("parse agent-task fanout run-plan --input {spec}")),
+            None,
+        )
+    })?;
+    let original_value = value.clone();
+    remap_paths_in_value(&mut value, mappings);
+    rewrite_fanout_cook_workspaces(&mut value, &original_value, mappings);
+    serde_json::to_string(&value).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("serialize remapped agent-task fanout input".to_string()),
+        )
+    })
+}
+
+fn rewrite_fanout_cook_workspaces(
+    value: &mut Value,
+    original_value: &Value,
+    mappings: &[&LabPathRemap],
+) {
+    let original_cooks = original_value
+        .get("cooks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let Some(cooks) = value.get_mut("cooks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for (index, cook) in cooks.iter_mut().enumerate() {
+        let Some(object) = cook.as_object_mut() else {
+            continue;
+        };
+        let original_object = original_cooks.get(index).and_then(Value::as_object);
+        let mut materializations = Vec::new();
+        for field in ["cwd", "workspace"] {
+            let Some(controller_value) = original_object
+                .and_then(|object| object.get(field))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let resolved_controller_path = crate::core::worktree::resolve(&controller_value)
+                .ok()
+                .map(|record| record.worktree_path)
+                .unwrap_or_else(|| controller_value.clone());
+            let Some(runner_path) = rewrite_path_with_mappings(&resolved_controller_path, mappings)
+            else {
+                continue;
+            };
+            object.insert(field.to_string(), Value::String(runner_path.clone()));
+            materializations.push(serde_json::json!({
+                "field": field,
+                "controller_path": resolved_controller_path,
+                "runner_path": runner_path,
+                "branch": object.get("head").and_then(Value::as_str).or_else(|| object.get("base").and_then(Value::as_str)),
+                "ref": object.get("head").and_then(Value::as_str).or_else(|| object.get("base").and_then(Value::as_str)),
+                "sync_status": "materialized",
+            }));
+        }
+        if !materializations.is_empty() {
+            object.insert(
+                "workspace_materialization".to_string(),
+                Value::Array(materializations),
+            );
+        }
+    }
+}
+
+fn rewrite_path_with_mappings(path: &str, mappings: &[&LabPathRemap]) -> Option<String> {
+    mappings.iter().find_map(|mapping| {
+        if path == mapping.local {
+            return Some(mapping.remote.clone());
+        }
+        path.strip_prefix(&format!("{}/", mapping.local))
+            .map(|suffix| format!("{}/{suffix}", mapping.remote))
     })
 }
 

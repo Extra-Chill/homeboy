@@ -131,7 +131,7 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
                 "--input",
                 "fanout.json",
             ]),
-            "agent-task fanout submit-batch/status/artifacts",
+            "agent-task fanout run-plan/submit-batch/status/artifacts",
         ),
         (
             parsed_command(&[
@@ -141,7 +141,7 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
                 "status",
                 "fanout-batch-123",
             ]),
-            "agent-task fanout submit-batch/status/artifacts",
+            "agent-task fanout run-plan/submit-batch/status/artifacts",
         ),
         (
             parsed_command(&[
@@ -279,7 +279,7 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
             "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
             "agent-task retry --run",
             "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
-            "agent-task fanout submit-batch/status/artifacts",
+            "agent-task fanout run-plan/submit-batch/status/artifacts",
             "agent-task auth status",
             "lint",
             "test",

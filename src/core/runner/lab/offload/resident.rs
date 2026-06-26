@@ -124,7 +124,7 @@ pub(crate) fn run_runner_resident_lab_offload(
     for (name, value) in &request.job_overrides.env {
         env.insert(name.clone(), value.clone());
     }
-    let mut secret_env_names = secret_env_handoff.secret_env_names;
+    let mut secret_env_names = secret_env_handoff.secret_env_plan.secret_env_names();
     secret_env_names.extend(request.job_overrides.secret_env_names.clone());
     secret_env_names.sort();
     secret_env_names.dedup();

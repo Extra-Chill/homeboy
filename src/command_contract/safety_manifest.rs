@@ -441,11 +441,13 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "reports a plan by default; pass --write to rewrite source files";
             metadata.dangerous_flags = vec!["--write"];
         }
-        ["rig", "up"]
-        | ["rig", "down"]
-        | ["rig", "repair"]
-        | ["rig", "install"]
-        | ["rig", "update"] => {
+        ["rig", "up"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes = "mutates local rig runtime state unless --dry-run is passed with --runner to emit a runner exec plan";
+        }
+        ["rig", "down"] | ["rig", "repair"] | ["rig", "install"] | ["rig", "update"] => {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "mutates local rig runtime state or installed rig packages";
@@ -471,6 +473,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["runner", "remove"]
         | ["runner", "connect"]
         | ["runner", "disconnect"]
+        | ["runner", "refresh-homeboy"]
         | ["runner", "work"] => {
             metadata.mutates = true;
             metadata.operator = true;

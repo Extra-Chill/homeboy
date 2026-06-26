@@ -147,9 +147,8 @@ impl CliRuntime {
 
         if let Some(extension_cmd) = self.try_parse_extension_cli_command(&matches) {
             if let Some(path) = output_file.as_deref() {
-                if let Some(err) = output_runtime::validate_output_file_path(path) {
-                    output_runtime::emit_json_result(Err(err), None, 2);
-                    return std::process::ExitCode::from(exit_code_to_u8(2));
+                if let Some(exit) = output_file_path_exit_code(path) {
+                    return exit;
                 }
             }
 
@@ -179,9 +178,8 @@ impl CliRuntime {
             // This command owns `--output/-o`; it is not the global JSON envelope.
             output_file = None;
         } else if let Some(path) = output_file.as_deref() {
-            if let Some(err) = output_runtime::validate_output_file_path(path) {
-                output_runtime::emit_json_result(Err(err), None, 2);
-                return std::process::ExitCode::from(exit_code_to_u8(2));
+            if let Some(exit) = output_file_path_exit_code(path) {
+                return exit;
             }
         }
 
@@ -591,6 +589,17 @@ fn run_startup_update_checks(command: &Commands) {
         crate::core::upgrade::update_check::run_startup_check();
         crate::core::extension::update_check::run_startup_check();
     }
+}
+
+/// Validate the JSON-envelope output-file path. When the path is invalid,
+/// emit the error envelope and return the process `ExitCode` the caller
+/// should return; otherwise return `None` to continue.
+fn output_file_path_exit_code(path: &str) -> Option<std::process::ExitCode> {
+    if let Some(err) = output_runtime::validate_output_file_path(path) {
+        output_runtime::emit_json_result(Err(err), None, 2);
+        return Some(std::process::ExitCode::from(exit_code_to_u8(2)));
+    }
+    None
 }
 
 fn exit_code_to_u8(code: i32) -> u8 {

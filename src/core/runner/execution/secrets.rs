@@ -6,6 +6,7 @@ use crate::core::agent_tasks::{
 };
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
+use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::server::{self, SshClient};
 
 use super::super::resolve_runner_secret_env;
@@ -14,14 +15,14 @@ use super::super::{Runner, RunnerCapabilityPreflight};
 #[allow(unused_imports)]
 use super::*;
 
-pub(super) fn resolve_runner_secret_env_for_command(
+pub(super) fn resolve_runner_secret_env_for_plan(
     secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
-    required_names: &[String],
+    plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
     resolve_runner_secret_env_for_command_with_fallbacks(
         secret_env,
-        required_names,
+        &plan.secret_env_names(),
         env,
         &provider_secret_sources_for_discovered_providers(),
     )
@@ -321,6 +322,14 @@ pub(crate) fn runner_exec_secret_env_names(
     preflight: Option<&RunnerCapabilityPreflight>,
     explicit_names: &[String],
 ) -> Vec<String> {
+    runner_exec_secret_env_plan(command, preflight, explicit_names).secret_env_names()
+}
+
+pub(crate) fn runner_exec_secret_env_plan(
+    command: &[String],
+    preflight: Option<&RunnerCapabilityPreflight>,
+    explicit_names: &[String],
+) -> SecretEnvPlan {
     let mut names = Vec::new();
     names.extend(explicit_names.iter().cloned());
     if let Some(preflight) = preflight {
@@ -335,7 +344,5 @@ pub(crate) fn runner_exec_secret_env_names(
     names.extend(super::super::lab::secrets::declared_tunnel_secret_env(
         command,
     ));
-    names.sort();
-    names.dedup();
-    names
+    SecretEnvPlan::from_secret_env_names(names)
 }

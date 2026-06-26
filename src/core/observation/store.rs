@@ -787,20 +787,16 @@ impl ObservationStore {
                     "#,
                 )
                 .map_err(sqlite_error("prepare joined run artifact records"))?;
-            let rows = statement
-                .query_map(
-                    params![
-                        started_since,
-                        filter.kind.as_deref(),
-                        filter.component_id.as_deref(),
-                        filter.status.as_deref(),
-                        filter.rig_id.as_deref(),
-                    ],
-                    row_to_run_artifact_record,
-                )
-                .map_err(sqlite_error("list joined run artifact records"))?;
-
-            return collect_rows(rows, "collect joined run artifact records");
+            return query_run_artifact_records(
+                &mut statement,
+                params![
+                    started_since,
+                    filter.kind.as_deref(),
+                    filter.component_id.as_deref(),
+                    filter.status.as_deref(),
+                    filter.rig_id.as_deref(),
+                ],
+            );
         }
 
         let limit = filter.limit.unwrap_or(100).clamp(1, 1000);
@@ -830,20 +826,16 @@ impl ObservationStore {
                 "#,
             )
             .map_err(sqlite_error("prepare joined run artifact records"))?;
-        let rows = statement
-            .query_map(
-                params![
-                    filter.kind.as_deref(),
-                    filter.component_id.as_deref(),
-                    filter.status.as_deref(),
-                    filter.rig_id.as_deref(),
-                    limit,
-                ],
-                row_to_run_artifact_record,
-            )
-            .map_err(sqlite_error("list joined run artifact records"))?;
-
-        collect_rows(rows, "collect joined run artifact records")
+        query_run_artifact_records(
+            &mut statement,
+            params![
+                filter.kind.as_deref(),
+                filter.component_id.as_deref(),
+                filter.status.as_deref(),
+                filter.rig_id.as_deref(),
+                limit,
+            ],
+        )
     }
 
     pub fn get_artifact(&self, artifact_id: &str) -> Result<Option<ArtifactRecord>> {
@@ -1330,6 +1322,18 @@ fn row_to_trace_span_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraceSp
         to_event: row.get(6)?,
         metadata_json: parse_metadata(row.get(7)?)?,
     })
+}
+
+/// Run the joined run-artifact `query_map` on a prepared statement with the
+/// given `params` and collect the rows, using the shared error contexts.
+fn query_run_artifact_records(
+    statement: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+) -> Result<Vec<RunArtifactRecord>> {
+    let rows = statement
+        .query_map(params, row_to_run_artifact_record)
+        .map_err(sqlite_error("list joined run artifact records"))?;
+    collect_rows(rows, "collect joined run artifact records")
 }
 
 fn collect_rows<T>(

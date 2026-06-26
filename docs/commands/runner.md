@@ -140,6 +140,31 @@ It does not upgrade binaries, rewrite runner paths, or refresh Sample Runtime ca
 those remain explicit operator actions because they can be expensive or depend
 on environment-specific paths.
 
+### `refresh-homeboy`
+
+```sh
+homeboy runner refresh-homeboy <runner-id> --ref main --reconnect
+homeboy runner refresh-homeboy <runner-id> --source https://github.com/Extra-Chill/homeboy.git --ref <branch-or-sha>
+homeboy runner refresh-homeboy <runner-id> --select /path/to/homeboy --reconnect
+homeboy runner refresh-homeboy <runner-id> --ref <branch-or-sha> --dry-run
+```
+
+Builds or selects the Homeboy binary used by runner/Lab job execution without
+mutating a runner's primary checkout. Materialize mode clones/fetches the
+Homeboy source into a managed runner-side cache under the runner workspace root
+unless `--target-dir` is supplied, hard-resets that isolated checkout to the
+requested ref, builds `target/release/homeboy`, probes `self identity`, and then
+updates the runner `homeboy_path` to the clean binary. Select mode skips the
+build and probes the exact binary passed to `--select` before updating
+`homeboy_path`.
+
+Use `--reconnect` when the active daemon/session should be refreshed immediately.
+Without it, the JSON output includes follow-up `disconnect`, `connect`, and
+`status` commands so operators can restart a session at the right time. `runner
+status` also reports controller, configured executable, active daemon version,
+build identity, drift signals, and refresh commands under
+`selected_lab_runner.runner_homeboy`.
+
 Pass one or more `--require-tool <command>` values when a provider or job path
 knows it needs additional runner-side commands before starting expensive work.
 Doctor resolves each command on the runner `PATH` and reports missing requested
@@ -569,6 +594,15 @@ Runner metrics:
 - Local runner execution, connected daemon jobs, and reverse-runner worker results include a `metrics` object with `duration_ms`, `sample_count`, and lightweight resource fields when available.
 - On Linux runners, metrics are sampled from `/proc` for the command process tree and include `peak_rss_bytes`, `child_process_count_peak`, `cpu_user_ms`, and `cpu_system_ms`.
 - CPU accounting is sampled and can miss very short-lived child processes between samples; duration is always recorded, and non-Linux runners report `source: "duration_only"`.
+
+### `workspace list`
+
+```sh
+homeboy runner workspace list <runner-id>
+homeboy runner workspace list <runner-id> --limit 5
+```
+
+`workspace list` shows recent runner-side Lab workspace directories under the runner's configured `workspace_root` and includes a reusable `runner exec --cwd <remote-path>` command for each entry. Use it after a manual or matrix session when the previous `remote_path` scrolled out of view and you need to run another command against the same runner-side checkout.
 
 ### `workspace sync`
 

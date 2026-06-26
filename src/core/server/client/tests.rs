@@ -327,6 +327,7 @@ fn managed_session_connect_reports_per_command_fallback() {
             stderr: String::new(),
             success: true,
             exit_code: 0,
+            timed_out: false,
             child_resource: None,
         },
     );

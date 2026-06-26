@@ -71,6 +71,7 @@ pub struct LabSelectedRunnerOutput {
 #[derive(Debug, Serialize)]
 pub struct LabRunnerHomeboyOutput {
     pub controller_version: String,
+    pub controller_build_identity: String,
     pub configured_executable: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_daemon_version: Option<String>,
@@ -80,8 +81,18 @@ pub struct LabRunnerHomeboyOutput {
     pub stale_daemon: Option<Value>,
     pub version_drift: bool,
     pub command_availability_checks: Vec<String>,
+    pub artifact_features: RunnerArtifactFeatureDiagnostics,
     pub refresh_commands: Vec<String>,
     pub upgrade_command: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerArtifactFeatureDiagnostics {
+    pub required_features: Vec<&'static str>,
+    pub controller_commands: Vec<String>,
+    pub runner_command_checks: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -128,6 +139,7 @@ pub enum RunnerCommandOutput {
     Env(RunnerEnvOutput),
     Job(RunnerJobOutput),
     BrokerJob(RunnerBrokerJobOutput),
+    RefreshHomeboy(homeboy::core::runners::HomeboyBinaryRefreshOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
     Broker(RunnerBrokerOutput),

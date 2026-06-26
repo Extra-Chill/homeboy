@@ -36,6 +36,7 @@ pub(super) fn request(
         lab_runtime_components: Vec::new(),
         timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery::default(),
         role_aliases: AgentTaskProviderRoleAliases::default(),
+        result_contract: AgentTaskProviderResultContract::default(),
         runtime_contract: AgentTaskRuntimeContract::default(),
         extension_id: None,
         extension_path: None,

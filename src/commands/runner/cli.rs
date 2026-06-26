@@ -208,6 +208,35 @@ pub(super) enum RunnerCommand {
         /// Runner ID
         id: String,
     },
+    /// Build or select the Homeboy binary used for runner/Lab jobs
+    RefreshHomeboy {
+        /// Runner ID
+        runner_id: String,
+
+        /// Existing runner-side Homeboy binary to select instead of building one
+        #[arg(long)]
+        select: Option<String>,
+
+        /// Git remote URL to clone/fetch when materializing a managed Homeboy binary
+        #[arg(long)]
+        source: Option<String>,
+
+        /// Git ref to materialize from the source remote
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+
+        /// Runner-side checkout directory for the managed Homeboy source
+        #[arg(long)]
+        target_dir: Option<String>,
+
+        /// Disconnect and reconnect the runner daemon after updating homeboy_path
+        #[arg(long)]
+        reconnect: bool,
+
+        /// Print the plan without executing it or changing runner config
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Execute a command on a configured runner
     Exec {
         /// Runner ID
@@ -257,6 +286,11 @@ pub(super) enum RunnerCommand {
         /// Relative paths are resolved from the runner exec cwd. Repeat for multiple artifacts.
         #[arg(long = "artifact", value_name = "PATH")]
         artifact_outputs: Vec<String>,
+
+        /// Summary file or directory produced by the runner command to persist as typed run evidence.
+        /// Relative paths are resolved from the runner exec cwd. Repeat for multiple summaries.
+        #[arg(long = "summary", value_name = "PATH")]
+        summary_outputs: Vec<String>,
 
         /// Print remote stdout/stderr directly instead of the structured JSON envelope.
         /// Use global --output to still write the full structured envelope to a file.

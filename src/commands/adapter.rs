@@ -1,8 +1,7 @@
 use serde_json::Value;
 
 use crate::command_contract::{
-    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, CommandPortabilityContract,
-    LabCommandContract,
+    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
 };
 
 use crate::cli_surface::Commands;
@@ -12,7 +11,6 @@ use super::{fleet, observe, version, GlobalArgs};
 pub(crate) type JsonCommandRun = (homeboy::core::Result<Value>, i32);
 pub(crate) type JsonCommandExecutor<Args> = fn(Args, &GlobalArgs) -> JsonCommandRun;
 pub(crate) type LabContractResolver<Args> = fn(&Args) -> Option<LabCommandContract>;
-pub(crate) type PortabilityContractResolver<Args> = fn(&Args) -> CommandPortabilityContract;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommandLabRunnerPolicy {
@@ -55,7 +53,6 @@ pub(crate) struct TypedCommandAdapter<Args> {
     pub contract: CommandAdapterContract,
     pub execute_json: Option<JsonCommandExecutor<Args>>,
     pub lab_contract: Option<LabContractResolver<Args>>,
-    pub portability_contract: Option<PortabilityContractResolver<Args>>,
 }
 
 pub(crate) struct BoundCommandAdapter {
@@ -95,7 +92,6 @@ impl<Args> TypedCommandAdapter<Args> {
             },
             execute_json: Some(execute_json),
             lab_contract: None,
-            portability_contract: None,
         }
     }
 
@@ -104,25 +100,8 @@ impl<Args> TypedCommandAdapter<Args> {
         self
     }
 
-    pub fn with_portability_contract(
-        mut self,
-        portability_contract: PortabilityContractResolver<Args>,
-    ) -> Self {
-        self.portability_contract = Some(portability_contract);
-        self
-    }
-
-    pub fn portability_contract(&self, args: &Args) -> CommandPortabilityContract {
-        if let Some(resolver) = self.portability_contract {
-            return resolver(args);
-        }
-        CommandPortabilityContract::lab_optional(
-            self.lab_contract.and_then(|resolver| resolver(args)),
-        )
-    }
-
     pub fn lab_contract(&self, args: &Args) -> Option<LabCommandContract> {
-        self.portability_contract(args).lab_command()
+        self.lab_contract.and_then(|resolver| resolver(args))
     }
 }
 
@@ -238,33 +217,5 @@ mod tests {
         assert!(fleet::adapter(CommandOutputFileMode::None)
             .lab_contract(&args)
             .is_none());
-    }
-
-    #[test]
-    fn adapter_can_expose_generic_portability_contract() {
-        let adapter = TypedCommandAdapter::<()>::json_only(
-            CommandJsonFamily::Quality,
-            CommandOutputFileMode::None,
-            |_, _| (Ok(Value::Null), 0),
-        )
-        .with_portability_contract(|_| {
-            CommandPortabilityContract::lab(LabCommandContract::portable(
-                "adapter-owned",
-                None,
-                false,
-                &[],
-            ))
-        });
-
-        let contract = adapter
-            .portability_contract(&())
-            .lab_command()
-            .expect("adapter should expose Lab portability");
-
-        assert_eq!(contract.hot_label, "adapter-owned");
-        assert!(matches!(
-            contract.portability,
-            LabCommandPortability::Portable
-        ));
     }
 }

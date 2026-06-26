@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,12 +30,18 @@ pub struct MatrixArtifactSummary {
     pub schema: String,
     pub run_id: String,
     pub fixture_count: usize,
+    pub passed_count: usize,
+    pub failed_count: usize,
+    pub not_run_count: usize,
     pub finding_count: usize,
     pub group_counts: Vec<MatrixSummaryCount>,
     pub top_diagnostic_kinds: Vec<MatrixSummaryCount>,
     pub top_fixtures: Vec<MatrixSummaryCount>,
+    pub candidate_repo_counts: Vec<MatrixSummaryCount>,
     pub result_refs: Vec<ArtifactRef>,
     pub finding_packet_refs: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,14 +53,19 @@ pub struct MatrixSummaryCount {
 #[derive(Default)]
 struct SummaryAccumulator {
     fixture_count: usize,
+    passed_count: usize,
+    failed_count: usize,
+    not_run_count: usize,
     finding_count: usize,
     group_counts: BTreeMap<String, usize>,
     diagnostic_kind_counts: BTreeMap<String, usize>,
     fixture_counts: BTreeMap<String, usize>,
+    candidate_repo_counts: BTreeMap<String, usize>,
     result_ref_ids: BTreeSet<String>,
     result_refs: Vec<ArtifactRef>,
     finding_packet_ref_ids: BTreeSet<String>,
     finding_packet_refs: Vec<ArtifactRef>,
+    parse_diagnostics: Vec<String>,
 }
 
 pub fn summarize_matrix_artifacts(
@@ -64,6 +77,9 @@ pub fn summarize_matrix_artifacts(
     let mut saw_matrix_signal = false;
 
     for artifact in artifacts {
+        if artifact.run_id != run_id {
+            continue;
+        }
         let class = classify_artifact(artifact);
         if class.is_matrix {
             saw_matrix_signal = true;
@@ -78,9 +94,20 @@ pub fn summarize_matrix_artifacts(
                 artifact,
             );
         }
-        if let Some(value) = read_json_artifact(artifact) {
-            saw_matrix_signal |= value_has_matrix_signal(&value);
-            collect_from_value(&mut acc, &value);
+        match read_json_artifact(artifact) {
+            Ok(Some(value)) => {
+                saw_matrix_signal |= value_has_matrix_signal(&value);
+                collect_from_value(&mut acc, &value);
+            }
+            Ok(None) => {}
+            Err(message) => {
+                if class.is_matrix || class.is_result || class.is_finding_packet {
+                    acc.parse_diagnostics.push(format!(
+                        "artifact {} ({}) was not readable as JSON: {message}",
+                        artifact.id, artifact.kind
+                    ));
+                }
+            }
         }
     }
 
@@ -100,12 +127,17 @@ pub fn summarize_matrix_artifacts(
         schema: MATRIX_ARTIFACT_SUMMARY_SCHEMA.to_string(),
         run_id: run_id.to_string(),
         fixture_count: acc.fixture_count,
+        passed_count: acc.passed_count,
+        failed_count: acc.failed_count,
+        not_run_count: acc.not_run_count,
         finding_count: acc.finding_count,
         group_counts: top_counts(acc.group_counts, 20),
         top_diagnostic_kinds: top_counts(acc.diagnostic_kind_counts, 10),
         top_fixtures: top_counts(acc.fixture_counts, 10),
+        candidate_repo_counts: top_counts(acc.candidate_repo_counts, 10),
         result_refs: acc.result_refs,
         finding_packet_refs: acc.finding_packet_refs,
+        parse_diagnostics: acc.parse_diagnostics,
     })
 }
 
@@ -114,7 +146,7 @@ pub fn generic_matrix_summary_from_artifacts(
     artifacts: &[ArtifactRecord],
 ) -> Option<GenericMatrixSummary> {
     for artifact in artifacts {
-        let Some(value) = read_json_artifact(artifact) else {
+        let Ok(Some(value)) = read_json_artifact(artifact) else {
             continue;
         };
         if schema_at(&value) != Some(GENERIC_MATRIX_SUMMARY_SCHEMA) {
@@ -237,6 +269,10 @@ pub fn render_matrix_artifact_summary_markdown(summary: &MatrixArtifactSummary) 
         String::new(),
         format!("Run: `{}`", summary.run_id),
         format!("Fixtures: {}", summary.fixture_count),
+        format!(
+            "Status: {} passed / {} failed / {} not run",
+            summary.passed_count, summary.failed_count, summary.not_run_count
+        ),
         format!("Findings: {}", summary.finding_count),
     ];
     push_count_section(&mut lines, "Group Counts", &summary.group_counts);
@@ -246,12 +282,24 @@ pub fn render_matrix_artifact_summary_markdown(summary: &MatrixArtifactSummary) 
         &summary.top_diagnostic_kinds,
     );
     push_count_section(&mut lines, "Top Fixtures", &summary.top_fixtures);
+    push_count_section(
+        &mut lines,
+        "Candidate Repositories",
+        &summary.candidate_repo_counts,
+    );
     push_ref_section(&mut lines, "Result Artifacts", &summary.result_refs);
     push_ref_section(
         &mut lines,
         "Finding Packet Artifacts",
         &summary.finding_packet_refs,
     );
+    if !summary.parse_diagnostics.is_empty() {
+        lines.push(String::new());
+        lines.push("## Parse Diagnostics".to_string());
+        for diagnostic in &summary.parse_diagnostics {
+            lines.push(format!("- {diagnostic}"));
+        }
+    }
     lines.push(String::new());
     lines.join("\n")
 }
@@ -302,12 +350,20 @@ fn classify_artifact(artifact: &ArtifactRecord) -> ArtifactClass {
         }
     }
     let joined = tokens.join(" ").to_ascii_lowercase();
+    let kind = artifact.kind.to_ascii_lowercase();
+    let path = artifact.path.to_ascii_lowercase();
+    let is_matrix = joined.contains("matrix")
+        || joined.contains("fixture")
+        || joined.contains("finding-packet")
+        || joined.contains("finding_packet");
     ArtifactClass {
-        is_matrix: joined.contains("matrix")
-            || joined.contains("fixture")
-            || joined.contains("finding-packet")
-            || joined.contains("finding_packet"),
-        is_result: joined.contains("result") || joined.contains("summary"),
+        is_matrix,
+        is_result: kind == "result"
+            || kind == "summary"
+            || kind == "matrix_summary"
+            || (is_matrix && (joined.contains("result") || joined.contains("summary")))
+            || path.ends_with("static-site-fixture-matrix-result.json")
+            || path.ends_with("summary.json"),
         is_finding_packet: (joined.contains("finding") && joined.contains("packet"))
             || joined.contains("finding-packets")
             || joined.contains("finding_packets"),
@@ -344,18 +400,89 @@ fn artifact_ref_with_metadata(artifact: &ArtifactRecord) -> ArtifactRef {
     }
 }
 
-fn read_json_artifact(artifact: &ArtifactRecord) -> Option<Value> {
-    if artifact.artifact_type != "file" {
-        return None;
-    }
+const MAX_JSON_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
+
+fn read_json_artifact(artifact: &ArtifactRecord) -> Result<Option<Value>, String> {
     let path = Path::new(&artifact.path);
     let looks_json = artifact.mime.as_deref() == Some("application/json")
-        || path.extension().and_then(|ext| ext.to_str()) == Some("json");
-    if !looks_json || !path.is_file() {
-        return None;
+        || path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        || artifact.url.as_deref().is_some_and(url_path_looks_json)
+        || artifact
+            .public_url
+            .as_deref()
+            .is_some_and(url_path_looks_json);
+    if !looks_json {
+        return Ok(None);
     }
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    if artifact.artifact_type == "file" {
+        if !path.is_file() {
+            return Err(format!("local file does not exist: {}", artifact.path));
+        }
+        let metadata = std::fs::metadata(path).map_err(|err| err.to_string())?;
+        if metadata.len() > MAX_JSON_ARTIFACT_BYTES {
+            return Err(format!(
+                "JSON artifact is {} bytes, above the {} byte parser limit",
+                metadata.len(),
+                MAX_JSON_ARTIFACT_BYTES
+            ));
+        }
+        let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
+        return serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|err| err.to_string());
+    }
+    if artifact.artifact_type == "url" {
+        let Some(url) = artifact.url.as_deref().or(artifact.public_url.as_deref()) else {
+            return Err("URL artifact is missing a URL".to_string());
+        };
+        return read_json_url(url).map(Some);
+    }
+    Ok(None)
+}
+
+fn read_json_url(url: &str) -> Result<Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| err.to_string())?;
+    let response = client.get(url).send().map_err(|err| err.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {} while fetching {url}", status.as_u16()));
+    }
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_JSON_ARTIFACT_BYTES)
+    {
+        return Err(format!(
+            "remote JSON artifact is above the {} byte parser limit",
+            MAX_JSON_ARTIFACT_BYTES
+        ));
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_JSON_ARTIFACT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| err.to_string())?;
+    if bytes.len() as u64 > MAX_JSON_ARTIFACT_BYTES {
+        return Err(format!(
+            "remote JSON artifact is above the {} byte parser limit",
+            MAX_JSON_ARTIFACT_BYTES
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|err| err.to_string())
+}
+
+fn url_path_looks_json(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()
+                .and_then(Iterator::last)
+                .map(str::to_ascii_lowercase)
+        })
+        .is_some_and(|path| path.ends_with(".json"))
 }
 
 fn value_has_matrix_signal(value: &Value) -> bool {
@@ -368,6 +495,15 @@ fn value_has_matrix_signal(value: &Value) -> bool {
 }
 
 fn collect_from_value(acc: &mut SummaryAccumulator, value: &Value) {
+    if let Some(items) = value.as_array() {
+        apply_total(acc, CountTarget::FindingTotal, items.len());
+        for item in items {
+            collect_status_from_value(acc, item);
+            collect_finding_like_value(acc, item);
+        }
+        return;
+    }
+
     collect_count_field(acc, value, &["fixture_count"], CountTarget::FixtureTotal);
     collect_count_field(
         acc,
@@ -376,6 +512,12 @@ fn collect_from_value(acc: &mut SummaryAccumulator, value: &Value) {
         CountTarget::FixtureTotal,
     );
     collect_count_field(acc, value, &["total_fixtures"], CountTarget::FixtureTotal);
+    collect_count_field(
+        acc,
+        value,
+        &["result_summary", "fixture_count"],
+        CountTarget::FixtureTotal,
+    );
     collect_count_field(acc, value, &["finding_count"], CountTarget::FindingTotal);
     collect_count_field(
         acc,
@@ -384,6 +526,43 @@ fn collect_from_value(acc: &mut SummaryAccumulator, value: &Value) {
         CountTarget::FindingTotal,
     );
     collect_count_field(acc, value, &["total_findings"], CountTarget::FindingTotal);
+    collect_count_field(
+        acc,
+        value,
+        &["result_summary", "finding_count"],
+        CountTarget::FindingTotal,
+    );
+
+    collect_status_count(acc, value, &["summary", "succeeded"], StatusTarget::Passed);
+    collect_status_count(acc, value, &["summary", "passed"], StatusTarget::Passed);
+    collect_status_count(acc, value, &["summary", "failed"], StatusTarget::Failed);
+    collect_status_count(acc, value, &["summary", "not_run"], StatusTarget::NotRun);
+    collect_status_count(
+        acc,
+        value,
+        &["result_summary", "succeeded"],
+        StatusTarget::Passed,
+    );
+    collect_status_count(
+        acc,
+        value,
+        &["result_summary", "passed"],
+        StatusTarget::Passed,
+    );
+    collect_status_count(
+        acc,
+        value,
+        &["result_summary", "failed"],
+        StatusTarget::Failed,
+    );
+    collect_status_count(
+        acc,
+        value,
+        &["result_summary", "not_run"],
+        StatusTarget::NotRun,
+    );
+    let has_explicit_status_totals =
+        acc.passed_count > 0 || acc.failed_count > 0 || acc.not_run_count > 0;
 
     collect_array_len(acc, value, &["fixtures"], CountTarget::FixtureTotal);
     collect_array_len(acc, value, &["results"], CountTarget::FixtureTotal);
@@ -397,6 +576,15 @@ fn collect_from_value(acc: &mut SummaryAccumulator, value: &Value) {
         &mut acc.group_counts,
         value_at(value, &["summary", "group_counts"]),
     );
+    collect_counts_object(&mut acc.group_counts, value_at(value, &["groups"]));
+    collect_counts_object(
+        &mut acc.group_counts,
+        value_at(value, &["summary", "groups"]),
+    );
+    collect_counts_object(
+        &mut acc.group_counts,
+        value_at(value, &["result_summary", "groups"]),
+    );
     collect_counts_object(
         &mut acc.diagnostic_kind_counts,
         value_at(value, &["top_diagnostic_kinds"]),
@@ -406,6 +594,10 @@ fn collect_from_value(acc: &mut SummaryAccumulator, value: &Value) {
         value_at(value, &["top_finding_kinds"]),
     );
     collect_counts_object(&mut acc.fixture_counts, value_at(value, &["top_fixtures"]));
+    collect_counts_object(
+        &mut acc.candidate_repo_counts,
+        value_at(value, &["candidate_repo_counts"]),
+    );
 
     for key in [
         "findings",
@@ -417,8 +609,32 @@ fn collect_from_value(acc: &mut SummaryAccumulator, value: &Value) {
     ] {
         if let Some(items) = value.get(key).and_then(Value::as_array) {
             for item in items {
+                if !has_explicit_status_totals {
+                    collect_status_from_value(acc, item);
+                }
                 collect_finding_like_value(acc, item);
             }
+        }
+    }
+}
+
+enum StatusTarget {
+    Passed,
+    Failed,
+    NotRun,
+}
+
+fn collect_status_count(
+    acc: &mut SummaryAccumulator,
+    value: &Value,
+    path: &[&str],
+    target: StatusTarget,
+) {
+    if let Some(count) = value_at(value, path).and_then(Value::as_u64) {
+        match target {
+            StatusTarget::Passed => acc.passed_count = acc.passed_count.max(count as usize),
+            StatusTarget::Failed => acc.failed_count = acc.failed_count.max(count as usize),
+            StatusTarget::NotRun => acc.not_run_count = acc.not_run_count.max(count as usize),
         }
     }
 }
@@ -481,6 +697,7 @@ fn collect_counts_object(counts: &mut BTreeMap<String, usize>, value: Option<&Va
 
 fn collect_finding_like_value(acc: &mut SummaryAccumulator, value: &Value) {
     for path in [
+        &["group_key"][..],
         &["group"][..],
         &["category"][..],
         &["diagnostic", "group"][..],
@@ -488,6 +705,16 @@ fn collect_finding_like_value(acc: &mut SummaryAccumulator, value: &Value) {
     ] {
         if let Some(group) = string_at(value, path) {
             increment(&mut acc.group_counts, group);
+            break;
+        }
+    }
+    for path in [
+        &["candidate_repo"][..],
+        &["candidate", "repo"][..],
+        &["metadata", "candidate_repo"][..],
+    ] {
+        if let Some(repo) = string_at(value, path) {
+            increment(&mut acc.candidate_repo_counts, repo);
             break;
         }
     }
@@ -516,6 +743,18 @@ fn collect_finding_like_value(acc: &mut SummaryAccumulator, value: &Value) {
             increment(&mut acc.fixture_counts, fixture);
             break;
         }
+    }
+}
+
+fn collect_status_from_value(acc: &mut SummaryAccumulator, value: &Value) {
+    let Some(status) = string_at(value, &["status"]) else {
+        return;
+    };
+    match status {
+        "passed" | "pass" | "succeeded" | "success" => acc.passed_count += 1,
+        "failed" | "fail" | "failure" => acc.failed_count += 1,
+        "not_run" | "not-run" | "skipped" | "pending" => acc.not_run_count += 1,
+        _ => {}
     }
 }
 

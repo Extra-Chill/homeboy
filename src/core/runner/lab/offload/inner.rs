@@ -597,18 +597,19 @@ pub(crate) fn run_lab_offload_inner(
     for (name, value) in &request.job_overrides.env {
         env.insert(name.clone(), value.clone());
     }
-    let mut secret_env_names = secret_env_handoff.secret_env_names;
+    let mut secret_env_names = secret_env_handoff.secret_env_plan.secret_env_names();
     secret_env_names.extend(request.job_overrides.secret_env_names.clone());
     secret_env_names.sort();
     secret_env_names.dedup();
     // The remaining pre-dispatch checks (secret-env, provider, path translation)
     // are still runner setup overhead before the workload executes.
     let pre_dispatch_started = std::time::Instant::now();
-    preflight_agent_task_runner_secret_env(
+    preflight_agent_task_runner_secret_env_plan(
         runner_id,
         &runner,
         &changed_since_preflight.args,
         &env,
+        &secret_env_handoff.secret_env_plan,
     )?;
     preflight_agent_task_provider_on_runner(
         runner_id,
@@ -655,7 +656,11 @@ pub(crate) fn run_lab_offload_inner(
             required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
             runner_workload: Some(runner_workload),
-            run_id: None,
+            run_id: if request.detach_after_handoff {
+                agent_task_run_id.clone()
+            } else {
+                None
+            },
             detach_after_handoff: request.detach_after_handoff,
         },
     );
@@ -742,6 +747,21 @@ pub(crate) fn run_lab_offload_inner(
     plan = add_success_step(plan, "lab.exec");
     if exec_output.mirror_run_id.is_some() {
         plan = add_success_step(plan, "lab.mirror_evidence");
+    }
+    if request.detach_after_handoff {
+        let mut stderr = String::new();
+        for message in messages {
+            stderr.push_str(&message);
+            stderr.push('\n');
+        }
+        stderr.push_str(&exec_output.stderr);
+        return Ok(LabOffloadOutcome::Offloaded {
+            plan,
+            stdout: exec_output.stdout.clone(),
+            stderr,
+            exit_code,
+            output_file_content: Some(exec_output.stdout),
+        });
     }
     // Parsing/applying the remote command output (patch extraction) is post-
     // workload overhead, not workload time.

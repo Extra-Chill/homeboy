@@ -2,7 +2,8 @@ use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
 
 use homeboy::core::runners::{
-    self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
+    self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOutput,
 };
 
 use super::CmdResult;
@@ -10,12 +11,22 @@ use super::CmdResult;
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RunnerWorkspaceOutput {
+    List(RunnerWorkspaceListOutput),
     Sync(RunnerWorkspaceSyncOutput),
     Apply(RunnerWorkspaceApplyOutput),
 }
 
 #[derive(Subcommand)]
 pub(super) enum RunnerWorkspaceCommand {
+    /// List recent runner-side Lab workspaces and reusable exec commands
+    List {
+        /// Runner ID
+        runner_id: String,
+
+        /// Maximum number of workspaces to return
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     /// Materialize a controller-side worktree into the runner workspace root
     Sync {
         /// Runner ID
@@ -54,6 +65,10 @@ pub(super) enum RunnerWorkspaceSyncModeArg {
 
 pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceOutput> {
     match command {
+        RunnerWorkspaceCommand::List { runner_id, limit } => {
+            runner::list_workspaces(&runner_id, limit)
+                .map(|(output, exit_code)| (RunnerWorkspaceOutput::List(output), exit_code))
+        }
         RunnerWorkspaceCommand::Sync {
             runner_id,
             path,

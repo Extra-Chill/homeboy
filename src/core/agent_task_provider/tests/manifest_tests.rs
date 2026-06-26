@@ -131,6 +131,16 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
             "outputs": { "patch": ["diff"] },
             "provider_alias_policy": "strict"
         },
+        "result_contract": {
+            "typed_artifact_envelope": {
+                "schema": "provider/artifact-result-envelope/v1",
+                "output": "provider_run_result",
+                "provider_label": "Provider Runtime",
+                "diagnostic_class_prefix": "provider_runtime",
+                "private_shape_markers": ["private_result"],
+                "require_typed_artifacts": true
+            }
+        },
         "runtime_contract": {
             "capabilities": ["sandbox", "artifacts"],
             "lifecycle_states": {
@@ -197,6 +207,25 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
         provider.role_aliases.extra["provider_alias_policy"],
         "strict"
     );
+    let result_contract = provider
+        .result_contract
+        .typed_artifact_envelope
+        .as_ref()
+        .expect("typed artifact envelope contract");
+    assert_eq!(
+        result_contract.schema,
+        "provider/artifact-result-envelope/v1"
+    );
+    assert_eq!(result_contract.output, "provider_run_result");
+    assert_eq!(
+        result_contract.diagnostic_class_prefix.as_deref(),
+        Some("provider_runtime")
+    );
+    assert_eq!(
+        result_contract.private_shape_markers,
+        vec!["private_result"]
+    );
+    assert_eq!(result_contract.require_typed_artifacts, Some(true));
     assert_eq!(
         provider.runtime_contract.capabilities,
         vec!["sandbox".to_string(), "artifacts".to_string()]
@@ -245,6 +274,14 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
         "diagnostic"
     );
     assert_eq!(exported["role_aliases"]["provider_alias_policy"], "strict");
+    assert_eq!(
+        exported["result_contract"]["typed_artifact_envelope"]["schema"],
+        "provider/artifact-result-envelope/v1"
+    );
+    assert_eq!(
+        exported["result_contract"]["typed_artifact_envelope"]["private_shape_markers"][0],
+        "private_result"
+    );
     assert_eq!(exported["runtime_contract"]["capabilities"][0], "sandbox");
     assert_eq!(
         exported["runtime_contract"]["normalization"]["output_artifacts"][0]["name"],
