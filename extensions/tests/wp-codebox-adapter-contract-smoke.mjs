@@ -75,6 +75,14 @@ try {
 		runtimeCli
 	);
 	assert.equal(
+		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wpCodeboxBin: '/path/request/wp-codebox', executable: '', preferPackagedRuntime: true }),
+		runtimeCli
+	);
+	assert.equal(
+		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, runtime_bin: '/path/runtime/wp-codebox', executable: '', preferPackagedRuntime: true }),
+		runtimeCli
+	);
+	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT: runtimeComponent }, wp_codebox_bin: '/path/explicit/wp-codebox', executable: '' }),
 		'/path/explicit/wp-codebox'
 	);

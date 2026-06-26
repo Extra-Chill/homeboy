@@ -55,16 +55,19 @@ function wpCodeboxBin(options = {}) {
     wpCodeboxBinFromRuntimeComponent(env),
     managedWpCodeboxBin(env),
   ];
-  return firstValue(
+  const explicitBinCandidates = [
     options.runtimeBin,
     options.runtime_bin,
     options.wpCodeboxBin,
-    ...(options.preferPackagedRuntime ? packagedRuntimeCandidates : [options.wp_codebox_bin]),
+    options.wp_codebox_bin,
+  ];
+  return firstValue(
+    ...(options.preferPackagedRuntime ? packagedRuntimeCandidates : explicitBinCandidates),
     options.bin,
     ...descriptor.settings.map((key) => settings[key]),
     env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN,
     ...descriptor.env.map((key) => env[key]),
-    ...(options.preferPackagedRuntime ? [options.wp_codebox_bin] : packagedRuntimeCandidates),
+    ...(options.preferPackagedRuntime ? explicitBinCandidates : packagedRuntimeCandidates),
     options.executable === undefined ? descriptor.executable : options.executable,
   );
 }
