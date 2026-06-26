@@ -58,6 +58,15 @@ impl RunsArgs {
         )
     }
 
+    pub fn has_command_local_runner_option(&self) -> bool {
+        matches!(
+            self.command,
+            RunsCommand::Artifact(RunsArtifactArgs {
+                command: RunsArtifactCommand::Attach(_),
+            })
+        )
+    }
+
     fn global_runner_guidance(&self, runner_id: &str) -> (String, Vec<String>) {
         match &self.command {
             RunsCommand::List(_) => (

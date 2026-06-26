@@ -21,7 +21,7 @@ pub fn route_after_parse(
     }
 
     if let (Some(runner_id), Commands::Runs(args)) = (cli.runner.as_deref(), &cli.command) {
-        if !is_runs_list_runner_option(normalized_args) {
+        if !is_runs_list_runner_option(normalized_args) && !args.has_command_local_runner_option() {
             return Err(crate::commands::runs::global_runner_error(args, runner_id));
         }
 
@@ -1254,6 +1254,44 @@ mod tests {
         assert!(err
             .message
             .contains("homeboy runs list --runner homeboy-lab"));
+    }
+
+    #[test]
+    fn runs_artifact_attach_runner_option_routes_locally() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+
+        for normalized in [
+            vec![
+                "homeboy".to_string(),
+                "runs".to_string(),
+                "artifact".to_string(),
+                "attach".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "--path".to_string(),
+                "/tmp/matrix-summary.json".to_string(),
+                "--name".to_string(),
+                "matrix-summary".to_string(),
+                "run-123".to_string(),
+            ],
+            vec![
+                "homeboy".to_string(),
+                "runs".to_string(),
+                "artifact".to_string(),
+                "attach".to_string(),
+                "--runner=homeboy-lab".to_string(),
+                "--path=/tmp/matrix-summary.json".to_string(),
+                "--name=matrix-summary".to_string(),
+                "run-123".to_string(),
+            ],
+        ] {
+            let cli = Cli::parse_from(&normalized);
+
+            let outcome = route_after_parse(&cli, &normalized, None)
+                .expect("runs artifact attach command-local runner option should not be rejected");
+
+            assert_eq!(outcome, None);
+        }
     }
 
     #[test]
