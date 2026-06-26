@@ -9,7 +9,7 @@ use homeboy::core::project::{self, Project};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::commands::runner::{wp_codebox_tool_diagnostics, RunnerToolDiagnostics};
+use crate::commands::runner::{declared_tool_diagnostics_for_legacy, RunnerToolDiagnostics};
 use crate::commands::CmdResult;
 
 #[derive(Args)]
@@ -796,7 +796,7 @@ fn setup_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
 }
 
 fn extension_wp_codebox_diagnostics(extension_id: &str) -> Option<RunnerToolDiagnostics> {
-    if extension_id != "wordpress" {
+    if load_extension(extension_id).is_err() {
         return None;
     }
     let env = [
@@ -812,7 +812,7 @@ fn extension_wp_codebox_diagnostics(extension_id: &str) -> Option<RunnerToolDiag
     })
     .collect::<BTreeMap<_, _>>();
 
-    Some(wp_codebox_tool_diagnostics(None, &env))
+    declared_tool_diagnostics_for_legacy("wp_codebox", None, &env)
 }
 
 fn run_action(
