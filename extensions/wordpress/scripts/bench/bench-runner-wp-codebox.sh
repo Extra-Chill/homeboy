@@ -152,6 +152,26 @@ if [ -n "$WP_CODEBOX_SOURCE_ROOT" ]; then
     fi
 fi
 
+homeboy_wp_codebox_component_extra_plugin_json() {
+    local plugin_file="$1"
+
+    if [ -n "$WP_CODEBOX_SOURCE_ROOT" ]; then
+        jq -nc \
+            --arg source "$WP_CODEBOX_SOURCE_ROOT" \
+            --arg sourceSubpath "$WP_CODEBOX_SOURCE_SUBPATH" \
+            --arg slug "$PLUGIN_SLUG" \
+            --arg pluginFile "${PLUGIN_SLUG}/${plugin_file}" \
+            '[{source: $source, sourceRoot: $source, sourceSubpath: $sourceSubpath, slug: $slug, pluginFile: $pluginFile, activate: false}]'
+        return
+    fi
+
+    jq -nc \
+        --arg source "$WP_CODEBOX_PLUGIN_SOURCE_PATH" \
+        --arg slug "$PLUGIN_SLUG" \
+        --arg pluginFile "${PLUGIN_SLUG}/${plugin_file}" \
+        '[{source: $source, slug: $slug, pluginFile: $pluginFile, activate: false}]'
+}
+
 homeboy_wp_codebox_resolve_host_path() {
     local base_dir="$1"
     local path_value="$2"
@@ -979,7 +999,7 @@ homeboy_wp_codebox_require_bench_primitive "external-http-guardrail"
 MOUNTS_JSON="[]"
 COMPONENT_PLUGIN_FILE="$(homeboy_wp_codebox_find_plugin_file "$WP_CODEBOX_PLUGIN_SOURCE_PATH" || true)"
 if [ -n "$COMPONENT_PLUGIN_FILE" ]; then
-    EXTRA_PLUGINS_JSON=$(jq -nc --arg source "$WP_CODEBOX_PLUGIN_SOURCE_PATH" --arg slug "$PLUGIN_SLUG" --arg pluginFile "${PLUGIN_SLUG}/${COMPONENT_PLUGIN_FILE}" '[{source: $source, slug: $slug, pluginFile: $pluginFile, activate: false}]')
+    EXTRA_PLUGINS_JSON=$(homeboy_wp_codebox_component_extra_plugin_json "$COMPONENT_PLUGIN_FILE")
 else
     EXTRA_PLUGINS_JSON="[]"
     MOUNTS_JSON=$(jq -nc --arg source "$WP_CODEBOX_PLUGIN_SOURCE_PATH" --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}" '[{source: $source, target: $target, mode: "readonly"}]')
