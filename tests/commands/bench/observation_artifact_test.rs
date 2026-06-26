@@ -118,6 +118,7 @@ fn bench_observation_resolves_shared_state_mount_artifacts() {
             workloads: Vec::new(),
             provenance: Default::default(),
             runner: None,
+            rig_package: None,
             lifecycle: None,
             diagnostics: Vec::new(),
         });

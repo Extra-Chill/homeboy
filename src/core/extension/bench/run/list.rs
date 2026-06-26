@@ -41,7 +41,12 @@ pub fn run_bench_list_workflow(
             &output.stdout,
             &output.stderr,
         )?;
-        return bench_list_result(args.component_label, results_file, &args.scenario_ids);
+        return bench_list_result(
+            args.component_label,
+            results_file,
+            &args.scenario_ids,
+            args.rig_package,
+        );
     }
 
     let execution_context = resolve_execution_context(component, ExtensionCapability::Bench)?;
@@ -74,6 +79,7 @@ pub fn run_bench_list_workflow(
             rig_id: None,
             shared_state: None,
             extra_workloads: args.extra_workloads,
+            rig_package: args.rig_package.clone(),
             invocation_requirements: InvocationRequirements::default(),
         },
         run_dir,
@@ -88,7 +94,12 @@ pub fn run_bench_list_workflow(
         &runner_output.stdout,
         &runner_output.stderr,
     )?;
-    bench_list_result(args.component_label, results_file, &args.scenario_ids)
+    bench_list_result(
+        args.component_label,
+        results_file,
+        &args.scenario_ids,
+        args.rig_package,
+    )
 }
 
 pub(crate) fn ensure_bench_list_success(
@@ -113,6 +124,7 @@ pub(crate) fn bench_list_result(
     component_label: String,
     results_file: PathBuf,
     scenario_ids: &[String],
+    rig_package: Option<crate::core::extension::bench::parsing::RigPackageEvidence>,
 ) -> Result<BenchListWorkflowResult> {
     let mut parsed = parsing::parse_bench_results_file_with_artifact_context(&results_file, None)?;
     normalize_workload_json_scenario_ids(&mut parsed);
@@ -124,6 +136,7 @@ pub(crate) fn bench_list_result(
         component_id: parsed.component_id,
         scenarios: parsed.scenarios,
         count,
+        rig_package,
     })
 }
 

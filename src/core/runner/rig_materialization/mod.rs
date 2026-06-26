@@ -56,6 +56,14 @@ pub(super) struct LabOffloadRigPackageSource {
     pub discovery_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_source_revision: Option<String>,
+    pub freshness_verified: bool,
+    pub freshness_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_command: Option<String>,
     pub linked: bool,
     pub materialized: bool,
 }
@@ -108,6 +116,17 @@ pub(super) fn sync_lab_offload_rigs(
                         rig_path: None,
                         discovery_path: None,
                         source_revision: primary.source_snapshot.git_sha.clone(),
+                        current_source_revision: primary.source_snapshot.git_sha.clone(),
+                        freshness_verified: primary.source_snapshot.git_sha.is_some(),
+                        freshness_status: if primary.source_snapshot.git_sha.is_some() {
+                            "verified".to_string()
+                        } else {
+                            "unknown".to_string()
+                        },
+                        freshness_message: primary.source_snapshot.git_sha.is_none().then(|| {
+                            "primary rig source freshness could not be verified because a git revision was unavailable".to_string()
+                        }),
+                        refresh_command: None,
                         linked: true,
                         materialized: false,
                     },
@@ -160,20 +179,27 @@ pub(super) fn sync_lab_offload_rigs(
                     Some(&synced.remote_path),
                     "lab_rig_source",
                 );
+                let package_source = LabOffloadRigPackageSource {
+                    source: metadata.source,
+                    source_root,
+                    package_path: metadata.package_path,
+                    install_source: install_source.clone(),
+                    rig_path: Some(metadata.rig_path),
+                    discovery_path: metadata.discovery_path,
+                    source_revision: metadata.source_revision,
+                    current_source_revision: source_snapshot.git_sha.clone(),
+                    linked: metadata.linked,
+                    materialized: metadata.materialized,
+                    freshness_verified: false,
+                    freshness_status: String::new(),
+                    freshness_message: None,
+                    refresh_command: None,
+                };
+                let package_source = with_lab_package_freshness(rig_id, package_source);
                 (
                     install_source.clone(),
                     LabOffloadRigSyncSource::InstalledMetadata,
-                    LabOffloadRigPackageSource {
-                        source: metadata.source,
-                        source_root,
-                        package_path: metadata.package_path,
-                        install_source,
-                        rig_path: Some(metadata.rig_path),
-                        discovery_path: metadata.discovery_path,
-                        source_revision: metadata.source_revision,
-                        linked: metadata.linked,
-                        materialized: metadata.materialized,
-                    },
+                    package_source,
                     LabOffloadRigWorkloadHashes {
                         source_snapshot_hash: source_snapshot.snapshot_hash.clone(),
                         workspace_snapshot_identity: synced.snapshot_identity,
@@ -263,6 +289,43 @@ pub(super) fn sync_lab_offload_rigs(
     }
 
     Ok(synced_rigs)
+}
+
+fn with_lab_package_freshness(
+    rig_id: &str,
+    mut package_source: LabOffloadRigPackageSource,
+) -> LabOffloadRigPackageSource {
+    match (
+        package_source.source_revision.as_deref(),
+        package_source.current_source_revision.as_deref(),
+    ) {
+        (Some(installed), Some(current)) if installed == current => {
+            package_source.freshness_verified = true;
+            package_source.freshness_status = "verified".to_string();
+        }
+        (Some(installed), Some(current)) => {
+            package_source.freshness_status = "stale".to_string();
+            package_source.freshness_message = Some(format!(
+                "installed source revision {installed} differs from current source revision {current}"
+            ));
+            package_source.refresh_command = Some(format!(
+                "homeboy rig install {} --id {} --reinstall",
+                package_source.install_source, rig_id
+            ));
+        }
+        _ => {
+            package_source.freshness_status = "unknown".to_string();
+            package_source.freshness_message = Some(
+                "runner rig source freshness could not be verified because a git revision was unavailable"
+                    .to_string(),
+            );
+            package_source.refresh_command = Some(format!(
+                "homeboy rig install {} --id {} --reinstall",
+                package_source.install_source, rig_id
+            ));
+        }
+    }
+    package_source
 }
 
 fn installed_rig_path_from_stdout(stdout: &str, rig_id: &str) -> Option<String> {
@@ -1034,6 +1097,41 @@ mod tests {
                 .remote_checkout_root
                 .contains("${package.root}"));
         });
+    }
+
+    #[test]
+    fn lab_package_source_freshness_reports_stale_revision_and_refresh_command() {
+        let package = with_lab_package_freshness(
+            "studio-web-product-matrix",
+            LabOffloadRigPackageSource {
+                source: "/controller/homeboy-rigs".to_string(),
+                source_root: "/controller/homeboy-rigs".to_string(),
+                package_path: "/controller/homeboy-rigs".to_string(),
+                install_source: "/runner/_lab_workspaces/homeboy-rigs".to_string(),
+                rig_path: Some("/controller/homeboy-rigs/rigs/studio/rig.json".to_string()),
+                discovery_path: Some("/controller/homeboy-rigs".to_string()),
+                source_revision: Some("abc1234".to_string()),
+                current_source_revision: Some("def5678".to_string()),
+                freshness_verified: false,
+                freshness_status: String::new(),
+                freshness_message: None,
+                refresh_command: None,
+                linked: true,
+                materialized: false,
+            },
+        );
+
+        assert!(!package.freshness_verified);
+        assert_eq!(package.freshness_status, "stale");
+        assert!(package
+            .freshness_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("abc1234"));
+        assert_eq!(
+            package.refresh_command.as_deref(),
+            Some("homeboy rig install /runner/_lab_workspaces/homeboy-rigs --id studio-web-product-matrix --reinstall")
+        );
     }
 
     #[test]
