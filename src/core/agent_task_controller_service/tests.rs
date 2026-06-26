@@ -3558,7 +3558,7 @@ fn run_command_workflow_executes_deterministic_artifact_action() {
                 tools: Vec::new(),
                 abilities: Vec::new(),
                 artifacts: vec!["validation_result".to_string()],
-                consumes: Vec::new(),
+                consumes: vec!["static_site_candidate".to_string()],
                 emits: Vec::new(),
                 dependencies: Vec::new(),
                 gates: Vec::new(),
@@ -3573,6 +3573,11 @@ fn run_command_workflow_executes_deterministic_artifact_action() {
             artifacts: vec![AgentTaskRepoLoopSpecArtifact {
                 artifact_id: "validation_result".to_string(),
                 kind: "example/ValidationResult/v1".to_string(),
+                description: None,
+                required: true,
+            }, AgentTaskRepoLoopSpecArtifact {
+                artifact_id: "static_site_candidate".to_string(),
+                kind: "example/StaticSiteCandidate/v1".to_string(),
                 description: None,
                 required: true,
             }],
@@ -3591,6 +3596,7 @@ fn run_command_workflow_executes_deterministic_artifact_action() {
         match &initialized.actions[0].action {
             AgentTaskLoopPolicyAction::RunCommand { request, .. } => {
                 assert_eq!(request["execution"]["kind"], "command");
+                assert_eq!(request["consumes"], json!(["static_site_candidate"]));
             }
             other => panic!("expected run_command action, got {other:?}"),
         }

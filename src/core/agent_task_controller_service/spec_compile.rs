@@ -967,7 +967,7 @@ fn workflow_command_request(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
     serde_json::json!({
         "mode": "command",
         "workflow_id": workflow.workflow_id,
-        "consumes": workflow.inputs.get("consumes").cloned().unwrap_or(Value::Null),
+        "consumes": workflow.consumes,
         "artifacts": workflow.artifacts,
         "execution": workflow.runtime_execution,
         "runtime_execution": workflow.runtime_execution,
