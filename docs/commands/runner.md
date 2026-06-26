@@ -570,6 +570,15 @@ Runner metrics:
 - On Linux runners, metrics are sampled from `/proc` for the command process tree and include `peak_rss_bytes`, `child_process_count_peak`, `cpu_user_ms`, and `cpu_system_ms`.
 - CPU accounting is sampled and can miss very short-lived child processes between samples; duration is always recorded, and non-Linux runners report `source: "duration_only"`.
 
+### `workspace list`
+
+```sh
+homeboy runner workspace list <runner-id>
+homeboy runner workspace list <runner-id> --limit 5
+```
+
+`workspace list` shows recent runner-side Lab workspace directories under the runner's configured `workspace_root` and includes a reusable `runner exec --cwd <remote-path>` command for each entry. Use it after a manual or matrix session when the previous `remote_path` scrolled out of view and you need to run another command against the same runner-side checkout.
+
 ### `workspace sync`
 
 ```sh

@@ -35,7 +35,7 @@ pub use super::runner::{
     evaluate_lab_runner_capabilities_for_runner, exec, execute_lab_offload,
     is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, lab_offload_changed_since_ref, lab_offload_metadata,
-    lab_offload_metadata_with_workspace_mapping, mirror_connected_runner_run,
+    lab_offload_metadata_with_workspace_mapping, list_workspaces, mirror_connected_runner_run,
     mirrored_runner_job_identity, plan_managed_runner_source_sync,
     plan_managed_runner_source_syncs, preflight_lab_offload_changed_since,
     preflight_remote_argv_path_translation, prepare_git_lab_offload_changed_since,
@@ -56,7 +56,8 @@ pub use super::runner::{
     RunnerSpec, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec,
     RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
     RunnerWorkspaceApplyStatus, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
@@ -105,9 +106,10 @@ pub mod execution {
 /// Workspace sync and patch application contracts.
 pub mod workspace {
     pub use super::super::runner::{
-        apply_change_artifact, apply_workspace_patch, plan_managed_runner_source_sync,
-        plan_managed_runner_source_syncs, sync_workspace, ManagedRunnerSourceSyncPlan,
-        RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
+        apply_change_artifact, apply_workspace_patch, list_workspaces,
+        plan_managed_runner_source_sync, plan_managed_runner_source_syncs, sync_workspace,
+        ManagedRunnerSourceSyncPlan, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
+        RunnerWorkspaceApplyStatus, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
         RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
     };
 }
