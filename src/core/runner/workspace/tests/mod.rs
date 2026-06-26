@@ -1,5 +1,6 @@
 mod deterministic;
 mod git;
+mod prune;
 mod snapshot;
 
 use std::path::Path;

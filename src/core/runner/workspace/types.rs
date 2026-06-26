@@ -110,6 +110,67 @@ pub struct RunnerWorkspaceListEntry {
     pub exec_command: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RunnerWorkspacePruneOptions {
+    pub apply: bool,
+    pub min_age_hours: u64,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspacePruneOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    pub runner_id: String,
+    pub dry_run: bool,
+    pub workspace_root: String,
+    pub lab_workspaces_root: String,
+    pub min_age_hours: u64,
+    pub candidates: Vec<RunnerWorkspacePruneEntry>,
+    pub removed: Vec<RunnerWorkspacePruneEntry>,
+    pub skipped: Vec<RunnerWorkspacePruneSkippedEntry>,
+    pub total_candidate_bytes: u64,
+    pub total_removed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspacePruneEntry {
+    pub remote_path: String,
+    pub source_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_identity: Option<String>,
+    pub age_seconds: u64,
+    pub bytes: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspacePruneSkippedEntry {
+    pub remote_path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct RunnerWorkspaceMetadata {
+    pub schema: &'static str,
+    pub runner_id: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub sync_mode: String,
+    pub snapshot_identity: String,
+    pub synced_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerWorkspaceCurrentSummary {
     pub local_path: String,

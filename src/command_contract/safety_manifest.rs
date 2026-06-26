@@ -494,6 +494,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "applies a Lab-generated workspace patch to a local worktree";
             metadata.dangerous_flags = vec!["--force"];
         }
+        ["runner", "workspace", "prune"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "default output is a non-mutating orphan cleanup plan; pass --apply to delete exact runner workspace paths";
+            metadata.dangerous_flags = vec!["--apply"];
+        }
         ["http", "request"] => {
             metadata.mutates = true;
             metadata.operator = true;

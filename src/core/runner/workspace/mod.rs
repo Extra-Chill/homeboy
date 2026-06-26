@@ -12,12 +12,13 @@ mod sync;
 mod types;
 mod util;
 
-pub use sync::list_workspaces;
 pub use sync::sync_workspace;
+pub use sync::{list_workspaces, prune_workspaces};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
-    RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    RunnerWorkspaceListOutput, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 pub(crate) use snapshot::{
