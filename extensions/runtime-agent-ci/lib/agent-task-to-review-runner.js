@@ -1,6 +1,12 @@
 'use strict';
 
-const { runGenericAgentLoop } = require('./generic-agent-loop-runner');
+const {
+  buildControllerLoopProofSpec,
+  controllerProofPolicy,
+  runGenericAgentLoop,
+} = require('./generic-agent-loop-runner');
+const { runBoundedProductionLoop } = require('./bounded-production-loop-runner');
+const { validateControllerLoopProof } = require('./controller-loop-proof-validator');
 const { evaluateGatePlan, evaluateGateResults } = require('./gate-plan-evaluator');
 const {
   recordLifecycle,
@@ -39,7 +45,19 @@ function runAgentTaskToReview(options = {}) {
   }, { succeeded: runtimeSucceeded(runtimeResult) });
   const lifecycleGate = lifecycle.gateSummary || evaluateGateResults([]);
   const publicationGate = evaluatePublicationGate(lifecycle.publication, lifecycle.capture, plan);
-  const finalGate = evaluateGateResults([runtimeGate, lifecycleGate, publicationGate]);
+  const productionProof = buildReviewProductionProof({ runtimeResult, lifecycle, plan, validationPolicy: options.validationPolicy || options.validation_policy || {} });
+  const controllerProofValidation = validateControllerLoopProof({
+    spec: buildControllerLoopProofSpec({ request: runtimeResult.request, plan, validationPolicy: options.validationPolicy || options.validation_policy || {} }),
+    proof: productionProof,
+    policy: controllerProofPolicy(options.validationPolicy || options.validation_policy || {}, plan),
+  });
+  attachReviewProofValidation(results, { productionProof, controllerProofValidation });
+  const proofGate = evaluateGatePlan({
+    id: 'production_proof',
+    label: 'Production Proof',
+    pass_when: [{ field: 'valid', op: 'truthy', reason: 'production_proof_invalid' }],
+  }, { valid: controllerProofValidation.valid });
+  const finalGate = evaluateGateResults([runtimeGate, lifecycleGate, publicationGate, proofGate]);
   const status = finalGate.success && lifecycle.success ? 'succeeded' : 'failed';
 
   return {
@@ -59,11 +77,48 @@ function runAgentTaskToReview(options = {}) {
     },
     publication_result: lifecycle.publication,
     gate_result: finalGate,
+    production_proof: productionProof,
+    controller_proof_validation: controllerProofValidation,
     artifacts: collectArtifacts(runtimeResult, lifecycle),
     results,
     scenario,
     error: status === 'succeeded' ? '' : (lifecycle.error || finalGate.error || finalGate.reason || 'agent task to review failed'),
   };
+}
+
+function buildReviewProductionProof({ runtimeResult, lifecycle, plan, validationPolicy }) {
+  const proofPolicy = controllerProofPolicy(validationPolicy, plan);
+  const evidenceRefs = [
+    ...normalizeArray(runtimeResult.outcome?.evidence_refs || runtimeResult.outcome?.evidence),
+    ...normalizeArray(lifecycle.publication?.publication_evidence_ref ? [{ kind: 'publication', ...lifecycle.publication.publication_evidence_ref }] : []),
+  ];
+  const outcome = {
+    ...runtimeResult.outcome,
+    status: runtimeSucceeded(runtimeResult) && lifecycle.success ? 'succeeded' : 'failed',
+    artifacts: normalizeArray(runtimeResult.outcome?.artifacts),
+    evidence_refs: evidenceRefs,
+  };
+  return runBoundedProductionLoop({
+    loopId: `${runtimeResult.request?.task_id || plan.task_id || plan.workload_id || 'agent-task'}-review-proof`,
+    maxIterations: 1,
+    executeIteration: () => outcome,
+    acceptedStatuses: ['accepted', 'succeeded', 'passed', 'no_op'],
+    artifactRequirements: normalizeArray(runtimeResult.request?.expected_artifacts).map((name) => ({ name })),
+    evidenceRequirements: normalizeArray(proofPolicy.required_evidence || proofPolicy.evidence || proofPolicy.evidence_requirements),
+    previewRequirement: proofPolicy.preview_required === true || proofPolicy.require_preview === true,
+    publicationEvidenceRequirement: proofPolicy.publication_required === true || proofPolicy.require_publication === true || proofPolicy.pr_required === true || proofPolicy.require_pr === true,
+  });
+}
+
+function attachReviewProofValidation(results, { productionProof, controllerProofValidation }) {
+  if (!results || !Array.isArray(results.scenarios)) {
+    return;
+  }
+  for (const scenario of results.scenarios) {
+    scenario.metadata = optionalObject(scenario.metadata);
+    scenario.metadata.controller_loop_proof = productionProof;
+    scenario.metadata.controller_loop_proof_validation = controllerProofValidation;
+  }
 }
 
 function evaluatePublicationGate(publication = {}, capture = {}, plan = {}) {
@@ -137,6 +192,10 @@ function requiredObject(value, name) {
 
 function optionalObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 module.exports = {

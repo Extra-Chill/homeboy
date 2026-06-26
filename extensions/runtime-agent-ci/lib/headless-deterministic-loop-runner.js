@@ -112,6 +112,7 @@ function executeHeadlessTask(options = {}) {
   pushEvent(events, 'task_planned', { task_id: request.task_id, backend: request.executor.backend });
 
   const loopPolicy = normalizeLoopPolicy(plan);
+  assertHeadlessPolicyModeSupported(loopPolicy, options);
 
   if (dryRun) {
     finalOutcome = dryRunOutcome(request);
@@ -376,10 +377,9 @@ function policyIterationOutcome(task, candidate, validation) {
 function normalizeLoopPolicy(plan) {
   const raw = optionalObject(plan.loop_policy || plan.loopPolicy);
   const primitive = normalizeSharedLoopPolicy({ ...plan, ...raw }, { defaultMode: 'count', defaultMaxRevolutions: 1 });
-  const maxIterations = loopPolicyMaxRevolutions(primitive, {
-    nonCountMaxRevolutions: raw.max_synchronous_revolutions || raw.maxSynchronousRevolutions || plan.max_synchronous_revolutions || plan.maxSynchronousRevolutions,
-    requireNonCountMaxRevolutions: true,
-  });
+  const maxIterations = primitive.mode === 'count'
+    ? loopPolicyMaxRevolutions(primitive)
+    : positiveInteger(raw.max_synchronous_revolutions || raw.maxSynchronousRevolutions || plan.max_synchronous_revolutions || plan.maxSynchronousRevolutions) || 0;
   const enabled = Object.keys(raw).length > 0 || maxIterations > 1;
   return {
     enabled,
@@ -397,6 +397,16 @@ function normalizeLoopPolicy(plan) {
     validation_task: optionalNullableObject(raw.validation_task || raw.validationTask),
     repair_task_template: optionalNullableObject(raw.repair_task_template || raw.repairTaskTemplate),
   };
+}
+
+function assertHeadlessPolicyModeSupported(loopPolicy, options = {}) {
+  if (!loopPolicy.enabled || loopPolicy.mode === 'count') {
+    return;
+  }
+  if (typeof options.submitIteration === 'function' && typeof options.pollIteration === 'function') {
+    throw new Error('Headless durable duration and indefinite loop policies are not implemented yet; submit/poll support must route through createDurableDeterministicLoop before enabling this mode.');
+  }
+  throw new Error('Headless duration and indefinite loop policies require a durable submit/poll implementation. Use count mode for synchronous headless loops.');
 }
 
 function buildRequestForPlan(plan, options) {

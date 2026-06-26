@@ -3,7 +3,12 @@
 const BATCH_PRODUCTION_LOOP_RESULT_SCHEMA = 'homeboy/batch-production-loop-result/v1';
 const BATCH_PRODUCTION_LOOP_WAVE_SCHEMA = 'homeboy/batch-production-loop-wave/v1';
 const BATCH_PRODUCTION_LOOP_EVIDENCE_SCHEMA = 'homeboy/batch-production-loop-evidence/v1';
-const DEFAULT_CONCURRENCY = 3;
+const {
+  DEFAULT_CONCURRENCY,
+  FANOUT_RECONCILE_RECORD_STATUSES,
+  FANOUT_RECONCILE_RUN_STATUSES,
+  executeFanoutReconcileRun,
+} = require('./fanout-reconcile-runner');
 const DEFAULT_MAX_ITERATIONS = 3;
 
 async function runBatchProductionLoop(options = {}) {
@@ -169,50 +174,41 @@ async function runBatchProductionLoop(options = {}) {
 }
 
 async function executeGroups(context) {
-  const records = new Array(context.groups.length);
-  let nextIndex = 0;
-  let running = 0;
-
-  return new Promise((resolve) => {
-    const startNext = () => {
-      if (nextIndex >= context.groups.length && running === 0) {
-        resolve(records);
-        return;
+  const run = await executeFanoutReconcileRun({
+    plan: {
+      schema: 'homeboy/batch-production-loop-wave-plan/v1',
+      summary: { group_count: context.groups.length, task_count: context.groups.length },
+      task_requests: context.groups.map((group, index) => ({ group, group_index: index, group_key: groupKey(group, index) })),
+    },
+    concurrency: context.concurrency,
+    task_id: (task) => task.group_key,
+    task_order: (record) => record.group_index,
+    execute_task_request: async (task) => {
+      try {
+        const outcome = await context.executeGroup({
+          loop_id: context.loopId,
+          loopId: context.loopId,
+          iteration: context.iteration,
+          wave: context.iteration,
+          group: task.group,
+          group_index: task.group_index,
+          groupIndex: task.group_index,
+          groups: context.groups,
+          state: context.state,
+          plan: context.plan,
+          fanout: context.fanout,
+          options: context.options,
+        });
+        return normalizeGroupOutcome({ group: task.group, index: task.group_index, outcome, classifyGroupOutcome: context.classifyGroupOutcome });
+      } catch (error) {
+        return failedGroupOutcome(task.group, task.group_index, error);
       }
-      while (running < context.concurrency && nextIndex < context.groups.length) {
-        const index = nextIndex;
-        const group = context.groups[index];
-        nextIndex += 1;
-        running += 1;
-        Promise.resolve()
-          .then(() => context.executeGroup({
-            loop_id: context.loopId,
-            loopId: context.loopId,
-            iteration: context.iteration,
-            wave: context.iteration,
-            group,
-            group_index: index,
-            groupIndex: index,
-            groups: context.groups,
-            state: context.state,
-            plan: context.plan,
-            fanout: context.fanout,
-            options: context.options,
-          }))
-          .then((outcome) => {
-            records[index] = normalizeGroupOutcome({ group, index, outcome, classifyGroupOutcome: context.classifyGroupOutcome });
-          })
-          .catch((error) => {
-            records[index] = failedGroupOutcome(group, index, error);
-          })
-          .finally(() => {
-            running -= 1;
-            startNext();
-          });
-      }
-    };
-    startNext();
+    },
+    is_record_successful: (record) => record.success === true,
+    classify_outcome: (record) => record.outcome,
+    include_reconciliation: false,
   });
+  return run.records;
 }
 
 function resolveExecuteGroup(options) {
@@ -399,5 +395,7 @@ module.exports = {
   BATCH_PRODUCTION_LOOP_RESULT_SCHEMA,
   BATCH_PRODUCTION_LOOP_WAVE_SCHEMA,
   DEFAULT_CONCURRENCY,
+  FANOUT_RECONCILE_RECORD_STATUSES,
+  FANOUT_RECONCILE_RUN_STATUSES,
   runBatchProductionLoop,
 };

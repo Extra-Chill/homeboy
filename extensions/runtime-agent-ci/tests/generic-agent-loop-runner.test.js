@@ -126,11 +126,14 @@ assert.equal(result.loop.state.status, 'succeeded');
 assert.equal(result.loop.iterations.length, 1);
 assert.equal(result.loop.results.length, 1);
 assert.equal(result.loop.outcome.status, 'succeeded');
+assert.equal(result.productionProof, null);
+assert.equal(result.controllerProofValidation, null);
 
 const proofPolicy = { preview_required: true, publication_required: true };
 const validProofRun = genericLoopRunner.runGenericAgentLoop({
   runtime,
   plan: { ...plan, workload_id: 'valid-proof-workload' },
+  controllerProof: true,
   validate: true,
   validationPolicy: { success_completion_outcomes: ['done'], controller_loop_proof: proofPolicy },
   execute: ({ request }) => proofOutcome(request, [
@@ -145,6 +148,7 @@ assert.equal(validProofRun.results.scenarios[0].metadata.controller_loop_proof_v
 assert.throws(() => genericLoopRunner.runGenericAgentLoop({
   runtime,
   plan: { ...plan, workload_id: 'missing-proof-evidence' },
+  controllerProof: true,
   validate: true,
   validationPolicy: { success_completion_outcomes: ['done'], controller_loop_proof: proofPolicy },
   execute: ({ request }) => proofOutcome(request, [{ kind: 'preview', url: 'https://example.test/preview/missing-publication' }]),
@@ -153,6 +157,7 @@ assert.throws(() => genericLoopRunner.runGenericAgentLoop({
 assert.throws(() => genericLoopRunner.runGenericAgentLoop({
   runtime,
   plan: { ...plan, workload_id: 'missing-preview-evidence' },
+  controllerProof: true,
   validate: true,
   validationPolicy: { success_completion_outcomes: ['done'], controller_loop_proof: proofPolicy },
   execute: ({ request }) => proofOutcome(request, [{ kind: 'publication', url: 'https://example.test/pull/125' }]),
@@ -161,6 +166,7 @@ assert.throws(() => genericLoopRunner.runGenericAgentLoop({
 assert.throws(() => genericLoopRunner.runGenericAgentLoop({
   runtime,
   plan: { ...plan, workload_id: 'local-proof-evidence' },
+  controllerProof: true,
   validate: true,
   validationPolicy: { success_completion_outcomes: ['done'], controller_loop_proof: proofPolicy },
   execute: ({ request }) => proofOutcome(request, [

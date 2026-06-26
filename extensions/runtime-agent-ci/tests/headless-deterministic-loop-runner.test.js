@@ -122,63 +122,34 @@ await assert.rejects(
     validate: false,
     execute: ({ request }) => outcome(request, 'failed', 'Still failing.'),
   }),
-  /require max_synchronous_revolutions/
+  /Headless duration and indefinite loop policies require a durable submit\/poll implementation/
 );
 
-let durationCalls = 0;
-const durationBounded = await runHeadlessDeterministicLoop({
-  spec: {
-    ...baseSpec,
-    task_id: 'duration-explicit-sync-cap',
-    workload_id: 'duration-explicit-sync-cap',
-    loop_policy: {
-      mode: 'duration',
-      duration_ms: 60_000,
-      max_synchronous_revolutions: 2,
-      accepted_statuses: ['succeeded'],
-      continue_conditions: [{ outcome_status: 'failed' }],
-    },
-  },
-  runtime,
-  validate: false,
-  now: () => 1000,
-  execute: ({ request }) => {
-    durationCalls += 1;
-    return outcome(request, 'failed', 'Still failing.');
-  },
-});
-
-assert.equal(durationCalls, 2);
-assert.equal(durationBounded.status, 'failed');
-assert.equal(durationBounded.tasks[0].loop_policy.stop_reason, 'max_revolutions_reached');
-assert.equal(durationBounded.tasks[0].loop_policy.iteration_count, 2);
-
 let expiredHeadlessCalls = 0;
-const expiredHeadlessDeadline = await runHeadlessDeterministicLoop({
-  spec: {
-    ...baseSpec,
-    task_id: 'expired-headless-deadline',
-    workload_id: 'expired-headless-deadline',
-    loop_policy: {
-      mode: 'duration',
-      deadline_at: 2000,
-      max_synchronous_revolutions: 2,
-      accepted_statuses: ['succeeded'],
+await assert.rejects(
+  () => runHeadlessDeterministicLoop({
+    spec: {
+      ...baseSpec,
+      task_id: 'expired-headless-deadline',
+      workload_id: 'expired-headless-deadline',
+      loop_policy: {
+        mode: 'duration',
+        deadline_at: 2000,
+        max_synchronous_revolutions: 2,
+        accepted_statuses: ['succeeded'],
+      },
     },
-  },
-  runtime,
-  validate: false,
-  now: () => 2000,
-  execute: ({ request }) => {
-    expiredHeadlessCalls += 1;
-    return outcome(request, 'succeeded', 'Should not run.');
-  },
-});
-
+    runtime,
+    validate: false,
+    now: () => 2000,
+    execute: ({ request }) => {
+      expiredHeadlessCalls += 1;
+      return outcome(request, 'succeeded', 'Should not run.');
+    },
+  }),
+  /Headless duration and indefinite loop policies require a durable submit\/poll implementation/
+);
 assert.equal(expiredHeadlessCalls, 0);
-assert.equal(expiredHeadlessDeadline.status, 'failed');
-assert.equal(expiredHeadlessDeadline.tasks[0].loop_policy.stop_reason, 'deadline_reached');
-assert.equal(expiredHeadlessDeadline.tasks[0].loop_policy.iteration_count, 0);
 
 const multiTaskExecutionOrder = [];
 const multiTask = await runHeadlessDeterministicLoop({
