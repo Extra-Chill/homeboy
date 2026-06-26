@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.17.6] - 2026-06-26
+
+### Fixed
+- use public plugin activation command
+
 ## [3.17.5] - 2026-06-26
 
 ### Changed
