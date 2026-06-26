@@ -81,6 +81,7 @@ impl RunsArgs {
             RunsCommand::Show { run_id, .. }
             | RunsCommand::ResumePlan { run_id }
             | RunsCommand::Evidence { run_id }
+            | RunsCommand::Env { run_id }
             | RunsCommand::Artifacts { run_id } => (
                 format!(
                     "Lab-offloaded run records are mirrored locally; inspect run `{run_id}` with `homeboy runs show {run_id}` without --runner."
@@ -124,6 +125,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Show { run_id, json: _ } => handlers::show_run(&run_id),
         RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&run_id),
         RunsCommand::Evidence { run_id } => evidence::evidence(&run_id),
+        RunsCommand::Env { run_id } => handlers::env(&run_id),
         RunsCommand::Artifacts { run_id } => handlers::artifacts(&run_id),
         RunsCommand::Artifact(args) => handlers::artifact_command(args),
         RunsCommand::Findings(args) => findings::findings(args),

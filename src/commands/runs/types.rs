@@ -87,6 +87,8 @@ pub(super) enum RunsCommand {
     ResumePlan { run_id: String },
     /// Show stable evidence registry data for one run; start here for reviewer-facing evidence
     Evidence { run_id: String },
+    /// Explain redacted Lab environment provenance for one run
+    Env { run_id: String },
     /// List artifacts recorded for one run
     Artifacts { run_id: String },
     /// Retrieve or sync recorded run artifacts
@@ -150,6 +152,7 @@ pub enum RunsOutput {
     Show(RunsShowOutput),
     ResumePlan(RunsResumePlanOutput),
     Evidence(RunsEvidenceOutput),
+    Env(RunsEnvOutput),
     Artifacts(RunsArtifactsOutput),
     ArtifactAttach(RunsArtifactAttachOutput),
     ArtifactGet(RunsArtifactGetOutput),
@@ -208,6 +211,43 @@ pub struct RunsResumePlanOutput {
     pub active_command: Option<ValidationCommandSummary>,
     pub next_command: Option<ValidationCommandSummary>,
     pub hints: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEnvOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    pub schema: String,
+    pub values_redacted: bool,
+    pub summary: RunsEnvSummary,
+    pub keys: Vec<RunsEnvKeyOutput>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEnvSummary {
+    pub key_count: usize,
+    pub secret_key_count: usize,
+    pub public_key_count: usize,
+    pub shadowed_key_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct RunsEnvKeyOutput {
+    pub key: String,
+    pub classification: String,
+    pub value_status: String,
+    pub value_preview: String,
+    pub winning_source_layer: String,
+    pub shadowed_source_layers: Vec<String>,
+    pub source_layers: Vec<RunsEnvSourceLayerOutput>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEnvSourceLayerOutput {
+    pub source: String,
+    pub status: String,
+    pub classification: String,
+    pub value_status: String,
 }
 
 #[derive(Args, Clone)]

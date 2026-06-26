@@ -2,7 +2,7 @@
 
 mod export_import;
 
-use super::handlers::{artifact_get, artifacts, show_run};
+use super::handlers::{artifact_get, artifacts, env, show_run};
 use super::{
     bench_compare, dead_owned_run, findings, latest, list_runs, RunsArtifactGetArgs, RunsListArgs,
     RunsOutput, WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER,
@@ -204,6 +204,126 @@ fn run_show_reconciles_owned_dead_running_run_before_displaying() {
             output.run.metadata["homeboy_reconciled"]["reason"],
             "owner_process_not_running"
         );
+    });
+}
+
+#[test]
+fn runs_env_explains_redacted_lab_env_resolution() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "bench",
+                "homeboy",
+                "studio",
+                serde_json::json!({
+                    "env_resolution": {
+                        "schema": "homeboy/env-resolution/v1",
+                        "values_redacted": true,
+                        "keys": [
+                            {
+                                "key": "API_TOKEN",
+                                "classification": "secret",
+                                "value_status": "secret_redacted",
+                                "value_preview": "<redacted>",
+                                "winning_source_layer": "secret_env_plan_env_delta",
+                                "shadowed_source_layers": ["env_delta"],
+                                "source_layers": [
+                                    {
+                                        "source": "env_delta",
+                                        "status": "shadowed",
+                                        "classification": "secret",
+                                        "value_status": "secret_redacted"
+                                    },
+                                    {
+                                        "source": "secret_env_plan_env_delta",
+                                        "status": "winner",
+                                        "classification": "secret",
+                                        "value_status": "secret_redacted"
+                                    }
+                                ]
+                            },
+                            {
+                                "key": "HOMEBOY_RUNTIME_DIR",
+                                "classification": "public",
+                                "value_status": "redacted",
+                                "value_preview": "<redacted>",
+                                "winning_source_layer": "runtime_overlay",
+                                "shadowed_source_layers": [],
+                                "source_layers": [
+                                    {
+                                        "source": "runtime_overlay",
+                                        "status": "winner",
+                                        "classification": "public",
+                                        "value_status": "redacted"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }),
+            ))
+            .expect("run");
+
+        let (output, _) = env(&run.id).expect("runs env");
+        let RunsOutput::Env(output) = output else {
+            panic!("expected env output");
+        };
+
+        assert_eq!(output.command, "runs.env");
+        assert_eq!(output.run_id, run.id);
+        assert_eq!(output.schema, "homeboy/env-resolution/v1");
+        assert!(output.values_redacted);
+        assert_eq!(output.summary.key_count, 2);
+        assert_eq!(output.summary.secret_key_count, 1);
+        assert_eq!(output.summary.public_key_count, 1);
+        assert_eq!(output.summary.shadowed_key_count, 1);
+        let secret = output
+            .keys
+            .iter()
+            .find(|entry| entry.key == "API_TOKEN")
+            .expect("secret entry");
+        assert_eq!(secret.winning_source_layer, "secret_env_plan_env_delta");
+        assert_eq!(secret.shadowed_source_layers, vec!["env_delta"]);
+        assert_eq!(secret.value_preview, "<redacted>");
+        assert_eq!(secret.source_layers.len(), 2);
+        let serialized = serde_json::to_string(&output).expect("serialize output");
+        assert!(serialized.contains("secret_redacted"));
+        assert!(!serialized.contains("super-secret"));
+    });
+}
+
+#[test]
+fn runs_env_refuses_unredacted_env_resolution() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "bench",
+                "homeboy",
+                "studio",
+                serde_json::json!({
+                    "env_resolution": {
+                        "schema": "homeboy/env-resolution/v1",
+                        "values_redacted": false,
+                        "keys": [{
+                            "key": "API_TOKEN",
+                            "value_preview": "super-secret"
+                        }]
+                    }
+                }),
+            ))
+            .expect("run");
+
+        let error = match env(&run.id) {
+            Ok(_) => panic!("unredacted env must fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("not marked redacted"));
+        assert!(!message.contains("super-secret"));
     });
 }
 
