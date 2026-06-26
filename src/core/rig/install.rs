@@ -398,8 +398,9 @@ fn package_source_roots_for_dependencies(
         });
     }
 
-    let repo_root =
-        git::repo_root(&prepared.package_path).unwrap_or_else(|| prepared.source_root.clone());
+    let repo_root = git::repo_root(&prepared.package_path)
+        .or_else(|| materialized_runner_source_root(&prepared.package_path))
+        .unwrap_or_else(|| prepared.source_root.clone());
     let repo_root = repo_root.canonicalize().map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -477,6 +478,19 @@ fn validate_package_dependency_path(
         ));
     }
     Ok(canonical)
+}
+
+fn materialized_runner_source_root(path: &Path) -> Option<PathBuf> {
+    let mut ancestors = path.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    ancestors
+        .windows(2)
+        .find(|window| {
+            window[0]
+                .file_name()
+                .is_some_and(|name| name == "_lab_workspaces")
+        })
+        .map(|window| window[1].to_path_buf())
 }
 
 fn merge_json(target: &mut serde_json::Value, overlay: serde_json::Value) {

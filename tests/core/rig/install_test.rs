@@ -286,6 +286,77 @@ mod install_flows {
     }
 
     #[test]
+    fn materialized_lab_nested_package_dependency_uses_snapshot_source_root() {
+        let _home = HomeGuard::new();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let snapshot = workspace
+            .path()
+            .join("_lab_workspaces/homeboy-rigs-fixture-123");
+        let nested = snapshot.join("WordPress/static-site-importer");
+        fs::create_dir_all(snapshot.join("shared/wp-codebox")).expect("shared dir");
+        fs::write(
+            snapshot.join("shared/wp-codebox/recipe.mjs"),
+            "export default {};\n",
+        )
+        .expect("shared recipe");
+        write_single_rig(
+            &nested,
+            "static-site-importer-fixture-matrix",
+            r#"{
+                "id": "static-site-importer-fixture-matrix",
+                "package_dependencies": ["../../shared/wp-codebox"],
+                "bench_workloads": {
+                    "static-site-importer": [
+                        { "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs" }
+                    ]
+                }
+            }"#,
+        );
+
+        let result =
+            install(nested.to_str().unwrap(), None, false).expect("install materialized package");
+        let metadata =
+            read_source_metadata("static-site-importer-fixture-matrix").expect("metadata");
+        let source_root = snapshot.canonicalize().expect("canonical source root");
+        let package_root = nested.canonicalize().expect("canonical package root");
+
+        assert_eq!(result.source_root, source_root);
+        assert_eq!(result.package_path, package_root);
+        assert_eq!(
+            metadata.source_root.as_deref(),
+            Some(source_root.to_str().unwrap())
+        );
+        assert_eq!(metadata.package_path, package_root.to_string_lossy());
+    }
+
+    #[test]
+    fn materialized_lab_package_dependency_outside_snapshot_is_rejected() {
+        let _home = HomeGuard::new();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let snapshot = workspace
+            .path()
+            .join("_lab_workspaces/homeboy-rigs-fixture-123");
+        let nested = snapshot.join("WordPress/static-site-importer");
+        fs::create_dir_all(workspace.path().join("_lab_workspaces/outside")).expect("outside dir");
+        write_single_rig(
+            &nested,
+            "bad-rig",
+            r#"{
+                "id": "bad-rig",
+                "package_dependencies": ["../../../outside"]
+            }"#,
+        );
+
+        let err = install(nested.to_str().unwrap(), None, false)
+            .expect_err("dependency outside snapshot should fail");
+
+        assert!(err
+            .message
+            .contains("package dependency paths must stay inside"));
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
     fn package_dependency_outside_source_root_is_rejected() {
         let _home = HomeGuard::new();
         let parent = tempfile::tempdir().expect("parent");
