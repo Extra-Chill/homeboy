@@ -84,43 +84,47 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
         ),
         (
             parsed_command(&["homeboy", "agent-task", "run", "agent-task-123"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "run-next"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "logs", "agent-task-123"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "evidence", "agent-task-123"]),
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "list"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "active"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "latest"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "providers"]),
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         ),
         (
             parsed_command(&[
@@ -278,7 +282,7 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
             "agent-task cook/run-plan",
             "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
             "agent-task retry --run",
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
             "agent-task fanout run-plan/submit-batch/status/artifacts",
             "agent-task auth status",
             "lint",

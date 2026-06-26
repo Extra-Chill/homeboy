@@ -369,7 +369,7 @@ const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
     "agent-task controller from-spec --resume/run-from-spec/materialize";
 const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
 const AGENT_TASK_STATUS_LAB_LABEL: &str =
-    "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
+    "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest";
 const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
 const AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL: &str = "agent-task fanout run-plan";
 const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
@@ -423,9 +423,9 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
     LabSupportedCommandSummary {
         contract_labels: &[AGENT_TASK_STATUS_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL],
         message_label:
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
         hint_label:
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task run/run-next/status/logs/artifacts/evidence/review/list/active/latest/providers",
     },
     LabSupportedCommandSummary {
         contract_labels: &[
@@ -675,6 +675,7 @@ impl Commands {
                     | agent_task::AgentTaskCommand::RunNext
                     | agent_task::AgentTaskCommand::Logs(_)
                     | agent_task::AgentTaskCommand::Artifacts(_)
+                    | agent_task::AgentTaskCommand::Evidence(_)
                     | agent_task::AgentTaskCommand::Review(_)
                     // Discovery commands (list/active/latest) are runner-resident
                     // reads too: a freshly-offloaded Lab run's durable record

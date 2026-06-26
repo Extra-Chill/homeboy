@@ -14,7 +14,8 @@ pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerRunFromSpecArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskCookArgs, CompileLoopArgs, ReviewArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    AgentTaskCookArgs, CompileLoopArgs, EvidenceArgs, ReviewArgs, StatusArgs, SubmitArgs,
+    VerifyGateArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
     apply_controller_event, controller_from_spec, controller_materialize,
@@ -25,7 +26,7 @@ pub(in crate::commands::agent_task) use super::super::run::{
     retry, run_cook_with_executor, run_loaded_plan, run_next_with_executor,
     run_resume_with_executor, run_submitted, submit,
 };
-pub(in crate::commands::agent_task) use super::super::status::{cancel, logs, status};
+pub(in crate::commands::agent_task) use super::super::status::{cancel, evidence, logs, status};
 pub(in crate::commands::agent_task) use super::super::{
     review, CancelArgs, ProvidersArgs, RetryArgs,
 };
