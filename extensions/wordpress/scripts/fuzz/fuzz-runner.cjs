@@ -23,6 +23,8 @@ const {
 	wpCodeboxFuzzSuiteAbility,
 	wpCodeboxRuntimeContractManifest,
 } = require('../../lib/wp-codebox-fuzz-run');
+
+const WP_CODEBOX_FUZZ_EXECUTION_SCHEMA = 'homeboy/wp-codebox-fuzz-execution/v1';
 if (require.main === module) {
 	main().catch((error) => {
 		process.stderr.write(`${error.message}\n`);
@@ -95,7 +97,9 @@ function wpCodeboxPublicRuntimeInvocation(request, options = {}) {
 	if (requiresCodeboxTaskAdapter(request)) {
 		return null;
 	}
-	const runtimeTask = request.executor?.config?.runtime_task || {};
+	const runtimeTask = request.schema === WP_CODEBOX_FUZZ_EXECUTION_SCHEMA
+		? { ability: request.ability, input: request.input }
+		: request.executor?.config?.runtime_task || {};
 	const ability = runtimeTask.ability || wpCodeboxFuzzSuiteAbility(options);
 	const command = wpCodeboxCommandFromPublicAbility(ability, options);
 	if (!command) {
@@ -108,13 +112,17 @@ function wpCodeboxPublicRuntimeInvocation(request, options = {}) {
 			...(runtimeTask.input || {}),
 			metadata: {
 				...(runtimeTask.input?.metadata || {}),
-				homeboy_agent_task_request: request,
+				runtime_requirements: request.runtime_requirements,
+				homeboy_wp_codebox_fuzz_execution: request,
 			},
 		},
 	};
 }
 
 function requiresCodeboxTaskAdapter(request) {
+	if (request.schema === WP_CODEBOX_FUZZ_EXECUTION_SCHEMA) {
+		return false;
+	}
 	const config = request.executor?.config || {};
 	const runtimeRequirements = config.runtime_requirements || config.runtimeRequirements || {};
 	return [

@@ -15,6 +15,7 @@ const {
 	WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
 	WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA,
 	WORDPRESS_FUZZ_OBSERVATION_SCHEMA,
+	WP_CODEBOX_FUZZ_EXECUTION_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
@@ -30,6 +31,7 @@ const {
 	runWpCodeboxPublicFuzzOperation,
 	runWpCodeboxFuzzSuite,
 	wordpressFuzzPostprocessBinding,
+	wpCodeboxFuzzExecutionRequest,
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
 } = require('../lib/wp-codebox-fuzz-run');
@@ -142,6 +144,14 @@ assert.deepEqual(
 );
 assert(!JSON.stringify(taskRequest).includes('woocommerce'), 'fuzz suite helper must stay product-agnostic');
 assert.equal(wpCodeboxFuzzSuiteTaskRequest({ taskId: 'suite-task' }).executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+
+const executionRequest = wpCodeboxFuzzExecutionRequest({ taskId: 'direct-suite-task', input, wpCodeboxBin: '/custom/wp-codebox' });
+assert.equal(executionRequest.schema, WP_CODEBOX_FUZZ_EXECUTION_SCHEMA);
+assert.equal(executionRequest.task_id, 'direct-suite-task');
+assert.equal(executionRequest.command, 'run-fuzz-suite');
+assert.equal(executionRequest.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+assert.equal(executionRequest.metadata.executor, 'wp-codebox-direct-fuzz');
+assert.equal(executionRequest.executor, undefined);
 
 const preflightMissingCommand = preflightWpCodeboxFuzzCapabilityContract({
 	request: taskRequest,
@@ -426,7 +436,9 @@ runWpCodeboxFuzzSuite({
 	input,
 	runFuzzSuite: async (request) => {
 		invoked = true;
-		assert.equal(request.executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+		assert.equal(request.schema, WP_CODEBOX_FUZZ_EXECUTION_SCHEMA);
+		assert.equal(request.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+		assert.equal(request.executor, undefined);
 		return {
 			json: {
 				schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
@@ -875,11 +887,13 @@ runWpCodeboxFuzzSuite({
 	return runWpCodeboxFuzzSuite({
 		taskId: 'public-cli-suite-run',
 		input,
+		wpCodeboxBin: '/custom/direct-wp-codebox',
 		runtimeRequirements: {
 			extra_plugins: [{ slug: 'sample-plugin', source: '/runner/components/sample-plugin', loadAs: 'plugin' }],
 			runtime_env: { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: '/runner/workloads' },
 		},
-		runPublicCli: ({ args, stdin }) => {
+		runPublicCli: ({ command, args, stdin }) => {
+			assert.equal(command, '/custom/direct-wp-codebox');
 			if (args.join(' ') === 'run-fuzz-suite --help') {
 				return { status: 0, stdout: 'usage' };
 			}
@@ -894,6 +908,9 @@ runWpCodeboxFuzzSuite({
 			assert.equal(publicCliInput.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 			assert.equal(publicCliInput.metadata.runtime_requirements.extra_plugins[0].source, '/runner/components/sample-plugin');
 			assert.equal(publicCliInput.metadata.runtime_requirements.runtime_env.WP_CODEBOX_FUZZ_WORKLOAD_ROOT, '/runner/workloads');
+			assert.equal(publicCliInput.metadata.homeboy_wp_codebox_fuzz_execution.schema, WP_CODEBOX_FUZZ_EXECUTION_SCHEMA);
+			assert.equal(publicCliInput.metadata.homeboy_wp_codebox_fuzz_execution.expected_artifacts.includes('case-log'), true);
+			assert.equal(publicCliInput.metadata.homeboy_agent_task_request, undefined);
 			return {
 				status: 0,
 				stdout: JSON.stringify({

@@ -79,12 +79,16 @@ if (request.id !== 'contract-run' || request.cases?.[0]?.target_id !== 'rest-pos
   process.stderr.write('fuzz suite request was not built from the Homeboy workload');
   process.exit(1);
 }
-if (request.metadata?.homeboy_agent_task_request?.executor?.config?.runtime_task?.ability !== 'wp-codebox/run-fuzz-suite') {
-  process.stderr.write('missing Homeboy agent task request metadata for the public fuzz-suite call');
+if (request.metadata?.homeboy_wp_codebox_fuzz_execution?.schema !== 'homeboy/wp-codebox-fuzz-execution/v1') {
+  process.stderr.write('missing Homeboy direct fuzz execution metadata for the public fuzz-suite call');
   process.exit(1);
 }
-if (request.metadata?.homeboy_agent_task_request?.executor?.config?.runtime_task?.input?.schema !== 'wp-codebox/fuzz-suite/v1') {
-  process.stderr.write('Homeboy task request did not carry a fuzz-suite input');
+if (request.metadata?.homeboy_wp_codebox_fuzz_execution?.input?.schema !== 'wp-codebox/fuzz-suite/v1') {
+  process.stderr.write('Homeboy direct execution request did not carry a fuzz-suite input');
+  process.exit(1);
+}
+if (request.metadata?.homeboy_agent_task_request) {
+  process.stderr.write('fuzz execution must not route through Homeboy agent-task metadata');
   process.exit(1);
 }
 
@@ -149,12 +153,14 @@ assert.deepEqual(
 
 const observedRequest = JSON.parse(fs.readFileSync(observedRequestPath, 'utf8'));
 assert.equal(observedRequest.schema, 'wp-codebox/fuzz-suite/v1');
-assert.equal(observedRequest.metadata.homeboy_agent_task_request.task_id, 'contract-run');
-assert.equal(observedRequest.metadata.homeboy_agent_task_request.expected_artifacts[0], 'wp-codebox-fuzz-suite-result');
-assert.equal(observedRequest.metadata.homeboy_agent_task_request.artifact_declarations[0].semantic_key, 'fuzz.result.normalized');
-assert.equal(observedRequest.metadata.homeboy_agent_task_request.expected_artifacts.includes('case-log'), true);
-assert.equal(observedRequest.metadata.homeboy_agent_task_request.expected_artifacts.includes('replay-data'), true);
-assert.equal(observedRequest.metadata.homeboy_agent_task_request.expected_artifacts.includes('coverage-summary'), true);
+assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.schema, 'homeboy/wp-codebox-fuzz-execution/v1');
+assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.task_id, 'contract-run');
+assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.expected_artifacts[0], 'wp-codebox-fuzz-suite-result');
+assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.artifact_declarations[0].semantic_key, 'fuzz.result.normalized');
+assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.expected_artifacts.includes('case-log'), true);
+assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.expected_artifacts.includes('replay-data'), true);
+assert.equal(observedRequest.metadata.homeboy_wp_codebox_fuzz_execution.expected_artifacts.includes('coverage-summary'), true);
+assert.equal(observedRequest.metadata.homeboy_agent_task_request, undefined);
 
 const campaign = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
 assert.equal(campaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
