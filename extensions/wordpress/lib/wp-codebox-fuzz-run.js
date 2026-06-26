@@ -519,8 +519,9 @@ function homeboyFuzzWorkloadRunInputFromFile(workloadPath, options = {}) {
 	} catch {
 		return undefined;
 	}
-	source = expandWorkloadTemplateTokens(source, { packageRoot: packageRootFromWorkloadPath(filePath), sourceFilePath: filePath });
-	const steps = normalizeWordPressWorkloadSteps(source.run || source.steps, { sourceFilePath: filePath });
+	const packageRoot = packageRootFromWorkloadPath(filePath);
+	source = expandWorkloadTemplateTokens(source, { packageRoot, sourceFilePath: filePath });
+	const steps = normalizeWordPressWorkloadSteps(source.run || source.steps, { packageRoot, sourceFilePath: filePath });
 	if (steps.length === 0) {
 		return undefined;
 	}
@@ -703,7 +704,7 @@ function wpCodeboxWordPressWorkloadRunInput(options = {}) {
 		secret_env: normalizeArray(options.secretEnv || options.secret_env),
 		staged_files: normalizeArray(options.stagedFiles || options.staged_files),
 		before: normalizeArray(options.before),
-		steps: normalizeWordPressWorkloadSteps(options.steps),
+		steps: normalizeWordPressWorkloadSteps(options.steps, options),
 		after: normalizeArray(options.after),
 		metadata: objectOrUndefined(options.metadata),
 	});
@@ -730,10 +731,11 @@ function normalizeWordPressWorkloadStep(step, options = {}) {
 	const parameters = objectOrUndefined(args.parameters) || {};
 	const inputArtifactRoot = input.path || args.inputArtifactRoot || args.input_artifact_root;
 	const outputArtifactPath = output.path || args.outputArtifactPath || args.output_artifact_path;
+	const helperPath = packageRelativePath(args.helper || args.helperPath || args.helper_path, options.packageRoot);
 	return stripUndefined({
 		type: 'artifact-postprocess',
 		action: args.action,
-		helperPath: args.helper || args.helperPath || args.helper_path,
+		helperPath,
 		inputArtifactRoot,
 		outputArtifactPath,
 		maxInputBytes: input.max_bytes || input.maxBytes || args.maxInputBytes || args.max_input_bytes,
@@ -749,6 +751,18 @@ function normalizeWordPressWorkloadStep(step, options = {}) {
 			contract: 'homeboy/artifact-postprocess/v1',
 		}),
 	});
+}
+
+function packageRelativePath(value, packageRoot) {
+	const requested = typeof value === 'string' ? value.trim() : '';
+	if (!requested || !packageRoot || !path.isAbsolute(requested)) {
+		return requested || undefined;
+	}
+	const relative = path.relative(packageRoot, requested).replaceAll(path.sep, '/');
+	if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+		return requested;
+	}
+	return relative;
 }
 
 function embedSourcePhpWorkloadStep(step, options = {}) {
