@@ -355,7 +355,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
   const runtimeTask = runtimeTaskWithExecutionDefaults(
     inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
-    { provider, model, agentBundles }
+    { provider, model, agentBundles, runtimePackage: runtimePackageDefaultFromProfile(config, runtimeOptions) }
   );
   let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
   let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
@@ -612,6 +612,11 @@ function runtimeProfileFromExecutorConfig(config = {}, options = {}) {
   const profiles = firstObject(config.runtime_profiles, config.runtimeProfiles, options.runtimeProfiles, options.runtime_profiles) || {};
   const namedProfile = profiles[runtimeProfile] || profiles[runtimeProfile.trim()];
   return firstObject(namedProfile) || {};
+}
+
+function runtimePackageDefaultFromProfile(config = {}, runtimeOptions = {}) {
+  const runtimeProfile = firstObject(runtimeOptions.runtimeProfile) || {};
+  return firstValue(runtimeProfile.runtime_package, runtimeProfile.runtimePackage, runtimeProfile.package, config.runtime_profile, config.runtimeProfile, runtimeProfile.id);
 }
 
 function artifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
@@ -1283,6 +1288,7 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
     ? normalizedRuntimeTask.input
     : {};
   const defaultInput = Object.fromEntries(Object.entries({
+    runtime_package: defaults.runtimePackage,
     provider: defaults.provider,
     model: defaults.model,
   }).filter(([, value]) => value !== '' && value !== undefined));
