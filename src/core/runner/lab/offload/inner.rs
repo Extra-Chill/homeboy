@@ -283,7 +283,7 @@ pub(crate) fn run_lab_offload_inner(
         PlanStep::builder(
             "lab.runner_homeboy",
             "lab.runner_homeboy",
-            if runner_status.stale_daemon.is_some() {
+            if lab_runner_homeboy_has_blocking_drift(&runner_status) {
                 PlanStepStatus::Failed
             } else {
                 PlanStepStatus::Ready
@@ -314,7 +314,7 @@ pub(crate) fn run_lab_offload_inner(
                 shell::quote_arg(runner_id)
             ))
     );
-    if runner_status.stale_daemon.is_some() {
+    if lab_runner_homeboy_has_blocking_drift(&runner_status) {
         return Err(stale_runner_homeboy_error(
             runner_id,
             homeboy_path,
