@@ -80,7 +80,12 @@ const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const AGENT_TASK_EVENT_SCHEMA = 'homeboy/agent-task-event/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 const WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY = 'wp-codebox/run-runtime-package';
+const NEUTRAL_RUNTIME_PACKAGE_ABILITIES = new Set(['homeboy/run-runtime-package']);
 const LEGACY_RUNTIME_PACKAGE_ABILITIES = new Set(['agents/run-runtime-package', 'runtime-package/run']);
+const RUNTIME_PACKAGE_ABILITY_ALIASES = new Set([
+  ...NEUTRAL_RUNTIME_PACKAGE_ABILITIES,
+  ...LEGACY_RUNTIME_PACKAGE_ABILITIES,
+]);
 const LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE = 'legacy-runtime-package-ability-alias';
 const LEGACY_RUNTIME_PACKAGE_ABILITY_DEPRECATIONS = Array.from(LEGACY_RUNTIME_PACKAGE_ABILITIES).map((ability) => ({
   schema: 'wp-codebox/deprecated-compatibility-alias/v1',
@@ -350,7 +355,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
   const runtimeTask = runtimeTaskWithExecutionDefaults(
     inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
-    { provider, model, agentBundles }
+    { provider, model, agentBundles, runtimePackage: runtimePackageDefaultFromProfile(config, runtimeOptions) }
   );
   let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
   let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
@@ -607,6 +612,11 @@ function runtimeProfileFromExecutorConfig(config = {}, options = {}) {
   const profiles = firstObject(config.runtime_profiles, config.runtimeProfiles, options.runtimeProfiles, options.runtime_profiles) || {};
   const namedProfile = profiles[runtimeProfile] || profiles[runtimeProfile.trim()];
   return firstObject(namedProfile) || {};
+}
+
+function runtimePackageDefaultFromProfile(config = {}, runtimeOptions = {}) {
+  const runtimeProfile = firstObject(runtimeOptions.runtimeProfile) || {};
+  return firstValue(runtimeProfile.runtime_package, runtimeProfile.runtimePackage, runtimeProfile.package, config.runtime_profile, config.runtimeProfile, runtimeProfile.id);
 }
 
 function artifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
@@ -909,7 +919,7 @@ function genericAbilityRuntimeTask(request, config, inputs) {
   const input = runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared);
   const normalizedAbility = normalizeRuntimeTaskAbilityForCodebox(ability);
   const abilityNormalization = runtimeTaskAbilityNormalization({ requestedAbility: ability, normalizedAbility });
-  if (LEGACY_RUNTIME_PACKAGE_ABILITIES.has(ability) || normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
+  if (RUNTIME_PACKAGE_ABILITY_ALIASES.has(ability) || normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
     return {
       ability: normalizedAbility,
       ...(abilityNormalization ? { ability_normalization: abilityNormalization } : {}),
@@ -920,7 +930,7 @@ function genericAbilityRuntimeTask(request, config, inputs) {
 }
 
 function normalizeRuntimeTaskAbilityForCodebox(ability) {
-  return LEGACY_RUNTIME_PACKAGE_ABILITIES.has(ability) ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : ability;
+  return RUNTIME_PACKAGE_ABILITY_ALIASES.has(ability) ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : ability;
 }
 
 function runtimePackageTaskInputForCodebox(input) {
@@ -1278,6 +1288,7 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
     ? normalizedRuntimeTask.input
     : {};
   const defaultInput = Object.fromEntries(Object.entries({
+    runtime_package: defaults.runtimePackage,
     provider: defaults.provider,
     model: defaults.model,
   }).filter(([, value]) => value !== '' && value !== undefined));
@@ -1340,9 +1351,10 @@ function runtimeTaskAbilityNormalizationEvidence(runtimeTask = {}) {
 }
 
 function runtimeComponentPaths(config, options = {}) {
-  const runtimeComponents = config.runtime_components && typeof config.runtime_components === 'object'
-    ? config.runtime_components
-    : {};
+  const runtimeComponents = {
+    ...(config.runtime_components && typeof config.runtime_components === 'object' ? config.runtime_components : {}),
+    ...(process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT ? { runtime: process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT } : {}),
+  };
   const explicit = config.runtime_component_paths && typeof config.runtime_component_paths === 'object'
     ? config.runtime_component_paths
     : {};

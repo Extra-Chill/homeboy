@@ -89,16 +89,22 @@ function runGenericAgentLoop(options = {}) {
     stopPolicy: options.stopPolicy || options.stop_policy,
   });
   const outcome = loop.outcome || normalizeOutcome(null, request);
-  validateGenericAgentLoopOutcomeContract({
-    request,
-    outcome,
-    runtime,
-    plan: options.plan || {},
-    validationPolicy,
-  });
-  const results = materializeGenericAgentLoopResults(outcome, { ...options, runtime });
+  let contractValidation = null;
+  let contractOutcome = outcome;
+  try {
+    contractValidation = validateGenericAgentLoopOutcomeContract({
+      request,
+      outcome,
+      runtime,
+      plan: options.plan || {},
+      validationPolicy,
+    });
+  } catch (error) {
+    contractOutcome = outcomeWithContractValidationFailure(outcome, request, error);
+  }
+  const results = materializeGenericAgentLoopResults(contractOutcome, { ...options, runtime });
   const controllerProofRequested = options.controllerProof === true || options.controller_proof === true;
-  const productionProof = controllerProofRequested ? buildBoundedProductionProof({ request, outcome, plan: options.plan || {}, validationPolicy }) : null;
+  const productionProof = controllerProofRequested ? buildBoundedProductionProof({ request, outcome: contractOutcome, plan: options.plan || {}, validationPolicy }) : null;
   const controllerProofValidation = controllerProofRequested ? validateControllerLoopProof({
     spec: buildControllerLoopProofSpec({ request, plan: options.plan || {}, validationPolicy }),
     proof: productionProof,
@@ -111,7 +117,7 @@ function runGenericAgentLoop(options = {}) {
   if (options.validate !== false && controllerProofRequested && !controllerProofValidation.valid) {
     throw new Error(`controller loop proof validation failed: ${controllerProofValidation.failures.map((item) => item.message).join('; ')}`);
   }
-  return { request, outcome, results, assertion, loop, productionProof, controllerProofValidation };
+  return { request, outcome: contractOutcome, results, assertion, loop, productionProof, controllerProofValidation, contractValidation };
 }
 
 function runGenericDeterministicLoop(options = {}) {
@@ -900,6 +906,43 @@ function normalizeOutcome(value, request) {
     status: 'failed',
     summary: 'Runtime agent task executor produced an invalid outcome.',
   };
+}
+
+function outcomeWithContractValidationFailure(outcome, request, error) {
+  const normalized = normalizeOutcome(outcome, request);
+  return {
+    ...normalized,
+    schema: normalized.schema || 'homeboy/agent-task-outcome/v1',
+    task_id: normalized.task_id || request.task_id,
+    status: 'failed',
+    summary: errorMessage(error),
+    diagnostics: [
+      ...(Array.isArray(normalized.diagnostics) ? normalized.diagnostics : []),
+      {
+        class: 'homeboy.generic_agent_loop.contract_validation_failed',
+        message: errorMessage(error),
+        data: {
+          original_status: normalized.status || '',
+          original_summary: normalized.summary || '',
+        },
+      },
+    ],
+    metadata: {
+      ...(optionalObject(normalized.metadata)),
+      generic_agent_loop_contract_validation: {
+        schema: 'homeboy/generic-agent-loop-contract-validation/v1',
+        valid: false,
+        error: errorMessage(error),
+        invalid_candidate_outcome: normalized,
+      },
+    },
+  };
+}
+
+function errorMessage(error) {
+  return error && typeof error.message === 'string' && error.message.trim()
+    ? error.message
+    : String(error || 'generic agent loop contract validation failed');
 }
 
 function findScenario(results, scenarioId) {

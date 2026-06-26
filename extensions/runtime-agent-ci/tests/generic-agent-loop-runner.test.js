@@ -129,6 +129,35 @@ assert.equal(result.loop.outcome.status, 'succeeded');
 assert.equal(result.productionProof, null);
 assert.equal(result.controllerProofValidation, null);
 
+const invalidCandidateResult = genericLoopRunner.runGenericAgentLoop({
+  runtime,
+  plan: {
+    ...plan,
+    workload_id: 'invalid-candidate-contract',
+    artifact_declarations: [{ name: 'required-packet', kind: 'fixture/Packet/v1', required: true }],
+  },
+  validate: false,
+  validationPolicy: { success_completion_outcomes: ['done'] },
+  execute: ({ request }) => ({
+    schema: 'homeboy/agent-task-outcome/v1',
+    task_id: request.task_id,
+    status: 'provider_error',
+    summary: 'Provider returned no artifact packet.',
+    diagnostics: [{ class: 'fixture.provider_error', message: 'provider failure detail' }],
+  }),
+});
+assert.equal(invalidCandidateResult.outcome.status, 'failed');
+assert.match(invalidCandidateResult.outcome.summary, /missing declared artifact required-packet/);
+assert.equal(invalidCandidateResult.outcome.diagnostics[0].class, 'fixture.provider_error');
+assert.equal(
+  invalidCandidateResult.outcome.metadata.generic_agent_loop_contract_validation.invalid_candidate_outcome.status,
+  'provider_error'
+);
+assert.equal(
+  invalidCandidateResult.outcome.metadata.generic_agent_loop_contract_validation.invalid_candidate_outcome.summary,
+  'Provider returned no artifact packet.'
+);
+
 const proofPolicy = { preview_required: true, publication_required: true };
 const validProofRun = genericLoopRunner.runGenericAgentLoop({
   runtime,

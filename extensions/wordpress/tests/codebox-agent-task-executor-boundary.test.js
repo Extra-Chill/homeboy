@@ -542,6 +542,21 @@ assert.deepEqual(customRuntimePolicyTaskInput.allowed_tools, [
 assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime, '/components/example-runtime');
 assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime_tools, '/components/example-tools');
 
+const previousRuntimeComponentEnv = process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT;
+process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT = '/components/wp-codebox-runtime-plugin';
+const envRuntimeComponentTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'env-runtime-component-task-1',
+  executor: { backend: 'codebox', config: { provider: 'codex' } },
+  instructions: 'Run with a runtime component supplied by the selected runner environment.',
+});
+if (previousRuntimeComponentEnv === undefined) {
+  delete process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT;
+} else {
+  process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT = previousRuntimeComponentEnv;
+}
+assert.equal(envRuntimeComponentTaskInput.runtime_component_paths.runtime, '/components/wp-codebox-runtime-plugin');
+
 const runtimeInvocationTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'generic-provider-runtime-invocation-task-1',
@@ -765,6 +780,52 @@ assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.provider, 'codex')
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.model, 'gpt-5.5');
 assert.deepEqual(legacyRuntimePackageTaskInput.runtime_task.input.metadata.runtime_package_descriptor, { slug: 'example-agent', source: 'bundles/example-agent' });
 assert.equal(Object.hasOwn(legacyRuntimePackageTaskInput.runtime_task.input, 'package'), false);
+
+const neutralRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'neutral-runtime-package-task-1',
+  executor: { backend: 'codebox', model: 'gpt-5.5', config: { provider: 'codex' } },
+  instructions: 'Run a neutral runtime-package task through the selected runtime adapter.',
+  inputs: {
+    ability_request: {
+      name: 'homeboy/run-runtime-package',
+      input: { package: { slug: 'example-agent', source: 'bundles/example-agent' } },
+    },
+  },
+});
+assert.equal(neutralRuntimePackageTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.equal(neutralRuntimePackageTaskInput.runtime_task.ability_normalization.requested_ability, 'homeboy/run-runtime-package');
+assert.equal(neutralRuntimePackageTaskInput.runtime_task.ability_normalization.normalized_codebox_ability, 'wp-codebox/run-runtime-package');
+assert.equal(Object.hasOwn(neutralRuntimePackageTaskInput.runtime_task.ability_normalization, 'deprecated_compatibility_alias'), false);
+assert.equal(neutralRuntimePackageTaskInput.runtime_task.input.runtime_package, 'example-agent');
+assert.equal(neutralRuntimePackageTaskInput.runtime_task.input.agent, 'example-agent');
+
+const neutralProfileRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'neutral-profile-runtime-package-task-1',
+  executor: {
+    backend: 'codebox',
+    model: 'gpt-5.5',
+    config: {
+      provider: 'codex',
+      runtime_profile: 'example-agent-profile',
+      runtime_profiles: {
+        'example-agent-profile': {
+          schema: 'homeboy/runtime-profile/v1',
+          id: 'example-agent-profile',
+          runtime_task_ability: 'homeboy/run-runtime-package',
+        },
+      },
+      runtime_task: { ability: 'homeboy/run-runtime-package', input: {} },
+    },
+  },
+  instructions: 'Run a neutral runtime-package task through the selected runtime profile.',
+});
+assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.input.runtime_package, 'example-agent-profile');
+assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.input.agent, 'example-agent-profile');
+assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.input.provider, 'codex');
+assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.input.model, 'gpt-5.5');
 
 const explicitRuntimePackageComponentTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
