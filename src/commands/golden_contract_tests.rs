@@ -133,6 +133,7 @@ fn runs_command_json_contract_matches_golden_fixture() {
                     artifacts: vec![artifact_record()],
                     preview_entrypoints: Vec::new(),
                     matrix_summary: None,
+                    fuzz_result_envelopes: Vec::new(),
                 })),
                 scenario("runs query json", RunsOutput::Query(RunsQueryOutput {
                     command: "runs.query",

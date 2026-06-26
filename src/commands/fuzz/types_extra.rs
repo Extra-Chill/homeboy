@@ -80,6 +80,8 @@ pub struct FuzzInspectOutput {
     pub result: Option<serde_json::Value>,
     /// Raw text body when the result is not valid JSON (or `--raw` text fallback).
     pub raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_summary: Option<homeboy::core::fuzz::FuzzResultEnvelopeArtifactSummary>,
     pub candidates: Vec<FuzzInspectCandidate>,
     pub next_steps: Vec<String>,
 }
