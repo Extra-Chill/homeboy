@@ -17,10 +17,11 @@ const {
 	buildWordPressPerformanceObservation,
 } = require('./wordpress-performance-observation-aggregate');
 const {
-	DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS,
-	DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+	wordpressFuzzPostprocessArtifactDeclarations,
+	wordpressFuzzPostprocessBinding,
+	wordpressFuzzPostprocessExpectedArtifacts,
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
 } = require('./wp-codebox-fuzz-run');
@@ -61,6 +62,7 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 			production_campaign: production || undefined,
 		},
 		artifacts: input.artifacts || options.artifacts,
+		postprocess_binding: input.postprocess_binding || input.postprocessBinding || options.postprocess_binding || options.postprocessBinding || (production ? wordpressFuzzPostprocessBinding() : undefined),
 		production,
 	});
 	const suiteInput = wpCodeboxFuzzSuiteInput({
@@ -77,6 +79,7 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 			aggregation_hooks: campaignAggregationHooks(),
 			production_campaign: production || undefined,
 			output_requirements: production ? productionOutputRequirements() : undefined,
+			postprocess_binding: production ? wordpressFuzzPostprocessBinding() : undefined,
 		},
 	});
 	const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
@@ -126,10 +129,12 @@ function buildWordPressFuzzCampaignWorkload(input = {}) {
 			})),
 		},
 		artifacts: input.artifacts || defaultCampaignArtifacts({ production: input.production }),
+		postprocess_binding: objectOrUndefined(input.postprocess_binding || input.postprocessBinding),
 		metadata: {
 			...(objectOrUndefined(input.metadata) || {}),
 			coverage_manifest: input.coverageManifest || input.coverage_manifest,
 			aggregation_hooks: campaignAggregationHooks(),
+			postprocess_binding: objectOrUndefined(input.postprocess_binding || input.postprocessBinding),
 		},
 	};
 }
@@ -187,20 +192,34 @@ function defaultCampaignArtifacts(options = {}) {
 
 function defaultCampaignArtifactsWithOptions(options = {}) {
 	const hotspotRequired = Boolean(options.production);
+	const expected = [
+		{ name: 'wordpress_fuzz_result', role: 'normalized_fuzz_result', semantic_key: 'fuzz.result.normalized', required: true },
+		{ name: 'wordpress_fuzz_coverage', role: 'coverage', semantic_key: 'fuzz.coverage', required: true },
+		{ name: 'wordpress-hotspots', role: 'hotspot_summary', semantic_key: 'fuzz.hotspot.summary', schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA, required: hotspotRequired },
+		{ name: 'wordpress_performance_observation', role: 'fuzz_report', semantic_key: 'fuzz.performance', required: false },
+	];
+	if (options.production) {
+		expected.push(...wordpressFuzzPostprocessBinding().outputs);
+	}
 	return {
-		expected: [
-			{ name: 'wordpress_fuzz_result', role: 'normalized_fuzz_result', semantic_key: 'fuzz.result.normalized', required: true },
-			{ name: 'wordpress_fuzz_coverage', role: 'coverage', semantic_key: 'fuzz.coverage', required: true },
-			{ name: 'wordpress-hotspots', role: 'hotspot_summary', semantic_key: 'fuzz.hotspot.summary', schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA, required: hotspotRequired },
-			{ name: 'wordpress_performance_observation', role: 'fuzz_report', semantic_key: 'fuzz.performance', required: false },
-		],
+		expected: dedupeArtifactsBySemanticKey(expected),
 	};
+}
+
+function dedupeArtifactsBySemanticKey(artifacts = []) {
+	const byKey = new Map();
+	for (const artifact of artifacts) {
+		byKey.set(artifact.semantic_key || artifact.name, artifact);
+	}
+	return [...byKey.values()];
 }
 
 function productionOutputRequirements() {
 	return {
 		required_artifact_keys: ['fuzz.coverage', 'fuzz.hotspot.summary'],
+		required_postprocess_outputs: ['fuzz.coverage', 'fuzz.hotspot.summary', 'fuzz.coverage.gap_report', 'fuzz.hotspot.codebox'],
 		required_artifact_schemas: [WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA],
+		production_campaign: true,
 	};
 }
 
@@ -208,16 +227,14 @@ function productionExpectedArtifacts(production = false) {
 	if (!production) {
 		return undefined;
 	}
-	return [...new Set([...DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS, 'wordpress-hotspots'])];
+	return wordpressFuzzPostprocessExpectedArtifacts();
 }
 
 function productionArtifactDeclarations(production = false) {
 	if (!production) {
 		return undefined;
 	}
-	return DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS.map((artifact) => artifact.semantic_key === 'fuzz.hotspot.summary'
-		? { ...artifact, required: true }
-		: artifact);
+	return wordpressFuzzPostprocessArtifactDeclarations();
 }
 
 function aggregateWordPressFuzzCampaignResult(input = {}) {
