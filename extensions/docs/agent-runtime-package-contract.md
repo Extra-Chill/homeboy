@@ -134,19 +134,15 @@ semantics belong to callers or runtime packages.
 
 ## Homeboy Contract Adapter
 
-Extension runtime packages should consume generic Homeboy contract constants
-through `runtime-agent-ci/lib/agent-task-provider-contract.js`. That adapter is the
-local compatibility seam while the matching Homeboy core contracts are released.
-It owns schema identifiers, the default provider fields, secret-env requirement
-selectors, redacted metadata keys, and artifact/evidence reference projection
-helpers.
-
-Reusable CI callers that need to describe a runner without embedding workflow
-glue should consume `agent-task-contracts`. That shared package owns
-`homeboy/agent-task-runner-spec/v1` validation and projection into the generic
-request fields consumed by executor providers. Extension-specific exports should
-re-export the shared package instead of copying schema and lifecycle validation
-logic; legacy runtime-CI and WordPress paths remain compatibility shims.
+Extension runtime packages and reusable CI callers should consume generic
+Homeboy contract constants through `agent-task-contracts`. That shared package
+owns schema identifiers, the default provider fields, secret-env requirement
+selectors, redacted metadata keys, artifact/evidence reference projection
+helpers, and `homeboy/agent-task-runner-spec/v1` validation/projection into the
+generic request fields consumed by executor providers. Extension-specific
+exports should re-export the shared package instead of copying schema and
+lifecycle validation logic; legacy runtime-CI, agent-runtimes, and
+extension-specific paths remain compatibility shims only.
 
 Runtime packages may add backend-specific capabilities, secret names, role
 aliases, and metadata keys, but should extend the adapter output instead of

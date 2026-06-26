@@ -3,7 +3,7 @@
 const {
   AGENT_TASK_RUNNER_SPEC_SCHEMA,
   validateAgentTaskRunnerSpec,
-} = require('./agent-task-runner-contract');
+} = require('../../agent-task-contracts/agent-task-runner-contract');
 const {
   GENERIC_AGENT_TASK_PLAN_SCHEMA,
   GENERIC_AGENT_TASK_REQUEST_SCHEMA,
@@ -16,7 +16,7 @@ const { normalizeRuntimeId, resolveRuntimeProvider } = require('./runtime-provid
 const {
   expandAgentTaskCapabilityBundles,
   expandAgentTaskToolPresets,
-} = require('./agent-task-provider-contract');
+} = require('../../agent-task-contracts/agent-task-provider-contract');
 
 const AGENT_TASK_PLAN_SCHEMA = GENERIC_AGENT_TASK_PLAN_SCHEMA;
 const AGENT_TASK_REQUEST_SCHEMA = GENERIC_AGENT_TASK_REQUEST_SCHEMA;

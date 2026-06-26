@@ -21,7 +21,7 @@ const {
   agentTaskEvidenceRefFromRef,
   agentTaskProviderContractFields,
   providerDefaultsContract,
-} = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
+} = require('../../../agent-task-contracts/agent-task-provider-contract');
 const {
   normalizeAgentTaskOutcome,
   providerFailureClassification,

@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const canonicalProviderContractPath = path.join(rootDir, 'agent-task-contracts', 'agent-task-provider-contract.js');
+const canonicalRunnerContractPath = path.join(rootDir, 'agent-task-contracts', 'agent-task-runner-contract.js');
 const {
 	AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA,
 	AGENT_TASK_ARTIFACT_FIELDS,
@@ -24,13 +26,28 @@ const {
 	expandAgentTaskToolPresets,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
-} = require(path.join(rootDir, 'agent-runtimes', 'lib', 'agent-task-provider-contract.js'));
+} = require(canonicalProviderContractPath);
 const {
 	AGENT_TASK_RUNNER_SPEC_SCHEMA,
 	agentTaskRequestFromRunnerSpec,
 	agentTaskRunnerSpec,
 	validateAgentTaskRunnerSpec,
-} = require(path.join(rootDir, 'agent-runtimes', 'lib', 'agent-task-runner-contract.js'));
+} = require(canonicalRunnerContractPath);
+
+for (const [shimPath, canonicalPath] of [
+	['agent-runtimes/lib/agent-task-provider-contract.js', canonicalProviderContractPath],
+	['runtime-agent-ci/lib/agent-task-provider-contract.js', canonicalProviderContractPath],
+	['agent-runtimes/lib/agent-task-runner-contract.js', canonicalRunnerContractPath],
+	['runtime-agent-ci/lib/agent-task-runner-contract.js', canonicalRunnerContractPath],
+]) {
+	const shimFullPath = path.join(rootDir, shimPath);
+	assert.equal(require(shimFullPath), require(canonicalPath), `${shimPath} must re-export the canonical agent-task-contracts module`);
+	assert.match(
+		fs.readFileSync(shimFullPath, 'utf8'),
+		/require\('\.\.\/\.\.\/agent-task-contracts\/agent-task-(?:provider|runner)-contract'\)/,
+		`${shimPath} must stay a compatibility re-export of agent-task-contracts`,
+	);
+}
 
 assert.equal(AGENT_TASK_ARTIFACT_SCHEMA, 'homeboy/agent-task-artifact/v1');
 assert.equal(AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA, 'homeboy/agent-task-artifact-declaration/v1');

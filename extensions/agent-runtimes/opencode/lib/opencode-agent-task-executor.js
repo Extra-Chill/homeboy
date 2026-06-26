@@ -14,7 +14,7 @@ const {
 	agentTaskProviderContractFields,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
-} = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
+} = require('../../../agent-task-contracts/agent-task-provider-contract');
 const {
 	normalizeAgentTaskOutcome,
 } = require('../../../runtime-agent-ci/lib/agent-task-outcome-normalizer');

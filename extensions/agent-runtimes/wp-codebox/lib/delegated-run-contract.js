@@ -1,6 +1,6 @@
 'use strict';
 
-const { AGENT_TASK_REQUEST_SCHEMA } = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
+const { AGENT_TASK_REQUEST_SCHEMA } = require('../../../agent-task-contracts/agent-task-provider-contract');
 
 const DELEGATED_RUN_REQUEST_SCHEMA = 'homeboy/delegated-run-request/v1';
 const DELEGATED_RUN_RESULT_SCHEMA = 'homeboy/delegated-run-result/v1';
