@@ -163,6 +163,10 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     })?;
     let matrix_summary =
         homeboy::core::artifacts::summarize_matrix_artifacts(run_id, &artifacts, &findings);
+    let fuzz_result_envelopes = artifacts
+        .iter()
+        .filter_map(homeboy::core::fuzz::inspect_fuzz_result_envelope_artifact)
+        .collect();
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
@@ -170,6 +174,7 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
             artifacts,
             preview_entrypoints,
             matrix_summary,
+            fuzz_result_envelopes,
         }),
         0,
     ))
