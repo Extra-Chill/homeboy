@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
 use homeboy::core::runners::{self as runner, RunnerExecOutput, RunnerKind};
 use homeboy::core::stream_capture::StreamCaptureMetadata;
+use homeboy::core::{server, Error};
 
 use super::super::CmdResult;
 use super::types::RUNNER_EXEC_SCRIPT_ENV;
@@ -86,8 +87,8 @@ pub(super) fn exec(
         },
     )?;
     if let Some(run_id) = validated_run_id.as_deref() {
-        promote_runner_exec_artifacts(run_id, &output.remote_cwd, &artifact_outputs)?;
-        promote_runner_exec_summaries(run_id, &output.remote_cwd, &summary_outputs)?;
+        promote_runner_exec_artifacts(run_id, &output, &artifact_outputs)?;
+        promote_runner_exec_summaries(run_id, &output, &summary_outputs)?;
     }
     Ok((output, exit_code))
 }
@@ -241,12 +242,12 @@ pub(super) fn prepare_runner_exec_env(
 
 pub(super) fn promote_runner_exec_artifacts(
     run_id: &str,
-    remote_cwd: &str,
+    output: &RunnerExecOutput,
     artifact_outputs: &[String],
 ) -> homeboy::core::Result<Vec<ArtifactRecord>> {
     promote_runner_exec_outputs(
         run_id,
-        remote_cwd,
+        output,
         artifact_outputs,
         RunnerExecEvidenceRole::Artifact,
     )
@@ -254,12 +255,12 @@ pub(super) fn promote_runner_exec_artifacts(
 
 pub(super) fn promote_runner_exec_summaries(
     run_id: &str,
-    remote_cwd: &str,
+    output: &RunnerExecOutput,
     summary_outputs: &[String],
 ) -> homeboy::core::Result<Vec<ArtifactRecord>> {
     promote_runner_exec_outputs(
         run_id,
-        remote_cwd,
+        output,
         summary_outputs,
         RunnerExecEvidenceRole::Summary,
     )
@@ -289,7 +290,7 @@ impl RunnerExecEvidenceRole {
 
 fn promote_runner_exec_outputs(
     run_id: &str,
-    remote_cwd: &str,
+    output: &RunnerExecOutput,
     output_paths: &[String],
     role: RunnerExecEvidenceRole,
 ) -> homeboy::core::Result<Vec<ArtifactRecord>> {
@@ -298,23 +299,156 @@ fn promote_runner_exec_outputs(
     }
 
     let store = ObservationStore::open_initialized()?;
+    let runner = match output.mode {
+        runner::RunnerExecMode::Local => None,
+        runner::RunnerExecMode::Daemon
+        | runner::RunnerExecMode::ReverseBroker
+        | runner::RunnerExecMode::DiagnosticSsh => Some(runner::load(&output.runner_id)?),
+    };
     output_paths
         .iter()
         .map(|declared| {
-            let path = resolve_runner_exec_artifact_path(remote_cwd, declared);
+            let runner_path = resolve_runner_exec_artifact_path(&output.remote_cwd, declared);
             let kind = role.kind(declared);
-            let metadata = serde_json::json!({
+            let mut metadata = serde_json::json!({
                 "declared_path": declared,
                 "evidence_role": role.as_str(),
                 "promoted_by": "runner.exec",
             });
-            if path.is_dir() {
-                store.record_directory_artifact_with_metadata(run_id, &kind, &path, metadata)
+            let record_path = if let Some(runner) = runner.as_ref() {
+                metadata["source"] = serde_json::json!("runner_path_attach");
+                metadata["runner_id"] = serde_json::json!(runner.id.clone());
+                metadata["runner_path"] = serde_json::json!(runner_path.display().to_string());
+                copy_runner_exec_artifact_source(runner, &runner_path)?
             } else {
-                store.record_artifact_with_metadata(run_id, &kind, &path, metadata)
+                runner_path.clone()
+            };
+            if record_path.is_dir() {
+                store.record_directory_artifact_with_metadata(run_id, &kind, &record_path, metadata)
+            } else {
+                store.record_artifact_with_metadata(run_id, &kind, &record_path, metadata)
             }
         })
         .collect()
+}
+
+fn copy_runner_exec_artifact_source(
+    runner: &runner::Runner,
+    path: &Path,
+) -> homeboy::core::Result<PathBuf> {
+    let path_string = path.display().to_string();
+    match runner.kind {
+        RunnerKind::Local => Ok(path.to_path_buf()),
+        RunnerKind::Ssh => {
+            validate_runner_exec_artifact_path(runner, path)?;
+            let server_id = runner.server_id.as_deref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "runner",
+                    "SSH runner is missing server_id",
+                    Some(runner.id.clone()),
+                    None,
+                )
+            })?;
+            let temp_path = runner_exec_attach_download_path(&runner.id, path)?;
+            if let Some(parent) = temp_path.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    Error::internal_io(
+                        err.to_string(),
+                        Some(format!("create {}", parent.display())),
+                    )
+                })?;
+            }
+            let server = server::load(server_id)?;
+            let client = server::SshClient::from_server(&server, server_id)?;
+            let output = client.download_file(&path_string, &temp_path.display().to_string());
+            if !output.success {
+                return Err(Error::validation_invalid_argument(
+                    "path",
+                    format!(
+                        "failed to download runner exec artifact: {}",
+                        output.stderr.trim()
+                    ),
+                    Some(path_string),
+                    None,
+                ));
+            }
+            Ok(temp_path)
+        }
+    }
+}
+
+fn validate_runner_exec_artifact_path(
+    runner: &runner::Runner,
+    path: &Path,
+) -> homeboy::core::Result<()> {
+    if !path.is_absolute() {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "runner exec artifact path must resolve to an absolute runner-side path",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "runner exec artifact path must not contain parent directory components",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+
+    let roots = allowed_runner_exec_artifact_roots(runner);
+    if roots.iter().any(|root| path_is_within_root(path, root)) {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "path",
+        "runner exec artifact path must be under an allowed runner workspace/output root",
+        Some(path.display().to_string()),
+        Some(vec![format!(
+            "Allowed roots: {}",
+            roots
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )]),
+    ))
+}
+
+fn allowed_runner_exec_artifact_roots(runner: &runner::Runner) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    roots.extend(runner.workspace_root.as_deref().map(PathBuf::from));
+    roots.extend(runner.policy.workspace_roots.iter().map(PathBuf::from));
+    roots.extend(runner.env.get("HOMEBOY_ARTIFACT_ROOT").map(PathBuf::from));
+    roots.retain(|root| root.is_absolute());
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn path_is_within_root(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
+fn runner_exec_attach_download_path(
+    runner_id: &str,
+    path: &Path,
+) -> homeboy::core::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("artifact");
+    Ok(homeboy::core::artifact_root()?
+        .join("runner-exec-attach")
+        .join(runner_id)
+        .join(format!("{}-{file_name}", uuid::Uuid::new_v4())))
 }
 
 fn resolve_runner_exec_artifact_path(remote_cwd: &str, declared: &str) -> PathBuf {
