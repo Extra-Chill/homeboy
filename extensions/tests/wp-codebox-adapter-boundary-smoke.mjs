@@ -24,6 +24,7 @@ const stableConsumerExports = [
   './wp-codebox-adapter-contract',
   './wp-codebox-adapter-descriptor',
   './wp-codebox-runtime-contract-source',
+  './wp-codebox-runtime-readiness',
 ];
 const forbidden = /datamachine|data machine|wp-site-generator|wpsg|site generator/i;
 for (const exportName of stableConsumerExports) {

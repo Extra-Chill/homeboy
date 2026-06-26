@@ -27,6 +27,9 @@ const {
   providerSecretEnv,
 } = require('../../lib/provider-preflight-manifest');
 const {
+  wpCodeboxRuntimeReadinessDiagnostics,
+} = require('../../lib/wp-codebox-runtime-readiness');
+const {
   loadWpCodeboxCore,
 } = requireWpCodeboxCoreLoader();
 
@@ -551,6 +554,25 @@ function runtimeOverlayConfigFailurePayload(error) {
   };
 }
 
+function runtimeReadinessFailurePayload(taskInput) {
+  const diagnostics = wpCodeboxRuntimeReadinessDiagnostics(taskInput);
+  if (diagnostics.length === 0) {
+    return null;
+  }
+  return {
+    success: false,
+    status: 'failed',
+    failure_classification: 'provider',
+    summary: diagnostics[0].message || 'WP Codebox runtime readiness preflight failed.',
+    diagnostics,
+    metadata: {
+      phase: 'codebox.preflight',
+      owner_surface: 'wp-codebox-runtime-integration',
+      runtime_readiness_failed: true,
+    },
+  };
+}
+
 async function runTaskRunner(request) {
   const coreNormalizers = await loadCodeboxCoreNormalizers();
   const runner = argValue('--task-runner') || DEFAULT_TASK_RUNNER;
@@ -564,6 +586,10 @@ async function runTaskRunner(request) {
       return agentTaskOutcomeFromCodeboxResult(request, validationPayload, { exitStatus: 1, ...coreNormalizers });
     }
     throw error;
+  }
+  const runtimeReadinessPayload = runtimeReadinessFailurePayload(taskInput);
+  if (runtimeReadinessPayload) {
+    return agentTaskOutcomeFromCodeboxResult(request, runtimeReadinessPayload, { exitStatus: 1, ...coreNormalizers });
   }
   const missingModelPayload = missingModelPreflightPayload(taskInput);
   if (missingModelPayload) {
