@@ -571,6 +571,7 @@ where
                 action_id: None,
                 status: None,
                 failure_summary: None,
+                runtime_evidence: None,
                 execution: None,
                 controller: record,
             },
