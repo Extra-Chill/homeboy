@@ -184,12 +184,14 @@ const preflightPassed = preflightWpCodeboxFuzzCapabilityContract({
 });
 assert.equal(preflightPassed.ok, true);
 
-const tempWorkloadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-run-smoke-'));
+const tempPackageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-run-smoke-'));
+const tempWorkloadDir = path.join(tempPackageRoot, 'bench');
+fs.mkdirSync(tempWorkloadDir, { recursive: true });
 const jsonWorkloadPath = path.join(tempWorkloadDir, 'json-workload-smoke.workload.json');
 fs.writeFileSync(jsonWorkloadPath, `${JSON.stringify({
 	id: 'json-workload-smoke',
-	run: [{ type: 'php', code: 'return array("ok" => true);' }],
-	metadata: { fixture: 'json-workload-smoke' },
+	run: [{ command: 'wp-codebox/run-fuzz-suite', args: ['suite=${package.root}/manifests/codebox-fuzz-suite-smoke.json'] }],
+	metadata: { fixture: 'json-workload-smoke', package_root: '${package.root}' },
 })}\n`, 'utf8');
 
 const jsonWorkloadManifest = {
@@ -232,9 +234,9 @@ assert.deepEqual(jsonWorkloadInput.cases[0].input, {
 	secret_env: [],
 	staged_files: [],
 	before: [],
-	steps: [{ type: 'php', code: 'return array("ok" => true);' }],
+	steps: [{ command: 'wp-codebox/run-fuzz-suite', args: [`suite=${tempPackageRoot}/manifests/codebox-fuzz-suite-smoke.json`] }],
 	after: [],
-	metadata: { fixture: 'json-workload-smoke', source_path: jsonWorkloadPath, source_entry: 'wp-codebox/run-fuzz-suite' },
+	metadata: { fixture: 'json-workload-smoke', package_root: tempPackageRoot, source_path: jsonWorkloadPath, source_entry: 'wp-codebox/run-fuzz-suite' },
 });
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.plugin-state', args: ['plugin-state-json={"activate":[{"plugin":"sample-plugin/sample-plugin.php"}],"deactivate":[],"report":true}'] }]);
 assert.equal(JSON.stringify(jsonWorkloadInput).includes('wordpress.ensure-plugin-active'), false);
