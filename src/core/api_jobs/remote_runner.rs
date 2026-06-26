@@ -147,6 +147,7 @@ impl JobStore {
             &request.command,
             None,
             &request.secret_env_names,
+            &request.env,
         );
         crate::core::runner::workload::validate_runner_workload_dispatch(
             request.runner_workload.as_ref(),
