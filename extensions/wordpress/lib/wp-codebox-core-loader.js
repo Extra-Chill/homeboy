@@ -8,13 +8,21 @@ const { existsSync, readdirSync } = require('node:fs');
 const { homedir } = require('node:os');
 const { pathToFileURL } = require('node:url');
 
+/**
+ * Internal dependencies
+ */
+const {
+	resolveWpCodeboxIdentity,
+} = require('./wp-codebox-resolver');
+
 const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
 const RUNTIME_CORE_ENTRY = 'packages/runtime-core/dist/index.js';
 const DEFAULT_CORE_PACKAGE_CANDIDATES = [DEFAULT_CODEBOX_CORE_MODULE];
 const DEFAULT_RUNTIME_CORE_ENTRIES = [RUNTIME_CORE_ENTRY];
 
 function coreModuleSpecifier(options = {}) {
-	const explicit = options.wpCodeboxCoreModule || options.coreModule || process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE || process.env.WP_CODEBOX_CORE_MODULE;
+	const identity = resolveWpCodeboxIdentity(options);
+	const explicit = identity.coreModulePath || options.wpCodeboxCoreModule || options.coreModule || process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE || process.env.WP_CODEBOX_CORE_MODULE;
 	if (!explicit) {
 		return DEFAULT_CODEBOX_CORE_MODULE;
 	}
@@ -42,6 +50,12 @@ function coreModuleCandidates(options = {}) {
 	const explicit = options.wpCodeboxCoreModule || options.coreModule || process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE || process.env.WP_CODEBOX_CORE_MODULE;
 	if (explicit) {
 		return [normalizeCoreModuleSpecifier(explicit)];
+	}
+
+	const usesCustomCandidateSearch = options.packageCandidates || options.runtimeCoreEntries || options.globalNodeModuleRoots;
+	const identity = usesCustomCandidateSearch ? null : resolveWpCodeboxIdentity(options);
+	if (identity?.coreModulePath && identity.coreModulePath !== DEFAULT_CODEBOX_CORE_MODULE) {
+		return [normalizeCoreModuleSpecifier(identity.coreModulePath)];
 	}
 
 	const packageCandidates = options.packageCandidates || DEFAULT_CORE_PACKAGE_CANDIDATES;

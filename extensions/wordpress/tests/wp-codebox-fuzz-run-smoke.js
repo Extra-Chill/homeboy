@@ -200,6 +200,26 @@ const preflightPassed = preflightWpCodeboxFuzzCapabilityContract({
 });
 assert.equal(preflightPassed.ok, true);
 
+const mismatchRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-mismatch-'));
+const mismatchCliRoot = path.join(mismatchRoot, 'wp-codebox@cli');
+const mismatchCoreRoot = path.join(mismatchRoot, 'wp-codebox@core');
+fs.mkdirSync(path.join(mismatchCliRoot, 'packages', 'cli', 'dist'), { recursive: true });
+fs.mkdirSync(path.join(mismatchCliRoot, 'packages', 'runtime-playground', 'dist'), { recursive: true });
+fs.mkdirSync(path.join(mismatchCoreRoot, 'packages', 'runtime-core', 'dist'), { recursive: true });
+fs.writeFileSync(path.join(mismatchCliRoot, 'packages', 'cli', 'dist', 'index.js'), '#!/usr/bin/env node\n');
+fs.writeFileSync(path.join(mismatchCliRoot, 'packages', 'runtime-playground', 'dist', 'index.js'), 'export const runtime = true;\n');
+fs.writeFileSync(path.join(mismatchCoreRoot, 'packages', 'runtime-core', 'dist', 'index.js'), 'export const core = true;\n');
+const preflightMismatch = preflightWpCodeboxFuzzCapabilityContract({
+	request: taskRequest,
+	runtimeContractManifest: manifest,
+	publicCliCapabilities: { commands: { 'run-fuzz-suite': true, 'run-wordpress-workload': true } },
+	env: { HOMEBOY_WP_CODEBOX_BIN: path.join(mismatchCliRoot, 'packages', 'cli', 'dist', 'index.js') },
+	coreModule: path.join(mismatchCoreRoot, 'packages', 'runtime-core', 'dist', 'index.js'),
+});
+assert.equal(preflightMismatch.ok, false);
+assert.equal(preflightMismatch.diagnostics[0].code, 'wp_codebox_identity_mismatch');
+fs.rmSync(mismatchRoot, { recursive: true, force: true });
+
 const tempPackageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-run-smoke-'));
 const tempWorkloadDir = path.join(tempPackageRoot, 'bench');
 fs.mkdirSync(tempWorkloadDir, { recursive: true });

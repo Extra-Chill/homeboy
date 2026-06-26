@@ -14,38 +14,17 @@ const DEFAULT_MAX_BUFFER = 1024 * 1024 * 50;
 const DEFAULT_EVENT_SOURCE = 'wp_codebox';
 const DEFAULT_EVENT_PREFIX = 'recipe';
 
-function homeboySettings(env) {
-  if (!env.HOMEBOY_SETTINGS_JSON) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(env.HOMEBOY_SETTINGS_JSON);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
+/**
+ * Internal dependencies
+ */
+const {
+  homeboySettings,
+  resolveWpCodeboxIdentity,
+  wpCodeboxCommand,
+} = require('./wp-codebox-resolver');
 
 function wpCodeboxBin(options = {}) {
-  const env = options.env || process.env;
-  const settings = homeboySettings(env);
-  return options.wpCodeboxBin
-    || options.bin
-    || settings.wp_codebox_bin
-    || settings.wpCodeboxBin
-    || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
-    || env.HOMEBOY_WP_CODEBOX_BIN
-    || env.WP_CODEBOX_BIN
-    || 'wp-codebox';
-}
-
-function wpCodeboxCommand(bin = wpCodeboxBin()) {
-  if (/\.(?:js|cjs|mjs)$/.test(bin)) {
-    return { command: process.execPath, args: [bin] };
-  }
-
-  return { command: bin, args: [] };
+  return resolveWpCodeboxIdentity(options).bin;
 }
 
 function recipeEventName(name, options = {}) {
@@ -138,8 +117,8 @@ async function runWpCodeboxRecipe({
   }
 
   const eventOptions = { eventSource, eventPrefix };
-  const resolvedBin = wpCodeboxBin({ wpCodeboxBin: explicitWpCodeboxBin, bin, env });
-  const { command, args } = wpCodeboxCommand(resolvedBin);
+  const identity = resolveWpCodeboxIdentity({ wpCodeboxBin: explicitWpCodeboxBin, bin, env });
+  const { command, args } = identity.invocation;
   const commandArgs = [
     ...args,
     WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
