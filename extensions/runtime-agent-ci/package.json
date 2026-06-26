@@ -19,6 +19,7 @@
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js",
     "./agent-task-to-review-runner": "./lib/agent-task-to-review-runner.js",
     "./runtime-workflow-inputs": "./lib/runtime-workflow-inputs.cjs",
+    "./runtime-status": "./lib/runtime-status.cjs",
     "./artifact-paths": "./lib/artifact-paths.cjs",
     "./loop-lifecycle": "./lib/loop-lifecycle.cjs",
     "./workspace-publication-lifecycle": "./lib/workspace-publication-lifecycle.cjs"
@@ -27,7 +28,8 @@
     "homeboy-controller-loop-proof-validate": "./scripts/homeboy-controller-loop-proof-validate.cjs",
     "homeboy-generic-fanout-reconcile": "./scripts/homeboy-generic-fanout-reconcile.cjs",
     "homeboy-render-runtime-workflow-inputs": "./scripts/render-runtime-workflow-inputs.cjs",
-    "homeboy-run-headless-production-loop": "./scripts/run-headless-loop.cjs"
+    "homeboy-run-headless-production-loop": "./scripts/run-headless-loop.cjs",
+    "homeboy-run-agent-task-to-review": "./scripts/run-agent-task-to-review.cjs"
   },
   "scripts": {
     "test:controller-loop-proof-validator": "node ../tests/controller-loop-proof-validator.test.mjs",

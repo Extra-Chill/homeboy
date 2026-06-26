@@ -13,7 +13,7 @@ const {
   normalizeLoopPolicy: normalizeSharedLoopPolicy,
 } = require('./loop-policy');
 const { executeFanoutReconcileRun } = require('./fanout-reconcile-runner');
-const { resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
+const { resolveRuntimeProvider, runtimeIdFromOptions } = require('./runtime-provider-resolver.cjs');
 const { runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
 
 async function runHeadlessDeterministicLoop(options = {}) {
@@ -195,7 +195,7 @@ function writeHeadlessDeterministicLoopArtifacts(options = {}) {
   writeGenericAgentLoopArtifacts({
     outcome: options.result?.outcome,
     results: options.result?.results,
-    artifact_paths: artifactPaths,
+    artifact_paths: { ...artifactPaths, status: '' },
   });
 }
 
@@ -561,7 +561,7 @@ function resolveLoopRuntime(spec, options = {}) {
       workspace: spec.component_path || options.workspace || process.cwd(),
     });
   }
-  return resolveRuntimeProvider(spec.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND, {
+  return resolveRuntimeProvider(runtimeIdFromOptions({ runtime_id: spec.runtime_id || spec.runtime }, process.env), {
     ...options,
     workspace: spec.component_path || options.workspace || process.cwd(),
   });

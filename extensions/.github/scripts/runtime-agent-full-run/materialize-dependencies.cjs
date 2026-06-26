@@ -4,7 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { capture, normalizeProviderPlugin, parseJsonInput, requireRepo, run, splitCsv } = require('./lib/common.cjs');
-const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
+const { resolveRuntimeProvider, runtimeIdFromOptions } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 function main() {
   const printPlan = process.argv.includes('--print-plan');
@@ -24,7 +24,7 @@ function main() {
 }
 
 function dependencyEntries(env) {
-  const runtimeId = env.RUNTIME || env.RUNTIME_PROVIDER || env.BACKEND || DEFAULT_RUNTIME_ID;
+  const runtimeId = runtimeIdFromOptions({}, env);
   const runtime = resolveRuntimeProvider(runtimeId, { env });
   const entries = runtime.checkout.repo ? [{ repo: runtime.checkout.repo, ref: runtime.checkout.ref, target: runtime.checkout.target }] : [];
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || '', true);
