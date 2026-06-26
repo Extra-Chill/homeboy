@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.17.4] - 2026-06-26
+
+### Changed
+- Build PHP fuzz workloads as workload-run input
+
 ## [3.17.3] - 2026-06-26
 
 ### Changed
