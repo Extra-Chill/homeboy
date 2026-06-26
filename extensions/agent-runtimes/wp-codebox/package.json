@@ -15,7 +15,8 @@
     "./provider-outcome-normalizer": "./lib/provider-outcome-normalizer.js",
     "./wp-codebox-adapter-descriptor": "./lib/wp-codebox-adapter-descriptor.js",
     "./wp-codebox-adapter-contract": "./lib/wp-codebox-adapter-contract.js",
-    "./wp-codebox-runtime-contract-source": "./lib/wp-codebox-runtime-contract-source.js"
+    "./wp-codebox-runtime-contract-source": "./lib/wp-codebox-runtime-contract-source.js",
+    "./wp-codebox-runtime-readiness": "./lib/wp-codebox-runtime-readiness.js"
   },
   "bin": {
     "homeboy-codebox-agent-task-executor": "./scripts/agent/homeboy-codebox-agent-task-executor.cjs"
