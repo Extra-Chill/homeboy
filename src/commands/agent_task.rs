@@ -30,12 +30,13 @@ pub use args::{
     AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
     AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs,
-    AgentTaskFanoutCommand, AgentTaskFanoutInputArgs, AgentTaskFanoutPlanArgs,
-    AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
-    AgentTaskLoopArgs, AgentTaskLoopCommand, AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs,
-    AgentTaskLoopStatusArgs, CancelArgs, CompileLoopArgs, ContractArgs, ContractFormat,
-    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, ProvidersArgs, RetryArgs,
-    ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs,
+    AgentTaskFanoutPlanArgs, AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
+    AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
+    AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
+    CompileLoopArgs, ContractArgs, ContractFormat, FinalizePrArgs, GateFeedbackArgs, LatestArgs,
+    ListArgs, PromoteArgs, ProvidersArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs,
+    SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
