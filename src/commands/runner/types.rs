@@ -49,9 +49,9 @@ impl Default for RunnerExtra {
 
 #[derive(Debug, Serialize)]
 pub struct LabFollowup {
-    pub label: &'static str,
+    pub label: String,
     pub command: String,
-    pub purpose: &'static str,
+    pub purpose: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,7 +60,8 @@ pub struct LabSelectedRunnerOutput {
     pub kind: String,
     pub configured_executable: String,
     pub runner_homeboy: LabRunnerHomeboyOutput,
-    pub wp_codebox_runtime: WpCodeboxRuntimeOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wp_codebox_runtime: Option<WpCodeboxRuntimeOutput>,
     pub daemon_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<String>,
@@ -98,25 +99,25 @@ pub struct RunnerArtifactFeatureDiagnostics {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerToolDiagnostics {
-    pub tool: &'static str,
+    pub tool: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configured_binary: Option<String>,
-    pub configured_binary_source: &'static str,
+    pub configured_binary_source: String,
     pub managed_cache_source: String,
     pub managed_cache_binary: String,
-    pub effective_binary_rule: &'static str,
+    pub effective_binary_rule: String,
     pub diagnostic_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WpCodeboxRuntimeOutput {
-    pub tool: &'static str,
+    pub tool: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configured_binary: Option<String>,
-    pub configured_binary_source: &'static str,
+    pub configured_binary_source: String,
     pub managed_cache_source: String,
     pub managed_cache_binary: String,
-    pub effective_binary_rule: &'static str,
+    pub effective_binary_rule: String,
     pub playground_package: WpCodeboxPackageRuntimeOutput,
     pub core_package: WpCodeboxPackageRuntimeOutput,
     pub source_git_sha: WpCodeboxProbeValue,
@@ -128,7 +129,7 @@ pub struct WpCodeboxRuntimeOutput {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WpCodeboxPackageRuntimeOutput {
-    pub package: &'static str,
+    pub package: String,
     pub expected_path: String,
     pub resolution: WpCodeboxProbeValue,
 }
@@ -136,13 +137,13 @@ pub struct WpCodeboxPackageRuntimeOutput {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WpCodeboxProbeValue {
     pub value: Option<String>,
-    pub source: &'static str,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WpCodeboxRuntimeDiagnostic {
-    pub id: &'static str,
-    pub severity: &'static str,
+    pub id: String,
+    pub severity: String,
     pub message: String,
     pub remediation: String,
 }

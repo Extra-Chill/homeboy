@@ -2,6 +2,8 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use homeboy::core::engine::shell;
 use homeboy::core::observation::runs_service::{
@@ -13,7 +15,9 @@ use homeboy::core::runners::{self as runner, Runner, RunnerKind};
 use homeboy::core::{server, Error};
 
 use super::types::{
-    RunsArtifactAttachArgs, RunsArtifactAttachOutput, RunsArtifactCleanupDownloadsArgs,
+    RunsArtifactAttachArgs, RunsArtifactAttachOutput, RunsArtifactCaptureArgs,
+    RunsArtifactCaptureBrowser, RunsArtifactCaptureOutput, RunsArtifactCapturePage,
+    RunsArtifactCaptureViewport, RunsArtifactCleanupDownloadsArgs,
     RunsArtifactCleanupDownloadsOutput, RunsArtifactCleanupPersistedArgs,
     RunsArtifactCleanupPersistedOutput, RunsArtifactGetOutput, RunsArtifactPreviewArgs,
     RunsArtifactPreviewOutput, RunsOutput,
@@ -162,6 +166,309 @@ pub fn preview(args: RunsArtifactPreviewArgs) -> CmdResult<RunsOutput> {
         }),
         0,
     ))
+}
+
+pub fn capture(args: RunsArtifactCaptureArgs) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
+    if artifact.artifact_type != "directory" {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "artifact {} is {}, not a capturable directory",
+                artifact.id, artifact.artifact_type
+            ),
+            Some(artifact.id),
+            Some(vec![
+                "Run `homeboy runs artifacts <run-id>` to find directory artifacts.".to_string(),
+            ]),
+        ));
+    }
+
+    let artifact_path = PathBuf::from(&artifact.path);
+    if !artifact_path.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "artifact {} directory is missing or unreadable at {}",
+                artifact.id,
+                artifact_path.display()
+            ),
+            Some(artifact.id),
+            None,
+        ));
+    }
+
+    fs::create_dir_all(&args.output_dir).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "create artifact capture output directory {}",
+                args.output_dir.display()
+            )),
+        )
+    })?;
+
+    let port = args.port.map(Ok).unwrap_or_else(available_port)?;
+    let base_url = format!("http://127.0.0.1:{port}/");
+    let mut child = start_static_artifact_server(&artifact_path, port)?;
+    let _ = wait_for_static_server(&base_url);
+    let browser = detect_playwright();
+    let viewport = RunsArtifactCaptureViewport {
+        width: args.viewport_width,
+        height: args.viewport_height,
+    };
+    let mut pages = Vec::new();
+
+    for entrypoint in &args.entrypoints {
+        let page_start = Instant::now();
+        let screenshot_path = args
+            .output_dir
+            .join(format!("{}.png", screenshot_basename(entrypoint)));
+        let page_url_result = entrypoint_url(&base_url, entrypoint);
+        let local_path_result = resolve_artifact_entrypoint(&artifact_path, entrypoint);
+        let mut status = "captured".to_string();
+        let mut error = None;
+
+        let page_url = match page_url_result {
+            Ok(page_url) => page_url,
+            Err(err) => {
+                status = "failed".to_string();
+                error = Some(err.to_string());
+                base_url.clone()
+            }
+        };
+
+        if let Err(err) = local_path_result {
+            status = "failed".to_string();
+            error = Some(err.to_string());
+        } else if error.is_none() {
+            if let Some(browser_error) = browser.error.as_ref() {
+                status = "failed".to_string();
+                error = Some(browser_error.clone());
+            } else if let Err(err) = capture_screenshot(&page_url, &screenshot_path, &viewport) {
+                status = "failed".to_string();
+                error = Some(err.to_string());
+            }
+        }
+
+        pages.push(RunsArtifactCapturePage {
+            entrypoint: entrypoint.clone(),
+            page_url,
+            screenshot_path: screenshot_path.display().to_string(),
+            viewport: viewport.clone(),
+            status,
+            timing_ms: page_start.elapsed().as_millis(),
+            error,
+        });
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let manifest_path = args.output_dir.join("capture-manifest.json");
+    let output = RunsArtifactCaptureOutput {
+        command: "runs.artifact.capture",
+        run_id: args.run_id,
+        artifact_id: artifact.id,
+        artifact_path: artifact_path.display().to_string(),
+        output_dir: args.output_dir.display().to_string(),
+        manifest_path: manifest_path.display().to_string(),
+        base_url,
+        viewport,
+        browser,
+        pages,
+    };
+    let manifest = serde_json::to_vec_pretty(&output).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("serialize capture manifest".to_string()),
+        )
+    })?;
+    fs::write(&manifest_path, manifest).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "write capture manifest {}",
+                manifest_path.display()
+            )),
+        )
+    })?;
+    let exit_code = if output.pages.iter().all(|page| page.status == "captured") {
+        0
+    } else {
+        1
+    };
+
+    Ok((RunsOutput::ArtifactCapture(output), exit_code))
+}
+
+fn start_static_artifact_server(
+    artifact_path: &Path,
+    port: u16,
+) -> homeboy::core::Result<std::process::Child> {
+    let port_arg = port.to_string();
+    let directory_arg = artifact_path.display().to_string();
+    Command::new("python3")
+        .args([
+            "-m",
+            "http.server",
+            &port_arg,
+            "--bind",
+            "127.0.0.1",
+            "--directory",
+            &directory_arg,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("start python3 static artifact capture server".to_string()),
+            )
+        })
+}
+
+fn wait_for_static_server(base_url: &str) -> bool {
+    for _ in 0..20 {
+        if reqwest::blocking::get(base_url)
+            .map(|response| response.status().is_success())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+fn detect_playwright() -> RunsArtifactCaptureBrowser {
+    match Command::new("playwright")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => RunsArtifactCaptureBrowser {
+            command: "playwright".to_string(),
+            available: true,
+            error: None,
+        },
+        Ok(status) => RunsArtifactCaptureBrowser {
+            command: "playwright".to_string(),
+            available: false,
+            error: Some(format!("playwright --version exited with status {status}")),
+        },
+        Err(err) => RunsArtifactCaptureBrowser {
+            command: "playwright".to_string(),
+            available: false,
+            error: Some(format!(
+                "playwright CLI is not available: {err}. Install Playwright and browser binaries to capture screenshots."
+            )),
+        },
+    }
+}
+
+fn capture_screenshot(
+    page_url: &str,
+    screenshot_path: &Path,
+    viewport: &RunsArtifactCaptureViewport,
+) -> homeboy::core::Result<()> {
+    let viewport_arg = format!("{},{}", viewport.width, viewport.height);
+    let output = Command::new("playwright")
+        .arg("screenshot")
+        .arg("--browser=chromium")
+        .arg("--viewport-size")
+        .arg(&viewport_arg)
+        .arg(page_url)
+        .arg(screenshot_path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("run playwright screenshot".to_string()),
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(Error::validation_invalid_argument(
+        "playwright",
+        format!(
+            "playwright screenshot failed with status {}{}",
+            output.status,
+            if stderr.is_empty() {
+                "".to_string()
+            } else {
+                format!(": {stderr}")
+            }
+        ),
+        Some(page_url.to_string()),
+        None,
+    ))
+}
+
+fn entrypoint_url(base_url: &str, entrypoint: &str) -> homeboy::core::Result<String> {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.join(entrypoint).ok())
+        .map(|url| url.to_string())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "entrypoint",
+                "entrypoint could not be resolved against the local artifact preview URL",
+                Some(entrypoint.to_string()),
+                None,
+            )
+        })
+}
+
+fn resolve_artifact_entrypoint(
+    artifact_path: &Path,
+    entrypoint: &str,
+) -> homeboy::core::Result<PathBuf> {
+    let entrypoint_path = Path::new(entrypoint);
+    if entrypoint_path.is_absolute()
+        || entrypoint_path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(Error::validation_invalid_argument(
+            "entrypoint",
+            "entrypoint must be a relative path inside the directory artifact",
+            Some(entrypoint.to_string()),
+            None,
+        ));
+    }
+    let resolved = artifact_path.join(entrypoint_path);
+    if !resolved.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "entrypoint",
+            format!("entrypoint file does not exist at {}", resolved.display()),
+            Some(entrypoint.to_string()),
+            None,
+        ));
+    }
+    Ok(resolved)
+}
+
+fn screenshot_basename(entrypoint: &str) -> String {
+    let mut basename = entrypoint
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if basename.is_empty() {
+        basename = "entrypoint".to_string();
+    }
+    basename
 }
 
 fn available_port() -> homeboy::core::Result<u16> {
@@ -518,7 +825,9 @@ pub fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdResult<Ru
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
@@ -825,6 +1134,90 @@ mod tests {
 
             assert!(err.to_string().contains("not a previewable directory"));
         });
+    }
+
+    #[test]
+    fn capture_records_manifest_with_fake_playwright() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let bin = home.path().join("bin");
+            fs::create_dir_all(&bin).expect("bin");
+            let fake_playwright = bin.join("playwright");
+            fs::write(
+                &fake_playwright,
+                b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nif [ \"$1\" = \"screenshot\" ]; then printf fake-screenshot > \"$6\"; exit 0; fi\nexit 2\n",
+            )
+            .expect("fake playwright");
+            let mut perms = fs::metadata(&fake_playwright)
+                .expect("metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_playwright, perms).expect("chmod");
+            let old_path = env::var("PATH").unwrap_or_default();
+            env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("runner-exec").build())
+                .expect("run");
+            let site = home.path().join("site");
+            fs::create_dir_all(site.join("fse-pilot-build-theme")).expect("site");
+            fs::write(
+                site.join("fse-pilot-build-theme/index.html"),
+                b"<html>Generated</html>",
+            )
+            .expect("html");
+            let artifact = store
+                .record_directory_artifact(&run.id, "generated_site", &site)
+                .expect("artifact");
+            let output_dir = home.path().join("captures");
+
+            let result = capture(RunsArtifactCaptureArgs {
+                run_id: run.id.clone(),
+                artifact_id: artifact.id.clone(),
+                entrypoints: vec!["fse-pilot-build-theme/index.html".to_string()],
+                output_dir: output_dir.clone(),
+                port: None,
+                viewport_width: 390,
+                viewport_height: 844,
+            })
+            .expect("capture");
+            env::set_var("PATH", old_path);
+            assert_eq!(result.1, 0);
+            let RunsOutput::ArtifactCapture(output) = result.0 else {
+                panic!("unexpected output");
+            };
+
+            assert_eq!(output.command, "runs.artifact.capture");
+            assert_eq!(output.run_id, run.id);
+            assert_eq!(output.artifact_id, artifact.id);
+            assert!(output.browser.available);
+            assert_eq!(output.pages.len(), 1);
+            assert_eq!(output.pages[0].status, "captured");
+            assert_eq!(output.pages[0].viewport.width, 390);
+            assert!(PathBuf::from(&output.pages[0].screenshot_path).exists());
+            assert!(PathBuf::from(&output.manifest_path).exists());
+            let manifest = fs::read_to_string(&output.manifest_path).expect("manifest");
+            assert!(manifest.contains("runs.artifact.capture"));
+            assert!(manifest.contains("fse-pilot-build-theme/index.html"));
+        });
+    }
+
+    #[test]
+    fn capture_entrypoint_helpers_are_path_safe_and_stable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(root.path().join("nested")).expect("nested");
+        fs::write(root.path().join("nested/index.html"), b"<html></html>").expect("html");
+
+        assert!(resolve_artifact_entrypoint(root.path(), "nested/index.html").is_ok());
+        assert!(resolve_artifact_entrypoint(root.path(), "../outside.html").is_err());
+        assert!(resolve_artifact_entrypoint(root.path(), "/tmp/outside.html").is_err());
+        assert_eq!(
+            screenshot_basename("fse-pilot-build-theme/index.html"),
+            "fse_pilot_build_theme_index_html"
+        );
     }
 
     #[test]

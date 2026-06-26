@@ -4,7 +4,7 @@ use homeboy::core::runners::{self as runner};
 use homeboy::core::server::RunnerSecretEnvRef;
 
 use super::super::CmdResult;
-use super::status::wp_codebox_tool_diagnostics;
+use super::status::declared_tool_diagnostics_for_legacy;
 use super::types::{
     RunnerEnvDiagnostics, RunnerEnvOutput, RunnerSecretEnvReferenceOutput, REDACTED_ENV_VALUE,
 };
@@ -19,10 +19,8 @@ pub(super) fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
         .map(|key| (key, REDACTED_ENV_VALUE.to_string()))
         .collect();
 
-    let wp_codebox = Some(wp_codebox_tool_diagnostics(
-        Some(runner_id),
-        &diagnostic_env,
-    ));
+    let wp_codebox =
+        declared_tool_diagnostics_for_legacy("wp_codebox", Some(runner_id), &diagnostic_env);
 
     let secret_env = runner
         .secret_env
