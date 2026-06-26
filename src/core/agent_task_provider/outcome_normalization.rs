@@ -6,62 +6,70 @@ pub(super) fn normalize_provider_outcome_roles(
 ) {
     normalize_provider_artifact_roles(&mut outcome.artifacts, &provider.role_aliases);
     normalize_provider_run_result_output(outcome, &provider.role_aliases);
-    let codebox_public_envelope_valid = normalize_codebox_public_result_envelope(outcome, provider);
+    let result_contract_valid = normalize_provider_result_contract(outcome, provider);
     normalize_provider_runtime_contract(outcome, provider);
-    if codebox_public_envelope_valid {
+    if result_contract_valid {
         surface_provider_run_result_diagnostics(outcome);
     }
 }
 
-const CODEBOX_PUBLIC_ARTIFACT_RESULT_ENVELOPE_SCHEMA: &str =
-    "wp-codebox/artifact-result-envelope/v1";
-
-fn normalize_codebox_public_result_envelope(
+fn normalize_provider_result_contract(
     outcome: &mut AgentTaskOutcome,
     provider: &AgentTaskExecutorProvider,
 ) -> bool {
-    if provider.backend != "codebox" {
+    let Some(contract) = provider.result_contract.typed_artifact_envelope.as_ref() else {
         return true;
-    }
+    };
 
-    let envelope = output_value(&outcome.outputs, "provider_run_result").cloned();
+    let envelope = output_value(&outcome.outputs, &contract.output).cloned();
     let Some(envelope) = envelope else {
-        fail_codebox_public_envelope_boundary(
+        fail_typed_artifact_envelope_boundary(
             outcome,
-            "codebox.public_result_envelope_missing",
-            "WP Codebox provider result did not include the public artifact result envelope.",
+            contract,
+            "public_result_envelope_missing",
+            format!(
+                "{} provider result did not include the declared artifact result envelope.",
+                typed_artifact_envelope_provider_label(provider, contract)
+            ),
             json!({
-                "expected_schema": CODEBOX_PUBLIC_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+                "expected_schema": contract.schema,
+                "output": contract.output,
                 "provider_backend": provider.backend,
             }),
         );
         return false;
     };
 
-    if envelope.get("schema").and_then(Value::as_str)
-        != Some(CODEBOX_PUBLIC_ARTIFACT_RESULT_ENVELOPE_SCHEMA)
-    {
-        fail_codebox_public_envelope_boundary(
+    if envelope.get("schema").and_then(Value::as_str) != Some(contract.schema.as_str()) {
+        fail_typed_artifact_envelope_boundary(
             outcome,
-            "codebox.public_result_envelope_missing",
-            "WP Codebox provider result used a non-public result shape; Homeboy only consumes the public artifact result envelope.",
+            contract,
+            "public_result_envelope_missing",
+            format!(
+                "{} provider result used a non-public result shape; Homeboy only consumes the declared artifact result envelope.",
+                typed_artifact_envelope_provider_label(provider, contract)
+            ),
             json!({
-                "expected_schema": CODEBOX_PUBLIC_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+                "expected_schema": contract.schema,
                 "actual_schema": envelope.get("schema").and_then(Value::as_str),
-                "private_shape_detected": codebox_private_result_shape_detected(&envelope),
+                "private_shape_detected": private_result_shape_detected(&envelope, contract),
             }),
         );
         return false;
     }
 
-    let typed_artifacts = codebox_public_typed_artifacts(&envelope);
-    if typed_artifacts.is_empty() {
-        fail_codebox_public_envelope_boundary(
+    let typed_artifacts = public_typed_artifacts(&envelope, &contract.schema);
+    if typed_artifacts.is_empty() && contract.require_typed_artifacts.unwrap_or(false) {
+        fail_typed_artifact_envelope_boundary(
             outcome,
-            "codebox.public_result_typed_artifacts_missing",
-            "WP Codebox public artifact result envelope did not include any typed artifacts.",
+            contract,
+            "public_result_typed_artifacts_missing",
+            format!(
+                "{} artifact result envelope did not include any typed artifacts.",
+                typed_artifact_envelope_provider_label(provider, contract)
+            ),
             json!({
-                "expected_schema": CODEBOX_PUBLIC_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+                "expected_schema": contract.schema,
                 "envelope_status": envelope.get("status").and_then(Value::as_str),
             }),
         );
@@ -82,31 +90,52 @@ fn normalize_codebox_public_result_envelope(
     true
 }
 
-fn fail_codebox_public_envelope_boundary(
+fn fail_typed_artifact_envelope_boundary(
     outcome: &mut AgentTaskOutcome,
-    class: &str,
-    message: &str,
+    contract: &AgentTaskProviderTypedArtifactEnvelopeContract,
+    class_suffix: &str,
+    message: String,
     data: Value,
 ) {
     outcome.status = AgentTaskOutcomeStatus::Failed;
     outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
     push_unique_diagnostic(
         &mut outcome.diagnostics,
-        class.to_string(),
-        message.to_string(),
+        format!(
+            "{}.{}",
+            contract
+                .diagnostic_class_prefix
+                .as_deref()
+                .unwrap_or("provider.result_contract"),
+            class_suffix
+        ),
+        message,
         data,
     );
 }
 
-fn codebox_private_result_shape_detected(value: &Value) -> bool {
-    value.get("agent_result").is_some()
-        || value
-            .get("metadata")
-            .and_then(|metadata| metadata.get("agent_runtime"))
-            .is_some()
+fn typed_artifact_envelope_provider_label(
+    provider: &AgentTaskExecutorProvider,
+    contract: &AgentTaskProviderTypedArtifactEnvelopeContract,
+) -> String {
+    contract
+        .provider_label
+        .clone()
+        .or_else(|| provider.label.clone())
+        .unwrap_or_else(|| provider.id.clone())
 }
 
-fn codebox_public_typed_artifacts(envelope: &Value) -> Vec<AgentTaskTypedArtifact> {
+fn private_result_shape_detected(
+    value: &Value,
+    contract: &AgentTaskProviderTypedArtifactEnvelopeContract,
+) -> bool {
+    contract
+        .private_shape_markers
+        .iter()
+        .any(|path| value_at_path(value, path).is_some())
+}
+
+fn public_typed_artifacts(envelope: &Value, envelope_schema: &str) -> Vec<AgentTaskTypedArtifact> {
     let Some(value) = envelope
         .get("typed_artifacts")
         .or_else(|| envelope.get("typedArtifacts"))
@@ -117,12 +146,12 @@ fn codebox_public_typed_artifacts(envelope: &Value) -> Vec<AgentTaskTypedArtifac
     match value {
         Value::Array(items) => items
             .iter()
-            .filter_map(codebox_public_typed_artifact_from_value)
+            .filter_map(|value| public_typed_artifact_from_value(value, envelope_schema))
             .collect(),
         Value::Object(map) => map
             .iter()
             .filter_map(|(name, payload)| {
-                codebox_public_typed_artifact_from_value(payload).or_else(|| {
+                public_typed_artifact_from_value(payload, envelope_schema).or_else(|| {
                     Some(AgentTaskTypedArtifact {
                         name: name.clone(),
                         artifact_type: payload
@@ -137,7 +166,7 @@ fn codebox_public_typed_artifacts(envelope: &Value) -> Vec<AgentTaskTypedArtifac
                             .map(str::to_string),
                         payload: payload.clone(),
                         artifact: None,
-                        metadata: json!({ "source": CODEBOX_PUBLIC_ARTIFACT_RESULT_ENVELOPE_SCHEMA }),
+                        metadata: json!({ "source": envelope_schema }),
                     })
                 })
             })
@@ -146,7 +175,10 @@ fn codebox_public_typed_artifacts(envelope: &Value) -> Vec<AgentTaskTypedArtifac
     }
 }
 
-fn codebox_public_typed_artifact_from_value(value: &Value) -> Option<AgentTaskTypedArtifact> {
+fn public_typed_artifact_from_value(
+    value: &Value,
+    envelope_schema: &str,
+) -> Option<AgentTaskTypedArtifact> {
     let name = value
         .get("name")
         .and_then(Value::as_str)
@@ -173,8 +205,15 @@ fn codebox_public_typed_artifact_from_value(value: &Value) -> Option<AgentTaskTy
         metadata: value
             .get("metadata")
             .cloned()
-            .unwrap_or_else(|| json!({ "source": CODEBOX_PUBLIC_ARTIFACT_RESULT_ENVELOPE_SCHEMA })),
+            .unwrap_or_else(|| json!({ "source": envelope_schema })),
     })
+}
+
+fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .try_fold(value, |current, part| current.get(part))
 }
 
 /// Whether an outcome status represents a failure for which we want to mine the
