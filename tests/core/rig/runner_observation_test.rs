@@ -197,12 +197,15 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
             "component".to_string(),
             ComponentSpec {
                 path: repo.to_string_lossy().to_string(),
+                component_id: None,
+                path_setting: None,
                 checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
                 r#ref: None,
+                default_ref: None,
                 extensions: None,
             },
         );

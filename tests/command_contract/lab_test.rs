@@ -38,10 +38,6 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
             ]),
             "bench",
         ),
-        (
-            parsed_command(&["homeboy", "bench", "history", "homeboy"]),
-            "bench",
-        ),
         (parsed_command(&["homeboy", "fuzz"]), "fuzz"),
         (parsed_command(&["homeboy", "fuzz", "run"]), "fuzz"),
         // `fuzz list` offloads (unlike `bench list`) because fuzz workloads are
@@ -267,34 +263,38 @@ fn unsupported_lab_command_cases() -> Vec<Commands> {
         ]),
         parsed_command(&["homeboy", "status"]),
         parsed_command(&["homeboy", "bench", "list"]),
+        parsed_command(&["homeboy", "bench", "history", "homeboy"]),
     ]
 }
 
 #[test]
 fn test_lab_runner_supported_labels_are_contract_owned() {
+    let spec_labels = crate::command_contract::COMMAND_SPECS
+        .iter()
+        .flat_map(|spec| spec.lab_support_summary.iter())
+        .map(|summary| summary.message_label)
+        .collect::<Vec<_>>();
+
     assert_eq!(
         lab_runner_supported_labels().as_slice(),
-        &[
-            "agent-task cook/run-plan",
-            "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
-            "agent-task retry --run",
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
-            "agent-task fanout run-plan/submit-batch/status/artifacts",
-            "agent-task auth status",
-            "lint",
-            "test",
-            "audit",
-            "review",
-            "bench",
-            "fuzz",
-            "trace",
-            "refactor source runs",
-            "rig check",
-            "tunnel preview-consumer run",
-            "tunnel service expose",
-            "tunnel service start",
-        ]
+        spec_labels.as_slice(),
+        "Lab support labels should be generated from CommandSpec summary rows"
     );
+
+    let spec_contract_labels = crate::command_contract::COMMAND_SPECS
+        .iter()
+        .flat_map(|spec| spec.lab_support_summary.iter())
+        .flat_map(|summary| summary.contract_labels.iter().copied())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for (command, expected_label) in supported_lab_command_cases() {
+        let contract = command.lab_contract().expect("hot contract");
+        assert!(
+            spec_contract_labels.contains(contract.hot_label),
+            "CommandSpec Lab support summaries should include contract `{}` for `{expected_label}`",
+            contract.hot_label
+        );
+    }
     for label in lab_runner_supported_labels() {
         assert!(lab_runner_unsupported_message().contains(label));
         assert!(lab_runner_unsupported_hint().contains(label));
@@ -356,8 +356,11 @@ fn local_execution_policy_names_legacy_flag_combinations() {
 
 #[test]
 fn test_supports_lab_runner() {
-    for (command, _) in supported_lab_command_cases() {
-        assert!(command.supports_lab_runner());
+    for (command, expected_label) in supported_lab_command_cases() {
+        assert!(
+            command.supports_lab_runner(),
+            "expected `{expected_label}` to support Lab runner"
+        );
     }
     for command in unsupported_lab_command_cases() {
         assert!(!command.supports_lab_runner());
@@ -432,8 +435,10 @@ fn fuzz_run_and_list_offload_but_other_subcommands_stay_local() {
 
 #[test]
 fn test_lab_command_contracts_cover_hot_commands() {
-    for (command, _) in supported_lab_command_cases() {
-        let contract = command.lab_contract().expect("hot contract");
+    for (command, expected_label) in supported_lab_command_cases() {
+        let contract = command
+            .lab_contract()
+            .unwrap_or_else(|| panic!("expected `{expected_label}` to expose a hot contract"));
         assert!(
             lab_runner_summary_covers_contract_label(contract.hot_label),
             "Lab support summary omitted `{}`",

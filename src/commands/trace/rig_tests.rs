@@ -139,12 +139,15 @@ fn rig_component_path_and_trace_env_are_threaded() {
         "studio".to_string(),
         ComponentSpec {
             path: component_dir.path().to_string_lossy().to_string(),
+            component_id: None,
+            path_setting: None,
             checkout_root: None,
             remote_url: Some("https://github.com/example-org/studio".to_string()),
             triage_remote_url: None,
             stack: None,
             branch: None,
             r#ref: None,
+            default_ref: None,
             extensions: Some(extensions),
         },
     );
