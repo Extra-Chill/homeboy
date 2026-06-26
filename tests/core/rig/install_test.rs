@@ -244,6 +244,97 @@ mod install_flows {
     }
 
     #[test]
+    fn local_nested_package_dependency_records_repo_source_root() {
+        let _home = HomeGuard::new();
+        let repo = tempfile::tempdir().expect("repo");
+        let nested = repo.path().join("WordPress/static-site-importer");
+        fs::create_dir_all(repo.path().join("shared/wp-codebox")).expect("shared dir");
+        fs::write(
+            repo.path().join("shared/wp-codebox/recipe.mjs"),
+            "export default {};\n",
+        )
+        .expect("shared recipe");
+        write_single_rig(
+            &nested,
+            "static-site-importer-fixture-matrix",
+            r#"{
+                "id": "static-site-importer-fixture-matrix",
+                "package_dependencies": ["../../shared/wp-codebox"],
+                "bench_workloads": {
+                    "static-site-importer": [
+                        { "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs" }
+                    ]
+                }
+            }"#,
+        );
+        GitFixture::init(repo.path()).commit("nested package with shared dependency");
+
+        let result =
+            install(nested.to_str().unwrap(), None, false).expect("install nested package");
+        let metadata =
+            read_source_metadata("static-site-importer-fixture-matrix").expect("metadata");
+        let repo_root = repo.path().canonicalize().expect("canonical repo root");
+        let package_root = nested.canonicalize().expect("canonical package root");
+
+        assert_eq!(result.source_root, repo_root);
+        assert_eq!(result.package_path, package_root);
+        assert_eq!(
+            metadata.source_root.as_deref(),
+            Some(repo_root.to_str().unwrap())
+        );
+        assert_eq!(metadata.package_path, package_root.to_string_lossy());
+    }
+
+    #[test]
+    fn package_dependency_outside_source_root_is_rejected() {
+        let _home = HomeGuard::new();
+        let parent = tempfile::tempdir().expect("parent");
+        let repo = parent.path().join("repo");
+        let outside = parent.path().join("outside-shared");
+        let nested = repo.join("packages/app");
+        fs::create_dir_all(&outside).expect("outside dir");
+        write_single_rig(
+            &nested,
+            "bad-rig",
+            r#"{
+                "id": "bad-rig",
+                "package_dependencies": ["../../../outside-shared"]
+            }"#,
+        );
+        GitFixture::init(&repo).commit("bad dependency");
+
+        let err = install(nested.to_str().unwrap(), None, false)
+            .expect_err("dependency outside repo should fail");
+
+        assert!(err
+            .message
+            .contains("package dependency paths must stay inside"));
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
+    fn absolute_package_dependency_is_rejected() {
+        let _home = HomeGuard::new();
+        let repo = tempfile::tempdir().expect("repo");
+        let nested = repo.path().join("packages/app");
+        write_single_rig(
+            &nested,
+            "bad-rig",
+            r#"{
+                "id": "bad-rig",
+                "package_dependencies": ["/tmp/shared"]
+            }"#,
+        );
+        GitFixture::init(repo.path()).commit("bad dependency");
+
+        let err = install(nested.to_str().unwrap(), None, false)
+            .expect_err("absolute dependency should fail");
+
+        assert!(err.message.contains("non-empty relative paths"));
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
     fn install_git_source_missing_subpath_reports_source_and_package_roots() {
         let _home = HomeGuard::new();
         let repo = tempfile::tempdir().expect("repo");
