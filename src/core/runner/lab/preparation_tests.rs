@@ -6,7 +6,7 @@ use crate::core::runner::{
     RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
 };
 
-use super::super::session::RunnerStaleDaemonWarning;
+use super::super::session::{RunnerStaleDaemonWarning, RunnerStaleRuntimePath};
 
 #[test]
 fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
@@ -147,7 +147,50 @@ fn lab_runner_preparation_refreshes_stale_default_daemon_version() {
 }
 
 #[test]
-fn lab_runner_preparation_errors_when_explicit_stale_daemon_refresh_fails() {
+fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Default,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+
+    let prepared = prepare_lab_runner_for_offload_with(
+        &selection,
+        |runner_id| {
+            Ok(RunnerStatusReport {
+                runner_id: runner_id.to_string(),
+                connected: true,
+                state: super::super::RunnerSessionState::Connected,
+                session: Some(connected_direct_session(
+                    runner_id,
+                    Some("http://127.0.0.1:1234"),
+                )),
+                stale_daemon: Some(stale_runtime_path_warning(runner_id)),
+                active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
+                active_job_count: 0,
+                stale_runner_jobs: Vec::new(),
+                stale_runner_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
+                session_path: "/tmp/lab.json".to_string(),
+            })
+        },
+        |_| panic!("stale runtime daemon should not dispatch or reconnect automatically"),
+    )
+    .expect("prepared");
+
+    assert_eq!(
+        prepared,
+        LabRunnerPreparation::FallBackLocal {
+            reason: "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner disconnect lab && homeboy runner connect lab`".to_string()
+        }
+    );
+}
+
+#[test]
+fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
         source: LabRunnerSelectionSource::Explicit,
@@ -519,5 +562,25 @@ fn stale_daemon_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
         "homeboy 0.219.0".to_string(),
         Some("homeboy 0.218.0+old".to_string()),
         Some("homeboy 0.219.0+new".to_string()),
+    )
+}
+
+fn stale_runtime_path_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
+    RunnerStaleDaemonWarning::new(
+        runner_id,
+        "homeboy 0.219.0".to_string(),
+        "homeboy 0.219.0".to_string(),
+        Some("homeboy 0.219.0+same".to_string()),
+        Some("homeboy 0.219.0+same".to_string()),
+    )
+    .with_runtime_paths(
+        runner_id,
+        vec![RunnerStaleRuntimePath {
+            env: "HOMEBOY_WP_CODEBOX_COMPONENT_PATH".to_string(),
+            path: "/home/chubes/Developer/wp-codebox".to_string(),
+            loaded_fingerprint: "files=10".to_string(),
+            current_fingerprint: "files=11".to_string(),
+        }],
+        Vec::new(),
     )
 }

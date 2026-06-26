@@ -50,16 +50,16 @@ pub use super::runner::{
     LabRunnerSelectionSource, ManagedRunnerSourceSyncPlan, PreparedLabRunnerCapability,
     RemoteArtifactDownload, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions,
     ReverseRunnerWorkerOutput, Runner, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerArtifactRef, RunnerCapabilityPreflight, RunnerConnectReport, RunnerDisconnectReport,
-    RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerFailureKind,
-    RunnerHandoff, RunnerJob, RunnerKind, RunnerLifecycleOwner, RunnerMutationArtifacts,
-    RunnerNamedWorkspaceLease, RunnerRequiredTool, RunnerResourceMetrics, RunnerResult,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerSpec, RunnerStaleDaemonWarning,
-    RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode,
-    RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
-    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet, RunnerWorkspaceListEntry,
-    RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    RunnerArtifactRef, RunnerCapabilityPreflight, RunnerChangedRuntimePath, RunnerConnectReport,
+    RunnerDisconnectReport, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
+    RunnerExecOutput, RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerKind,
+    RunnerLifecycleOwner, RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRequiredTool,
+    RunnerResourceMetrics, RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState,
+    RunnerSpec, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
+    RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode, RunnerWorkspaceApplyOptions,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus, RunnerWorkspaceLease,
+    RunnerWorkspaceLeaseSet, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
@@ -91,9 +91,9 @@ pub mod connection {
     pub use super::super::runner::{
         connect, connect_reverse, disconnect, run_reverse_worker, status, statuses,
         ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput,
-        RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerSession,
-        RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
-        RunnerTunnelMode,
+        RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
+        RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+        RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
     };
 }
 

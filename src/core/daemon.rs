@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::UNIX_EPOCH;
 
 use crate::command_contract::RunnerWorkload;
 use crate::core::api_jobs::{JobStatus, JobStore, RunnerJobLifecycleMetadata};
@@ -36,6 +37,15 @@ use patch_capture::{capture_baseline, capture_patch_report};
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
 
 static DAEMON_JOB_STORE: OnceLock<JobStore> = OnceLock::new();
+static DAEMON_RUNTIME_SNAPSHOT: OnceLock<DaemonRuntimeSnapshot> = OnceLock::new();
+
+const RUNTIME_PATH_FILE_LIMIT: usize = 2_000;
+const RUNTIME_PATH_SUFFIXES: &[&str] = &[
+    "_COMPONENT_PATH",
+    "_PLUGIN_PATH",
+    "_PROVIDER_PATH",
+    "_RUNTIME_PATH",
+];
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonState {
@@ -65,6 +75,19 @@ pub struct DaemonStopResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub state_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DaemonRuntimeSnapshot {
+    loaded_at: String,
+    paths: Vec<DaemonRuntimePathSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DaemonRuntimePathSnapshot {
+    env: String,
+    path: String,
+    fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +236,7 @@ where
     })?;
     let state = write_state(local_addr)?;
     let job_store = JobStore::open(paths::daemon_jobs_file()?)?;
+    let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 
     for stream in listener.incoming() {
@@ -305,6 +329,7 @@ where
             body: json!({
                 "version": VERSION,
                 "build_identity": build_identity::current(),
+                "runtime_paths": daemon_runtime_paths_body(),
             }),
             artifact: None,
         },
@@ -535,6 +560,136 @@ fn enqueue_exec_job(
 
 fn daemon_job_store() -> &'static JobStore {
     DAEMON_JOB_STORE.get_or_init(JobStore::default)
+}
+
+fn daemon_runtime_snapshot() -> &'static DaemonRuntimeSnapshot {
+    DAEMON_RUNTIME_SNAPSHOT.get_or_init(capture_daemon_runtime_snapshot)
+}
+
+fn daemon_runtime_paths_body() -> serde_json::Value {
+    let snapshot = daemon_runtime_snapshot();
+    let current: Vec<_> = snapshot
+        .paths
+        .iter()
+        .map(|path| DaemonRuntimePathSnapshot {
+            env: path.env.clone(),
+            path: path.path.clone(),
+            fingerprint: runtime_path_fingerprint(Path::new(&path.path)),
+        })
+        .collect();
+    let stale: Vec<_> = snapshot
+        .paths
+        .iter()
+        .zip(current.iter())
+        .filter(|(loaded, current)| loaded.fingerprint != current.fingerprint)
+        .map(|(loaded, current)| {
+            json!({
+                "env": loaded.env,
+                "path": loaded.path,
+                "loaded_fingerprint": loaded.fingerprint,
+                "current_fingerprint": current.fingerprint,
+            })
+        })
+        .collect();
+
+    json!({
+        "loaded_at": snapshot.loaded_at,
+        "loaded": snapshot.paths,
+        "current": current,
+        "stale": stale,
+    })
+}
+
+fn capture_daemon_runtime_snapshot() -> DaemonRuntimeSnapshot {
+    let paths = runtime_path_env_values()
+        .into_iter()
+        .map(|(env, path)| DaemonRuntimePathSnapshot {
+            env,
+            fingerprint: runtime_path_fingerprint(Path::new(&path)),
+            path,
+        })
+        .collect();
+
+    DaemonRuntimeSnapshot {
+        loaded_at: chrono::Utc::now().to_rfc3339(),
+        paths,
+    }
+}
+
+fn runtime_path_env_values() -> BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(name, value)| is_runtime_path_env(name) && !value.trim().is_empty())
+        .collect()
+}
+
+fn is_runtime_path_env(name: &str) -> bool {
+    name.starts_with("HOMEBOY_")
+        && RUNTIME_PATH_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
+fn runtime_path_fingerprint(path: &Path) -> String {
+    let mut state = RuntimePathFingerprintState::default();
+    collect_runtime_path_fingerprint(path, &mut state);
+    format!(
+        "exists={};files={};dirs={};bytes={};mtime_ns={};truncated={}",
+        state.exists, state.files, state.dirs, state.bytes, state.latest_mtime_ns, state.truncated
+    )
+}
+
+#[derive(Default)]
+struct RuntimePathFingerprintState {
+    exists: bool,
+    files: usize,
+    dirs: usize,
+    bytes: u64,
+    latest_mtime_ns: u128,
+    truncated: bool,
+}
+
+fn collect_runtime_path_fingerprint(path: &Path, state: &mut RuntimePathFingerprintState) {
+    if state.files >= RUNTIME_PATH_FILE_LIMIT {
+        state.truncated = true;
+        return;
+    }
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    state.exists = true;
+    if metadata.is_dir() {
+        state.dirs += 1;
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.filter_map(|entry| entry.ok()).collect();
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            let path = entry.path();
+            if should_skip_runtime_fingerprint_path(&path) {
+                continue;
+            }
+            collect_runtime_path_fingerprint(&path, state);
+            if state.truncated {
+                return;
+            }
+        }
+    } else if metadata.is_file() {
+        state.files += 1;
+        state.bytes = state.bytes.saturating_add(metadata.len());
+    }
+    if let Ok(modified) = metadata.modified() {
+        if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+            state.latest_mtime_ns = state.latest_mtime_ns.max(duration.as_nanos());
+        }
+    }
+}
+
+fn should_skip_runtime_fingerprint_path(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(".git" | "node_modules" | "vendor" | "target")
+    )
 }
 
 fn route_read_only_api(
