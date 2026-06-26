@@ -403,33 +403,48 @@ pub(crate) fn execute_capability_script(
 
     let current_dir = working_dir;
 
+    // Select the timeout-aware vs plain variant of the chosen execution mode,
+    // keeping the `options.timeout` dispatch in one place rather than repeating
+    // it per passthrough mode.
+    let dispatch = |with_timeout: &dyn Fn(Duration) -> CommandOutput,
+                    without_timeout: &dyn Fn() -> CommandOutput| {
+        match options.timeout {
+            Some(timeout) => with_timeout(timeout),
+            None => without_timeout(),
+        }
+    };
+
     if options.passthrough {
-        Ok(match options.timeout {
-            Some(timeout) => execute_local_command_passthrough_with_timeout(
-                &command,
-                current_dir,
-                env_opt,
-                timeout,
-            ),
-            None => execute_local_command_passthrough(&command, current_dir, env_opt),
-        })
+        Ok(dispatch(
+            &|timeout| {
+                execute_local_command_passthrough_with_timeout(
+                    &command,
+                    current_dir,
+                    env_opt,
+                    timeout,
+                )
+            },
+            &|| execute_local_command_passthrough(&command, current_dir, env_opt),
+        ))
     } else if options.stderr_passthrough {
-        Ok(match options.timeout {
-            Some(timeout) => execute_local_command_stderr_passthrough_with_timeout(
-                &command,
-                current_dir,
-                env_opt,
-                timeout,
-            ),
-            None => execute_local_command_stderr_passthrough(&command, current_dir, env_opt),
-        })
+        Ok(dispatch(
+            &|timeout| {
+                execute_local_command_stderr_passthrough_with_timeout(
+                    &command,
+                    current_dir,
+                    env_opt,
+                    timeout,
+                )
+            },
+            &|| execute_local_command_stderr_passthrough(&command, current_dir, env_opt),
+        ))
     } else {
-        Ok(match options.timeout {
-            Some(timeout) => {
+        Ok(dispatch(
+            &|timeout| {
                 execute_local_command_in_dir_with_timeout(&command, current_dir, env_opt, timeout)
-            }
-            None => execute_local_command_in_dir(&command, current_dir, env_opt),
-        })
+            },
+            &|| execute_local_command_in_dir(&command, current_dir, env_opt),
+        ))
     }
 }
 
