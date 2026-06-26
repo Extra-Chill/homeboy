@@ -64,6 +64,9 @@ pub fn summarize_matrix_artifacts(
     let mut saw_matrix_signal = false;
 
     for artifact in artifacts {
+        if artifact.run_id != run_id {
+            continue;
+        }
         let class = classify_artifact(artifact);
         if class.is_matrix {
             saw_matrix_signal = true;
