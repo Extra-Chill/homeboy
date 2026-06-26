@@ -19,7 +19,7 @@ Install the standard Homeboy extension set on the local machine or an SSH
 reachable remote runner.
 
 Options:
-  --target <runner-id>        Runner ID such as homeboy-lab. Omit for local bootstrap.
+  --target <runner-id>        Runner ID such as example-runner. Omit for local bootstrap.
   --extensions "<ids>"       Space-separated extension IDs to install.
                              Default: nodejs rust wordpress go swift.
   --repo <url-or-path>        Extension monorepo URL or path.
@@ -33,8 +33,8 @@ Options:
   -h, --help                 Show this help.
 
 Examples:
-  scripts/bootstrap-standard-extensions.sh --target homeboy-lab
-  scripts/bootstrap-standard-extensions.sh --target chubes@homeboy-lab --extensions "nodejs rust wordpress"
+  scripts/bootstrap-standard-extensions.sh --target example-runner
+  scripts/bootstrap-standard-extensions.sh --target operator@example-runner --extensions "nodejs rust wordpress"
   scripts/bootstrap-standard-extensions.sh --repo /path/to/homeboy-extensions --extensions "rust" --dry-run
 USAGE
 }

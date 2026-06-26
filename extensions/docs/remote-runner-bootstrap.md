@@ -24,13 +24,13 @@ advertise or receive workloads for extension IDs that are present on that host.
 From a checkout of this repository, run:
 
 ```bash
-scripts/bootstrap-standard-extensions.sh --target homeboy-lab
+scripts/bootstrap-standard-extensions.sh --target example-runner
 ```
 
 Use any SSH target accepted by `ssh`:
 
 ```bash
-scripts/bootstrap-standard-extensions.sh --target chubes@homeboy-lab
+scripts/bootstrap-standard-extensions.sh --target operator@example-runner
 ```
 
 The script runs this idempotent install-and-verify loop on the target:
@@ -54,7 +54,7 @@ scripts/bootstrap-standard-extensions.sh
 Preview the exact target script without changing anything:
 
 ```bash
-scripts/bootstrap-standard-extensions.sh --target homeboy-lab --dry-run
+scripts/bootstrap-standard-extensions.sh --target example-runner --dry-run
 ```
 
 ## Repair Existing Installs
@@ -65,7 +65,7 @@ dirty checkout, repair it explicitly with `--replace-existing`:
 
 ```bash
 scripts/bootstrap-standard-extensions.sh \
-    --target homeboy-lab \
+    --target example-runner \
     --extensions "wordpress" \
     --replace-existing
 ```
@@ -82,7 +82,7 @@ refresh pass.
 Use `--extensions` for narrow runners or repair passes:
 
 ```bash
-scripts/bootstrap-standard-extensions.sh --target homeboy-lab --extensions "nodejs rust wordpress"
+scripts/bootstrap-standard-extensions.sh --target example-runner --extensions "nodejs rust wordpress"
 ```
 
 ## GitHub Installs Vs Local Path Installs
@@ -109,8 +109,8 @@ the symlink target points at, so they are easy to leave attached to stale or
 temporary worktrees. Before debugging remote-runner behavior, inspect the target:
 
 ```bash
-ssh homeboy-lab 'homeboy extension list && homeboy extension show rust'
-ssh homeboy-lab 'readlink ~/.config/homeboy/extensions/rust || true'
+ssh example-runner 'homeboy extension list && homeboy extension show rust'
+ssh example-runner 'readlink ~/.config/homeboy/extensions/rust || true'
 ```
 
 If a linked install is stale, reinstall from the GitHub monorepo URL with the
@@ -118,7 +118,7 @@ matching `--id` and `--replace`, or use the bootstrap repair mode:
 
 ```bash
 scripts/bootstrap-standard-extensions.sh \
-    --target homeboy-lab \
+    --target example-runner \
     --extensions "rust" \
     --replace-existing
 ```
@@ -129,8 +129,8 @@ If the target exposes Homeboy under a different command path, pass `--homeboy`:
 
 ```bash
 scripts/bootstrap-standard-extensions.sh \
-    --target homeboy-lab \
-    --homeboy /home/chubes/.local/bin/homeboy
+    --target example-runner \
+    --homeboy /home/operator/.local/bin/homeboy
 ```
 
 To test an extension branch on a runner, pass a repository path or URL with
@@ -139,8 +139,8 @@ should use the canonical GitHub URL.
 
 ```bash
 scripts/bootstrap-standard-extensions.sh \
-    --target homeboy-lab \
-    --repo /home/chubes/src/homeboy-extensions \
+    --target example-runner \
+    --repo /home/operator/src/homeboy-extensions \
     --extensions "rust"
 ```
 
@@ -149,12 +149,12 @@ scripts/bootstrap-standard-extensions.sh \
 After bootstrap, verify the runner from the dispatching machine:
 
 ```bash
-ssh homeboy-lab 'homeboy extension list'
-ssh homeboy-lab 'homeboy extension show nodejs'
-ssh homeboy-lab 'homeboy extension show rust'
-ssh homeboy-lab 'homeboy extension show wordpress'
-ssh homeboy-lab 'homeboy extension show go'
-ssh homeboy-lab 'homeboy extension show swift'
+ssh example-runner 'homeboy extension list'
+ssh example-runner 'homeboy extension show nodejs'
+ssh example-runner 'homeboy extension show rust'
+ssh example-runner 'homeboy extension show wordpress'
+ssh example-runner 'homeboy extension show go'
+ssh example-runner 'homeboy extension show swift'
 ```
 
 For a real offload check, run a Homeboy command for a component that requires one
@@ -173,7 +173,7 @@ Refresh that cache before collecting lab evidence that must point at a known WP
 Codebox revision:
 
 ```bash
-wordpress/scripts/build/update-wp-codebox-cache.sh --runner homeboy-lab --ref main
+wordpress/scripts/build/update-wp-codebox-cache.sh --runner example-runner --ref main
 ```
 
 The helper runs this sequence on the runner:

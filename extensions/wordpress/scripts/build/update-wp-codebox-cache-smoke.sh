@@ -92,7 +92,7 @@ case "$OUTPUT" in
         ;;
 esac
 
-DRY_RUN_OUTPUT="$("$SCRIPT" --runner homeboy-lab --source "$REMOTE_REPO" --ref fixture-ref --dry-run)"
+DRY_RUN_OUTPUT="$("$SCRIPT" --runner example-runner --source "$REMOTE_REPO" --ref fixture-ref --dry-run)"
 case "$DRY_RUN_OUTPUT" in
     *"Fetching WP Codebox ref"*) ;;
     *)

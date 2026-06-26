@@ -93,7 +93,7 @@ Local path installs are linked installs. The active extension code is whatever t
 To repair a runner that was accidentally left linked to a stale or dirty checkout, use the standard bootstrap script with `--replace-existing`. For linked installs, Homeboy removes only the installed symlink, preserves the linked checkout, and installs a managed extracted copy from the configured repository URL:
 
 ```bash
-scripts/bootstrap-standard-extensions.sh --target homeboy-lab --extensions "wordpress" --replace-existing
+scripts/bootstrap-standard-extensions.sh --target example-runner --extensions "wordpress" --replace-existing
 ```
 
 Inspect the current state before debugging extension behavior:

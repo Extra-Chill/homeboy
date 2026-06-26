@@ -82,14 +82,14 @@ Homeboy injects `HOMEBOY_SERVICE_LOCAL_URL` and `HOMEBOY_TUNNEL_PUBLIC_URL` into
 
 The broker response must prove `capabilities.hostname_preserving_browser_origin === true` and return browser-origin evidence matching the requested effective origin. A plain port tunnel that changes `window.location.origin` is rejected.
 
-Use `--target-id`, `--target-url`, and repeated `--route name=url` values to carry workload-owned proof targets into broker evidence without teaching this extension product semantics. For WPCOM, the rig can keep the exact `wordpress.com/ai` landing-page proof separate from Calypso `/start` and `/setup/ai-site-builder` proof:
+Use `--target-id`, `--target-url`, and repeated `--route name=url` values to carry workload-owned proof targets into broker evidence without teaching this extension product semantics. For example, a rig can keep an external landing-page proof separate from local application routes:
 
 ```sh
 node scripts/public-preview-backend.mjs \
-  --target-id wpcom-ai-landing \
-  --target-url https://wordpress.com/ai/ \
-  --route landing=https://wordpress.com/ai/ \
-  --route builder_handoff=https://wordpress.com/setup/ai-site-builder \
+  --target-id example-app-landing \
+  --target-url https://example.com/app/ \
+  --route landing=https://example.com/app/ \
+  --route builder_handoff=https://example.com/app/setup \
   --local-url http://127.0.0.1:7331 \
   --public-url https://preview-broker.example/runs/run-123 \
   --broker-url https://preview-broker.example/api/managed-previews \
@@ -98,23 +98,23 @@ node scripts/public-preview-backend.mjs \
 
 ## Hostname-Sensitive Proofs
 
-Some consumers need the browser-effective origin to remain the local development origin. The WPCOM Calypso `/start` proof is one of these: it expects `http://calypso.localhost:3000`, not a tunnel origin.
+Some consumers need the browser-effective origin to remain the local development origin. A hostname-sensitive application proof may expect `http://app.localhost:3000`, not a tunnel origin.
 
 For those consumers, pass `--expected-effective-origin` and `--require-host-preservation`. The helper fails before registering a backend that cannot prove it preserves the browser origin, returning structured blocker JSON on stderr. This keeps reviewer-clickable preview support from being mistaken for exact hostname-preserving proof.
 
 ```sh
 node scripts/public-preview-backend.mjs \
-  --target-id calypso-start \
-  --target-url http://calypso.localhost:3000/start \
-  --route start=http://calypso.localhost:3000/start \
-  --route builder_handoff=http://calypso.localhost:3000/setup/ai-site-builder \
-  --local-url http://calypso.localhost:3000 \
+  --target-id example-app-start \
+  --target-url http://app.localhost:3000/start \
+  --route start=http://app.localhost:3000/start \
+  --route setup=http://app.localhost:3000/setup \
+  --local-url http://app.localhost:3000 \
   --public-url https://preview-broker.example/runs/run-123 \
   --broker-url https://preview-broker.example/api/managed-previews \
-  --expected-effective-origin http://calypso.localhost:3000 \
-  --expected-config-hostname calypso.localhost \
+  --expected-effective-origin http://app.localhost:3000 \
+  --expected-config-hostname app.localhost \
   --require-host-preservation \
   --dry-run
 ```
 
-Until a broker endpoint exists and returns hostname-preserving evidence for `calypso.localhost:3000`, the Calypso `/start` proof should remain blocked rather than downgraded to a different-host tunnel proof.
+Until a broker endpoint exists and returns hostname-preserving evidence for `app.localhost:3000`, the hostname-sensitive proof should remain blocked rather than downgraded to a different-host tunnel proof.
