@@ -70,6 +70,29 @@ async function observedConcurrency(options = {}) {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 
+  const providerStatusRun = await executeFanoutReconcileRun({
+    plan: {
+      schema: 'homeboy/fanout-reconcile-plan/v1',
+      task_requests: [
+        { task_id: 'provider-succeeded' },
+        { task_id: 'provider-no-op' },
+      ],
+    },
+    execute_task_request: (request) => ({
+      id: request.task_id,
+      status: request.task_id === 'provider-no-op' ? 'no_op' : 'succeeded',
+      outcome: {
+        schema: 'homeboy/agent-task-outcome/v1',
+        task_id: request.task_id,
+        status: request.task_id === 'provider-no-op' ? 'no_op' : 'succeeded',
+      },
+    }),
+  });
+
+  assert.equal(providerStatusRun.status, 'completed');
+  assert.deepEqual(providerStatusRun.records.map((record) => record.status), ['completed', 'completed']);
+  assert.deepEqual(providerStatusRun.records.map((record) => record.outcome.status), ['succeeded', 'no_op']);
+
   console.log('Generic fanout reconcile workflow test passed');
 })().catch((error) => {
   console.error(error);
