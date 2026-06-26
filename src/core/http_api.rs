@@ -357,18 +357,15 @@ fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
             let size_bytes = download
                 .size_bytes
                 .or_else(|| i64::try_from(content.len()).ok());
-            return Ok(json!({
-                "command": "api.runs.artifact.content",
-                "run_id": run_id,
-                "artifact_id": artifact.id,
-                "content_available": true,
-                "retrieval": inline_content_retrieval(),
-                "filename": filename,
-                "mime": download.content_type.or_else(|| artifact.mime.clone()),
-                "size_bytes": size_bytes,
-                "sha256": download.sha256.or_else(|| artifact.sha256.clone()),
-                "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
-            }));
+            return Ok(artifact_content_response(
+                run_id,
+                &artifact.id,
+                filename,
+                download.content_type.or_else(|| artifact.mime.clone()),
+                size_bytes,
+                download.sha256.or_else(|| artifact.sha256.clone()),
+                &content,
+            ));
         }
         return Err(Error::validation_invalid_argument(
             "artifact_id",
@@ -391,18 +388,39 @@ fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(&artifact.id);
-    Ok(json!({
+    Ok(artifact_content_response(
+        run_id,
+        &artifact.id,
+        filename,
+        artifact.mime,
+        artifact.size_bytes,
+        artifact.sha256,
+        &content,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn artifact_content_response(
+    run_id: &str,
+    artifact_id: &str,
+    filename: &str,
+    mime: Option<String>,
+    size_bytes: Option<i64>,
+    sha256: Option<String>,
+    content: &[u8],
+) -> Value {
+    json!({
         "command": "api.runs.artifact.content",
         "run_id": run_id,
-        "artifact_id": artifact.id,
+        "artifact_id": artifact_id,
         "content_available": true,
         "retrieval": inline_content_retrieval(),
         "filename": filename,
-        "mime": artifact.mime,
-        "size_bytes": artifact.size_bytes,
-        "sha256": artifact.sha256,
+        "mime": mime,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
         "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
-    }))
+    })
 }
 
 fn artifact_store_content(

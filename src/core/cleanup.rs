@@ -161,14 +161,7 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
 
             if options.apply {
                 remove_artifact_path(&artifact_path)?;
-                applied.push(ArtifactCleanupApplied {
-                    worktree: candidate.worktree.clone(),
-                    path: candidate.path.clone(),
-                    relative_path: candidate.relative_path.clone(),
-                    kind: candidate.kind.clone(),
-                    size_bytes,
-                    removed: true,
-                });
+                applied.push(applied_row(&candidate));
             }
 
             candidates.push(candidate);
@@ -178,14 +171,7 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
     for candidate in self_temp_artifact_candidates(&options)? {
         if options.apply {
             remove_artifact_path(Path::new(&candidate.path))?;
-            applied.push(ArtifactCleanupApplied {
-                worktree: candidate.worktree.clone(),
-                path: candidate.path.clone(),
-                relative_path: candidate.relative_path.clone(),
-                kind: candidate.kind.clone(),
-                size_bytes: candidate.size_bytes,
-                removed: true,
-            });
+            applied.push(applied_row(&candidate));
         }
 
         candidates.push(candidate);
@@ -391,6 +377,17 @@ fn has_tracked_changes_under(dirty_paths: &[String], relative_path: &str) -> boo
     dirty_paths
         .iter()
         .any(|path| path == relative_path || path.starts_with(&prefix))
+}
+
+fn applied_row(candidate: &ArtifactCleanupCandidate) -> ArtifactCleanupApplied {
+    ArtifactCleanupApplied {
+        worktree: candidate.worktree.clone(),
+        path: candidate.path.clone(),
+        relative_path: candidate.relative_path.clone(),
+        kind: candidate.kind.clone(),
+        size_bytes: candidate.size_bytes,
+        removed: true,
+    }
 }
 
 fn skip_row(
