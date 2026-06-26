@@ -1200,6 +1200,7 @@ mod tests {
         assert_eq!(
             warning.recovery_commands,
             vec![
+                "homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect".to_string(),
                 "homeboy runner disconnect homeboy-lab".to_string(),
                 "homeboy runner connect homeboy-lab".to_string(),
             ]

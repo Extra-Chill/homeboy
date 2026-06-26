@@ -139,6 +139,7 @@ pub enum RunnerCommandOutput {
     Env(RunnerEnvOutput),
     Job(RunnerJobOutput),
     BrokerJob(RunnerBrokerJobOutput),
+    RefreshHomeboy(homeboy::core::runners::HomeboyBinaryRefreshOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
     Broker(RunnerBrokerOutput),

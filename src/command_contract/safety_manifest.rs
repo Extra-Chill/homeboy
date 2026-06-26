@@ -473,6 +473,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["runner", "remove"]
         | ["runner", "connect"]
         | ["runner", "disconnect"]
+        | ["runner", "refresh-homeboy"]
         | ["runner", "work"] => {
             metadata.mutates = true;
             metadata.operator = true;
