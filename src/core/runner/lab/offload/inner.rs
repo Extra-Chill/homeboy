@@ -797,7 +797,11 @@ pub(crate) fn run_lab_offload_inner(
         host_telemetry.to_metadata()
     );
     ensure_lab_offload_streams_not_truncated(&exec_output, output_file_content.is_some())?;
-    mirror_agent_task_run_plan_lifecycle(request.normalized_args, &exec_output.stdout)?;
+    mirror_agent_task_run_plan_lifecycle(
+        request.normalized_args,
+        &exec_output.stdout,
+        output_file_content.as_deref(),
+    )?;
 
     let mut stderr = String::new();
     for message in messages {

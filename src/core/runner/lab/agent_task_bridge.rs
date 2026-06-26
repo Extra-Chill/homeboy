@@ -97,14 +97,21 @@ pub(super) fn sync_inline_agent_task_file(
     Ok(Some((remote_spec, entry)))
 }
 
-pub(super) fn mirror_agent_task_run_plan_lifecycle(args: &[String], stdout: &str) -> Result<()> {
+pub(super) fn mirror_agent_task_run_plan_lifecycle(
+    args: &[String],
+    stdout: &str,
+    output_file_content: Option<&str>,
+) -> Result<()> {
     let Some((plan_spec, run_id)) = agent_task_run_plan_recording_args(args) else {
         return Ok(());
     };
     if plan_spec == "-" {
         return Ok(());
     }
-    let envelope = parse_offloaded_run_plan_envelope(stdout)?;
+    let envelope = parse_offloaded_run_plan_envelope(agent_task_run_plan_lifecycle_output(
+        stdout,
+        output_file_content,
+    ))?;
     if !is_agent_task_run_plan_envelope(&envelope) {
         return Ok(());
     }
@@ -130,6 +137,13 @@ pub(super) fn mirror_agent_task_run_plan_lifecycle(args: &[String], stdout: &str
     agent_task_lifecycle::mark_running(&run_id)?;
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(())
+}
+
+fn agent_task_run_plan_lifecycle_output<'a>(
+    stdout: &'a str,
+    output_file_content: Option<&'a str>,
+) -> &'a str {
+    output_file_content.unwrap_or(stdout)
 }
 
 pub(super) fn parse_offloaded_run_plan_envelope(stdout: &str) -> Result<serde_json::Value> {
@@ -788,7 +802,27 @@ mod tests {
         ];
         let stdout = "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}";
 
-        mirror_agent_task_run_plan_lifecycle(&args, stdout).expect("ignore non-aggregate output");
+        mirror_agent_task_run_plan_lifecycle(&args, stdout, None)
+            .expect("ignore non-aggregate output");
+    }
+
+    #[test]
+    fn run_plan_lifecycle_prefers_downloaded_output_file_content() {
+        let stdout = "{\"success\":true,\"data\":{\"command\":\"agent-task.run-plan\"}}";
+        let downloaded_output = concat!(
+            "{\"success\":true,\"data\":{",
+            "\"schema\":\"homeboy/agent-task-aggregate/v1\",",
+            "\"plan_id\":\"plan-from-file\",",
+            "\"status\":\"succeeded\",",
+            "\"totals\":{\"skipped\":0,\"succeeded\":1,\"failed\":0},",
+            "\"outcomes\":[]}}"
+        );
+
+        let selected = agent_task_run_plan_lifecycle_output(stdout, Some(downloaded_output));
+        let envelope = parse_offloaded_run_plan_envelope(selected).expect("parse selected output");
+
+        assert!(is_agent_task_run_plan_envelope(&envelope));
+        assert_eq!(envelope["data"]["plan_id"], "plan-from-file");
     }
 
     #[test]
