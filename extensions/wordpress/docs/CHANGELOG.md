@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.17.3] - 2026-06-26
+
+### Changed
+- Honor WP Codebox binary setting JSON in fuzz runner
+
 ## [3.17.2] - 2026-06-26
 
 ### Fixed
