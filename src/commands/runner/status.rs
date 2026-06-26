@@ -7,7 +7,8 @@ use super::super::CmdResult;
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
     RunnerConnectionOutput, RunnerExtra, RunnerOperatorCommand, RunnerOutput,
-    RunnerToolDiagnostics,
+    RunnerToolDiagnostics, WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue,
+    WpCodeboxRuntimeDiagnostic, WpCodeboxRuntimeOutput,
 };
 
 pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
@@ -82,11 +83,15 @@ fn selected_lab_runner_status(
         .homeboy_path
         .clone()
         .unwrap_or_else(|| "homeboy".to_string());
+    let effective_env = runner::effective_env(runner_id)?
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     Ok(Some(LabSelectedRunnerOutput {
         runner_id: runner_id.to_string(),
         kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
         configured_executable: configured_executable.clone(),
         runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
+        wp_codebox_runtime: wp_codebox_runtime_output(Some(runner_id), &effective_env),
         daemon_enabled: runner_config.settings.daemon,
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
@@ -171,8 +176,120 @@ pub(crate) fn wp_codebox_tool_diagnostics(
     }
 }
 
+pub(crate) fn wp_codebox_runtime_output(
+    runner_id: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> WpCodeboxRuntimeOutput {
+    let configured = env
+        .get("HOMEBOY_WP_CODEBOX_BIN")
+        .cloned()
+        .or_else(|| env.get("HOMEBOY_SETTINGS_WP_CODEBOX_BIN").cloned());
+    let configured_binary_source = if env.contains_key("HOMEBOY_WP_CODEBOX_BIN") {
+        "HOMEBOY_WP_CODEBOX_BIN"
+    } else if env.contains_key("HOMEBOY_SETTINGS_WP_CODEBOX_BIN") {
+        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"
+    } else {
+        "unset"
+    };
+    let install_dir = env
+        .get("HOMEBOY_WP_CODEBOX_INSTALL_DIR")
+        .cloned()
+        .unwrap_or_else(|| "${HOME}/.cache/homeboy/wp-codebox".to_string());
+    let managed_cache_source = format!("{}/source", install_dir.trim_end_matches('/'));
+    let managed_cache_binary = format!("{managed_cache_source}/packages/cli/dist/index.js");
+    let expected_playground_path = format!("{managed_cache_source}/packages/playground");
+    let expected_core_path = env
+        .get("HOMEBOY_WP_CODEBOX_CORE_MODULE")
+        .cloned()
+        .unwrap_or_else(|| format!("{managed_cache_source}/packages/core"));
+    let diagnostics = wp_codebox_runtime_diagnostics(
+        configured.as_deref(),
+        &managed_cache_source,
+        &expected_core_path,
+    );
+
+    WpCodeboxRuntimeOutput {
+        tool: "wp-codebox",
+        configured_binary: configured,
+        configured_binary_source,
+        managed_cache_source: managed_cache_source.clone(),
+        managed_cache_binary,
+        effective_binary_rule:
+            "managed cache binary wins when executable; otherwise configured binary, then PATH",
+        playground_package: WpCodeboxPackageRuntimeOutput {
+            package: "@automattic/wp-codebox-playground",
+            expected_path: expected_playground_path,
+            resolution: WpCodeboxProbeValue {
+                value: None,
+                source: "runtime_probe_command",
+            },
+        },
+        core_package: WpCodeboxPackageRuntimeOutput {
+            package: "@automattic/wp-codebox-core",
+            expected_path: expected_core_path,
+            resolution: WpCodeboxProbeValue {
+                value: None,
+                source: "runtime_probe_command",
+            },
+        },
+        source_git_sha: WpCodeboxProbeValue {
+            value: None,
+            source: "runtime_probe_command",
+        },
+        dist_build_freshness: WpCodeboxProbeValue {
+            value: None,
+            source: "runtime_probe_command",
+        },
+        runtime_probe_command: wp_codebox_runtime_probe_command(runner_id),
+        diagnostics,
+    }
+}
+
+pub(crate) fn wp_codebox_runtime_diagnostics(
+    configured_binary: Option<&str>,
+    managed_cache_source: &str,
+    core_path: &str,
+) -> Vec<WpCodeboxRuntimeDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if let Some(configured_binary) = configured_binary {
+        if !configured_binary.starts_with(managed_cache_source) {
+            diagnostics.push(WpCodeboxRuntimeDiagnostic {
+                id: "wp_codebox.mixed_cli_source",
+                severity: "warning",
+                message: format!(
+                    "Configured WP Codebox CLI `{configured_binary}` is outside managed cache `{managed_cache_source}`; runner jobs may mix a stale CLI with managed package sources."
+                ),
+                remediation: "Unset HOMEBOY_WP_CODEBOX_BIN/HOMEBOY_SETTINGS_WP_CODEBOX_BIN or point it at the managed cache binary reported here.".to_string(),
+            });
+        }
+    }
+    if !core_path.starts_with(managed_cache_source) {
+        diagnostics.push(WpCodeboxRuntimeDiagnostic {
+            id: "wp_codebox.mixed_core_source",
+            severity: "warning",
+            message: format!(
+                "Resolved WP Codebox core path `{core_path}` is outside managed cache `{managed_cache_source}`; runner jobs may mix core and playground builds."
+            ),
+            remediation: "Refresh the WordPress extension setup/runtime env so HOMEBOY_WP_CODEBOX_CORE_MODULE resolves from the same managed WP Codebox checkout used by the CLI.".to_string(),
+        });
+    }
+    diagnostics
+}
+
 pub(crate) fn wp_codebox_effective_binary_command(runner_id: Option<&str>) -> String {
     let script = "configured=${HOMEBOY_WP_CODEBOX_BIN:-${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}}; install_dir=${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-$HOME/.cache/homeboy/wp-codebox}; managed_source=$install_dir/source; managed_binary=$managed_source/packages/cli/dist/index.js; if [ -x \"$managed_binary\" ]; then effective=$managed_binary; source=managed_cache; elif [ -n \"$configured\" ]; then effective=$configured; source=configured; else effective=$(command -v wp-codebox 2>/dev/null || true); source=path; fi; revision=$(git -C \"$managed_source\" rev-parse --short HEAD 2>/dev/null || true); printf 'configured_binary=%s\nmanaged_cache_source=%s\nmanaged_cache_binary=%s\neffective_binary=%s\neffective_source=%s\nmanaged_cache_revision=%s\n' \"${configured:-}\" \"$managed_source\" \"$managed_binary\" \"${effective:-}\" \"$source\" \"${revision:-}\"";
+    match runner_id {
+        Some(runner_id) => format!(
+            "homeboy runner exec {} --raw -- bash -lc {}",
+            shell_arg(runner_id),
+            shell_arg(script)
+        ),
+        None => format!("bash -lc {}", shell_arg(script)),
+    }
+}
+
+pub(crate) fn wp_codebox_runtime_probe_command(runner_id: Option<&str>) -> String {
+    let script = "configured=${HOMEBOY_WP_CODEBOX_BIN:-${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}}; install_dir=${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-$HOME/.cache/homeboy/wp-codebox}; managed_source=$install_dir/source; managed_binary=$managed_source/packages/cli/dist/index.js; if [ -x \"$managed_binary\" ]; then effective=$managed_binary; source=managed_cache; elif [ -n \"$configured\" ]; then effective=$configured; source=configured; else effective=$(command -v wp-codebox 2>/dev/null || true); source=path; fi; resolve_pkg() { node -e 'const path=require(\"path\"); try { const p=require.resolve(process.argv[2] + \"/package.json\", { paths: [process.argv[1]] }); process.stdout.write(path.dirname(p)); } catch (error) {}' \"$managed_source\" \"$1\" 2>/dev/null || true; }; playground=$(resolve_pkg @automattic/wp-codebox-playground); core=$(resolve_pkg @automattic/wp-codebox-core); if [ -z \"$core\" ] && [ -n \"${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}\" ]; then core=$HOMEBOY_WP_CODEBOX_CORE_MODULE; fi; revision=$(git -C \"$managed_source\" rev-parse HEAD 2>/dev/null || true); if [ ! -e \"$managed_binary\" ]; then dist_state=missing; elif find \"$managed_source/packages/cli/src\" -type f -newer \"$managed_binary\" 2>/dev/null | read newer; then dist_state=stale; else dist_state=fresh; fi; printf 'cli_binary=%s\ncli_binary_source=%s\nmanaged_cache_source=%s\nmanaged_cache_binary=%s\nplayground_path=%s\ncore_path=%s\nsource_git_sha=%s\ndist_build_freshness=%s\n' \"${effective:-}\" \"$source\" \"$managed_source\" \"$managed_binary\" \"${playground:-}\" \"${core:-}\" \"${revision:-}\" \"$dist_state\"";
     match runner_id {
         Some(runner_id) => format!(
             "homeboy runner exec {} --raw -- bash -lc {}",
