@@ -243,6 +243,10 @@ function normalizeControllerExecution(value) {
     policy_result: stringValue(value.policy_result || value.policyResult || value.policy_result_path || value.policyResultPath),
     output: stringValue(value.output || value.output_path || value.outputPath),
     max_actions: positiveInteger(value.max_actions || value.maxActions) || 100,
+    reconcile_stale: booleanValue(value.reconcile_stale ?? value.reconcileStale),
+    replace: booleanValue(value.replace),
+    fork: booleanValue(value.fork),
+    resume_existing: booleanValue(value.resume_existing ?? value.resumeExisting),
     prepare: normalizeArray(value.prepare || value.prepare_commands || value.prepareCommands),
     env: optionalObject(value.env),
     metadata: optionalObject(value.metadata),
@@ -308,6 +312,7 @@ function defaultExecuteControllerExecution(options = {}) {
   if (controllerExecution.output) {
     args.push('--output', controllerExecution.output);
   }
+  args.push(...controllerExecutionRunModeArgs(controllerExecution));
   const run = spawnSync(homeboyBin, args, { cwd, env, encoding: 'utf8' });
   if (run.status !== 0) {
     return {
@@ -327,6 +332,19 @@ function defaultExecuteControllerExecution(options = {}) {
     stderr: run.stderr || '',
     result: parsed,
   };
+}
+
+function controllerExecutionRunModeArgs(controllerExecution) {
+  const modes = [
+    ['reconcile_stale', '--reconcile-stale'],
+    ['replace', '--replace'],
+    ['fork', '--fork'],
+    ['resume_existing', '--resume-existing'],
+  ].filter(([key]) => controllerExecution[key] === true);
+  if (modes.length > 1) {
+    throw new Error(`controller_execution run mode flags are mutually exclusive: ${modes.map(([, flag]) => flag).join(', ')}`);
+  }
+  return modes.map(([, flag]) => flag);
 }
 
 function resolveControllerCwd(plan = {}, options = {}) {
@@ -1048,6 +1066,10 @@ function loopStatus(taskResults) {
 function positiveInteger(value) {
   const parsed = Number.parseInt(value || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function booleanValue(value) {
+  return value === true || value === 'true';
 }
 
 function optionalObject(value) {

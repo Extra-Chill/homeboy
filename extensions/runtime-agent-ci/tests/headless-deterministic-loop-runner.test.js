@@ -306,6 +306,44 @@ assert.equal(controllerBacked.tasks[0].outcome.metadata.controller_execution.max
 assert.equal(controllerBacked.tasks[0].outcome.metadata.controller_result.loop_id, 'controller-backed-loop');
 assert.equal(controllerRequest.controller_execution.spec, '.github/homeboy/controllers/static-site-generation-loop.controller.json');
 
+const controllerTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-controller-execution-'));
+try {
+  const argvFile = path.join(controllerTmpRoot, 'argv.json');
+  const fakeHomeboy = path.join(controllerTmpRoot, 'homeboy.js');
+  fs.writeFileSync(fakeHomeboy, `#!/usr/bin/env node
+const fs = require('node:fs');
+const argv = process.argv.slice(2);
+fs.writeFileSync(process.env.HOMEBOY_ARGV_FILE, JSON.stringify(argv));
+const outputIndex = argv.indexOf('--output');
+if (outputIndex !== -1) {
+  fs.writeFileSync(argv[outputIndex + 1], JSON.stringify({ schema: 'fixture/controller-result', loop_id: 'controller-reconcile-loop' }));
+}
+`);
+  fs.chmodSync(fakeHomeboy, 0o755);
+  const defaultController = await runHeadlessDeterministicLoop({
+    spec: {
+      ...baseSpec,
+      task_id: 'controller-reconcile-loop',
+      workload_id: 'controller-reconcile-loop',
+      component_path: controllerTmpRoot,
+      controller_execution: {
+        spec: 'controller.json',
+        output: path.join(controllerTmpRoot, 'controller-result.json'),
+        reconcile_stale: true,
+        env: { HOMEBOY_ARGV_FILE: argvFile },
+      },
+    },
+    runtime,
+    validate: false,
+    homeboyBin: fakeHomeboy,
+  });
+  assert.equal(defaultController.status, 'succeeded');
+  assert.ok(JSON.parse(fs.readFileSync(argvFile, 'utf8')).includes('--reconcile-stale'));
+  assert.equal(defaultController.tasks[0].outcome.metadata.controller_execution.reconcile_stale, true);
+} finally {
+  fs.rmSync(controllerTmpRoot, { recursive: true, force: true });
+}
+
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-headless-loop-policy-'));
 try {
   const loopPolicyFile = path.join(tmpRoot, 'loop-policy.json');
