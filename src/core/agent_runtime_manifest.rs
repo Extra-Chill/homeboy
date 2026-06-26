@@ -66,6 +66,11 @@ pub struct AgentRuntimeMaterializationContract {
     pub executable_requirements: Vec<AgentRuntimeExecutableRequirement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readiness_checks: Vec<AgentTaskProviderRunnerReadiness>,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentRuntimeDiagnosticsContract::is_empty"
+    )]
+    pub diagnostics: AgentRuntimeDiagnosticsContract,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_passthrough: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,10 +85,115 @@ impl AgentRuntimeMaterializationContract {
             && self.dependencies.is_empty()
             && self.executable_requirements.is_empty()
             && self.readiness_checks.is_empty()
+            && self.diagnostics.is_empty()
             && self.env_passthrough.is_empty()
             && self.workspace.is_none()
             && self.extra.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeDiagnosticsContract {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<AgentRuntimeToolDiagnosticDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtimes: Vec<AgentRuntimeRuntimeDiagnosticDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followups: Vec<AgentRuntimeDiagnosticFollowup>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl AgentRuntimeDiagnosticsContract {
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+            && self.runtimes.is_empty()
+            && self.followups.is_empty()
+            && self.extra.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeToolDiagnosticDeclaration {
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub configured_binary_env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_dir_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_install_dir: Option<String>,
+    pub managed_cache_source: String,
+    pub managed_cache_binary: String,
+    pub effective_binary_rule: String,
+    pub diagnostic_script: String,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeRuntimeDiagnosticDeclaration {
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub configured_binary_env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_dir_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_install_dir: Option<String>,
+    pub managed_cache_source: String,
+    pub managed_cache_binary: String,
+    pub effective_binary_rule: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<AgentRuntimePackageDiagnosticDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<AgentRuntimeProbeDiagnosticDeclaration>,
+    pub runtime_probe_script: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_consistency: Vec<AgentRuntimeSourceConsistencyDiagnostic>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimePackageDiagnosticDeclaration {
+    pub field: String,
+    pub package: String,
+    pub expected_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_override: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeProbeDiagnosticDeclaration {
+    pub field: String,
+    #[serde(default = "default_runtime_probe_source")]
+    pub source: String,
+}
+
+fn default_runtime_probe_source() -> String {
+    "runtime_probe_command".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeSourceConsistencyDiagnostic {
+    pub id: String,
+    pub severity: String,
+    pub path: String,
+    pub root: String,
+    pub message: String,
+    pub remediation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeDiagnosticFollowup {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_output: Option<String>,
+    pub command_script: String,
+    pub purpose: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -583,6 +693,25 @@ mod tests {
                         "label": "Example Runtime Ready",
                         "secret_env": ["EXAMPLE_RUNTIME_TOKEN"]
                     }],
+                    "diagnostics": {
+                        "tools": [{
+                            "tool": "example-runtime",
+                            "legacy_output": "example_runtime",
+                            "configured_binary_env": ["EXAMPLE_RUNTIME_BIN"],
+                            "install_dir_env": "EXAMPLE_RUNTIME_INSTALL_DIR",
+                            "default_install_dir": "${HOME}/.cache/homeboy/example-runtime",
+                            "managed_cache_source": "${install_dir}/source",
+                            "managed_cache_binary": "${managed_cache_source}/bin/example-runtime",
+                            "effective_binary_rule": "managed cache binary wins",
+                            "diagnostic_script": "printf example-runtime"
+                        }],
+                        "followups": [{
+                            "label": "example_runtime_binary",
+                            "legacy_output": "managed_followups",
+                            "command_script": "printf example-runtime",
+                            "purpose": "Inspect the declared runtime binary."
+                        }]
+                    },
                     "env_passthrough": ["EXAMPLE_RUNTIME_BIN", "EXAMPLE_RUNTIME_TOKEN", "EXAMPLE_RUNTIME_BIN"],
                     "workspace": {
                         "cwd": "git_checkout",
@@ -626,6 +755,19 @@ mod tests {
                 "EXAMPLE_RUNTIME_BIN".to_string(),
                 "EXAMPLE_RUNTIME_TOKEN".to_string()
             ]
+        );
+        assert_eq!(
+            manifests[0].materialization.diagnostics.tools[0].tool,
+            "example-runtime"
+        );
+        assert_eq!(
+            manifests[0].materialization.diagnostics.followups[0].label,
+            "example_runtime_binary"
+        );
+        assert_eq!(
+            serde_json::to_value(&manifests[0]).expect("runtime export")["materialization"]
+                ["diagnostics"]["tools"][0]["managed_cache_binary"],
+            "${managed_cache_source}/bin/example-runtime"
         );
         assert_eq!(
             materialization_plan

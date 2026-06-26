@@ -1377,6 +1377,9 @@ fn expanded_fuzz_component_path(
             return shellexpand::tilde(trimmed).to_string();
         }
     }
+    if let Ok(path) = crate::core::rig::resolve_component_path(&rig_context.spec, component_id) {
+        return path;
+    }
     expand_fuzz_rig_string(rig_context, fallback)
 }
 

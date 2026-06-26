@@ -1,5 +1,10 @@
 use std::collections::BTreeMap;
 
+use homeboy::core::agent_runtime_manifest::{
+    discover_agent_runtime_catalog, AgentRuntimeDiagnosticFollowup,
+    AgentRuntimeDiagnosticsContract, AgentRuntimeRuntimeDiagnosticDeclaration,
+    AgentRuntimeSourceConsistencyDiagnostic, AgentRuntimeToolDiagnosticDeclaration,
+};
 use homeboy::core::runner::RunnerActiveJobState;
 use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, RunnerTunnelMode};
 
@@ -91,7 +96,11 @@ fn selected_lab_runner_status(
         kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
         configured_executable: configured_executable.clone(),
         runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
-        wp_codebox_runtime: wp_codebox_runtime_output(Some(runner_id), &effective_env),
+        wp_codebox_runtime: declared_runtime_diagnostics_for_legacy(
+            "wp_codebox_runtime",
+            Some(runner_id),
+            &effective_env,
+        ),
         daemon_enabled: runner_config.settings.daemon,
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
@@ -143,153 +152,236 @@ fn lab_runner_homeboy_output(
     }
 }
 
-pub(crate) fn wp_codebox_tool_diagnostics(
+pub(crate) fn declared_tool_diagnostics_for_legacy(
+    legacy_output: &str,
+    runner_id: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Option<RunnerToolDiagnostics> {
+    declared_diagnostics_contracts()
+        .iter()
+        .flat_map(|contract| contract.tools.iter())
+        .find(|declaration| declaration.legacy_output.as_deref() == Some(legacy_output))
+        .map(|declaration| declared_tool_diagnostics(declaration, runner_id, env))
+}
+
+pub(crate) fn declared_runtime_diagnostics_for_legacy(
+    legacy_output: &str,
+    runner_id: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Option<WpCodeboxRuntimeOutput> {
+    declared_diagnostics_contracts()
+        .iter()
+        .flat_map(|contract| contract.runtimes.iter())
+        .find(|declaration| declaration.legacy_output.as_deref() == Some(legacy_output))
+        .map(|declaration| declared_runtime_diagnostics(declaration, runner_id, env))
+}
+
+pub(crate) fn declared_tool_diagnostics(
+    declaration: &AgentRuntimeToolDiagnosticDeclaration,
     runner_id: Option<&str>,
     env: &BTreeMap<String, String>,
 ) -> RunnerToolDiagnostics {
-    let configured = env
-        .get("HOMEBOY_WP_CODEBOX_BIN")
-        .cloned()
-        .or_else(|| env.get("HOMEBOY_SETTINGS_WP_CODEBOX_BIN").cloned());
-    let configured_binary_source = if env.contains_key("HOMEBOY_WP_CODEBOX_BIN") {
-        "HOMEBOY_WP_CODEBOX_BIN"
-    } else if env.contains_key("HOMEBOY_SETTINGS_WP_CODEBOX_BIN") {
-        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"
-    } else {
-        "unset"
-    };
-    let install_dir = env
-        .get("HOMEBOY_WP_CODEBOX_INSTALL_DIR")
-        .cloned()
-        .unwrap_or_else(|| "${HOME}/.cache/homeboy/wp-codebox".to_string());
-    let managed_cache_source = format!("{}/source", install_dir.trim_end_matches('/'));
-    let managed_cache_binary = format!("{managed_cache_source}/packages/cli/dist/index.js");
+    let (configured, configured_binary_source) =
+        configured_value(env, &declaration.configured_binary_env);
+    let install_dir = install_dir(
+        env,
+        declaration.install_dir_env.as_deref(),
+        declaration.default_install_dir.as_deref(),
+    );
+    let managed_cache_source =
+        render_diagnostic_template(&declaration.managed_cache_source, &install_dir, "");
+    let managed_cache_binary = render_diagnostic_template(
+        &declaration.managed_cache_binary,
+        &install_dir,
+        &managed_cache_source,
+    );
     RunnerToolDiagnostics {
-        tool: "wp-codebox",
+        tool: declaration.tool.clone(),
         configured_binary: configured,
         configured_binary_source,
         managed_cache_source,
         managed_cache_binary,
-        effective_binary_rule:
-            "managed cache binary wins when executable; otherwise configured binary, then PATH",
-        diagnostic_command: wp_codebox_effective_binary_command(runner_id),
+        effective_binary_rule: declaration.effective_binary_rule.clone(),
+        diagnostic_command: diagnostic_command(runner_id, &declaration.diagnostic_script),
     }
 }
 
-pub(crate) fn wp_codebox_runtime_output(
+pub(crate) fn declared_runtime_diagnostics(
+    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
     runner_id: Option<&str>,
     env: &BTreeMap<String, String>,
 ) -> WpCodeboxRuntimeOutput {
-    let configured = env
-        .get("HOMEBOY_WP_CODEBOX_BIN")
-        .cloned()
-        .or_else(|| env.get("HOMEBOY_SETTINGS_WP_CODEBOX_BIN").cloned());
-    let configured_binary_source = if env.contains_key("HOMEBOY_WP_CODEBOX_BIN") {
-        "HOMEBOY_WP_CODEBOX_BIN"
-    } else if env.contains_key("HOMEBOY_SETTINGS_WP_CODEBOX_BIN") {
-        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"
-    } else {
-        "unset"
-    };
-    let install_dir = env
-        .get("HOMEBOY_WP_CODEBOX_INSTALL_DIR")
-        .cloned()
-        .unwrap_or_else(|| "${HOME}/.cache/homeboy/wp-codebox".to_string());
-    let managed_cache_source = format!("{}/source", install_dir.trim_end_matches('/'));
-    let managed_cache_binary = format!("{managed_cache_source}/packages/cli/dist/index.js");
-    let expected_playground_path = format!("{managed_cache_source}/packages/playground");
-    let expected_core_path = env
-        .get("HOMEBOY_WP_CODEBOX_CORE_MODULE")
-        .cloned()
-        .unwrap_or_else(|| format!("{managed_cache_source}/packages/core"));
-    let diagnostics = wp_codebox_runtime_diagnostics(
-        configured.as_deref(),
+    let (configured, configured_binary_source) =
+        configured_value(env, &declaration.configured_binary_env);
+    let install_dir = install_dir(
+        env,
+        declaration.install_dir_env.as_deref(),
+        declaration.default_install_dir.as_deref(),
+    );
+    let managed_cache_source =
+        render_diagnostic_template(&declaration.managed_cache_source, &install_dir, "");
+    let managed_cache_binary = render_diagnostic_template(
+        &declaration.managed_cache_binary,
+        &install_dir,
         &managed_cache_source,
-        &expected_core_path,
+    );
+    let packages = declared_runtime_packages(declaration, env, &install_dir, &managed_cache_source);
+    let diagnostics = declared_runtime_source_diagnostics(
+        &declaration.source_consistency,
+        env,
+        configured.as_deref(),
+        &install_dir,
+        &managed_cache_source,
     );
 
     WpCodeboxRuntimeOutput {
-        tool: "wp-codebox",
+        tool: declaration.tool.clone(),
         configured_binary: configured,
         configured_binary_source,
         managed_cache_source: managed_cache_source.clone(),
         managed_cache_binary,
-        effective_binary_rule:
-            "managed cache binary wins when executable; otherwise configured binary, then PATH",
-        playground_package: WpCodeboxPackageRuntimeOutput {
-            package: "@automattic/wp-codebox-playground",
-            expected_path: expected_playground_path,
-            resolution: WpCodeboxProbeValue {
-                value: None,
-                source: "runtime_probe_command",
-            },
-        },
-        core_package: WpCodeboxPackageRuntimeOutput {
-            package: "@automattic/wp-codebox-core",
-            expected_path: expected_core_path,
-            resolution: WpCodeboxProbeValue {
-                value: None,
-                source: "runtime_probe_command",
-            },
-        },
-        source_git_sha: WpCodeboxProbeValue {
-            value: None,
-            source: "runtime_probe_command",
-        },
-        dist_build_freshness: WpCodeboxProbeValue {
-            value: None,
-            source: "runtime_probe_command",
-        },
-        runtime_probe_command: wp_codebox_runtime_probe_command(runner_id),
+        effective_binary_rule: declaration.effective_binary_rule.clone(),
+        playground_package: packages.first().cloned().unwrap_or_else(empty_package),
+        core_package: packages.get(1).cloned().unwrap_or_else(empty_package),
+        source_git_sha: declared_probe_value(declaration, "source_git_sha"),
+        dist_build_freshness: declared_probe_value(declaration, "dist_build_freshness"),
+        runtime_probe_command: diagnostic_command(runner_id, &declaration.runtime_probe_script),
         diagnostics,
     }
 }
 
-pub(crate) fn wp_codebox_runtime_diagnostics(
+pub(crate) fn declared_runtime_source_diagnostics(
+    declarations: &[AgentRuntimeSourceConsistencyDiagnostic],
+    env: &BTreeMap<String, String>,
     configured_binary: Option<&str>,
+    install_dir: &str,
     managed_cache_source: &str,
-    core_path: &str,
 ) -> Vec<WpCodeboxRuntimeDiagnostic> {
     let mut diagnostics = Vec::new();
-    if let Some(configured_binary) = configured_binary {
-        if !configured_binary.starts_with(managed_cache_source) {
+    for declaration in declarations {
+        let path = match declaration.path.as_str() {
+            "configured_binary" => configured_binary.map(str::to_string),
+            other => env.get(other).cloned(),
+        }
+        .unwrap_or_else(|| {
+            render_diagnostic_template(&declaration.path, install_dir, managed_cache_source)
+        });
+        let root = render_diagnostic_template(&declaration.root, install_dir, managed_cache_source);
+        if !path.starts_with(&root) {
             diagnostics.push(WpCodeboxRuntimeDiagnostic {
-                id: "wp_codebox.mixed_cli_source",
-                severity: "warning",
-                message: format!(
-                    "Configured WP Codebox CLI `{configured_binary}` is outside managed cache `{managed_cache_source}`; runner jobs may mix a stale CLI with managed package sources."
-                ),
-                remediation: "Unset HOMEBOY_WP_CODEBOX_BIN/HOMEBOY_SETTINGS_WP_CODEBOX_BIN or point it at the managed cache binary reported here.".to_string(),
+                id: declaration.id.clone(),
+                severity: declaration.severity.clone(),
+                message: render_path_message(&declaration.message, &path, &root),
+                remediation: declaration.remediation.clone(),
             });
         }
-    }
-    if !core_path.starts_with(managed_cache_source) {
-        diagnostics.push(WpCodeboxRuntimeDiagnostic {
-            id: "wp_codebox.mixed_core_source",
-            severity: "warning",
-            message: format!(
-                "Resolved WP Codebox core path `{core_path}` is outside managed cache `{managed_cache_source}`; runner jobs may mix core and playground builds."
-            ),
-            remediation: "Refresh the WordPress extension setup/runtime env so HOMEBOY_WP_CODEBOX_CORE_MODULE resolves from the same managed WP Codebox checkout used by the CLI.".to_string(),
-        });
     }
     diagnostics
 }
 
-pub(crate) fn wp_codebox_effective_binary_command(runner_id: Option<&str>) -> String {
-    let script = "configured=${HOMEBOY_WP_CODEBOX_BIN:-${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}}; install_dir=${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-$HOME/.cache/homeboy/wp-codebox}; managed_source=$install_dir/source; managed_binary=$managed_source/packages/cli/dist/index.js; if [ -x \"$managed_binary\" ]; then effective=$managed_binary; source=managed_cache; elif [ -n \"$configured\" ]; then effective=$configured; source=configured; else effective=$(command -v wp-codebox 2>/dev/null || true); source=path; fi; revision=$(git -C \"$managed_source\" rev-parse --short HEAD 2>/dev/null || true); printf 'configured_binary=%s\nmanaged_cache_source=%s\nmanaged_cache_binary=%s\neffective_binary=%s\neffective_source=%s\nmanaged_cache_revision=%s\n' \"${configured:-}\" \"$managed_source\" \"$managed_binary\" \"${effective:-}\" \"$source\" \"${revision:-}\"";
-    match runner_id {
-        Some(runner_id) => format!(
-            "homeboy runner exec {} --raw -- bash -lc {}",
-            shell_arg(runner_id),
-            shell_arg(script)
-        ),
-        None => format!("bash -lc {}", shell_arg(script)),
+fn declared_diagnostics_contracts() -> Vec<AgentRuntimeDiagnosticsContract> {
+    discover_agent_runtime_catalog()
+        .manifests
+        .into_iter()
+        .map(|manifest| manifest.materialization.diagnostics)
+        .filter(|contract| !contract.is_empty())
+        .collect()
+}
+
+fn configured_value(env: &BTreeMap<String, String>, keys: &[String]) -> (Option<String>, String) {
+    for key in keys {
+        if let Some(value) = env.get(key) {
+            return (Some(value.clone()), key.clone());
+        }
+    }
+    (None, "unset".to_string())
+}
+
+fn install_dir(
+    env: &BTreeMap<String, String>,
+    key: Option<&str>,
+    default_value: Option<&str>,
+) -> String {
+    key.and_then(|key| env.get(key).cloned())
+        .or_else(|| default_value.map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn render_diagnostic_template(
+    template: &str,
+    install_dir: &str,
+    managed_cache_source: &str,
+) -> String {
+    template
+        .replace("${install_dir}", install_dir.trim_end_matches('/'))
+        .replace(
+            "${managed_cache_source}",
+            managed_cache_source.trim_end_matches('/'),
+        )
+}
+
+fn render_path_message(template: &str, path: &str, root: &str) -> String {
+    template.replace("${path}", path).replace("${root}", root)
+}
+
+fn declared_runtime_packages(
+    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
+    env: &BTreeMap<String, String>,
+    install_dir: &str,
+    managed_cache_source: &str,
+) -> Vec<WpCodeboxPackageRuntimeOutput> {
+    declaration
+        .packages
+        .iter()
+        .map(|package| WpCodeboxPackageRuntimeOutput {
+            package: package.package.clone(),
+            expected_path: package
+                .env_override
+                .as_deref()
+                .and_then(|key| env.get(key).cloned())
+                .unwrap_or_else(|| {
+                    render_diagnostic_template(
+                        &package.expected_path,
+                        install_dir,
+                        managed_cache_source,
+                    )
+                }),
+            resolution: WpCodeboxProbeValue {
+                value: None,
+                source: "runtime_probe_command".to_string(),
+            },
+        })
+        .collect()
+}
+
+fn empty_package() -> WpCodeboxPackageRuntimeOutput {
+    WpCodeboxPackageRuntimeOutput {
+        package: String::new(),
+        expected_path: String::new(),
+        resolution: WpCodeboxProbeValue {
+            value: None,
+            source: "runtime_probe_command".to_string(),
+        },
     }
 }
 
-pub(crate) fn wp_codebox_runtime_probe_command(runner_id: Option<&str>) -> String {
-    let script = "configured=${HOMEBOY_WP_CODEBOX_BIN:-${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}}; install_dir=${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-$HOME/.cache/homeboy/wp-codebox}; managed_source=$install_dir/source; managed_binary=$managed_source/packages/cli/dist/index.js; if [ -x \"$managed_binary\" ]; then effective=$managed_binary; source=managed_cache; elif [ -n \"$configured\" ]; then effective=$configured; source=configured; else effective=$(command -v wp-codebox 2>/dev/null || true); source=path; fi; resolve_pkg() { node -e 'const path=require(\"path\"); try { const p=require.resolve(process.argv[2] + \"/package.json\", { paths: [process.argv[1]] }); process.stdout.write(path.dirname(p)); } catch (error) {}' \"$managed_source\" \"$1\" 2>/dev/null || true; }; playground=$(resolve_pkg @automattic/wp-codebox-playground); core=$(resolve_pkg @automattic/wp-codebox-core); if [ -z \"$core\" ] && [ -n \"${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}\" ]; then core=$HOMEBOY_WP_CODEBOX_CORE_MODULE; fi; revision=$(git -C \"$managed_source\" rev-parse HEAD 2>/dev/null || true); if [ ! -e \"$managed_binary\" ]; then dist_state=missing; elif find \"$managed_source/packages/cli/src\" -type f -newer \"$managed_binary\" 2>/dev/null | read newer; then dist_state=stale; else dist_state=fresh; fi; printf 'cli_binary=%s\ncli_binary_source=%s\nmanaged_cache_source=%s\nmanaged_cache_binary=%s\nplayground_path=%s\ncore_path=%s\nsource_git_sha=%s\ndist_build_freshness=%s\n' \"${effective:-}\" \"$source\" \"$managed_source\" \"$managed_binary\" \"${playground:-}\" \"${core:-}\" \"${revision:-}\" \"$dist_state\"";
+fn declared_probe_value(
+    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
+    field: &str,
+) -> WpCodeboxProbeValue {
+    let source = declaration
+        .probes
+        .iter()
+        .find(|probe| probe.field == field)
+        .map(|probe| probe.source.clone())
+        .unwrap_or_else(|| "runtime_probe_command".to_string());
+    WpCodeboxProbeValue {
+        value: None,
+        source,
+    }
+}
+
+fn diagnostic_command(runner_id: Option<&str>, script: &str) -> String {
     match runner_id {
         Some(runner_id) => format!(
             "homeboy runner exec {} --raw -- bash -lc {}",
@@ -368,39 +460,41 @@ fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
 pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
     let mut followups = vec![
         LabFollowup {
-            label: "recent_runs",
+            label: "recent_runs".to_string(),
             command: "homeboy runs list --limit 5".to_string(),
-            purpose: "Find recent persisted run records before digging into runner state.",
+            purpose: "Find recent persisted run records before digging into runner state."
+                .to_string(),
         },
         LabFollowup {
-            label: "latest_bench_run",
+            label: "latest_bench_run".to_string(),
             command: "homeboy runs latest-run --kind bench".to_string(),
-            purpose: "Resolve the latest benchmark run id for evidence inspection.",
+            purpose: "Resolve the latest benchmark run id for evidence inspection.".to_string(),
         },
         LabFollowup {
-            label: "latest_fuzz_run",
+            label: "latest_fuzz_run".to_string(),
             command: "homeboy runs latest-run --kind fuzz".to_string(),
-            purpose: "Resolve the latest fuzz run id for evidence inspection.",
+            purpose: "Resolve the latest fuzz run id for evidence inspection.".to_string(),
         },
         LabFollowup {
-            label: "run_artifacts",
+            label: "run_artifacts".to_string(),
             command: "homeboy runs artifacts <run-id>".to_string(),
-            purpose: "List recorded run artifacts through Homeboy.",
+            purpose: "List recorded run artifacts through Homeboy.".to_string(),
         },
         LabFollowup {
-            label: "run_evidence",
+            label: "run_evidence".to_string(),
             command: "homeboy runs evidence <run-id>".to_string(),
-            purpose: "Show stable evidence summary and reviewer-facing commands for one run.",
+            purpose: "Show stable evidence summary and reviewer-facing commands for one run."
+                .to_string(),
         },
         LabFollowup {
-            label: "run_refs",
+            label: "run_refs".to_string(),
             command: "homeboy runs refs --kind bench --limit 10".to_string(),
-            purpose: "List recent benchmark run and artifact refs.",
+            purpose: "List recent benchmark run and artifact refs.".to_string(),
         },
         LabFollowup {
-            label: "fuzz_run_refs",
+            label: "fuzz_run_refs".to_string(),
             command: "homeboy runs refs --kind fuzz --limit 10".to_string(),
-            purpose: "List recent fuzz run and artifact refs.",
+            purpose: "List recent fuzz run and artifact refs.".to_string(),
         },
     ];
     let Some(runner_id) = runner_id else {
@@ -409,54 +503,73 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
     let runner_arg = shell_arg(runner_id);
     followups.extend([
         LabFollowup {
-            label: "doctor",
+            label: "doctor".to_string(),
             command: format!("homeboy runner doctor {runner_arg} --scope lab-offload"),
-            purpose: "Probe runner tools, workspace writability, artifact storage, and Lab offload readiness.",
+            purpose: "Probe runner tools, workspace writability, artifact storage, and Lab offload readiness.".to_string(),
         },
         LabFollowup {
-            label: "refresh_homeboy",
+            label: "refresh_homeboy".to_string(),
             command: format!("homeboy runner refresh-homeboy {runner_arg} --ref main --reconnect"),
-            purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.",
+            purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.".to_string(),
         },
         LabFollowup {
-            label: "env",
+            label: "env".to_string(),
             command: format!("homeboy runner env {runner_arg}"),
-            purpose: "Show the redacted environment Homeboy injects into runner jobs.",
+            purpose: "Show the redacted environment Homeboy injects into runner jobs.".to_string(),
         },
         LabFollowup {
-            label: "homeboy_binary_refresh",
+            label: "homeboy_binary_refresh".to_string(),
             command: format!(
                 "homeboy runner disconnect {runner_arg} && homeboy runner connect {runner_arg}"
             ),
-            purpose: "Restart the runner daemon so offload uses the currently configured Homeboy binary.",
+            purpose: "Restart the runner daemon so offload uses the currently configured Homeboy binary.".to_string(),
         },
         LabFollowup {
-            label: "homeboy_binary_upgrade",
+            label: "homeboy_binary_upgrade".to_string(),
             command: format!("homeboy upgrade --force --upgrade-runner {runner_arg}"),
-            purpose: "Upgrade the Homeboy binary configured for this runner before reconnecting stale runs.",
+            purpose: "Upgrade the Homeboy binary configured for this runner before reconnecting stale runs.".to_string(),
         },
         LabFollowup {
-            label: "wp_codebox_effective_binary",
-            command: wp_codebox_effective_binary_command(Some(runner_id)),
-            purpose: "Print the configured WP Codebox binary, managed cache binary/source, effective binary/source, and managed cache revision used by runner workloads.",
-        },
-        LabFollowup {
-            label: "exec",
+            label: "exec".to_string(),
             command: format!("homeboy runner exec {runner_arg} -- <command>"),
-            purpose: "Run a managed follow-up command through Homeboy instead of opening an ad-hoc shell.",
+            purpose: "Run a managed follow-up command through Homeboy instead of opening an ad-hoc shell.".to_string(),
         },
     ]);
+    followups.extend(declared_followups_for_legacy(
+        "managed_followups",
+        Some(runner_id),
+    ));
     if let Ok(path) = std::env::current_dir() {
         followups.push(LabFollowup {
-            label: "workspace_sync",
+            label: "workspace_sync".to_string(),
             command: format!(
                 "homeboy runner workspace sync {runner_arg} --path {} --mode snapshot",
                 shell_arg(&path.display().to_string())
             ),
-            purpose: "Materialize the current checkout into the runner workspace before a replay or follow-up run.",
+            purpose: "Materialize the current checkout into the runner workspace before a replay or follow-up run.".to_string(),
         });
     }
     followups
+}
+
+fn declared_followups_for_legacy(legacy_output: &str, runner_id: Option<&str>) -> Vec<LabFollowup> {
+    declared_diagnostics_contracts()
+        .iter()
+        .flat_map(|contract| contract.followups.iter())
+        .filter(|followup| followup.legacy_output.as_deref() == Some(legacy_output))
+        .map(|followup| declared_followup(followup, runner_id))
+        .collect()
+}
+
+fn declared_followup(
+    declaration: &AgentRuntimeDiagnosticFollowup,
+    runner_id: Option<&str>,
+) -> LabFollowup {
+    LabFollowup {
+        label: declaration.label.clone(),
+        command: diagnostic_command(runner_id, &declaration.command_script),
+        purpose: declaration.purpose.clone(),
+    }
 }
 
 fn shell_arg(value: &str) -> String {

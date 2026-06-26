@@ -123,6 +123,24 @@ pub(crate) fn run_runner_resident_lab_offload(
     lab_metadata["job_scoped_overrides"] = job_scoped_overrides_metadata(&request.job_overrides);
     let secret_env_handoff = build_lab_secret_env_handoff_plan(&remapped_args, Default::default())?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
+    let base_env = build_lab_offload_env_with_passthroughs(&lab_metadata);
+    lab_metadata["env_resolution"] = lab_env_resolution_report(vec![
+        LabEnvResolutionLayer {
+            source: "lab_metadata_and_passthroughs",
+            env: base_env,
+            secret_names: Vec::new(),
+        },
+        LabEnvResolutionLayer {
+            source: "secret_env_plan_env_delta",
+            env: secret_env_handoff.env_delta.clone(),
+            secret_names: secret_env_handoff.secret_env_names.clone(),
+        },
+        LabEnvResolutionLayer {
+            source: "job_override",
+            env: request.job_overrides.env.clone(),
+            secret_names: request.job_overrides.secret_env_names.clone(),
+        },
+    ]);
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     env.extend(secret_env_handoff.env_delta);
     for (name, value) in &request.job_overrides.env {

@@ -524,13 +524,14 @@ pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result
     let Some((component_id, component)) = spec.components.iter().next() else {
         return Ok(None);
     };
+    let resolved_component_path = rig::resolve_component_path(&spec, component_id)?;
     let declared_checkout_root = component
         .checkout_root
         .as_deref()
-        .unwrap_or(component.path.as_str());
+        .unwrap_or(resolved_component_path.as_str());
     let declared_required_subpath = required_component_subpath(
         Path::new(&expanded_local_path(&spec, declared_checkout_root)),
-        Path::new(&expanded_local_path(&spec, &component.path)),
+        Path::new(&resolved_component_path),
         &rig_ids[0],
         component_id,
     )?;
@@ -553,12 +554,13 @@ pub(super) fn lab_offload_rig_component_dependencies(
         let spec = rig::load(&rig_id)?;
         let single_component = spec.components.len() == 1;
         for (component_id, component) in &spec.components {
+            let resolved_component_path = rig::resolve_component_path(&spec, component_id)?;
             let declared_checkout_root = component
                 .checkout_root
-                .as_deref()
-                .unwrap_or(component.path.as_str());
-            let declared_local_checkout_root = expanded_local_path(&spec, declared_checkout_root);
-            let declared_local_component_path = expanded_local_path(&spec, &component.path);
+                .clone()
+                .unwrap_or_else(|| resolved_component_path.clone());
+            let declared_local_checkout_root = expanded_local_path(&spec, &declared_checkout_root);
+            let declared_local_component_path = resolved_component_path;
             let declared_required_subpath = required_component_subpath(
                 Path::new(&declared_local_checkout_root),
                 Path::new(&declared_local_component_path),
@@ -586,7 +588,7 @@ pub(super) fn lab_offload_rig_component_dependencies(
                 }
             } else {
                 (
-                    declared_checkout_root.to_string(),
+                    declared_checkout_root,
                     declared_local_checkout_root,
                     declared_local_component_path,
                 )
@@ -610,7 +612,7 @@ pub(super) fn lab_offload_rig_component_dependencies(
                 declared_checkout_root: checkout_root.to_string(),
                 required_subpath,
                 remote_url: component.remote_url.clone(),
-                pinned_ref: component.r#ref.clone(),
+                pinned_ref: rig::component_ref(component),
             });
         }
     }

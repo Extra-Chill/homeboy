@@ -14,6 +14,7 @@ use crate::core::agent_task_loop_controller::{
 };
 use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
 use crate::test_support::with_isolated_home;
+use clap::Parser;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -3334,6 +3335,7 @@ fn run_failure_summary_normalizes_nested_provider_failure() {
             "diagnostic": "PHP fatal: Uncaught Error: Class 'Foo' not found",
         },
         "execution": {
+            "runner_id": "homeboy-lab",
             "runner_job_id": "job-77",
             "diagnostics": [
                 { "message": "PHP fatal: Uncaught Error: Class 'Foo' not found" }
@@ -3361,6 +3363,7 @@ fn run_failure_summary_normalizes_nested_provider_failure() {
     assert_eq!(summary.provider.as_deref(), Some("wp-codebox"));
     assert_eq!(summary.failure_phase.as_deref(), Some("plugin_activation"));
     assert!(summary.next_command.contains("loop-9"));
+    assert_homeboy_command_parses(&summary.next_command);
 
     // Durable evidence refs: persisted run evidence, runner job log, per-run
     // evidence, and the declared provider artifact bundle.
@@ -3375,11 +3378,12 @@ fn run_failure_summary_normalizes_nested_provider_failure() {
     assert!(summary
         .evidence_refs
         .iter()
-        .any(|reference| reference.uri.contains("job-77")));
+        .any(|reference| reference.uri == "homeboy runner job logs homeboy-lab job-77"));
     assert!(summary
         .evidence_refs
         .iter()
         .any(|reference| reference.uri == "file:///runs/run-42/codebox.log"));
+    assert_emitted_homeboy_evidence_commands_parse(&summary);
 }
 
 #[test]
@@ -3400,11 +3404,13 @@ fn run_failure_summary_handles_runner_block_without_diagnostic_message() {
     assert_eq!(summary.owner_surface, "lab_runner");
     assert!(summary.root_blocker.contains("runner"));
     assert!(summary.next_command.contains("--resume"));
+    assert_homeboy_command_parses(&summary.next_command);
     // Still always surfaces the persisted run-evidence ref.
     assert!(summary
         .evidence_refs
         .iter()
         .any(|reference| reference.kind == "run_evidence"));
+    assert_emitted_homeboy_evidence_commands_parse(&summary);
 }
 
 #[test]
@@ -3421,6 +3427,28 @@ fn run_failure_summary_falls_back_to_stopped_reason() {
     assert!(summary.root_blocker.contains("max-actions"));
     assert_eq!(summary.phase.as_deref(), Some("plan"));
     assert!(!summary.evidence_refs.is_empty());
+    assert_homeboy_command_parses(&summary.next_command);
+    assert_emitted_homeboy_evidence_commands_parse(&summary);
+}
+
+fn assert_emitted_homeboy_evidence_commands_parse(summary: &ControllerRunFailureSummary) {
+    for reference in &summary.evidence_refs {
+        if reference.uri.starts_with("homeboy ") {
+            assert_homeboy_command_parses(&reference.uri);
+        }
+    }
+}
+
+fn assert_homeboy_command_parses(command: &str) {
+    let command = command.split('#').next().unwrap_or(command).trim();
+    let argv: Vec<&str> = command.split_whitespace().collect();
+    assert!(
+        !argv.is_empty(),
+        "expected non-empty emitted Homeboy command: {command:?}"
+    );
+    crate::cli_surface::Cli::try_parse_from(argv).unwrap_or_else(|error| {
+        panic!("emitted Homeboy command did not parse: {command}\n{error}")
+    });
 }
 
 #[test]

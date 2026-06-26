@@ -95,15 +95,19 @@ The installed rig keeps the base `pipeline.check` and `components.app.branch`, w
 
 ## `ComponentSpec`
 
-Components are local checkouts used by pipeline steps. They are intentionally decoupled from the global component registry so package rigs can work on machines where the component has not been registered globally.
+Components are local checkouts used by pipeline steps. Portable package rigs can keep declaring explicit paths. Rigs that run on machines with Homeboy component registrations can instead declare a registry-backed component with `component_id`, keeping env-expanded path settings as a fallback during rollout.
 
 | Field | Type | Description |
 |---|---|---|
 | `path` | string | Filesystem path to the checkout. Supports `~`, `${env.NAME}`, and use through `${components.<id>.path}`. |
+| `component_id` | string | Optional Homeboy component registry ID to resolve when `path` is omitted or expands to an empty value. Defaults to the component map key. |
+| `path_setting` | string | Optional environment variable name whose value supplies the path when explicit `path` and registry lookup are unavailable. |
 | `remote_url` | string | Optional source repository URL for triage/reporting fallback. |
 | `triage_remote_url` | string | Optional reporting-only GitHub remote override. |
 | `stack` | string | Stack ID synced by `homeboy rig sync` and by explicit `stack` pipeline steps. The component `path` must resolve to the same checkout as the stack's `component_path`. |
 | `branch` | string | Expected branch hint surfaced to humans in status/spec output. |
+| `ref` | string | Explicit pinned ref for Lab dependency materialization. |
+| `default_ref` | string | Default Lab dependency ref used when `ref` is omitted. |
 | `extensions` | object | Optional rig-owned scoped extension config, mainly for rig-pinned bench dispatch. |
 
 Example:
@@ -115,6 +119,20 @@ Example:
       "path": "~/Developer/studio",
       "stack": "studio-combined",
       "branch": "dev/combined-fixes"
+    }
+  }
+}
+```
+
+Registry-backed example with an env path fallback:
+
+```jsonc
+{
+  "components": {
+    "studio": {
+      "component_id": "studio",
+      "default_ref": "origin/main",
+      "path_setting": "HOMEBOY_RIG_COMPONENT_PATH__STUDIO_ADMIN_PERF__STUDIO"
     }
   }
 }
