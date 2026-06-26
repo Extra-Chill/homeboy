@@ -1,7 +1,9 @@
 //! Split from `agent_task_controller_service` god file (#5208). Structural move only.
 #![allow(unused_imports)]
 use super::*;
+use std::fs;
 use std::io::{self, Read};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -389,6 +391,11 @@ where
             executor,
             dispatch,
         ),
+        AgentTaskLoopPolicyAction::RunCommand {
+            dedupe_key,
+            entity_id,
+            request,
+        } => execute_run_command_action(record, action, dedupe_key, entity_id.as_deref(), request),
         AgentTaskLoopPolicyAction::FanOut {
             dedupe_key,
             entity_ids,
@@ -534,6 +541,227 @@ where
     }
 }
 
+fn execute_run_command_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    dedupe_key: &str,
+    entity_id: Option<&str>,
+    request: &Value,
+) -> Result<(Value, i32)> {
+    let request = hydrate_consumed_artifacts(record, request);
+    let request = request_with_required_workflow_artifacts(record, &request);
+    let execution = request.get("execution").unwrap_or(&Value::Null);
+    let command = required_string(execution, "command")?;
+    let args = execution
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|args| {
+            args.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let required_artifacts = request
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .map(|artifacts| {
+            artifacts
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let io_dir = loop_action_io_dir(&record.loop_id, &action.action_id)?;
+    fs::create_dir_all(&io_dir).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let input_path = io_dir.join("input.json");
+    let output_path = io_dir.join("output.json");
+    let input = serde_json::json!({
+        "schema": "homeboy/agent-task-loop-command-input/v1",
+        "loop_id": record.loop_id,
+        "action_id": action.action_id,
+        "dedupe_key": dedupe_key,
+        "entity_id": entity_id,
+        "request": request,
+        "controller": &*record,
+    });
+    write_json_file(&input_path, &input)?;
+
+    let mut process = Command::new(&command);
+    process.args(&args);
+    if let Some(cwd) = execution
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+    {
+        process.current_dir(cwd);
+    }
+    process.env("HOMEBOY_LOOP_ACTION_INPUT", &input_path);
+    process.env("HOMEBOY_LOOP_ACTION_OUTPUT", &output_path);
+    process.env("HOMEBOY_LOOP_ID", &record.loop_id);
+    process.env("HOMEBOY_LOOP_ACTION_ID", &action.action_id);
+    process.env("HOMEBOY_LOOP_ACTION_DEDUPE_KEY", dedupe_key);
+
+    let output = process
+        .output()
+        .map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let exit_code = output.status.code().unwrap_or(1);
+    let result = if output_path.exists() {
+        read_json_file(&output_path)?
+    } else {
+        serde_json::json!({})
+    };
+    let artifacts = result.get("artifacts").cloned().unwrap_or(Value::Null);
+    let missing = missing_required_command_artifacts(&required_artifacts, &artifacts);
+    let command_success = exit_code == 0 && missing.is_empty();
+    let effective_exit_code = if command_success { 0 } else { 1 };
+
+    if command_success {
+        record_run_command_outputs(record, action, dedupe_key, entity_id, &request, &artifacts)?;
+    }
+
+    Ok((
+        serde_json::json!({
+            "mode": "run_command",
+            "command": command,
+            "args": args,
+            "input_path": input_path,
+            "output_path": output_path,
+            "exit_code": exit_code,
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+            "missing_artifacts": missing,
+            "result": result,
+        }),
+        effective_exit_code,
+    ))
+}
+
+fn loop_action_io_dir(loop_id: &str, action_id: &str) -> Result<PathBuf> {
+    Ok(crate::core::paths::homeboy_data()?
+        .join("agent-task-loop-actions")
+        .join(sanitize_loop_action_id(loop_id))
+        .join(action_id))
+}
+
+fn sanitize_loop_action_id(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn write_json_file(path: &PathBuf, value: &Value) -> Result<()> {
+    let payload = serde_json::to_string_pretty(value)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    fs::write(path, format!("{payload}\n"))
+        .map_err(|error| Error::internal_io(error.to_string(), None))
+}
+
+fn read_json_file(path: &PathBuf) -> Result<Value> {
+    let payload =
+        fs::read_to_string(path).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    serde_json::from_str(&payload).map_err(|error| Error::internal_json(error.to_string(), None))
+}
+
+fn missing_required_command_artifacts(required: &[String], artifacts: &Value) -> Vec<String> {
+    required
+        .iter()
+        .filter(|artifact| artifacts.get(artifact.as_str()).is_none_or(Value::is_null))
+        .cloned()
+        .collect()
+}
+
+fn record_run_command_outputs(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    dedupe_key: &str,
+    entity_id: Option<&str>,
+    request: &Value,
+    artifacts: &Value,
+) -> Result<()> {
+    let run_id = format!("{}:{}", record.loop_id, action.action_id);
+    let artifact_refs = artifact_refs_from_command_result(artifacts);
+    persist_controller_artifacts(&record.loop_id, &action.action_id, artifacts)?;
+    if let Some(entity_id) = entity_id {
+        if let Some(entity) = record.entities.get_mut(entity_id) {
+            entity.artifact_refs.extend(artifact_refs.clone());
+        }
+    }
+    if !record
+        .task_lineage
+        .iter()
+        .any(|lineage| lineage.run_id == run_id)
+    {
+        record.task_lineage.push(AgentTaskLoopTaskLineage {
+            run_id: run_id.clone(),
+            task_id: None,
+            parent_run_id: None,
+            parent_task_id: None,
+            entity_id: entity_id.map(str::to_string),
+            dedupe_key: Some(dedupe_key.to_string()),
+            artifact_refs,
+            inputs: request.clone(),
+            outputs: serde_json::json!({ "artifacts": artifacts }),
+        });
+    }
+    Ok(())
+}
+
+fn persist_controller_artifacts(loop_id: &str, action_id: &str, artifacts: &Value) -> Result<()> {
+    let Some(object) = artifacts.as_object() else {
+        return Ok(());
+    };
+    if object.is_empty() {
+        return Ok(());
+    }
+    let root = crate::core::paths::artifact_root()?
+        .join("agent-task-loop-controller")
+        .join(sanitize_loop_action_id(loop_id))
+        .join(action_id);
+    fs::create_dir_all(&root).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    for (artifact_id, artifact) in object {
+        let path = root.join(format!("{}.json", sanitize_loop_action_id(artifact_id)));
+        write_json_file(&path, artifact)?;
+    }
+    Ok(())
+}
+
+fn artifact_refs_from_command_result(artifacts: &Value) -> Vec<AgentTaskLoopArtifactRef> {
+    let Some(object) = artifacts.as_object() else {
+        return Vec::new();
+    };
+    object
+        .iter()
+        .map(|(artifact_id, artifact)| {
+            let uri = artifact
+                .get("artifact_url")
+                .or_else(|| artifact.get("url"))
+                .or_else(|| artifact.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or(artifact_id)
+                .to_string();
+            AgentTaskLoopArtifactRef {
+                uri,
+                kind: artifact
+                    .get("schema")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                role: None,
+                label: Some(artifact_id.clone()),
+                semantic_key: None,
+            }
+        })
+        .collect()
+}
+
 pub(super) fn execute_retry_action(
     record: &mut AgentTaskLoopControllerRecord,
     action: &AgentTaskLoopPolicyActionRecord,
@@ -644,7 +872,8 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
-    let request = request_with_required_workflow_artifacts(record, request);
+    let request = hydrate_consumed_artifacts(record, request);
+    let request = request_with_required_workflow_artifacts(record, &request);
     let request = &request;
     let mode = request
         .get("mode")

@@ -915,8 +915,21 @@ pub(super) fn compile_loop_spec_workflow(
     spec: &AgentTaskRepoLoopSpec,
     workflow: &AgentTaskRepoLoopSpecWorkflow,
 ) -> Result<AgentTaskLoopPolicyAction> {
-    let request = workflow_dispatch_request(spec, workflow)?;
     let dedupe_key = format!("workflow:{}", workflow.workflow_id);
+    if workflow
+        .runtime_execution
+        .get("kind")
+        .and_then(Value::as_str)
+        == Some("command")
+    {
+        return Ok(AgentTaskLoopPolicyAction::RunCommand {
+            dedupe_key,
+            entity_id: None,
+            request: workflow_command_request(workflow),
+        });
+    }
+
+    let request = workflow_dispatch_request(spec, workflow)?;
     let fan_out_entity_ids = workflow_fan_out_entity_ids(workflow)?;
     if fan_out_entity_ids.is_empty() {
         Ok(AgentTaskLoopPolicyAction::SpawnTask {
@@ -938,6 +951,18 @@ pub(super) fn compile_loop_spec_workflow(
             request_template: request,
         })
     }
+}
+
+fn workflow_command_request(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
+    serde_json::json!({
+        "mode": "command",
+        "workflow_id": workflow.workflow_id,
+        "consumes": workflow.inputs.get("consumes").cloned().unwrap_or(Value::Null),
+        "artifacts": workflow.artifacts,
+        "execution": workflow.runtime_execution,
+        "runtime_execution": workflow.runtime_execution,
+        "inputs": workflow.inputs,
+    })
 }
 
 fn workflow_fan_out_entity_ids(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Result<Vec<String>> {

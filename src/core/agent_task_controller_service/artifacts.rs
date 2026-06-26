@@ -230,6 +230,218 @@ pub(super) fn request_with_required_workflow_artifacts(
     Value::Object(request)
 }
 
+pub(super) fn hydrate_consumed_artifacts(
+    record: &AgentTaskLoopControllerRecord,
+    request: &Value,
+) -> Value {
+    let consumed = consumed_artifact_ids(request);
+    if consumed.is_empty() {
+        return request.clone();
+    }
+
+    let mut artifacts = serde_json::Map::new();
+    for artifact_id in consumed {
+        if let Some(artifact) = find_controller_artifact(record, &artifact_id) {
+            artifacts.insert(artifact_id, artifact);
+        }
+    }
+    if artifacts.is_empty() {
+        return request.clone();
+    }
+
+    let mut hydrated = request.clone();
+    merge_request_input_artifacts(&mut hydrated, &artifacts);
+    merge_runtime_execution_input_artifacts(&mut hydrated, &artifacts);
+    merge_dispatch_context_artifacts(&mut hydrated, &artifacts);
+    hydrated
+}
+
+fn consumed_artifact_ids(request: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    append_string_array(&mut ids, request.get("consumes"));
+    append_string_array(
+        &mut ids,
+        request
+            .get("inputs")
+            .and_then(|inputs| inputs.get("consumes")),
+    );
+    if let Some(context) = request
+        .get("dispatch")
+        .and_then(|dispatch| dispatch.get("client_context"))
+        .and_then(Value::as_str)
+        .and_then(|context| serde_json::from_str::<Value>(context).ok())
+    {
+        append_string_array(&mut ids, context.get("consumes"));
+        append_string_array(
+            &mut ids,
+            context
+                .get("inputs")
+                .and_then(|inputs| inputs.get("consumes")),
+        );
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn append_string_array(ids: &mut Vec<String>, value: Option<&Value>) {
+    let Some(values) = value.and_then(Value::as_array) else {
+        return;
+    };
+    ids.extend(
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    );
+}
+
+fn find_controller_artifact(
+    record: &AgentTaskLoopControllerRecord,
+    artifact_id: &str,
+) -> Option<Value> {
+    for lineage in record.task_lineage.iter().rev() {
+        if let Some(artifact) = artifact_from_outputs(&lineage.outputs, artifact_id) {
+            return Some(artifact);
+        }
+    }
+    for event in record.history.iter().rev() {
+        if let Some(artifact) = artifact_from_history_payload(&event.payload, artifact_id) {
+            return Some(artifact);
+        }
+    }
+    None
+}
+
+fn artifact_from_outputs(outputs: &Value, artifact_id: &str) -> Option<Value> {
+    outputs
+        .get("artifacts")
+        .and_then(|artifacts| artifacts.get(artifact_id))
+        .or_else(|| {
+            outputs
+                .get("typed_artifacts")
+                .and_then(|artifacts| artifacts.get(artifact_id))
+        })
+        .cloned()
+}
+
+fn artifact_from_history_payload(payload: &Value, artifact_id: &str) -> Option<Value> {
+    let result = payload.get("execution")?.get("result")?;
+    if let Some(artifact) = artifact_from_outputs(result, artifact_id) {
+        return Some(artifact);
+    }
+    let outcomes = result
+        .get("aggregate")
+        .and_then(|aggregate| aggregate.get("outcomes"))
+        .and_then(Value::as_array)?;
+    for outcome in outcomes.iter().rev() {
+        if let Some(artifact) =
+            artifact_from_outputs(outcome.get("outputs").unwrap_or(&Value::Null), artifact_id)
+        {
+            return Some(artifact);
+        }
+        if let Some(artifact) = outcome
+            .get("metadata")
+            .and_then(|metadata| metadata.get("typed_artifacts"))
+            .and_then(|artifacts| artifacts.get(artifact_id))
+            .cloned()
+        {
+            return Some(artifact);
+        }
+    }
+    None
+}
+
+fn merge_request_input_artifacts(request: &mut Value, artifacts: &serde_json::Map<String, Value>) {
+    let Some(object) = request.as_object_mut() else {
+        return;
+    };
+    let inputs = object
+        .entry("inputs".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(inputs) = inputs.as_object_mut() else {
+        return;
+    };
+    let artifact_inputs = inputs
+        .entry("artifacts".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(artifact_inputs) = artifact_inputs.as_object_mut() else {
+        return;
+    };
+    for (artifact_id, artifact) in artifacts {
+        artifact_inputs.insert(artifact_id.clone(), artifact.clone());
+    }
+    insert_artifact_aliases(inputs, artifacts);
+}
+
+fn merge_runtime_execution_input_artifacts(
+    request: &mut Value,
+    artifacts: &serde_json::Map<String, Value>,
+) {
+    let Some(runtime_input) = request
+        .get_mut("runtime_execution")
+        .and_then(|runtime_execution| runtime_execution.get_mut("input"))
+        .and_then(|input| input.get_mut("input"))
+    else {
+        return;
+    };
+    let Some(runtime_input) = runtime_input.as_object_mut() else {
+        return;
+    };
+    let artifact_inputs = runtime_input
+        .entry("artifacts".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(artifact_inputs) = artifact_inputs.as_object_mut() else {
+        return;
+    };
+    for (artifact_id, artifact) in artifacts {
+        artifact_inputs.insert(artifact_id.clone(), artifact.clone());
+    }
+    insert_artifact_aliases(runtime_input, artifacts);
+}
+
+fn merge_dispatch_context_artifacts(
+    request: &mut Value,
+    artifacts: &serde_json::Map<String, Value>,
+) {
+    let Some(context_value) = request
+        .get_mut("dispatch")
+        .and_then(|dispatch| dispatch.get_mut("client_context"))
+    else {
+        return;
+    };
+    let Some(context_string) = context_value.as_str() else {
+        return;
+    };
+    let Ok(mut context) = serde_json::from_str::<Value>(context_string) else {
+        return;
+    };
+    merge_request_input_artifacts(&mut context, artifacts);
+    merge_runtime_execution_input_artifacts(&mut context, artifacts);
+    *context_value = Value::String(context.to_string());
+}
+
+fn insert_artifact_aliases(
+    inputs: &mut serde_json::Map<String, Value>,
+    artifacts: &serde_json::Map<String, Value>,
+) {
+    for (artifact_id, artifact) in artifacts {
+        let should_insert = inputs
+            .get(artifact_id)
+            .is_none_or(|value| value.is_null() || value.as_str() == Some(""));
+        if should_insert {
+            inputs.insert(
+                artifact_id.clone(),
+                artifact
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or_else(|| artifact.clone()),
+            );
+        }
+    }
+}
+
 pub(super) fn execution_with_request_workflow_artifacts(
     execution: Value,
     request: &Value,
