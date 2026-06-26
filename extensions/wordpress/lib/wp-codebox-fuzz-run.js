@@ -728,19 +728,21 @@ function normalizeWordPressWorkloadStep(step, options = {}) {
 	const input = objectOrUndefined(args.input) || {};
 	const output = objectOrUndefined(args.output) || {};
 	const parameters = objectOrUndefined(args.parameters) || {};
+	const inputArtifactRoot = input.path || args.inputArtifactRoot || args.input_artifact_root;
+	const outputArtifactPath = output.path || args.outputArtifactPath || args.output_artifact_path;
 	return stripUndefined({
 		type: 'artifact-postprocess',
 		action: args.action,
-		helperPath: args.helper,
-		inputArtifactRoot: input.path,
-		outputArtifactPath: output.path,
-		maxInputBytes: input.max_bytes || input.maxBytes,
-		maxArtifacts: input.max_artifacts || input.maxArtifacts,
-		expectedOutputSchema: output.schema,
-		artifactName: output.artifact,
-		artifactKind: output.kind,
-		semantic: output.semantic_key || output.semantic,
-		args: [args.action, '${inputArtifactRoot}', '${outputArtifactPath}', JSON.stringify(parameters)],
+		helperPath: args.helper || args.helperPath || args.helper_path,
+		inputArtifactRoot,
+		outputArtifactPath,
+		maxInputBytes: input.max_bytes || input.maxBytes || args.maxInputBytes || args.max_input_bytes,
+		maxArtifacts: input.max_artifacts || input.maxArtifacts || args.maxArtifacts || args.max_artifacts,
+		expectedOutputSchema: output.schema || args.expectedOutputSchema || args.expected_output_schema,
+		artifactName: output.artifact || args.artifactName || args.artifact_name,
+		artifactKind: output.kind || args.artifactKind || args.artifact_kind,
+		semantic: output.semantic_key || output.semantic || args.semantic,
+		args: Array.isArray(step.args) ? step.args : [args.action, '${inputArtifactRoot}', '${outputArtifactPath}', JSON.stringify(parameters)],
 		metadata: stripUndefined({
 			...(objectOrUndefined(step.metadata) || {}),
 			adapter: 'homeboy-extensions',

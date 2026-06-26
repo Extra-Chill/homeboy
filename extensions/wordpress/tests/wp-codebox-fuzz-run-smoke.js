@@ -118,6 +118,10 @@ assert.equal(artifactPostprocessWorkloadInput.steps[0].artifactKind, 'json');
 assert.equal(artifactPostprocessWorkloadInput.steps[0].semantic, 'fuzz.coverage.gap_report');
 assert.deepEqual(artifactPostprocessWorkloadInput.steps[0].args, ['coverage-gap-report', '${inputArtifactRoot}', '${outputArtifactPath}', JSON.stringify({ max_bytes: 1024 })]);
 assert.equal(artifactPostprocessWorkloadInput.steps[0].metadata.contract, 'homeboy/artifact-postprocess/v1');
+const artifactPostprocessWorkloadInputAgain = wpCodeboxWordPressWorkloadRunInput(artifactPostprocessWorkloadInput);
+assert.equal(artifactPostprocessWorkloadInputAgain.steps[0].helperPath, '${package.root}/tools/artifact-helper.mjs');
+assert.equal(artifactPostprocessWorkloadInputAgain.steps[0].inputArtifactRoot, '${artifacts.root}');
+assert.equal(artifactPostprocessWorkloadInputAgain.steps[0].outputArtifactPath, 'coverage/gaps.json');
 
 const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
 	taskId: 'wp-codebox-fuzz-suite-smoke',
