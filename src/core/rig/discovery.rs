@@ -165,13 +165,7 @@ fn discovered_from_path(
 ) -> Result<DiscoveredRig> {
     let content = fs::read_to_string(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some("read rig spec".into())))?;
-    let mut spec: super::RigSpec = serde_json::from_str(&content).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some(format!("parse rig spec {}", path.display())),
-            Some(content.chars().take(200).collect()),
-        )
-    })?;
+    let mut spec = parse_discovered_rig_spec(path, &content)?;
     if spec.id.is_empty() {
         spec.id = fallback_name
             .and_then(|name| name.to_str())
@@ -189,6 +183,29 @@ fn discovered_from_path(
         id: extension::slugify_id(&spec.id)?,
         description: spec.description,
         rig_path: path.to_path_buf(),
+    })
+}
+
+fn parse_discovered_rig_spec(path: &Path, content: &str) -> Result<super::RigSpec> {
+    let value: serde_json::Value = serde_json::from_str(content).map_err(|e| {
+        Error::validation_invalid_json(
+            e,
+            Some(format!("parse rig spec {}", path.display())),
+            Some(content.chars().take(200).collect()),
+        )
+    })?;
+
+    serde_json::from_value(value).map_err(|e| {
+        Error::validation_invalid_argument(
+            "rig_spec",
+            format!(
+                "Rig spec schema is not compatible with this Homeboy binary: {}",
+                e
+            ),
+            Some(path.to_string_lossy().to_string()),
+            None,
+        )
+        .with_hint("Upgrade Homeboy, or update the rig spec to fields supported by this binary")
     })
 }
 
