@@ -388,7 +388,7 @@ pub struct FuzzWorkloadOutput {
 pub struct FuzzRunnerContract {
     pub capability: String,
     pub extension_script_required: bool,
-    pub env: Vec<&'static str>,
+    pub env: Vec<String>,
 }
 
 #[derive(Serialize)]
