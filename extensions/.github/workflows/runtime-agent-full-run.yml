@@ -461,22 +461,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ACTIONS_ARTIFACT_DOWNLOADS: ${{ inputs.actions_artifact_downloads }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf '%s' "$ACTIONS_ARTIFACT_DOWNLOADS" | jq -e 'type == "array"' >/dev/null
-          while IFS= read -r item; do
-            [ -n "$item" ] || continue
-            repo="$(jq -r '.repo // env.GITHUB_REPOSITORY' <<< "$item")"
-            run_id="$(jq -r '.run_id // .runId // ""' <<< "$item")"
-            name="$(jq -r '.name // .artifact_name // .artifactName // ""' <<< "$item")"
-            dir="$(jq -r '.dir // .destination // (".ci/actions-artifacts/" + $name)' --arg name "$(jq -r '.name // .artifact_name // .artifactName // ""' <<< "$item")" <<< "$item")"
-            [ -n "$repo" ] || { echo "Artifact download repo is required" >&2; exit 1; }
-            [ -n "$run_id" ] || { echo "Artifact download run_id is required" >&2; exit 1; }
-            [ -n "$name" ] || { echo "Artifact download name is required" >&2; exit 1; }
-            mkdir -p "$dir"
-            gh run download "$run_id" --repo "$repo" --name "$name" --dir "$dir"
-          done < <(printf '%s' "$ACTIONS_ARTIFACT_DOWNLOADS" | jq -c '.[]')
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/actions-artifact-downloads.cjs
 
       - name: Prepare runtime payload
         if: ${{ inputs.run_agent && inputs.prepare_payload_command != '' }}
@@ -677,10 +662,7 @@ jobs:
         if: ${{ inputs.run_agent }}
         env:
           CALLBACK_DATA: ${{ inputs.callback_data }}
-        run: |
-          set -euo pipefail
-          json="$(printf '%s' "$CALLBACK_DATA" | jq -c '. // {}')"
-          printf 'callback_data_json=%s\n' "$json" >> "$GITHUB_OUTPUT"
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/project-callback-data.cjs
 
       - name: Assert success
         if: ${{ inputs.run_agent && ! inputs.dry_run }}

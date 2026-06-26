@@ -9,6 +9,7 @@ const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
 const RUNTIME_INVOCATION_CONTRACT = providerRuntimeInvocationContract();
 
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
+const WP_CODEBOX_AGENT_FANOUT_REQUEST_SCHEMA = 'wp-codebox/agent-fanout-request/v1';
 const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
 const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
 const WP_CODEBOX_BACKEND = 'codebox';
@@ -107,6 +108,13 @@ const WP_CODEBOX_ROLE_ALIASES = {
 
 const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
   {
+    id: 'agent-fanout-request',
+    schema: WP_CODEBOX_AGENT_FANOUT_REQUEST_SCHEMA,
+    owner: 'wp-codebox',
+    adapter_behavior: 'project_homeboy_agent_task_metadata_without_product_assumptions',
+    requirement: 'Accept lower-level sandbox-native fanout requests with typed worker, artifact, event, and aggregation contracts. Homeboy owns durable fanout plan/run state; Homeboy Extensions only adapts generic task metadata, workspace, provider/model, secret-env names, progress/evidence callbacks, and artifact declarations into this request shape.',
+  },
+  {
     id: 'run-agent-task',
     schema: 'wp-codebox/run-agent-task/v1',
     owner: 'wp-codebox',
@@ -198,6 +206,34 @@ function wpCodeboxProviderRuntimeOperationConfig(key, operation) {
   });
 }
 
+function wpCodeboxAgentFanoutAdapterContract() {
+  return {
+    schema: 'homeboy-extensions/wp-codebox-agent-fanout-adapter/v1',
+    canonical_path: 'homeboy-durable-scheduler-to-homeboy-extensions-codebox-executor-to-wp-codebox-sandbox-fanout',
+    ownership: {
+      substrate: 'agents-api',
+      durable_scheduler: 'homeboy',
+      executor_adapter: 'homeboy-extensions',
+      sandbox_worker_runtime: 'wp-codebox',
+    },
+    accepted_request_schema: WP_CODEBOX_AGENT_FANOUT_REQUEST_SCHEMA,
+    maps: [
+      'task_id',
+      'parent_plan_id',
+      'group_key',
+      'metadata',
+      'workspace',
+      'artifact_declarations',
+      'expected_artifacts',
+      'secret_env_names',
+      'provider',
+      'model',
+      'progress_callbacks',
+      'evidence_refs',
+    ],
+  };
+}
+
 function firstValue(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
 }
@@ -212,6 +248,7 @@ function withoutUndefinedValues(value) {
 
 module.exports = {
   WP_CODEBOX_BACKEND,
+  WP_CODEBOX_AGENT_FANOUT_REQUEST_SCHEMA,
   WP_CODEBOX_PROVIDER_ID,
   WP_CODEBOX_PROVIDER_LABEL,
   WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA,
@@ -226,6 +263,7 @@ module.exports = {
   WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   WP_CODEBOX_WORKSPACE_MOUNT_KIND,
   wpCodeboxProviderRuntimeInvocationContract,
+  wpCodeboxAgentFanoutAdapterContract,
   wpCodeboxProviderRuntimeOperationConfig,
   wpCodeboxProviderRuntimeOperationEntry,
 };

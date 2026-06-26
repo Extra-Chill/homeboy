@@ -1,0 +1,14 @@
+{
+  "name": "homeboy-agent-task-contracts",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./agent-task-runner-contract": "./agent-task-runner-contract.js",
+    "./generic-agent-task-plan": "./generic-agent-task-plan.js"
+  },
+  "engines": {
+    "node": ">=18.12.0"
+  }
+}

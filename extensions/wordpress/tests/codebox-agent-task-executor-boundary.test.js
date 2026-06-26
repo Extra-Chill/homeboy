@@ -10,6 +10,7 @@ process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(__dirname, '..', '..', 
 const {
   agentTaskOutcomeFromCodeboxResult,
   artifactResultEnvelopeFromCodeboxResult,
+  codeboxFanoutRequestFromAgentTaskRequest,
   codeboxTaskRequestFromAgentTaskRequest,
   codeboxRunAgentTaskInvocation,
   normalizeCodeboxAgentTaskEvents,
@@ -19,6 +20,7 @@ const {
   publicEnvelopeBoundaryDiagnostic,
   providerContract,
   providerRuntimeInvocationContract,
+  wpCodeboxAgentFanoutAdapterContract,
   reconcileRunSummaryWithPublicEnvelope,
   runtimeContractSchemas,
   typedArtifactsFromCodeboxResult,
@@ -67,7 +69,12 @@ assert.equal(provider.backend, 'codebox');
 assert.equal(provider.runtime_id, 'wp-codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
 assert.equal(provider.provider_credential_boundary.schema, 'wp-codebox/provider-credential-boundary/v1');
+assert.deepEqual(provider.agent_fanout_adapter, wpCodeboxAgentFanoutAdapterContract());
+assert.equal(provider.agent_fanout_adapter.ownership.durable_scheduler, 'homeboy');
+assert.equal(provider.agent_fanout_adapter.ownership.executor_adapter, 'homeboy-extensions');
+assert.equal(provider.agent_fanout_adapter.ownership.sandbox_worker_runtime, 'wp-codebox');
 assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'provider-credential-boundary'), true);
+assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'agent-fanout-request' && requirement.schema === 'wp-codebox/agent-fanout-request/v1'), true);
 assert.deepEqual(provider.deprecated_compatibility_aliases, [
   legacyRuntimePackageAbilityAlias('agents/run-runtime-package'),
   legacyRuntimePackageAbilityAlias('runtime-package/run'),
@@ -330,6 +337,44 @@ assert.equal(
   taskInput.sandbox_tool_policy.tools.some((tool) => tool.id === 'wordpress.read-post'),
   true
 );
+const fanoutAgentTaskRequest = {
+  ...genericAgentTaskRequest,
+  task_id: 'generic-fanout-task-1',
+  parent_plan_id: 'homeboy-plan-1',
+  group_key: 'site-generation',
+  executor: {
+    backend: 'codebox',
+    model: 'gpt-5.5',
+    secret_env: ['AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN'],
+    config: {
+      provider: 'codex',
+      model: 'gpt-5.5',
+      fanout_request: {
+        concurrency: 2,
+        workers: [
+          { id: 'design', goal: 'Generate design artifact' },
+          { id: 'verify', goal: 'Verify design artifact', depends_on: ['design'] },
+        ],
+      },
+    },
+  },
+};
+const fanoutRequest = codeboxFanoutRequestFromAgentTaskRequest(
+  fanoutAgentTaskRequest,
+  fanoutAgentTaskRequest.executor.config,
+  fanoutAgentTaskRequest.inputs,
+  {}
+);
+assert.equal(fanoutRequest.schema, 'wp-codebox/agent-fanout-request/v1');
+assert.deepEqual(fanoutRequest.workers.map((worker) => worker.id), ['design', 'verify']);
+assert.deepEqual(fanoutRequest.workers[1].dependsOn, ['design']);
+assert.equal(fanoutRequest.orchestrator.agent_task_id, 'generic-fanout-task-1');
+assert.equal(fanoutRequest.orchestrator.parent_plan_id, 'homeboy-plan-1');
+assert.equal(fanoutRequest.orchestrator.provider, 'codex');
+assert.equal(fanoutRequest.orchestrator.model, 'gpt-5.5');
+assert.deepEqual(fanoutRequest.orchestrator.secret_env_names, ['AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN']);
+assert.equal(fanoutRequest.metadata.homeboy_agent_task.group_key, 'site-generation');
+assert.equal(codeboxTaskRequestFromAgentTaskRequest(fanoutAgentTaskRequest).fanout_request.schema, 'wp-codebox/agent-fanout-request/v1');
 const stableCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput });
 assert.equal(stableCodeboxInvocation.contract, runtimeContractSchemas().agentTask.runRequest);
 assert.equal(stableCodeboxInvocation.input.schema, runtimeContractSchemas().agentTask.runRequest);
