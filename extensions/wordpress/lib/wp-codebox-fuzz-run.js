@@ -464,6 +464,17 @@ function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execu
 	}
 	const workloadPath = execute.path || manifest.workload?.path;
 	if (typeof workloadPath === 'string' && workloadPath.trim() !== '') {
+		if (String(execute.type || manifest.workload?.type || '').toLowerCase() === 'php') {
+			return wpCodeboxWordPressWorkloadRunInput({
+				id: execute.entry || manifest.workload?.entry,
+				steps: [{ command: 'wordpress.run-workload', args: [`path=${workloadPath}`, 'type=php'] }],
+				metadata: stripUndefined({
+					source_path: workloadPath,
+					source_entry: execute.entry || manifest.workload?.entry,
+					source_type: 'php',
+				}),
+			});
+		}
 		const workloadInput = homeboyFuzzWorkloadRunInputFromFile(workloadPath, { entry: execute.entry || manifest.workload?.entry });
 		if (workloadInput) {
 			return workloadInput;

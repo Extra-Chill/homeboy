@@ -243,6 +243,23 @@ assert.equal(jsonWorkloadInput.cases[0].artifacts[0].required, true);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].metadata.semantic_key, 'fuzz.suite_result');
 assert.equal(jsonWorkloadInput.metadata.artifacts.expected[0].required, true);
 
+const phpWorkloadPath = path.join(tempWorkloadDir, 'bench', 'rest-product-batch-import.php');
+fs.mkdirSync(path.dirname(phpWorkloadPath), { recursive: true });
+fs.writeFileSync(phpWorkloadPath, '<?php return function (): array { return array("status" => "passed"); };\n', 'utf8');
+const phpWorkloadInput = wpCodeboxFuzzSuiteInput({
+	id: 'php-workload-run',
+	homeboyFuzzWorkload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'php-workload',
+		workload: { path: phpWorkloadPath, type: 'php', entry: 'rest-product-batch-import' },
+		cases: [{ id: 'php-workload:default', intent: { execute: { path: phpWorkloadPath, type: 'php', entry: 'rest-product-batch-import' } } }],
+	},
+});
+assert.equal(phpWorkloadInput.cases[0].input.schema, DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA);
+assert.deepEqual(phpWorkloadInput.cases[0].input.steps, [
+	{ command: 'wordpress.run-workload', args: [`path=${phpWorkloadPath}`, 'type=php'] },
+]);
+
 const wooDbApiWorkloadPath = path.join(tempWorkloadDir, 'rest-db-query-profile.workload.json');
 fs.mkdirSync(path.join(tempWorkloadDir, 'bench'), { recursive: true });
 fs.writeFileSync(path.join(tempWorkloadDir, 'bench', 'generated-rest-request-cases.php'), `<?php
