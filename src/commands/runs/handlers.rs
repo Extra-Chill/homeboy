@@ -180,6 +180,7 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
         RunsArtifactCommand::Attach(args) => remote_artifact::attach(args),
         RunsArtifactCommand::Get(args) => artifact_get(args),
         RunsArtifactCommand::Preview(args) => remote_artifact::preview(args),
+        RunsArtifactCommand::Capture(args) => remote_artifact::capture(args),
         RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
         RunsArtifactCommand::CleanupPersisted(args) => remote_artifact::cleanup_persisted(args),
     }
