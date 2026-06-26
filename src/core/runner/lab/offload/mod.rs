@@ -75,6 +75,7 @@ use super::super::lab_env::{
 };
 use super::super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 use super::super::lab_selection::{
+    fail_if_no_default_runner_accepts_jobs, preflight_lab_runner_availability,
     prepare_lab_runner_for_offload, release_gate_local_hot_denied_error,
     resolve_lab_runner_selection, status_tunnel_mode, LabRunnerPreparation, LabRunnerSelection,
     LabRunnerSelectionSource,

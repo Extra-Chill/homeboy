@@ -369,7 +369,6 @@ struct DefaultLabRunnerReadiness {
 }
 
 impl DefaultLabRunnerCandidate {
-    #[cfg(test)]
     fn availability(&self) -> RunnerAvailability {
         RunnerAvailability::from_status_parts(
             self.id.clone(),
@@ -417,6 +416,38 @@ impl DefaultLabRunnerCandidate {
             score,
         }
     }
+}
+
+pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability>> {
+    let mut availability: Vec<RunnerAvailability> = list()?
+        .into_iter()
+        .filter_map(|runner| {
+            if runner.kind != RunnerKind::Ssh {
+                return None;
+            }
+            let status = status(&runner.id).ok()?;
+            let mode = status
+                .session
+                .as_ref()
+                .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
+            let candidate = DefaultLabRunnerCandidate {
+                id: runner.id,
+                mode,
+                connected: status.connected,
+                capacity: runner.settings.concurrency_limit,
+                stale_daemon: status.stale_daemon.is_some(),
+                active_jobs: status.active_jobs.len(),
+                active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
+                capabilities_ready: true,
+            };
+            candidate
+                .readiness()
+                .eligible
+                .then(|| candidate.availability())
+        })
+        .collect();
+    availability.sort_by(|a, b| a.runner_id.cmp(&b.runner_id));
+    Ok(availability)
 }
 
 fn resolve_default_lab_runner_from_candidates(
