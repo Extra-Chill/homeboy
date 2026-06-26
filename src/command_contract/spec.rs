@@ -4,7 +4,9 @@
 //! consumed by output routing, safety/docs manifest derivation, and command
 //! lookup without changing parsed CLI behavior.
 
-use super::output::{CommandDispatchFamily, CommandJsonFamily};
+use super::output::{
+    CommandDispatchFamily, CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -25,6 +27,17 @@ impl CommandSpec {
     pub fn docs_path(&self) -> Option<String> {
         self.docs_slug
             .map(|slug| format!("docs/commands/{slug}.md"))
+    }
+
+    pub const fn output_descriptor(
+        &self,
+        output_file_mode: CommandOutputFileMode,
+    ) -> CommandOutputDescriptor {
+        CommandOutputDescriptor::json_envelope(self.json_family, output_file_mode)
+    }
+
+    pub fn dispatch_family(&self) -> CommandDispatchFamily {
+        self.json_family.into()
     }
 }
 
@@ -212,5 +225,5 @@ pub fn registered_command_json_family(name: &str) -> Option<CommandJsonFamily> {
 }
 
 pub fn registered_command_dispatch_family(name: &str) -> Option<CommandDispatchFamily> {
-    registered_command_json_family(name).map(Into::into)
+    registered_command(name).map(CommandSpec::dispatch_family)
 }

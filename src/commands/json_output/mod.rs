@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::cli_surface::Commands;
-use crate::command_contract::{registered_command_dispatch_family, CommandDispatchFamily};
+use crate::command_contract::{registered_command, CommandDispatchFamily};
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::output_runtime::{CommandPresentation, JsonCommandRun};
@@ -293,7 +293,8 @@ fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Va
 }
 
 fn dispatch_family(command: &Commands) -> CommandDispatchFamily {
-    registered_command_dispatch_family(command.top_level_name())
+    registered_command(command.top_level_name())
+        .map(|spec| spec.dispatch_family())
         .expect("top-level command should be registered")
 }
 

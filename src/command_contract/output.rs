@@ -17,7 +17,7 @@ use crate::commands::{
 };
 
 use super::lab::apply_lab_contract_to_descriptor;
-use super::spec::registered_command_json_family;
+use super::spec::registered_command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandResponseMode {
@@ -326,23 +326,13 @@ fn markdown_or_json_response(markdown: bool) -> CommandResponseMode {
     }
 }
 
-/// Builds the common JSON-envelope descriptor: a JSON response mode paired with
-/// the [`CommandOutputContractKind::JsonEnvelope`] contract, varying only by
-/// [`CommandJsonFamily`] and output-file mode.
-fn json_envelope_descriptor(
-    json_family: CommandJsonFamily,
-    output_file_mode: CommandOutputFileMode,
-) -> CommandOutputDescriptor {
-    CommandOutputDescriptor::json_envelope(json_family, output_file_mode)
-}
-
 fn registered_json_envelope_descriptor(
     command: &Commands,
     output_file_mode: CommandOutputFileMode,
 ) -> CommandOutputDescriptor {
-    let json_family = registered_command_json_family(command.top_level_name())
-        .expect("top-level command should be registered");
-    json_envelope_descriptor(json_family, output_file_mode)
+    registered_command(command.top_level_name())
+        .expect("top-level command should be registered")
+        .output_descriptor(output_file_mode)
 }
 
 #[cfg(test)]
@@ -568,16 +558,15 @@ mod tests {
     }
 
     #[test]
-    fn json_envelope_descriptor_uses_shared_contract_shape() {
+    fn command_spec_output_descriptor_uses_shared_contract_shape() {
+        let spec = crate::command_contract::registered_command("status")
+            .expect("status command should be registered");
+
         assert_eq!(
+            spec.output_descriptor(CommandOutputFileMode::GenericEnvelope),
             CommandOutputDescriptor::json_envelope(
-                CommandJsonFamily::Workspace,
+                CommandJsonFamily::Ops,
                 CommandOutputFileMode::GenericEnvelope,
-            ),
-            workspace_descriptor(
-                CommandResponseMode::Json,
-                CommandOutputFileMode::GenericEnvelope,
-                CommandOutputContractKind::JsonEnvelope,
             )
         );
     }
