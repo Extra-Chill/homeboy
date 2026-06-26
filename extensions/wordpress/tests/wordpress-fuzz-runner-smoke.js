@@ -429,6 +429,14 @@ assert.equal(
 	'/explicit/wp-codebox',
 	'Explicit WP Codebox env should override the Homeboy-managed cache'
 );
+assert.equal(
+	wpCodeboxCommand({
+		HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: '/settings-json/wp-codebox' }),
+		HOMEBOY_WP_CODEBOX_INSTALL_DIR: codeboxInstallRoot,
+	}),
+	'/settings-json/wp-codebox',
+	'Explicit WP Codebox setting JSON should override the Homeboy-managed cache'
+);
 
 const cli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',

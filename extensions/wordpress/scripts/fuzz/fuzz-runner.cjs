@@ -251,7 +251,12 @@ function discoverWpCodeboxBin(env) {
 }
 
 function wpCodeboxCommand(env) {
-	return env.HOMEBOY_WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || discoverWpCodeboxBin(env) || 'wp-codebox';
+	const settings = parseJsonObject(env.HOMEBOY_SETTINGS_JSON);
+	return env.HOMEBOY_WP_CODEBOX_BIN
+		|| env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
+		|| settings?.wp_codebox_bin
+		|| discoverWpCodeboxBin(env)
+		|| 'wp-codebox';
 }
 
 function parseJsonObject(value) {
