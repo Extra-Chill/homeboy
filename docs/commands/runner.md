@@ -127,6 +127,10 @@ The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
 Use `doctor` before `connect` when you need to know whether Homeboy, Git, SSH,
 and the configured workspace root are usable on the target machine.
 
+Safety manifest metadata marks `runner connect` and `runner work` as explicit
+operator lifecycle actions. They do not currently expose dry-run contracts; use
+`runner doctor` for preflight diagnostics before changing runner lifecycle state.
+
 Use `--scope lab-offload` before serious Lab evidence runs. It adds checks for
 the configured runner Homeboy command, bare `homeboy` PATH resolution, preferred
 runner binaries, connected daemon exec readiness, and Sample Runtime runner-path
