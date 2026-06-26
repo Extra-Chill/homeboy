@@ -243,6 +243,7 @@ function normalizeControllerExecution(value) {
     policy_result: stringValue(value.policy_result || value.policyResult || value.policy_result_path || value.policyResultPath),
     output: stringValue(value.output || value.output_path || value.outputPath),
     max_actions: positiveInteger(value.max_actions || value.maxActions) || 100,
+    reconcile_stale: booleanValue(value.reconcile_stale || value.reconcileStale || process.env.HOMEBOY_CONTROLLER_RECONCILE_STALE),
     prepare: normalizeArray(value.prepare || value.prepare_commands || value.prepareCommands),
     env: optionalObject(value.env),
     metadata: optionalObject(value.metadata),
@@ -307,6 +308,9 @@ function defaultExecuteControllerExecution(options = {}) {
   }
   if (controllerExecution.output) {
     args.push('--output', controllerExecution.output);
+  }
+  if (controllerExecution.reconcile_stale) {
+    args.push('--reconcile-stale');
   }
   const run = spawnSync(homeboyBin, args, { cwd, env, encoding: 'utf8' });
   if (run.status !== 0) {
@@ -1048,6 +1052,14 @@ function loopStatus(taskResults) {
 function positiveInteger(value) {
   const parsed = Number.parseInt(value || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function booleanValue(value) {
+  if (value === true) {
+    return true;
+  }
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(normalized);
 }
 
 function optionalObject(value) {
