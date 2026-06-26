@@ -4,6 +4,7 @@ use crate::core::engine::local_files;
 use crate::core::engine::output_parse::ParseSpec;
 use crate::core::engine::run_dir::{self, RunDir};
 use crate::core::error::{Error, ErrorCode};
+use crate::core::extension::runner::tail_lines;
 use crate::core::extension::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
 use crate::core::extension::test::baseline::{self, TestBaselineComparison, TestCounts};
 use crate::core::extension::test::{
@@ -106,16 +107,6 @@ pub struct RawTestOutput {
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
 const PHPUNIT_NO_DISCOVERY_MARKER: &str = "NO PHPUNIT TEST FILES DISCOVERED";
 const REQUIRE_PHPUNIT_TESTS_SETTING: &str = "require_phpunit_tests";
-
-fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
-    let lines: Vec<&str> = s.lines().collect();
-    if lines.len() <= max_lines {
-        (s.to_string(), false)
-    } else {
-        let start = lines.len() - max_lines;
-        (lines[start..].join("\n"), true)
-    }
-}
 
 fn test_run_status(
     runner_success: bool,
