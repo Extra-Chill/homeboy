@@ -3,6 +3,7 @@ use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use homeboy::core::engine::shell;
 use homeboy::core::observation::runs_service::{
     self, PersistedArtifactCleanupOptions, RunnerDownloadCleanupOptions,
 };
@@ -43,19 +44,28 @@ pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
     let runner = runner::load(&args.runner)?;
     validate_runner_artifact_path(&runner, &args.path)?;
 
-    let source_path = copy_runner_artifact_source(&runner, &args.path)?;
-    let artifact = store.record_artifact_with_metadata(
-        &args.run_id,
-        &args.name,
-        &source_path,
-        serde_json::json!({
-            "source": "runner_path_attach",
-            "runner_id": runner.id,
-            "runner_path": args.path,
-        }),
-    )?;
-    if source_path != PathBuf::from(&args.path) {
-        let _ = fs::remove_file(&source_path);
+    let source = copy_runner_artifact_source(&runner, &args.path)?;
+    let metadata = runner_attach_metadata(&runner, &args.path, &source);
+    let artifact = match source.artifact_type {
+        RunnerAttachArtifactType::File => {
+            store.record_artifact_with_metadata(&args.run_id, &args.name, &source.path, metadata)?
+        }
+        RunnerAttachArtifactType::Directory => store.record_directory_artifact_with_metadata(
+            &args.run_id,
+            &args.name,
+            &source.path,
+            metadata,
+        )?,
+    };
+    if source.temporary {
+        match source.artifact_type {
+            RunnerAttachArtifactType::File => {
+                let _ = fs::remove_file(&source.path);
+            }
+            RunnerAttachArtifactType::Directory => {
+                let _ = fs::remove_dir_all(&source.path);
+            }
+        }
     }
 
     Ok((
@@ -164,6 +174,40 @@ fn available_port() -> homeboy::core::Result<u16> {
     Ok(port.port())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunnerAttachArtifactType {
+    File,
+    Directory,
+}
+
+struct RunnerAttachSource {
+    path: PathBuf,
+    artifact_type: RunnerAttachArtifactType,
+    temporary: bool,
+}
+
+fn runner_attach_metadata(
+    runner: &Runner,
+    runner_path: &str,
+    source: &RunnerAttachSource,
+) -> serde_json::Value {
+    let mut metadata = serde_json::json!({
+            "source": "runner_path_attach",
+            "runner_id": runner.id,
+            "runner_path": runner_path,
+            "source_type": match source.artifact_type {
+                RunnerAttachArtifactType::File => "file",
+                RunnerAttachArtifactType::Directory => "directory",
+            },
+    });
+    if source.artifact_type == RunnerAttachArtifactType::Directory
+        && directory_contains_html(&source.path)
+    {
+        metadata["role"] = serde_json::Value::String("static_site_artifact".to_string());
+    }
+    metadata
+}
+
 fn validate_artifact_name(name: &str) -> homeboy::core::Result<()> {
     if name.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -262,22 +306,33 @@ fn path_is_within_root(path: &str, root: &str) -> bool {
     path == root || path.starts_with(&format!("{root}/"))
 }
 
-fn copy_runner_artifact_source(runner: &Runner, path: &str) -> homeboy::core::Result<PathBuf> {
+fn copy_runner_artifact_source(
+    runner: &Runner,
+    path: &str,
+) -> homeboy::core::Result<RunnerAttachSource> {
     match runner.kind {
         RunnerKind::Local => {
             let source = PathBuf::from(path);
             let metadata = fs::metadata(&source).map_err(|err| {
                 Error::internal_io(err.to_string(), Some(format!("read artifact {path}")))
             })?;
-            if !metadata.is_file() {
+            let artifact_type = if metadata.is_file() {
+                RunnerAttachArtifactType::File
+            } else if metadata.is_dir() {
+                RunnerAttachArtifactType::Directory
+            } else {
                 return Err(Error::validation_invalid_argument(
                     "path",
-                    "runner artifact attach currently supports files",
+                    "runner artifact attach supports files and directories",
                     Some(path.to_string()),
                     None,
                 ));
-            }
-            Ok(source)
+            };
+            Ok(RunnerAttachSource {
+                path: source,
+                artifact_type,
+                temporary: false,
+            })
         }
         RunnerKind::Ssh => {
             let server_id = runner.server_id.as_deref().ok_or_else(|| {
@@ -299,6 +354,33 @@ fn copy_runner_artifact_source(runner: &Runner, path: &str) -> homeboy::core::Re
             }
             let server = server::load(server_id)?;
             let client = server::SshClient::from_server(&server, server_id)?;
+            let artifact_type = remote_runner_artifact_type(&client, path)?;
+            if artifact_type == RunnerAttachArtifactType::Directory {
+                let output = server::transfer::transfer(&server::transfer::TransferConfig {
+                    source: format!("{server_id}:{path}"),
+                    destination: temp_path.display().to_string(),
+                    recursive: true,
+                    compress: true,
+                    dry_run: false,
+                    exclude: Vec::new(),
+                })?;
+                if output.1 != 0 || !output.0.success {
+                    return Err(Error::validation_invalid_argument(
+                        "path",
+                        format!(
+                            "failed to download runner artifact directory: {}",
+                            output.0.error.unwrap_or_else(|| "scp failed".to_string())
+                        ),
+                        Some(path.to_string()),
+                        None,
+                    ));
+                }
+                return Ok(RunnerAttachSource {
+                    path: temp_path,
+                    artifact_type,
+                    temporary: true,
+                });
+            }
             let output = client.download_file(path, &temp_path.display().to_string());
             if !output.success {
                 return Err(Error::validation_invalid_argument(
@@ -311,9 +393,59 @@ fn copy_runner_artifact_source(runner: &Runner, path: &str) -> homeboy::core::Re
                     None,
                 ));
             }
-            Ok(temp_path)
+            Ok(RunnerAttachSource {
+                path: temp_path,
+                artifact_type,
+                temporary: true,
+            })
         }
     }
+}
+
+fn remote_runner_artifact_type(
+    client: &server::SshClient,
+    path: &str,
+) -> homeboy::core::Result<RunnerAttachArtifactType> {
+    let quoted = shell::quote_path(path);
+    if client.execute(&format!("test -d {quoted}")).success {
+        return Ok(RunnerAttachArtifactType::Directory);
+    }
+    if client.execute(&format!("test -f {quoted}")).success {
+        return Ok(RunnerAttachArtifactType::File);
+    }
+    Err(Error::validation_invalid_argument(
+        "path",
+        "runner artifact path is not a file or directory",
+        Some(path.to_string()),
+        None,
+    ))
+}
+
+fn directory_contains_html(path: &Path) -> bool {
+    directory_contains_html_inner(path, 0)
+}
+
+fn directory_contains_html_inner(path: &Path, seen: usize) -> bool {
+    if seen >= 100 {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    for (index, entry) in entries.flatten().enumerate() {
+        if seen + index >= 100 {
+            return false;
+        }
+        let path = entry.path();
+        if path.is_dir() && directory_contains_html_inner(&path, seen + index + 1) {
+            return true;
+        }
+        let lower = path.to_string_lossy().to_ascii_lowercase();
+        if lower.ends_with(".html") || lower.ends_with(".htm") {
+            return true;
+        }
+    }
+    false
 }
 
 fn attach_download_path(runner_id: &str, path: &str) -> homeboy::core::Result<PathBuf> {
@@ -455,6 +587,75 @@ mod tests {
             let artifacts = store.list_artifacts(&run.id).expect("artifacts");
             assert_eq!(artifacts.len(), 1);
             assert_eq!(artifacts[0].id, output.artifact.id);
+        });
+    }
+
+    #[test]
+    fn attach_records_local_runner_directory_and_preview_entrypoints() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
+            let workspace = home.path().join("runner-workspace");
+            let site = workspace.join("site-output");
+            fs::create_dir_all(site.join("case-a")).expect("site dirs");
+            fs::write(site.join("index.html"), b"<html>Home</html>").expect("index");
+            fs::write(site.join("case-a/index.html"), b"<html>Case</html>").expect("case");
+
+            runner::create(
+                &format!(
+                    r#"{{"id":"issue-6462-local","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.display()
+                ),
+                false,
+            )
+            .expect("runner");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("runner-exec")
+                        .command("homeboy runner exec issue-6462-local")
+                        .metadata(serde_json::json!({ "issue": 6462 }))
+                        .build(),
+                )
+                .expect("run");
+
+            let output = attach(RunsArtifactAttachArgs {
+                run_id: run.id.clone(),
+                runner: "issue-6462-local".to_string(),
+                path: site.display().to_string(),
+                name: "generated-site".to_string(),
+            })
+            .expect("attach")
+            .0;
+            let RunsOutput::ArtifactAttach(output) = output else {
+                panic!("unexpected output");
+            };
+
+            assert_eq!(output.artifact.kind, "generated-site");
+            assert_eq!(output.artifact.artifact_type, "directory");
+            assert_eq!(output.artifact.metadata_json["source_type"], "directory");
+            assert_eq!(
+                output.artifact.metadata_json["role"],
+                "static_site_artifact"
+            );
+            let stored_path = PathBuf::from(&output.artifact.path);
+            assert!(stored_path.join("index.html").exists());
+            assert!(stored_path.join("case-a/index.html").exists());
+
+            let (artifacts_output, _) =
+                super::super::handlers::artifacts(&run.id).expect("artifacts output");
+            let RunsOutput::Artifacts(artifacts_output) = artifacts_output else {
+                panic!("expected artifacts output");
+            };
+            assert!(artifacts_output
+                .preview_entrypoints
+                .iter()
+                .any(|entrypoint| entrypoint.path == "index.html"));
+            assert!(artifacts_output
+                .preview_entrypoints
+                .iter()
+                .any(|entrypoint| entrypoint.path == "case-a/index.html"));
         });
     }
 

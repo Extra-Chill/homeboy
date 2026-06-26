@@ -322,6 +322,90 @@ fn runner_job_artifact_listing_includes_related_lab_run_artifacts() {
 }
 
 #[test]
+fn runner_job_matrix_summary_result_refs_exclude_related_lab_run_artifacts() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let job_id = "job-123";
+        let runner_run = RunRecord {
+            id: "runner-exec-lab-job-123".to_string(),
+            kind: "runner-exec".to_string(),
+            component_id: None,
+            started_at: "2026-06-12T00:00:00Z".to_string(),
+            finished_at: None,
+            status: "running".to_string(),
+            command: Some("homeboy bench".to_string()),
+            cwd: Some("/srv/homeboy/project".to_string()),
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({
+                "lab": {
+                    "runner": { "id": "lab" },
+                    "remote_job": { "id": job_id }
+                }
+            }),
+        };
+        store.upsert_imported_run(&runner_run).expect("runner run");
+        let remote_run = RunRecord {
+            id: "woocommerce-fuzz-run".to_string(),
+            kind: "fuzz".to_string(),
+            component_id: Some("woocommerce".to_string()),
+            started_at: "2026-06-12T00:00:01Z".to_string(),
+            finished_at: Some("2026-06-12T00:10:00Z".to_string()),
+            status: "fail".to_string(),
+            command: Some("homeboy fuzz".to_string()),
+            cwd: Some("/srv/homeboy/woocommerce".to_string()),
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({
+                "lab": { "remote_job_id": job_id }
+            }),
+        };
+        store.upsert_imported_run(&remote_run).expect("remote run");
+        let runner_summary = home.path().join("runner-matrix-summary.json");
+        std::fs::write(
+            &runner_summary,
+            br#"{"schema":"example/matrix-summary/v1","fixture_count":1,"finding_count":0}"#,
+        )
+        .expect("runner summary");
+        let runner_artifact = store
+            .record_artifact(&runner_run.id, "matrix_summary", &runner_summary)
+            .expect("runner artifact");
+        let remote_summary = home.path().join("woocommerce-fuzz-summary.json");
+        std::fs::write(
+            &remote_summary,
+            br#"{"schema":"example/matrix-summary/v1","fixture_count":99,"finding_count":99,"findings":[{"kind":"unrelated_fuzz","fixture":"cart"}]}"#,
+        )
+        .expect("remote summary");
+        let remote_artifact = store
+            .record_artifact(&remote_run.id, "fuzz_matrix_summary", &remote_summary)
+            .expect("remote artifact");
+
+        let (output, _) = artifacts(&runner_run.id).expect("artifacts");
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("expected artifacts output");
+        };
+
+        assert!(output
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.id == remote_artifact.id));
+        let summary = output.matrix_summary.expect("matrix summary");
+        assert_eq!(summary.fixture_count, 1);
+        assert_eq!(summary.finding_count, 0);
+        assert_eq!(summary.result_refs.len(), 1);
+        assert_eq!(summary.result_refs[0].id, runner_artifact.id);
+        assert_eq!(summary.result_refs[0].run_id, runner_run.id);
+        assert!(!summary
+            .top_diagnostic_kinds
+            .iter()
+            .any(|count| count.key == "unrelated_fuzz"));
+    });
+}
+
+#[test]
 fn bench_artifact_listing_does_not_include_sibling_lab_run_artifacts() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
