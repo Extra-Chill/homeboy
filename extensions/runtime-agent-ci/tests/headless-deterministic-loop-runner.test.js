@@ -205,6 +205,16 @@ assert.deepEqual(multiTask.tasks.map((task) => task.task_id), ['task-b', 'task-a
 assert.deepEqual(multiTask.fanout.records.map((record) => record.id), ['task-b', 'task-a']);
 assert.equal(multiTask.outcome.task_id, 'task-a');
 
+const dryRun = await runHeadlessDeterministicLoop({
+  spec: baseSpec,
+  runtime,
+  dryRun: true,
+});
+assert.equal(dryRun.status, 'succeeded');
+assert.equal(dryRun.tasks[0].outcome.status, 'no_op');
+assert.equal(dryRun.fanout.status, 'completed');
+assert.equal(dryRun.fanout.records[0].status, 'no_op');
+
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-headless-loop-policy-'));
 try {
   const loopPolicyFile = path.join(tmpRoot, 'loop-policy.json');
