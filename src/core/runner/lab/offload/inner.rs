@@ -878,7 +878,7 @@ pub(crate) fn ensure_lab_offload_streams_not_truncated(
     if !capture.stdout.truncated && !capture.stderr.truncated {
         return Ok(());
     }
-    if structured_output_available {
+    if structured_output_available || has_recoverable_fuzz_result_artifact(exec_output) {
         return Ok(());
     }
 
@@ -893,6 +893,48 @@ pub(crate) fn ensure_lab_offload_streams_not_truncated(
     error.details["capture"] =
         serde_json::to_value(capture).unwrap_or_else(|_| serde_json::json!({}));
     Err(error)
+}
+
+fn has_recoverable_fuzz_result_artifact(
+    exec_output: &super::super::super::RunnerExecOutput,
+) -> bool {
+    exec_output
+        .artifacts
+        .iter()
+        .any(job_artifact_is_fuzz_result)
+        || exec_output.runner_result.as_ref().is_some_and(|result| {
+            result
+                .artifact_refs
+                .iter()
+                .any(runner_artifact_is_fuzz_result)
+        })
+}
+
+fn job_artifact_is_fuzz_result(artifact: &crate::core::api_jobs::JobArtifactMetadata) -> bool {
+    artifact
+        .name
+        .as_deref()
+        .is_some_and(artifact_name_or_kind_is_fuzz_result)
+        || artifact
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(artifact_name_or_kind_is_fuzz_result)
+}
+
+fn runner_artifact_is_fuzz_result(artifact: &crate::core::runner::RunnerArtifactRef) -> bool {
+    artifact
+        .name
+        .as_deref()
+        .is_some_and(artifact_name_or_kind_is_fuzz_result)
+}
+
+fn artifact_name_or_kind_is_fuzz_result(value: &str) -> bool {
+    matches!(
+        value,
+        "fuzz_results" | "fuzz_result_envelope" | "result_envelope"
+    )
 }
 
 pub(crate) fn download_lab_output_file(runner_id: &str, remote_path: &str) -> Result<String> {

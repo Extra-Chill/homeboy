@@ -530,6 +530,61 @@ fn lab_stream_truncation_is_allowed_with_structured_output_file() {
 }
 
 #[test]
+fn lab_stream_truncation_is_allowed_with_fuzz_results_artifact() {
+    let mut output = truncated_runner_exec_output();
+    output
+        .artifacts
+        .push(crate::core::api_jobs::JobArtifactMetadata {
+            id: "024b0a9c-d639-4662-a727-a3a6a2970701".to_string(),
+            name: Some("fuzz_results".to_string()),
+            path: Some("/tmp/fuzz-results.json".to_string()),
+            url: None,
+            mime: Some("application/json".to_string()),
+            size_bytes: Some(1234),
+            sha256: None,
+            content_base64: None,
+            metadata: Some(serde_json::json!({ "kind": "fuzz_results" })),
+        });
+
+    let allowed = ensure_lab_offload_streams_not_truncated(&output, false);
+
+    assert!(
+        allowed.is_ok(),
+        "fuzz result artifact must permit truncated retained stdout, got: {allowed:?}"
+    );
+}
+
+#[test]
+fn lab_stream_truncation_is_allowed_with_fuzz_result_runner_ref() {
+    let mut output = truncated_runner_exec_output();
+    output.runner_result = Some(crate::core::runner::RunnerResult {
+        exit_code: 0,
+        status: crate::core::api_jobs::JobStatus::Succeeded,
+        stdout_bytes: Some(5 * 1024 * 1024),
+        stderr_bytes: Some(0),
+        mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+        mutation_artifacts: None,
+        artifact_refs: vec![crate::core::runner::RunnerArtifactRef {
+            artifact_id: "024b0a9c-d639-4662-a727-a3a6a2970701".to_string(),
+            name: Some("fuzz_result_envelope".to_string()),
+            path: Some("/tmp/fuzz-result-envelope.json".to_string()),
+            url: None,
+            mime: Some("application/json".to_string()),
+            size_bytes: Some(1234),
+            sha256: None,
+            transport: None,
+        }],
+    });
+
+    let allowed = ensure_lab_offload_streams_not_truncated(&output, false);
+
+    assert!(
+        allowed.is_ok(),
+        "fuzz result runner artifact ref must permit truncated retained stdout, got: {allowed:?}"
+    );
+}
+
+#[test]
 fn lab_artifact_dir_is_a_sibling_outside_the_checkout() {
     let checkout = "/srv/runner/workspaces/homeboy-core";
     let artifact_dir = remote_lab_artifact_dir(checkout);
