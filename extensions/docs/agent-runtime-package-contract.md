@@ -142,11 +142,11 @@ selectors, redacted metadata keys, and artifact/evidence reference projection
 helpers.
 
 Reusable CI callers that need to describe a runner without embedding workflow
-glue should consume `runtime-agent-ci/lib/agent-task-runner-contract.js`. That
-adapter owns `homeboy/agent-task-runner-spec/v1` validation and projection into
-the generic request fields consumed by executor providers. Extension-specific
-exports should re-export that adapter instead of copying schema and lifecycle
-validation logic.
+glue should consume `agent-task-contracts`. That shared package owns
+`homeboy/agent-task-runner-spec/v1` validation and projection into the generic
+request fields consumed by executor providers. Extension-specific exports should
+re-export the shared package instead of copying schema and lifecycle validation
+logic; legacy runtime-CI and WordPress paths remain compatibility shims.
 
 Runtime packages may add backend-specific capabilities, secret names, role
 aliases, and metadata keys, but should extend the adapter output instead of
