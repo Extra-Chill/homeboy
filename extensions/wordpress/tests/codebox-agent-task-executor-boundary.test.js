@@ -375,6 +375,87 @@ assert.equal(fanoutRequest.orchestrator.model, 'gpt-5.5');
 assert.deepEqual(fanoutRequest.orchestrator.secret_env_names, ['AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN']);
 assert.equal(fanoutRequest.metadata.homeboy_agent_task.group_key, 'site-generation');
 assert.equal(codeboxTaskRequestFromAgentTaskRequest(fanoutAgentTaskRequest).fanout_request.schema, 'wp-codebox/agent-fanout-request/v1');
+
+const controllerRuntimeTaskFanoutRequest = codeboxFanoutRequestFromAgentTaskRequest({
+  ...fanoutAgentTaskRequest,
+  task_id: 'controller-runtime-task-fanout-1',
+  executor: {
+    ...fanoutAgentTaskRequest.executor,
+    config: {
+      ...fanoutAgentTaskRequest.executor.config,
+      fanout_request: {
+        workers: [{
+          id: 'concept',
+          goal: 'Generate concept packet',
+          runtime_task: {
+            ability: 'runtime-package/run',
+            input: { package: { slug: 'website-idea-agent', source: 'bundles/website-idea-agent' } },
+          },
+        }],
+      },
+    },
+  },
+}, {
+  ...fanoutAgentTaskRequest.executor.config,
+  fanout_request: {
+    workers: [{
+      id: 'concept',
+      goal: 'Generate concept packet',
+      runtime_task: {
+        ability: 'runtime-package/run',
+        input: { package: { slug: 'website-idea-agent', source: 'bundles/website-idea-agent' } },
+      },
+    }],
+  },
+}, fanoutAgentTaskRequest.inputs, {});
+assert.equal(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.deepEqual(
+  controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.ability_normalization.deprecated_compatibility_alias,
+  legacyRuntimePackageAbilityAlias('runtime-package/run')
+);
+assert.equal(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.input.runtime_package, 'website-idea-agent');
+assert.equal(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.input.agent, 'website-idea-agent');
+assert.deepEqual(controllerRuntimeTaskFanoutRequest.workers[0].ability_requirements, ['wp-codebox/run-runtime-package']);
+
+const controllerAbilityRequestFanoutRequest = codeboxFanoutRequestFromAgentTaskRequest({
+  ...fanoutAgentTaskRequest,
+  task_id: 'controller-ability-request-fanout-1',
+  executor: {
+    ...fanoutAgentTaskRequest.executor,
+    config: {
+      ...fanoutAgentTaskRequest.executor.config,
+      fanout_request: {
+        workers: [{
+          id: 'design',
+          goal: 'Generate design packet',
+          ability_request: {
+            name: 'homeboy/run-runtime-package',
+            input: { package: { slug: 'design-agent', source: 'bundles/design-agent' } },
+          },
+          ability_requirements: ['wordpress/site-health'],
+        }],
+      },
+    },
+  },
+}, {
+  ...fanoutAgentTaskRequest.executor.config,
+  fanout_request: {
+    workers: [{
+      id: 'design',
+      goal: 'Generate design packet',
+      ability_request: {
+        name: 'homeboy/run-runtime-package',
+        input: { package: { slug: 'design-agent', source: 'bundles/design-agent' } },
+      },
+      ability_requirements: ['wordpress/site-health'],
+    }],
+  },
+}, fanoutAgentTaskRequest.inputs, {});
+assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.ability_normalization.requested_ability, 'homeboy/run-runtime-package');
+assert.equal(Object.hasOwn(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.ability_normalization, 'deprecated_compatibility_alias'), false);
+assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.input.runtime_package, 'design-agent');
+assert.deepEqual(controllerAbilityRequestFanoutRequest.workers[0].ability_requirements, ['wp-codebox/run-runtime-package', 'wordpress/site-health']);
 const stableCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput });
 assert.equal(stableCodeboxInvocation.contract, runtimeContractSchemas().agentTask.runRequest);
 assert.equal(stableCodeboxInvocation.input.schema, runtimeContractSchemas().agentTask.runRequest);
