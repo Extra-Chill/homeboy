@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::core::component::Component;
 use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
@@ -20,6 +21,7 @@ pub struct RunnerOutput {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    pub timed_out: bool,
     pub child_resource: Option<ExtensionChildResourceSummary>,
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }
@@ -52,6 +54,8 @@ pub struct ExtensionRunner {
     passthrough: bool,
     /// Tee only runner stderr to the terminal while capturing stdout/stderr.
     stderr_passthrough: bool,
+    /// Optional wall-clock budget enforced by the parent process.
+    timeout: Option<Duration>,
     /// Run directory path for recording machine-local child process evidence.
     run_dir_path: Option<PathBuf>,
     invocation_requirements: InvocationRequirements,
@@ -81,6 +85,7 @@ impl ExtensionRunner {
             command_override: None,
             passthrough: true,
             stderr_passthrough: false,
+            timeout: None,
             run_dir_path: None,
             invocation_requirements: InvocationRequirements::default(),
         }
@@ -190,6 +195,11 @@ impl ExtensionRunner {
         self
     }
 
+    pub(crate) fn timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Execute the extension runner script.
     ///
     /// Performs the full orchestration:
@@ -267,6 +277,7 @@ impl ExtensionRunner {
             success: output.success,
             stdout: output.stdout,
             stderr: output.stderr,
+            timed_out: output.timed_out,
             child_resource: output.child_resource,
             extension_phase_timings: self
                 .run_dir_path
@@ -324,6 +335,7 @@ impl ExtensionRunner {
             super::execution::CapabilityScriptOptions {
                 passthrough: self.passthrough,
                 stderr_passthrough: self.stderr_passthrough,
+                timeout: self.timeout,
             },
         )
     }
@@ -652,6 +664,7 @@ mod tests {
             stderr: "fatal setup error".to_string(),
             success: false,
             exit_code: 2,
+            timed_out: false,
             child_resource: None,
         };
 
@@ -685,6 +698,7 @@ mod tests {
             stderr: "formatter missing".to_string(),
             success: false,
             exit_code: 127,
+            timed_out: false,
             child_resource: None,
         };
 
