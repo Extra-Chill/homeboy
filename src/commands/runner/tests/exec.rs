@@ -155,6 +155,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             false,
             Some(run.id.clone()),
             vec!["out.txt".to_string(), "reports".to_string()],
+            Vec::new(),
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
@@ -179,6 +180,62 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
 }
 
 #[test]
+fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        runner::create(
+            &format!(
+                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                workspace.path().display()
+            ),
+            false,
+        )
+        .expect("create local runner");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec lab-local".to_string())
+                    .cwd_path(workspace.path())
+                    .metadata(serde_json::json!({}))
+                    .build(),
+            )
+            .expect("run");
+
+        let (_output, exit_code) = exec(
+            "lab-local",
+            Some(workspace.path().display().to_string()),
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            false,
+            Some(run.id.clone()),
+            Vec::new(),
+            vec!["summary.json".to_string()],
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                r#"printf '{"matrix":{"passed":1}}' > summary.json"#.to_string(),
+            ],
+        )
+        .expect("runner exec");
+
+        assert_eq!(exit_code, 0);
+        let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].kind, "summary");
+        assert_eq!(artifacts[0].artifact_type, "file");
+        assert_eq!(artifacts[0].metadata_json["declared_path"], "summary.json");
+        assert_eq!(artifacts[0].metadata_json["evidence_role"], "summary");
+        assert_eq!(artifacts[0].metadata_json["promoted_by"], "runner.exec");
+        assert!(std::path::Path::new(&artifacts[0].path).is_file());
+    });
+}
+
+#[test]
 fn runner_exec_rejects_artifacts_without_run_id() {
     let err = exec(
         "lab-local",
@@ -192,9 +249,33 @@ fn runner_exec_rejects_artifacts_without_run_id() {
         false,
         None,
         vec!["out.txt".to_string()],
+        Vec::new(),
         vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
     )
     .expect_err("artifact requires run id");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert_eq!(err.details["field"], "run_id");
+}
+
+#[test]
+fn runner_exec_rejects_summaries_without_run_id() {
+    let err = exec(
+        "lab-local",
+        None,
+        None,
+        false,
+        false,
+        Vec::new(),
+        None,
+        Vec::new(),
+        false,
+        None,
+        Vec::new(),
+        vec!["summary.json".to_string()],
+        vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
+    )
+    .expect_err("summary requires run id");
 
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert_eq!(err.details["field"], "run_id");
