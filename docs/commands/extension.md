@@ -35,6 +35,9 @@ homeboy extension run <extension_id> [-p|--project <project_id>] [-c|--component
 - `--no-stream` disables streaming and captures output.
 - By default, Homeboy auto-detects streaming behavior based on TTY.
 - Trailing `<args...>` are passed to CLI-type extensions.
+- Safety manifest metadata marks `extension run` as an operator command because
+  extension-owned runtime commands and forwarded arguments may mutate the target
+  system.
 
 ### `set`
 
@@ -134,7 +137,7 @@ Executes an action defined in the extension manifest.
 homeboy extension exec <extension_id> [-c|--component <component_id>] -- <command...>
 ```
 
-Runs a tool from the extension's vendor/runtime directory. When `--component` is provided, the command runs with that component's path as the working directory.
+Runs a tool from the extension's vendor/runtime directory. When `--component` is provided, the command runs with that component's path as the working directory. Safety manifest metadata marks `extension exec` as an operator command because forwarded commands may mutate the target system.
 
 ## Settings
 
