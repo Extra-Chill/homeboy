@@ -517,6 +517,16 @@
           "provider_run_result": ["codebox_run_result"]
         }
       },
+      "result_contract": {
+        "typed_artifact_envelope": {
+          "schema": "wp-codebox/artifact-result-envelope/v1",
+          "output": "provider_run_result",
+          "provider_label": "WP Codebox",
+          "diagnostic_class_prefix": "codebox",
+          "private_shape_markers": ["agent_result", "metadata.agent_runtime"],
+          "require_typed_artifacts": true
+        }
+      },
       "deprecated_compatibility_aliases": [
         {
           "schema": "wp-codebox/deprecated-compatibility-alias/v1",
