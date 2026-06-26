@@ -164,6 +164,7 @@ fn try_execute_direct(
         stderr: String::from_utf8_lossy(&out.stderr).to_string(),
         success: out.status.success(),
         exit_code: out.status.code().unwrap_or(-1),
+        timed_out: false,
         child_resource: None,
     })
 }

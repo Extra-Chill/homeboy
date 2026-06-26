@@ -303,6 +303,7 @@ impl SshClient {
                     stderr: String::new(),
                     success: true,
                     exit_code: 0,
+                    timed_out: false,
                     child_resource: None,
                 },
                 Err(err) => CommandOutput {
@@ -313,6 +314,7 @@ impl SshClient {
                     ),
                     success: false,
                     exit_code: -1,
+                    timed_out: false,
                     child_resource: None,
                 },
             };
@@ -326,6 +328,7 @@ impl SshClient {
                     stderr: format!("failed to create download target '{}': {}", local_path, err),
                     success: false,
                     exit_code: -1,
+                    timed_out: false,
                     child_resource: None,
                 };
             }
@@ -343,6 +346,7 @@ impl SshClient {
                 stderr: String::from_utf8_lossy(&out.stderr).to_string(),
                 success: out.status.success(),
                 exit_code: out.status.code().unwrap_or(-1),
+                timed_out: false,
                 child_resource: None,
             },
             Err(err) => CommandOutput {
@@ -350,6 +354,7 @@ impl SshClient {
                 stderr: format!("SSH download error: {}", err),
                 success: false,
                 exit_code: -1,
+                timed_out: false,
                 child_resource: None,
             },
         }
@@ -392,6 +397,7 @@ impl SshClient {
             stderr: "SSH retry exhausted".to_string(),
             success: false,
             exit_code: -1,
+            timed_out: false,
             child_resource: None,
         }
     }
@@ -423,6 +429,7 @@ impl SshClient {
                         stderr: format!("Failed to open stdin file: {}", err),
                         success: false,
                         exit_code: -1,
+                        timed_out: false,
                         child_resource: None,
                     };
                 }
@@ -437,6 +444,7 @@ impl SshClient {
                 stderr: String::from_utf8_lossy(&out.stderr).to_string(),
                 success: out.status.success(),
                 exit_code: out.status.code().unwrap_or(-1),
+                timed_out: false,
                 child_resource: None,
             },
             Err(e) => CommandOutput {
@@ -444,6 +452,7 @@ impl SshClient {
                 stderr: format!("SSH error: {}", e),
                 success: false,
                 exit_code: -1,
+                timed_out: false,
                 child_resource: None,
             },
         }

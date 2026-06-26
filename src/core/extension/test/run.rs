@@ -622,6 +622,7 @@ fn run_declared_result_parser(
         crate::core::extension::execution::CapabilityScriptOptions {
             passthrough: false,
             stderr_passthrough: false,
+            timeout: None,
         },
     )?;
     if !output.success {

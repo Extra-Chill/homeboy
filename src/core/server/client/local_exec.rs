@@ -1,4 +1,5 @@
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::core::engine::invocation;
 
@@ -26,13 +27,23 @@ pub fn execute_local_command_in_dir(
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
 ) -> CommandOutput {
-    execute_local_command_in_dir_impl(command, current_dir, env)
+    execute_local_command_in_dir_impl(command, current_dir, env, None)
+}
+
+pub(crate) fn execute_local_command_in_dir_with_timeout(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Duration,
+) -> CommandOutput {
+    execute_local_command_in_dir_impl(command, current_dir, env, Some(timeout))
 }
 
 fn execute_local_command_in_dir_impl(
     command: &str,
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
+    timeout: Option<Duration>,
 ) -> CommandOutput {
     use std::io::Read;
     use std::thread;
@@ -71,6 +82,7 @@ fn execute_local_command_in_dir_impl(
                 stderr: format!("Command error: {}", e),
                 success: false,
                 exit_code: -1,
+                timed_out: false,
                 child_resource: None,
             };
         }
@@ -106,8 +118,8 @@ fn execute_local_command_in_dir_impl(
         .take()
         .map(|pipe| thread::spawn(move || read_all(pipe)));
 
-    let (status, delegated_failure) =
-        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard);
+    let (status, delegated_failure, timed_out) =
+        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
     let interrupted_signal = active_cleanup_signal();
 
     let stdout = stdout_handle
@@ -121,26 +133,43 @@ fn execute_local_command_in_dir_impl(
         Ok(status) => CommandOutput {
             stdout,
             stderr: stderr_with_delegated_failure(
-                stderr_with_interruption(stderr, interrupted_signal),
+                stderr_with_timeout(
+                    stderr_with_interruption(stderr, interrupted_signal),
+                    timed_out,
+                    timeout,
+                ),
                 delegated_failure.as_ref(),
             ),
             success: status.success()
                 && interrupted_signal.is_none()
-                && delegated_failure.is_none(),
-            exit_code: interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+                && delegated_failure.is_none()
+                && !timed_out,
+            exit_code: timed_out_exit_code(
+                timed_out,
+                interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+            ),
+            timed_out,
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout,
             stderr: stderr_with_delegated_failure(
                 stderr_with_interruption(
-                    format!("{stderr}\nCommand error: {}", e),
+                    stderr_with_timeout(
+                        format!("{stderr}\nCommand error: {}", e),
+                        timed_out,
+                        timeout,
+                    ),
                     interrupted_signal,
                 ),
                 delegated_failure.as_ref(),
             ),
             success: false,
-            exit_code: interrupted_exit_code(interrupted_signal, -1),
+            exit_code: timed_out_exit_code(
+                timed_out,
+                interrupted_exit_code(interrupted_signal, -1),
+            ),
+            timed_out,
             child_resource: Some(monitor.finish()),
         },
     };
@@ -202,13 +231,23 @@ pub fn execute_local_command_passthrough(
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
 ) -> CommandOutput {
-    execute_local_command_passthrough_impl(command, current_dir, env)
+    execute_local_command_passthrough_impl(command, current_dir, env, None)
+}
+
+pub(crate) fn execute_local_command_passthrough_with_timeout(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Duration,
+) -> CommandOutput {
+    execute_local_command_passthrough_impl(command, current_dir, env, Some(timeout))
 }
 
 fn execute_local_command_passthrough_impl(
     command: &str,
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
+    timeout: Option<Duration>,
 ) -> CommandOutput {
     use std::io::{Read, Write};
     use std::thread;
@@ -247,6 +286,7 @@ fn execute_local_command_passthrough_impl(
                 stderr: format!("Command error: {}", e),
                 success: false,
                 exit_code: -1,
+                timed_out: false,
                 child_resource: None,
             };
         }
@@ -293,8 +333,8 @@ fn execute_local_command_passthrough_impl(
         .take()
         .map(|pipe| thread::spawn(move || tee_to(pipe, std::io::stderr())));
 
-    let (status, delegated_failure) =
-        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard);
+    let (status, delegated_failure, timed_out) =
+        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
     let interrupted_signal = active_cleanup_signal();
 
     let stdout = stdout_handle
@@ -308,26 +348,43 @@ fn execute_local_command_passthrough_impl(
         Ok(status) => CommandOutput {
             stdout,
             stderr: stderr_with_delegated_failure(
-                stderr_with_interruption(stderr, interrupted_signal),
+                stderr_with_timeout(
+                    stderr_with_interruption(stderr, interrupted_signal),
+                    timed_out,
+                    timeout,
+                ),
                 delegated_failure.as_ref(),
             ),
             success: status.success()
                 && interrupted_signal.is_none()
-                && delegated_failure.is_none(),
-            exit_code: interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+                && delegated_failure.is_none()
+                && !timed_out,
+            exit_code: timed_out_exit_code(
+                timed_out,
+                interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+            ),
+            timed_out,
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout,
             stderr: stderr_with_delegated_failure(
                 stderr_with_interruption(
-                    format!("{stderr}\nCommand error: {}", e),
+                    stderr_with_timeout(
+                        format!("{stderr}\nCommand error: {}", e),
+                        timed_out,
+                        timeout,
+                    ),
                     interrupted_signal,
                 ),
                 delegated_failure.as_ref(),
             ),
             success: false,
-            exit_code: interrupted_exit_code(interrupted_signal, -1),
+            exit_code: timed_out_exit_code(
+                timed_out,
+                interrupted_exit_code(interrupted_signal, -1),
+            ),
+            timed_out,
             child_resource: Some(monitor.finish()),
         },
     };
@@ -341,6 +398,24 @@ pub(crate) fn execute_local_command_stderr_passthrough(
     command: &str,
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
+) -> CommandOutput {
+    execute_local_command_stderr_passthrough_impl(command, current_dir, env, None)
+}
+
+pub(crate) fn execute_local_command_stderr_passthrough_with_timeout(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Duration,
+) -> CommandOutput {
+    execute_local_command_stderr_passthrough_impl(command, current_dir, env, Some(timeout))
+}
+
+fn execute_local_command_stderr_passthrough_impl(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Option<Duration>,
 ) -> CommandOutput {
     use std::io::{Read, Write};
     use std::thread;
@@ -379,6 +454,7 @@ pub(crate) fn execute_local_command_stderr_passthrough(
                 stderr: format!("Command error: {}", e),
                 success: false,
                 exit_code: -1,
+                timed_out: false,
                 child_resource: None,
             };
         }
@@ -432,8 +508,8 @@ pub(crate) fn execute_local_command_stderr_passthrough(
         .take()
         .map(|pipe| thread::spawn(move || tee_to_stderr(pipe)));
 
-    let (status, delegated_failure) =
-        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard);
+    let (status, delegated_failure, timed_out) =
+        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
     let interrupted_signal = active_cleanup_signal();
 
     let stdout = stdout_handle
@@ -447,26 +523,43 @@ pub(crate) fn execute_local_command_stderr_passthrough(
         Ok(status) => CommandOutput {
             stdout,
             stderr: stderr_with_delegated_failure(
-                stderr_with_interruption(stderr, interrupted_signal),
+                stderr_with_timeout(
+                    stderr_with_interruption(stderr, interrupted_signal),
+                    timed_out,
+                    timeout,
+                ),
                 delegated_failure.as_ref(),
             ),
             success: status.success()
                 && interrupted_signal.is_none()
-                && delegated_failure.is_none(),
-            exit_code: interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+                && delegated_failure.is_none()
+                && !timed_out,
+            exit_code: timed_out_exit_code(
+                timed_out,
+                interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+            ),
+            timed_out,
             child_resource: Some(monitor.finish()),
         },
         Err(e) => CommandOutput {
             stdout,
             stderr: stderr_with_delegated_failure(
                 stderr_with_interruption(
-                    format!("{stderr}\nCommand error: {}", e),
+                    stderr_with_timeout(
+                        format!("{stderr}\nCommand error: {}", e),
+                        timed_out,
+                        timeout,
+                    ),
                     interrupted_signal,
                 ),
                 delegated_failure.as_ref(),
             ),
             success: false,
-            exit_code: interrupted_exit_code(interrupted_signal, -1),
+            exit_code: timed_out_exit_code(
+                timed_out,
+                interrupted_exit_code(interrupted_signal, -1),
+            ),
+            timed_out,
             child_resource: Some(monitor.finish()),
         },
     };
@@ -474,6 +567,32 @@ pub(crate) fn execute_local_command_stderr_passthrough(
         cleanup_guard.cleanup();
     }
     output
+}
+
+fn timed_out_exit_code(timed_out: bool, fallback: i32) -> i32 {
+    if timed_out {
+        124
+    } else {
+        fallback
+    }
+}
+
+fn stderr_with_timeout(mut stderr: String, timed_out: bool, timeout: Option<Duration>) -> String {
+    if timed_out {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        match timeout {
+            Some(timeout) => stderr.push_str(&format!(
+                "Homeboy command timed out after {}ms; terminated child process group before returning failure evidence.",
+                timeout.as_millis()
+            )),
+            None => stderr.push_str(
+                "Homeboy command timed out; terminated child process group before returning failure evidence.",
+            ),
+        }
+    }
+    stderr
 }
 
 fn invocation_child_guard(
@@ -496,28 +615,45 @@ fn wait_for_child_or_delegated_failure(
     child: &mut std::process::Child,
     env: Option<&[(&str, &str)]>,
     cleanup_guard: &mut Option<ProcessGroupCleanupGuard>,
+    timeout: Option<Duration>,
 ) -> (
     std::io::Result<std::process::ExitStatus>,
     Option<DelegatedRunTerminalFailure>,
+    bool,
 ) {
-    let Some(monitor) = DelegatedRunFailureMonitor::from_env(env) else {
-        return (child.wait(), None);
-    };
+    let monitor = DelegatedRunFailureMonitor::from_env(env);
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
 
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return (Ok(status), None),
+            Ok(Some(status)) => return (Ok(status), None, false),
             Ok(None) => {}
-            Err(error) => return (Err(error), None),
+            Err(error) => return (Err(error), None, false),
         }
 
-        if let Some(failure) = monitor.terminal_failure() {
+        if let Some(failure) = monitor
+            .as_ref()
+            .and_then(|monitor| monitor.terminal_failure())
+        {
             if let Some(cleanup_guard) = cleanup_guard.take() {
                 cleanup_guard.cleanup();
             }
-            return (child.wait(), Some(failure));
+            return (child.wait(), Some(failure), false);
         }
 
-        std::thread::sleep(monitor.poll_interval);
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if let Some(cleanup_guard) = cleanup_guard.take() {
+                cleanup_guard.cleanup();
+            } else {
+                let _ = child.kill();
+            }
+            return (child.wait(), None, true);
+        }
+
+        let poll_interval = monitor
+            .as_ref()
+            .map(|monitor| monitor.poll_interval)
+            .unwrap_or_else(|| Duration::from_millis(50));
+        std::thread::sleep(poll_interval);
     }
 }
