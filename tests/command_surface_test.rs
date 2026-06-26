@@ -264,6 +264,38 @@ fn command_specs_drive_top_level_manifest_metadata() {
             spec.name
         );
         assert_eq!(
+            entry.mutates, spec.safety.mutates,
+            "top-level manifest mutation metadata drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.operator, spec.safety.operator,
+            "top-level manifest operator metadata drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.dry_run.flag.as_deref(),
+            spec.safety.dry_run_flag,
+            "top-level manifest dry-run metadata drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.risk_exemption.as_deref(),
+            spec.safety.risk_exemption,
+            "top-level manifest risk metadata drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.dangerous_flags,
+            spec.safety
+                .dangerous_flags
+                .iter()
+                .map(|flag| flag.to_string())
+                .collect::<Vec<_>>(),
+            "top-level manifest dangerous flag metadata drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
             entry.docs.path,
             spec.docs_path(),
             "top-level manifest docs path drifted from CommandSpec for `{}`",
