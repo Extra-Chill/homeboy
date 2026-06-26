@@ -116,6 +116,10 @@ enum RigCommand {
         /// Select a rig from a local package path containing multiple rigs
         #[arg(long)]
         id: Option<String>,
+        /// Override the rig's primary component checkout path for this check.
+        /// Uses bench.default_component when present, otherwise the rig's only component.
+        #[arg(long, value_name = "CHECKOUT")]
+        path: Option<String>,
     },
     /// Tear down a rig: stop services and run its `down` pipeline
     Down {
@@ -215,7 +219,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::List => list(),
         RigCommand::Show { rig_id } => show(&rig_id),
         RigCommand::Up { rig_id, dry_run } => up(&rig_id, dry_run),
-        RigCommand::Check { target, id } => check(&target, id.as_deref()),
+        RigCommand::Check { target, id, path } => check(&target, id.as_deref(), path.as_deref()),
         RigCommand::Down { rig_id } => down(&rig_id),
         RigCommand::Repair { rig_id } => repair(&rig_id),
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
@@ -497,8 +501,12 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn check(target: &str, id: Option<&str>) -> CmdResult<RigCommandOutput> {
-    let rig = if std::path::Path::new(target).exists() {
+fn check(
+    target: &str,
+    id: Option<&str>,
+    path_override: Option<&str>,
+) -> CmdResult<RigCommandOutput> {
+    let mut rig = if std::path::Path::new(target).exists() {
         rig::load_local_source(target, id)?
     } else {
         if id.is_some() {
@@ -511,6 +519,9 @@ fn check(target: &str, id: Option<&str>) -> CmdResult<RigCommandOutput> {
         }
         rig::load(target)?
     };
+    if let Some(path) = path_override {
+        apply_check_path_override(&mut rig, path)?;
+    }
     let report = rig::run_check(&rig)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
@@ -520,6 +531,56 @@ fn check(target: &str, id: Option<&str>) -> CmdResult<RigCommandOutput> {
         }),
         exit_code,
     ))
+}
+
+fn apply_check_path_override(rig: &mut rig::RigSpec, path: &str) -> homeboy::core::Result<()> {
+    if path.trim().is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "path",
+            "--path requires a non-empty component checkout path",
+            Some(path.to_string()),
+            None,
+        ));
+    }
+
+    let component_id = if let Some(component_id) = rig
+        .bench
+        .as_ref()
+        .and_then(|bench| bench.default_component.as_deref())
+        .filter(|component_id| !component_id.trim().is_empty())
+    {
+        component_id.to_string()
+    } else if rig.components.len() == 1 {
+        rig.components
+            .keys()
+            .next()
+            .expect("one component key")
+            .to_string()
+    } else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "path",
+            "rig check --path can only infer a target component when the rig declares bench.default_component or exactly one component",
+            Some(path.to_string()),
+            Some(vec![
+                "Add bench.default_component to the rig spec".to_string(),
+                "Run homeboy bench --rig <rig> --path <checkout> for bench workflows".to_string(),
+            ]),
+        ));
+    };
+
+    let Some(component) = rig.components.get_mut(&component_id) else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "bench.default_component",
+            format!(
+                "rig '{}' declares bench.default_component '{}' but no matching component exists",
+                rig.id, component_id
+            ),
+            Some(component_id),
+            None,
+        ));
+    };
+    component.path = path.to_string();
+    Ok(())
 }
 
 fn down(rig_id: &str) -> CmdResult<RigCommandOutput> {
@@ -647,6 +708,87 @@ mod tests {
                 .expect("rig sync should parse");
 
         assert!(cli.rig.is_runner_source_management_command());
+    }
+
+    #[test]
+    fn check_accepts_path_override() {
+        let cli =
+            TestCli::try_parse_from(["homeboy", "check", "studio-bfb", "--path", "/tmp/studio"])
+                .expect("rig check --path should parse");
+
+        let RigCommand::Check { target, path, .. } = cli.rig.command else {
+            panic!("expected rig check command");
+        };
+        assert_eq!(target, "studio-bfb");
+        assert_eq!(path.as_deref(), Some("/tmp/studio"));
+    }
+
+    #[test]
+    fn check_path_override_uses_bench_default_component() {
+        crate::test_support::with_isolated_home(|home| {
+            let declared_component = tempfile::TempDir::new().expect("declared component");
+            let override_component = tempfile::TempDir::new().expect("override component");
+            fs::write(override_component.path().join("ready.txt"), "ready").expect("marker");
+            write_rig(
+                home.path(),
+                "studio-bfb",
+                serde_json::json!({
+                    "id": "studio-bfb",
+                    "components": {
+                        "studio": { "path": declared_component.path() },
+                        "helper": { "path": declared_component.path() }
+                    },
+                    "bench": { "default_component": "studio" },
+                    "requirements": {
+                        "filesystem_assertions": [
+                            {
+                                "kind": "file",
+                                "path": "${components.studio.path}/ready.txt"
+                            }
+                        ]
+                    }
+                }),
+            );
+
+            let (_output, exit_code) = check(
+                "studio-bfb",
+                None,
+                Some(&override_component.path().to_string_lossy()),
+            )
+            .expect("rig check should use --path override");
+
+            assert_eq!(exit_code, 0);
+        });
+    }
+
+    #[test]
+    fn check_path_override_requires_unambiguous_component() {
+        crate::test_support::with_isolated_home(|home| {
+            let component = tempfile::TempDir::new().expect("component");
+            write_rig(
+                home.path(),
+                "multi-component",
+                serde_json::json!({
+                    "id": "multi-component",
+                    "components": {
+                        "app": { "path": component.path() },
+                        "helper": { "path": component.path() }
+                    }
+                }),
+            );
+
+            let err = match check(
+                "multi-component",
+                None,
+                Some(&component.path().to_string_lossy()),
+            ) {
+                Ok(_) => panic!("ambiguous --path should fail"),
+                Err(err) => err,
+            };
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("bench.default_component"));
+        });
     }
 
     #[test]
