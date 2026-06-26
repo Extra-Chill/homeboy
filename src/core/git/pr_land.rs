@@ -58,6 +58,13 @@ pub struct PrLandItem {
     pub merge_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PrMergeOutcome {
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -128,7 +135,7 @@ trait PrLandClient {
         number: u64,
         method: &str,
         delete_branch: bool,
-    ) -> Result<()>;
+    ) -> Result<PrMergeOutcome>;
     fn refresh_pr(&mut self, repo: &str, pr: &PrView, helper: &PrLandRefreshHelper) -> Result<()>;
 }
 
@@ -184,7 +191,7 @@ impl PrLandClient for GhPrLandClient {
         number: u64,
         method: &str,
         delete_branch: bool,
-    ) -> Result<()> {
+    ) -> Result<PrMergeOutcome> {
         let branch_to_delete = if delete_branch {
             let pr = self.view_pr(&self.repo.clone(), number)?;
             (pr.head_repository.as_deref() == Some(self.repo.as_str()))
@@ -196,13 +203,17 @@ impl PrLandClient for GhPrLandClient {
 
         self.gh
             .run(&pr_merge_api_args(&self.repo, number, method))?;
+        let mut warnings = Vec::new();
         if let Some(branch) = branch_to_delete {
-            let _ = self
+            if let Err(error) = self
                 .gh
-                .run(&delete_branch_ref_api_args(&self.repo, &branch));
+                .run(&delete_branch_ref_api_args(&self.repo, &branch))
+            {
+                warnings.push(format!("failed to delete branch {branch}: {error}"));
+            }
         }
 
-        Ok(())
+        Ok(PrMergeOutcome { warnings })
     }
 
     fn refresh_pr(&mut self, repo: &str, pr: &PrView, helper: &PrLandRefreshHelper) -> Result<()> {
@@ -317,9 +328,14 @@ fn merge_ready_pr(
             &options.merge_method,
             options.delete_branch,
         ) {
-            Ok(()) => {
+            Ok(outcome) => {
                 summary.landed += 1;
-                items.push(item_from_pr(&pr, PrLandStatus::Landed, "merged"));
+                items.push(item_from_pr_with_warnings(
+                    &pr,
+                    PrLandStatus::Landed,
+                    "merged",
+                    outcome.warnings,
+                ));
                 return Ok(());
             }
             Err(err)
@@ -382,6 +398,15 @@ fn readiness(pr: &PrView, can_refresh: bool) -> PrReadiness {
 }
 
 fn item_from_pr(pr: &PrView, status: PrLandStatus, reason: &str) -> PrLandItem {
+    item_from_pr_with_warnings(pr, status, reason, Vec::new())
+}
+
+fn item_from_pr_with_warnings(
+    pr: &PrView,
+    status: PrLandStatus,
+    reason: &str,
+    warnings: Vec<String>,
+) -> PrLandItem {
     PrLandItem {
         number: pr.number,
         url: pr.url.clone(),
@@ -391,6 +416,7 @@ fn item_from_pr(pr: &PrView, status: PrLandStatus, reason: &str) -> PrLandItem {
         checks: pr.checks.clone(),
         merge_state: pr.merge_state.clone(),
         head_sha: pr.head_sha.clone(),
+        warnings,
     }
 }
 
@@ -577,6 +603,7 @@ mod tests {
     struct FakeClient {
         views: BTreeMap<u64, VecDeque<PrView>>,
         merge_errors: VecDeque<Error>,
+        merge_warnings: VecDeque<Vec<String>>,
         merged: Vec<u64>,
         refreshed: Vec<u64>,
     }
@@ -603,12 +630,14 @@ mod tests {
             number: u64,
             _method: &str,
             _delete_branch: bool,
-        ) -> Result<()> {
+        ) -> Result<PrMergeOutcome> {
             if let Some(err) = self.merge_errors.pop_front() {
                 return Err(err);
             }
             self.merged.push(number);
-            Ok(())
+            Ok(PrMergeOutcome {
+                warnings: self.merge_warnings.pop_front().unwrap_or_default(),
+            })
         }
 
         fn refresh_pr(
@@ -703,6 +732,25 @@ mod tests {
         assert_eq!(client.merged, vec![1]);
         assert_eq!(output.summary.merge_retries, 1);
         assert_eq!(output.summary.landed, 1);
+    }
+
+    #[test]
+    fn branch_cleanup_warning_after_remote_merge_does_not_block_landing() {
+        let mut client = FakeClient::default();
+        client.push_view(pr(1, Some("SUCCESS"), Some("CLEAN")));
+        client.merge_warnings.push_back(vec![
+            "failed to delete branch main: fatal: 'main' is already used by worktree at /tmp/homeboy".to_string(),
+        ]);
+        let mut opts = options(vec!["1"]);
+        opts.delete_branch = true;
+
+        let output = land_prs_with_client(opts, &mut client).unwrap();
+
+        assert_eq!(client.merged, vec![1]);
+        assert_eq!(output.summary.landed, 1);
+        assert_eq!(output.summary.blocked, 0);
+        assert_eq!(output.items[0].status, PrLandStatus::Landed);
+        assert!(output.items[0].warnings[0].contains("already used by worktree"));
     }
 
     #[test]
