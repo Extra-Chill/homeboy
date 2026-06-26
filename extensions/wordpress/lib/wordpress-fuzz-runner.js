@@ -391,6 +391,7 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 		id: runId,
 		title: `WordPress fuzz campaign ${runId}`,
 		safety_class: deriveHomeboyFuzzSafetyClass(plan),
+		artifacts: homeboyFuzzCampaignArtifacts(codeboxResult),
 		metadata: stripUndefined({
 			workload_id: workloadId,
 			plan_id: plan?.id,
@@ -403,6 +404,35 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 			hotspot_summary: codeboxResult?.hotspot_summary,
 			observation: codeboxResult?.observation,
 			wordpress_fuzz_result: codeboxResult?.wordpress_fuzz_result,
+		}),
+	});
+}
+
+function homeboyFuzzCampaignArtifacts(codeboxResult = {}) {
+	return normalizeArray(codeboxResult?.wordpress_fuzz_result?.artifacts || codeboxResult?.wordpressFuzzResult?.artifacts || codeboxResult?.artifacts)
+		.map(homeboyFuzzCampaignArtifact)
+		.filter(Boolean);
+}
+
+function homeboyFuzzCampaignArtifact(artifact = {}) {
+	if (!objectOrUndefined(artifact)) {
+		return null;
+	}
+	const id = artifact.id || artifact.name || artifact.role || artifact.kind;
+	const kind = artifact.kind || artifact.role || artifact.name || artifact.id;
+	if (!id || !kind) {
+		return null;
+	}
+	return stripUndefined({
+		schema: 'homeboy/fuzz-artifact/v1',
+		id: String(id),
+		kind: String(kind),
+		metadata: stripUndefined({
+			name: artifact.name,
+			role: artifact.role,
+			semantic_key: artifact.semantic_key || artifact.semanticKey,
+			content_type: artifact.content_type || artifact.contentType,
+			schema: artifact.schema || artifact.metadata?.schema,
 		}),
 	});
 }
