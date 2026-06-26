@@ -125,8 +125,39 @@ pub(crate) fn local_package_root(id: &str) -> Option<PathBuf> {
 }
 
 pub fn package_evidence(id: &str) -> Option<RigPackageEvidence> {
+    if let Some(package_root) = local_package_root(id) {
+        return Some(local_package_evidence(id, package_root));
+    }
     let metadata = read_source_metadata(id)?;
     Some(package_evidence_from_metadata(id, metadata))
+}
+
+fn local_package_evidence(id: &str, package_root: PathBuf) -> RigPackageEvidence {
+    let source = package_root.to_string_lossy().to_string();
+    let current_source_revision = git::short_head_revision_at(&package_root);
+    RigPackageEvidence {
+        rig_id: id.to_string(),
+        package_root: source.clone(),
+        source: source.clone(),
+        source_root: Some(source),
+        rig_path: Some(
+            package_root
+                .join("rigs")
+                .join(id)
+                .join("rig.json")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        discovery_path: Some(package_root.to_string_lossy().to_string()),
+        installed_source_revision: current_source_revision.clone(),
+        current_source_revision,
+        linked: true,
+        materialized: false,
+        freshness: RigPackageFreshness::Verified,
+        freshness_verified: true,
+        freshness_message: None,
+        refresh_command: None,
+    }
 }
 
 fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigPackageEvidence {
@@ -457,8 +488,10 @@ impl RigSourceContext {
     /// Build a source context from an already-loaded spec, resolving the
     /// package root from the rig's recorded source metadata.
     pub fn from_spec(spec: RigSpec) -> Self {
-        let package_root = read_source_metadata(&spec.id)
-            .map(|metadata| std::path::PathBuf::from(metadata.package_path));
+        let package_root = local_package_root(&spec.id).or_else(|| {
+            read_source_metadata(&spec.id)
+                .map(|metadata| std::path::PathBuf::from(metadata.package_path))
+        });
         Self { spec, package_root }
     }
 
@@ -466,6 +499,36 @@ impl RigSourceContext {
     pub fn load(id: &str) -> Result<Self> {
         Ok(Self::from_spec(load(id)?))
     }
+
+    /// Load a rig for a command invocation, preferring an enclosing local rig
+    /// package checkout that contains the requested rig ID over the globally
+    /// installed rig registry.
+    pub fn load_for_invocation(id: &str) -> Result<Self> {
+        if let Some(package_root) = enclosing_local_package_for_rig(id)? {
+            return Ok(Self::from_spec(load_local_source(
+                package_root.to_string_lossy().as_ref(),
+                Some(id),
+            )?));
+        }
+        Self::load(id)
+    }
+}
+
+fn enclosing_local_package_for_rig(id: &str) -> Result<Option<PathBuf>> {
+    let current_dir = std::env::current_dir()
+        .map_err(|e| Error::internal_io(e.to_string(), Some("get current dir".into())))?;
+    for candidate in current_dir.ancestors() {
+        if candidate.join("rigs").join(id).join("rig.json").is_file() {
+            return Ok(Some(candidate.to_path_buf()));
+        }
+        if candidate.join("rig.json").is_file() {
+            let rigs = discover_rigs_for_install(candidate, Some(id), false)?;
+            if !rigs.is_empty() {
+                return Ok(Some(candidate.to_path_buf()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Return the JSON-declared rig ID when it differs from the installed ID.

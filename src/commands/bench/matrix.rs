@@ -40,9 +40,12 @@ fn prepare_rig_bench_context(
     rig_id: &str,
     args: &BenchRunArgs,
 ) -> homeboy::core::Result<RigBenchContext> {
-    let mut spec = rig::load(rig_id)?;
+    let mut source = rig::RigSourceContext::load_for_invocation(rig_id)?;
+    report_rig_source(&source);
+    let mut spec = source.spec.clone();
     let declared_spec = spec.clone();
     apply_bench_path_override(&mut spec, args);
+    source.spec = spec.clone();
     let lease = rig::lease::acquire_active_run_lease(&spec, "bench")?;
     let prepare_settings = bench_prepare_settings(args);
     if let Some(prepare) = rig::run_bench_prepare(&spec, &prepare_settings)? {
@@ -58,10 +61,19 @@ fn prepare_rig_bench_context(
     let id = spec.id.clone();
     Ok(RigBenchContext {
         id,
-        source: rig::RigSourceContext::from_spec(spec),
+        source,
         snapshot,
         _lease: lease,
     })
+}
+
+fn report_rig_source(source: &rig::RigSourceContext) {
+    if let Some(evidence) = rig::package_evidence(&source.spec.id) {
+        eprintln!(
+            "bench rig source: rig={} package_root={} freshness={:?}",
+            evidence.rig_id, evidence.package_root, evidence.freshness
+        );
+    }
 }
 
 fn bench_prepare_failure_message(prepare: &BenchPrepareReport) -> String {
