@@ -213,7 +213,12 @@ fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> 
         return Ok(());
     };
 
-    for shared_dir in ["scripts/lib", "agent-runtimes", "runtime-agent-ci"] {
+    for shared_dir in [
+        "scripts/lib",
+        "agent-runtimes",
+        "runtime-agent-ci",
+        "agent-task-contracts",
+    ] {
         let source = source_root.join(shared_dir);
         if !source.is_dir() {
             continue;
@@ -221,7 +226,7 @@ fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> 
 
         let target = match shared_dir {
             "agent-runtimes" => paths::agent_runtimes()?,
-            "runtime-agent-ci" => paths::homeboy()?.join(shared_dir),
+            "runtime-agent-ci" | "agent-task-contracts" => paths::homeboy()?.join(shared_dir),
             // Shared extension libraries install under the extensions root so
             // installed wrappers can source `../../../scripts/lib/...`.
             _ => extensions_dir.join(shared_dir),
