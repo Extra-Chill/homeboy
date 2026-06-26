@@ -61,6 +61,20 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             )?;
             Ok((command_json_value(report)?, 0))
         }
+        AgentTaskControllerCommand::Diagnose(status_args) => {
+            let report = homeboy::core::agent_tasks::loop_controller::controller_status_report(
+                &status_args.loop_id,
+            )?;
+            Ok((
+                command_json_value(serde_json::json!({
+                    "schema": "homeboy/agent-task-loop-controller-diagnose-result/v1",
+                    "loop_id": status_args.loop_id,
+                    "failed_child_actions": report.diagnostics.failed_child_actions,
+                    "next_command": format!("homeboy agent-task controller status {}", status_args.loop_id),
+                }))?,
+                0,
+            ))
+        }
         AgentTaskControllerCommand::List => {
             let report = agent_task_controller_service::list()?;
             Ok((command_json_value(report)?, 0))
