@@ -16,10 +16,10 @@ use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
-use homeboy::core::redaction;
+use homeboy::core::redaction::{self, RedactionPolicy};
 
 use super::super::CmdResult;
-use super::args::{CancelArgs, EvidenceArgs, StatusArgs};
+use super::args::{CancelArgs, DiagnoseArgs, EvidenceArgs, StatusArgs};
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
 /// aggregate cannot flood recovery output. Overflow is reported as an
@@ -191,6 +191,63 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
             evidence: hydrated,
         })
         .unwrap_or(Value::Null),
+        0,
+    ))
+}
+
+pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
+    let record = agent_task_service::status(&args.run_id)?;
+    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
+    let mut hydrated_evidence = Vec::new();
+    let mut nested_reasons = Vec::new();
+
+    if let Some(aggregate) = aggregate.as_ref() {
+        for outcome in &aggregate.outcomes {
+            for evidence in &outcome.evidence_refs {
+                if let Some(summary) = hydrate_evidence_summary(&outcome.task_id, evidence) {
+                    collect_nested_diagnostics(
+                        &outcome.task_id,
+                        summary.get("summary").unwrap_or(&Value::Null),
+                        "hydrated_evidence",
+                        &mut nested_reasons,
+                    );
+                    hydrated_evidence.push(summary);
+                }
+            }
+        }
+    }
+
+    let root_cause = nested_reasons
+        .into_iter()
+        .map(collected_diagnostic_value)
+        .next()
+        .or_else(|| {
+            aggregate
+                .as_ref()
+                .and_then(|aggregate| failure_reasons_from_aggregate(aggregate).into_iter().next())
+        });
+
+    let missing_artifacts = aggregate
+        .as_ref()
+        .map(missing_artifact_summaries)
+        .unwrap_or_default();
+    let causal_chain = aggregate
+        .as_ref()
+        .map(causal_chain_from_aggregate)
+        .unwrap_or_default();
+    let next_commands = diagnose_next_commands(&args.run_id);
+
+    Ok((
+        json!({
+            "schema": "homeboy/agent-task-diagnose/v1",
+            "run_id": record.run_id,
+            "state": record.state,
+            "root_cause": root_cause,
+            "causal_chain": causal_chain,
+            "missing_artifacts": missing_artifacts,
+            "hydrated_evidence": hydrated_evidence,
+            "next_commands": next_commands,
+        }),
         0,
     ))
 }
@@ -1071,6 +1128,190 @@ fn evidence_is_test(kind: &str, uri: &str) -> bool {
         || kind.contains("gate")
         || uri.contains("test")
         || uri.contains("transcript")
+}
+
+fn hydrate_evidence_summary(
+    task_id: &str,
+    evidence: &homeboy::core::agent_tasks::AgentTaskEvidenceRef,
+) -> Option<Value> {
+    let path = evidence.uri.strip_prefix("file://")?;
+    if !path.ends_with(".json") {
+        return None;
+    }
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let redacted = RedactionPolicy::default().redact_json(&value);
+    Some(json!({
+        "task_id": task_id,
+        "kind": evidence.kind,
+        "label": evidence.label,
+        "uri": evidence.uri,
+        "summary": evidence_json_summary(&redacted),
+    }))
+}
+
+fn evidence_json_summary(value: &Value) -> Value {
+    json!({
+        "status": find_string_field(value, &["status", "state"]),
+        "failure_classification": find_string_field(value, &["failure_classification", "failure_class", "classification", "class", "code", "kind"]),
+        "message": find_string_field(value, &["message", "summary", "error", "detail", "reason"]),
+        "command": find_string_field(value, &["command", "cmd", "failing_command"]),
+        "exit_code": find_number_field(value, &["exit_code", "exit_status", "status_code"]),
+        "stderr_excerpt": find_string_field(value, &["stderr", "stderr_excerpt"]).map(|text| excerpt(&text)),
+        "stdout_excerpt": find_string_field(value, &["stdout", "stdout_excerpt"]).map(|text| excerpt(&text)),
+        "diagnostics": first_diagnostics(value),
+    })
+}
+
+fn find_string_field(value: &Value, names: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(text) = map.get(*name).and_then(Value::as_str) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+            map.values()
+                .find_map(|nested| find_string_field(nested, names))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|nested| find_string_field(nested, names)),
+        _ => None,
+    }
+}
+
+fn find_number_field(value: &Value, names: &[&str]) -> Option<i64> {
+    match value {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(number) = map.get(*name).and_then(Value::as_i64) {
+                    return Some(number);
+                }
+            }
+            map.values()
+                .find_map(|nested| find_number_field(nested, names))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|nested| find_number_field(nested, names)),
+        _ => None,
+    }
+}
+
+fn first_diagnostics(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(items)) = map.get("diagnostics") {
+                return Value::Array(items.iter().take(5).cloned().collect());
+            }
+            map.values()
+                .find_map(|nested| {
+                    let diagnostics = first_diagnostics(nested);
+                    diagnostics
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+                        .then_some(diagnostics)
+                })
+                .unwrap_or_else(|| Value::Array(Vec::new()))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|nested| {
+                let diagnostics = first_diagnostics(nested);
+                diagnostics
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+                    .then_some(diagnostics)
+            })
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+        _ => Value::Array(Vec::new()),
+    }
+}
+
+fn excerpt(text: &str) -> String {
+    const MAX_CHARS: usize = 1200;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        return trimmed.to_string();
+    }
+    let truncated: String = trimmed.chars().take(MAX_CHARS).collect();
+    format!("{truncated}…")
+}
+
+fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
+    json!({
+        "task_id": item.task_id,
+        "class": item.class,
+        "message": item.message,
+        "source": item.source,
+    })
+}
+
+fn missing_artifact_summaries(aggregate: &AgentTaskAggregate) -> Vec<Value> {
+    aggregate
+        .outcomes
+        .iter()
+        .filter_map(|outcome| {
+            let expected: Vec<String> = outcome
+                .metadata
+                .get("expected_artifacts")
+                .or_else(|| outcome.outputs.get("expected_artifacts"))
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let produced: std::collections::HashSet<String> = outcome
+                .typed_artifacts
+                .iter()
+                .map(|artifact| artifact.name.clone())
+                .collect();
+            let missing: Vec<String> = expected
+                .into_iter()
+                .filter(|name| !produced.contains(name))
+                .collect();
+            (!missing.is_empty()).then(|| {
+                json!({
+                    "task_id": outcome.task_id,
+                    "missing": missing,
+                })
+            })
+        })
+        .collect()
+}
+
+fn causal_chain_from_aggregate(aggregate: &AgentTaskAggregate) -> Vec<Value> {
+    aggregate
+        .outcomes
+        .iter()
+        .map(|outcome| {
+            json!({
+                "task_id": outcome.task_id,
+                "surface": "agent-task",
+                "status": outcome.status,
+                "failure_classification": outcome.failure_classification,
+                "provider_summary": outcome.summary,
+                "evidence_kinds": outcome.evidence_refs.iter().map(|evidence| evidence.kind.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+fn diagnose_next_commands(run_id: &str) -> Vec<String> {
+    vec![
+        format!("homeboy agent-task status {run_id} --full"),
+        format!("homeboy agent-task artifacts {run_id}"),
+        format!("homeboy agent-task review {run_id}"),
+        format!("homeboy agent-task retry {run_id} --run"),
+    ]
 }
 
 #[cfg(test)]

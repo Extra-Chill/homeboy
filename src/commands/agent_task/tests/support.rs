@@ -14,8 +14,8 @@ pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerRunFromSpecArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskCookArgs, CompileLoopArgs, EvidenceArgs, ReviewArgs, StatusArgs, SubmitArgs,
-    VerifyGateArgs,
+    AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, ReviewArgs, StatusArgs,
+    SubmitArgs, VerifyGateArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
     apply_controller_event, controller_from_spec, controller_materialize,
@@ -26,7 +26,9 @@ pub(in crate::commands::agent_task) use super::super::run::{
     retry, run_cook_with_executor, run_loaded_plan, run_next_with_executor,
     run_resume_with_executor, run_submitted, submit,
 };
-pub(in crate::commands::agent_task) use super::super::status::{cancel, evidence, logs, status};
+pub(in crate::commands::agent_task) use super::super::status::{
+    cancel, diagnose, evidence, logs, status,
+};
 pub(in crate::commands::agent_task) use super::super::{
     review, CancelArgs, ProvidersArgs, RetryArgs,
 };
@@ -192,6 +194,46 @@ impl AgentTaskExecutorAdapter for DiagnosticFailureExecutor {
                 follow_up: None,
                 metadata: Value::Null,
             }
+    }
+}
+
+pub(crate) struct ExecutorResultEvidenceFailureExecutor {
+    pub(crate) evidence_uri: String,
+}
+
+impl AgentTaskExecutorAdapter for ExecutorResultEvidenceFailureExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::ProviderError,
+            summary: Some(
+                "WP Codebox agent task did not produce required typed artifacts: concept_packet, design_packet."
+                    .to_string(),
+            ),
+            failure_classification: Some(AgentTaskFailureClassification::Provider),
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: vec![AgentTaskEvidenceRef {
+                kind: "executor-result".to_string(),
+                uri: self.evidence_uri.clone(),
+                label: Some("latest raw executor result".to_string()),
+            }],
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "missing_required_typed_artifacts".to_string(),
+                message: "WP Codebox agent task did not produce required typed artifacts: concept_packet, design_packet."
+                    .to_string(),
+                data: json!({ "missing": ["concept_packet", "design_packet"] }),
+            }],
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: json!({ "expected_artifacts": ["concept_packet", "design_packet"] }),
+        }
     }
 }
 

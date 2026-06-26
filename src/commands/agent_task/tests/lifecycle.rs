@@ -172,6 +172,67 @@ fn evidence_command_hydrates_homeboy_and_file_refs_with_filters_and_redaction() 
 }
 
 #[test]
+fn diagnose_hydrates_executor_result_evidence_root_cause() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "status": "provider_error",
+                "diagnostics": [{
+                    "class": "runtime_task_ability_unavailable",
+                    "message": "The requested runtime task ability is not available inside the sandbox."
+                }],
+                "command": "wp-codebox runtime task run",
+                "exit_code": 1,
+                "stderr": "ability unavailable\nsecret=raw-secret"
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        run_loaded_plan(
+            test_plan(),
+            Some("run-cli-diagnose-evidence"),
+            ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            },
+        )
+        .expect("run completed with failed outcome");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: "run-cli-diagnose-evidence".to_string(),
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["schema"], "homeboy/agent-task-diagnose/v1");
+        assert_eq!(
+            value["root_cause"]["class"],
+            "runtime_task_ability_unavailable"
+        );
+        assert_eq!(
+            value["root_cause"]["message"],
+            "The requested runtime task ability is not available inside the sandbox."
+        );
+        assert_eq!(
+            value["hydrated_evidence"][0]["summary"]["command"],
+            "wp-codebox runtime task run"
+        );
+        assert_eq!(value["hydrated_evidence"][0]["summary"]["exit_code"], 1);
+        assert!(value["hydrated_evidence"][0]["summary"]["stderr_excerpt"]
+            .as_str()
+            .expect("stderr excerpt")
+            .contains("[REDACTED]"));
+        assert_eq!(
+            value["next_commands"][0],
+            "homeboy agent-task status run-cli-diagnose-evidence --full"
+        );
+    });
+}
+
+#[test]
 fn evidence_command_truncates_large_file_evidence() {
     with_isolated_home(|home| {
         let file_path = home.path().join("large.log");
