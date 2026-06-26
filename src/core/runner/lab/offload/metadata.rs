@@ -3,6 +3,9 @@
 
 use super::*;
 
+const ENV_RESOLUTION_SCHEMA: &str = "homeboy/env-resolution/v1";
+const REDACTED_ENV_VALUE: &str = "<redacted>";
+
 /// Insert generic `${components.<id>.path}` override env vars so a remote rig
 /// check resolves component paths to the runner-side materialized checkout
 /// instead of the controller path the rig spec declares (issue #3766/#3767).
@@ -71,6 +74,119 @@ pub(crate) fn job_scoped_overrides_metadata(overrides: &LabJobOverrides) -> serd
             "source": "job_override",
             "value": path,
         })),
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct LabEnvResolutionLayer {
+    pub(crate) source: &'static str,
+    pub(crate) env: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub(crate) secret_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct LabEnvResolutionReport {
+    schema: &'static str,
+    values_redacted: bool,
+    keys: Vec<LabEnvResolutionEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct LabEnvResolutionEntry {
+    key: String,
+    classification: &'static str,
+    value_status: &'static str,
+    value_preview: &'static str,
+    winning_source_layer: String,
+    shadowed_source_layers: Vec<String>,
+    source_layers: Vec<LabEnvResolutionSource>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct LabEnvResolutionSource {
+    source: String,
+    status: &'static str,
+    classification: &'static str,
+    value_status: &'static str,
+}
+
+pub(crate) fn lab_env_resolution_report(layers: Vec<LabEnvResolutionLayer>) -> serde_json::Value {
+    let policy = RedactionPolicy::default();
+    let mut entries_by_key: std::collections::BTreeMap<String, Vec<LabEnvResolutionSource>> =
+        std::collections::BTreeMap::new();
+
+    for layer in layers {
+        let explicit_secret_names = layer
+            .secret_names
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let mut names = layer.env.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        for name in names {
+            let Some(value) = layer.env.get(&name) else {
+                continue;
+            };
+            let secret = explicit_secret_names.contains(name.as_str())
+                || policy.is_sensitive_key(&name)
+                || policy.redact_string(value) != *value;
+            entries_by_key
+                .entry(name)
+                .or_default()
+                .push(LabEnvResolutionSource {
+                    source: layer.source.to_string(),
+                    status: "shadowed",
+                    classification: if secret { "secret" } else { "public" },
+                    value_status: if secret {
+                        "secret_redacted"
+                    } else {
+                        "redacted"
+                    },
+                });
+        }
+    }
+
+    let keys = entries_by_key
+        .into_iter()
+        .filter_map(|(key, mut source_layers)| {
+            let winning_index = source_layers.len().checked_sub(1)?;
+            source_layers[winning_index].status = "winner";
+            let winning_source_layer = source_layers[winning_index].source.clone();
+            let secret = source_layers
+                .iter()
+                .any(|source| source.classification == "secret");
+            let shadowed_source_layers = source_layers[..winning_index]
+                .iter()
+                .map(|source| source.source.clone())
+                .collect::<Vec<_>>();
+            Some(LabEnvResolutionEntry {
+                key,
+                classification: if secret { "secret" } else { "public" },
+                value_status: if secret {
+                    "secret_redacted"
+                } else {
+                    "redacted"
+                },
+                value_preview: REDACTED_ENV_VALUE,
+                winning_source_layer,
+                shadowed_source_layers,
+                source_layers,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_value(LabEnvResolutionReport {
+        schema: ENV_RESOLUTION_SCHEMA,
+        values_redacted: true,
+        keys,
+    })
+    .unwrap_or_else(|_| {
+        serde_json::json!({
+            "schema": ENV_RESOLUTION_SCHEMA,
+            "values_redacted": true,
+            "keys": [],
+        })
     })
 }
 
@@ -329,5 +445,81 @@ mod tests {
             .expect("secret");
         assert_eq!(secret["value_preview"], "<redacted>");
         assert_eq!(secret["redacted"], true);
+    }
+
+    #[test]
+    fn lab_env_resolution_report_records_runtime_overlay_secret_delta_and_job_override_precedence()
+    {
+        let report = lab_env_resolution_report(vec![
+            LabEnvResolutionLayer {
+                source: "env_delta",
+                env: std::collections::HashMap::from([
+                    ("SHARED".to_string(), "from-env-delta".to_string()),
+                    ("ENV_ONLY".to_string(), "public".to_string()),
+                ]),
+                secret_names: Vec::new(),
+            },
+            LabEnvResolutionLayer {
+                source: "runtime_overlay",
+                env: std::collections::HashMap::from([
+                    ("SHARED".to_string(), "from-runtime-overlay".to_string()),
+                    ("RUNTIME_ONLY".to_string(), "/runner/runtime".to_string()),
+                ]),
+                secret_names: Vec::new(),
+            },
+            LabEnvResolutionLayer {
+                source: "secret_env_plan_env_delta",
+                env: std::collections::HashMap::from([
+                    ("SHARED".to_string(), "from-secret-plan".to_string()),
+                    ("API_TOKEN".to_string(), "super-secret".to_string()),
+                ]),
+                secret_names: vec!["API_TOKEN".to_string()],
+            },
+            LabEnvResolutionLayer {
+                source: "job_override",
+                env: std::collections::HashMap::from([(
+                    "SHARED".to_string(),
+                    "from-job-override".to_string(),
+                )]),
+                secret_names: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(report["schema"], ENV_RESOLUTION_SCHEMA);
+        assert_eq!(report["values_redacted"], true);
+        let keys = report["keys"].as_array().expect("keys array");
+        let shared = keys
+            .iter()
+            .find(|entry| entry["key"] == "SHARED")
+            .expect("shared entry");
+        assert_eq!(shared["winning_source_layer"], "job_override");
+        assert_eq!(
+            shared["shadowed_source_layers"],
+            serde_json::json!(["env_delta", "runtime_overlay", "secret_env_plan_env_delta"])
+        );
+        assert_eq!(shared["classification"], "public");
+        assert_eq!(shared["value_preview"], REDACTED_ENV_VALUE);
+
+        let api_token = keys
+            .iter()
+            .find(|entry| entry["key"] == "API_TOKEN")
+            .expect("api token entry");
+        assert_eq!(
+            api_token["winning_source_layer"],
+            "secret_env_plan_env_delta"
+        );
+        assert_eq!(api_token["classification"], "secret");
+        assert_eq!(api_token["value_status"], "secret_redacted");
+        assert_eq!(api_token["value_preview"], REDACTED_ENV_VALUE);
+
+        let runtime_only = keys
+            .iter()
+            .find(|entry| entry["key"] == "RUNTIME_ONLY")
+            .expect("runtime entry");
+        assert_eq!(runtime_only["winning_source_layer"], "runtime_overlay");
+        assert_eq!(
+            runtime_only["shadowed_source_layers"],
+            serde_json::json!([])
+        );
     }
 }
