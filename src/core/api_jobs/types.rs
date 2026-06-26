@@ -5,6 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::remote_runner::JobArtifactMetadata;
+use super::remote_runner::RunnerJobLifecycleMetadata;
 use crate::core::source_snapshot::SourceSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +114,8 @@ pub struct ActiveRunnerJobSummary {
     pub claim_expires_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_expires_in_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<RunnerJobLifecycleMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::command_contract::RunnerWorkload;
-use crate::core::api_jobs::{JobStatus, JobStore};
+use crate::core::api_jobs::{JobStatus, JobStore, RunnerJobLifecycleMetadata};
 use crate::core::build_identity;
 use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
@@ -98,6 +98,8 @@ struct ExecRequest {
     require_paths: Vec<String>,
     #[serde(default)]
     runner_workload: Option<RunnerWorkload>,
+    #[serde(default)]
+    lifecycle: Option<RunnerJobLifecycleMetadata>,
 }
 
 pub fn parse_bind_addr(addr: &str) -> Result<SocketAddr> {
@@ -416,6 +418,7 @@ fn enqueue_exec_job(
         "command": plan.command,
         "capture_patch": request.capture_patch,
         "source_snapshot": source_snapshot,
+        "lifecycle": request.lifecycle.clone(),
     });
     let operation = "runner.exec".to_string();
     let runner = job_store.run_background_with_source_snapshot(

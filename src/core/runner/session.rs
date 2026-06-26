@@ -179,6 +179,8 @@ pub struct RunnerJob {
     pub source: String,
     pub lifecycle_owner: RunnerLifecycleOwner,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<crate::core::api_jobs::RunnerJobLifecycleMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at_ms: Option<u64>,
@@ -230,6 +232,7 @@ impl From<&ActiveRunnerJobSummary> for RunnerJob {
                     RunnerLifecycleOwner::Controller
                 }
             },
+            lifecycle: job.lifecycle.clone(),
             started_at_ms: Some(job.started_at_ms),
             updated_at_ms: Some(job.updated_at_ms),
             elapsed_ms: Some(job.elapsed_ms),
@@ -269,6 +272,7 @@ impl RunnerJob {
             } else {
                 RunnerLifecycleOwner::Controller
             },
+            lifecycle: None,
             started_at_ms: job.started_at_ms,
             updated_at_ms: Some(job.updated_at_ms),
             elapsed_ms: None,

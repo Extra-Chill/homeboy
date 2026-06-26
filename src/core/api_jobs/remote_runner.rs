@@ -35,6 +35,20 @@ pub struct JobArtifactMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerJobLifecycleMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_child_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_cell_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteRunnerJobRequest {
     pub runner_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,6 +70,8 @@ pub struct RemoteRunnerJobRequest {
     pub require_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_workload: Option<RunnerWorkload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<RunnerJobLifecycleMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
