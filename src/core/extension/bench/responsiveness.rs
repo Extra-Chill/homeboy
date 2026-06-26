@@ -100,17 +100,21 @@ pub fn summarize_responsiveness_pings(
     let mut previous_t_ms = None;
     let mut last_ping_at = None;
 
+    let mut accumulate_gap = |current: u64, previous: u64| {
+        let gap = current.saturating_sub(previous);
+        max_ping_gap_ms = max_ping_gap_ms.max(gap);
+        if gap > missed_ping_window_ms {
+            missed_ping_count += gap / missed_ping_window_ms;
+        }
+    };
+
     for ping in &pings {
         if ping.at.is_some() {
             last_ping_at = ping.at.clone();
         }
         if let Some(t_ms) = ping.t_ms {
             if let Some(previous) = previous_t_ms {
-                let gap = t_ms.saturating_sub(previous);
-                max_ping_gap_ms = max_ping_gap_ms.max(gap);
-                if gap > missed_ping_window_ms {
-                    missed_ping_count += gap / missed_ping_window_ms;
-                }
+                accumulate_gap(t_ms, previous);
             }
             previous_t_ms = Some(t_ms);
         }
@@ -118,11 +122,7 @@ pub fn summarize_responsiveness_pings(
 
     if let (Some(previous), Some(observed_elapsed_ms)) = (previous_t_ms, observed_elapsed_ms) {
         let observed_elapsed_ms = observed_elapsed_ms.min(u128::from(u64::MAX)) as u64;
-        let gap = observed_elapsed_ms.saturating_sub(previous);
-        max_ping_gap_ms = max_ping_gap_ms.max(gap);
-        if gap > missed_ping_window_ms {
-            missed_ping_count += gap / missed_ping_window_ms;
-        }
+        accumulate_gap(observed_elapsed_ms, previous);
     }
 
     Ok(BenchResponsivenessSummary {

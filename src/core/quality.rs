@@ -150,39 +150,38 @@ pub fn build_quality_steps(options: &QualityPlanOptions) -> Vec<PlanStep> {
         )
     };
 
-    let lint = if options.skip_lint {
-        disabled_step(
-            &options.step_prefix,
-            "lint",
-            &options.lint_label,
-            &options.granular_skip_reason,
-        )
-    } else {
-        ready_step(
-            &options.step_prefix,
-            "lint",
-            &options.lint_label,
-            options.lint_needs.clone(),
-            options.needs_kind,
-        )
+    let skippable_step = |skip: bool, name: &str, label: &str, needs: &[String]| {
+        if skip {
+            disabled_step(
+                &options.step_prefix,
+                name,
+                label,
+                &options.granular_skip_reason,
+            )
+        } else {
+            ready_step(
+                &options.step_prefix,
+                name,
+                label,
+                needs.to_vec(),
+                options.needs_kind,
+            )
+        }
     };
 
-    let test = if options.skip_test {
-        disabled_step(
-            &options.step_prefix,
-            "test",
-            &options.test_label,
-            &options.granular_skip_reason,
-        )
-    } else {
-        ready_step(
-            &options.step_prefix,
-            "test",
-            &options.test_label,
-            options.test_needs.clone(),
-            options.needs_kind,
-        )
-    };
+    let lint = skippable_step(
+        options.skip_lint,
+        "lint",
+        &options.lint_label,
+        &options.lint_needs,
+    );
+
+    let test = skippable_step(
+        options.skip_test,
+        "test",
+        &options.test_label,
+        &options.test_needs,
+    );
 
     vec![audit, lint, test]
 }

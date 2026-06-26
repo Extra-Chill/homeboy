@@ -178,27 +178,21 @@ fn response_for_request(root: &Path, method: &str, target: &str) -> Result<Artif
         });
     }
     if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
-        let body = br#"{"error":"method_not_allowed"}"#.to_vec();
-        headers.push(("content-type".to_string(), "application/json".to_string()));
-        headers.push(("content-length".to_string(), body.len().to_string()));
-        return Ok(ArtifactOriginResponse {
-            status: 405,
+        return Ok(json_error_response(
+            405,
+            br#"{"error":"method_not_allowed"}"#.to_vec(),
             headers,
-            body,
-        });
+        ));
     }
     if let Some(response) = artifact_route_response(method, target, headers.clone())? {
         return Ok(response);
     }
     let Some(path) = safe_target_path(root, target) else {
-        let body = br#"{"error":"not_found"}"#.to_vec();
-        headers.push(("content-type".to_string(), "application/json".to_string()));
-        headers.push(("content-length".to_string(), body.len().to_string()));
-        return Ok(ArtifactOriginResponse {
-            status: 404,
+        return Ok(json_error_response(
+            404,
+            br#"{"error":"not_found"}"#.to_vec(),
             headers,
-            body,
-        });
+        ));
     };
     let body = match std::fs::read(&path) {
         Ok(body) => body,
@@ -220,6 +214,20 @@ fn response_for_request(root: &Path, method: &str, target: &str) -> Result<Artif
             body
         },
     })
+}
+
+fn json_error_response(
+    status: u16,
+    body: Vec<u8>,
+    mut headers: Vec<(String, String)>,
+) -> ArtifactOriginResponse {
+    headers.push(("content-type".to_string(), "application/json".to_string()));
+    headers.push(("content-length".to_string(), body.len().to_string()));
+    ArtifactOriginResponse {
+        status,
+        headers,
+        body,
+    }
 }
 
 fn cors_headers() -> Vec<(String, String)> {

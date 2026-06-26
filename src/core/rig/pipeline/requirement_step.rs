@@ -80,19 +80,23 @@ pub(super) fn run_requirement_step(
         ));
     }
 
-    let missing_before_prepare = path_specs
-        .iter()
-        .filter_map(|(kind, declared)| {
-            requirement_path_failure(rig, cwd.as_deref(), kind, declared)
-        })
-        .chain(requirement_executable_failure(
-            rig,
-            executable.as_deref(),
-            executable_env.as_deref(),
-            executable_env_aliases,
-            env,
-        ))
-        .collect::<Vec<_>>();
+    let collect_missing = || {
+        path_specs
+            .iter()
+            .filter_map(|(kind, declared)| {
+                requirement_path_failure(rig, cwd.as_deref(), kind, declared)
+            })
+            .chain(requirement_executable_failure(
+                rig,
+                executable.as_deref(),
+                executable_env.as_deref(),
+                executable_env_aliases,
+                env,
+            ))
+            .collect::<Vec<_>>()
+    };
+
+    let missing_before_prepare = collect_missing();
 
     if !missing_before_prepare.is_empty()
         && prepare_command.is_some()
@@ -118,19 +122,7 @@ pub(super) fn run_requirement_step(
         })?;
     }
 
-    let missing = path_specs
-        .iter()
-        .filter_map(|(kind, declared)| {
-            requirement_path_failure(rig, cwd.as_deref(), kind, declared)
-        })
-        .chain(requirement_executable_failure(
-            rig,
-            executable.as_deref(),
-            executable_env.as_deref(),
-            executable_env_aliases,
-            env,
-        ))
-        .collect::<Vec<_>>();
+    let missing = collect_missing();
 
     if !missing.is_empty() {
         return Err(requirement_failed(
