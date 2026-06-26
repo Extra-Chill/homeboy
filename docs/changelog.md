@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.262.0] - 2026-06-26
+
+### Added
+- persist artifacts and compare runs
+- surface static HTML preview entrypoints
+- surface generic matrix summaries
+
+### Fixed
+- run rig workloads over native scripts
+- attach runner-side artifacts
+- promote exec artifacts to runs
+- scope monorepo changelog commits
+
 ## [0.261.0] - 2026-06-25
 
 ### Added
