@@ -493,6 +493,8 @@ function codeboxFanoutRequestFromAgentTaskRequest(request, config = {}, inputs =
   }
   const workers = normalizeArray(source.workers).map((worker, index) => {
     const metadata = firstObject(worker.metadata) || {};
+    const runtimeTask = fanoutWorkerRuntimeTask(worker, request, config, runtimeOptions);
+    const runtimeTaskAbilityNormalization = runtimeTaskAbilityNormalizationEvidence(runtimeTask);
     return withoutUndefinedValues({
       ...worker,
       id: firstValue(worker.id, worker.worker_id, `${request.task_id}-worker-${index + 1}`),
@@ -500,6 +502,9 @@ function codeboxFanoutRequestFromAgentTaskRequest(request, config = {}, inputs =
       agent: firstValue(worker.agent, source.agent, config.agent, runtimeOptions.agent),
       dependsOn: normalizeArray(firstValue(worker.dependsOn, worker.depends_on)),
       artifactNamespace: firstValue(worker.artifactNamespace, worker.artifact_namespace, `${request.task_id}/${index + 1}`),
+      ...(runtimeTask ? { runtime_task: runtimeTask } : {}),
+      ...(runtimeTaskAbilityNormalization ? { runtime_task_ability_normalization: runtimeTaskAbilityNormalization } : {}),
+      ability_requirements: runtimeTask?.ability ? uniqueStrings([runtimeTask.ability, ...normalizeArray(worker.ability_requirements), ...normalizeArray(worker.abilityRequirements)]) : firstDefined(worker.ability_requirements, worker.abilityRequirements),
       metadata: {
         ...metadata,
         homeboy_task_id: request.task_id,
@@ -532,6 +537,40 @@ function codeboxFanoutRequestFromAgentTaskRequest(request, config = {}, inputs =
       },
     },
   });
+}
+
+function fanoutWorkerRuntimeTask(worker = {}, request = {}, config = {}, runtimeOptions = {}) {
+  const runtimeTask = firstObject(worker.runtime_task, worker.runtimeTask);
+  if (runtimeTask) {
+    return runtimeTaskWithExecutionDefaults(runtimeTask, fanoutWorkerRuntimeTaskDefaults(worker, request, config, runtimeOptions));
+  }
+
+  const abilityRequest = firstObject(worker.ability_request, worker.abilityRequest);
+  const ability = firstValue(
+    abilityRequest?.id,
+    abilityRequest?.name,
+    abilityRequest?.ability,
+    typeof worker.ability === 'string' ? worker.ability : '',
+    worker.ability_name,
+    worker.abilityName
+  );
+  if (!ability || typeof ability !== 'string') {
+    return null;
+  }
+
+  return runtimeTaskWithExecutionDefaults({
+    ability,
+    input: firstObject(abilityRequest?.input, abilityRequest?.args, worker.ability_input, worker.abilityInput, worker.input) || {},
+  }, fanoutWorkerRuntimeTaskDefaults(worker, request, config, runtimeOptions));
+}
+
+function fanoutWorkerRuntimeTaskDefaults(worker = {}, request = {}, config = {}, runtimeOptions = {}) {
+  return {
+    provider: firstValue(worker.provider, config.provider, runtimeOptions.provider),
+    model: firstValue(worker.model, request.executor?.model, config.model, runtimeOptions.model),
+    agentBundles: firstDefined(worker.agent_bundles, worker.agentBundles, runtimeOptions.agentBundles, []),
+    runtimePackage: firstValue(worker.runtime_package, worker.runtimePackage, runtimePackageDefaultFromProfile(config, runtimeOptions)),
+  };
 }
 
 function expectedArtifactsForCodeboxTask(request, artifactDeclarations = []) {
