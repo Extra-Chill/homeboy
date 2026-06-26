@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::io::ErrorKind;
 use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
@@ -254,23 +255,32 @@ fn run_browser_capture(
     page_paths: &[String],
     text_sample_limit: usize,
 ) -> Result<BrowserReport> {
-    let output = Command::new("node")
-        .arg("-e")
-        .arg(browser_script())
-        .arg(base_url)
-        .arg(serde_json::to_string(page_paths).map_err(|err| {
-            Error::internal_json(err.to_string(), Some("serialize DOM box page paths".into()))
-        })?)
-        .arg(text_sample_limit.to_string())
+    let provider = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND")
+        .ok()
+        .filter(|command| !command.trim().is_empty())
+        .ok_or_else(missing_browser_error)?;
+    let page_paths_json = serde_json::to_string(page_paths).map_err(|err| {
+        Error::internal_json(err.to_string(), Some("serialize DOM box page paths".into()))
+    })?;
+    let output = Command::new("sh")
+        .args(["-c", &provider])
+        .env("HOMEBOY_DOM_BOX_BASE_URL", base_url)
+        .env("HOMEBOY_DOM_BOX_PAGE_PATHS_JSON", page_paths_json)
+        .env(
+            "HOMEBOY_DOM_BOX_TEXT_SAMPLE_LIMIT",
+            text_sample_limit.to_string(),
+        )
         .output()
-        .map_err(|err| missing_browser_error(format!("failed to start node: {err}")))?;
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("run DOM box capture provider".to_string()),
+            )
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        if output.status.code() == Some(42) || stderr.contains("playwright install") {
-            return Err(missing_browser_error(stderr.trim().to_string()));
-        }
         return Err(Error::internal_unexpected(format!(
-            "DOM box browser capture failed: {}",
+            "DOM box capture provider failed: {}",
             stderr.trim()
         )));
     }
@@ -287,16 +297,16 @@ fn run_browser_capture(
     })
 }
 
-fn missing_browser_error(problem: String) -> Error {
+fn missing_browser_error() -> Error {
     Error::validation_invalid_argument(
-        "browser",
-        format!("browser automation dependency is unavailable: {problem}"),
+        "HOMEBOY_DOM_BOX_CAPTURE_COMMAND",
+        "no DOM box capture provider configured",
         None,
         Some(vec![
-            "Install Node.js and Playwright for this checkout: npm install -D playwright && npx playwright install chromium".to_string(),
+            "Set HOMEBOY_DOM_BOX_CAPTURE_COMMAND to a command that writes a browser DOM-box JSON payload to stdout.".to_string(),
+            "Provider commands receive HOMEBOY_DOM_BOX_BASE_URL, HOMEBOY_DOM_BOX_PAGE_PATHS_JSON, and HOMEBOY_DOM_BOX_TEXT_SAMPLE_LIMIT.".to_string(),
         ]),
     )
-    .with_hint("Homeboy DOM box capture runs a local Chromium browser through Playwright.".to_string())
 }
 
 fn write_report(path: &Path, report: &DomBoxReport) -> Result<()> {
@@ -312,70 +322,13 @@ fn write_report(path: &Path, report: &DomBoxReport) -> Result<()> {
         .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))
 }
 
-fn browser_script() -> &'static str {
-    r#"
-const [baseUrl, pathsJson, limitRaw] = process.argv.slice(1);
-let chromium;
-try {
-  chromium = require('playwright').chromium;
-} catch (error) {
-  console.error('Playwright is not installed or cannot be loaded: ' + error.message);
-  process.exit(42);
-}
-const paths = JSON.parse(pathsJson);
-const limit = Number.parseInt(limitRaw, 10) || 160;
-(async () => {
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
-  const entrypoints = [];
-  for (const pagePath of paths) {
-    const page = await context.newPage();
-    const pageUrl = new URL(pagePath, baseUrl).toString();
-    await page.goto(pageUrl, { waitUntil: 'networkidle' });
-    const viewport = page.viewportSize() || { width: 1440, height: 900 };
-    const elements = await page.evaluate((sampleLimit) => Array.from(document.querySelectorAll('[data-figma-node-id]')).map((element) => {
-      const rect = element.getBoundingClientRect();
-      const nodeId = element.getAttribute('data-figma-node-id') || '';
-      const rawText = (element.innerText || element.textContent || '').replace(/\s+/g, ' ').trim();
-      const tag = element.tagName.toLowerCase();
-      return {
-        node_id: nodeId,
-        node_name: element.getAttribute('data-figma-node-name') || null,
-        selector: `${tag}[data-figma-node-id="${nodeId.replace(/"/g, '\\"')}"]`,
-        tag,
-        text_sample: rawText.slice(0, sampleLimit),
-        boundingClientRect: {
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-          top: rect.top,
-          right: rect.right,
-          bottom: rect.bottom,
-          left: rect.left,
-        },
-      };
-    }), limit);
-    entrypoints.push({
-      page_path: pagePath,
-      page_url: pageUrl,
-      viewport: { width: viewport.width, height: viewport.height, device_scale_factor: 1 },
-      elements,
-    });
-    await page.close();
-  }
-  await browser.close();
-  process.stdout.write(JSON.stringify({ entrypoints }));
-})().catch((error) => {
-  console.error(error && error.stack ? error.stack : String(error));
-  process.exit(1);
-});
-"#
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    static PROVIDER_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn rect() -> DomRect {
         DomRect {
@@ -444,5 +397,59 @@ mod tests {
         .expect("plan");
 
         assert_eq!(planned, vec!["/index.html", "/nested/page.html"]);
+    }
+
+    #[test]
+    fn browser_capture_uses_configured_provider_command() {
+        let _guard = PROVIDER_ENV_LOCK.lock().expect("provider env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = dir.path().join("dom-provider");
+        std::fs::write(
+            &provider,
+            r#"#!/bin/sh
+printf '%s' '{"entrypoints":[{"page_path":"/index.html","page_url":"http://127.0.0.1/index.html","viewport":{"width":1440,"height":900,"device_scale_factor":1},"elements":[{"node_id":"12:34","node_name":"Hero","selector":"div[data-figma-node-id=\"12:34\"]","tag":"div","text_sample":"Hello world","boundingClientRect":{"x":1,"y":2,"width":3,"height":4,"top":2,"right":4,"bottom":6,"left":1}}]}]}'
+"#,
+        )
+        .expect("provider");
+        let mut perms = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&provider, perms).expect("chmod");
+
+        let previous = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND").ok();
+        env::set_var(
+            "HOMEBOY_DOM_BOX_CAPTURE_COMMAND",
+            provider.display().to_string(),
+        );
+        let report = run_browser_capture("http://127.0.0.1/", &["/index.html".to_string()], 160)
+            .expect("capture");
+        match previous {
+            Some(value) => env::set_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND", value),
+            None => env::remove_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND"),
+        }
+
+        assert_eq!(report.entrypoints.len(), 1);
+        assert_eq!(report.entrypoints[0].elements[0].node_id, "12:34");
+    }
+
+    #[test]
+    fn browser_capture_reports_missing_provider_without_browser_assumption() {
+        let _guard = PROVIDER_ENV_LOCK.lock().expect("provider env lock");
+        let previous = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND").ok();
+        env::remove_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND");
+        let error = run_browser_capture("http://127.0.0.1/", &["/index.html".to_string()], 160)
+            .expect_err("missing provider");
+        match previous {
+            Some(value) => env::set_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND", value),
+            None => env::remove_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND"),
+        }
+
+        assert!(error
+            .to_string()
+            .contains("HOMEBOY_DOM_BOX_CAPTURE_COMMAND"));
+        assert!(error
+            .to_string()
+            .contains("no DOM box capture provider configured"));
     }
 }

@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
@@ -213,7 +214,7 @@ pub fn capture(args: RunsArtifactCaptureArgs) -> CmdResult<RunsOutput> {
     let base_url = format!("http://127.0.0.1:{port}/");
     let mut child = start_static_artifact_server(&artifact_path, port)?;
     let _ = wait_for_static_server(&base_url);
-    let browser = detect_playwright();
+    let browser = resolve_capture_provider();
     let viewport = RunsArtifactCaptureViewport {
         width: args.viewport_width,
         height: args.viewport_height,
@@ -246,7 +247,9 @@ pub fn capture(args: RunsArtifactCaptureArgs) -> CmdResult<RunsOutput> {
             if let Some(browser_error) = browser.error.as_ref() {
                 status = "failed".to_string();
                 error = Some(browser_error.clone());
-            } else if let Err(err) = capture_screenshot(&page_url, &screenshot_path, &viewport) {
+            } else if let Err(err) =
+                capture_screenshot(&browser, &page_url, &screenshot_path, &viewport)
+            {
                 status = "failed".to_string();
                 error = Some(err.to_string());
             }
@@ -344,53 +347,48 @@ fn wait_for_static_server(base_url: &str) -> bool {
     false
 }
 
-fn detect_playwright() -> RunsArtifactCaptureBrowser {
-    match Command::new("playwright")
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        Ok(status) if status.success() => RunsArtifactCaptureBrowser {
-            command: "playwright".to_string(),
+fn resolve_capture_provider() -> RunsArtifactCaptureBrowser {
+    match env::var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND") {
+        Ok(command) if !command.trim().is_empty() => RunsArtifactCaptureBrowser {
+            command,
             available: true,
             error: None,
         },
-        Ok(status) => RunsArtifactCaptureBrowser {
-            command: "playwright".to_string(),
+        _ => RunsArtifactCaptureBrowser {
+            command: "HOMEBOY_ARTIFACT_CAPTURE_COMMAND".to_string(),
             available: false,
-            error: Some(format!("playwright --version exited with status {status}")),
-        },
-        Err(err) => RunsArtifactCaptureBrowser {
-            command: "playwright".to_string(),
-            available: false,
-            error: Some(format!(
-                "playwright CLI is not available: {err}. Install Playwright and browser binaries to capture screenshots."
-            )),
+            error: Some(
+                "no browser capture provider configured; set HOMEBOY_ARTIFACT_CAPTURE_COMMAND to a command that writes HOMEBOY_ARTIFACT_CAPTURE_OUTPUT"
+                    .to_string(),
+            ),
         },
     }
 }
 
 fn capture_screenshot(
+    provider: &RunsArtifactCaptureBrowser,
     page_url: &str,
     screenshot_path: &Path,
     viewport: &RunsArtifactCaptureViewport,
 ) -> homeboy::core::Result<()> {
-    let viewport_arg = format!("{},{}", viewport.width, viewport.height);
-    let output = Command::new("playwright")
-        .arg("screenshot")
-        .arg("--browser=chromium")
-        .arg("--viewport-size")
-        .arg(&viewport_arg)
-        .arg(page_url)
-        .arg(screenshot_path)
+    let output = Command::new("sh")
+        .args(["-c", &provider.command])
+        .env("HOMEBOY_ARTIFACT_CAPTURE_URL", page_url)
+        .env("HOMEBOY_ARTIFACT_CAPTURE_OUTPUT", screenshot_path)
+        .env(
+            "HOMEBOY_ARTIFACT_CAPTURE_VIEWPORT_WIDTH",
+            viewport.width.to_string(),
+        )
+        .env(
+            "HOMEBOY_ARTIFACT_CAPTURE_VIEWPORT_HEIGHT",
+            viewport.height.to_string(),
+        )
         .stdin(Stdio::null())
         .output()
         .map_err(|err| {
             Error::internal_io(
                 err.to_string(),
-                Some("run playwright screenshot".to_string()),
+                Some("run artifact capture provider".to_string()),
             )
         })?;
     if output.status.success() {
@@ -399,9 +397,9 @@ fn capture_screenshot(
 
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Err(Error::validation_invalid_argument(
-        "playwright",
+        "HOMEBOY_ARTIFACT_CAPTURE_COMMAND",
         format!(
-            "playwright screenshot failed with status {}{}",
+            "artifact capture provider failed with status {}{}",
             output.status,
             if stderr.is_empty() {
                 "".to_string()
@@ -409,8 +407,10 @@ fn capture_screenshot(
                 format!(": {stderr}")
             }
         ),
-        Some(page_url.to_string()),
-        None,
+        Some(provider.command.clone()),
+        Some(vec![
+            "Provider commands receive HOMEBOY_ARTIFACT_CAPTURE_URL, HOMEBOY_ARTIFACT_CAPTURE_OUTPUT, HOMEBOY_ARTIFACT_CAPTURE_VIEWPORT_WIDTH, and HOMEBOY_ARTIFACT_CAPTURE_VIEWPORT_HEIGHT.".to_string(),
+        ]),
     ))
 }
 
@@ -1137,26 +1137,29 @@ mod tests {
     }
 
     #[test]
-    fn capture_records_manifest_with_fake_playwright() {
+    fn capture_records_manifest_with_configured_provider() {
         let _guard = artifact_root_test_lock();
         with_isolated_home(|home| {
             let artifact_root = home.path().join("artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root));
             let bin = home.path().join("bin");
             fs::create_dir_all(&bin).expect("bin");
-            let fake_playwright = bin.join("playwright");
+            let fake_provider = bin.join("capture-provider");
             fs::write(
-                &fake_playwright,
-                b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nif [ \"$1\" = \"screenshot\" ]; then printf fake-screenshot > \"$6\"; exit 0; fi\nexit 2\n",
+                &fake_provider,
+                b"#!/bin/sh\nprintf fake-screenshot > \"$HOMEBOY_ARTIFACT_CAPTURE_OUTPUT\"\n",
             )
-            .expect("fake playwright");
-            let mut perms = fs::metadata(&fake_playwright)
+            .expect("fake provider");
+            let mut perms = fs::metadata(&fake_provider)
                 .expect("metadata")
                 .permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&fake_playwright, perms).expect("chmod");
-            let old_path = env::var("PATH").unwrap_or_default();
-            env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+            fs::set_permissions(&fake_provider, perms).expect("chmod");
+            let old_provider = env::var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND").ok();
+            env::set_var(
+                "HOMEBOY_ARTIFACT_CAPTURE_COMMAND",
+                fake_provider.display().to_string(),
+            );
 
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
@@ -1184,7 +1187,10 @@ mod tests {
                 viewport_height: 844,
             })
             .expect("capture");
-            env::set_var("PATH", old_path);
+            match old_provider {
+                Some(value) => env::set_var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND", value),
+                None => env::remove_var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND"),
+            }
             assert_eq!(result.1, 0);
             let RunsOutput::ArtifactCapture(output) = result.0 else {
                 panic!("unexpected output");
@@ -1202,6 +1208,57 @@ mod tests {
             let manifest = fs::read_to_string(&output.manifest_path).expect("manifest");
             assert!(manifest.contains("runs.artifact.capture"));
             assert!(manifest.contains("fse-pilot-build-theme/index.html"));
+        });
+    }
+
+    #[test]
+    fn capture_reports_missing_provider_without_browser_assumptions() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let old_provider = env::var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND").ok();
+            env::remove_var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND");
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("runner-exec").build())
+                .expect("run");
+            let site = home.path().join("site");
+            fs::create_dir_all(&site).expect("site");
+            fs::write(site.join("index.html"), b"<html>Generated</html>").expect("html");
+            let artifact = store
+                .record_directory_artifact(&run.id, "generated_site", &site)
+                .expect("artifact");
+
+            let result = capture(RunsArtifactCaptureArgs {
+                run_id: run.id,
+                artifact_id: artifact.id,
+                entrypoints: vec!["index.html".to_string()],
+                output_dir: home.path().join("captures"),
+                port: None,
+                viewport_width: 390,
+                viewport_height: 844,
+            })
+            .expect("capture manifest");
+            match old_provider {
+                Some(value) => env::set_var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND", value),
+                None => env::remove_var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND"),
+            }
+            assert_eq!(result.1, 1);
+            let RunsOutput::ArtifactCapture(output) = result.0 else {
+                panic!("unexpected output");
+            };
+            assert!(!output.browser.available);
+            assert!(output
+                .browser
+                .command
+                .contains("HOMEBOY_ARTIFACT_CAPTURE_COMMAND"));
+            assert!(output
+                .browser
+                .error
+                .unwrap()
+                .contains("no browser capture provider configured"));
         });
     }
 
