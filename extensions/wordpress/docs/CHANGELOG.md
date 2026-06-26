@@ -2,6 +2,16 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.18.0] - 2026-06-26
+
+### Added
+- project canonical fanout adapter metadata
+
+### Fixed
+- mark unsupported fuzz as non-proof
+- centralize runtime artifact contracts
+- share runner contract package
+
 ## [3.17.8] - 2026-06-26
 
 ### Fixed
