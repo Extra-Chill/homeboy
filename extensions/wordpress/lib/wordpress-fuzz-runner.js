@@ -278,10 +278,10 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 			path: source,
 			pluginFile: activation,
 			loadAs: 'plugin',
-			activate: Boolean(activation),
 			metadata: stripUndefined({
 				component: componentId,
 				rig_id: context.rig_id,
+				activation: activation ? 'fuzz-suite-setup-step' : undefined,
 			}),
 		}),
 		componentContract: stripUndefined({
