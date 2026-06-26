@@ -4,6 +4,7 @@ use crate::core::rig::{
     declared_id, discover_rigs, install, list, list_ids, load, load_local_source,
     read_source_metadata, read_stack_source_metadata, run_check,
 };
+use crate::core::ErrorCode;
 use crate::test_support::HomeGuard;
 use std::fs;
 use std::path::Path;
@@ -424,6 +425,63 @@ mod install_flows {
                 .expect("metadata")
                 .materialized
         );
+    }
+
+    #[test]
+    fn install_accepts_registry_backed_component_specs() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        write_rig(
+            package.path(),
+            "registry-backed",
+            r#"{
+            "id": "registry-backed",
+            "components": {
+                "app": {
+                    "component_id": "registry-app",
+                    "default_ref": "origin/main",
+                    "path_setting": "HOMEBOY_RIG_COMPONENT_PATH__REGISTRY_BACKED__APP",
+                    "branch": "main"
+                }
+            }
+        }"#,
+        );
+
+        let result = install(package.path().to_str().unwrap(), None, false)
+            .expect("install registry-backed component rig");
+
+        assert_eq!(result.installed.len(), 1);
+        let rig = load("registry-backed").expect("load registry-backed rig");
+        let component = &rig.components["app"];
+        assert!(component.path.is_empty());
+        assert_eq!(component.component_id.as_deref(), Some("registry-app"));
+        assert_eq!(component.default_ref.as_deref(), Some("origin/main"));
+        assert_eq!(component.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn install_reports_schema_errors_separately_from_invalid_json() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        fs::create_dir_all(package.path().join("rigs/schema-bad")).expect("rig dir");
+        fs::write(
+            package.path().join("rigs/schema-bad/rig.json"),
+            r#"{
+            "id": "schema-bad",
+            "app_launcher": {
+                "platform": "macos"
+            }
+        }"#,
+        )
+        .expect("rig json");
+
+        let err = install(package.path().to_str().unwrap(), None, false)
+            .expect_err("schema error should fail install discovery");
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.details["field"], "rig_spec");
+        assert!(err.message.contains("schema"));
+        assert!(err.message.contains("missing field"));
     }
 
     #[test]
