@@ -163,7 +163,31 @@ assert.equal(privateRuntimeShapeOutcome.status, 'failed');
 assert.equal(privateRuntimeShapeOutcome.failure_classification, 'execution_failed');
 assert.equal(privateRuntimeShapeOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.public_result_envelope_missing'), true);
 assert.equal(privateRuntimeShapeOutcome.outputs.reply, undefined);
+assert.equal(privateRuntimeShapeOutcome.metadata.dispatch_identity, undefined);
 assert.deepEqual(publicEnvelopeBoundaryDiagnostic({ run: { agentResult: { reply: 'private' } } }).data.private_shapes, ['run.agentResult']);
+const dispatchIdentityOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...privateRuntimeShapeRequest,
+  task_id: 'dispatch-identity-boundary',
+  inputs: {
+    dispatch_identity: {
+      source: 'agents-api',
+      dispatch_id: 'dispatch-123',
+      conversation_id: 'conversation-456',
+    },
+  },
+}, {
+  success: true,
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: { outputs: { reply: 'Public reply' } },
+  },
+});
+assert.deepEqual(dispatchIdentityOutcome.metadata.dispatch_identity, {
+  source: 'agents-api',
+  dispatch_id: 'dispatch-123',
+  conversation_id: 'conversation-456',
+});
 const publicRuntimeShapeOutcome = agentTaskOutcomeFromCodeboxResult(privateRuntimeShapeRequest, {
   success: true,
   run: {

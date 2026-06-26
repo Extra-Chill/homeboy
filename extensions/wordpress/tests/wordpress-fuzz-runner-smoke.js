@@ -113,6 +113,7 @@ assert.equal(result.homeboy_fuzz_result_envelope.campaign.max_duration_seconds, 
 assert.equal(result.homeboy_fuzz_result_envelope.gates.required_artifacts.some((artifact) => artifact.name === 'result-envelope' && artifact.status === 'present'), true);
 assert.equal(result.homeboy_fuzz_result_envelope.gates.required_artifacts.some((artifact) => artifact.name === 'wordpress-fuzz-coverage' && artifact.status === 'missing'), true);
 assert.equal(result.homeboy_fuzz_result_envelope.dispatch.task_id, 'run-from-env');
+assert.equal(result.homeboy_fuzz_result_envelope.dispatch_identity, undefined);
 assert.equal(result.homeboy_fuzz_campaign.metadata.fuzz_result_envelope.schema, HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA);
 assert.equal(result.observation.schema, 'homeboy/wordpress-fuzz-observation/v1');
 assert.equal(result.homeboy_fuzz_campaign.metadata.observation.schema, 'homeboy/wordpress-fuzz-observation/v1');
@@ -125,6 +126,14 @@ const executedResult = buildWordPressFuzzRunnerResult({
 	},
 	workload: {
 		...workload,
+		metadata: {
+			...(workload.metadata || {}),
+			dispatch_identity: {
+				source: 'homeboy-agent-task',
+				dispatch_id: 'dispatch-123',
+				conversation_id: 'conversation-456',
+			},
+		},
 		wp_codebox_suite_result: {
 			schema: 'wp-codebox/fuzz-suite-result/v1',
 			suite: { id: 'generic-wordpress-plan' },
@@ -143,6 +152,11 @@ assert.equal(executedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path
 assert.equal(executedResult.homeboy_fuzz_campaign.artifacts.some((artifact) => artifact.id === 'result-envelope' && artifact.kind === 'result_envelope'), true);
 assert.equal(executedResult.homeboy_fuzz_result_envelope.artifacts[0].path, 'artifacts/replay.json');
 assert.equal(executedResult.homeboy_fuzz_result_envelope.gates.required_artifacts.find((artifact) => artifact.name === 'result-envelope').status, 'present');
+assert.deepEqual(executedResult.homeboy_fuzz_result_envelope.dispatch_identity, {
+	source: 'homeboy-agent-task',
+	dispatch_id: 'dispatch-123',
+	conversation_id: 'conversation-456',
+});
 assert.equal(executedResult.observation.status, 'succeeded');
 
 const mutatingPlanResult = buildWordPressFuzzRunnerResult({

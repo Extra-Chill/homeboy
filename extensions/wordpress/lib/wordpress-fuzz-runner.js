@@ -422,6 +422,7 @@ function buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, 
 	const artifacts = normalizeArray(codeboxResult?.artifacts);
 	const requiredArtifacts = requiredFuzzArtifactStatuses({ artifacts, runtimeTaskRequest, taskRequest, workload });
 	const failures = normalizeArray(codeboxResult?.failures || codeboxResult?.metadata?.diagnostics || codeboxResult?.diagnostics);
+	const dispatchIdentity = fuzzDispatchIdentityPassthrough({ codeboxResult, runtimeTaskRequest, taskRequest, workload });
 	return stripUndefined({
 		schema: HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA,
 		version: HOMEBOY_FUZZ_CONTRACT_VERSION,
@@ -451,6 +452,7 @@ function buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, 
 			failures: failures.length > 0 ? failures : undefined,
 		}),
 		dispatch: fuzzDispatchIdentity({ codeboxResult, runtimeTaskRequest, taskRequest }),
+		dispatch_identity: dispatchIdentity,
 	});
 }
 
@@ -522,6 +524,35 @@ function fuzzDispatchIdentity({ codeboxResult = {}, runtimeTaskRequest = {}, tas
 		runtime: taskRequest.executor?.runtime || runtimeTaskRequest.provider_metadata?.wp_codebox?.runtime,
 		ability: taskRequest.executor?.config?.runtime_task?.ability || runtimeTaskRequest.provider_metadata?.wp_codebox?.ability,
 	});
+}
+
+function fuzzDispatchIdentityPassthrough({ codeboxResult = {}, runtimeTaskRequest = {}, taskRequest = {}, workload = {} } = {}) {
+	return firstObject(
+		codeboxResult.dispatch_identity,
+		codeboxResult.dispatchIdentity,
+		codeboxResult.metadata?.dispatch_identity,
+		codeboxResult.metadata?.dispatchIdentity,
+		runtimeTaskRequest.dispatch_identity,
+		runtimeTaskRequest.dispatchIdentity,
+		runtimeTaskRequest.metadata?.dispatch_identity,
+		runtimeTaskRequest.metadata?.dispatchIdentity,
+		runtimeTaskRequest.input?.dispatch_identity,
+		runtimeTaskRequest.input?.dispatchIdentity,
+		runtimeTaskRequest.input?.metadata?.dispatch_identity,
+		runtimeTaskRequest.input?.metadata?.dispatchIdentity,
+		taskRequest.dispatch_identity,
+		taskRequest.dispatchIdentity,
+		taskRequest.inputs?.dispatch_identity,
+		taskRequest.inputs?.dispatchIdentity,
+		taskRequest.executor?.config?.runtime_task?.input?.dispatch_identity,
+		taskRequest.executor?.config?.runtime_task?.input?.dispatchIdentity,
+		taskRequest.executor?.config?.runtime_task?.input?.metadata?.dispatch_identity,
+		taskRequest.executor?.config?.runtime_task?.input?.metadata?.dispatchIdentity,
+		workload.dispatch_identity,
+		workload.dispatchIdentity,
+		workload.metadata?.dispatch_identity,
+		workload.metadata?.dispatchIdentity,
+	);
 }
 
 function homeboyFuzzCampaignArtifacts(codeboxResult = {}) {
@@ -644,6 +675,10 @@ function normalizeArray(value) {
 
 function objectOrUndefined(value) {
 	return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
+}
+
+function firstObject(...values) {
+	return values.find(objectOrUndefined);
 }
 
 function numericValue(value) {
