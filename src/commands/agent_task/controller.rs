@@ -1324,17 +1324,6 @@ where
     Ok((command_json_value(result.value)?, result.exit_code))
 }
 
-fn controller_resume_with_executor<E>(
-    loop_id: String,
-    executor: E,
-    defaults: ControllerDispatchDefaults,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
-    controller_resume_with_executor_and_defaults(loop_id, executor, defaults)
-}
-
 fn controller_resume_with_executor_and_defaults<E>(
     loop_id: String,
     executor: E,

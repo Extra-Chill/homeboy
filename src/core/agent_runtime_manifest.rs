@@ -160,10 +160,6 @@ pub(crate) fn runtime_materialization_plan(
     }
 }
 
-pub(crate) fn discover_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
-    discover_agent_runtime_catalog().manifests
-}
-
 pub(crate) fn discover_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
     let standalone = discover_standalone_agent_runtime_catalog();
     let extensions = load_all_extensions().unwrap_or_default();
@@ -191,10 +187,6 @@ fn merge_agent_runtime_manifests(
             .filter(|manifest| !extension_runtime_ids.contains(manifest.id.as_str())),
     );
     manifests
-}
-
-fn discover_standalone_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
-    discover_standalone_agent_runtime_catalog().manifests
 }
 
 fn discover_standalone_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
@@ -290,12 +282,6 @@ fn load_standalone_agent_runtime_manifest(
     manifest.extension_path = None;
     manifest.runtime_path = Some(path.to_string_lossy().to_string());
     StandaloneAgentRuntimeManifestLoad::Loaded(manifest)
-}
-
-pub(crate) fn discover_agent_runtime_manifests_from_extensions(
-    extensions: &[ExtensionManifest],
-) -> Vec<AgentRuntimeManifest> {
-    discover_agent_runtime_catalog_from_extensions(extensions).manifests
 }
 
 pub(crate) fn discover_agent_runtime_catalog_from_extensions(
@@ -609,7 +595,7 @@ mod tests {
             .expect("runtime manifest"),
         );
 
-        let manifests = discover_agent_runtime_manifests_from_extensions(&[extension]);
+        let manifests = discover_agent_runtime_catalog_from_extensions(&[extension]).manifests;
 
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].schema, AGENT_RUNTIME_MANIFEST_SCHEMA);
@@ -714,7 +700,7 @@ mod tests {
             )
             .expect("runtime manifest");
 
-            let manifests = discover_standalone_agent_runtime_manifests();
+            let manifests = discover_standalone_agent_runtime_catalog().manifests;
 
             assert_eq!(manifests.len(), 1);
             assert_eq!(manifests[0].id, "standalone-example");
@@ -841,7 +827,7 @@ mod tests {
             )
             .expect("runtime manifest");
 
-            let standalone = discover_standalone_agent_runtime_manifests();
+            let standalone = discover_standalone_agent_runtime_catalog().manifests;
             let mut extension = extension("sample-runtime-extension");
             extension.agent_runtimes.push(
                 serde_json::from_value(json!({
@@ -860,7 +846,7 @@ mod tests {
                 .expect("extension runtime"),
             );
             let extension_manifests =
-                discover_agent_runtime_manifests_from_extensions(&[extension]);
+                discover_agent_runtime_catalog_from_extensions(&[extension]).manifests;
 
             let merged = merge_agent_runtime_manifests(standalone, extension_manifests);
             assert_eq!(merged.len(), 1);
