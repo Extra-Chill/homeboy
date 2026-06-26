@@ -195,6 +195,8 @@ pub(crate) fn lab_runner_homeboy_metadata(
     configured_executable: &str,
     status: &RunnerStatusReport,
 ) -> serde_json::Value {
+    let controller_version = env!("CARGO_PKG_VERSION");
+    let controller_build_identity = crate::core::build_identity::current().display;
     let refresh_commands = vec![
         format!(
             "homeboy runner refresh-homeboy {} --ref main --reconnect",
@@ -206,13 +208,29 @@ pub(crate) fn lab_runner_homeboy_metadata(
     serde_json::json!({
         "schema": "homeboy/lab-runner-homeboy/v1",
         "runner_id": runner_id,
+        "controller_version": controller_version,
+        "controller_build_identity": controller_build_identity,
         "configured_executable": configured_executable,
         "active_daemon_version": status.session.as_ref().map(|session| session.homeboy_version.clone()),
         "active_daemon_build_identity": status.session.as_ref().and_then(|session| session.homeboy_build_identity.clone()),
         "stale_daemon": status.stale_daemon,
+        "version_drift": lab_runner_homeboy_version_drift(status),
         "refresh_commands": refresh_commands,
         "upgrade_command": format!("homeboy upgrade --force --upgrade-runner {}", shell::quote_arg(runner_id)),
     })
+}
+
+pub(crate) fn lab_runner_homeboy_has_blocking_drift(status: &RunnerStatusReport) -> bool {
+    status.stale_daemon.is_some() || lab_runner_homeboy_version_drift(status)
+}
+
+fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
+    let controller_version = env!("CARGO_PKG_VERSION");
+    status
+        .session
+        .as_ref()
+        .map(|session| session.homeboy_version.as_str())
+        .is_some_and(|version| version != controller_version)
 }
 
 pub(crate) fn lab_source_checkout_metadata(source_path: &Path) -> serde_json::Value {
@@ -341,7 +359,15 @@ pub(crate) fn stale_runner_homeboy_error(
         .as_ref()
         .map(|warning| warning.message.clone())
         .unwrap_or_else(|| {
-            "connected runner daemon was started by a different Homeboy runtime".to_string()
+            format!(
+                "connected runner daemon reports Homeboy version `{}` while the controller is `{}`",
+                status
+                    .session
+                    .as_ref()
+                    .map(|session| session.homeboy_version.as_str())
+                    .unwrap_or("<unknown>"),
+                env!("CARGO_PKG_VERSION")
+            )
         });
     let refresh = refresh_commands.join(" && ");
     Error::validation_invalid_argument(
