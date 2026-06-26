@@ -36,7 +36,53 @@ async function main() {
 	const env = readWordPressFuzzRunnerEnv();
 	const result = await buildRunnerResult(env);
 	writeHomeboyFuzzResultsFile(env.resultsFile, result.homeboy_fuzz_campaign);
-	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+	process.stdout.write(`${JSON.stringify(fuzzRunnerStdoutSummary(result), null, 2)}\n`);
+}
+
+function fuzzRunnerStdoutSummary(result = {}) {
+	return {
+		schema: result.schema,
+		run_id: result.run_id,
+		status: result.status,
+		succeeded: result.succeeded,
+		result_schema: result.result_schema,
+		wp_codebox_input: result.wp_codebox_input ? {
+			schema: result.wp_codebox_input.schema,
+			metadata: result.wp_codebox_input.metadata,
+		} : undefined,
+		wp_codebox_task_request: result.wp_codebox_task_request ? {
+			executor: {
+				config: {
+					runtime_task: {
+						ability: result.wp_codebox_task_request.executor?.config?.runtime_task?.ability,
+						input: {
+							schema: result.wp_codebox_task_request.executor?.config?.runtime_task?.input?.schema,
+						},
+					},
+				},
+			},
+		} : undefined,
+		wp_codebox_result: result.wp_codebox_result ? {
+			request_id: result.wp_codebox_result.request_id,
+			status: result.wp_codebox_result.status,
+			result_schema: result.wp_codebox_result.result_schema,
+			summary: result.wp_codebox_result.summary,
+			wordpress_fuzz_result: result.wp_codebox_result.wordpress_fuzz_result ? {
+				schema: result.wp_codebox_result.wordpress_fuzz_result.schema,
+			} : undefined,
+		} : undefined,
+		homeboy_fuzz_campaign: result.homeboy_fuzz_campaign ? {
+			schema: result.homeboy_fuzz_campaign.schema,
+			id: result.homeboy_fuzz_campaign.id,
+			artifacts: result.homeboy_fuzz_campaign.artifacts,
+			metadata: {
+				status: result.homeboy_fuzz_campaign.metadata?.status,
+				success: result.homeboy_fuzz_campaign.metadata?.success,
+				wp_codebox_result_schema: result.homeboy_fuzz_campaign.metadata?.wp_codebox_result_schema,
+				artifact_refs: result.homeboy_fuzz_campaign.metadata?.artifact_refs,
+			},
+		} : undefined,
+	};
 }
 
 async function buildRunnerResult(env) {
