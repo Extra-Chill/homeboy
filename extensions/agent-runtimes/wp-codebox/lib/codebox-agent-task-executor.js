@@ -1405,8 +1405,10 @@ function runtimeComponentPaths(config, options = {}) {
   const aliases = runtimeComponentPathAliases(options);
   const resolved = {
     ...contractPaths,
-    agent_runtime: config.agent_runtime || options.agentRuntime,
+    agents_api: contractPaths.agents_api || firstValue(process.env.WP_CODEBOX_AGENTS_API_PATH, process.env.HOMEBOY_WP_CODEBOX_AGENTS_API_PATH),
+    agent_runtime: contractPaths.agent_runtime || explicit.agent_runtime || config.agent_runtime || options.agentRuntime,
     agent_runtime_tools: config.agent_runtime_tools || options.agentRuntimeTools,
+    data_machine_code: contractPaths.data_machine_code || firstValue(process.env.WP_CODEBOX_DATA_MACHINE_CODE_PATH, process.env.HOMEBOY_WP_CODEBOX_DATA_MACHINE_CODE_PATH),
     ...explicit,
     runtime: explicit.runtime || runtimeComponents.runtime,
   };
@@ -1423,6 +1425,8 @@ function runtimeComponentPaths(config, options = {}) {
       options,
     })));
   }
+
+  resolved.agent_runtime = resolved.agent_runtime || firstValue(process.env.WP_CODEBOX_DATA_MACHINE_PATH, process.env.HOMEBOY_WP_CODEBOX_DATA_MACHINE_PATH);
 
   return Object.fromEntries(Object.entries(resolved).filter(([, value]) => value !== undefined && value !== ''));
 }

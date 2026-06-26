@@ -143,6 +143,8 @@ assert.equal(artifactResultEnvelope.evidenceRefs.length, 2);
 assert.equal(artifactResultEnvelope.evidenceRefs[0].uri, 'artifacts/run-1');
 assert.deepEqual(typedArtifactsFromCodeboxResult({ artifact_result: artifactResultEnvelope }).review.payload, { ok: true });
 assert.deepEqual(normalizeCodeboxPublicResultEnvelope({ artifact_result: artifactResultEnvelope }).outputs, {});
+assert.deepEqual(typedArtifactsFromCodeboxResult({ outputs: { artifact_result: artifactResultEnvelope } }).review.payload, { ok: true });
+assert.equal(normalizeCodeboxPublicResultEnvelope({ outputs: { artifact_result: artifactResultEnvelope } }).artifact_result.schema, 'wp-codebox/artifact-result-envelope/v1');
 const privateRuntimeShapeRequest = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'private-runtime-shape-boundary',
@@ -1010,6 +1012,9 @@ restoreEnv('WP_CODEBOX_AGENTS_API_PATH', previousAgentsApiPath);
 restoreEnv('WP_CODEBOX_DATA_MACHINE_PATH', previousDataMachinePath);
 restoreEnv('WP_CODEBOX_DATA_MACHINE_CODE_PATH', previousDataMachineCodePath);
 assert.deepEqual(runtimePackageEnvSubstrateTaskInput.component_contracts, []);
+assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.agents_api, workspaceRoot);
+assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.agent_runtime, workspaceRoot);
+assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.data_machine_code, workspaceRoot);
 
 const explicitLegacyRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
