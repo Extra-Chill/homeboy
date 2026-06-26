@@ -132,10 +132,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["manifest"] => {
-            metadata.output_notes =
-                "recursive command safety, docs, output, and Lab metadata in the standard JSON envelope";
-        }
+        ["manifest"] => {}
         ["docs", "map"] => {
             metadata.mutates = true;
             metadata.output_notes =
@@ -152,7 +149,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "release execution mutates git tags/releases and may deploy; use --dry-run to plan and --apply for risky modes";
             metadata.dangerous_flags = vec![
                 "--apply",
                 "--deploy",
@@ -166,16 +162,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["upgrade"] => {
             metadata.mutates = true;
             metadata.operator = true;
-            metadata.output_notes = "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used";
             metadata.dangerous_flags = vec!["--force", "--upgrade-runner"];
         }
         ["trace"] => {
             metadata.mutates = true;
-            metadata.output_notes = "runs trace workflows and records observation artifacts unless using read-only subcommands";
         }
         ["lint"] => {
-            metadata.output_notes =
-                "runs lint workflows; pass --fix to apply auto-fixable findings in place";
             metadata.dangerous_flags = vec!["--fix", "--force"];
         }
         ["deps", "install"] | ["deps", "update"] | ["deps", "stack", "apply"] => {
@@ -190,8 +182,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         }
         ["cleanup"] => {
             metadata.mutates = true;
-            metadata.output_notes =
-                "cleanup subcommands report plans by default and require --apply for removals";
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["cleanup", "artifacts"] => {
@@ -427,7 +417,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         }
         ["refactor"] => {
             metadata.mutates = true;
-            metadata.output_notes = "refactor subcommands can rewrite source files; use planning/dry-run modes where available";
             metadata.dangerous_flags = vec!["--write", "--commit"];
         }
         ["refactor", "rename"]
@@ -583,7 +572,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         }
         ["undo"] => {
             metadata.mutates = true;
-            metadata.output_notes = "restores files from the latest or selected undo snapshot";
         }
         ["undo", "delete"] => {
             metadata.mutates = true;
