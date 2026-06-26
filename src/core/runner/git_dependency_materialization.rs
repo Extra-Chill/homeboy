@@ -199,6 +199,31 @@ struct DependencyFreshness {
     used_pinned_ref: bool,
 }
 
+impl DependencyFreshness {
+    /// Build a freshness record for the common (non-pinned) case where both the
+    /// before/after SHA derive from the same `HEAD` snapshot and no pinned ref is
+    /// in play. Centralizes the repeated struct literal so each call site only
+    /// names the parts that actually vary (status, branch, upstream metadata).
+    fn at_head(
+        status: DependencyUpdateStatus,
+        branch: Option<String>,
+        before: &str,
+        upstream_sha: Option<String>,
+        upstream: Option<String>,
+    ) -> Self {
+        DependencyFreshness {
+            status,
+            branch,
+            before_sha: Some(before.to_string()),
+            after_sha: Some(before.to_string()),
+            upstream_sha,
+            upstream,
+            pinned_ref: None,
+            used_pinned_ref: false,
+        }
+    }
+}
+
 fn ensure_git_dependency_fresh(
     local_path: &Path,
     pinned_ref: Option<&str>,
@@ -220,16 +245,13 @@ fn ensure_git_dependency_fresh(
     let before = git_output(local_path, &["rev-parse", "HEAD"])?;
     let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"]).ok();
     if branch.as_deref() == Some("HEAD") && pinned_ref.is_none() {
-        let freshness = DependencyFreshness {
-            status: DependencyUpdateStatus::DetachedUnpinned,
+        let freshness = DependencyFreshness::at_head(
+            DependencyUpdateStatus::DetachedUnpinned,
             branch,
-            before_sha: Some(before.clone()),
-            after_sha: Some(before),
-            upstream_sha: None,
-            upstream: None,
-            pinned_ref: None,
-            used_pinned_ref: false,
-        };
+            &before,
+            None,
+            None,
+        );
         return Err(terminal_dependency_error(local_path, &freshness, None));
     }
 
@@ -252,31 +274,25 @@ fn ensure_git_dependency_fresh(
     ) {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {
-            let freshness = DependencyFreshness {
-                status: DependencyUpdateStatus::NoUpstream,
+            let freshness = DependencyFreshness::at_head(
+                DependencyUpdateStatus::NoUpstream,
                 branch,
-                before_sha: Some(before.clone()),
-                after_sha: Some(before),
-                upstream_sha: None,
-                upstream: None,
-                pinned_ref: None,
-                used_pinned_ref: false,
-            };
+                &before,
+                None,
+                None,
+            );
             return Err(terminal_dependency_error(local_path, &freshness, None));
         }
     };
     let remote = upstream.split('/').next().unwrap_or("").trim();
     if remote.is_empty() || remote == upstream {
-        let freshness = DependencyFreshness {
-            status: DependencyUpdateStatus::NoUpstream,
+        let freshness = DependencyFreshness::at_head(
+            DependencyUpdateStatus::NoUpstream,
             branch,
-            before_sha: Some(before.clone()),
-            after_sha: Some(before),
-            upstream_sha: None,
-            upstream: Some(upstream),
-            pinned_ref: None,
-            used_pinned_ref: false,
-        };
+            &before,
+            None,
+            Some(upstream),
+        );
         return Err(terminal_dependency_error(local_path, &freshness, None));
     }
 
@@ -290,27 +306,21 @@ fn ensure_git_dependency_fresh(
         // overlay: `materialize_snapshot` tars the working directory, so the
         // dirty files travel to the runner verbatim.
         if allow_dirty {
-            return Ok(DependencyFreshness {
-                status: DependencyUpdateStatus::DirtyOverlayAllowed,
+            return Ok(DependencyFreshness::at_head(
+                DependencyUpdateStatus::DirtyOverlayAllowed,
                 branch,
-                before_sha: Some(before.clone()),
-                after_sha: Some(before),
-                upstream_sha: upstream_head,
-                upstream: Some(upstream),
-                pinned_ref: None,
-                used_pinned_ref: false,
-            });
+                &before,
+                upstream_head,
+                Some(upstream),
+            ));
         }
-        let freshness = DependencyFreshness {
-            status: DependencyUpdateStatus::DirtyNotUpdated,
+        let freshness = DependencyFreshness::at_head(
+            DependencyUpdateStatus::DirtyNotUpdated,
             branch,
-            before_sha: Some(before.clone()),
-            after_sha: Some(before),
-            upstream_sha: upstream_head,
-            upstream: Some(upstream),
-            pinned_ref: None,
-            used_pinned_ref: false,
-        };
+            &before,
+            upstream_head,
+            Some(upstream),
+        );
         return Err(terminal_dependency_error(
             local_path,
             &freshness,
@@ -319,29 +329,23 @@ fn ensure_git_dependency_fresh(
     }
 
     if fetch_error.is_some() && upstream_head.as_deref() == Some(before.as_str()) {
-        return Ok(DependencyFreshness {
-            status: DependencyUpdateStatus::FetchFailedCachedUpToDate,
+        return Ok(DependencyFreshness::at_head(
+            DependencyUpdateStatus::FetchFailedCachedUpToDate,
             branch,
-            before_sha: Some(before.clone()),
-            after_sha: Some(before),
-            upstream_sha: upstream_head,
-            upstream: Some(upstream),
-            pinned_ref: None,
-            used_pinned_ref: false,
-        });
+            &before,
+            upstream_head,
+            Some(upstream),
+        ));
     }
 
     if fetch_error.is_some() {
-        let freshness = DependencyFreshness {
-            status: DependencyUpdateStatus::FetchFailed,
+        let freshness = DependencyFreshness::at_head(
+            DependencyUpdateStatus::FetchFailed,
             branch,
-            before_sha: Some(before.clone()),
-            after_sha: Some(before),
-            upstream_sha: upstream_head,
-            upstream: Some(upstream),
-            pinned_ref: None,
-            used_pinned_ref: false,
-        };
+            &before,
+            upstream_head,
+            Some(upstream),
+        );
         return Err(terminal_dependency_error(
             local_path,
             &freshness,

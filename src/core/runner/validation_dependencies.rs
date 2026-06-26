@@ -135,17 +135,21 @@ fn collect_validation_dependency_ids(value: &serde_json::Value, ids: &mut Vec<St
     );
 }
 
+fn canonicalize_dependency_path(path: &Path, dependency_id: &str) -> Result<PathBuf> {
+    path.canonicalize().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "canonicalize validation dependency {dependency_id}"
+            )),
+        )
+    })
+}
+
 fn resolve_sibling_dependency_workspace(parent: &Path, dependency_id: &str) -> Result<PathBuf> {
     let exact = parent.join(dependency_id);
     if is_homeboy_component_id(&exact, dependency_id) {
-        return exact.canonicalize().map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!(
-                    "canonicalize validation dependency {dependency_id}"
-                )),
-            )
-        });
+        return canonicalize_dependency_path(&exact, dependency_id);
     }
 
     let mut matches = fs::read_dir(parent)
@@ -157,14 +161,7 @@ fn resolve_sibling_dependency_workspace(parent: &Path, dependency_id: &str) -> R
     matches.sort();
 
     if let Some(path) = matches.into_iter().next() {
-        return path.canonicalize().map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!(
-                    "canonicalize validation dependency {dependency_id}"
-                )),
-            )
-        });
+        return canonicalize_dependency_path(&path, dependency_id);
     }
 
     Err(Error::validation_invalid_argument(
@@ -209,14 +206,7 @@ fn prepare_validation_dependency_workspace(
         &prepared_path,
     )?;
 
-    let prepared_path = prepared_path.canonicalize().map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some(format!(
-                "canonicalize validation dependency {dependency_id}"
-            )),
-        )
-    })?;
+    let prepared_path = canonicalize_dependency_path(&prepared_path, dependency_id)?;
 
     Ok(PreparedValidationDependencyWorkspace {
         remote_name: component.id,
@@ -327,14 +317,7 @@ fn canonical_existing_dependency_dir(path: &Path, dependency_id: &str) -> Result
             &format!("path is not a directory: {}", path.display()),
         ));
     }
-    path.canonicalize().map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some(format!(
-                "canonicalize validation dependency {dependency_id}"
-            )),
-        )
-    })
+    canonicalize_dependency_path(path, dependency_id)
 }
 
 fn read_standalone_dependency_config(dependency_id: &str) -> Result<Option<Component>> {

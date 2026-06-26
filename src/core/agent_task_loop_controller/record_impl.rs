@@ -314,48 +314,50 @@ impl AgentTaskLoopControllerRecord {
             };
         };
 
+        // Both "unavailable" and "materialization blocked" availability results
+        // resolve the same way: fall back to local with a diagnostic when the
+        // policy allows it, otherwise emit a blocked decision. Only the
+        // diagnostic code and the blocked status differ between the two cases.
+        let resolve_unavailable =
+            |runner: String,
+             reason: String,
+             code: &str,
+             blocked_status: AgentTaskLoopActionStatus| match fallback {
+                AgentTaskLoopLocalFallbackPolicy::Allowed => AgentTaskLoopRunnerPolicyDecision {
+                    target: Some(AgentTaskLoopRunnerExecutionTarget::Local),
+                    blocked_status: None,
+                    diagnostic: Some(AgentTaskLoopActionDiagnostic {
+                        code: code.to_string(),
+                        message: reason,
+                        runner: Some(runner),
+                        details: Value::Null,
+                    }),
+                },
+                AgentTaskLoopLocalFallbackPolicy::Denied => {
+                    blocked_runner_decision(blocked_status, Some(runner), reason, Value::Null)
+                }
+            };
+
         match runner_availability(&runner) {
             AgentTaskLoopRunnerAvailability::Available => AgentTaskLoopRunnerPolicyDecision {
                 target: Some(AgentTaskLoopRunnerExecutionTarget::Runner(runner)),
                 blocked_status: None,
                 diagnostic: None,
             },
-            AgentTaskLoopRunnerAvailability::Unavailable { reason } => match fallback {
-                AgentTaskLoopLocalFallbackPolicy::Allowed => AgentTaskLoopRunnerPolicyDecision {
-                    target: Some(AgentTaskLoopRunnerExecutionTarget::Local),
-                    blocked_status: None,
-                    diagnostic: Some(AgentTaskLoopActionDiagnostic {
-                        code: "runner_unavailable_local_fallback_allowed".to_string(),
-                        message: reason,
-                        runner: Some(runner),
-                        details: Value::Null,
-                    }),
-                },
-                AgentTaskLoopLocalFallbackPolicy::Denied => blocked_runner_decision(
-                    AgentTaskLoopActionStatus::BlockedRunnerUnavailable,
-                    Some(runner),
+            AgentTaskLoopRunnerAvailability::Unavailable { reason } => resolve_unavailable(
+                runner,
+                reason,
+                "runner_unavailable_local_fallback_allowed",
+                AgentTaskLoopActionStatus::BlockedRunnerUnavailable,
+            ),
+            AgentTaskLoopRunnerAvailability::MaterializationBlocked { reason } => {
+                resolve_unavailable(
+                    runner,
                     reason,
-                    Value::Null,
-                ),
-            },
-            AgentTaskLoopRunnerAvailability::MaterializationBlocked { reason } => match fallback {
-                AgentTaskLoopLocalFallbackPolicy::Allowed => AgentTaskLoopRunnerPolicyDecision {
-                    target: Some(AgentTaskLoopRunnerExecutionTarget::Local),
-                    blocked_status: None,
-                    diagnostic: Some(AgentTaskLoopActionDiagnostic {
-                        code: "remote_materialization_blocked_local_fallback_allowed".to_string(),
-                        message: reason,
-                        runner: Some(runner),
-                        details: Value::Null,
-                    }),
-                },
-                AgentTaskLoopLocalFallbackPolicy::Denied => blocked_runner_decision(
+                    "remote_materialization_blocked_local_fallback_allowed",
                     AgentTaskLoopActionStatus::BlockedRemoteMaterialization,
-                    Some(runner),
-                    reason,
-                    Value::Null,
-                ),
-            },
+                )
+            }
         }
     }
 

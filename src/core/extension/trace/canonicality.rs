@@ -468,22 +468,21 @@ fn push_git_reasons(
             path.display()
         ));
     }
-    if behind.unwrap_or(0) > 0 {
-        reasons.push(format!(
-            "{} checkout is behind upstream by {} commit(s): {}",
-            target,
-            behind.unwrap_or(0),
-            path.display()
-        ));
-    }
-    if ahead.unwrap_or(0) > 0 {
-        reasons.push(format!(
-            "{} checkout is ahead of upstream by {} unmerged commit(s): {}",
-            target,
-            ahead.unwrap_or(0),
-            path.display()
-        ));
-    }
+    let mut push_divergence = |count: Option<u32>, direction: &str, qualifier: &str| {
+        let count = count.unwrap_or(0);
+        if count > 0 {
+            reasons.push(format!(
+                "{} checkout is {} upstream by {} {}commit(s): {}",
+                target,
+                direction,
+                count,
+                qualifier,
+                path.display()
+            ));
+        }
+    };
+    push_divergence(behind, "behind", "");
+    push_divergence(ahead, "ahead of", "unmerged ");
 }
 
 fn checkout_status(
