@@ -124,7 +124,7 @@ function buildWordPressFuzzRunnerSummary({
 	return stripUndefined({
 		schema: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 		status,
-		succeeded: !['failed', 'errored'].includes(String(status).toLowerCase()),
+		succeeded: !['failed', 'errored', 'error', 'skipped', 'unsupported', 'not_executed'].includes(String(status).toLowerCase()),
 		run_id: runId,
 		workload_id: workloadId,
 		seed,
@@ -342,7 +342,7 @@ function normalizeCodeboxResult(workload, context = {}) {
 	return normalizeWpCodeboxFuzzSuiteResult({
 		schema: 'wp-codebox/fuzz-suite-result/v1',
 		request_id: context.runId,
-		status: 'skipped',
+		status: 'unsupported',
 		diagnostics: [
 			{
 				severity: 'warning',
@@ -378,10 +378,15 @@ function hasCoverageFailures(coverage) {
 }
 
 function normalizeRunnerStatus(codeboxResult, coverage) {
-	if (codeboxResult.succeeded === false || hasCoverageFailures(coverage)) {
+	const status = codeboxResult.status || 'succeeded';
+	const normalized = String(status).toLowerCase();
+	if (['skipped', 'unsupported', 'not_executed'].includes(normalized)) {
+		return normalized;
+	}
+	if (hasCoverageFailures(coverage) || codeboxResult.succeeded === false) {
 		return 'failed';
 	}
-	return codeboxResult.status || 'succeeded';
+	return status;
 }
 
 function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, status }) {

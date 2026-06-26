@@ -77,7 +77,7 @@ const result = buildWordPressFuzzRunnerResult({
 });
 
 assert.equal(result.schema, WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA);
-assert.equal(result.status, 'failed');
+assert.equal(result.status, 'unsupported');
 assert.equal(result.succeeded, false);
 assert.equal(result.run_id, 'run-from-env');
 assert.equal(result.workload_id, 'workload-from-env');
@@ -98,7 +98,7 @@ assert.equal(result.homeboy_fuzz_campaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
 assert.equal(result.homeboy_fuzz_campaign.version, 1);
 assert.equal(result.homeboy_fuzz_campaign.id, 'run-from-env');
 assert.equal(result.homeboy_fuzz_campaign.safety_class, 'read_only');
-assert.equal(result.homeboy_fuzz_campaign.metadata.status, 'failed');
+assert.equal(result.homeboy_fuzz_campaign.metadata.status, 'unsupported');
 assert.equal(result.homeboy_fuzz_campaign.metadata.wp_codebox_result_schema, 'wp-codebox/fuzz-suite-result/v1');
 assert.equal(result.homeboy_fuzz_campaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
 assert.equal(result.observation.schema, 'homeboy/wordpress-fuzz-observation/v1');
@@ -457,9 +457,10 @@ const cli = spawnSync(runnerPath, [], {
 	},
 });
 
-assert.equal(cli.status, 0, cli.stderr);
+assert.equal(cli.status, 1, cli.stderr);
 const cliResult = JSON.parse(cli.stdout);
 assert.equal(cliResult.schema, WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA);
+assert.equal(cliResult.status, 'unsupported');
 assert.equal(cliResult.run_id, 'cli-run');
 assert.equal(cliResult.succeeded, false);
 assert.equal(cliResult.wp_codebox_input.metadata.limits.max_duration_seconds, 15);
