@@ -546,9 +546,11 @@ pub(crate) fn run_lab_offload_inner(
     // Surface synced runtime-overlay remote paths into the command env so a hot
     // command (e.g. a CLI-runner env entry) points at the real remote runtime
     // directory rather than a controller-local path (#3831).
+    let env_delta_before_runtime_overlay = env_delta.clone();
     for (name, value) in &runtime_overlay_env {
         env_delta.insert(name.clone(), value.clone());
     }
+    let env_delta_before_secret_handoff = env_delta.clone();
     lab_metadata["runtime_overlays"] = runtime_overlay_metadata;
     let secret_env_handoff =
         build_lab_secret_env_handoff_plan(&changed_since_preflight.args, env_delta)?;
@@ -588,6 +590,40 @@ pub(crate) fn run_lab_offload_inner(
     // emitted controller-side after the run, but recording the pre-run host
     // state and machine id here keeps the embedded metadata self-describing.
     lab_metadata["lab_host_telemetry"] = host_telemetry.before_metadata();
+    let base_env = build_lab_offload_env_with_passthroughs(&lab_metadata);
+    let secret_env_delta = secret_env_handoff
+        .env_delta
+        .iter()
+        .filter(|(name, value)| env_delta_before_secret_handoff.get(*name) != Some(*value))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    lab_metadata["env_resolution"] = lab_env_resolution_report(vec![
+        LabEnvResolutionLayer {
+            source: "lab_metadata_and_passthroughs",
+            env: base_env,
+            secret_names: Vec::new(),
+        },
+        LabEnvResolutionLayer {
+            source: "env_delta",
+            env: env_delta_before_runtime_overlay,
+            secret_names: Vec::new(),
+        },
+        LabEnvResolutionLayer {
+            source: "runtime_overlay",
+            env: runtime_overlay_env.iter().cloned().collect(),
+            secret_names: Vec::new(),
+        },
+        LabEnvResolutionLayer {
+            source: "secret_env_plan_env_delta",
+            env: secret_env_delta,
+            secret_names: secret_env_handoff.secret_env_names.clone(),
+        },
+        LabEnvResolutionLayer {
+            source: "job_override",
+            env: request.job_overrides.env.clone(),
+            secret_names: request.job_overrides.secret_env_names.clone(),
+        },
+    ]);
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     env.extend(secret_env_handoff.env_delta.clone());
     for (name, value) in &request.job_overrides.env {
