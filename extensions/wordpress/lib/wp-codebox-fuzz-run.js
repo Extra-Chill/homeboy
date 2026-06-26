@@ -930,6 +930,7 @@ function stageArtifactPostprocessHelpers(input = {}, runtimeRequirements = {}, o
 
 function wpCodeboxArtifactPostprocessRoot(options = {}) {
 	const env = { ...process.env, ...(options.env || {}) };
+	const resultsFile = options.resultsFile || options.results_file || env.resultsFile || env.HOMEBOY_FUZZ_RESULTS_FILE;
 	const candidates = [
 		options.artifactsRoot,
 		options.artifactRoot,
@@ -940,6 +941,7 @@ function wpCodeboxArtifactPostprocessRoot(options = {}) {
 		env.HOMEBOY_ARTIFACTS_DIR,
 		env.HOMEBOY_RUN_ARTIFACT_ROOT,
 		env.HOMEBOY_RUN_ARTIFACT_DIR,
+		typeof resultsFile === 'string' && resultsFile.trim() ? path.dirname(resultsFile) : undefined,
 	];
 	for (const candidate of candidates) {
 		if (typeof candidate === 'string' && candidate.trim() && fs.existsSync(candidate)) {

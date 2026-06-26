@@ -997,7 +997,7 @@ runWpCodeboxFuzzSuite({
 		input: stagedHelperInput,
 		wpCodeboxBin: '/custom/direct-wp-codebox',
 		runtimeRequirements: { extra_plugins: [{ slug: 'sample-plugin', source: stagedHelperDir, loadAs: 'plugin' }] },
-		env: { HOMEBOY_ARTIFACT_ROOT: stagedArtifactRoot },
+		env: { resultsFile: path.join(stagedArtifactRoot, 'fuzz-results.json') },
 		runPublicCli: ({ args }) => {
 			if (args.includes('--help')) return { status: 0, stdout: 'usage' };
 			const publicCliInput = JSON.parse(fs.readFileSync(args[2], 'utf8'));
