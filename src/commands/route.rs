@@ -1331,6 +1331,36 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_fanout_run_plan_supports_lab_runner_routing() {
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--lab-only".to_string(),
+            "agent-task".to_string(),
+            "fanout".to_string(),
+            "run-plan".to_string(),
+            "--input".to_string(),
+            "fanout.json".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+        let local_policy = runners::LabLocalExecutionPolicy::from_flags(
+            cli.allow_local_hot,
+            cli.allow_local_fallback,
+            cli.lab_only,
+        );
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert!(local_policy.deny_local_execution());
+        assert_eq!(command.hot_label, "agent-task fanout run-plan");
+        assert!(command.portable);
+        assert!(command.routing_policy.default_lab_offload);
+        assert!(command.routing_policy.requires_extension_parity);
+    }
+
+    #[test]
     fn agent_task_fanout_state_reads_are_runner_resident() {
         for args in [
             [

@@ -309,6 +309,7 @@ const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resu
 const AGENT_TASK_STATUS_LAB_LABEL: &str =
     "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
 const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
+const AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL: &str = "agent-task fanout run-plan";
 const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
 const AGENT_TASK_FANOUT_STATUS_LAB_LABEL: &str = "agent-task fanout status/artifacts";
 const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
@@ -366,11 +367,12 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
     },
     LabSupportedCommandSummary {
         contract_labels: &[
+            AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
             AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
             AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
         ],
-        message_label: "agent-task fanout submit-batch/status/artifacts",
-        hint_label: "agent-task fanout submit-batch/status/artifacts",
+        message_label: "agent-task fanout run-plan/submit-batch/status/artifacts",
+        hint_label: "agent-task fanout run-plan/submit-batch/status/artifacts",
     },
     LabSupportedCommandSummary {
         contract_labels: &[AGENT_TASK_AUTH_STATUS_LAB_LABEL],
@@ -554,6 +556,17 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
+                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                        command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
+                    }),
+            }) => LabCommandContract::portable(
+                AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
+                None,
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
