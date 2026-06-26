@@ -33,6 +33,7 @@ pub(super) fn exec_worker_local_with_process_output(
         &options.command,
         options.capability_preflight.as_ref(),
         &options.secret_env_names,
+        &options.env,
     );
     let mut runner = load(runner_id)?;
     runner.kind = RunnerKind::Local;

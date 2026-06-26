@@ -262,6 +262,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         &options.command,
         options.capability_preflight.as_ref(),
         &options.secret_env_names,
+        &options.env,
     );
     let mut plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
