@@ -23,6 +23,7 @@ pub(super) fn exec(
     dry_run: bool,
     run_id: Option<String>,
     artifact_outputs: Vec<String>,
+    summary_outputs: Vec<String>,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
     let script = script_file
@@ -32,11 +33,12 @@ pub(super) fn exec(
     let prepared_command = prepare_runner_exec_command(script.as_ref(), command)?;
     let env = prepare_runner_exec_env(env, script.as_deref())?;
     let required_commands = prepared_command.first().cloned().into_iter().collect();
+    let has_declared_outputs = !artifact_outputs.is_empty() || !summary_outputs.is_empty();
 
-    if !dry_run && !artifact_outputs.is_empty() && run_id.is_none() {
+    if !dry_run && has_declared_outputs && run_id.is_none() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "run_id",
-            "runner exec --artifact requires --run-id so artifacts can be attached to a persisted run",
+            "runner exec --artifact/--summary requires --run-id so evidence can be attached to a persisted run",
             None,
             None,
         ));
@@ -85,6 +87,7 @@ pub(super) fn exec(
     )?;
     if let Some(run_id) = validated_run_id.as_deref() {
         promote_runner_exec_artifacts(run_id, &output.remote_cwd, &artifact_outputs)?;
+        promote_runner_exec_summaries(run_id, &output.remote_cwd, &summary_outputs)?;
     }
     Ok((output, exit_code))
 }
@@ -241,18 +244,68 @@ pub(super) fn promote_runner_exec_artifacts(
     remote_cwd: &str,
     artifact_outputs: &[String],
 ) -> homeboy::core::Result<Vec<ArtifactRecord>> {
-    if artifact_outputs.is_empty() {
+    promote_runner_exec_outputs(
+        run_id,
+        remote_cwd,
+        artifact_outputs,
+        RunnerExecEvidenceRole::Artifact,
+    )
+}
+
+pub(super) fn promote_runner_exec_summaries(
+    run_id: &str,
+    remote_cwd: &str,
+    summary_outputs: &[String],
+) -> homeboy::core::Result<Vec<ArtifactRecord>> {
+    promote_runner_exec_outputs(
+        run_id,
+        remote_cwd,
+        summary_outputs,
+        RunnerExecEvidenceRole::Summary,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RunnerExecEvidenceRole {
+    Artifact,
+    Summary,
+}
+
+impl RunnerExecEvidenceRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Artifact => "artifact",
+            Self::Summary => "summary",
+        }
+    }
+
+    fn kind(self, declared: &str) -> String {
+        match self {
+            Self::Artifact => runner_exec_artifact_kind(declared),
+            Self::Summary => runner_exec_summary_kind(declared),
+        }
+    }
+}
+
+fn promote_runner_exec_outputs(
+    run_id: &str,
+    remote_cwd: &str,
+    output_paths: &[String],
+    role: RunnerExecEvidenceRole,
+) -> homeboy::core::Result<Vec<ArtifactRecord>> {
+    if output_paths.is_empty() {
         return Ok(Vec::new());
     }
 
     let store = ObservationStore::open_initialized()?;
-    artifact_outputs
+    output_paths
         .iter()
         .map(|declared| {
             let path = resolve_runner_exec_artifact_path(remote_cwd, declared);
-            let kind = runner_exec_artifact_kind(declared);
+            let kind = role.kind(declared);
             let metadata = serde_json::json!({
                 "declared_path": declared,
+                "evidence_role": role.as_str(),
                 "promoted_by": "runner.exec",
             });
             if path.is_dir() {
@@ -278,6 +331,23 @@ fn runner_exec_artifact_kind(declared: &str) -> String {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("runner_exec_artifact");
+    sanitize_runner_exec_kind(name, "runner_exec_artifact")
+}
+
+fn runner_exec_summary_kind(declared: &str) -> String {
+    let name = Path::new(declared)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("runner_exec_summary");
+    let kind = sanitize_runner_exec_kind(name, "runner_exec_summary");
+    if kind.ends_with("summary") {
+        kind
+    } else {
+        format!("{kind}_summary")
+    }
+}
+
+fn sanitize_runner_exec_kind(name: &str, fallback: &str) -> String {
     let kind: String = name
         .chars()
         .map(|ch| {
@@ -289,7 +359,7 @@ fn runner_exec_artifact_kind(declared: &str) -> String {
         })
         .collect();
     if kind.is_empty() {
-        "runner_exec_artifact".to_string()
+        fallback.to_string()
     } else {
         kind
     }

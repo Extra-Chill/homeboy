@@ -258,6 +258,11 @@ pub(super) enum RunnerCommand {
         #[arg(long = "artifact", value_name = "PATH")]
         artifact_outputs: Vec<String>,
 
+        /// Summary file or directory produced by the runner command to persist as typed run evidence.
+        /// Relative paths are resolved from the runner exec cwd. Repeat for multiple summaries.
+        #[arg(long = "summary", value_name = "PATH")]
+        summary_outputs: Vec<String>,
+
         /// Print remote stdout/stderr directly instead of the structured JSON envelope.
         /// Use global --output to still write the full structured envelope to a file.
         #[arg(long)]
