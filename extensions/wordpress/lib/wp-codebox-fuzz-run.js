@@ -725,15 +725,22 @@ function normalizeWordPressWorkloadStep(step, options = {}) {
 		return step;
 	}
 	const args = objectOrUndefined(step.args) || step;
+	const input = objectOrUndefined(args.input) || {};
+	const output = objectOrUndefined(args.output) || {};
+	const parameters = objectOrUndefined(args.parameters) || {};
 	return stripUndefined({
-		command: ARTIFACT_POSTPROCESS_COMMAND,
-		args: stripUndefined({
-			helper: args.helper,
-			action: args.action,
-			input: objectOrUndefined(args.input),
-			output: objectOrUndefined(args.output),
-			parameters: objectOrUndefined(args.parameters),
-		}),
+		type: 'artifact-postprocess',
+		action: args.action,
+		helperPath: args.helper,
+		inputArtifactRoot: input.path,
+		outputArtifactPath: output.path,
+		maxInputBytes: input.max_bytes || input.maxBytes,
+		maxArtifacts: input.max_artifacts || input.maxArtifacts,
+		expectedOutputSchema: output.schema,
+		artifactName: output.artifact,
+		artifactKind: output.kind,
+		semantic: output.semantic_key || output.semantic,
+		args: [args.action, '${inputArtifactRoot}', '${outputArtifactPath}', JSON.stringify(parameters)],
 		metadata: stripUndefined({
 			...(objectOrUndefined(step.metadata) || {}),
 			adapter: 'homeboy-extensions',

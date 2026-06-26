@@ -100,16 +100,23 @@ const artifactPostprocessWorkloadInput = wpCodeboxWordPressWorkloadRunInput({
 		args: {
 			helper: '${package.root}/tools/artifact-helper.mjs',
 			action: 'coverage-gap-report',
-			input: { type: 'artifact-root', path: '${artifacts.root}' },
-			output: { artifact: 'coverage_gap_report', path: 'coverage/gaps.json', semantic_key: 'fuzz.coverage.gap_report' },
+			input: { type: 'artifact-root', path: '${artifacts.root}', max_bytes: 1024 },
+			output: { artifact: 'coverage_gap_report', path: 'coverage/gaps.json', kind: 'json', schema: 'homeboy-rigs/wordpress-coverage-gap-report/v1', semantic_key: 'fuzz.coverage.gap_report' },
 			parameters: { max_bytes: 1024 },
 		},
 	}],
 });
-assert.equal(artifactPostprocessWorkloadInput.steps[0].command, ARTIFACT_POSTPROCESS_COMMAND);
-assert.equal(artifactPostprocessWorkloadInput.steps[0].args.helper, '${package.root}/tools/artifact-helper.mjs');
-assert.equal(artifactPostprocessWorkloadInput.steps[0].args.action, 'coverage-gap-report');
-assert.equal(artifactPostprocessWorkloadInput.steps[0].args.output.semantic_key, 'fuzz.coverage.gap_report');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].type, 'artifact-postprocess');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].helperPath, '${package.root}/tools/artifact-helper.mjs');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].action, 'coverage-gap-report');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].inputArtifactRoot, '${artifacts.root}');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].outputArtifactPath, 'coverage/gaps.json');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].maxInputBytes, 1024);
+assert.equal(artifactPostprocessWorkloadInput.steps[0].expectedOutputSchema, 'homeboy-rigs/wordpress-coverage-gap-report/v1');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].artifactName, 'coverage_gap_report');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].artifactKind, 'json');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].semantic, 'fuzz.coverage.gap_report');
+assert.deepEqual(artifactPostprocessWorkloadInput.steps[0].args, ['coverage-gap-report', '${inputArtifactRoot}', '${outputArtifactPath}', JSON.stringify({ max_bytes: 1024 })]);
 assert.equal(artifactPostprocessWorkloadInput.steps[0].metadata.contract, 'homeboy/artifact-postprocess/v1');
 
 const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
