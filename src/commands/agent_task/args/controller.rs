@@ -7,10 +7,16 @@ pub enum AgentTaskControllerCommand {
     /// Create a durable loop controller record.
     Init(AgentTaskControllerInitArgs),
     /// Initialize or resume a durable loop controller from a repo-authored JSON spec.
+    ///
+    /// With a configured default Lab runner, --resume uses automatic Lab offload unless local execution is explicitly forced.
     FromSpec(AgentTaskControllerFromSpecArgs),
     /// Materialize, initialize, and run a bounded controller loop from a repo-authored JSON spec.
+    ///
+    /// With a configured default Lab runner, this uses automatic Lab offload unless local execution is explicitly forced.
     RunFromSpec(AgentTaskControllerRunFromSpecArgs),
     /// Materialize a repo-authored loop spec with explicit run inputs.
+    ///
+    /// With a configured default Lab runner, this uses automatic Lab offload unless local execution is explicitly forced.
     Materialize(AgentTaskControllerMaterializeArgs),
     /// Validate a proof, materialized spec, or controller record for deterministic handoff.
     ValidateProof(AgentTaskControllerValidateProofArgs),
