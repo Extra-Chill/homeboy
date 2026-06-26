@@ -413,6 +413,12 @@ fn ensure_stack_refreshable(stack: &DiscoveredStack, target: &Path) -> Result<()
         return Ok(());
     }
 
+    if read_stack_source_metadata(&stack.id)
+        .is_some_and(|metadata| config_matches_source(target, Path::new(&metadata.stack_path)))
+    {
+        return Ok(());
+    }
+
     if config_matches_source(target, &stack.stack_path) {
         return Ok(());
     }

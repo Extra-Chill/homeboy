@@ -160,6 +160,33 @@ mod install_flows {
     }
 
     #[test]
+    fn reinstall_replaces_owned_stack_with_updated_content() {
+        let _home = HomeGuard::new();
+        let first_package = tempfile::tempdir().expect("first package");
+        write_rig(first_package.path(), "studio", &minimal_rig("studio"));
+        write_stack(first_package.path(), "studio-combined", "studio");
+        install(first_package.path().to_str().unwrap(), None, false).expect("install first");
+
+        let second_package = tempfile::tempdir().expect("second package");
+        write_rig(second_package.path(), "studio", &minimal_rig("studio"));
+        let stack_path = write_stack(second_package.path(), "studio-combined", "studio");
+        fs::write(
+            &stack_path,
+            minimal_stack("studio-combined", "studio")
+                .replace("studio-combined stack", "updated stack"),
+        )
+        .expect("update stack content");
+
+        let result = install(second_package.path().to_str().unwrap(), None, false)
+            .expect("reinstall replaces owned stack with updated content");
+
+        assert_eq!(result.installed_stacks.len(), 1);
+        let installed = crate::core::paths::stack_config("studio-combined").expect("stack path");
+        #[cfg(unix)]
+        assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
+    }
+
+    #[test]
     fn install_git_source_subpath_records_nested_package_root() {
         let _home = HomeGuard::new();
         let repo = tempfile::tempdir().expect("repo");
