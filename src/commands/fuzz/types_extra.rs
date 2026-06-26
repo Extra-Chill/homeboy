@@ -152,6 +152,8 @@ pub struct FuzzRunOutput {
     pub inventory_file: Option<String>,
     pub max_duration: Option<String>,
     pub passthrough_args: Vec<String>,
+    pub requested_settings: serde_json::Value,
+    pub gates: Vec<FuzzGateEvaluation>,
     pub target_inventory: Option<FuzzTargetInventory>,
     pub execution: Option<FuzzExecutionOutput>,
     pub postprocess: Vec<FuzzArtifactPostprocessOutput>,

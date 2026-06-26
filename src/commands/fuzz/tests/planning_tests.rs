@@ -216,6 +216,8 @@ fn fuzz_run_parses_generic_contract_flags() {
         "--require-result-envelope",
         "--max-duration",
         "60s",
+        "--expect-metric",
+        "side_effect_grouped_created_count=2",
         "--",
         "--engine",
         "libfuzzer",
@@ -236,6 +238,13 @@ fn fuzz_run_parses_generic_contract_flags() {
             assert!(run.require_coverage_summary);
             assert!(run.require_result_envelope);
             assert_eq!(run.max_duration.as_deref(), Some("60s"));
+            assert_eq!(
+                run.expect_metric,
+                vec![(
+                    "side_effect_grouped_created_count".to_string(),
+                    "2".to_string()
+                )]
+            );
             assert_eq!(run.args, vec!["--engine", "libfuzzer"]);
         }
         _ => panic!("expected fuzz run command"),
@@ -384,6 +393,8 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
         inventory_file: None,
         max_duration: None,
         passthrough_args: Vec::new(),
+        requested_settings: serde_json::Value::Null,
+        gates: Vec::new(),
         target_inventory: None,
         execution: None,
         postprocess: Vec::new(),
