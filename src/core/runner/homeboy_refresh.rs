@@ -240,13 +240,14 @@ fn identity_probe_script(binary_path: &str) -> String {
 }
 
 fn parse_identity(stdout: &str) -> Result<Value> {
-    let Some(line) = stdout.lines().rev().find(|line| !line.trim().is_empty()) else {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
         return Err(Error::internal_json(
             "refresh-homeboy produced no identity output".to_string(),
             None,
         ));
-    };
-    serde_json::from_str(line).map_err(|err| {
+    }
+    serde_json::from_str(trimmed).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("parse runner Homeboy identity output".to_string()),
