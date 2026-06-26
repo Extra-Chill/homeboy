@@ -12,14 +12,8 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
     }
 
     let runner_error = find_runner_homeboy_error(output);
-    let runner_code = runner_error
-        .as_ref()
-        .and_then(|error| error.get("code"))
-        .and_then(Value::as_str);
-    let runner_message = runner_error
-        .as_ref()
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str);
+    let runner_code = runner_error_str_field(runner_error.as_ref(), "code");
+    let runner_message = runner_error_str_field(runner_error.as_ref(), "message");
     let cause = runner_message
         .or(runner_code)
         .or_else(|| first_non_empty_line(&output.stderr))
@@ -69,6 +63,15 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
     }
 
     Some(error)
+}
+
+/// Reads a string field out of an optional structured runner error object.
+/// Both the `code` and `message` extractions in [`runner_exec_failure_error`]
+/// share this identical lookup.
+fn runner_error_str_field<'a>(runner_error: Option<&'a Value>, key: &str) -> Option<&'a str> {
+    runner_error
+        .and_then(|error| error.get(key))
+        .and_then(Value::as_str)
 }
 
 pub(super) fn string_field(value: &Value, key: &str) -> String {

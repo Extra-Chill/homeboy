@@ -40,6 +40,13 @@ pub fn run(
 ) -> CmdResult<build::BuildResult> {
     // Priority: --json > --all with project > positional args
 
+    // Shared tail: every multi-component build path dispatches the resolved
+    // component records through the same changed-since runner with the same
+    // `--changed-since` argument, so funnel them through one helper.
+    let run_components = |components: &[component::Component]| {
+        build::run_components_with_changed_since(components, args.changed_since.as_deref())
+    };
+
     // JSON takes precedence
     if let Some(ref json) = args.json {
         return build::run(json);
@@ -102,10 +109,7 @@ pub fn run(
 
         let components =
             scope::resolve_scope_component_records(&Scope::Project(target_id.clone()))?;
-        return build::run_components_with_changed_since(
-            &components,
-            args.changed_since.as_deref(),
-        );
+        return run_components(&components);
     }
 
     // Multiple positional args: use shared resolver
@@ -152,10 +156,7 @@ pub fn run(
             })
             .collect();
 
-        return build::run_components_with_changed_since(
-            &components,
-            args.changed_since.as_deref(),
-        );
+        return run_components(&components);
     }
 
     // Single target_id: treat as component ID

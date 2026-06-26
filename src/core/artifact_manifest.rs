@@ -247,37 +247,25 @@ impl ArtifactManifestEntry {
         if let Some(id) = &self.id {
             extra.insert("id".to_string(), Value::String(id.clone()));
         }
+        // Optional structured fields all serialize into `extra` through the same
+        // to_value + map_err plumbing, so funnel them through one helper that
+        // takes the map key and the serialization-context label.
         if let Some(provenance) = &self.provenance {
             extra.insert(
                 "provenance".to_string(),
-                serde_json::to_value(provenance).map_err(|e| {
-                    Error::internal_json(
-                        e.to_string(),
-                        Some("serialize artifact provenance".to_string()),
-                    )
-                })?,
+                serialize_extra_field(provenance, "artifact provenance")?,
             );
         }
         if let Some(viewer) = &self.viewer {
             extra.insert(
                 "viewer".to_string(),
-                serde_json::to_value(viewer).map_err(|e| {
-                    Error::internal_json(
-                        e.to_string(),
-                        Some("serialize artifact viewer".to_string()),
-                    )
-                })?,
+                serialize_extra_field(viewer, "artifact viewer")?,
             );
         }
         if let Some(public_url_state) = &self.public_url_state {
             extra.insert(
                 "public_url_state".to_string(),
-                serde_json::to_value(public_url_state).map_err(|e| {
-                    Error::internal_json(
-                        e.to_string(),
-                        Some("serialize artifact public URL state".to_string()),
-                    )
-                })?,
+                serialize_extra_field(public_url_state, "artifact public URL state")?,
             );
         }
 
@@ -305,6 +293,14 @@ impl ArtifactManifestEntry {
     ) -> Result<crate::core::artifact_ref::ArtifactRef> {
         Ok(self.to_artifact_contract()?.to_artifact_ref(id, run_id))
     }
+}
+
+/// Serializes an optional structured manifest field into a JSON value, mapping
+/// any serialization failure to a contextual internal-json error. Shared by the
+/// `extra` field assembly in [`ArtifactManifestEntry::to_artifact_contract`].
+fn serialize_extra_field<T: Serialize>(value: &T, context: &str) -> Result<Value> {
+    serde_json::to_value(value)
+        .map_err(|e| Error::internal_json(e.to_string(), Some(format!("serialize {context}"))))
 }
 
 fn manifest_path(root: impl AsRef<Path>) -> PathBuf {

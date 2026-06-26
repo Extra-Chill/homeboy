@@ -200,6 +200,19 @@ fn run_once_output(
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build broker HTTP client: {err}")))?;
+    // Every cancellation checkpoint in this claim lifecycle polls the broker for
+    // the same claimed job snapshot through identical plumbing; funnel them
+    // through one borrow-only helper so the three checkpoints stay in lockstep.
+    let poll_cancelled = |client: &Client,
+                          options: &ReverseRunnerWorkerOptions,
+                          job: &crate::core::api_jobs::Job| {
+        cancelled_job_snapshot(
+            client,
+            &options.broker_url,
+            options.broker_token.as_deref(),
+            job,
+        )
+    };
     let claim = claim_job(&client, &options)?;
     let Some(claim) = claim else {
         let loop_mode = options.loop_mode;
@@ -225,12 +238,7 @@ fn run_once_output(
         ));
     };
 
-    if let Some(job) = cancelled_job_snapshot(
-        &client,
-        &options.broker_url,
-        options.broker_token.as_deref(),
-        &claim.job,
-    )? {
+    if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
         return Ok(cancelled_output(
             options,
             iterations,
@@ -293,26 +301,16 @@ fn run_once_output(
                 return cancel_seen;
             }
             last_cancel_poll = Instant::now();
-            cancel_seen = cancelled_job_snapshot(
-                &client,
-                &options.broker_url,
-                options.broker_token.as_deref(),
-                &claim.job,
-            )
-            .map(|job| job.is_some())
-            .unwrap_or(false);
+            cancel_seen = poll_cancelled(&client, &options, &claim.job)
+                .map(|job| job.is_some())
+                .unwrap_or(false);
             cancel_seen
         },
     );
     let (exec_output, exit_code) = match exec_result {
         Ok(result) => result,
         Err(err) => {
-            if let Some(job) = cancelled_job_snapshot(
-                &client,
-                &options.broker_url,
-                options.broker_token.as_deref(),
-                &claim.job,
-            )? {
+            if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
                 return Ok(cancelled_output(
                     options,
                     iterations,
@@ -352,12 +350,7 @@ fn run_once_output(
             ));
         }
     };
-    if let Some(job) = cancelled_job_snapshot(
-        &client,
-        &options.broker_url,
-        options.broker_token.as_deref(),
-        &claim.job,
-    )? {
+    if let Some(job) = poll_cancelled(&client, &options, &claim.job)? {
         return Ok(cancelled_output(
             options,
             iterations,
