@@ -60,6 +60,7 @@ pub struct LabSelectedRunnerOutput {
     pub kind: String,
     pub configured_executable: String,
     pub runner_homeboy: LabRunnerHomeboyOutput,
+    pub wp_codebox_runtime: WpCodeboxRuntimeOutput,
     pub daemon_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<String>,
@@ -107,6 +108,45 @@ pub struct RunnerToolDiagnostics {
     pub diagnostic_command: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WpCodeboxRuntimeOutput {
+    pub tool: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_binary: Option<String>,
+    pub configured_binary_source: &'static str,
+    pub managed_cache_source: String,
+    pub managed_cache_binary: String,
+    pub effective_binary_rule: &'static str,
+    pub playground_package: WpCodeboxPackageRuntimeOutput,
+    pub core_package: WpCodeboxPackageRuntimeOutput,
+    pub source_git_sha: WpCodeboxProbeValue,
+    pub dist_build_freshness: WpCodeboxProbeValue,
+    pub runtime_probe_command: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<WpCodeboxRuntimeDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WpCodeboxPackageRuntimeOutput {
+    pub package: &'static str,
+    pub expected_path: String,
+    pub resolution: WpCodeboxProbeValue,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WpCodeboxProbeValue {
+    pub value: Option<String>,
+    pub source: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WpCodeboxRuntimeDiagnostic {
+    pub id: &'static str,
+    pub severity: &'static str,
+    pub message: String,
+    pub remediation: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RunnerOperatorCommand {
     pub scope: &'static str,
@@ -139,6 +179,7 @@ pub enum RunnerCommandOutput {
     Env(RunnerEnvOutput),
     Job(RunnerJobOutput),
     BrokerJob(RunnerBrokerJobOutput),
+    RefreshHomeboy(homeboy::core::runners::HomeboyBinaryRefreshOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
     Broker(RunnerBrokerOutput),

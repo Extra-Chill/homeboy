@@ -378,17 +378,19 @@ fn ensure_rig_refreshable(rig: &DiscoveredRig, target: &Path) -> Result<()> {
             ));
         }
     };
-    let mut spec: super::RigSpec = serde_json::from_str(&content).map_err(|e| {
+    let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
         Error::validation_invalid_json(
             e,
             Some(format!("parse existing rig spec {}", target.display())),
             Some(content.chars().take(200).collect()),
         )
     })?;
-    if spec.id.is_empty() {
-        spec.id = rig.id.clone();
-    }
-    let existing_id = extension::slugify_id(&spec.id)?;
+    let existing_id = value
+        .get("id")
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+        .unwrap_or(&rig.id);
+    let existing_id = extension::slugify_id(existing_id)?;
     if existing_id == rig.id {
         return Ok(());
     }
@@ -407,6 +409,16 @@ fn ensure_rig_refreshable(rig: &DiscoveredRig, target: &Path) -> Result<()> {
 }
 
 fn ensure_stack_refreshable(stack: &DiscoveredStack, target: &Path) -> Result<()> {
+    if !target.exists() && fs::symlink_metadata(target).is_ok() {
+        return Ok(());
+    }
+
+    if read_stack_source_metadata(&stack.id)
+        .is_some_and(|metadata| config_matches_source(target, Path::new(&metadata.stack_path)))
+    {
+        return Ok(());
+    }
+
     if config_matches_source(target, &stack.stack_path) {
         return Ok(());
     }

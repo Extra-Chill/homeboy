@@ -92,10 +92,7 @@ impl BenchArgs {
     }
 
     pub fn is_lab_offload_command(&self) -> bool {
-        matches!(
-            self.command,
-            None | Some(BenchCommand::Matrix(_)) | Some(BenchCommand::History(_))
-        )
+        matches!(self.command, None | Some(BenchCommand::Matrix(_)))
     }
 
     pub fn lab_offload_writes_local_state(&self) -> bool {
@@ -128,11 +125,14 @@ enum BenchCommand {
     Matrix(settings_matrix::BenchMatrixArgs),
     /// List declared benchmark scenarios without executing them
     List(BenchListArgs),
-    /// Compatibility alias for `homeboy runs list --kind bench --component <component>`
+    /// Deprecated compatibility alias for `homeboy runs list --kind bench --component <component>`
+    #[command(hide = true)]
     History(BenchHistoryArgs),
-    /// Compatibility alias for `homeboy runs distribution --kind bench --component <component>`
+    /// Deprecated compatibility alias for `homeboy runs distribution --kind bench --component <component>`
+    #[command(hide = true)]
     Distribution(BenchDistributionArgs),
-    /// Compatibility alias for `homeboy runs bench-compare --from-run <id> --to-run <id>`
+    /// Deprecated compatibility alias for `homeboy runs bench-compare --from-run <id> --to-run <id>`
+    #[command(hide = true)]
     Compare(BenchCompareArgs),
 }
 
@@ -470,6 +470,9 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
             }
             BenchCommand::List(list_args) => run_list(list_args),
             BenchCommand::History(history_args) => {
+                eprintln!(
+                    "warning: `homeboy bench history` is deprecated; use `homeboy runs list --kind bench --component <component>`"
+                );
                 let (output, exit_code) = runs::list_runs(
                     runs::RunsListArgs {
                         runner: None,
@@ -486,6 +489,9 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
                 Ok((BenchOutput::Observation(output), exit_code))
             }
             BenchCommand::Distribution(distribution_args) => {
+                eprintln!(
+                    "warning: `homeboy bench distribution` is deprecated; use `homeboy runs distribution --kind bench --component <component>`"
+                );
                 let (output, exit_code) = runs::runs_distribution(
                     runs::RunsDistributionArgs {
                         kind: Some("bench".to_string()),
@@ -501,6 +507,9 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
                 Ok((BenchOutput::Observation(output), exit_code))
             }
             BenchCommand::Compare(compare_args) => {
+                eprintln!(
+                    "warning: `homeboy bench compare` is deprecated; use `homeboy runs bench-compare`"
+                );
                 let (output, exit_code) =
                     runs::bench_compare_from_args(runs::RunsBenchCompareArgs {
                         from_run: compare_args.from_run.clone(),
@@ -784,6 +793,9 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
             passthrough_args,
             scenario_ids: args.scenario_ids.clone(),
             extra_workloads,
+            rig_package: rig_context
+                .as_ref()
+                .and_then(|context| rig::package_evidence(&context.spec.id)),
         },
         &run_dir,
     );

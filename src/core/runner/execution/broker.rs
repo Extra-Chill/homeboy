@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::command_contract::RunnerWorkload;
-use crate::core::api_jobs::{Job, JobStatus, RemoteRunnerJobRequest};
+use crate::core::api_jobs::{Job, JobStatus, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata};
 use crate::core::error::{Error, Result};
 use crate::core::redaction::redact_argv;
 use crate::core::source_snapshot::SourceSnapshot;
@@ -55,6 +55,13 @@ pub(super) fn exec_via_reverse_broker(
             run_id.as_deref(),
             "reverse_broker",
         )),
+        lifecycle: Some(RunnerJobLifecycleMetadata {
+            source: Some("reverse-broker".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: run_id.clone(),
+            active_child_count: None,
+            active_cell_count: None,
+        }),
         require_paths: require_paths.clone(),
     };
     let broker_token = super::super::broker_auth::broker_token_from_env();

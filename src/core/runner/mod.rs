@@ -26,6 +26,7 @@ mod daemon_http_get;
 mod evidence;
 mod execution;
 mod git_dependency_materialization;
+mod homeboy_refresh;
 mod lab;
 mod lab_apply;
 mod lab_args;
@@ -94,6 +95,10 @@ pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
     RunnerGitDependencyMaterializationOutput,
 };
+pub use homeboy_refresh::{
+    plan_homeboy_binary_refresh, refresh_homeboy_binary, HomeboyBinaryRefreshMode,
+    HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan,
+};
 pub use lab::{
     execute_lab_offload, LabJobOverrides, LabLocalExecutionPolicy, LabOffloadCommand,
     LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
@@ -111,19 +116,21 @@ pub use offload_metadata::{
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerArtifactRef, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerHandoff, RunnerJob, RunnerLifecycleOwner, RunnerMutationArtifacts,
+    RunnerArtifactRef, RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport,
+    RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerLifecycleOwner, RunnerMutationArtifacts,
     RunnerNamedWorkspaceLease, RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState,
-    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceLease,
-    RunnerWorkspaceLeaseSet,
+    RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
+    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
-pub(crate) use transport::{select_runner_transport, RunnerTransport};
+pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
 pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::{
-    list_workspaces, sync_workspace, ByteFileCounts, RunnerWorkspaceCurrentSummary,
-    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    list_workspaces, prune_workspaces, sync_workspace, ByteFileCounts,
+    RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
+    RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

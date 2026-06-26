@@ -13,8 +13,8 @@
 
 use crate::cli_surface::{
     current_command_surface, CommandDocsMetadata, CommandDryRunMetadata, CommandLabMetadata,
-    CommandOutputMetadata, CommandSafetyEntry, CommandSafetyManifest, CommandSurface,
-    CommandSurfaceEntry, DynamicCommandDescriptor,
+    CommandOutputMetadata, CommandSafetyAuditFinding, CommandSafetyAuditReport, CommandSafetyEntry,
+    CommandSafetyManifest, CommandSurface, CommandSurfaceEntry, DynamicCommandDescriptor,
 };
 use crate::command_contract::registered_command;
 
@@ -36,6 +36,24 @@ pub fn command_safety_manifest_from_dynamic(
             .iter()
             .map(|entry| command_safety_entry(entry, &[], dynamic_commands))
             .collect(),
+    }
+}
+
+pub fn command_safety_manifest_audit(manifest: &CommandSafetyManifest) -> CommandSafetyAuditReport {
+    let mut missing_action_metadata = Vec::new();
+
+    for entry in flatten_manifest_entries(&manifest.commands) {
+        if !entry.hidden && entry.mutates && !entry_has_action_metadata(entry) {
+            missing_action_metadata.push(CommandSafetyAuditFinding {
+                path: entry.path.clone(),
+                reason: "visible mutating command lacks dry-run, dangerous/apply flag, or risk exemption metadata".to_string(),
+            });
+        }
+    }
+
+    CommandSafetyAuditReport {
+        report_only: true,
+        missing_action_metadata,
     }
 }
 
@@ -79,6 +97,7 @@ fn command_safety_entry(
         docs: CommandDocsMetadata {
             path: docs_path(&path, dynamic_commands),
         },
+        risk_exemption: safety.risk_exemption.map(str::to_string),
         extension: dynamic_command.and_then(|command| command.extension.clone()),
         dangerous_flags: safety
             .dangerous_flags
@@ -101,6 +120,7 @@ struct CommandSafetyMetadata {
     output_notes: &'static str,
     lab_supported: bool,
     lab_notes: &'static str,
+    risk_exemption: Option<&'static str>,
     dangerous_flags: Vec<&'static str>,
 }
 
@@ -114,9 +134,29 @@ impl Default for CommandSafetyMetadata {
             output_notes: "standard CLI output contract",
             lab_supported: false,
             lab_notes: "not declared as Lab-routable in the safety manifest",
+            risk_exemption: None,
             dangerous_flags: Vec::new(),
         }
     }
+}
+
+fn flatten_manifest_entries(entries: &[CommandSafetyEntry]) -> Vec<&CommandSafetyEntry> {
+    let mut flattened = Vec::new();
+
+    for entry in entries {
+        flattened.push(entry);
+        flattened.extend(flatten_manifest_entries(&entry.subcommands));
+    }
+
+    flattened
+}
+
+fn entry_has_action_metadata(entry: &CommandSafetyEntry) -> bool {
+    entry.dry_run.supported
+        || !entry.dangerous_flags.is_empty()
+        || entry.risk_exemption.is_some()
+        || entry.output.notes.contains("--apply")
+        || entry.output.notes.contains("--dry-run")
 }
 
 fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
@@ -132,10 +172,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["manifest"] => {
-            metadata.output_notes =
-                "recursive command safety, docs, output, and Lab metadata in the standard JSON envelope";
-        }
+        ["manifest"] => {}
         ["docs", "map"] => {
             metadata.mutates = true;
             metadata.output_notes =
@@ -152,7 +189,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "release execution mutates git tags/releases and may deploy; use --dry-run to plan and --apply for risky modes";
             metadata.dangerous_flags = vec![
                 "--apply",
                 "--deploy",
@@ -166,16 +202,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["upgrade"] => {
             metadata.mutates = true;
             metadata.operator = true;
-            metadata.output_notes = "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used";
             metadata.dangerous_flags = vec!["--force", "--upgrade-runner"];
         }
         ["trace"] => {
             metadata.mutates = true;
-            metadata.output_notes = "runs trace workflows and records observation artifacts unless using read-only subcommands";
         }
         ["lint"] => {
-            metadata.output_notes =
-                "runs lint workflows; pass --fix to apply auto-fixable findings in place";
             metadata.dangerous_flags = vec!["--fix", "--force"];
         }
         ["deps", "install"] | ["deps", "update"] | ["deps", "stack", "apply"] => {
@@ -190,8 +222,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         }
         ["cleanup"] => {
             metadata.mutates = true;
-            metadata.output_notes =
-                "cleanup subcommands report plans by default and require --apply for removals";
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["cleanup", "artifacts"] => {
@@ -339,6 +369,14 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.output_notes = "removes one stored agent-task prompt";
         }
+        ["agent-task", "fanout", "cook-batch"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes =
+                "creates/reuses DMC worktrees and can run the generated fanout unless --dry-run is passed";
+            metadata.dangerous_flags = vec!["--run-plan"];
+        }
         ["fuzz", "replay"] => {
             metadata.mutates = true;
             metadata.output_notes =
@@ -395,6 +433,9 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "mutates GitHub issue state through the configured repository";
+            metadata.risk_exemption = Some(
+                "the issue subcommand is the explicit GitHub write action; no dry-run contract exists yet",
+            );
         }
         ["git", "pr", "create"]
         | ["git", "pr", "edit"]
@@ -404,6 +445,9 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "mutates GitHub pull request state or branch state";
+            metadata.risk_exemption = Some(
+                "the PR subcommand is the explicit GitHub write action; no dry-run contract exists yet",
+            );
         }
         ["git", "pr", "fleet"] | ["git", "pr", "land"] => {
             metadata.mutates = true;
@@ -427,7 +471,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         }
         ["refactor"] => {
             metadata.mutates = true;
-            metadata.output_notes = "refactor subcommands can rewrite source files; use planning/dry-run modes where available";
             metadata.dangerous_flags = vec!["--write", "--commit"];
         }
         ["refactor", "rename"]
@@ -471,13 +514,20 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["runner", "trust"]
         | ["runner", "pair"]
         | ["runner", "remove"]
-        | ["runner", "connect"]
         | ["runner", "disconnect"]
-        | ["runner", "work"] => {
+        | ["runner", "refresh-homeboy"] => {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes =
                 "mutates runner configuration, trust policy, or runner lifecycle state";
+        }
+        ["runner", "connect"] | ["runner", "work"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "mutates runner lifecycle state";
+            metadata.risk_exemption = Some(
+                "runner lifecycle command name is the explicit operator action; no dry-run contract exists yet",
+            );
         }
         ["runner", "doctor"] => {
             metadata.mutates = true;
@@ -503,6 +553,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.operator = true;
             metadata.output_notes = "applies a Lab-generated workspace patch to a local worktree";
             metadata.dangerous_flags = vec!["--force"];
+        }
+        ["runner", "workspace", "prune"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "default output is a non-mutating orphan cleanup plan; pass --apply to delete exact runner workspace paths";
+            metadata.dangerous_flags = vec!["--apply"];
         }
         ["http", "request"] => {
             metadata.mutates = true;
@@ -568,6 +624,9 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "mutates the configured stack target branch";
+            metadata.risk_exemption = Some(
+                "stack command name is the explicit branch mutation action; status/sync --dry-run are the planning paths",
+            );
         }
         ["stack", "sync"] => {
             metadata.mutates = true;
@@ -579,10 +638,18 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "pushes the configured stack target branch to its remote";
+            metadata.risk_exemption = Some(
+                "push is the explicit remote publication action; no dry-run contract exists yet",
+            );
+        }
+        ["extension", "run"] | ["extension", "exec"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "executes extension-owned runtime commands with forwarded arguments that may mutate the target system";
+            metadata.dangerous_flags = vec!["extension runtime command", "passthrough args"];
         }
         ["undo"] => {
             metadata.mutates = true;
-            metadata.output_notes = "restores files from the latest or selected undo snapshot";
         }
         ["undo", "delete"] => {
             metadata.mutates = true;
@@ -718,6 +785,15 @@ mod tests {
             || entry.operator
             || entry.dry_run.supported
             || !entry.dangerous_flags.is_empty()
+            || entry.risk_exemption.is_some()
+            || entry.output.notes.contains("--apply")
+            || entry.output.notes.contains("--dry-run")
+    }
+
+    fn entry_has_action_metadata(entry: &CommandSafetyEntry) -> bool {
+        entry.dry_run.supported
+            || !entry.dangerous_flags.is_empty()
+            || entry.risk_exemption.is_some()
             || entry.output.notes.contains("--apply")
             || entry.output.notes.contains("--dry-run")
     }
@@ -805,6 +881,8 @@ mod tests {
             ["extension", "install"].as_slice(),
             ["extension", "update"].as_slice(),
             ["extension", "uninstall"].as_slice(),
+            ["extension", "run"].as_slice(),
+            ["extension", "exec"].as_slice(),
             ["config", "set"].as_slice(),
             ["config", "remove"].as_slice(),
             ["project", "set"].as_slice(),
@@ -818,6 +896,20 @@ mod tests {
             ["api", "patch"].as_slice(),
             ["api", "delete"].as_slice(),
             ["http", "request"].as_slice(),
+            ["git", "issue", "create"].as_slice(),
+            ["git", "issue", "comment"].as_slice(),
+            ["git", "issue", "close"].as_slice(),
+            ["git", "issue", "edit"].as_slice(),
+            ["git", "pr", "create"].as_slice(),
+            ["git", "pr", "edit"].as_slice(),
+            ["git", "pr", "comment"].as_slice(),
+            ["git", "pr", "refresh"].as_slice(),
+            ["git", "pr", "policy", "open"].as_slice(),
+            ["runner", "connect"].as_slice(),
+            ["runner", "work"].as_slice(),
+            ["stack", "apply"].as_slice(),
+            ["stack", "rebase"].as_slice(),
+            ["stack", "push"].as_slice(),
         ] {
             let entry = manifest_path(&manifest, path);
 
@@ -899,6 +991,62 @@ mod tests {
             agent_task_promote.dry_run.flag.as_deref(),
             Some("--dry-run")
         );
+
+        let extension_run = manifest_path(&manifest, &["extension", "run"]);
+        assert!(extension_run.operator);
+        assert!(extension_run
+            .dangerous_flags
+            .contains(&"passthrough args".to_string()));
+
+        let stack_push = manifest_path(&manifest, &["stack", "push"]);
+        assert!(stack_push.risk_exemption.is_some());
+    }
+
+    #[test]
+    fn manifest_audit_reports_mutating_commands_without_action_metadata() {
+        let manifest = current_command_safety_manifest();
+        let report = command_safety_manifest_audit(&manifest);
+
+        assert!(report.report_only);
+
+        let findings = report
+            .missing_action_metadata
+            .iter()
+            .map(|finding| finding.path.join(" "))
+            .collect::<Vec<_>>();
+        assert!(findings.contains(&"config set".to_string()));
+        assert!(findings.contains(&"project set".to_string()));
+    }
+
+    #[test]
+    fn high_risk_action_commands_have_explicit_action_metadata() {
+        let manifest = current_command_safety_manifest();
+
+        for path in [
+            ["git", "issue", "create"].as_slice(),
+            ["git", "issue", "comment"].as_slice(),
+            ["git", "issue", "close"].as_slice(),
+            ["git", "issue", "edit"].as_slice(),
+            ["git", "pr", "create"].as_slice(),
+            ["git", "pr", "edit"].as_slice(),
+            ["git", "pr", "comment"].as_slice(),
+            ["git", "pr", "refresh"].as_slice(),
+            ["git", "pr", "policy", "open"].as_slice(),
+            ["stack", "apply"].as_slice(),
+            ["stack", "rebase"].as_slice(),
+            ["stack", "push"].as_slice(),
+            ["runner", "connect"].as_slice(),
+            ["runner", "work"].as_slice(),
+            ["extension", "run"].as_slice(),
+            ["extension", "exec"].as_slice(),
+        ] {
+            let entry = manifest_path(&manifest, path);
+            assert!(entry.mutates, "{path:?} should be marked mutating");
+            assert!(
+                entry_has_action_metadata(entry),
+                "{path:?} should have dry-run, dangerous/apply, or risk exemption metadata"
+            );
+        }
     }
 
     #[test]

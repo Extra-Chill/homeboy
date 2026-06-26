@@ -23,6 +23,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             require_result_envelope: false,
             max_duration: None,
             gate_profile: FuzzGateProfileArg::Measurement,
+            expect_metric: vec![],
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");
@@ -43,6 +44,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
+            expected_metric_gates: &[],
             results_error: None,
             missing_artifact_refs: &[],
         })
@@ -109,6 +111,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
+            expected_metric_gates: &[],
             results_error: None,
             missing_artifact_refs: &[],
         })
@@ -137,7 +140,7 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
         "case_counts": { "passed": 2, "failed": 1, "errored": 0 }
     });
 
-    let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
 
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.success);
@@ -166,8 +169,41 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
         extra: std::collections::BTreeMap::new(),
     }];
 
-    let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
 
+    assert_eq!(outcome.status, "failed");
+    assert!(!outcome.success);
+    assert_eq!(outcome.exit_code, 1);
+}
+
+#[test]
+fn fuzz_run_expected_metric_gate_fails_when_observed_metric_differs() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.metadata = serde_json::json!({
+        "metrics": {
+            "side_effect_grouped_created_count": 25,
+            "simple_created": 25,
+            "grouped_created": 25,
+            "variation_created": 25
+        }
+    });
+    let expectations = vec![(
+        "side_effect_grouped_created_count".to_string(),
+        "2".to_string(),
+    )];
+
+    let gates = evaluate_expected_metric_gates(Some(&campaign), &expectations);
+    let error = fuzz_expected_metric_error(&gates).expect("expected metric failure");
+    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), Some(&error));
+
+    assert_eq!(gate_status(&gates), "failed");
+    assert!(gates.iter().any(|gate| {
+        gate.gate_id == "expected-metric-side_effect_grouped_created_count"
+            && gate.status == "failed"
+            && gate.observed == 25.0
+            && gate.expected == 2.0
+    }));
+    assert!(error.contains("side_effect_grouped_created_count expected 2 observed 25"));
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.success);
     assert_eq!(outcome.exit_code, 1);
@@ -192,7 +228,7 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_failed_lifecycle_phase
         metadata: std::collections::BTreeMap::new(),
     });
 
-    let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
 
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.success);
@@ -225,11 +261,89 @@ fn fuzz_run_outcome_fails_when_workload_reports_invariant_failure_count() {
         }
     });
 
-    let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
 
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.success);
     assert_eq!(outcome.exit_code, 1);
+}
+
+#[test]
+fn fuzz_run_outcome_reports_timeout_as_non_pass() {
+    let outcome = fuzz_run_outcome(0, true, true, None, None);
+
+    assert_eq!(outcome.status, "timeout");
+    assert!(!outcome.success);
+    assert_eq!(outcome.exit_code, 124);
+}
+
+#[test]
+fn fuzz_run_outcome_reports_skipped_lifecycle_as_non_proof() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.lifecycle = Some(LifecycleResultMetadata {
+        schema: LIFECYCLE_RESULT_SCHEMA.to_string(),
+        version: LIFECYCLE_CONTRACT_VERSION,
+        phases: vec![LifecyclePhaseResult {
+            id: "execute".to_string(),
+            phase: LifecyclePhaseKind::Snapshot,
+            status: LifecyclePhaseStatus::Skipped,
+            snapshot_ref: None,
+            started_at: None,
+            finished_at: None,
+            message: Some("runner skipped unsupported workload".to_string()),
+        }],
+        snapshot_refs: Vec::new(),
+        metadata: std::collections::BTreeMap::new(),
+    });
+
+    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
+
+    assert_eq!(outcome.status, "skipped");
+    assert!(!outcome.success);
+    assert_eq!(outcome.exit_code, 1);
+}
+
+#[test]
+fn fuzz_run_outcome_reports_unsupported_metadata_as_non_proof() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.metadata = serde_json::json!({
+        "wordpress_fuzz_result": {
+            "status": "unsupported",
+            "success": true
+        }
+    });
+
+    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
+
+    assert_eq!(outcome.status, "unsupported");
+    assert!(!outcome.success);
+    assert_eq!(outcome.exit_code, 1);
+}
+
+#[test]
+fn fuzz_max_duration_accepts_supported_units() {
+    assert_eq!(
+        fuzz_max_duration(Some("250ms")).expect("duration"),
+        Some(std::time::Duration::from_millis(250))
+    );
+    assert_eq!(
+        fuzz_max_duration(Some("60s")).expect("duration"),
+        Some(std::time::Duration::from_secs(60))
+    );
+    assert_eq!(
+        fuzz_max_duration(Some("5m")).expect("duration"),
+        Some(std::time::Duration::from_secs(300))
+    );
+    assert_eq!(
+        fuzz_max_duration(Some("1h")).expect("duration"),
+        Some(std::time::Duration::from_secs(3600))
+    );
+}
+
+#[test]
+fn fuzz_max_duration_rejects_zero_and_unknown_units() {
+    assert!(fuzz_max_duration(Some("0s")).is_err());
+    assert!(fuzz_max_duration(Some("10x")).is_err());
 }
 
 #[test]
@@ -299,6 +413,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             require_result_envelope: false,
             max_duration: None,
             gate_profile: FuzzGateProfileArg::Measurement,
+            expect_metric: vec![],
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");
@@ -323,6 +438,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
+            expected_metric_gates: &[],
             results_error: Some(
                 "fuzz results schema must be homeboy/fuzz-campaign/v1, got unsupported/fuzz-result/v1",
             ),

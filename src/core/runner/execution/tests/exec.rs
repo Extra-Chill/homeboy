@@ -227,9 +227,58 @@ fn runner_exec_secret_env_names_include_tunnel_preview_client_token() {
         ],
         None,
         &[],
+        &HashMap::new(),
     );
 
     assert_eq!(names, vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]);
+}
+
+#[test]
+fn runner_exec_secret_env_names_include_runtime_provider_defaults() {
+    let names = runner_exec_secret_env_names(
+        &["node".to_string(), "run-headless-loop.cjs".to_string()],
+        None,
+        &[],
+        &HashMap::from([(
+            "HOMEBOY_AGENT_RUNTIME_PROVIDER".to_string(),
+            "codex".to_string(),
+        )]),
+    );
+
+    assert_eq!(
+        names,
+        vec![
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn runner_exec_secret_env_names_prefer_explicit_runtime_secret_env() {
+    let names = runner_exec_secret_env_names(
+        &["node".to_string(), "run-headless-loop.cjs".to_string()],
+        None,
+        &[],
+        &HashMap::from([
+            (
+                "HOMEBOY_AGENT_RUNTIME_PROVIDER".to_string(),
+                "codex".to_string(),
+            ),
+            (
+                "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
+                "CUSTOM_REFRESH,CUSTOM_ACCESS".to_string(),
+            ),
+        ]),
+    );
+
+    assert_eq!(
+        names,
+        vec!["CUSTOM_ACCESS".to_string(), "CUSTOM_REFRESH".to_string()]
+    );
 }
 
 #[test]

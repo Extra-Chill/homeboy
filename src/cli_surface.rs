@@ -227,6 +227,24 @@ pub struct CommandSafetyManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandSafetyAuditReport {
+    pub report_only: bool,
+    pub missing_action_metadata: Vec<CommandSafetyAuditFinding>,
+}
+
+impl CommandSafetyAuditReport {
+    pub fn has_findings(&self) -> bool {
+        !self.missing_action_metadata.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandSafetyAuditFinding {
+    pub path: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandSurfaceDoctorReport {
     pub agrees: bool,
     pub source_registry_commands: Vec<String>,
@@ -263,6 +281,8 @@ pub struct CommandSafetyEntry {
     pub output: CommandOutputMetadata,
     pub lab: CommandLabMetadata,
     pub docs: CommandDocsMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_exemption: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<ExtensionCommandManifest>,
     pub dangerous_flags: Vec<String>,
@@ -606,8 +626,8 @@ fn push_drift_note(notes: &mut Vec<String>, commands: &[String], label: &str) {
 // entry points here so existing call sites keep importing them from
 // `crate::cli_surface` unchanged while this module leans toward clap shapes.
 pub use crate::command_contract::safety_manifest::{
-    command_safety_manifest_from, command_safety_manifest_from_dynamic,
-    current_command_safety_manifest,
+    command_safety_manifest_audit, command_safety_manifest_from,
+    command_safety_manifest_from_dynamic, current_command_safety_manifest,
 };
 
 fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {

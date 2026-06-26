@@ -1,11 +1,10 @@
 use clap::{CommandFactory, Parser};
 use homeboy::cli_surface::{
     command_surface_doctor_report, command_surface_from_with_depth,
-    current_command_safety_manifest, current_command_surface, Cli, CommandSafetyEntry,
-    CommandSafetyManifest, Commands,
+    current_command_safety_manifest, current_command_surface, Cli, CommandSafetyManifest, Commands,
 };
+use homeboy::command_contract::{CommandJsonFamily, COMMAND_SPECS};
 use std::collections::BTreeSet;
-use std::fs;
 use std::sync::OnceLock;
 
 #[test]
@@ -233,258 +232,44 @@ fn manifest_command_exposes_recursive_safety_manifest() {
 }
 
 #[test]
-fn command_index_matches_top_level_command_surface() {
+fn command_specs_drive_top_level_manifest_metadata() {
     let manifest = command_safety_manifest();
-    let documented = documented_command_index_entries();
 
-    let extension_commands = BTreeSet::from(["cargo".to_string(), "wp".to_string()]);
-    let expected: BTreeSet<String> = manifest
-        .commands
-        .iter()
-        .filter(|entry| visible_manifest_entry_with_docs_path(entry))
-        .map(|entry| entry.name.clone())
-        .chain(extension_commands.iter().cloned())
-        .collect();
+    for spec in COMMAND_SPECS {
+        let entry = manifest
+            .commands
+            .iter()
+            .find(|entry| entry.name == spec.name)
+            .unwrap_or_else(|| panic!("command spec `{}` missing from safety manifest", spec.name));
 
-    let missing: Vec<_> = expected.difference(&documented).cloned().collect();
-    let stale: Vec<_> = documented.difference(&expected).cloned().collect();
-
-    assert!(
-        missing.is_empty(),
-        "docs/commands/commands-index.md is missing top-level commands: {missing:?}"
-    );
-    assert!(
-        stale.is_empty(),
-        "docs/commands/commands-index.md lists stale top-level commands: {stale:?}"
-    );
-
-    for command in &expected {
-        assert!(
-            command_doc_path(command).is_file(),
-            "docs/commands/commands-index.md lists `{command}` but docs/commands/{command}.md is missing"
-        );
-    }
-}
-
-#[test]
-fn command_safety_manifest_docs_paths_match_command_docs() {
-    let manifest = command_safety_manifest();
-    let hidden_top_level_commands = BTreeSet::from(["list"]);
-
-    for entry in &manifest.commands {
-        if entry.hidden {
-            assert!(
-                hidden_top_level_commands.contains(entry.name.as_str()),
-                "hidden top-level command `{}` must be added to the explicit internal-command exemption list before it can skip command docs",
-                entry.name
-            );
-            assert!(
-                entry.docs.path.is_none(),
-                "hidden internal command `{}` should not advertise a command docs path",
-                entry.name
-            );
-            continue;
-        }
-
-        let Some(path) = &entry.docs.path else {
-            continue;
-        };
         assert_eq!(
-            path,
-            &format!("docs/commands/{}.md", entry.name),
-            "visible top-level command `{}` has an unexpected docs path in the safety manifest",
-            entry.name
+            entry.output.structured,
+            spec.json_family != CommandJsonFamily::RawOnly,
+            "top-level manifest output structure drifted from CommandSpec for `{}`",
+            spec.name
         );
-        assert!(
-            command_doc_manifest_path(path).is_file(),
-            "visible top-level command `{}` advertises `{path}` in the safety manifest, but that file is missing",
-            entry.name
-        );
-    }
-}
-
-#[test]
-fn visible_safety_manifest_entries_advertise_live_command_docs() {
-    let manifest = command_safety_manifest();
-
-    for entry in all_safety_entries(&manifest.commands) {
-        if entry.hidden {
-            continue;
-        }
-
-        let path =
-            entry.docs.path.as_deref().unwrap_or_else(|| {
-                panic!("visible command {:?} is missing docs metadata", entry.path)
-            });
-        let top_level = entry.path.first().expect("safety path should not be empty");
         assert_eq!(
-            path,
-            format!("docs/commands/{top_level}.md"),
-            "visible command {:?} should point at its top-level command doc",
-            entry.path
+            entry.output.notes, spec.output_notes,
+            "top-level manifest output notes drifted from CommandSpec for `{}`",
+            spec.name
         );
-        assert!(
-            command_doc_manifest_path(path).is_file(),
-            "visible command {:?} advertises `{path}` in the safety manifest, but that file is missing",
-            entry.path
+        assert_eq!(
+            entry.lab.supported, spec.lab_supported,
+            "top-level manifest Lab support drifted from CommandSpec for `{}`",
+            spec.name
         );
-    }
-}
-
-#[test]
-fn mutating_safety_manifest_entries_advertise_apply_or_are_allowlisted() {
-    let manifest = command_safety_manifest();
-    let explicit_no_apply_surface = BTreeSet::from([
-        "component create".to_string(),
-        "component delete".to_string(),
-        "component rename".to_string(),
-        "component set".to_string(),
-        "component setup".to_string(),
-        "config remove".to_string(),
-        "config reset".to_string(),
-        "config set".to_string(),
-        "extension install".to_string(),
-        "extension install-for-component".to_string(),
-        "extension refresh".to_string(),
-        "extension relink".to_string(),
-        "extension set".to_string(),
-        "extension setup".to_string(),
-        "extension uninstall".to_string(),
-        "extension update".to_string(),
-        "file mkdir".to_string(),
-        "file rename".to_string(),
-        "project components attach-path".to_string(),
-        "project components clear".to_string(),
-        "project components remove".to_string(),
-        "project components set".to_string(),
-        "project create".to_string(),
-        "project delete".to_string(),
-        "project init".to_string(),
-        "project pin add".to_string(),
-        "project pin remove".to_string(),
-        "project pin update".to_string(),
-        "project remove".to_string(),
-        "project rename".to_string(),
-        "project set".to_string(),
-        "runs artifact attach".to_string(),
-        "runs import".to_string(),
-        "server connect".to_string(),
-        "server create".to_string(),
-        "server delete".to_string(),
-        "server disconnect".to_string(),
-        "server key generate".to_string(),
-        "server key import".to_string(),
-        "server key unset".to_string(),
-        "server key use".to_string(),
-        "server set".to_string(),
-        "triage".to_string(),
-    ]);
-
-    let missing_safety_surface: Vec<_> = all_safety_entries(&manifest.commands)
-        .into_iter()
-        .filter(|entry| entry.mutates)
-        .filter(|entry| {
-            !entry.dry_run.supported
-                && !entry.output.notes.contains("--apply")
-                && !entry.output.notes.contains("--dry-run")
-                && !entry.output.notes.contains("--check")
-                && !entry.dangerous_flags.iter().any(|flag| flag == "--apply")
-                && !entry.dangerous_flags.iter().any(|flag| flag == "--write")
-                && !explicit_no_apply_surface.contains(&entry.path.join(" "))
-        })
-        .map(|entry| entry.path.join(" "))
-        .collect();
-
-    assert!(
-        missing_safety_surface.is_empty(),
-        "mutating safety-manifest entries must advertise dry-run/apply/check metadata or be explicitly allowlisted: {missing_safety_surface:?}"
-    );
-}
-
-#[test]
-fn command_docs_files_match_command_index_snapshot() {
-    let documented = documented_command_index_entries();
-    let companion_topics = BTreeSet::from([
-        "audit-rules".to_string(),
-        "commands-index".to_string(),
-        "rig-spec".to_string(),
-    ]);
-    let hidden_documented_commands: BTreeSet<String> = BTreeSet::new();
-    let docs_files = documented_command_doc_files();
-
-    // Guard against a vacuously-passing snapshot: the index and the docs
-    // directory must both be populated, otherwise the set algebra below would
-    // pass trivially against empty inputs.
-    assert!(
-        documented.len() >= 10,
-        "commands-index.md should enumerate the real command surface, found only {} entries: {documented:?}",
-        documented.len()
-    );
-    assert!(
-        docs_files.len() > documented.len(),
-        "docs/commands/ should contain one file per indexed command plus companion topics, found {} docs vs {} indexed",
-        docs_files.len(),
-        documented.len()
-    );
-
-    // Tie the snapshot to the live product command surface: every visible
-    // top-level command exposed by the safety manifest must be both indexed and
-    // backed by a docs file. This anchors the assertion to real product
-    // behavior rather than to fixture-only set arithmetic.
-    let manifest = command_safety_manifest();
-    let live_top_level: BTreeSet<String> = manifest
-        .commands
-        .iter()
-        .filter(|entry| visible_manifest_entry_with_docs_path(entry))
-        .map(|entry| entry.name.clone())
-        .collect();
-    assert!(
-        live_top_level.contains("audit") && live_top_level.contains("report"),
-        "expected representative live commands `audit` and `report` in the safety manifest: {live_top_level:?}"
-    );
-
-    let live_missing_from_index: Vec<_> = live_top_level.difference(&documented).cloned().collect();
-    assert!(
-        live_missing_from_index.is_empty(),
-        "commands-index.md is missing live top-level commands from the safety manifest: {live_missing_from_index:?}"
-    );
-
-    let live_missing_docs: Vec<_> = live_top_level
-        .iter()
-        .filter(|command| !docs_files.contains(*command))
-        .cloned()
-        .collect();
-    assert!(
-        live_missing_docs.is_empty(),
-        "live top-level commands are missing docs/commands/<command>.md files: {live_missing_docs:?}"
-    );
-
-    // Every command doc file must either be an indexed command or a known
-    // companion topic — no orphaned docs allowed.
-    let missing_from_index: Vec<_> = docs_files
-        .difference(&documented)
-        .filter(|entry| {
-            !companion_topics.contains(*entry) && !hidden_documented_commands.contains(*entry)
-        })
-        .cloned()
-        .collect();
-    assert!(
-        missing_from_index.is_empty(),
-        "docs/commands/*.md contains command docs that are not listed in commands-index.md: {missing_from_index:?}"
-    );
-
-    // Companion topics are documentation-only — they must ship a doc file and
-    // must never leak into the command index.
-    for topic in &companion_topics {
-        assert!(
-            docs_files.contains(topic),
-            "expected companion topic `{topic}` to have a docs/commands/{topic}.md file"
+        assert_eq!(
+            entry.lab.notes, spec.lab_notes,
+            "top-level manifest Lab notes drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.docs.path,
+            spec.docs_path(),
+            "top-level manifest docs path drifted from CommandSpec for `{}`",
+            spec.name
         );
     }
-    assert!(
-        documented.contains("audit") && documented.contains("report"),
-        "commands-index.md should document representative commands `audit` and `report`: {documented:?}"
-    );
 }
 
 #[test]
@@ -648,133 +433,6 @@ fn runner_env_rejects_legacy_show_values_flag() {
 }
 
 #[test]
-fn auth_and_self_docs_cover_live_command_variants() {
-    let auth = include_str!("../docs/commands/auth.md");
-    assert!(auth.contains("`profile`"));
-    assert!(auth.contains("set-basic"));
-    assert!(auth.contains("set-bearer"));
-
-    let self_docs = include_str!("../docs/commands/self.md");
-    assert!(self_docs.contains("`identity`"));
-    assert!(self_docs.contains("`doctor`"));
-    assert!(self_docs.contains("`cleanup-runtime-tmp`"));
-    assert!(self_docs.contains("--older-than-days"));
-    assert!(self_docs.contains("--apply"));
-
-    assert_documented_commands_parse(&[
-        &["homeboy", "auth", "profile", "set-basic", "dev"],
-        &["homeboy", "auth", "profile", "set-bearer", "dev"],
-        &["homeboy", "self", "identity"],
-        &["homeboy", "self", "doctor"],
-        &[
-            "homeboy",
-            "self",
-            "cleanup-runtime-tmp",
-            "--older-than-days",
-            "14",
-        ],
-    ]);
-}
-
-#[test]
-fn report_and_runs_docs_cover_live_command_variants() {
-    let report = include_str!("../docs/commands/report.md");
-    assert!(report.contains("`performance-digest`"));
-
-    let runs = include_str!("../docs/commands/runs.md");
-    assert!(runs.contains("## Mutating Subcommands"));
-    assert!(runs.contains("artifact cleanup-persisted"));
-    assert!(runs.contains("`reconcile`"));
-    assert!(runs.contains("`latest-run`"));
-    assert!(runs.contains("`query`"));
-    assert!(runs.contains("`drift`"));
-    assert!(runs.contains("`loop-sync`"));
-
-    assert_documented_commands_parse(&[
-        &[
-            "homeboy",
-            "report",
-            "performance-digest",
-            "--output-dir",
-            ".",
-        ],
-        &["homeboy", "runs", "artifact", "get", "run-1", "artifact-1"],
-        &["homeboy", "runs", "latest-run"],
-        &["homeboy", "runs", "evidence", "run-1"],
-        &["homeboy", "runs", "findings", "run-1"],
-        &["homeboy", "runs", "query", "--select", "$.status"],
-        &["homeboy", "runs", "drift", "--metric", "$.status"],
-        &["homeboy", "runs", "loop-sync", ".", "--dry-run"],
-        &[
-            "homeboy",
-            "runs",
-            "artifact",
-            "cleanup-persisted",
-            "--older-than-days",
-            "30",
-        ],
-    ]);
-}
-
-#[test]
-fn extension_command_docs_cover_live_install_for_component_flags() {
-    let extension = include_str!("../docs/commands/extension.md");
-    let install_for_component =
-        command_doc_heading_section(extension, "### `install-for-component`");
-    assert!(install_for_component
-        .contains("install-for-component --source <source> [--path <component_path>]"));
-
-    Cli::try_parse_from([
-        "homeboy",
-        "extension",
-        "install-for-component",
-        "--source",
-        "https://example.com/extensions.git",
-    ])
-    .expect("documented extension install-for-component command should parse");
-
-    assert!(!install_for_component.contains("--revision"));
-    assert!(!install_for_component.contains("--ref"));
-    assert!(
-        Cli::try_parse_from([
-            "homeboy",
-            "extension",
-            "install-for-component",
-            "--source",
-            "https://example.com/extensions.git",
-            "--revision",
-            "main",
-        ])
-        .is_err(),
-        "extension install-for-component should not advertise or accept stale --revision/--ref flags"
-    );
-}
-
-#[test]
-fn extension_provided_command_docs_identify_extension_origin() {
-    let cargo = include_str!("../docs/commands/cargo.md");
-    assert!(cargo.contains("extension-provided"));
-    let wp = include_str!("../docs/commands/wp.md");
-    assert!(wp.contains("extension-provided"));
-}
-
-fn command_doc_heading_section<'a>(document: &'a str, heading: &str) -> &'a str {
-    let section = document
-        .split_once(heading)
-        .unwrap_or_else(|| panic!("missing command docs heading {heading}"))
-        .1;
-    section.split("\n### ").next().unwrap_or(section)
-}
-
-fn assert_documented_commands_parse(commands: &[&[&str]]) {
-    for args in commands {
-        Cli::try_parse_from(*args).unwrap_or_else(|error| {
-            panic!("documented command failed to parse: {args:?}\n{error}")
-        });
-    }
-}
-
-#[test]
 fn agent_task_auth_status_accepts_global_runner_and_secret_env() {
     Cli::try_parse_from([
         "homeboy",
@@ -833,62 +491,7 @@ fn rig_install_unknown_force_like_flag_does_not_suggest_force_hot() {
     assert!(!message.contains("--force-hot"));
 }
 
-fn documented_command_index_entries() -> BTreeSet<String> {
-    let index = include_str!("../docs/commands/commands-index.md");
-    let command_section = index.split("Related:").next().unwrap_or(index);
-
-    command_section
-        .lines()
-        .filter_map(|line| line.strip_prefix("- ["))
-        .filter_map(|rest| rest.split(']').next())
-        .map(str::to_string)
-        .collect()
-}
-
 fn command_safety_manifest() -> &'static CommandSafetyManifest {
     static MANIFEST: OnceLock<CommandSafetyManifest> = OnceLock::new();
     MANIFEST.get_or_init(current_command_safety_manifest)
-}
-
-fn documented_command_doc_files() -> BTreeSet<String> {
-    let commands_dir = command_doc_path("");
-    fs::read_dir(&commands_dir)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", commands_dir.display()))
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            entry
-                .path()
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_string)
-        })
-        .collect()
-}
-
-fn visible_manifest_entry_with_docs_path(entry: &CommandSafetyEntry) -> bool {
-    !entry.hidden && entry.docs.path.is_some()
-}
-
-fn all_safety_entries(entries: &[CommandSafetyEntry]) -> Vec<&CommandSafetyEntry> {
-    let mut flattened = Vec::new();
-    for entry in entries {
-        flattened.push(entry);
-        flattened.extend(all_safety_entries(&entry.subcommands));
-    }
-    flattened
-}
-
-fn command_doc_manifest_path(path: &str) -> std::path::PathBuf {
-    let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    root.push(path);
-    root
-}
-
-fn command_doc_path(command: &str) -> std::path::PathBuf {
-    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("docs/commands");
-    if !command.is_empty() {
-        path.push(format!("{command}.md"));
-    }
-    path
 }

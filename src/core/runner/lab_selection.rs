@@ -193,7 +193,10 @@ pub(super) fn prepare_lab_runner_for_offload_with(
     let status = status_fn(&selection.runner_id)?;
     if status.connected {
         if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
-            if status.stale_daemon.is_some()
+            if status
+                .stale_daemon
+                .as_ref()
+                .is_some_and(|warning| !stale_daemon_runtime_paths_changed(warning))
                 && status_tunnel_mode(&status) == RunnerTunnelMode::DirectSsh
             {
                 eprintln!(
@@ -312,6 +315,11 @@ fn connected_runner_not_ready_reason(
 ) -> Option<String> {
     if let Some(warning) = status.stale_daemon.as_ref() {
         let restart = stale_daemon_repair_command(runner_id, status);
+        if !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty() {
+            return Some(format!(
+                "connected runner `{runner_id}` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `{restart}`"
+            ));
+        }
         return Some(format!(
             "connected runner `{runner_id}` daemon is stale: connected daemon reports {}, but the configured runner executable reports {}; stale runner runtimes can return malformed or misleading provider output; restart the active daemon with `{restart}`",
             warning.session_homeboy_version, warning.current_homeboy_version
@@ -332,6 +340,10 @@ fn connected_runner_not_ready_reason(
         }
         _ => None,
     }
+}
+
+fn stale_daemon_runtime_paths_changed(warning: &super::RunnerStaleDaemonWarning) -> bool {
+    !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty()
 }
 
 fn stale_daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String {

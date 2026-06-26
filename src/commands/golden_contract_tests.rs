@@ -68,6 +68,7 @@ fn bench_command_json_contract_matches_golden_fixture() {
                     component_id: "homeboy".to_string(),
                     scenarios: Vec::new(),
                     count: 0,
+                    rig_package: None,
                 })),
             ]
         }),

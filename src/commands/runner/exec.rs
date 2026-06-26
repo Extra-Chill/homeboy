@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
+use homeboy::core::engine::shell;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
 use homeboy::core::runners::{self as runner, RunnerExecOutput, RunnerKind};
 use homeboy::core::stream_capture::StreamCaptureMetadata;
@@ -360,6 +361,34 @@ fn copy_runner_exec_artifact_source(
             }
             let server = server::load(server_id)?;
             let client = server::SshClient::from_server(&server, server_id)?;
+            if remote_runner_exec_artifact_type(&client, path)?
+                == RunnerExecArtifactSourceType::Directory
+            {
+                if client.is_local {
+                    copy_dir_all(path, &temp_path)?;
+                } else {
+                    let output = server::transfer::transfer(&server::transfer::TransferConfig {
+                        source: format!("{server_id}:{path_string}"),
+                        destination: temp_path.display().to_string(),
+                        recursive: true,
+                        compress: true,
+                        dry_run: false,
+                        exclude: Vec::new(),
+                    })?;
+                    if output.1 != 0 || !output.0.success {
+                        return Err(Error::validation_invalid_argument(
+                            "path",
+                            format!(
+                                "failed to download runner exec artifact directory: {}",
+                                output.0.error.unwrap_or_else(|| "scp failed".to_string())
+                            ),
+                            Some(path_string),
+                            None,
+                        ));
+                    }
+                }
+                return Ok(temp_path);
+            }
             let output = client.download_file(&path_string, &temp_path.display().to_string());
             if !output.success {
                 return Err(Error::validation_invalid_argument(
@@ -375,6 +404,65 @@ fn copy_runner_exec_artifact_source(
             Ok(temp_path)
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunnerExecArtifactSourceType {
+    File,
+    Directory,
+}
+
+fn remote_runner_exec_artifact_type(
+    client: &server::SshClient,
+    path: &Path,
+) -> homeboy::core::Result<RunnerExecArtifactSourceType> {
+    let path_string = path.display().to_string();
+    let quoted = shell::quote_path(&path_string);
+    if client.execute(&format!("test -d {quoted}")).success {
+        return Ok(RunnerExecArtifactSourceType::Directory);
+    }
+    if client.execute(&format!("test -f {quoted}")).success {
+        return Ok(RunnerExecArtifactSourceType::File);
+    }
+    Err(Error::validation_invalid_argument(
+        "path",
+        "runner exec artifact path is not a file or directory",
+        Some(path_string),
+        None,
+    ))
+}
+
+fn copy_dir_all(from: &Path, to: &Path) -> homeboy::core::Result<()> {
+    fs::create_dir_all(to).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("create {}", to.display())))
+    })?;
+    for entry in fs::read_dir(from).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("read {}", from.display())))
+    })? {
+        let entry = entry.map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("read {}", from.display())))
+        })?;
+        let source = entry.path();
+        let destination = to.join(entry.file_name());
+        let metadata = entry.metadata().map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("stat {}", source.display())))
+        })?;
+        if metadata.is_dir() {
+            copy_dir_all(&source, &destination)?;
+        } else if metadata.is_file() {
+            fs::copy(&source, &destination).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!(
+                        "copy {} to {}",
+                        source.display(),
+                        destination.display()
+                    )),
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_runner_exec_artifact_path(

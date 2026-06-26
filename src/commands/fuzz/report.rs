@@ -252,6 +252,115 @@ pub(super) fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvalua
         .collect()
 }
 
+pub(super) fn evaluate_expected_metric_gates(
+    campaign: Option<&FuzzCampaign>,
+    expectations: &[(String, String)],
+) -> Vec<FuzzGateEvaluation> {
+    expectations
+        .iter()
+        .map(|(metric, expected)| {
+            let expected_value = expected.trim().parse::<f64>().unwrap_or(f64::NAN);
+            let observed = campaign.and_then(|campaign| fuzz_campaign_metric(campaign, metric));
+            let passed = expected_value.is_finite()
+                && observed
+                    .is_some_and(|observed| (observed - expected_value).abs() < f64::EPSILON);
+            FuzzGateEvaluation {
+                gate_id: format!("expected-metric-{metric}"),
+                status: if passed { "passed" } else { "failed" }.to_string(),
+                metric: metric.clone(),
+                observed: observed.unwrap_or(0.0),
+                expected: if expected_value.is_finite() {
+                    expected_value
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect()
+}
+
+pub(super) fn fuzz_campaign_metric(campaign: &FuzzCampaign, metric: &str) -> Option<f64> {
+    let mut metrics = BTreeMap::new();
+    collect_value_metrics(None, &campaign.metadata, &mut metrics);
+    for (key, value) in &campaign.extra {
+        collect_value_metrics(Some(key), value, &mut metrics);
+    }
+    for artifact in &campaign.artifacts {
+        collect_value_metrics(
+            Some(&format!("artifact.{}.metadata", artifact.id)),
+            &artifact.metadata,
+            &mut metrics,
+        );
+        for (key, value) in &artifact.extra {
+            collect_value_metrics(
+                Some(&format!("artifact.{}.extra.{key}", artifact.id)),
+                value,
+                &mut metrics,
+            );
+        }
+    }
+    if let Some(summary) = campaign.coverage_summary.as_ref() {
+        collect_value_metrics(
+            Some("coverage_summary.metadata"),
+            &summary.metadata,
+            &mut metrics,
+        );
+        for (key, value) in &summary.extra {
+            collect_value_metrics(
+                Some(&format!("coverage_summary.extra.{key}")),
+                value,
+                &mut metrics,
+            );
+        }
+    }
+
+    metrics.get(metric).copied().or_else(|| {
+        metrics
+            .iter()
+            .find_map(|(key, value)| key.ends_with(&format!(".{metric}")).then_some(*value))
+    })
+}
+
+fn collect_value_metrics(
+    prefix: Option<&str>,
+    value: &serde_json::Value,
+    metrics: &mut BTreeMap<String, f64>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                let metric = prefix
+                    .map(|prefix| format!("{prefix}.{key}"))
+                    .unwrap_or_else(|| key.clone());
+                collect_value_metrics(Some(&metric), value, metrics);
+            }
+        }
+        serde_json::Value::Number(number) => {
+            if let (Some(prefix), Some(value)) =
+                (prefix, number.as_f64().filter(|value| value.is_finite()))
+            {
+                metrics.insert(prefix.to_string(), value);
+            }
+        }
+        serde_json::Value::String(raw) => {
+            if let (Some(prefix), Ok(value)) = (prefix, raw.parse::<f64>()) {
+                if value.is_finite() {
+                    metrics.insert(prefix.to_string(), value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                let metric = prefix
+                    .map(|prefix| format!("{prefix}.{index}"))
+                    .unwrap_or_else(|| index.to_string());
+                collect_value_metrics(Some(&metric), value, metrics);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn evaluate_fuzz_result_envelope_gates(
     envelope: &FuzzResultEnvelope,
 ) -> Vec<FuzzGateEvaluation> {

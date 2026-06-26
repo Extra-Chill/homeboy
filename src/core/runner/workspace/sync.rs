@@ -1,4 +1,8 @@
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use base64::Engine;
 
 use crate::core::engine::temp;
 use crate::core::error::{Error, Result};
@@ -14,12 +18,19 @@ use super::snapshot::{
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
-    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceMetadata,
+    RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput, DEFAULT_EXCLUDES,
 };
-use super::util::{deterministic_remote_path, git_output, validate_absolute_path};
+use super::util::{
+    deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
+    validate_absolute_path,
+};
 use crate::core::engine::shell;
 use crate::core::server::{self, SshClient};
+
+const WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 
 pub fn sync_workspace(
     runner_id: &str,
@@ -77,6 +88,16 @@ pub fn sync_workspace(
                 materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
                 None
             };
+            write_workspace_metadata(
+                &runner,
+                workspace_metadata(
+                    &runner.id,
+                    &local_path,
+                    &remote_path,
+                    options.mode,
+                    &snapshot,
+                ),
+            )?;
             let validation_dependencies = sync_validation_dependency_workspaces(
                 &runner,
                 &local_path,
@@ -161,6 +182,16 @@ pub fn sync_workspace(
                     options.allow_dirty_lab_workspace,
                 )?;
             }
+            write_workspace_metadata(
+                &runner,
+                workspace_metadata(
+                    &runner.id,
+                    &local_path,
+                    &remote_path,
+                    RunnerWorkspaceSyncMode::Git,
+                    &git.head,
+                ),
+            )?;
             let validation_dependencies = sync_validation_dependency_workspaces(
                 &runner,
                 &local_path,
@@ -200,6 +231,67 @@ pub fn sync_workspace(
             ))
         }
     }
+}
+
+pub fn prune_workspaces(
+    runner_id: &str,
+    options: RunnerWorkspacePruneOptions,
+) -> Result<(RunnerWorkspacePruneOutput, i32)> {
+    let runner = load(runner_id)?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner workspace prune requires workspace_root",
+            Some(runner.id.clone()),
+            Some(vec![
+                "Set runner.workspace_root to the remote workspace directory.".to_string(),
+            ]),
+        )
+    })?;
+    validate_absolute_path("workspace_root", workspace_root)?;
+    let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    let limit = options.limit.max(1);
+    let candidates = match runner.kind {
+        RunnerKind::Local => prune_candidates_local(Path::new(&lab_workspaces_root), &options)?,
+        RunnerKind::Ssh => prune_candidates_ssh(&runner, &lab_workspaces_root, &options)?,
+    };
+
+    let mut removed = Vec::new();
+    let mut skipped = Vec::new();
+    let mut candidate_entries = Vec::new();
+    for candidate in candidates.into_iter().take(limit) {
+        if options.apply {
+            match remove_workspace(&runner, &lab_workspaces_root, &candidate.remote_path) {
+                Ok(()) => removed.push(candidate),
+                Err(err) => skipped.push(RunnerWorkspacePruneSkippedEntry {
+                    remote_path: candidate.remote_path,
+                    reason: err.to_string(),
+                }),
+            }
+        } else {
+            candidate_entries.push(candidate);
+        }
+    }
+
+    let total_candidate_bytes = candidate_entries.iter().map(|entry| entry.bytes).sum();
+    let total_removed_bytes = removed.iter().map(|entry| entry.bytes).sum();
+    Ok((
+        RunnerWorkspacePruneOutput {
+            variant: "workspace_prune",
+            command: "runner.workspace.prune",
+            runner_id: runner.id,
+            dry_run: !options.apply,
+            workspace_root: workspace_root.to_string(),
+            lab_workspaces_root,
+            min_age_hours: options.min_age_hours,
+            candidates: candidate_entries,
+            removed,
+            skipped,
+            total_candidate_bytes,
+            total_removed_bytes,
+        },
+        0,
+    ))
 }
 
 pub fn list_workspaces(runner_id: &str, limit: usize) -> Result<(RunnerWorkspaceListOutput, i32)> {
@@ -309,6 +401,332 @@ fn list_ssh_lab_workspaces(
         .map(str::to_string)
         .collect::<Vec<_>>();
     Ok(paths.into_iter().take(limit).collect())
+}
+
+fn workspace_metadata(
+    runner_id: &str,
+    local_path: &Path,
+    remote_path: &str,
+    sync_mode: RunnerWorkspaceSyncMode,
+    snapshot_identity: &str,
+) -> RunnerWorkspaceMetadata {
+    RunnerWorkspaceMetadata {
+        schema: "homeboy/runner-workspace/v1",
+        runner_id: runner_id.to_string(),
+        local_path: local_path.display().to_string(),
+        remote_path: remote_path.to_string(),
+        sync_mode: sync_mode.label().to_string(),
+        snapshot_identity: snapshot_identity.to_string(),
+        synced_at: chrono::Utc::now().to_rfc3339(),
+        run_id: None,
+        job_id: None,
+    }
+}
+
+fn write_workspace_metadata(
+    runner: &super::super::Runner,
+    metadata: RunnerWorkspaceMetadata,
+) -> Result<()> {
+    let json = serde_json::to_string_pretty(&metadata)
+        .map_err(|err| Error::internal_json(err.to_string(), None))?;
+    let metadata_path = format!(
+        "{}/{}",
+        metadata.remote_path.trim_end_matches('/'),
+        WORKSPACE_METADATA_FILE
+    );
+    match runner.kind {
+        RunnerKind::Local => {
+            let path = Path::new(&metadata_path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    Error::internal_io(
+                        err.to_string(),
+                        Some("create workspace metadata dir".to_string()),
+                    )
+                })?;
+            }
+            fs::write(path, json).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("write workspace metadata".to_string()),
+                )
+            })
+        }
+        RunnerKind::Ssh => {
+            let (_server, mut client) = ssh_client_for_runner(runner)?;
+            client.env.extend(runner.env.clone());
+            let parent = parent_remote_path(&metadata_path);
+            let command = format!(
+                "mkdir -p {parent} && cat > {path} <<'HOMEBOY_WORKSPACE_METADATA'\n{json}\nHOMEBOY_WORKSPACE_METADATA",
+                parent = shell::quote_arg(&parent),
+                path = shell::quote_arg(&metadata_path),
+                json = json,
+            );
+            let output = client.execute(&command);
+            if output.success {
+                Ok(())
+            } else {
+                Err(Error::internal_unexpected(format!(
+                    "write runner workspace metadata failed: {}",
+                    output.stderr.trim()
+                )))
+            }
+        }
+    }
+}
+
+fn prune_candidates_local(
+    root: &Path,
+    options: &RunnerWorkspacePruneOptions,
+) -> Result<Vec<RunnerWorkspacePruneEntry>> {
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(root).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("read runner workspace root".to_string()),
+        )
+    })? {
+        let entry = entry.map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read runner workspace entry".to_string()),
+            )
+        })?;
+        let path = entry.path();
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        if let Some(candidate) = classify_local_candidate(root, &path, options)? {
+            candidates.push(candidate);
+        }
+    }
+    candidates.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| b.age_seconds.cmp(&a.age_seconds))
+    });
+    Ok(candidates)
+}
+
+fn classify_local_candidate(
+    root: &Path,
+    path: &Path,
+    options: &RunnerWorkspacePruneOptions,
+) -> Result<Option<RunnerWorkspacePruneEntry>> {
+    if !path.starts_with(root) || path == root {
+        return Ok(None);
+    }
+    let age_seconds = path_age_seconds(path)?;
+    if age_seconds < options.min_age_hours.saturating_mul(3600) {
+        return Ok(None);
+    }
+    if has_pending_apply_back_local(path) {
+        return Ok(None);
+    }
+    let metadata_path = path.join(WORKSPACE_METADATA_FILE);
+    let metadata = match fs::read_to_string(&metadata_path) {
+        Ok(content) => content,
+        Err(_) => return Ok(None),
+    };
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).map_err(|err| {
+        Error::internal_json(err.to_string(), Some(metadata_path.display().to_string()))
+    })?;
+    if metadata.get("schema").and_then(|value| value.as_str())
+        != Some("homeboy/runner-workspace/v1")
+    {
+        return Ok(None);
+    }
+    let Some(source_path) = metadata.get("local_path").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    if Path::new(source_path).exists() {
+        return Ok(None);
+    }
+    Ok(Some(RunnerWorkspacePruneEntry {
+        remote_path: path.display().to_string(),
+        source_path: source_path.to_string(),
+        run_id: metadata
+            .get("run_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        job_id: metadata
+            .get("job_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        sync_mode: metadata
+            .get("sync_mode")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        snapshot_identity: metadata
+            .get("snapshot_identity")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        age_seconds,
+        bytes: directory_size(path)?,
+        reason: "source_path_missing".to_string(),
+    }))
+}
+
+fn prune_candidates_ssh(
+    runner: &super::super::Runner,
+    root: &str,
+    options: &RunnerWorkspacePruneOptions,
+) -> Result<Vec<RunnerWorkspacePruneEntry>> {
+    let (_server, mut client) = ssh_client_for_runner(runner)?;
+    client.env.extend(runner.env.clone());
+    let min_age = options.min_age_hours.saturating_mul(3600);
+    let command = format!(
+        "root={root}; meta_rel={meta}; now=$(date +%s); if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'meta_rel=$1; now=$2; min_age=$3; shift 3; for dir do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; bytes=$(du -sk \"$dir\" 2>/dev/null | awk '\''{{print $1 * 1024}}'\''); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done' sh {meta_arg} \"$now\" {min_age_arg} {{}} +; fi",
+        root = shell::quote_arg(root),
+        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        meta_arg = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        min_age_arg = shell::quote_arg(&min_age.to_string()),
+    );
+    let output = client.execute(&command);
+    if !output.success {
+        return Err(Error::internal_unexpected(format!(
+            "runner workspace prune scan failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    let mut candidates = Vec::new();
+    for line in output.stdout.lines() {
+        let parts = line.splitn(4, '\t').collect::<Vec<_>>();
+        if parts.len() != 4 {
+            continue;
+        }
+        let age_seconds = parts[0].parse::<u64>().unwrap_or(0);
+        let bytes = parts[1].parse::<u64>().unwrap_or(0);
+        let remote_path = parts[2].to_string();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(parts[3])
+            .map_err(|err| Error::internal_json(err.to_string(), None))?;
+        let metadata: serde_json::Value = serde_json::from_slice(&decoded)
+            .map_err(|err| Error::internal_json(err.to_string(), Some(remote_path.clone())))?;
+        let Some(source_path) = metadata.get("local_path").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if Path::new(source_path).exists() {
+            continue;
+        }
+        candidates.push(RunnerWorkspacePruneEntry {
+            remote_path,
+            source_path: source_path.to_string(),
+            run_id: metadata
+                .get("run_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            job_id: metadata
+                .get("job_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            sync_mode: metadata
+                .get("sync_mode")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            snapshot_identity: metadata
+                .get("snapshot_identity")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            age_seconds,
+            bytes,
+            reason: "source_path_missing".to_string(),
+        });
+    }
+    candidates.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| b.age_seconds.cmp(&a.age_seconds))
+    });
+    Ok(candidates)
+}
+
+fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str) -> Result<()> {
+    let root_path = Path::new(root);
+    let path = Path::new(remote_path);
+    if !path.starts_with(root_path) || path == root_path || remote_path.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "remote_path",
+            "refusing to remove runner workspace outside _lab_workspaces root",
+            Some(remote_path.to_string()),
+            None,
+        ));
+    }
+    match runner.kind {
+        RunnerKind::Local => fs::remove_dir_all(path).map_err(|err| {
+            Error::internal_io(err.to_string(), Some("remove runner workspace".to_string()))
+        }),
+        RunnerKind::Ssh => {
+            let (_server, mut client) = ssh_client_for_runner(runner)?;
+            client.env.extend(runner.env.clone());
+            let command = format!(
+                "root={root}; path={path}; case \"$path\" in \"$root\"/*) [ \"$path\" != \"$root\" ] && rm -rf -- \"$path\" ;; *) echo refused >&2; exit 2 ;; esac",
+                root = shell::quote_arg(root),
+                path = shell::quote_arg(remote_path),
+            );
+            let output = client.execute(&command);
+            if output.success {
+                Ok(())
+            } else {
+                Err(Error::internal_unexpected(format!(
+                    "remove runner workspace failed: {}",
+                    output.stderr.trim()
+                )))
+            }
+        }
+    }
+}
+
+fn path_age_seconds(path: &Path) -> Result<u64> {
+    let modified = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some("read workspace mtime".to_string()))
+        })?;
+    Ok(SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default()
+        .as_secs())
+}
+
+fn directory_size(path: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(path).map_err(|err| {
+        Error::internal_io(err.to_string(), Some("read workspace size".to_string()))
+    })? {
+        let entry = entry.map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read workspace size entry".to_string()),
+            )
+        })?;
+        let metadata = entry.metadata().map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read workspace size metadata".to_string()),
+            )
+        })?;
+        if metadata.is_dir() {
+            total = total.saturating_add(directory_size(&entry.path())?);
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
+}
+
+fn has_pending_apply_back_local(path: &Path) -> bool {
+    let homeboy = path.join(".homeboy");
+    let Ok(entries) = fs::read_dir(homeboy) else {
+        return false;
+    };
+    entries.filter_map(|entry| entry.ok()).any(|entry| {
+        let name = entry.file_name().to_string_lossy().to_string();
+        name.contains("patch") || name.ends_with(".patch") || name.ends_with(".diff")
+    })
 }
 
 fn shell_arg(value: &str) -> String {

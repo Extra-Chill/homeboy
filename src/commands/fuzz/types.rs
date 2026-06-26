@@ -189,6 +189,11 @@ pub struct FuzzRunArgs {
     #[arg(long = "gate-profile", value_enum, default_value_t = FuzzGateProfileArg::Measurement)]
     pub(crate) gate_profile: FuzzGateProfileArg,
 
+    /// Require a numeric metric emitted by the fuzz campaign to equal this value.
+    /// Repeatable. Format: `--expect-metric metric_name=2`.
+    #[arg(long = "expect-metric", value_name = "METRIC=VALUE", value_parser = crate::commands::parse_key_val)]
+    pub(crate) expect_metric: Vec<(String, String)>,
+
     /// Additional runner arguments reserved for the fuzz extension script.
     #[arg(last = true)]
     pub(crate) args: Vec<String>,

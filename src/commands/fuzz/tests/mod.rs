@@ -3,15 +3,16 @@
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use super::execution::{
     default_runner_contract, fuzz_artifact_ref_validation, fuzz_campaign_contract,
-    fuzz_evidence_followups, fuzz_postprocess_error, fuzz_run_artifact_validation_error,
-    fuzz_run_outcome, fuzz_runner_env, persist_fuzz_run_evidence, run_fuzz_artifact_postprocess,
-    FuzzRunEvidenceInput,
+    fuzz_evidence_followups, fuzz_expected_metric_error, fuzz_max_duration, fuzz_postprocess_error,
+    fuzz_run_artifact_validation_error, fuzz_run_outcome, fuzz_runner_env,
+    persist_fuzz_run_evidence, run_fuzz_artifact_postprocess, FuzzRunEvidenceInput,
 };
 use super::planning::plan_inventory_selection;
 use super::replay::run_replay;
 use super::report::{
-    evaluate_fuzz_gates, fuzz_coverage_completeness, fuzz_performance_hotspots, gate_status,
-    run_report, run_validate, FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
+    evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
+    fuzz_performance_hotspots, gate_status, run_report, run_validate,
+    FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
 };
 use super::types::{
     FuzzCommand, FuzzDiscoverArgs, FuzzExecutionOutput, FuzzGateProfileArg, FuzzListOutput,
@@ -89,6 +90,7 @@ fn planner_args() -> FuzzPlanArgs {
             require_result_envelope: false,
             max_duration: None,
             gate_profile: FuzzGateProfileArg::Measurement,
+            expect_metric: vec![],
             args: Vec::new(),
         },
         request_id: None,
@@ -210,6 +212,7 @@ fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         require_result_envelope: false,
         max_duration: None,
         gate_profile: FuzzGateProfileArg::Measurement,
+        expect_metric: vec![],
         args: vec![],
     }
 }

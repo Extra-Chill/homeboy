@@ -43,17 +43,9 @@ pub(crate) fn ensure_remote_lab_artifact_dir(runner_id: &str, output_file: &str)
         .rsplit_once('/')
         .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
         .unwrap_or(".");
-    let client = ssh_client_for_lab_runner(runner_id)?;
-    let mkdir = client.execute(&format!("mkdir -p {}", shell::quote_arg(parent)));
-    if !mkdir.success {
-        return Err(Error::internal_unexpected(format!(
-            "Lab offload could not create Homeboy-owned artifact directory `{parent}` on runner `{runner_id}`: {}",
-            mkdir.stderr.trim()
-        ))
-        .with_hint(
-            "Lab structured output is written outside the synced checkout so it does not dirty the runner workspace; the runner workspace parent must be writable.".to_string(),
-        ));
-    }
+    lab_runner_file_transfer(runner_id)?
+        .ensure_directory(parent)
+        .map_err(|err| lab_artifact_directory_error(runner_id, parent, err))?;
     Ok(())
 }
 
@@ -79,50 +71,54 @@ pub(crate) fn materialize_lab_at_files_on_runner(
         return Ok(());
     }
 
-    let client = ssh_client_for_lab_runner(runner_id)?;
+    let transfer = lab_runner_file_transfer(runner_id)?;
     for spec in specs {
         let parent = spec
             .remote_path
             .rsplit_once('/')
             .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
             .unwrap_or(".");
-        let mkdir = client.execute(&format!("mkdir -p {}", shell::quote_arg(parent)));
-        if !mkdir.success {
-            return Err(lab_at_file_materialization_error(
+        transfer.ensure_directory(parent).map_err(|err| {
+            lab_at_file_materialization_error(
                 runner_id,
                 spec,
-                format!("failed to create remote parent directory: {}", mkdir.stderr),
-            ));
-        }
-        let upload = client.upload_file(&spec.local_path.display().to_string(), &spec.remote_path);
-        if !upload.success {
-            return Err(lab_at_file_materialization_error(
-                runner_id,
-                spec,
-                format!("failed to upload file: {}", upload.stderr),
-            ));
-        }
+                format!("failed to create remote parent directory: {}", err.message),
+            )
+        })?;
+        transfer
+            .upload_file(&spec.local_path.display().to_string(), &spec.remote_path)
+            .map_err(|err| {
+                lab_at_file_materialization_error(
+                    runner_id,
+                    spec,
+                    format!("failed to upload file: {}", err.message),
+                )
+            })?;
     }
 
     Ok(())
 }
 
-pub(crate) fn ssh_client_for_lab_runner(runner_id: &str) -> Result<SshClient> {
+pub(crate) fn lab_runner_file_transfer(runner_id: &str) -> Result<RunnerFileTransfer> {
     let runner = load(runner_id)?;
-    let server_id = runner.server_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "runner",
-            "Lab offload @file materialization requires an SSH runner with server_id",
-            Some(runner_id.to_string()),
-            Some(vec![
-                "Register a direct SSH runner or configure a reverse-connected runner before Lab offload.".to_string(),
-            ]),
-        )
-    })?;
-    let server = server::load(server_id)?;
-    let mut client = SshClient::from_server(&server, server_id)?;
-    client.env.extend(runner.env);
-    Ok(client)
+    let runner_status = status(runner_id).ok();
+    RunnerFileTransfer::for_runner(&runner, runner_status.as_ref())
+}
+
+pub(crate) fn lab_artifact_directory_error(runner_id: &str, parent: &str, err: Error) -> Error {
+    let mut error = Error::new(
+        err.code,
+        format!(
+            "Lab offload could not create Homeboy-owned artifact directory `{parent}` on runner `{runner_id}`: {}",
+            err.message
+        ),
+        err.details,
+    );
+    error.retryable = err.retryable;
+    error.hints = err.hints;
+    error.with_hint(
+        "Lab structured output is written outside the synced checkout so it does not dirty the runner workspace; the runner workspace parent must be writable.".to_string(),
+    )
 }
 
 pub(crate) fn lab_at_file_materialization_error(
@@ -597,18 +593,19 @@ pub(crate) fn run_lab_offload_inner(
     for (name, value) in &request.job_overrides.env {
         env.insert(name.clone(), value.clone());
     }
-    let mut secret_env_names = secret_env_handoff.secret_env_names;
+    let mut secret_env_names = secret_env_handoff.secret_env_plan.secret_env_names();
     secret_env_names.extend(request.job_overrides.secret_env_names.clone());
     secret_env_names.sort();
     secret_env_names.dedup();
     // The remaining pre-dispatch checks (secret-env, provider, path translation)
     // are still runner setup overhead before the workload executes.
     let pre_dispatch_started = std::time::Instant::now();
-    preflight_agent_task_runner_secret_env(
+    preflight_agent_task_runner_secret_env_plan(
         runner_id,
         &runner,
         &changed_since_preflight.args,
         &env,
+        &secret_env_handoff.secret_env_plan,
     )?;
     preflight_agent_task_provider_on_runner(
         runner_id,
@@ -743,6 +740,21 @@ pub(crate) fn run_lab_offload_inner(
     if exec_output.mirror_run_id.is_some() {
         plan = add_success_step(plan, "lab.mirror_evidence");
     }
+    if request.detach_after_handoff {
+        let mut stderr = String::new();
+        for message in messages {
+            stderr.push_str(&message);
+            stderr.push('\n');
+        }
+        stderr.push_str(&exec_output.stderr);
+        return Ok(LabOffloadOutcome::Offloaded {
+            plan,
+            stdout: exec_output.stdout.clone(),
+            stderr,
+            exit_code,
+            output_file_content: Some(exec_output.stdout),
+        });
+    }
     // Parsing/applying the remote command output (patch extraction) is post-
     // workload overhead, not workload time.
     let output_parse_started = std::time::Instant::now();
@@ -777,7 +789,11 @@ pub(crate) fn run_lab_offload_inner(
         host_telemetry.to_metadata()
     );
     ensure_lab_offload_streams_not_truncated(&exec_output, output_file_content.is_some())?;
-    mirror_agent_task_run_plan_lifecycle(request.normalized_args, &exec_output.stdout)?;
+    mirror_agent_task_run_plan_lifecycle(
+        request.normalized_args,
+        &exec_output.stdout,
+        output_file_content.as_deref(),
+    )?;
 
     let mut stderr = String::new();
     for message in messages {
@@ -898,15 +914,9 @@ pub(crate) fn ensure_lab_offload_streams_not_truncated(
 pub(crate) fn download_lab_output_file(runner_id: &str, remote_path: &str) -> Result<String> {
     let temp = local_lab_output_temp_path(runner_id, remote_path);
     let temp_text = temp.display().to_string();
-    let client = ssh_client_for_lab_runner(runner_id)?;
-    let output = client.download_file(remote_path, &temp_text);
-    if !output.success {
-        return Err(Error::internal_unexpected(format!(
-            "Lab offload could not retrieve remote structured output `{remote_path}` from runner `{runner_id}`: {}",
-            output.stderr.trim()
-        ))
-        .with_hint("The remote command was invoked with --output, but the runner-side file was not readable after execution.".to_string()));
-    }
+    lab_runner_file_transfer(runner_id)?
+        .download_file(remote_path, &temp_text)
+        .map_err(|err| lab_output_download_error(runner_id, remote_path, err))?;
     let content = std::fs::read_to_string(&temp).map_err(|err| {
         Error::internal_io(
             err.to_string(),
@@ -915,6 +925,20 @@ pub(crate) fn download_lab_output_file(runner_id: &str, remote_path: &str) -> Re
     })?;
     let _ = std::fs::remove_file(&temp);
     Ok(content)
+}
+
+pub(crate) fn lab_output_download_error(runner_id: &str, remote_path: &str, err: Error) -> Error {
+    let mut error = Error::new(
+        err.code,
+        format!(
+            "Lab offload could not retrieve remote structured output `{remote_path}` from runner `{runner_id}`: {}",
+            err.message
+        ),
+        err.details,
+    );
+    error.retryable = err.retryable;
+    error.hints = err.hints;
+    error.with_hint("The remote command was invoked with --output, but the runner-side file was not readable after execution.".to_string())
 }
 
 pub(crate) fn local_lab_output_temp_path(runner_id: &str, remote_path: &str) -> PathBuf {

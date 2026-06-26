@@ -182,6 +182,153 @@ fn runs_artifacts_surfaces_matrix_summary_from_typed_packets() {
 }
 
 #[test]
+fn runs_artifacts_summarizes_static_site_fixture_matrix_artifacts() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "bench",
+                "static-site-importer",
+                "static-site-importer-fixture-matrix",
+                serde_json::json!({
+                    "scenario_id": "static-site-fixture-matrix",
+                    "result_summary": {
+                        "fixture_count": 71,
+                        "succeeded": 6,
+                        "failed": 65,
+                        "not_run": 0,
+                        "finding_count": 1055
+                    }
+                }),
+            ))
+            .expect("matrix run");
+        store
+            .finish_run(&run.id, RunStatus::Fail, None)
+            .expect("finish matrix run");
+
+        let result = home.path().join("static-site-fixture-matrix-result.json");
+        std::fs::write(
+            &result,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "homeboy-rigs/static-site-fixture-matrix-result/v1",
+                "matrix_id": "static-site-importer-fixture-matrix-final",
+                "summary": {
+                    "fixture_count": 71,
+                    "succeeded": 6,
+                    "failed": 65,
+                    "not_run": 0,
+                    "finding_count": 1055,
+                    "groups": {
+                        "fallback_block": 700,
+                        "visual_parity": 250,
+                        "unresolved_asset": 105
+                    }
+                },
+                "fixtures": [
+                    { "fixture_id": "fixture-passed", "status": "passed" },
+                    { "fixture_id": "fixture-failed", "status": "failed" }
+                ],
+                "findings": [
+                    {
+                        "fixture_id": "fixture-failed",
+                        "kind": "unsupported_html_fallback",
+                        "group_key": "fallback_block",
+                        "candidate_repo": "Automattic/blocks-engine"
+                    }
+                ],
+                "fanout_groups": [{
+                    "group_key": "fallback_block",
+                    "findings": []
+                }]
+            }))
+            .expect("result json"),
+        )
+        .expect("write result");
+        let summary = home.path().join("summary.json");
+        std::fs::write(
+            &summary,
+            serde_json::to_vec(&serde_json::json!({
+                "fixture_count": 71,
+                "succeeded": 6,
+                "failed": 65,
+                "not_run": 0,
+                "finding_count": 1055,
+                "groups": {
+                    "fallback_block": 700,
+                    "visual_parity": 250,
+                    "unresolved_asset": 105
+                }
+            }))
+            .expect("summary json"),
+        )
+        .expect("write summary");
+        let packets = home.path().join("finding-packets.json");
+        std::fs::write(
+            &packets,
+            serde_json::to_vec(&serde_json::json!([
+                {
+                    "diagnostic_id": "diag-001",
+                    "fixture_id": "fixture-failed",
+                    "category": "fallback_block",
+                    "kind": "unsupported_html_fallback",
+                    "candidate_repo": "Automattic/blocks-engine"
+                },
+                {
+                    "diagnostic_id": "diag-002",
+                    "fixture_id": "fixture-failed",
+                    "category": "visual_parity",
+                    "kind": "visual_parity_mismatch",
+                    "candidate_repo": "chubes4/wp-site-generator"
+                },
+                {
+                    "diagnostic_id": "diag-003",
+                    "fixture_id": "fixture-failed",
+                    "category": "unresolved_asset",
+                    "kind": "asset_map",
+                    "candidate_repo": "chubes4/static-site-importer"
+                }
+            ]))
+            .expect("packet json"),
+        )
+        .expect("write packets");
+        store
+            .record_artifact(&run.id, "result", &result)
+            .expect("record result");
+        store
+            .record_artifact(&run.id, "summary", &summary)
+            .expect("record summary");
+        store
+            .record_artifact(&run.id, "finding_packets", &packets)
+            .expect("record packets");
+
+        let (output, _) = handlers::artifacts(&run.id).expect("artifacts");
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("expected artifacts output");
+        };
+        let summary = output.matrix_summary.expect("matrix summary");
+
+        assert_eq!(summary.fixture_count, 71);
+        assert_eq!(summary.passed_count, 6);
+        assert_eq!(summary.failed_count, 65);
+        assert_eq!(summary.not_run_count, 0);
+        assert_eq!(summary.finding_count, 1055);
+        assert_eq!(summary.group_counts[0].key, "fallback_block");
+        assert_eq!(
+            summary.top_diagnostic_kinds[0].key,
+            "unsupported_html_fallback"
+        );
+        assert!(summary
+            .candidate_repo_counts
+            .iter()
+            .any(|count| count.key == "Automattic/blocks-engine"));
+        assert_eq!(summary.result_refs.len(), 2);
+        assert_eq!(summary.finding_packet_refs.len(), 1);
+        assert!(summary.parse_diagnostics.is_empty());
+    });
+}
+
+#[test]
 fn runs_artifacts_surfaces_static_html_preview_entrypoints() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
