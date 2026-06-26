@@ -738,6 +738,9 @@ fn validate_report_selection_for_single_run(args: &BenchRunArgs) -> homeboy::cor
 fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
     let passthrough_args = filter_homeboy_flags(&args.args);
     let rig_context = load_list_rig(args)?;
+    if let Some(context) = rig_context.as_ref() {
+        report_list_rig_source(context);
+    }
     let rig_spec = rig_context.as_ref().map(|context| &context.spec);
     let effective_id = resolve_list_component_id(args, rig_spec)?;
     let path_override = args.comp.path.clone().or_else(|| {
@@ -805,6 +808,15 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
     Ok((BenchOutput::List(output), 0))
 }
 
+fn report_list_rig_source(context: &ListRigContext) {
+    if let Some(evidence) = rig::package_evidence(&context.spec.id) {
+        eprintln!(
+            "bench rig source: rig={} package_root={} freshness={:?}",
+            evidence.rig_id, evidence.package_root, evidence.freshness
+        );
+    }
+}
+
 fn effective_extension_overrides(
     explicit_overrides: &[String],
     rig_spec: Option<&rig::RigSpec>,
@@ -830,7 +842,7 @@ type ListRigContext = rig::RigSourceContext;
 fn load_list_rig(args: &BenchListArgs) -> homeboy::core::Result<Option<ListRigContext>> {
     match args.rig.as_slice() {
         [] => Ok(None),
-        [rig_id] => Ok(Some(rig::RigSourceContext::load(rig_id)?)),
+        [rig_id] => Ok(Some(rig::RigSourceContext::load_for_invocation(rig_id)?)),
         _ => Err(homeboy::core::Error::validation_invalid_argument(
             "--rig",
             "bench list accepts exactly one rig id",

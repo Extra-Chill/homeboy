@@ -6,6 +6,7 @@ use homeboy::core::extension::bench::aggregate_comparison;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
 /// Minimal CLI wrapper to exercise clap parsing of `BenchArgs`.
@@ -218,6 +219,48 @@ fn install_rig_package(
     homeboy::core::rig::install(package_root.to_string_lossy().as_ref(), Some(rig_id), false)
         .expect("install rig package");
     package_root
+}
+
+fn write_local_rig_package(
+    root: &std::path::Path,
+    rig_id: &str,
+    component_id: &str,
+    path: &std::path::Path,
+    workload_stem: &str,
+) {
+    let rig_dir = root.join("rigs").join(rig_id);
+    let workload_dir = root.join("workloads");
+    fs::create_dir_all(&rig_dir).expect("mkdir local package rig");
+    fs::create_dir_all(&workload_dir).expect("mkdir local package workloads");
+    fs::write(
+        workload_dir.join(format!("{workload_stem}.bench.js")),
+        "// fixture\n",
+    )
+    .expect("write local package workload");
+    fs::write(
+        rig_dir.join("rig.json"),
+        format!(
+            r#"{{
+                    "components": {{
+                        "{component_id}": {{
+                            "path": "{}",
+                            "extensions": {{ "fixture-bench": {{}} }}
+                        }}
+                    }},
+                    "bench": {{ "default_component": "{component_id}" }},
+                    "bench_workloads": {{ "fixture-bench": [
+                        {{ "path": "${{package.root}}/workloads/{workload_stem}.bench.js" }}
+                    ] }}
+                }}"#,
+            path.display()
+        ),
+    )
+    .expect("write local package rig");
+}
+
+fn current_dir_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn write_rig_with_component_script(
@@ -503,6 +546,53 @@ fn run_list_serializes_installed_rig_package_evidence() {
             _ => panic!("expected list output"),
         }
     });
+}
+
+#[test]
+fn run_list_prefers_enclosing_local_rig_package_over_installed_package() {
+    let _guard = current_dir_lock().lock().expect("lock current dir");
+    let original_dir = std::env::current_dir().expect("current dir");
+
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        install_rig_package(home, "studio-bfb", "studio", component_dir.path());
+
+        let local_package = tempfile::TempDir::new().expect("local package");
+        write_local_rig_package(
+            local_package.path(),
+            "studio-bfb",
+            "studio",
+            component_dir.path(),
+            "fresh-checkout-extra",
+        );
+        std::env::set_current_dir(local_package.path()).expect("enter local package");
+
+        let result = run_list(&list_args(None, vec!["studio-bfb".to_string()]));
+        std::env::set_current_dir(&original_dir).expect("restore current dir");
+        let (output, exit_code) = result.expect("rig bench list should run");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::List(result) => {
+                assert_eq!(result.scenarios[0].id, "fresh-checkout-extra");
+                let evidence = result.rig_package.expect("rig package evidence");
+                assert_eq!(
+                    std::path::PathBuf::from(evidence.package_root)
+                        .canonicalize()
+                        .expect("canonical evidence root"),
+                    local_package
+                        .path()
+                        .canonicalize()
+                        .expect("canonical local package")
+                );
+                assert!(evidence.freshness_verified);
+            }
+            _ => panic!("expected list output"),
+        }
+    });
+
+    std::env::set_current_dir(original_dir).expect("restore current dir");
 }
 
 #[test]
