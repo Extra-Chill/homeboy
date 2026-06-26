@@ -499,7 +499,7 @@ fn parsed_detail(output: &str) -> Option<serde_json::Value> {
     })
 }
 
-fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
+pub(in crate::core::extension) fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
     let lines: Vec<&str> = s.lines().collect();
     if lines.len() <= max_lines {
         (s.to_string(), false)

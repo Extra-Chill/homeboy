@@ -662,8 +662,6 @@
         "dead_code::src/core/lab_routing.rs::UnreferencedExport",
         "docs::docs/commands/runtime.md::BrokenDocReference",
         "duplication::src/core/artifact_contract.rs::DuplicateFunction",
-        "duplication::src/core/extension/runner.rs::DuplicateFunction",
-        "duplication::src/core/extension/test/run.rs::DuplicateFunction",
         "duplication::src/core/fuzz/types.rs::DuplicateFunction",
         "field_patterns::src/commands/agent_task/args/controller.rs::RepeatedFieldPattern",
         "field_patterns::src/commands/report/performance_digest.rs::RepeatedFieldPattern",
