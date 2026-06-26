@@ -4,87 +4,93 @@ use crate::core::redaction::redact_argv_display;
 
 use crate::core::api_jobs::{ActiveRunnerJobSummary, Job, JobArtifactMetadata, JobStatus};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerLifecycleOwner {
-    Controller,
-    Runner,
-    Broker,
-    Local,
-}
+mod session_enums {
+    use super::*;
 
-impl RunnerLifecycleOwner {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Controller => "controller",
-            Self::Runner => "runner",
-            Self::Broker => "broker",
-            Self::Local => "local",
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerLifecycleOwner {
+        Controller,
+        Runner,
+        Broker,
+        Local,
+    }
+
+    impl RunnerLifecycleOwner {
+        pub fn as_str(&self) -> &'static str {
+            match self {
+                Self::Controller => "controller",
+                Self::Runner => "runner",
+                Self::Broker => "broker",
+                Self::Local => "local",
+            }
         }
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerTunnelMode {
-    DirectSsh,
-    Reverse,
-}
-
-impl RunnerTunnelMode {
-    pub fn label(&self) -> &'static str {
-        self.labels().0
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerTunnelMode {
+        DirectSsh,
+        Reverse,
     }
 
-    pub fn metadata_value(&self) -> &'static str {
-        self.labels().1
-    }
+    impl RunnerTunnelMode {
+        pub fn label(&self) -> &'static str {
+            self.labels().0
+        }
 
-    fn labels(&self) -> (&'static str, &'static str) {
-        match self {
-            RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
-            RunnerTunnelMode::Reverse => ("reverse-connected", "reverse"),
+        pub fn metadata_value(&self) -> &'static str {
+            self.labels().1
+        }
+
+        fn labels(&self) -> (&'static str, &'static str) {
+            match self {
+                RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
+                RunnerTunnelMode::Reverse => ("reverse-connected", "reverse"),
+            }
         }
     }
-}
 
-fn default_tunnel_mode() -> RunnerTunnelMode {
-    RunnerTunnelMode::DirectSsh
-}
+    pub(super) fn default_tunnel_mode() -> RunnerTunnelMode {
+        RunnerTunnelMode::DirectSsh
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerSessionRole {
-    Controller,
-    Runner,
-}
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerSessionRole {
+        Controller,
+        Runner,
+    }
 
-fn default_session_role() -> RunnerSessionRole {
-    RunnerSessionRole::Controller
-}
+    pub(super) fn default_session_role() -> RunnerSessionRole {
+        RunnerSessionRole::Controller
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerSessionState {
-    Connected,
-    Disconnected,
-    Recorded,
-}
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerSessionState {
+        Connected,
+        Disconnected,
+        Recorded,
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerActiveJobState {
-    Available,
-    Unavailable,
-    NotQueried,
-}
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerActiveJobState {
+        Available,
+        Unavailable,
+        NotQueried,
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerActiveJobSource {
-    DirectDaemon,
-    ReverseBroker,
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerActiveJobSource {
+        DirectDaemon,
+        ReverseBroker,
+    }
 }
+pub use session_enums::*;
+use session_enums::{default_session_role, default_tunnel_mode};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerAvailability {
