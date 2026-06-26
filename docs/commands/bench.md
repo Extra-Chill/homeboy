@@ -246,12 +246,6 @@ homeboy runs distribution --kind bench --component <component> --field <metadata
 homeboy runs bench-compare --from-run <baseline-run-id> --to-run <candidate-run-id> [--metric <name>]
 ```
 
-The legacy `homeboy bench history <component>` reader is a compatibility wrapper over `runs list` and returns the same `runs.list` payload. `--scenario` filters to runs whose stored metadata includes the scenario, and `--rig` narrows to rig-pinned runs.
-
-The legacy `homeboy bench distribution <component> --field <metadata.path>` reader delegates to `runs distribution` and returns the same `runs.distribution` payload. It is generic over metadata shape: scalar string, number, and boolean values are counted directly, and arrays are flattened. Use `--scenario`, `--rig`, `--status`, and `--limit` to narrow the persisted run window before aggregation.
-
-The legacy `homeboy bench compare --from-run <baseline-run-id> --to-run <candidate-run-id>` reader delegates to `runs bench-compare` and returns the same `runs.bench-compare` payload. It compares numeric metrics recorded in two persisted benchmark runs, captures both run IDs, component state, shared bench context, selected metric deltas, and includes a Markdown table under `reports.markdown` in the JSON payload.
-
 Bench runners may attach generic tracker provenance to the top-level results
 envelope or to individual scenarios/workloads. Homeboy persists that metadata in
 the run record, keeps it in JSON artifacts/exports, and renders a `Provenance`
