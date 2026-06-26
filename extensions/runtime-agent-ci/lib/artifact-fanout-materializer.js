@@ -24,7 +24,7 @@ function materializeArtifactFanout(input = {}) {
   const tasks = groups.map((group) => renderTaskRequest(group, config)).filter(Boolean);
   const plan = {
     schema: AGENT_TASK_PLAN_SCHEMA,
-    plan_id: text(config.plan_id || config.planId) || text(config.fanout_id || config.fanoutId) || 'artifact-fanout',
+    plan_id: renderedText(config.plan_id || config.planId || config.fanout_id || config.fanoutId) || 'artifact-fanout',
     group_key: text(config.group_key || config.groupKey) || undefined,
     tasks,
     options: normalizeObject(config.options),
@@ -59,7 +59,7 @@ function runArtifactFanout(input = {}) {
   const planPath = path.join(tmpRoot, 'plan.json');
   fs.writeFileSync(planPath, `${JSON.stringify(result.plan, null, 2)}\n`);
 
-  const batchId = text(input.batch_id || input.batchId || config.batch_id || config.batchId || result.plan.plan_id);
+  const batchId = renderedText(input.batch_id || input.batchId || config.batch_id || config.batchId || result.plan.plan_id);
   const submitArgs = ['agent-task', 'fanout', 'submit-batch', '--input', planPath];
   if (batchId) {
     submitArgs.push('--batch-id', batchId);
@@ -188,6 +188,9 @@ function renderTaskRequest(group, config = {}) {
 
 function runtimeRenderEnv() {
   const names = [
+    'HOMEBOY_LOOP_ID',
+    'HOMEBOY_LOOP_ACTION_ID',
+    'HOMEBOY_LOOP_ACTION_DEDUPE_KEY',
     'HOMEBOY_AGENT_RUNTIME',
     'HOMEBOY_AGENT_RUNTIME_PROVIDER',
     'HOMEBOY_AGENT_RUNTIME_MODEL',
@@ -198,6 +201,11 @@ function runtimeRenderEnv() {
     'HOMEBOY_EXTENSIONS_PATH',
   ];
   return Object.fromEntries(names.map((name) => [name, process.env[name] || '']));
+}
+
+function renderedText(value) {
+  const raw = text(value);
+  return raw ? text(renderString(raw, { env: runtimeRenderEnv(), config: {} })) : '';
 }
 
 function renderValue(value, context) {
@@ -242,7 +250,7 @@ function stringifyTemplateValue(value) {
 function runHomeboy(homeboyBin, args, cwd) {
   const run = spawnSync(homeboyBin, args, { cwd: cwd || process.cwd(), env: process.env, encoding: 'utf8' });
   const parsed = parseJson(run.stdout);
-  return { status: run.status || 0, stdout: run.stdout || '', stderr: run.stderr || '', parsed, command: [homeboyBin, ...args] };
+  return { status: run.status === null ? 1 : (run.status || 0), stdout: run.stdout || '', stderr: run.stderr || '', parsed, command: [homeboyBin, ...args] };
 }
 
 function commandResult(result) {
