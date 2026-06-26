@@ -38,9 +38,10 @@ to hot commands such as `bench`, `rig up`, `fleet exec`, full-workspace
 runs when `homeboy doctor resources` sees a warm or hot machine. Non-interactive
 hot commands fail fast unless the work is routed through Lab/runner-hosted
 execution or the caller explicitly accepts local pressure. For portable hot
-commands with a default Lab runner, `--force-hot` does not implicitly keep
-execution local; pass `--runner <id>` to offload or add `--allow-local-hot` only
-when local controller-machine execution is intentional.
+commands with a default Lab runner, including controller spec materialization
+commands, Homeboy auto-selects the default runner when `--runner` is omitted.
+`--force-hot` does not implicitly keep execution local; add `--allow-local-hot`
+only when local controller-machine execution is intentional.
 
 Not every hot command is offloadable. Lab offload only applies to commands with
 a portable runner contract; local-only hot commands keep running locally and

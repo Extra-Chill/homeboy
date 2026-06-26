@@ -187,6 +187,13 @@ remains provider-neutral: controller actions use their declared generic request
 shape, and `--dispatch-backend`, `--dispatch-selector`, `--dispatch-model`, and
 `--dispatch-provider-config` only provide defaults when an action omits them.
 
+Controller spec materialization commands are portable Lab commands:
+`controller from-spec --resume`, `controller run-from-spec`, and
+`controller materialize` auto-select the configured default Lab runner when
+global `--runner` is omitted. Use `--runner <id>` to choose a specific runner, or
+`--force-hot --allow-local-hot` only when controller-machine execution is
+intentional.
+
 ## Internal Bridge
 
 `agent-task tool` is a hidden provider-runtime bridge. It remains parseable for

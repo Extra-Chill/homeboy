@@ -51,7 +51,7 @@ homeboy runner connect <runner-id>
 
 After this, `<runner-id>` is both the server ID and the runner ID.
 
-Commands that are both resource-policy hot and portable for Lab offload (`audit`, full `lint`, `test`, `bench run`, `fuzz run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
+Commands that are both resource-policy hot and portable for Lab offload (`agent-task controller from-spec --resume`, `agent-task controller run-from-spec`, `agent-task controller materialize`, `audit`, full `lint`, `test`, `bench run`, `fuzz run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
 - `--force-hot` only suppresses the resource-policy warning. If a default Lab runner is available for a portable hot command, Homeboy refuses to use `--force-hot` as an implicit local bypass.
@@ -78,7 +78,8 @@ Lab offload support is intentionally command-specific:
 | Command | Auto offload | Explicit `--runner` | Decision |
 |---|---:|---:|---|
 | `agent-task cook` / `agent-task run-plan` | Yes | Yes | Portable agent-task execution when the command has deterministic gates where required. |
-| `agent-task controller from-spec --resume` / `agent-task controller materialize` / `agent-task controller resume` | No | Yes | Runner-hosted controller lifecycle work. |
+| `agent-task controller from-spec --resume` / `agent-task controller run-from-spec` / `agent-task controller materialize` | Yes | Yes | Portable controller spec materialization defaults to Lab when a default runner exists. |
+| `agent-task controller resume` | No | Yes | Runner-resident controller lifecycle work. |
 | `agent-task retry --run` | Yes | Yes | Retry plus execution follows the portable agent-task run path. |
 | `agent-task run` / `run-next` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |
 | `agent-task auth status` | No | Yes | Runner-resident auth diagnostics. |

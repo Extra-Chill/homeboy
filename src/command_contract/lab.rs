@@ -659,8 +659,11 @@ impl Commands {
                             | agent_task::AgentTaskControllerCommand::RunFromSpec(_)
                             | agent_task::AgentTaskControllerCommand::Materialize(_),
                     }),
-            }) => LabCommandContract::explicit_runner_simple(
+            }) => LabCommandContract::portable(
                 AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
+                None,
+                false,
+                LAB_NO_EXTRA_TOOLS,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
