@@ -343,6 +343,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertProviderCredentialBoundaryNamesOnly(request.inputs || {});
   const runtimeOptions = runtimeOptionsFromExecutorConfig(config, options);
   const inputs = request.inputs || {};
+  const clientContext = agentTaskClientContext(request, config, inputs, runtimeOptions);
+  const clientInputs = firstObject(clientContext.inputs) || {};
   const defaults = defaultCodeboxRuntimeConfig(request, config, inputs, runtimeOptions);
   const workspaceMaterialization = defaultWorkspaceMaterialization(defaults.workspaceRoot, request, config, inputs, runtimeOptions);
   const target = defaultWorkspaceTargetPayload(inputs.target || request.workspace || {}, workspaceMaterialization);
@@ -354,7 +356,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const provider = config.provider || runtimeOptions.provider || defaults.provider || '';
   const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
   const runtimeTask = runtimeTaskWithExecutionDefaults(
-    inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
+    inputs.runtime_task || inputs.runtimeTask || clientInputs.runtime_task || clientInputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
     { provider, model, agentBundles, runtimePackage: runtimePackageDefaultFromProfile(config, runtimeOptions) }
   );
   let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
@@ -390,6 +392,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const runtimeTaskAbilityNormalization = runtimeTaskAbilityNormalizationEvidence(runtimeTask);
   const context = {
+    ...clientContext,
+    ...(clientInputs.context || {}),
     ...(inputs.context || {}),
     agent_task_id: request.task_id,
     group_key: request.group_key,

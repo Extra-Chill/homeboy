@@ -838,6 +838,32 @@ assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.en
   concept_packet: 'outputs.typed_artifacts.concept_packet.payload',
 });
 
+const controllerClientContextRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'controller-client-context-runtime-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Run a controller workflow with hydrated runtime task input in client context.',
+  dispatch: {
+    client_context: JSON.stringify({
+      inputs: {
+        runtime_task: {
+          ability: 'runtime-package/run',
+          input: {
+            package: { slug: 'static-site-agent', source: 'bundles/static-site-agent' },
+            input: {
+              concept_packet: { payload: { title: 'Concept' } },
+              design_packet: { payload: { design_system: 'Editorial' } },
+            },
+          },
+        },
+      },
+    }),
+  },
+});
+assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.input.input.concept_packet.payload.title, 'Concept');
+assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.input.input.design_packet.payload.design_system, 'Editorial');
+
 const legacyRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'legacy-runtime-package-task-1',
