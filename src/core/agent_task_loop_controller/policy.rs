@@ -32,6 +32,13 @@ pub enum AgentTaskLoopPolicyAction {
         #[serde(default, skip_serializing_if = "Value::is_null")]
         request: Value,
     },
+    RunCommand {
+        dedupe_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        request: Value,
+    },
     FanOut {
         dedupe_key: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

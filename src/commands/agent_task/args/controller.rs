@@ -60,6 +60,22 @@ pub struct AgentTaskControllerFromSpecArgs {
     #[arg(long)]
     pub resume: bool,
 
+    /// Explicit controller run inputs JSON, @file, or - for stdin. Supports `inputs` and `metadata` objects.
+    #[arg(long, value_name = "JSON")]
+    pub inputs: Option<String>,
+
+    /// Declarative policy result JSON, @file, or - for stdin. Repeatable.
+    #[arg(long = "policy-result", value_name = "JSON")]
+    pub policy_results: Vec<String>,
+
+    /// Maximum controller actions to execute when --resume is supplied.
+    #[arg(
+        long = "max-actions",
+        visible_alias = "max-iterations",
+        value_name = "N"
+    )]
+    pub max_actions: Option<u32>,
+
     /// On --resume, discard stale persisted controller state and re-create it from this spec.
     #[arg(long, conflicts_with_all = ["fork", "resume_existing"])]
     pub replace: bool,

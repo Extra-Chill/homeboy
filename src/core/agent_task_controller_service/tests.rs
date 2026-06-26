@@ -3377,6 +3377,96 @@ fn run_failure_summary_falls_back_to_stopped_reason() {
     assert!(!summary.evidence_refs.is_empty());
 }
 
+#[test]
+fn run_command_workflow_executes_deterministic_artifact_action() {
+    with_isolated_home(|home| {
+        let spec = AgentTaskRepoLoopSpec {
+            schema: None,
+            loop_id: "repo-loop-command".to_string(),
+            phase: "init".to_string(),
+            config_version: "v1".to_string(),
+            metadata: Value::Null,
+            entities: Vec::new(),
+            agents: Vec::new(),
+            tools: Vec::new(),
+            abilities: Vec::new(),
+            workflows: vec![AgentTaskRepoLoopSpecWorkflow {
+                workflow_id: "deterministic-validation".to_string(),
+                agent_id: None,
+                prompt: None,
+                tasks: vec!["Run deterministic validation.".to_string()],
+                entity_ids: Vec::new(),
+                fan_out: None,
+                tools: Vec::new(),
+                abilities: Vec::new(),
+                artifacts: vec!["validation_result".to_string()],
+                consumes: Vec::new(),
+                emits: Vec::new(),
+                dependencies: Vec::new(),
+                gates: Vec::new(),
+                metrics: Vec::new(),
+                runtime_execution: json!({
+                    "kind": "command",
+                    "command": "/bin/sh",
+                    "args": ["-c", "printf '%s\n' '{\"artifacts\":{\"validation_result\":{\"schema\":\"example/ValidationResult/v1\",\"artifact_url\":\"artifact://validation-result\"}}}' > \"$HOMEBOY_LOOP_ACTION_OUTPUT\""]
+                }),
+                inputs: Value::Null,
+            }],
+            artifacts: vec![AgentTaskRepoLoopSpecArtifact {
+                artifact_id: "validation_result".to_string(),
+                kind: "example/ValidationResult/v1".to_string(),
+                description: None,
+                required: true,
+            }],
+            artifact_graph: Vec::new(),
+            dependencies: Vec::new(),
+            gates: Vec::new(),
+            metrics: Vec::new(),
+            gate_bundles: Vec::new(),
+            policy: None,
+            phases: Vec::new(),
+            actions: Vec::new(),
+            initial_event: None,
+        };
+
+        let initialized = init_from_spec(ControllerFromSpecRequest { spec }).expect("init");
+        match &initialized.actions[0].action {
+            AgentTaskLoopPolicyAction::RunCommand { request, .. } => {
+                assert_eq!(request["execution"]["kind"], "command");
+            }
+            other => panic!("expected run_command action, got {other:?}"),
+        }
+
+        let result = run_next(
+            "repo-loop-command",
+            CapturingExecutor::default(),
+            &CapturingDispatchHook::default(),
+        )
+        .expect("run command action");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.value.status.as_deref(), Some("completed"));
+        assert_eq!(
+            result.value.execution.as_ref().unwrap()["result"]["artifacts"]["validation_result"]
+                ["schema"],
+            "example/ValidationResult/v1"
+        );
+        assert_eq!(result.value.controller.task_lineage.len(), 1);
+        assert_eq!(
+            result.value.controller.task_lineage[0].outputs["artifacts"]["validation_result"]
+                ["artifact_url"],
+            "artifact://validation-result"
+        );
+        let persisted_artifact = home
+            .path()
+            .join(".local/share/homeboy/artifacts/agent-task-loop-controller/repo-loop-command/action-1/validation_result.json");
+        let persisted: Value = serde_json::from_str(
+            &std::fs::read_to_string(&persisted_artifact).expect("persisted controller artifact"),
+        )
+        .expect("persisted artifact json");
+        assert_eq!(persisted["schema"], "example/ValidationResult/v1");
+    });
+}
+
 fn plan_stage<'a>(plan: &'a HomeboyPlan, id: &str) -> &'a PlanStep {
     plan.steps
         .iter()
