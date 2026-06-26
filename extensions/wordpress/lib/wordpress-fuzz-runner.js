@@ -26,6 +26,7 @@ const { aggregateWordPressFuzzCoverage } = require('./wordpress-fuzz-coverage-ag
 
 const WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA = 'homeboy/wordpress-fuzz-runner-result/v1';
 const HOMEBOY_FUZZ_CAMPAIGN_SCHEMA = 'homeboy/fuzz-campaign/v1';
+const HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA = 'homeboy/fuzz-result-envelope/v1';
 const HOMEBOY_FUZZ_CONTRACT_VERSION = 1;
 
 function readWordPressFuzzRunnerEnv(env = process.env) {
@@ -119,7 +120,8 @@ function buildWordPressFuzzRunnerSummary({
 }) {
 	const coverage = aggregateCoverage(workload, codeboxResult);
 	const status = normalizeRunnerStatus(codeboxResult, coverage);
-	const homeboyFuzzCampaign = buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, status });
+	const homeboyFuzzResultEnvelope = buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, workload, plan, codeboxResult, status, runtimeTaskRequest, taskRequest });
+	const homeboyFuzzCampaign = buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, status, homeboyFuzzResultEnvelope });
 
 	return stripUndefined({
 		schema: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
@@ -143,6 +145,7 @@ function buildWordPressFuzzRunnerSummary({
 		observation_set: codeboxResult.observation_set,
 		hotspot_summary: codeboxResult.hotspot_summary || coverage?.hotspot_summary,
 		homeboy_fuzz_campaign: homeboyFuzzCampaign,
+		homeboy_fuzz_result_envelope: homeboyFuzzResultEnvelope,
 		metadata: objectOrUndefined(workload.metadata),
 	});
 }
@@ -389,7 +392,7 @@ function normalizeRunnerStatus(codeboxResult, coverage) {
 	return status;
 }
 
-function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, status }) {
+function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, status, homeboyFuzzResultEnvelope }) {
 	const diagnostics = normalizeArray(codeboxResult?.failures || codeboxResult?.metadata?.diagnostics || codeboxResult?.diagnostics);
 	return stripUndefined({
 		schema: HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
@@ -410,7 +413,114 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 			hotspot_summary: codeboxResult?.hotspot_summary,
 			observation: codeboxResult?.observation,
 			wordpress_fuzz_result: codeboxResult?.wordpress_fuzz_result,
+			fuzz_result_envelope: homeboyFuzzResultEnvelope,
 		}),
+	});
+}
+
+function buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, workload, plan, codeboxResult, status, runtimeTaskRequest, taskRequest }) {
+	const artifacts = normalizeArray(codeboxResult?.artifacts);
+	const requiredArtifacts = requiredFuzzArtifactStatuses({ artifacts, runtimeTaskRequest, taskRequest, workload });
+	const failures = normalizeArray(codeboxResult?.failures || codeboxResult?.metadata?.diagnostics || codeboxResult?.diagnostics);
+	return stripUndefined({
+		schema: HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA,
+		version: HOMEBOY_FUZZ_CONTRACT_VERSION,
+		id: codeboxResult?.request_id || runId,
+		status,
+		succeeded: codeboxResult?.succeeded,
+		campaign: stripUndefined({
+			id: runId,
+			workload_id: workloadId,
+			plan_id: plan?.id,
+			safety_class: deriveHomeboyFuzzSafetyClass(plan),
+			seed,
+			max_duration_seconds: maxDuration,
+			metadata: objectOrUndefined(workload?.metadata),
+		}),
+		result: stripUndefined({
+			provider: 'wp-codebox',
+			provider_result_schema: codeboxResult?.result_schema,
+			wordpress_fuzz_result: codeboxResult?.wordpress_fuzz_result,
+			observation: codeboxResult?.observation,
+			observation_set: codeboxResult?.observation_set,
+			hotspot_summary: codeboxResult?.hotspot_summary,
+		}),
+		artifacts,
+		gates: stripUndefined({
+			required_artifacts: requiredArtifacts.length > 0 ? requiredArtifacts : undefined,
+			failures: failures.length > 0 ? failures : undefined,
+		}),
+		dispatch: fuzzDispatchIdentity({ codeboxResult, runtimeTaskRequest, taskRequest }),
+	});
+}
+
+function requiredFuzzArtifactStatuses({ artifacts = [], runtimeTaskRequest = {}, taskRequest = {}, workload = {} } = {}) {
+	const declarations = dedupeRequiredArtifactDeclarations([
+		...normalizeArray(runtimeTaskRequest.artifact_declarations),
+		...normalizeArray(taskRequest.artifact_declarations),
+		...normalizeArray(workload?.artifacts?.expected),
+		...normalizeArray(workload?.artifacts?.required),
+		...normalizeArray(workload?.cases).flatMap((entry) => normalizeArray(entry?.artifacts).filter((artifact) => artifact?.required === true)),
+	]);
+	return declarations.map((declaration) => stripUndefined({
+		name: declaration.name,
+		role: declaration.role || declaration.kind,
+		semantic_key: declaration.semantic_key || declaration.semanticKey || declaration.metadata?.semantic_key,
+		schema: declaration.schema || declaration.metadata?.schema,
+		path: declaration.path,
+		required: declaration.required !== false,
+		status: artifacts.some((artifact) => fuzzArtifactMatchesDeclaration(artifact, declaration)) ? 'present' : 'missing',
+	}));
+}
+
+function dedupeRequiredArtifactDeclarations(declarations = []) {
+	const seen = new Set();
+	return declarations.filter((declaration) => {
+		if (!objectOrUndefined(declaration)) {
+			return false;
+		}
+		if (declaration.required === false) {
+			return false;
+		}
+		const key = [
+			declaration.name,
+			declaration.path,
+			declaration.semantic_key || declaration.semanticKey || declaration.metadata?.semantic_key,
+			declaration.schema || declaration.metadata?.schema,
+		].filter(Boolean).join(':');
+		if (!key || seen.has(key)) {
+			return false;
+		}
+		seen.add(key);
+		return true;
+	});
+}
+
+function fuzzArtifactMatchesDeclaration(artifact = {}, declaration = {}) {
+	const declarationSemanticKey = declaration.semantic_key || declaration.semanticKey || declaration.metadata?.semantic_key;
+	const artifactSemanticKey = artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key;
+	const declarationSchema = declaration.schema || declaration.metadata?.schema;
+	const artifactSchema = artifact.schema || artifact.metadata?.schema;
+	return Boolean(
+		(declaration.name && artifact.name === declaration.name)
+		|| (declaration.path && artifact.path === declaration.path)
+		|| (declarationSemanticKey && artifactSemanticKey === declarationSemanticKey)
+		|| (declarationSchema && artifactSchema === declarationSchema)
+	);
+}
+
+function fuzzDispatchIdentity({ codeboxResult = {}, runtimeTaskRequest = {}, taskRequest = {} } = {}) {
+	const runtimeTaskResult = objectOrUndefined(codeboxResult.runtime_task_result) || {};
+	const provider = runtimeTaskResult.provider || runtimeTaskRequest.provider;
+	const taskId = runtimeTaskResult.task_id || runtimeTaskRequest.task_id || taskRequest.task_id || codeboxResult.request_id;
+	if (!taskId && !provider?.id && !taskRequest.executor?.runtime) {
+		return undefined;
+	}
+	return stripUndefined({
+		task_id: taskId,
+		provider: provider?.id || provider,
+		runtime: taskRequest.executor?.runtime || runtimeTaskRequest.provider_metadata?.wp_codebox?.runtime,
+		ability: taskRequest.executor?.config?.runtime_task?.ability || runtimeTaskRequest.provider_metadata?.wp_codebox?.ability,
 	});
 }
 
@@ -555,6 +665,7 @@ function stripUndefined(value) {
 
 module.exports = {
 	HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
+	HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA,
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 	buildWordPressFuzzRunnerResult,
 	runWordPressFuzzRunnerResult,

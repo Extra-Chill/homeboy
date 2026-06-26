@@ -28,6 +28,7 @@ Module._load = function loadWithoutRuntimeAgentCi(request, parent, isMain) {
 
 const {
 	HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
+	HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA,
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 	buildWordPressFuzzRunnerResult,
 	runWordPressFuzzRunnerResult,
@@ -101,6 +102,18 @@ assert.equal(result.homeboy_fuzz_campaign.safety_class, 'read_only');
 assert.equal(result.homeboy_fuzz_campaign.metadata.status, 'unsupported');
 assert.equal(result.homeboy_fuzz_campaign.metadata.wp_codebox_result_schema, 'wp-codebox/fuzz-suite-result/v1');
 assert.equal(result.homeboy_fuzz_campaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
+assert.equal(result.homeboy_fuzz_result_envelope.schema, HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA);
+assert.equal(result.homeboy_fuzz_result_envelope.version, 1);
+assert.equal(result.homeboy_fuzz_result_envelope.id, 'run-from-env');
+assert.equal(result.homeboy_fuzz_result_envelope.campaign.id, 'run-from-env');
+assert.equal(result.homeboy_fuzz_result_envelope.campaign.workload_id, 'workload-from-env');
+assert.equal(result.homeboy_fuzz_result_envelope.campaign.plan_id, 'generic-wordpress-plan');
+assert.equal(result.homeboy_fuzz_result_envelope.campaign.seed, 'seed-123');
+assert.equal(result.homeboy_fuzz_result_envelope.campaign.max_duration_seconds, 30);
+assert.equal(result.homeboy_fuzz_result_envelope.gates.required_artifacts.some((artifact) => artifact.name === 'result-envelope' && artifact.status === 'present'), true);
+assert.equal(result.homeboy_fuzz_result_envelope.gates.required_artifacts.some((artifact) => artifact.name === 'wordpress-fuzz-coverage' && artifact.status === 'missing'), true);
+assert.equal(result.homeboy_fuzz_result_envelope.dispatch.task_id, 'run-from-env');
+assert.equal(result.homeboy_fuzz_campaign.metadata.fuzz_result_envelope.schema, HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA);
 assert.equal(result.observation.schema, 'homeboy/wordpress-fuzz-observation/v1');
 assert.equal(result.homeboy_fuzz_campaign.metadata.observation.schema, 'homeboy/wordpress-fuzz-observation/v1');
 assert(!JSON.stringify(result).includes('woocommerce'), 'WordPress fuzz runner must stay product-agnostic');
@@ -128,6 +141,8 @@ assert.equal(executedResult.status, 'succeeded');
 assert.equal(executedResult.succeeded, true);
 assert.equal(executedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'artifacts/replay.json');
 assert.equal(executedResult.homeboy_fuzz_campaign.artifacts.some((artifact) => artifact.id === 'result-envelope' && artifact.kind === 'result_envelope'), true);
+assert.equal(executedResult.homeboy_fuzz_result_envelope.artifacts[0].path, 'artifacts/replay.json');
+assert.equal(executedResult.homeboy_fuzz_result_envelope.gates.required_artifacts.find((artifact) => artifact.name === 'result-envelope').status, 'present');
 assert.equal(executedResult.observation.status, 'succeeded');
 
 const mutatingPlanResult = buildWordPressFuzzRunnerResult({
@@ -469,6 +484,8 @@ assert.equal(homeboyCampaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
 assert.equal(homeboyCampaign.version, 1);
 assert.equal(homeboyCampaign.id, 'cli-run');
 assert.equal(homeboyCampaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
+assert.equal(homeboyCampaign.metadata.fuzz_result_envelope.schema, HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA);
+assert.equal(homeboyCampaign.metadata.fuzz_result_envelope.campaign.workload_id, 'cli-workload');
 
 const fakeCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-wp-codebox.js');
 const emptyCodeboxInstallRoot = path.join(tempDir, 'empty-wp-codebox-install');
