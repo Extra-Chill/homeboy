@@ -1,6 +1,7 @@
 'use strict';
 
 const { AGENT_TASK_OUTCOME_SCHEMA } = require('../../agent-task-contracts/agent-task-provider-contract');
+const { normalizeAgentTaskOutcomeStatus } = require('./runtime-status.cjs');
 
 const TERMINAL_FAILURE_STATUSES = ['failed', 'provider_error', 'timeout', 'unable_to_remediate'];
 const SUCCESS_STATUSES = ['succeeded', 'no_op', 'follow_up_issue'];
@@ -59,59 +60,14 @@ function normalizeAgentTaskStatus(result = {}, options = {}) {
   const explicitStatus = options.status;
   const resultStatus = result && typeof result === 'object' ? result.status : undefined;
 
-  if (TERMINAL_FAILURE_STATUSES.includes(resultStatus)) {
-    return resultStatus;
-  }
-  if (result?.provider_error) {
-    return 'provider_error';
-  }
-  if (result?.timeout) {
-    return 'timeout';
-  }
-  if (result?.unable_to_remediate) {
-    return 'unable_to_remediate';
-  }
-  if (result?.success === false || exitStatus !== 0) {
-    return 'failed';
-  }
   if (TERMINAL_FAILURE_STATUSES.includes(explicitStatus)) {
     return explicitStatus;
   }
-  if (explicitStatus) {
-    return explicitStatus;
-  }
-  return normalizeProviderStatus(result, exitStatus);
+  return normalizeAgentTaskOutcomeStatus({ ...result, status: explicitStatus || resultStatus }, { exitStatus });
 }
 
 function normalizeProviderStatus(result = {}, exitStatus = 0) {
-  if (TERMINAL_FAILURE_STATUSES.includes(result.status)) {
-    return result.status;
-  }
-  if (result.provider_error) {
-    return 'provider_error';
-  }
-  if (result.timeout) {
-    return 'timeout';
-  }
-  if (result.unable_to_remediate) {
-    return 'unable_to_remediate';
-  }
-  if (result.success === false || exitStatus !== 0) {
-    return 'failed';
-  }
-  if (result.status === 'completed') {
-    return 'succeeded';
-  }
-  if (result.status === 'succeeded' || result.status === 'no_op') {
-    return result.status;
-  }
-  if (result.outcome === 'no_op' || result.no_op) {
-    return 'no_op';
-  }
-  if (result.success === true) {
-    return 'succeeded';
-  }
-  return Object.keys(result || {}).length > 0 ? 'provider_error' : 'failed';
+  return normalizeAgentTaskOutcomeStatus(result, { exitStatus });
 }
 
 function providerFailureClassification(classification, status) {

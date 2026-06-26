@@ -3,6 +3,15 @@
 const path = require('node:path');
 
 const ARTIFACT_PATHS_SCHEMA = 'homeboy/runtime-agent-artifact-paths/v1';
+const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
+  events: 'events.json',
+  status: 'status.json',
+  results: 'results.json',
+  outcome: 'outcome.json',
+  fanout_run: 'fanout-run.json',
+  loop_result: 'loop-result.json',
+  loop_policy: 'loop-policy.json',
+});
 
 function runtimeAgentArtifactPaths(options = {}) {
   const provided = options.artifact_paths && typeof options.artifact_paths === 'object' && !Array.isArray(options.artifact_paths) ? options.artifact_paths : {};
@@ -27,15 +36,19 @@ function runtimeAgentArtifactPaths(options = {}) {
   return stripUndefined({
     schema: ARTIFACT_PATHS_SCHEMA,
     run_dir: runDir,
-    events: firstString(provided.events, options.eventsFile, options.events_file, options.env?.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE, runDir ? path.join(runDir, 'events.json') : ''),
-    status: firstString(provided.status, options.statusFile, options.status_file, options.env?.HOMEBOY_RUNTIME_AGENT_STATUS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_STATUS_FILE, runDir ? path.join(runDir, 'status.json') : ''),
-    results: firstString(provided.results, options.resultsFile, options.results_file, options.env?.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE, runDir ? path.join(runDir, 'results.json') : ''),
-    outcome: firstString(provided.outcome, options.outcomeFile, options.outcome_file, options.env?.HOMEBOY_AGENT_TASK_OUTCOME_FILE, process.env.HOMEBOY_AGENT_TASK_OUTCOME_FILE, runDir ? path.join(runDir, 'outcome.json') : ''),
+    events: firstString(provided.events, options.eventsFile, options.events_file, options.env?.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE, runArtifactPath(runDir, 'events')),
+    status: firstString(provided.status, options.statusFile, options.status_file, options.env?.HOMEBOY_RUNTIME_AGENT_STATUS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_STATUS_FILE, runArtifactPath(runDir, 'status')),
+    results: firstString(provided.results, options.resultsFile, options.results_file, options.env?.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE, runArtifactPath(runDir, 'results')),
+    outcome: firstString(provided.outcome, options.outcomeFile, options.outcome_file, options.env?.HOMEBOY_AGENT_TASK_OUTCOME_FILE, process.env.HOMEBOY_AGENT_TASK_OUTCOME_FILE, runArtifactPath(runDir, 'outcome')),
     stderr: firstString(provided.stderr, options.stderrFile, options.stderr_file, options.env?.HOMEBOY_RUNTIME_AGENT_STDERR_FILE, process.env.HOMEBOY_RUNTIME_AGENT_STDERR_FILE),
-    fanout_run: firstString(provided.fanout_run, provided.fanoutRun, options.fanoutRunFile, options.fanout_run_file, options.runsOutputPath, options.runs_output_path, options.env?.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, process.env.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, runDir ? path.join(runDir, 'fanout-run.json') : ''),
-    loop_result: firstString(provided.loop_result, provided.loopResult, options.loopResultFile, options.loop_result_file, options.resultFile, options.result_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, runDir ? path.join(runDir, 'loop-result.json') : ''),
-    loop_policy: firstString(provided.loop_policy, provided.loopPolicy, options.loopPolicyFile, options.loop_policy_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, runDir ? path.join(runDir, 'loop-policy.json') : ''),
+    fanout_run: firstString(provided.fanout_run, provided.fanoutRun, options.fanoutRunFile, options.fanout_run_file, options.runsOutputPath, options.runs_output_path, options.env?.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, process.env.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, runArtifactPath(runDir, 'fanout_run')),
+    loop_result: firstString(provided.loop_result, provided.loopResult, options.loopResultFile, options.loop_result_file, options.resultFile, options.result_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, runArtifactPath(runDir, 'loop_result')),
+    loop_policy: firstString(provided.loop_policy, provided.loopPolicy, options.loopPolicyFile, options.loop_policy_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, runArtifactPath(runDir, 'loop_policy')),
   });
+}
+
+function runArtifactPath(runDir, key) {
+  return runDir && CANONICAL_RUN_ARTIFACT_FILES[key] ? path.join(runDir, CANONICAL_RUN_ARTIFACT_FILES[key]) : '';
 }
 
 function firstString(...values) {
@@ -53,5 +66,6 @@ function stripUndefined(value) {
 
 module.exports = {
   ARTIFACT_PATHS_SCHEMA,
+  CANONICAL_RUN_ARTIFACT_FILES,
   runtimeAgentArtifactPaths,
 };

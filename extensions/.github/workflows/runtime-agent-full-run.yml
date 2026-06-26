@@ -572,10 +572,13 @@ jobs:
           PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
           PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
           PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
-          HOMEBOY_RUNTIME_AGENT_RESULTS_FILE: ${{ runner.temp }}/run-results.json
-          HOMEBOY_AGENT_TASK_OUTCOME_FILE: ${{ runner.temp }}/agent-task-outcome.json
-          HOMEBOY_RUNTIME_AGENT_EVENTS_FILE: ${{ runner.temp }}/runtime-agent-events.json
-          HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE: ${{ runner.temp }}/runtime-agent-loop-result.json
+          HOMEBOY_RUNTIME_AGENT_RUN_DIR: ${{ runner.temp }}/runtime-agent-run
+          HOMEBOY_RUNTIME_AGENT_RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
+          HOMEBOY_AGENT_TASK_OUTCOME_FILE: ${{ runner.temp }}/runtime-agent-run/outcome.json
+          HOMEBOY_RUNTIME_AGENT_EVENTS_FILE: ${{ runner.temp }}/runtime-agent-run/events.json
+          HOMEBOY_RUNTIME_AGENT_STATUS_FILE: ${{ runner.temp }}/runtime-agent-run/status.json
+          HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE: ${{ runner.temp }}/runtime-agent-run/loop-result.json
+          HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE: ${{ runner.temp }}/runtime-agent-run/loop-policy.json
           HOMEBOY_RUNTIME_AGENT_REPLAY_BUNDLE_DIR: ${{ inputs.replay_bundle_artifact_name != '' && format('{0}/runtime-agent-replay-bundles', runner.temp) || '' }}
         run: node .ci/homeboy-extensions/runtime-agent-ci/scripts/run-headless-loop.cjs --spec "${{ steps.config.outputs.config_path }}" ${{ inputs.dry_run && '--dry-run' || '' }}
 
@@ -584,7 +587,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
           CONFIG_FILE: ${{ steps.config.outputs.config_path }}
         run: |
           set -euo pipefail
@@ -598,7 +601,7 @@ jobs:
         id: extract
         if: ${{ always() && inputs.run_agent && ! inputs.dry_run }}
         env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
         run: |
           set -euo pipefail
           bash .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/extract-engine-data.sh \
@@ -614,7 +617,7 @@ jobs:
         if: ${{ always() && inputs.run_agent && ! inputs.dry_run }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
           CONFIG_FILE: ${{ steps.config.outputs.config_path }}
         run: |
           set -euo pipefail
@@ -627,7 +630,7 @@ jobs:
         id: extract_dry_run
         if: ${{ always() && inputs.run_agent && inputs.dry_run }}
         env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
         run: |
           set -euo pipefail
           bash .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/extract-engine-data.sh \
@@ -644,7 +647,7 @@ jobs:
         id: engine-data
         if: ${{ inputs.run_agent }}
         env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
           ENGINE_DATA_OUTPUTS: ${{ inputs.engine_data_outputs }}
           RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
           FLOW_SLUG: ${{ inputs.workload_id }}
@@ -660,7 +663,7 @@ jobs:
       - name: Assert success
         if: ${{ inputs.run_agent && ! inputs.dry_run }}
         env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
           FLOW_SLUG: ${{ inputs.workload_id }}
           SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
         run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/assert-success.cjs
@@ -669,7 +672,7 @@ jobs:
         id: transcript-artifact
         if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' && (steps.extract.outputs.transcript_json != '' || steps.extract_dry_run.outputs.transcript_json != '') }}
         env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
           FLOW_SLUG: ${{ inputs.workload_id }}
           TRANSCRIPT_JSON: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json }}
           TRANSCRIPT_HOST_DIR: ${{ steps.config.outputs.transcript_host_dir }}
@@ -689,9 +692,12 @@ jobs:
         with:
           name: ${{ inputs.transcript_artifact_name }}-results
           path: |
-            ${{ runner.temp }}/run-results.json
-            ${{ runner.temp }}/runtime-agent-events.json
-            ${{ runner.temp }}/runtime-agent-loop-result.json
+            ${{ runner.temp }}/runtime-agent-run/status.json
+            ${{ runner.temp }}/runtime-agent-run/outcome.json
+            ${{ runner.temp }}/runtime-agent-run/results.json
+            ${{ runner.temp }}/runtime-agent-run/events.json
+            ${{ runner.temp }}/runtime-agent-run/loop-result.json
+            ${{ runner.temp }}/runtime-agent-run/loop-policy.json
           if-no-files-found: warn
 
       - name: Upload replay bundle artifact

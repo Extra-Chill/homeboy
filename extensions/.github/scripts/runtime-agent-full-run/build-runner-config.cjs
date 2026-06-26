@@ -13,7 +13,7 @@ const {
   splitCsv,
   writeGithubOutput,
 } = require('./lib/common.cjs');
-const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
+const { resolveRuntimeProvider, runtimeIdFromOptions } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const {
   runtimeAgentCiFirstNonEmptyArray,
   runtimeAgentCiFirstNonEmptyObject,
@@ -37,7 +37,7 @@ function buildConfig(env) {
   const targetRepo = required(env.TARGET_REPO, 'TARGET_REPO');
   const componentId = env.COMPONENT_ID || path.basename(workspace);
   const componentPath = env.COMPONENT_PATH || workspace;
-  const runtimeId = env.RUNTIME || env.RUNTIME_PROVIDER || env.BACKEND || DEFAULT_RUNTIME_ID;
+  const runtimeId = runtimeIdFromOptions({}, env);
   const runtimeProfile = required(env.PROFILE || env.RUNTIME_PROFILE, 'PROFILE or RUNTIME_PROFILE');
   const runtimeProfiles = parseJsonInput('runtime_profiles', env.RUNTIME_PROFILES || '{}', 'object', {});
   const runtime = resolveRuntimeProvider(runtimeId, { workspace, env });

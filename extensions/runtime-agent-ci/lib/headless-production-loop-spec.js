@@ -1,21 +1,5 @@
 'use strict';
 
-const PROVIDER_DEFAULT_SECRET_ENV = Object.freeze({
-  codex: [
-    'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
-    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
-    'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
-    'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
-    'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
-  ],
-  openai: ['OPENAI_API_KEY'],
-  'claude-code': [
-    'AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN',
-    'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
-    'AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT',
-  ],
-});
-
 function materializeHeadlessProductionLoopSpec(spec = {}, options = {}) {
   const base = requiredObject(spec, 'spec');
   const overrides = runtimeOverrides(options);
@@ -68,12 +52,19 @@ function runtimeOverrides(options = {}) {
 }
 
 function secretEnvOverrides(options = {}, provider = '') {
-  return arrayValue(options.secretEnv || options.secret_env) || providerDefaultSecretEnv(provider);
+  return arrayValue(options.secretEnv || options.secret_env) || providerDefaultSecretEnv(provider, options.runtime || options.runtime_manifest || options.runtimeManifest);
 }
 
-function providerDefaultSecretEnv(provider = '') {
-  const names = PROVIDER_DEFAULT_SECRET_ENV[String(provider || '').trim()];
-  return names ? [...names] : undefined;
+function providerDefaultSecretEnv(provider = '', runtime = {}) {
+  const defaults = runtime?.executor?.provider_defaults?.[provider] || runtime?.provider_defaults?.[provider];
+  if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) {
+    return undefined;
+  }
+  return uniqueStrings([
+    ...(arrayValue(defaults.secret_env) || []),
+    ...(arrayValue(defaults.required_secret_env) || []),
+    ...(arrayValue(defaults.optional_secret_env) || []),
+  ]);
 }
 
 function loopTasks(spec) {
@@ -129,6 +120,10 @@ function objectValue(value) {
 
 function arrayValue(value) {
   return Array.isArray(value) && value.length > 0 ? value : undefined;
+}
+
+function uniqueStrings(values) {
+  return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.length > 0))).sort();
 }
 
 function optionalObject(value) {

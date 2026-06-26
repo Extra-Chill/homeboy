@@ -12,7 +12,7 @@ const {
   genericAgentTaskRunnerSpec,
   normalizeRuntimeExecutionDescriptor,
 } = require('./generic-agent-task-plan');
-const { normalizeRuntimeId, resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
+const { normalizeRuntimeId, resolveRuntimeProvider, runtimeIdFromOptions } = require('./runtime-provider-resolver.cjs');
 const {
   expandAgentTaskCapabilityBundles,
   expandAgentTaskToolPresets,
@@ -67,7 +67,7 @@ function runtimeAgentCiAbilityTaskRequest(options = {}, context = {}) {
 function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
   const taskExecutorConfig = context.taskExecutorConfig || runtimeAgentCiTaskExecutorConfig;
   const config = taskExecutorConfig(options);
-  const runtime = options.runtime || options.runtimeId || options.runtime_id || options.runtimeProvider || options.runtime_provider;
+  const runtime = runtimeIdFromOptions(options, {});
   const normalizedRuntime = runtime ? normalizeRuntimeId(runtime) : runtime;
   return genericAgentTaskRunnerSpec({
     backend: options.backend || options.runtimeBackend || options.runtime_backend || runtimeBackendForRuntime(normalizedRuntime),
@@ -92,7 +92,7 @@ function runtimeBackendForRuntime(runtime) {
 
 function runtimeAgentCiTaskExecutorConfig(options = {}) {
   const runtimeProfile = resolveRuntimeAgentCiRuntimeProfile(options);
-  const runtimeProvider = options.runtime || options.runtimeId || options.runtime_id || options.runtimeProvider || options.runtime_provider;
+  const runtimeId = runtimeIdFromOptions(options, {});
   const runtimeExecution = normalizeRuntimeExecutionDescriptor(options.runtimeExecution || options.runtime_execution, runtimeProfile);
   const runtimeTaskInput = runtimeExecution?.input || options.abilityInput || options.ability_input || {};
   const workload = nonEmptyObject(options.workload);
@@ -113,7 +113,7 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     ...(options.config || {}),
     provider: options.provider,
     model: options.model,
-    runtime_provider: runtimeProvider ? normalizeRuntimeId(runtimeProvider) : runtimeProvider,
+    runtime_id: runtimeId ? normalizeRuntimeId(runtimeId) : runtimeId,
     runtime_profile: runtimeProfile.id,
     runtime_profiles: runtimeProfilesForOptions(options, runtimeProfile),
     runtime_component_paths: options.runtimeComponentPaths || options.runtime_component_paths,
@@ -146,7 +146,6 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     runtime_config_mounts: options.runtimeConfigMounts || options.runtime_config_mounts,
     runtime_state_mounts: options.runtimeStateMounts || options.runtime_state_mounts,
     provider_runtime_invocation: nonEmptyObject(providerRuntimeInvocation),
-    runtime_id: options.runtimeId || options.runtime_id,
     runtime_bin: options.runtimeBin || options.runtime_bin,
   });
 }

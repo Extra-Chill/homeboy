@@ -89,6 +89,28 @@ function normalizeRuntimeId(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 	return runtimeAliasMap(options.registry || runtimeRegistry(options))[id]?.replacement || id;
 }
 
+function runtimeIdFromOptions(options = {}, env = process.env) {
+	return firstString(
+		options.runtimeId,
+		options.runtime_id,
+		options.runtime,
+		env.RUNTIME_ID,
+		env.RUNTIME,
+		legacyRuntimeIdFromOptions(options, env),
+		DEFAULT_RUNTIME_ID
+	);
+}
+
+function legacyRuntimeIdFromOptions(options = {}, env = process.env) {
+	return firstString(
+		options.runtimeProvider,
+		options.runtime_provider,
+		options.backend,
+		env.RUNTIME_PROVIDER,
+		env.BACKEND
+	);
+}
+
 function runtimeIdAliasDeprecation(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 	const id = runtimeId || DEFAULT_RUNTIME_ID;
 	return runtimeAliasMap(options.registry || runtimeRegistry(options))[id] || null;
@@ -448,6 +470,7 @@ module.exports = {
 	DEFAULT_RUNTIME_ID,
 	manifestRuntimeAliases,
 	normalizeRuntimeId,
+	runtimeIdFromOptions,
 	runtimeIdAliasDeprecation,
 	resolveRuntimeProvider,
 	runtimeManifestPath,

@@ -740,6 +740,14 @@ function writeGenericAgentLoopArtifacts(options = {}) {
   if (artifactPaths.results) {
     writeJsonFile(artifactPaths.results, options.results);
   }
+  if (artifactPaths.status) {
+    writeJsonFile(artifactPaths.status, {
+      schema: 'homeboy/runtime-agent-status/v1',
+      task_id: options.outcome?.task_id || options.request?.task_id || '',
+      status: options.outcome?.status || 'failed',
+      success: ['succeeded', 'no_op'].includes(options.outcome?.status),
+    });
+  }
 }
 
 function genericAgentLoopStdoutSummary(options = {}) {
