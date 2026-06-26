@@ -725,6 +725,7 @@ mod tests {
         assert!(surface.contains_path(&["doctor", "resources"]));
         assert!(surface.contains_path(&["ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
+        assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
         assert!(surface.contains_path(&["observe"]));
     }
 
@@ -737,6 +738,7 @@ mod tests {
         assert!(surface.contains_path(&["doctor", "resources"]));
         assert!(surface.contains_path(&["ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
+        assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
         assert!(surface.contains_path(&["observe"]));
     }
 

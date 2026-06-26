@@ -154,6 +154,7 @@ pub enum RunsOutput {
     ArtifactAttach(RunsArtifactAttachOutput),
     ArtifactGet(RunsArtifactGetOutput),
     ArtifactPreview(RunsArtifactPreviewOutput),
+    ArtifactCapture(RunsArtifactCaptureOutput),
     ArtifactCleanupDownloads(RunsArtifactCleanupDownloadsOutput),
     ArtifactCleanupPersisted(RunsArtifactCleanupPersistedOutput),
     Findings(RunsFindingsOutput),
@@ -223,6 +224,8 @@ pub(super) enum RunsArtifactCommand {
     Get(RunsArtifactGetArgs),
     /// Serve a recorded directory artifact with a local static preview URL
     Preview(RunsArtifactPreviewArgs),
+    /// Capture generated HTML entrypoint screenshots from a recorded directory artifact
+    Capture(RunsArtifactCaptureArgs),
     /// Plan or delete locally cached runner artifact downloads
     CleanupDownloads(RunsArtifactCleanupDownloadsArgs),
     /// Plan or delete persisted local run artifacts and their database records
@@ -298,6 +301,69 @@ pub struct RunsArtifactPreviewOutput {
     pub process_id: u32,
     pub entrypoints: Vec<ArtifactPreviewEntrypoint>,
     pub stop_hint: String,
+}
+
+#[derive(Args, Clone)]
+pub struct RunsArtifactCaptureArgs {
+    /// Observation run id that owns the artifact
+    pub run_id: String,
+    /// Directory artifact id/path token from `homeboy runs artifacts <run-id>`
+    pub artifact_id: String,
+    /// HTML path inside the directory artifact. Repeat for multiple pages.
+    #[arg(long = "entrypoint", required = true)]
+    pub entrypoints: Vec<String>,
+    /// Directory where screenshots and capture-manifest.json should be written
+    #[arg(long)]
+    pub output_dir: PathBuf,
+    /// Local loopback port. Defaults to an available ephemeral port.
+    #[arg(long)]
+    pub port: Option<u16>,
+    /// Browser viewport width in CSS pixels
+    #[arg(long, default_value_t = 1280)]
+    pub viewport_width: u32,
+    /// Browser viewport height in CSS pixels
+    #[arg(long, default_value_t = 720)]
+    pub viewport_height: u32,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactCaptureOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub artifact_path: String,
+    pub output_dir: String,
+    pub manifest_path: String,
+    pub base_url: String,
+    pub viewport: RunsArtifactCaptureViewport,
+    pub browser: RunsArtifactCaptureBrowser,
+    pub pages: Vec<RunsArtifactCapturePage>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct RunsArtifactCaptureViewport {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactCaptureBrowser {
+    pub command: String,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactCapturePage {
+    pub entrypoint: String,
+    pub page_url: String,
+    pub screenshot_path: String,
+    pub viewport: RunsArtifactCaptureViewport,
+    pub status: String,
+    pub timing_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Args, Clone, Default)]

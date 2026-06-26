@@ -1,6 +1,5 @@
 //! Component resolution plus build, extension, and stack pipeline steps.
 
-use super::super::expand::expand_vars;
 use super::super::spec::{ComponentSpec, RigSpec, StackOp};
 use super::super::stack as rig_stack;
 use crate::core::component::Component;
@@ -20,22 +19,12 @@ pub(super) fn resolve_component_path(
             ),
         )
     })?;
-    let path = expand_vars(rig, &component.path);
+    let path = super::super::resolve_component_path(rig, component_id)?;
     Ok((component.clone(), path))
 }
 
 fn resolve_rig_component(rig: &RigSpec, component_id: &str) -> Result<Component> {
-    let (component, path) = resolve_component_path(rig, component_id)?;
-    let mut resolved = Component {
-        id: component_id.to_string(),
-        local_path: path,
-        remote_url: component.remote_url,
-        triage_remote_url: component.triage_remote_url,
-        extensions: component.extensions,
-        ..Component::default()
-    };
-    resolved.resolve_remote_path();
-    Ok(resolved)
+    super::super::resolve_component(rig, component_id)
 }
 
 pub(super) fn run_build_step(rig: &RigSpec, component_id: &str) -> Result<()> {

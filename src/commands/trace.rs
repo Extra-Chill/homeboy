@@ -1374,11 +1374,7 @@ fn resolve_component_id(
 }
 
 fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<String> {
-    let component = spec.components.get(component_id)?;
-    Some(homeboy::core::rig::expand::expand_vars(
-        spec,
-        &component.path,
-    ))
+    homeboy::core::rig::resolve_component_path(spec, component_id).ok()
 }
 
 fn rig_component_for_trace(spec: &RigSpec, component_id: &str) -> Option<Component> {
@@ -1389,19 +1385,18 @@ fn rig_component_for_trace(spec: &RigSpec, component_id: &str) -> Option<Compone
             .entry(extension_id)
             .or_insert_with(ScopedExtensionConfig::default);
     }
-    Some(Component {
-        id: component_id.to_string(),
-        local_path: rig_component_path(spec, component_id)
-            .unwrap_or_else(|| component.path.clone()),
-        remote_url: component.remote_url.clone(),
-        triage_remote_url: component.triage_remote_url.clone(),
-        extensions: if extensions.is_empty() {
-            None
-        } else {
-            Some(extensions)
-        },
-        ..Default::default()
-    })
+    let mut resolved = homeboy::core::rig::resolve_component(spec, component_id).ok()?;
+    resolved.remote_url = component.remote_url.clone().or(resolved.remote_url);
+    resolved.triage_remote_url = component
+        .triage_remote_url
+        .clone()
+        .or(resolved.triage_remote_url);
+    resolved.extensions = if extensions.is_empty() {
+        None
+    } else {
+        Some(extensions)
+    };
+    Some(resolved)
 }
 
 /// Re-exported from core so existing CLI call sites keep using the

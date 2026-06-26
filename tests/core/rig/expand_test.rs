@@ -53,12 +53,15 @@ fn test_expand_vars_component_path() {
         "studio".to_string(),
         ComponentSpec {
             path: "/tmp/studio".to_string(),
+            component_id: None,
+            path_setting: None,
             checkout_root: None,
             remote_url: None,
             triage_remote_url: None,
             stack: None,
             branch: None,
             r#ref: None,
+            default_ref: None,
             extensions: None,
         },
     );
@@ -94,12 +97,15 @@ fn test_expand_vars_package_root_from_installed_source_metadata() {
             "studio-web".to_string(),
             ComponentSpec {
                 path: "${package.root}".to_string(),
+                component_id: None,
+                path_setting: None,
                 checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
                 r#ref: None,
+                default_ref: None,
                 extensions: None,
             },
         );
@@ -150,12 +156,15 @@ fn test_expand_resources_expands_string_entries() {
             "studio".to_string(),
             ComponentSpec {
                 path: "~/Developer/studio".to_string(),
+                component_id: None,
+                path_setting: None,
                 checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
                 r#ref: None,
+                default_ref: None,
                 extensions: None,
             },
         );
