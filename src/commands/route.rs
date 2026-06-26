@@ -33,6 +33,20 @@ pub fn route_after_parse(
     }
 
     if let (Some(runner_id), Commands::Rig(args)) = (cli.runner.as_deref(), &cli.command) {
+        if let Some(rig_id) = args.up_dry_run_rig_id() {
+            let (output, exit_code) = crate::commands::rig::up_runner_exec_plan(rig_id, runner_id)?;
+            let stdout = serde_json::to_string_pretty(&output).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("serialize rig up runner exec plan".to_string()),
+                )
+            })?;
+            if let Some(path) = output_file {
+                write_output_file(path, &stdout)?;
+            }
+            println!("{stdout}");
+            return Ok(Some(exit_code));
+        }
         if args.is_runner_source_management_command() {
             let (stdout, stderr, exit_code) =
                 run_rig_source_management_on_runner(runner_id, normalized_args, output_file)?;
@@ -732,6 +746,31 @@ mod tests {
         .expect("write rig source metadata");
     }
 
+    fn write_command_only_rig(home: &Path, rig_id: &str) {
+        let rigs_dir = home.join(".config").join("homeboy").join("rigs");
+        fs::create_dir_all(&rigs_dir).expect("create rigs dir");
+        let spec = serde_json::json!({
+            "id": rig_id,
+            "description": "command-only rig",
+            "pipeline": {
+                "up": [
+                    {
+                        "kind": "command",
+                        "command": "./scripts/run-matrix.sh",
+                        "cwd": "tools",
+                        "env": { "MATRIX": "portable" },
+                        "label": "run matrix"
+                    }
+                ]
+            }
+        });
+        fs::write(
+            rigs_dir.join(format!("{rig_id}.json")),
+            serde_json::to_string_pretty(&spec).expect("serialize rig"),
+        )
+        .expect("write rig");
+    }
+
     #[test]
     fn non_lab_command_continues_local_dispatch() {
         let cli = Cli::parse_from(["homeboy", "status"]);
@@ -769,6 +808,38 @@ mod tests {
         assert_eq!(command.hot_label, "test");
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn rig_up_dry_run_with_runner_emits_runner_exec_plan() {
+        crate::test_support::with_isolated_home(|home| {
+            write_command_only_rig(home.path(), "script-matrix");
+            let output = home.path().join("plan.json");
+            let normalized = vec![
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "rig".to_string(),
+                "up".to_string(),
+                "script-matrix".to_string(),
+                "--dry-run".to_string(),
+            ];
+            let cli = Cli::parse_from(&normalized);
+
+            let outcome = route_after_parse(&cli, &normalized, Some(&output.to_string_lossy()))
+                .expect("route rig up plan");
+
+            assert_eq!(outcome, Some(0));
+            let plan: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(output).expect("read output plan"))
+                    .expect("parse output plan");
+            assert_eq!(plan["variant"], "up_plan");
+            assert_eq!(plan["payload"]["runner_id"], "homeboy-lab");
+            assert_eq!(
+                plan["payload"]["commands"][0],
+                "homeboy runner exec homeboy-lab --cwd tools --env MATRIX=portable -- sh -c ./scripts/run-matrix.sh"
+            );
+        });
     }
 
     #[test]
