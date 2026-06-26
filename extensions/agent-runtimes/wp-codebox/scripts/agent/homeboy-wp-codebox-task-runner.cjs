@@ -169,10 +169,8 @@ async function codexAuthPreflightEnv(request) {
     }
   }
 
-  if (manifest.refresh_hook === 'codex-oauth-refresh') {
-    throw new Error(`Codex provider auth preflight failed: token refresh requires a Codebox/provider-owned public credential refresh primitive; Homeboy passes secret_env names only. ${codexAuthGuidance()}`);
-  }
-
+  // HBE validates that the credential contract is present. Refresh belongs to
+  // WP Codebox/provider plugins, where provider-specific auth state lives.
   return {};
 }
 

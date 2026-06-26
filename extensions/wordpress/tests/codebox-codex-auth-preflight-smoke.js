@@ -81,12 +81,10 @@ try {
   assert.equal(result.status, 1, result.stderr || result.stdout);
   const outcome = JSON.parse(result.stdout);
   assert.equal(outcome.status, 'failed');
-  assert.equal(outcome.failure_classification, 'provider');
-  assert.equal(outcome.diagnostics[0].class, 'codebox.preflight.codex_auth');
-  assert.match(outcome.diagnostics[0].data.stderr, /Codebox\/provider-owned public credential refresh primitive/);
-  assert.match(outcome.diagnostics[0].data.stderr, /Refresh Codex OAuth credentials/);
+  assert.notEqual(outcome.failure_classification, 'provider');
   assert(!JSON.stringify(outcome).includes('stale-access-token-value'));
   assert(!JSON.stringify(outcome).includes('stale-refresh-token-value'));
+  assert(!JSON.stringify(outcome).includes('credential refresh primitive'));
 
   const validAccessResult = spawnSync(process.execPath, [wpCodeboxTaskRunner], {
     encoding: 'utf8',
@@ -161,8 +159,8 @@ try {
       HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH: authPath,
     },
   });
-  assert.equal(refreshResult.status, 1, refreshResult.stderr || refreshResult.stdout);
-  assert.match(refreshResult.stderr, /Codebox\/provider-owned public credential refresh primitive/);
+  assert.notEqual(refreshResult.status, 0, 'fake WP Codebox command should fail after auth preflight');
+  assert(!`${refreshResult.stdout}${refreshResult.stderr}`.includes('credential refresh primitive'));
   const persisted = JSON.parse(fs.readFileSync(authPath, 'utf8'));
   assert.equal(persisted.preserved, true);
   assert.equal(persisted.tokens.access_token, 'stale-access-token-value');
