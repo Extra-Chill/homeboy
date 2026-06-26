@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.17.2] - 2026-06-26
+
+### Fixed
+- Fix fuzz runner WP Codebox binary override
+
 ## [3.17.1] - 2026-06-26
 
 ### Fixed
