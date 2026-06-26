@@ -7,6 +7,11 @@ const {
   runHeadlessDeterministicLoop,
   writeHeadlessDeterministicLoopArtifacts,
 } = require('../lib/headless-deterministic-loop-runner');
+const {
+  materializeHeadlessProductionLoopSpec,
+  parseJsonArray,
+  parseJsonObject,
+} = require('../lib/headless-production-loop-spec');
 
 (async () => {
 try {
@@ -16,7 +21,20 @@ try {
     throw new Error('Pass --spec <path>, --config <path>, or HOMEBOY_RUNTIME_AGENT_CONFIG_PATH.');
   }
   const repoRoot = path.resolve(__dirname, '..', '..');
-  const spec = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+  const spec = materializeHeadlessProductionLoopSpec(JSON.parse(fs.readFileSync(specPath, 'utf8')), {
+    revolutions: args.revolutions || args.max_revolutions || process.env.HOMEBOY_HEADLESS_LOOP_REVOLUTIONS,
+    runtime_id: args.runtime_id || process.env.HOMEBOY_AGENT_RUNTIME,
+    runtime_profile: args.runtime_profile || process.env.HOMEBOY_AGENT_RUNTIME_PROFILE,
+    runtime_profiles: parseJsonObject(args.runtime_profiles || process.env.HOMEBOY_AGENT_RUNTIME_PROFILES, 'runtime_profiles'),
+    provider: args.provider || process.env.HOMEBOY_AGENT_RUNTIME_PROVIDER,
+    model: args.model || process.env.HOMEBOY_AGENT_RUNTIME_MODEL,
+    provider_plugin_paths: listArg(args.provider_plugin_paths || process.env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATHS),
+    provider_plugins: parseJsonArray(args.provider_plugins || process.env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGINS, 'provider_plugins'),
+    secret_env: listArg(args.secret_env || process.env.HOMEBOY_AGENT_RUNTIME_SECRET_ENV),
+    runtime_env: parseJsonObject(args.runtime_env || process.env.HOMEBOY_AGENT_RUNTIME_ENV, 'runtime_env'),
+    runtime_config_mounts: parseJsonArray(args.runtime_config_mounts || process.env.HOMEBOY_AGENT_RUNTIME_CONFIG_MOUNTS, 'runtime_config_mounts'),
+    runtime_state_mounts: parseJsonArray(args.runtime_state_mounts || process.env.HOMEBOY_AGENT_RUNTIME_STATE_MOUNTS, 'runtime_state_mounts'),
+  });
   const result = await runHeadlessDeterministicLoop({
     spec,
     configPath: specPath,
@@ -61,4 +79,8 @@ function parseArgs(argv) {
     index += 1;
   }
   return args;
+}
+
+function listArg(value) {
+  return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
 }

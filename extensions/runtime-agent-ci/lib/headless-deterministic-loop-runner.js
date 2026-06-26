@@ -50,7 +50,7 @@ async function runHeadlessDeterministicLoop(options = {}) {
       startedAt,
       events,
     }),
-    is_record_successful: (record) => record.status === 'succeeded',
+    is_record_successful: (record) => ['succeeded', 'no_op'].includes(record.status),
     classify_outcome: (record) => record.outcome,
     include_reconciliation: false,
   });
@@ -169,7 +169,7 @@ function executeHeadlessTask(options = {}) {
   return {
     id: request.task_id,
     task_index: task.task_index,
-    status: finalOutcome?.status === 'succeeded' ? 'succeeded' : 'failed',
+    status: ['succeeded', 'no_op'].includes(finalOutcome?.status) ? finalOutcome.status : 'failed',
     outcome: finalOutcome,
     task_result: taskResult,
   };
