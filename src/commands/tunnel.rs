@@ -2,7 +2,8 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use homeboy::core::artifacts::{
-    self, ArtifactOriginInspect, ArtifactOriginServeSpec, ArtifactOriginStatus,
+    self, ArtifactOriginInspect, ArtifactOriginServeSpec, ArtifactOriginStatus, DomBoxCaptureSpec,
+    DomBoxReport,
 };
 use homeboy::core::preview_client::{
     self, PreviewClientAuthDiagnostic, PreviewClientReport, PreviewClientStartSpec,
@@ -82,6 +83,7 @@ pub enum ArtifactOriginActionOutput {
     Serve(ArtifactOriginStatus),
     Status(ArtifactOriginStatus),
     Inspect(ArtifactOriginInspect),
+    DomBoxes(DomBoxReport),
 }
 
 pub type TunnelOutput = EntityCrudOutput<ServiceTunnel, TunnelExtra>;
@@ -356,6 +358,25 @@ enum TunnelArtifactOriginCommand {
         #[arg(long)]
         fail_on_missing: bool,
     },
+    /// Capture DOM bounding boxes for data-figma-node-id elements in static HTML pages
+    #[command(name = "dom-boxes")]
+    DomBoxes {
+        /// Artifact directory root containing the static HTML entrypoints
+        #[arg(long)]
+        root: PathBuf,
+
+        /// HTML entrypoint path, relative to --root; repeat for multiple pages
+        #[arg(long, required = true)]
+        entrypoint: Vec<PathBuf>,
+
+        /// Write the schema payload directly to this JSON file
+        #[arg(long)]
+        report: Option<PathBuf>,
+
+        /// Maximum normalized characters captured from each element text sample
+        #[arg(long, default_value_t = 160)]
+        text_sample_limit: usize,
+    },
 }
 
 #[derive(Args)]
@@ -480,6 +501,30 @@ fn run_artifact_origin(command: TunnelArtifactOriginCommand) -> CmdResult<Tunnel
                     ..Default::default()
                 },
                 exit_code,
+            ))
+        }
+        TunnelArtifactOriginCommand::DomBoxes {
+            root,
+            entrypoint,
+            report,
+            text_sample_limit,
+        } => {
+            let output = artifacts::capture_dom_boxes(DomBoxCaptureSpec {
+                root,
+                entrypoints: entrypoint,
+                report,
+                text_sample_limit,
+            })?;
+            Ok((
+                TunnelOutput {
+                    command: "tunnel.artifact_origin.dom_boxes".to_string(),
+                    extra: TunnelExtra {
+                        artifact_origin: Some(ArtifactOriginActionOutput::DomBoxes(output)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
             ))
         }
     }

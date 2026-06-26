@@ -46,6 +46,7 @@ pub mod agent_tool_control_plane;
 pub mod api_jobs;
 pub mod artifact_address;
 pub mod artifact_contract;
+pub mod artifact_dom_boxes;
 pub mod artifact_inputs;
 pub mod artifact_links;
 pub mod artifact_manifest;
