@@ -3,6 +3,7 @@ use homeboy::cli_surface::{
     command_surface_doctor_report, command_surface_from_with_depth,
     current_command_safety_manifest, current_command_surface, Cli, CommandSafetyManifest, Commands,
 };
+use homeboy::command_contract::{CommandJsonFamily, COMMAND_SPECS};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
@@ -228,6 +229,47 @@ fn manifest_command_exposes_recursive_safety_manifest() {
         .any(|entry| entry.get("mutates").is_some()
             && entry.get("operator").is_some()
             && entry.get("dangerous_flags").is_some()));
+}
+
+#[test]
+fn command_specs_drive_top_level_manifest_metadata() {
+    let manifest = command_safety_manifest();
+
+    for spec in COMMAND_SPECS {
+        let entry = manifest
+            .commands
+            .iter()
+            .find(|entry| entry.name == spec.name)
+            .unwrap_or_else(|| panic!("command spec `{}` missing from safety manifest", spec.name));
+
+        assert_eq!(
+            entry.output.structured,
+            spec.json_family != CommandJsonFamily::RawOnly,
+            "top-level manifest output structure drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.output.notes, spec.output_notes,
+            "top-level manifest output notes drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.lab.supported, spec.lab_supported,
+            "top-level manifest Lab support drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.lab.notes, spec.lab_notes,
+            "top-level manifest Lab notes drifted from CommandSpec for `{}`",
+            spec.name
+        );
+        assert_eq!(
+            entry.docs.path,
+            spec.docs_path(),
+            "top-level manifest docs path drifted from CommandSpec for `{}`",
+            spec.name
+        );
+    }
 }
 
 #[test]
