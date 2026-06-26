@@ -11,13 +11,21 @@ pub(super) fn active_runner_job_summary(
     now_ms: u64,
 ) -> ActiveRunnerJobSummary {
     let started_at_ms = job.started_at_ms.unwrap_or(job.created_at_ms);
+    let lifecycle = request.lifecycle.clone();
     ActiveRunnerJobSummary {
         runner_id: request.runner_id.clone(),
         job_id: job.id.to_string(),
         operation: job.operation.clone(),
-        source: request_metadata_string(request, "source")
+        source: lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.source.clone())
+            .or_else(|| request_metadata_string(request, "source"))
             .unwrap_or_else(|| "runner-daemon".to_string()),
-        kind: request_metadata_string(request, "kind").unwrap_or_else(|| job.operation.clone()),
+        kind: lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.kind.clone())
+            .or_else(|| request_metadata_string(request, "kind"))
+            .unwrap_or_else(|| job.operation.clone()),
         status: job.status,
         command: redact_argv_display(&request.command),
         cwd: request.cwd.clone(),
@@ -32,23 +40,33 @@ pub(super) fn active_runner_job_summary(
         claim_expires_in_ms: job
             .claim_expires_at_ms
             .map(|expires_at| expires_at.saturating_sub(now_ms)),
-        durable_run_id: request_metadata_string(request, "durable_run_id")
+        lifecycle: lifecycle.clone(),
+        durable_run_id: lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.durable_run_id.clone())
+            .or_else(|| request_metadata_string(request, "durable_run_id"))
             .or_else(|| request_metadata_string(request, "run_id"))
             .or_else(|| request_metadata_string(request, "record_run_id")),
         stale_reason: job.stale_reason.clone(),
         lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
         retryable: Some(runner_job_retryable(job)),
-        active_child_count: request
-            .metadata
+        active_child_count: lifecycle
             .as_ref()
-            .and_then(|metadata| metadata.get("active_child_count"))
-            .and_then(Value::as_u64),
-        active_cell_count: request
-            .metadata
+            .and_then(|lifecycle| lifecycle.active_child_count)
+            .or_else(|| request_metadata_u64(request, "active_child_count")),
+        active_cell_count: lifecycle
             .as_ref()
-            .and_then(|metadata| metadata.get("active_cell_count"))
-            .and_then(Value::as_u64),
+            .and_then(|lifecycle| lifecycle.active_cell_count)
+            .or_else(|| request_metadata_u64(request, "active_cell_count")),
     }
+}
+
+fn request_metadata_u64(request: &RemoteRunnerJobRequest, key: &str) -> Option<u64> {
+    request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(key))
+        .and_then(Value::as_u64)
 }
 
 pub fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> ActiveRunnerJobRunSummary {

@@ -7,7 +7,7 @@ use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 use crate::command_contract::RunnerWorkload;
-use crate::core::api_jobs::{Job, JobEvent, JobStatus};
+use crate::core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::redaction::redact_argv;
@@ -50,6 +50,13 @@ pub(super) fn exec_via_daemon(
     let source_snapshot = source_snapshot_override.unwrap_or_else(|| {
         SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
     });
+    let lifecycle = RunnerJobLifecycleMetadata {
+        source: Some("runner-daemon".to_string()),
+        kind: Some("runner.exec".to_string()),
+        durable_run_id: run_id.clone(),
+        active_child_count: None,
+        active_cell_count: None,
+    };
     let payload = json!({
         "runner_id": runner.id,
         "project_id": project_id,
@@ -61,6 +68,7 @@ pub(super) fn exec_via_daemon(
         "source_snapshot": source_snapshot.clone(),
         "require_paths": require_paths.clone(),
         "runner_workload": runner_workload,
+        "lifecycle": lifecycle,
     });
     let (status_code, response_body) = daemon_loopback_post_json(local_url, "/exec", &payload)
         .map_err(|err| daemon_exec_loopback_transport_error(&runner.id, err))?;

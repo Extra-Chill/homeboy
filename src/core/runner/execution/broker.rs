@@ -5,7 +5,7 @@ use reqwest::blocking::Client;
 use serde_json::json;
 
 use crate::command_contract::RunnerWorkload;
-use crate::core::api_jobs::{Job, JobStatus, RemoteRunnerJobRequest};
+use crate::core::api_jobs::{Job, JobStatus, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata};
 use crate::core::error::{Error, Result};
 use crate::core::redaction::redact_argv;
 use crate::core::source_snapshot::SourceSnapshot;
@@ -53,6 +53,13 @@ pub(super) fn exec_via_reverse_broker(
         capture_patch,
         source_snapshot: Some(source_snapshot.clone()),
         runner_workload: runner_workload.clone(),
+        lifecycle: Some(RunnerJobLifecycleMetadata {
+            source: Some("reverse-broker".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: run_id.clone(),
+            active_child_count: None,
+            active_cell_count: None,
+        }),
         metadata: Some(json!({
             "transport": "reverse_broker",
         })),
