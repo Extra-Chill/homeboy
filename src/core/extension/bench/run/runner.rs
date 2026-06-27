@@ -299,6 +299,7 @@ pub(crate) fn run_concurrent_instances(
     let mut first_failure_exit: Option<i32> = None;
     let mut first_failure_stderr_tail: Option<String> = None;
     let mut first_failure_memory_sample: Option<BenchFailureMemorySample> = None;
+    let mut child_command_failures = Vec::new();
     let mut observed_elapsed_ms: Option<u128> = None;
     for (_, output) in &per_instance {
         observed_elapsed_ms = Some(
@@ -368,6 +369,7 @@ pub(crate) fn run_concurrent_instances(
                     &run_dir,
                     Some(&format!("i{}", instance_id)),
                 )?;
+                child_command_failures.extend(p.child_command_failures.clone());
                 p
             }
             Err(_) => continue,
@@ -401,6 +403,7 @@ pub(crate) fn run_concurrent_instances(
             timeline: Vec::new(),
             span_definitions: BTreeMap::new(),
             diagnostics: Vec::new(),
+            child_command_failures: child_command_failures.clone(),
             phase_events: Vec::new(),
             phase_summaries: Vec::new(),
             failure_classification: None,

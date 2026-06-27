@@ -647,6 +647,7 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
             timeline: Vec::new(),
             span_definitions: BTreeMap::new(),
             diagnostics: Vec::new(),
+            child_command_failures: Vec::new(),
             phase_events: Vec::new(),
             phase_summaries: Vec::new(),
             failure_classification: None,

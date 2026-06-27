@@ -466,7 +466,9 @@ fn next_command(loop_id: &str, owner: OwnerSurface, action_status: Option<&str>)
                 "homeboy runner status  # then `homeboy agent-task controller status {loop_id}`"
             )
         }
-        OwnerSurface::SelectedRuntime | OwnerSurface::WordPressRuntime | OwnerSurface::ProviderPlugin => {
+        OwnerSurface::SelectedRuntime
+        | OwnerSurface::WordPressRuntime
+        | OwnerSurface::ProviderPlugin => {
             format!("homeboy agent-task controller status {loop_id}  # inspect provider/runtime evidence refs above")
         }
         _ => format!("homeboy agent-task controller status {loop_id}"),

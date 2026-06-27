@@ -320,7 +320,6 @@ pub fn run_main_bench_workflow(
             &started_at,
         );
     }
-
     let mut gate_failures = parsed
         .as_mut()
         .map(crate::core::extension::bench::gate::evaluate_gates)

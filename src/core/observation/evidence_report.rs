@@ -131,6 +131,8 @@ pub struct EvidenceFailureSummary {
     pub failure: Value,
     pub gate_failures: Vec<String>,
     pub hints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_command_failures: Vec<Value>,
 }
 
 #[derive(Serialize)]
@@ -386,7 +388,16 @@ pub fn evidence_failure_summary(run: &RunRecord) -> EvidenceFailureSummary {
         failure: metadata.get("failure").cloned().unwrap_or(Value::Null),
         gate_failures: string_array(metadata.get("gate_failures")),
         hints: string_array(metadata.get("hints")),
+        child_command_failures: child_command_failures(metadata),
     }
+}
+
+fn child_command_failures(metadata: &Value) -> Vec<Value> {
+    metadata
+        .get("child_command_failures")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn string_array(value: Option<&Value>) -> Vec<String> {

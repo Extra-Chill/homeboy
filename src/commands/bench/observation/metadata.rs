@@ -76,6 +76,7 @@ pub(super) fn bench_observation_finish_metadata(
             "gate_failures": workflow.gate_failures,
             "baseline_status": baseline_status(workflow),
             "failure": workflow.failure,
+            "child_command_failures": workflow.results.as_ref().map(|results| results.child_command_failures.clone()).unwrap_or_default(),
             "failure_classification": workflow.results.as_ref().and_then(|results| results.failure_classification.clone()),
             "phase_events": workflow.results.as_ref().map(|results| results.phase_events.clone()).unwrap_or_default(),
             "phase_summaries": workflow.results.as_ref().map(|results| results.phase_summaries.clone()).unwrap_or_default(),
