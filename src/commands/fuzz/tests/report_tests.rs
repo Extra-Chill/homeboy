@@ -188,6 +188,46 @@ fn fuzz_performance_hotspots_extracts_generic_metadata_metrics() {
 }
 
 #[test]
+fn fuzz_observation_hotspots_rank_observation_set_metrics() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.metadata = serde_json::json!({
+        "observation_set": {
+            "schema": homeboy::core::fuzz::FUZZ_OBSERVATION_SET_SCHEMA,
+            "version": 1,
+            "id": "report-observations",
+            "observations": [
+                {
+                    "id": "low",
+                    "family": "timing",
+                    "subject": "case-low",
+                    "metric": "duration",
+                    "value": 10,
+                    "unit": "ms"
+                },
+                {
+                    "id": "high",
+                    "family": "timing",
+                    "subject": "case-high",
+                    "metric": "duration",
+                    "value": 40,
+                    "unit": "ms"
+                }
+            ]
+        }
+    });
+
+    let hotspots = fuzz_observation_hotspots(&campaign).expect("observation hotspots");
+
+    assert_eq!(hotspots.id, "report-observations-hotspots");
+    assert_eq!(hotspots.items[0].id, "timing:case-high:duration");
+    assert_eq!(hotspots.items[0].rank, Some(1));
+    assert_eq!(hotspots.items[0].relative_score, Some(1.0));
+    assert_eq!(hotspots.items[1].id, "timing:case-low:duration");
+    assert_eq!(hotspots.items[1].rank, Some(2));
+    assert_eq!(hotspots.items[1].relative_score, Some(0.25));
+}
+
+#[test]
 fn select_workload_requires_explicit_id_for_ambiguous_fuzz_workloads() {
     let workloads = vec![
         FuzzWorkloadOutput {

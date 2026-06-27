@@ -11,7 +11,7 @@ use super::planning::plan_inventory_selection;
 use super::replay::run_replay;
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
-    fuzz_performance_hotspots, gate_status, run_report, run_validate,
+    fuzz_observation_hotspots, fuzz_performance_hotspots, gate_status, run_report, run_validate,
     FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
 };
 use super::types::{

@@ -3,7 +3,8 @@ use std::path::Path;
 
 use homeboy::core::fuzz::{
     default_fuzz_gates, fuzz_gate_profile_contract, parse_fuzz_case_log_file,
-    parse_fuzz_results_file, parse_fuzz_target_inventory_file, FuzzCampaign, FuzzExecutionRequest,
+    parse_fuzz_observation_set_value, parse_fuzz_results_file, parse_fuzz_target_inventory_file,
+    rank_fuzz_observation_set_hotspots, FuzzCampaign, FuzzExecutionRequest, FuzzHotspotSet,
     FuzzProvenance, FuzzResultEnvelope, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
@@ -28,6 +29,7 @@ pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<Fuzz
     let gates = evaluate_fuzz_gates(&campaign);
     let coverage_completeness = fuzz_coverage_completeness(&campaign);
     let performance_hotspots = fuzz_performance_hotspots(&campaign);
+    let observation_hotspots = fuzz_observation_hotspots(&campaign);
 
     Ok(FuzzValidateOutput {
         command: "fuzz.validate".to_string(),
@@ -44,6 +46,7 @@ pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<Fuzz
         artifacts: campaign.artifacts.len(),
         coverage_completeness,
         performance_hotspots,
+        observation_hotspots,
         gates,
     })
 }
@@ -52,6 +55,7 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
     let campaign = parse_fuzz_results_file(&args.results_file)?;
     let coverage_completeness = fuzz_coverage_completeness(&campaign);
     let performance_hotspots = fuzz_performance_hotspots(&campaign);
+    let observation_hotspots = fuzz_observation_hotspots(&campaign);
     let component = args.run.comp.id().unwrap_or("unknown");
     let mut envelope = fuzz_result_envelope_from_campaign(
         &args.run,
@@ -85,8 +89,14 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
         envelope,
         coverage_completeness,
         performance_hotspots,
+        observation_hotspots,
         gates,
     })
+}
+
+pub(super) fn fuzz_observation_hotspots(campaign: &FuzzCampaign) -> Option<FuzzHotspotSet> {
+    parse_fuzz_observation_set_value(&campaign.metadata)
+        .map(|set| rank_fuzz_observation_set_hotspots(&set))
 }
 
 pub(super) fn fuzz_result_envelope_from_campaign(
