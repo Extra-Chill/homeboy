@@ -45,11 +45,21 @@ pub struct PrLandSummary {
     pub merge_retries: usize,
 }
 
+/// Shared identity fields repeated across PR-shaped structs in this module.
+///
+/// Flattened into serde-backed parents so the JSON wire format is identical to
+/// the prior inline `number` / `title` / `url` fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PrCommon {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PrLandItem {
-    pub number: u64,
-    pub url: String,
-    pub title: String,
+    #[serde(flatten)]
+    pub common: PrCommon,
     pub status: PrLandStatus,
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,9 +96,8 @@ enum PrReadiness {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RawPrView {
-    number: u64,
-    title: String,
-    url: String,
+    #[serde(flatten)]
+    common: PrCommon,
     state: String,
     #[serde(default, rename = "isDraft")]
     is_draft: bool,
@@ -114,9 +123,7 @@ struct RawHeadRepository {
 
 #[derive(Debug, Clone)]
 struct PrView {
-    number: u64,
-    title: String,
-    url: String,
+    common: PrCommon,
     state: String,
     draft: bool,
     checks: Option<String>,
@@ -169,9 +176,7 @@ impl PrLandClient for GhPrLandClient {
             Error::internal_json(e.to_string(), Some(format!("parse gh pr view #{number}")))
         })?;
         Ok(PrView {
-            number: parsed.number,
-            title: parsed.title,
-            url: parsed.url,
+            common: parsed.common,
             state: parsed.state,
             draft: parsed.is_draft,
             checks: summarize_checks(&parsed.status_check_rollup),
@@ -324,7 +329,7 @@ fn merge_ready_pr(
     loop {
         match client.merge_pr(
             &options.repo,
-            pr.number,
+            pr.common.number,
             &options.merge_method,
             options.delete_branch,
         ) {
@@ -343,7 +348,7 @@ fn merge_ready_pr(
             {
                 attempts += 1;
                 summary.merge_retries += 1;
-                pr = client.view_pr(&options.repo, pr.number)?;
+                pr = client.view_pr(&options.repo, pr.common.number)?;
                 match readiness(&pr, false) {
                     PrReadiness::Ready => continue,
                     PrReadiness::AlreadyMerged => {
@@ -408,9 +413,7 @@ fn item_from_pr_with_warnings(
     warnings: Vec<String>,
 ) -> PrLandItem {
     PrLandItem {
-        number: pr.number,
-        url: pr.url.clone(),
-        title: pr.title.clone(),
+        common: pr.common.clone(),
         status,
         reason: reason.to_string(),
         checks: pr.checks.clone(),
@@ -506,7 +509,7 @@ fn render_fleet_status_table(items: &[PrLandItem]) -> String {
     for item in items {
         rows.push(format!(
             "| #{} | {:?} | {} | {} | {} |",
-            item.number,
+            item.common.number,
             item.status,
             table_cell(item.checks.as_deref().unwrap_or("")),
             table_cell(item.merge_state.as_deref().unwrap_or("")),
@@ -557,8 +560,8 @@ fn run_refresh_helper(repo: &str, pr: &PrView, helper: &PrLandRefreshHelper) -> 
 
 fn render_helper_arg(arg: &str, repo: &str, pr: &PrView) -> String {
     arg.replace("{repo}", repo)
-        .replace("{number}", &pr.number.to_string())
-        .replace("{url}", &pr.url)
+        .replace("{number}", &pr.common.number.to_string())
+        .replace("{url}", &pr.common.url)
         .replace("{head_sha}", pr.head_sha.as_deref().unwrap_or(""))
 }
 
@@ -610,7 +613,10 @@ mod tests {
 
     impl FakeClient {
         fn push_view(&mut self, pr: PrView) {
-            self.views.entry(pr.number).or_default().push_back(pr);
+            self.views
+                .entry(pr.common.number)
+                .or_default()
+                .push_back(pr);
         }
     }
 
@@ -646,16 +652,18 @@ mod tests {
             pr: &PrView,
             _helper: &PrLandRefreshHelper,
         ) -> Result<()> {
-            self.refreshed.push(pr.number);
+            self.refreshed.push(pr.common.number);
             Ok(())
         }
     }
 
     fn pr(number: u64, checks: Option<&str>, merge_state: Option<&str>) -> PrView {
         PrView {
-            number,
-            title: format!("PR {number}"),
-            url: format!("https://github.com/Extra-Chill/homeboy/pull/{number}"),
+            common: PrCommon {
+                number,
+                title: format!("PR {number}"),
+                url: format!("https://github.com/Extra-Chill/homeboy/pull/{number}"),
+            },
             state: "OPEN".to_string(),
             draft: false,
             checks: checks.map(str::to_string),
