@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.19] - 2026-06-27
+
+### Fixed
+- Fix WordPress contract re-export layout
+
 ## [3.19.18] - 2026-06-27
 
 ### Changed
