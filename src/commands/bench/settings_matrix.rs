@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use homeboy::core::agent_tasks::AgentTaskMatrixExecutionState;
 use homeboy::core::extension::bench::{BenchCommandOutput, BenchScenario};
-use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+use homeboy::core::matrix_artifact_summary;
 
 use super::{filter_homeboy_flags, matrix as bench_runner, BenchRunArgs};
 
@@ -239,45 +239,14 @@ fn persist_settings_matrix_parent_run(
     child_run_ids: &[String],
     passed: bool,
 ) -> Option<String> {
-    try_persist_settings_matrix_parent_run(run_args, component, axes, cells, child_run_ids, passed)
-        .ok()
-}
-
-fn try_persist_settings_matrix_parent_run(
-    run_args: &BenchRunArgs,
-    component: &str,
-    axes: &[BenchSettingsMatrixAxisOutput],
-    cells: &[BenchSettingsMatrixCellOutput],
-    child_run_ids: &[String],
-    passed: bool,
-) -> homeboy::core::Result<String> {
-    let store = ObservationStore::open_initialized()?;
-    let cwd = std::env::current_dir().ok();
-    let run = store.start_run(
-        NewRunRecord::builder("bench.matrix")
-            .component_id(component)
-            .command(settings_matrix_parent_command(component, run_args))
-            .optional_cwd_path(cwd.as_deref())
-            .current_homeboy_version()
-            .optional_rig_id(run_args.rig.first().map(String::as_str))
-            .metadata(settings_matrix_parent_metadata(
-                axes,
-                cells,
-                child_run_ids,
-                passed,
-            ))
-            .build(),
-    )?;
-    store.finish_run(
-        &run.id,
-        if passed {
-            RunStatus::Pass
-        } else {
-            RunStatus::Fail
-        },
-        None,
-    )?;
-    Ok(run.id)
+    matrix_artifact_summary::persist_settings_matrix_parent_run(
+        component,
+        settings_matrix_parent_command(component, run_args),
+        run_args.rig.first().map(String::as_str),
+        settings_matrix_parent_metadata(axes, cells, child_run_ids, passed),
+        passed,
+    )
+    .ok()
 }
 
 fn settings_matrix_parent_command(component: &str, run_args: &BenchRunArgs) -> String {
@@ -689,7 +658,7 @@ mod tests {
             ];
             let child_run_ids = vec!["run-a".to_string(), "run-b".to_string()];
 
-            let parent_run_id = try_persist_settings_matrix_parent_run(
+            let parent_run_id = persist_settings_matrix_parent_run(
                 &args,
                 "studio-web",
                 &axes,
@@ -699,7 +668,8 @@ mod tests {
             )
             .expect("parent run should persist");
 
-            let store = ObservationStore::open_initialized().expect("store");
+            let store =
+                homeboy::core::observation::ObservationStore::open_initialized().expect("store");
             let run = store
                 .get_run(&parent_run_id)
                 .expect("read parent")

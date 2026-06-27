@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::artifact_ref::{ArtifactRef, EvidenceRef, ARTIFACT_REF_SCHEMA};
-use crate::core::observation::{ArtifactRecord, FindingRecord};
+use crate::core::observation::{
+    ArtifactRecord, FindingRecord, NewRunRecord, ObservationStore, RunStatus,
+};
 
 pub const MATRIX_ARTIFACT_SUMMARY_SCHEMA: &str = "homeboy/matrix-artifact-summary/v1";
 pub const GENERIC_MATRIX_SUMMARY_SCHEMA: &str = "homeboy/matrix-summary/v1";
@@ -811,6 +813,43 @@ fn top_counts(counts: BTreeMap<String, usize>, limit: usize) -> Vec<MatrixSummar
     rows.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
     rows.truncate(limit);
     rows
+}
+
+/// Persist a settings-matrix parent run to the observation store.
+///
+/// Opens (and initializes) the observation store, records a parent run with the
+/// supplied command/metadata, finishes it with a pass/fail status, and returns
+/// the new run id. The caller computes the agnostic inputs (command string,
+/// rig id, metadata payload); this owns the run-persistence orchestration.
+pub fn persist_settings_matrix_parent_run(
+    component: &str,
+    command: String,
+    rig_id: Option<&str>,
+    metadata: Value,
+    passed: bool,
+) -> crate::core::Result<String> {
+    let store = ObservationStore::open_initialized()?;
+    let cwd = std::env::current_dir().ok();
+    let run = store.start_run(
+        NewRunRecord::builder("bench.matrix")
+            .component_id(component)
+            .command(command)
+            .optional_cwd_path(cwd.as_deref())
+            .current_homeboy_version()
+            .optional_rig_id(rig_id)
+            .metadata(metadata)
+            .build(),
+    )?;
+    store.finish_run(
+        &run.id,
+        if passed {
+            RunStatus::Pass
+        } else {
+            RunStatus::Fail
+        },
+        None,
+    )?;
+    Ok(run.id)
 }
 
 #[cfg(test)]
