@@ -146,22 +146,16 @@ pub(super) fn resolve_fuzz_context(
 }
 
 fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<String> {
-    spec.components
-        .get(component_id)
-        .map(|component| rig::expand::expand_vars(spec, &component.path))
+    rig::resolve_component_path(spec, component_id).ok()
 }
 
 pub(super) fn rig_component_for_fuzz(spec: &RigSpec, component_id: &str) -> Option<Component> {
     let rig_component = spec.components.get(component_id)?;
     let mut extensions = rig_component.extensions.clone()?;
     expand_rig_extension_settings(spec, &mut extensions);
-    let mut component = Component {
-        id: component_id.to_string(),
-        local_path: rig::expand::expand_vars(spec, &rig_component.path),
-        remote_url: rig_component.remote_url.clone(),
-        extensions: Some(extensions),
-        ..Component::default()
-    };
+    let mut component = rig::resolve_component(spec, component_id).ok()?;
+    component.remote_url = rig_component.remote_url.clone().or(component.remote_url);
+    component.extensions = Some(extensions);
     component.resolve_remote_path();
     Some(component)
 }
@@ -308,6 +302,7 @@ fn fuzz_rig_workload_inputs(
     let Some((context, extension_id)) = rig_context.zip(extension_id) else {
         return rig::RigExtensionWorkloadInputs {
             workload_paths: Vec::new(),
+            env_provider_extensions: Vec::new(),
             invocation_requirements: InvocationRequirements::default(),
         };
     };

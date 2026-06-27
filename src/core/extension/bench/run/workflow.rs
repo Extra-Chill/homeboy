@@ -148,6 +148,7 @@ pub fn run_main_bench_workflow(
                     path: source_path.to_string_lossy().to_string(),
                     source_revision: None,
                 }),
+                rig_package: args.rig_package.clone(),
                 lifecycle: None,
                 diagnostics: Vec::new(),
             });

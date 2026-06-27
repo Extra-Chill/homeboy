@@ -198,327 +198,342 @@ pub fn cleanup(force: bool) -> Result<WorktreeCleanupOutput> {
     cleanup_with_store(force, &store)
 }
 
-fn cleanup_with_store(force: bool, store: &Path) -> Result<WorktreeCleanupOutput> {
-    let mut candidates = Vec::new();
-    for record in list_with_store(store)?.worktrees {
-        if record.state != TaskWorktreeState::Active {
-            continue;
-        }
-        if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
-            continue;
-        }
-        candidates.push(remove_with_store(
-            WorktreeRemoveOptions {
-                id: record.id,
-                force,
-            },
-            store,
-        )?);
-    }
-    Ok(WorktreeCleanupOutput { candidates })
-}
+mod store_ops {
+    use super::*;
 
-fn create_with_store(
-    options: WorktreeCreateOptions,
-    store_dir: &Path,
-) -> Result<WorktreeCreateOutput> {
-    let target = component::resolve_target(TargetSpec {
-        component_id: Some(&options.component_id),
-        path_override: None,
-        project: None,
-        capability: None,
-        allow_synthetic: false,
-        accept_bare_directory: false,
-        ..TargetSpec::default()
-    })?;
-    let source_checkout = target
-        .git_root
-        .clone()
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "component",
-                "Component local_path is not inside a git checkout",
-                Some(options.component_id.clone()),
-                Some(vec!["Register a git-backed component checkout".to_string()]),
-            )
-        })?
-        .canonicalize()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(target.source_path.display().to_string()),
-            )
+    pub(super) fn cleanup_with_store(force: bool, store: &Path) -> Result<WorktreeCleanupOutput> {
+        let mut candidates = Vec::new();
+        for record in list_with_store(store)?.worktrees {
+            if record.state != TaskWorktreeState::Active {
+                continue;
+            }
+            if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
+                continue;
+            }
+            candidates.push(remove_with_store(
+                WorktreeRemoveOptions {
+                    id: record.id,
+                    force,
+                },
+                store,
+            )?);
+        }
+        Ok(WorktreeCleanupOutput { candidates })
+    }
+
+    pub(super) fn create_with_store(
+        options: WorktreeCreateOptions,
+        store_dir: &Path,
+    ) -> Result<WorktreeCreateOutput> {
+        let target = component::resolve_target(TargetSpec {
+            component_id: Some(&options.component_id),
+            path_override: None,
+            project: None,
+            capability: None,
+            allow_synthetic: false,
+            accept_bare_directory: false,
+            ..TargetSpec::default()
+        })?;
+        let source_checkout = target
+            .git_root
+            .clone()
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "component",
+                    "Component local_path is not inside a git checkout",
+                    Some(options.component_id.clone()),
+                    Some(vec!["Register a git-backed component checkout".to_string()]),
+                )
+            })?
+            .canonicalize()
+            .map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(target.source_path.display().to_string()),
+                )
+            })?;
+
+        let parent = source_checkout.parent().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "source checkout has no parent: {}",
+                source_checkout.display()
+            ))
+        })?;
+        let id = format!("{}@{}", target.component_id, branch_slug(&options.branch));
+        let worktree_path = parent.join(&id);
+        if worktree_path.exists() {
+            return Err(Error::validation_invalid_argument(
+                "branch",
+                "Task worktree path already exists",
+                Some(worktree_path.display().to_string()),
+                Some(vec![
+                    "Use a unique branch name or remove the existing task worktree".to_string(),
+                ]),
+            ));
+        }
+
+        let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
+        let base_ref = options.from.unwrap_or_else(|| "HEAD".to_string());
+        git::run_git(
+            &source_checkout,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &options.branch,
+                &worktree_path.to_string_lossy(),
+                &base_ref,
+            ],
+            "git worktree add",
+        )?;
+        ownership::normalize_created_path(
+            &worktree_path,
+            worktree_owner,
+            true,
+            "git worktree add",
+        )?;
+
+        let record = TaskWorktreeRecord {
+            id,
+            component_id: target.component_id,
+            source_checkout: source_checkout.to_string_lossy().to_string(),
+            worktree_path: worktree_path.to_string_lossy().to_string(),
+            branch: options.branch,
+            base_ref,
+            task_url: options.task_url,
+            run_id: options.run_id.clone(),
+            cleanup_policy: options
+                .cleanup_policy
+                .unwrap_or_else(|| CleanupPolicy::default_for_run(options.run_id.as_deref())),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            state: TaskWorktreeState::Active,
+        };
+        write_record(store_dir, &record)?;
+        Ok(WorktreeCreateOutput { record })
+    }
+
+    pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
+        let mut worktrees = Vec::new();
+        if !store_dir.exists() {
+            return Ok(WorktreeListOutput { worktrees });
+        }
+        for entry in fs::read_dir(store_dir).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
+        })? {
+            let entry = entry.map_err(|err| Error::internal_io(err.to_string(), None))?;
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            worktrees.push(read_record_path(&entry.path())?);
+        }
+        worktrees.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(WorktreeListOutput { worktrees })
+    }
+
+    pub(super) fn status_with_store(id: &str, store_dir: &Path) -> Result<WorktreeStatusOutput> {
+        let record = read_record(store_dir, id)?;
+        let safety = safety_report(&record)?;
+        Ok(WorktreeStatusOutput { record, safety })
+    }
+
+    pub(super) fn remove_with_store(
+        options: WorktreeRemoveOptions,
+        store_dir: &Path,
+    ) -> Result<WorktreeRemoveOutput> {
+        let mut record = read_record(store_dir, &options.id)?;
+        let safety = safety_report(&record)?;
+        if !options.force && !safety.safe {
+            return Err(Error::validation_invalid_argument(
+                "worktree",
+                "Task worktree is not safe to remove",
+                Some(record.id.clone()),
+                Some(safety.reasons.clone()),
+            ));
+        }
+        if safety.primary_checkout || !safety.path_contained {
+            return Err(Error::validation_invalid_argument(
+                "worktree",
+                "Task worktree failed hard removal safety gates",
+                Some(record.id.clone()),
+                Some(safety.reasons.clone()),
+            ));
+        }
+
+        if !safety.worktree_missing {
+            git::run_git(
+                Path::new(&record.source_checkout),
+                &["worktree", "remove", &record.worktree_path],
+                "git worktree remove",
+            )?;
+        }
+        record.state = TaskWorktreeState::Removed;
+        write_record(store_dir, &record)?;
+        Ok(WorktreeRemoveOutput {
+            record,
+            safety,
+            removed: true,
+        })
+    }
+
+    pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {
+        let source = canonical_existing_path(&record.source_checkout)?;
+        let parent = source.parent().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "source checkout has no parent: {}",
+                source.display()
+            ))
+        })?;
+        let raw_worktree = Path::new(&record.worktree_path);
+        let worktree = match raw_worktree.canonicalize() {
+            Ok(path) => path,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                normalize_missing_path(raw_worktree)
+            }
+            Err(err) => {
+                return Err(Error::internal_io(
+                    err.to_string(),
+                    Some(record.worktree_path.clone()),
+                ))
+            }
+        };
+        let worktree_missing = !raw_worktree.exists();
+        let primary_checkout = source == worktree;
+        let path_contained = worktree.starts_with(parent) && worktree != source;
+        let dirty = !worktree_missing && is_dirty(&worktree)?;
+        let unpushed_commits = if worktree_missing {
+            0
+        } else {
+            unpushed_commit_count(&worktree, &record.base_ref)?
+        };
+        let mut reasons = Vec::new();
+        if dirty {
+            reasons.push("dirty worktree".to_string());
+        }
+        if unpushed_commits > 0 {
+            reasons.push(format!("{unpushed_commits} unpushed commit(s)"));
+        }
+        if primary_checkout {
+            reasons.push("refuses to remove primary checkout".to_string());
+        }
+        if !path_contained {
+            reasons.push("worktree path is outside the component checkout parent".to_string());
+        }
+        let safe = reasons.is_empty();
+        Ok(WorktreeSafetyReport {
+            dirty,
+            unpushed_commits,
+            primary_checkout,
+            path_contained,
+            worktree_missing,
+            safe,
+            reasons,
+        })
+    }
+
+    pub(super) fn is_dirty(path: &Path) -> Result<bool> {
+        Ok(
+            !git::run_git(path, &["status", "--porcelain=v1"], "git status")?
+                .trim()
+                .is_empty(),
+        )
+    }
+
+    pub(super) fn unpushed_commit_count(path: &Path, base_ref: &str) -> Result<u32> {
+        let upstream = git::run_git(path, &["rev-parse", "--abbrev-ref", "@{u}"], "git upstream");
+        let range = if let Ok(upstream) = upstream {
+            let upstream = upstream.trim();
+            if upstream.is_empty() {
+                format!("{base_ref}..HEAD")
+            } else {
+                format!("{upstream}..HEAD")
+            }
+        } else {
+            format!("{base_ref}..HEAD")
+        };
+        let count = git::run_git(path, &["rev-list", "--count", &range], "git rev-list")?;
+        Ok(count.trim().parse::<u32>().unwrap_or(0))
+    }
+
+    pub(super) fn canonical_existing_path(path: &str) -> Result<PathBuf> {
+        Path::new(path)
+            .canonicalize()
+            .map_err(|err| Error::internal_io(err.to_string(), Some(path.to_string())))
+    }
+
+    pub(super) fn normalize_missing_path(path: &Path) -> PathBuf {
+        let Some(parent) = path.parent() else {
+            return path.to_path_buf();
+        };
+        let Some(file_name) = path.file_name() else {
+            return path.to_path_buf();
+        };
+        parent
+            .canonicalize()
+            .map(|parent| parent.join(file_name))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    pub(super) fn metadata_dir() -> Result<PathBuf> {
+        let observation_db = paths::observation_db()?;
+        let data_root = observation_db.parent().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "observation database path `{}` has no parent directory",
+                observation_db.display()
+            ))
         })?;
 
-    let parent = source_checkout.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "source checkout has no parent: {}",
-            source_checkout.display()
-        ))
-    })?;
-    let id = format!("{}@{}", target.component_id, branch_slug(&options.branch));
-    let worktree_path = parent.join(&id);
-    if worktree_path.exists() {
-        return Err(Error::validation_invalid_argument(
-            "branch",
-            "Task worktree path already exists",
-            Some(worktree_path.display().to_string()),
-            Some(vec![
-                "Use a unique branch name or remove the existing task worktree".to_string(),
-            ]),
-        ));
+        Ok(data_root.join("task-worktrees"))
     }
 
-    let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
-    let base_ref = options.from.unwrap_or_else(|| "HEAD".to_string());
-    git::run_git(
-        &source_checkout,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &options.branch,
-            &worktree_path.to_string_lossy(),
-            &base_ref,
-        ],
-        "git worktree add",
-    )?;
-    ownership::normalize_created_path(&worktree_path, worktree_owner, true, "git worktree add")?;
-
-    let record = TaskWorktreeRecord {
-        id,
-        component_id: target.component_id,
-        source_checkout: source_checkout.to_string_lossy().to_string(),
-        worktree_path: worktree_path.to_string_lossy().to_string(),
-        branch: options.branch,
-        base_ref,
-        task_url: options.task_url,
-        run_id: options.run_id.clone(),
-        cleanup_policy: options
-            .cleanup_policy
-            .unwrap_or_else(|| CleanupPolicy::default_for_run(options.run_id.as_deref())),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        state: TaskWorktreeState::Active,
-    };
-    write_record(store_dir, &record)?;
-    Ok(WorktreeCreateOutput { record })
-}
-
-fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
-    let mut worktrees = Vec::new();
-    if !store_dir.exists() {
-        return Ok(WorktreeListOutput { worktrees });
-    }
-    for entry in fs::read_dir(store_dir)
-        .map_err(|err| Error::internal_io(err.to_string(), Some(store_dir.display().to_string())))?
-    {
-        let entry = entry.map_err(|err| Error::internal_io(err.to_string(), None))?;
-        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        worktrees.push(read_record_path(&entry.path())?);
-    }
-    worktrees.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(WorktreeListOutput { worktrees })
-}
-
-fn status_with_store(id: &str, store_dir: &Path) -> Result<WorktreeStatusOutput> {
-    let record = read_record(store_dir, id)?;
-    let safety = safety_report(&record)?;
-    Ok(WorktreeStatusOutput { record, safety })
-}
-
-fn remove_with_store(
-    options: WorktreeRemoveOptions,
-    store_dir: &Path,
-) -> Result<WorktreeRemoveOutput> {
-    let mut record = read_record(store_dir, &options.id)?;
-    let safety = safety_report(&record)?;
-    if !options.force && !safety.safe {
-        return Err(Error::validation_invalid_argument(
-            "worktree",
-            "Task worktree is not safe to remove",
-            Some(record.id.clone()),
-            Some(safety.reasons.clone()),
-        ));
-    }
-    if safety.primary_checkout || !safety.path_contained {
-        return Err(Error::validation_invalid_argument(
-            "worktree",
-            "Task worktree failed hard removal safety gates",
-            Some(record.id.clone()),
-            Some(safety.reasons.clone()),
-        ));
+    pub(super) fn record_path(store_dir: &Path, id: &str) -> PathBuf {
+        store_dir.join(format!("{}.json", paths::sanitize_path_segment(id)))
     }
 
-    if !safety.worktree_missing {
-        git::run_git(
-            Path::new(&record.source_checkout),
-            &["worktree", "remove", &record.worktree_path],
-            "git worktree remove",
+    pub(super) fn write_record(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
+        let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
+        fs::create_dir_all(store_dir).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
+        })?;
+        let json = serde_json::to_string_pretty(record)
+            .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
+        let path = record_path(store_dir, &record.id);
+        fs::write(&path, format!("{json}\n"))
+            .map_err(|err| Error::internal_io(err.to_string(), Some(record.id.clone())))?;
+        ownership::normalize_created_path(
+            store_dir,
+            store_owner,
+            false,
+            "write worktree metadata",
         )?;
+        ownership::normalize_created_path(&path, store_owner, false, "write worktree metadata")?;
+        Ok(())
     }
-    record.state = TaskWorktreeState::Removed;
-    write_record(store_dir, &record)?;
-    Ok(WorktreeRemoveOutput {
-        record,
-        safety,
-        removed: true,
-    })
-}
 
-fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {
-    let source = canonical_existing_path(&record.source_checkout)?;
-    let parent = source.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "source checkout has no parent: {}",
-            source.display()
-        ))
-    })?;
-    let raw_worktree = Path::new(&record.worktree_path);
-    let worktree = match raw_worktree.canonicalize() {
-        Ok(path) => path,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            normalize_missing_path(raw_worktree)
-        }
-        Err(err) => {
-            return Err(Error::internal_io(
-                err.to_string(),
-                Some(record.worktree_path.clone()),
-            ))
-        }
-    };
-    let worktree_missing = !raw_worktree.exists();
-    let primary_checkout = source == worktree;
-    let path_contained = worktree.starts_with(parent) && worktree != source;
-    let dirty = !worktree_missing && is_dirty(&worktree)?;
-    let unpushed_commits = if worktree_missing {
-        0
-    } else {
-        unpushed_commit_count(&worktree, &record.base_ref)?
-    };
-    let mut reasons = Vec::new();
-    if dirty {
-        reasons.push("dirty worktree".to_string());
+    pub(super) fn read_record(store_dir: &Path, id: &str) -> Result<TaskWorktreeRecord> {
+        read_record_path(&record_path(store_dir, id))
     }
-    if unpushed_commits > 0 {
-        reasons.push(format!("{unpushed_commits} unpushed commit(s)"));
+
+    pub(super) fn read_record_path(path: &Path) -> Result<TaskWorktreeRecord> {
+        let raw = fs::read_to_string(path)
+            .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+        serde_json::from_str(&raw)
+            .map_err(|err| Error::internal_json(err.to_string(), Some(path.display().to_string())))
     }
-    if primary_checkout {
-        reasons.push("refuses to remove primary checkout".to_string());
+
+    pub(super) fn branch_slug(branch: &str) -> String {
+        branch
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .collect()
     }
-    if !path_contained {
-        reasons.push("worktree path is outside the component checkout parent".to_string());
-    }
-    let safe = reasons.is_empty();
-    Ok(WorktreeSafetyReport {
-        dirty,
-        unpushed_commits,
-        primary_checkout,
-        path_contained,
-        worktree_missing,
-        safe,
-        reasons,
-    })
 }
-
-fn is_dirty(path: &Path) -> Result<bool> {
-    Ok(
-        !git::run_git(path, &["status", "--porcelain=v1"], "git status")?
-            .trim()
-            .is_empty(),
-    )
-}
-
-fn unpushed_commit_count(path: &Path, base_ref: &str) -> Result<u32> {
-    let upstream = git::run_git(path, &["rev-parse", "--abbrev-ref", "@{u}"], "git upstream");
-    let range = if let Ok(upstream) = upstream {
-        let upstream = upstream.trim();
-        if upstream.is_empty() {
-            format!("{base_ref}..HEAD")
-        } else {
-            format!("{upstream}..HEAD")
-        }
-    } else {
-        format!("{base_ref}..HEAD")
-    };
-    let count = git::run_git(path, &["rev-list", "--count", &range], "git rev-list")?;
-    Ok(count.trim().parse::<u32>().unwrap_or(0))
-}
-
-fn canonical_existing_path(path: &str) -> Result<PathBuf> {
-    Path::new(path)
-        .canonicalize()
-        .map_err(|err| Error::internal_io(err.to_string(), Some(path.to_string())))
-}
-
-fn normalize_missing_path(path: &Path) -> PathBuf {
-    let Some(parent) = path.parent() else {
-        return path.to_path_buf();
-    };
-    let Some(file_name) = path.file_name() else {
-        return path.to_path_buf();
-    };
-    parent
-        .canonicalize()
-        .map(|parent| parent.join(file_name))
-        .unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn metadata_dir() -> Result<PathBuf> {
-    let observation_db = paths::observation_db()?;
-    let data_root = observation_db.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "observation database path `{}` has no parent directory",
-            observation_db.display()
-        ))
-    })?;
-
-    Ok(data_root.join("task-worktrees"))
-}
-
-fn record_path(store_dir: &Path, id: &str) -> PathBuf {
-    store_dir.join(format!("{}.json", paths::sanitize_path_segment(id)))
-}
-
-fn write_record(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
-    let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
-    fs::create_dir_all(store_dir).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
-    })?;
-    let json = serde_json::to_string_pretty(record)
-        .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
-    let path = record_path(store_dir, &record.id);
-    fs::write(&path, format!("{json}\n"))
-        .map_err(|err| Error::internal_io(err.to_string(), Some(record.id.clone())))?;
-    ownership::normalize_created_path(store_dir, store_owner, false, "write worktree metadata")?;
-    ownership::normalize_created_path(&path, store_owner, false, "write worktree metadata")?;
-    Ok(())
-}
-
-fn read_record(store_dir: &Path, id: &str) -> Result<TaskWorktreeRecord> {
-    read_record_path(&record_path(store_dir, id))
-}
-
-fn read_record_path(path: &Path) -> Result<TaskWorktreeRecord> {
-    let raw = fs::read_to_string(path)
-        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
-    serde_json::from_str(&raw)
-        .map_err(|err| Error::internal_json(err.to_string(), Some(path.display().to_string())))
-}
-
-fn branch_slug(branch: &str) -> String {
-    branch
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
+use store_ops::*;
 
 pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueueCreateOutput> {
     let mut rows = Vec::new();
@@ -617,185 +632,201 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
     })
 }
 
-fn queue_row(
-    branch: &str,
-    handle: String,
-    command: Vec<String>,
-    status: WorktreeQueueCreateStatus,
-) -> WorktreeQueueCreateRow {
-    WorktreeQueueCreateRow {
-        branch: branch.to_string(),
-        handle,
-        status,
-        command,
-        retry_after_seconds: None,
-        active_lock_holder: None,
-        path: None,
-        error: None,
-    }
-}
+mod queue_ops {
+    use super::*;
 
-fn record_queued_worktree(
-    options: &WorktreeQueueCreateOptions,
-    branch: &str,
-    handle: &str,
-    path: &str,
-) -> Result<()> {
-    let worktree_path = PathBuf::from(path).canonicalize().map_err(|err| {
-        Error::internal_io(err.to_string(), Some(format!("DMC worktree path {path}")))
-    })?;
-    let source_checkout = registered_component_git_root(&options.repo)?;
-    let record = TaskWorktreeRecord {
-        id: handle.to_string(),
-        component_id: options.repo.clone(),
-        source_checkout: source_checkout.to_string_lossy().to_string(),
-        worktree_path: worktree_path.to_string_lossy().to_string(),
-        branch: branch.to_string(),
-        base_ref: options.from.clone(),
-        task_url: options.task_url.clone(),
-        run_id: None,
-        cleanup_policy: CleanupPolicy::RemoveWhenSafe,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        state: TaskWorktreeState::Active,
-    };
-    write_record(&metadata_dir()?, &record)
-}
-
-fn registered_component_git_root(repo: &str) -> Result<PathBuf> {
-    let component = component::load(repo)?;
-    let git_root = git::get_git_root(&component.local_path).map_err(|_| {
-        Error::validation_invalid_argument(
-            "repo",
-            "DMC worktree queue source component is not inside a git checkout",
-            Some(repo.to_string()),
-            None,
-        )
-    })?;
-    PathBuf::from(git_root)
-        .canonicalize()
-        .map_err(|err| Error::internal_io(err.to_string(), Some(repo.to_string())))
-}
-
-fn dmc_add_command(options: &WorktreeQueueCreateOptions, branch: &str) -> Vec<String> {
-    let mut command = vec![options.dmc_bin.clone()];
-    command.extend(dmc_add_args(options, branch));
-    command
-}
-
-fn dmc_add_args(options: &WorktreeQueueCreateOptions, branch: &str) -> Vec<String> {
-    let mut args = vec![
-        "wp".to_string(),
-        "datamachine-code".to_string(),
-        "workspace".to_string(),
-        "worktree".to_string(),
-        "add".to_string(),
-        options.repo.clone(),
-        branch.to_string(),
-        format!("--from={}", options.from),
-    ];
-    if let Some(task_url) = &options.task_url {
-        args.push(format!("--task-url={task_url}"));
-    }
-    if let Some(task_ref) = &options.task_ref {
-        args.push(format!("--task-ref={task_ref}"));
-    }
-    args
-}
-
-fn dmc_worktree_handle(repo: &str, branch: &str) -> String {
-    format!("{}@{}", repo, branch_slug(branch))
-}
-
-fn active_lock_holder(dmc_bin: &str, repo: &str) -> Result<Option<WorktreeQueueLockHolder>> {
-    let output = Command::new(dmc_bin)
-        .args([
-            "wp",
-            "datamachine-code",
-            "workspace",
-            "worktree",
-            "locks",
-            "--format=json",
-        ])
-        .output()
-        .map_err(|err| Error::internal_io(err.to_string(), Some("DMC lock status".to_string())))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
-        Error::internal_json(err.to_string(), Some("DMC lock status".to_string()))
-    })?;
-    Ok(active_lock_holder_from_status(&value, repo))
-}
-
-fn active_lock_holder_from_status(value: &Value, repo: &str) -> Option<WorktreeQueueLockHolder> {
-    let lock_key = format!("worktree-{repo}");
-    for section in ["database", "filesystem"] {
-        let Some(section_value) = value.get(section) else {
-            continue;
-        };
-        let active_keys = section_value
-            .get("active_keys")
-            .and_then(Value::as_array)
-            .map(|keys| keys.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let Some(locks) = section_value.get("locks").and_then(Value::as_array) else {
-            continue;
-        };
-        for lock in locks {
-            let key = lock
-                .get("lock_key")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let scope = lock
-                .get("scope")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let state = lock
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let active = state == "active"
-                || active_keys.iter().any(|active_key| {
-                    *active_key == key || *active_key == scope || *active_key == lock_key
-                });
-            if (key == lock_key || scope == repo) && active {
-                return Some(WorktreeQueueLockHolder {
-                    lock_key: key.to_string(),
-                    scope: scope.to_string(),
-                    path: lock.get("path").and_then(Value::as_str).map(str::to_string),
-                    command: lock
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                });
-            }
+    pub(super) fn queue_row(
+        branch: &str,
+        handle: String,
+        command: Vec<String>,
+        status: WorktreeQueueCreateStatus,
+    ) -> WorktreeQueueCreateRow {
+        WorktreeQueueCreateRow {
+            branch: branch.to_string(),
+            handle,
+            status,
+            command,
+            retry_after_seconds: None,
+            active_lock_holder: None,
+            path: None,
+            error: None,
         }
     }
-    None
-}
 
-fn parse_prefixed_line(output: &str, prefix: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix(prefix)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    })
-}
+    pub(super) fn record_queued_worktree(
+        options: &WorktreeQueueCreateOptions,
+        branch: &str,
+        handle: &str,
+        path: &str,
+    ) -> Result<()> {
+        let worktree_path = PathBuf::from(path).canonicalize().map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("DMC worktree path {path}")))
+        })?;
+        let source_checkout = registered_component_git_root(&options.repo)?;
+        let record = TaskWorktreeRecord {
+            id: handle.to_string(),
+            component_id: options.repo.clone(),
+            source_checkout: source_checkout.to_string_lossy().to_string(),
+            worktree_path: worktree_path.to_string_lossy().to_string(),
+            branch: branch.to_string(),
+            base_ref: options.from.clone(),
+            task_url: options.task_url.clone(),
+            run_id: None,
+            cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            state: TaskWorktreeState::Active,
+        };
+        write_record(&metadata_dir()?, &record)
+    }
 
-fn format_command_error(stdout: &str, stderr: &str) -> String {
-    let message = [stderr.trim(), stdout.trim()]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if message.is_empty() {
-        "DMC worktree add failed without output".to_string()
-    } else {
-        message
+    pub(super) fn registered_component_git_root(repo: &str) -> Result<PathBuf> {
+        let component = component::load(repo)?;
+        let git_root = git::get_git_root(&component.local_path).map_err(|_| {
+            Error::validation_invalid_argument(
+                "repo",
+                "DMC worktree queue source component is not inside a git checkout",
+                Some(repo.to_string()),
+                None,
+            )
+        })?;
+        PathBuf::from(git_root)
+            .canonicalize()
+            .map_err(|err| Error::internal_io(err.to_string(), Some(repo.to_string())))
+    }
+
+    pub(super) fn dmc_add_command(
+        options: &WorktreeQueueCreateOptions,
+        branch: &str,
+    ) -> Vec<String> {
+        let mut command = vec![options.dmc_bin.clone()];
+        command.extend(dmc_add_args(options, branch));
+        command
+    }
+
+    pub(super) fn dmc_add_args(options: &WorktreeQueueCreateOptions, branch: &str) -> Vec<String> {
+        let mut args = vec![
+            "wp".to_string(),
+            "datamachine-code".to_string(),
+            "workspace".to_string(),
+            "worktree".to_string(),
+            "add".to_string(),
+            options.repo.clone(),
+            branch.to_string(),
+            format!("--from={}", options.from),
+        ];
+        if let Some(task_url) = &options.task_url {
+            args.push(format!("--task-url={task_url}"));
+        }
+        if let Some(task_ref) = &options.task_ref {
+            args.push(format!("--task-ref={task_ref}"));
+        }
+        args
+    }
+
+    pub(super) fn dmc_worktree_handle(repo: &str, branch: &str) -> String {
+        format!("{}@{}", repo, branch_slug(branch))
+    }
+
+    pub(super) fn active_lock_holder(
+        dmc_bin: &str,
+        repo: &str,
+    ) -> Result<Option<WorktreeQueueLockHolder>> {
+        let output = Command::new(dmc_bin)
+            .args([
+                "wp",
+                "datamachine-code",
+                "workspace",
+                "worktree",
+                "locks",
+                "--format=json",
+            ])
+            .output()
+            .map_err(|err| {
+                Error::internal_io(err.to_string(), Some("DMC lock status".to_string()))
+            })?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
+            Error::internal_json(err.to_string(), Some("DMC lock status".to_string()))
+        })?;
+        Ok(active_lock_holder_from_status(&value, repo))
+    }
+
+    pub(super) fn active_lock_holder_from_status(
+        value: &Value,
+        repo: &str,
+    ) -> Option<WorktreeQueueLockHolder> {
+        let lock_key = format!("worktree-{repo}");
+        for section in ["database", "filesystem"] {
+            let Some(section_value) = value.get(section) else {
+                continue;
+            };
+            let active_keys = section_value
+                .get("active_keys")
+                .and_then(Value::as_array)
+                .map(|keys| keys.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let Some(locks) = section_value.get("locks").and_then(Value::as_array) else {
+                continue;
+            };
+            for lock in locks {
+                let key = lock
+                    .get("lock_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let scope = lock
+                    .get("scope")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let state = lock
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let active = state == "active"
+                    || active_keys.iter().any(|active_key| {
+                        *active_key == key || *active_key == scope || *active_key == lock_key
+                    });
+                if (key == lock_key || scope == repo) && active {
+                    return Some(WorktreeQueueLockHolder {
+                        lock_key: key.to_string(),
+                        scope: scope.to_string(),
+                        path: lock.get("path").and_then(Value::as_str).map(str::to_string),
+                        command: lock
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn parse_prefixed_line(output: &str, prefix: &str) -> Option<String> {
+        output.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix(prefix)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+    }
+
+    pub(super) fn format_command_error(stdout: &str, stderr: &str) -> String {
+        let message = [stderr.trim(), stdout.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if message.is_empty() {
+            "DMC worktree add failed without output".to_string()
+        } else {
+            message
+        }
     }
 }
+use queue_ops::*;
 
 #[cfg(test)]
 mod tests {
@@ -1086,7 +1117,10 @@ mod tests {
 
             assert_eq!(output.rows[0].status, WorktreeQueueCreateStatus::Created);
             let record = resolve("homeboy@cook-one").expect("queued worktree record");
-            assert_eq!(record.worktree_path, worktree_path.display().to_string());
+            assert_eq!(
+                std::fs::canonicalize(&record.worktree_path).unwrap(),
+                std::fs::canonicalize(&worktree_path).unwrap()
+            );
             assert_eq!(record.branch, "cook/one");
             assert_eq!(record.base_ref, "origin/main");
             assert_eq!(

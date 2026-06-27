@@ -2,8 +2,9 @@ use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
 
 use homeboy::core::runners::{
-    self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOutput,
+    self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePullOutput, RunnerWorkspaceSnapshotFilters,
+    RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
 };
 
 use super::CmdResult;
@@ -12,8 +13,11 @@ use super::CmdResult;
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RunnerWorkspaceOutput {
     List(RunnerWorkspaceListOutput),
+    Snapshots(RunnerWorkspaceSnapshotsOutput),
     Sync(RunnerWorkspaceSyncOutput),
+    Pull(RunnerWorkspacePullOutput),
     Apply(RunnerWorkspaceApplyOutput),
+    Prune(RunnerWorkspacePruneOutput),
 }
 
 #[derive(Subcommand)]
@@ -24,6 +28,31 @@ pub(super) enum RunnerWorkspaceCommand {
         runner_id: String,
 
         /// Maximum number of workspaces to return
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Discover metadata-backed runner workspace snapshots by repo, ref, commit, or run
+    Snapshots {
+        /// Runner ID
+        runner_id: String,
+
+        /// Source repository name, normally the local workspace basename before any @slug suffix
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Source git ref captured when the snapshot was synced
+        #[arg(long)]
+        source_ref: Option<String>,
+
+        /// Source git commit captured when the snapshot was synced
+        #[arg(long)]
+        source_commit: Option<String>,
+
+        /// Agent-task or Lab run id captured in snapshot metadata when available
+        #[arg(long = "run")]
+        run_id: Option<String>,
+
+        /// Maximum number of snapshots to return
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
@@ -44,6 +73,27 @@ pub(super) enum RunnerWorkspaceCommand {
         #[arg(long)]
         allow_dirty_lab_workspace: bool,
     },
+    /// Copy selected files from a runner workspace back to the controller
+    Pull {
+        /// Runner ID
+        runner_id: String,
+
+        /// Absolute runner-side workspace or snapshot path to pull from
+        #[arg(long)]
+        remote_path: String,
+
+        /// Relative glob to copy from the remote path. Repeat for multiple globs.
+        #[arg(long = "include")]
+        includes: Vec<String>,
+
+        /// Local destination directory on the controller
+        #[arg(long)]
+        to: String,
+
+        /// Validate and print the copy plan without transferring files
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Apply a Lab-generated patch/delta back to its local source worktree
     Apply {
         /// Lab apply JSON artifact path
@@ -52,6 +102,23 @@ pub(super) enum RunnerWorkspaceCommand {
         /// Apply even when the local worktree snapshot no longer matches the Lab source snapshot
         #[arg(long)]
         force: bool,
+    },
+    /// Preview or remove orphaned runner-side Lab workspaces
+    Prune {
+        /// Runner ID
+        runner_id: String,
+
+        /// Delete the previewed orphaned workspaces. Without this flag, the command is a dry run.
+        #[arg(long)]
+        apply: bool,
+
+        /// Minimum workspace age before it can be considered orphaned.
+        #[arg(long, default_value_t = 24)]
+        min_age_hours: u64,
+
+        /// Maximum number of orphan candidates to report or remove.
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
     },
 }
 
@@ -69,6 +136,24 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             runner::list_workspaces(&runner_id, limit)
                 .map(|(output, exit_code)| (RunnerWorkspaceOutput::List(output), exit_code))
         }
+        RunnerWorkspaceCommand::Snapshots {
+            runner_id,
+            repo,
+            source_ref,
+            source_commit,
+            run_id,
+            limit,
+        } => runner::workspace_snapshots(
+            &runner_id,
+            RunnerWorkspaceSnapshotFilters {
+                repo,
+                source_ref,
+                source_commit,
+                run_id,
+                limit,
+            },
+        )
+        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Snapshots(output), exit_code)),
         RunnerWorkspaceCommand::Sync {
             runner_id,
             path,
@@ -76,10 +161,40 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             allow_dirty_lab_workspace,
         } => sync(&runner_id, path, mode, allow_dirty_lab_workspace)
             .map(|(output, exit_code)| (RunnerWorkspaceOutput::Sync(output), exit_code)),
+        RunnerWorkspaceCommand::Pull {
+            runner_id,
+            remote_path,
+            includes,
+            to,
+            dry_run,
+        } => runner::pull_workspace(
+            &runner_id,
+            runner::RunnerWorkspacePullOptions {
+                remote_path,
+                includes,
+                to,
+                dry_run,
+            },
+        )
+        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Pull(output), exit_code)),
         RunnerWorkspaceCommand::Apply { input, force } => {
             runner::apply_workspace_patch(runner::RunnerWorkspaceApplyOptions { input, force })
                 .map(|(output, exit_code)| (RunnerWorkspaceOutput::Apply(output), exit_code))
         }
+        RunnerWorkspaceCommand::Prune {
+            runner_id,
+            apply,
+            min_age_hours,
+            limit,
+        } => runner::prune_workspaces(
+            &runner_id,
+            runner::RunnerWorkspacePruneOptions {
+                apply,
+                min_age_hours,
+                limit,
+            },
+        )
+        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Prune(output), exit_code)),
     }
 }
 

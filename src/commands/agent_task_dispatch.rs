@@ -120,6 +120,7 @@ impl From<DispatchArgs> for AgentTaskDispatchCommand {
             secret_env: args.secret_env,
             concurrency: args.concurrency,
             run_id: args.run_id,
+            task_id: None,
             core: args.core.into(),
         }
     }

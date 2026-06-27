@@ -7,6 +7,10 @@ use crate::core::error::{Error, Result};
 use crate::core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::redaction::redact_argv_display;
+use crate::core::runner::agent_task_lifecycle_event::{
+    agent_task_run_plan_lifecycle_event_from_job_events,
+    agent_task_run_plan_lifecycle_event_from_value,
+};
 
 use super::super::execution::{canonical_daemon_body, daemon_api_get, result_event_data};
 use super::super::{load, Runner};
@@ -255,6 +259,21 @@ pub(super) fn mirror_job_run(
     run_id: Option<&str>,
 ) -> Result<RunRecord> {
     let inferred_label = runner_exec_run_label(command);
+    let agent_task_lifecycle_event = agent_task_run_plan_lifecycle_event_from_value(result)
+        .or_else(|| agent_task_run_plan_lifecycle_event_from_job_events(Some(events)))
+        .and_then(|event| serde_json::to_value(event).ok());
+    let mut lab = json!({
+        "runner": runner_metadata(runner),
+        "remote_job": job,
+        "remote_events": events,
+        "result_summary": result_summary(result),
+        "source_snapshot": source_snapshot_from_result(result),
+        "run_label": inferred_label,
+        "explicit_run_id": run_id,
+    });
+    if let Some(event) = agent_task_lifecycle_event {
+        lab["agent_task_lifecycle_event"] = event;
+    }
     let run = RunRecord {
         id: run_id
             .map(str::to_string)
@@ -269,17 +288,7 @@ pub(super) fn mirror_job_run(
         homeboy_version: None,
         git_sha: None,
         rig_id: None,
-        metadata_json: json!({
-            "lab": {
-                "runner": runner_metadata(runner),
-                "remote_job": job,
-                "remote_events": events,
-                "result_summary": result_summary(result),
-                "source_snapshot": source_snapshot_from_result(result),
-                "run_label": inferred_label,
-                "explicit_run_id": run_id,
-            }
-        }),
+        metadata_json: json!({ "lab": lab }),
     };
     import_run_if_absent(store, &run)?;
     store.get_run(&run.id)?.ok_or_else(|| {

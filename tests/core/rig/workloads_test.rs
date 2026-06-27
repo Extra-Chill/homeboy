@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use crate::core::rig::spec::RigSpec;
 use crate::core::rig::{
-    check_groups_for_extension_workloads, extension_ids_for_workloads, extension_workload_inputs,
-    runner_capabilities_for_extension, trace_dependencies_for_extension,
-    workload_path_expansions_for_extension, workloads_for_extension, RigWorkloadKind,
+    check_groups_for_extension_workloads, env_provider_extensions_for_extension_workloads,
+    extension_ids_for_workloads, extension_workload_inputs, runner_capabilities_for_extension,
+    trace_dependencies_for_extension, workload_path_expansions_for_extension,
+    workloads_for_extension, RigWorkloadKind,
 };
 
 #[test]
@@ -38,6 +39,37 @@ fn test_bench_workloads_for_extension_filters_and_expands_paths() {
     );
     assert!(
         workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "extension-c").is_empty()
+    );
+}
+
+#[test]
+fn test_env_provider_extensions_for_extension_workloads_are_deduplicated() {
+    let rig_spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "fixture-bench",
+            "bench_workloads": {
+                "nodejs": [
+                    {
+                        "path": "/tmp/one.bench.mjs",
+                        "env_provider_extensions": ["fixture-runtime", "fixture-runtime"]
+                    },
+                    {
+                        "path": "/tmp/two.bench.mjs",
+                        "env_provider_extensions": ["artifact-helper", ""]
+                    }
+                ]
+            }
+        }"#,
+    )
+    .expect("parse rig spec");
+
+    assert_eq!(
+        env_provider_extensions_for_extension_workloads(
+            &rig_spec,
+            RigWorkloadKind::Bench,
+            "nodejs",
+        ),
+        vec!["artifact-helper".to_string(), "fixture-runtime".to_string()]
     );
 }
 

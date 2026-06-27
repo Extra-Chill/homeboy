@@ -1,6 +1,8 @@
 mod deterministic;
 mod git;
+mod prune;
 mod snapshot;
+mod snapshots;
 
 use std::path::Path;
 use std::process::Command;

@@ -36,6 +36,7 @@ For git sources, `repo.git//subpath` clones the repository root but discovers sp
 | `services` | object | No | Map of service ID to `ServiceSpec`. |
 | `symlinks` | array | No | List of `SymlinkSpec` entries. |
 | `shared_paths` | array | No | List of dependency paths the rig may borrow from another checkout. |
+| `package_dependencies` | array | No | Install-time package-relative paths that must materialize with the package, for nested package imports that cross the selected package root. |
 | `resources` | object | No | Resource declarations used by active-run leases. |
 | `pipeline` | object | No | Map of pipeline name to `PipelineStep[]`. |
 | `bench` | object | No | Rig-pinned benchmark component/default-baseline settings. |
@@ -93,17 +94,40 @@ Example:
 
 The installed rig keeps the base `pipeline.check` and `components.app.branch`, while replacing `components.app.path`.
 
+## Package Dependencies
+
+Nested package rigs can declare sibling files/directories that must travel with
+the selected package when Lab materializes the package source. Entries are
+resolved relative to the selected package root, must be relative paths, must
+exist, and must stay inside the package source repository root.
+
+```jsonc
+{
+  "id": "static-site-importer-fixture-matrix",
+  "package_dependencies": ["../../shared/wp-codebox"]
+}
+```
+
+When this rig is installed from `WordPress/static-site-importer`, Homeboy records
+the repository root as the source root and keeps the package path at
+`WordPress/static-site-importer`, so imports such as
+`../../../shared/wp-codebox/recipe.mjs` keep resolving on Lab.
+
 ## `ComponentSpec`
 
-Components are local checkouts used by pipeline steps. They are intentionally decoupled from the global component registry so package rigs can work on machines where the component has not been registered globally.
+Components are local checkouts used by pipeline steps. Portable package rigs can keep declaring explicit paths. Rigs that run on machines with Homeboy component registrations can instead declare a registry-backed component with `component_id`, keeping env-expanded path settings as a fallback during rollout.
 
 | Field | Type | Description |
 |---|---|---|
 | `path` | string | Filesystem path to the checkout. Supports `~`, `${env.NAME}`, and use through `${components.<id>.path}`. |
+| `component_id` | string | Optional Homeboy component registry ID to resolve when `path` is omitted or expands to an empty value. Defaults to the component map key. |
+| `path_setting` | string | Optional environment variable name whose value supplies the path when explicit `path` and registry lookup are unavailable. |
 | `remote_url` | string | Optional source repository URL for triage/reporting fallback. |
 | `triage_remote_url` | string | Optional reporting-only GitHub remote override. |
 | `stack` | string | Stack ID synced by `homeboy rig sync` and by explicit `stack` pipeline steps. The component `path` must resolve to the same checkout as the stack's `component_path`. |
 | `branch` | string | Expected branch hint surfaced to humans in status/spec output. |
+| `ref` | string | Explicit pinned ref for Lab dependency materialization. |
+| `default_ref` | string | Default Lab dependency ref used when `ref` is omitted. |
 | `extensions` | object | Optional rig-owned scoped extension config, mainly for rig-pinned bench dispatch. |
 
 Example:
@@ -115,6 +139,20 @@ Example:
       "path": "~/Developer/studio",
       "stack": "studio-combined",
       "branch": "dev/combined-fixes"
+    }
+  }
+}
+```
+
+Registry-backed example with an env path fallback:
+
+```jsonc
+{
+  "components": {
+    "studio": {
+      "component_id": "studio",
+      "default_ref": "origin/main",
+      "path_setting": "HOMEBOY_RIG_COMPONENT_PATH__STUDIO_ADMIN_PERF__STUDIO"
     }
   }
 }

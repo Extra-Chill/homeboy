@@ -63,238 +63,242 @@ const STUDIO_PLAYGROUND_SPEC: &str = r#"{
     }
 }"#;
 
-#[test]
-fn test_spec_parses_studio_playground_fixture() {
-    let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
-    assert_eq!(spec.id, "studio-playground-dev");
-    assert_eq!(spec.components.len(), 2);
-    assert_eq!(spec.services.len(), 1);
-    assert_eq!(spec.symlinks.len(), 1);
-    assert_eq!(spec.shared_paths.len(), 1);
-    assert_eq!(spec.resources.exclusive, vec!["studio-runtime"]);
-    assert_eq!(spec.pipeline.get("up").unwrap().len(), 3);
-    assert_eq!(spec.pipeline.get("check").unwrap().len(), 4);
-    assert_eq!(spec.pipeline.get("down").unwrap().len(), 2);
-}
+mod spec_parse_tests {
+    use super::*;
 
-#[test]
-fn test_spec_http_static_service_kind_roundtrips() {
-    let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
-    let svc = spec.services.get("tarball-server").expect("service");
-    assert_eq!(svc.kind, ServiceKind::HttpStatic);
-    assert_eq!(svc.port, Some(9724));
-    assert!(svc.health.is_some());
-    let health = svc.health.as_ref().unwrap();
-    assert_eq!(health.http.as_deref(), Some("http://127.0.0.1:9724/"));
-    assert_eq!(health.expect_status, Some(200));
-}
+    #[test]
+    fn test_spec_parses_studio_playground_fixture() {
+        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+        assert_eq!(spec.id, "studio-playground-dev");
+        assert_eq!(spec.components.len(), 2);
+        assert_eq!(spec.services.len(), 1);
+        assert_eq!(spec.symlinks.len(), 1);
+        assert_eq!(spec.shared_paths.len(), 1);
+        assert_eq!(spec.resources.exclusive, vec!["studio-runtime"]);
+        assert_eq!(spec.pipeline.get("up").unwrap().len(), 3);
+        assert_eq!(spec.pipeline.get("check").unwrap().len(), 4);
+        assert_eq!(spec.pipeline.get("down").unwrap().len(), 2);
+    }
 
-#[test]
-fn test_spec_pipeline_steps_discriminate_correctly() {
-    let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
-    let up = spec.pipeline.get("up").unwrap();
-    assert!(matches!(up[0], PipelineStep::Service { .. }));
-    assert!(matches!(up[1], PipelineStep::Symlink { .. }));
-    assert!(matches!(up[2], PipelineStep::SharedPath { .. }));
+    #[test]
+    fn test_spec_http_static_service_kind_roundtrips() {
+        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+        let svc = spec.services.get("tarball-server").expect("service");
+        assert_eq!(svc.kind, ServiceKind::HttpStatic);
+        assert_eq!(svc.port, Some(9724));
+        assert!(svc.health.is_some());
+        let health = svc.health.as_ref().unwrap();
+        assert_eq!(health.http.as_deref(), Some("http://127.0.0.1:9724/"));
+        assert_eq!(health.expect_status, Some(200));
+    }
 
-    let check = spec.pipeline.get("check").unwrap();
-    assert!(matches!(check[3], PipelineStep::Check { .. }));
+    #[test]
+    fn test_spec_pipeline_steps_discriminate_correctly() {
+        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+        let up = spec.pipeline.get("up").unwrap();
+        assert!(matches!(up[0], PipelineStep::Service { .. }));
+        assert!(matches!(up[1], PipelineStep::Symlink { .. }));
+        assert!(matches!(up[2], PipelineStep::SharedPath { .. }));
 
-    let declarative_spec: RigSpec = serde_json::from_str(
-        r#"{
-            "id": "declarative-primitives",
-            "pipeline": {
-                "check": [
+        let check = spec.pipeline.get("check").unwrap();
+        assert!(matches!(check[3], PipelineStep::Check { .. }));
+
+        let declarative_spec: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "declarative-primitives",
+                "pipeline": {
+                    "check": [
+                        {
+                            "kind": "check",
+                            "label": "compat server exists",
+                            "any_file_exists": ["lib/compat/runtime-v2/server.txt", "lib/compat/runtime-v1/server.txt"]
+                        }
+                    ],
+                    "bench_prepare": [
+                        {
+                            "kind": "command-if-missing",
+                            "label": "Install dependencies when project-env is missing",
+                            "cwd": "/tmp/project",
+                            "missing": "node_modules/.bin/project-env",
+                            "command": "npm install"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("parse declarative primitives");
+
+        let declarative_check = declarative_spec
+            .pipeline
+            .get("check")
+            .expect("check pipeline");
+        match &declarative_check[0] {
+            PipelineStep::Check { spec, .. } => assert_eq!(spec.any_file_exists.len(), 2),
+            other => panic!("expected check step, got {other:?}"),
+        }
+
+        let prepare = declarative_spec
+            .pipeline
+            .get("bench_prepare")
+            .expect("prepare pipeline");
+        match &prepare[0] {
+            PipelineStep::CommandIfMissing {
+                missing, cmd, cwd, ..
+            } => {
+                assert_eq!(missing, "node_modules/.bin/project-env");
+                assert_eq!(cmd, "npm install");
+                assert_eq!(cwd.as_deref(), Some("/tmp/project"));
+            }
+            other => panic!("expected command-if-missing step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_spec_symlink_fields_parse() {
+        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+        let link: &SymlinkSpec = &spec.symlinks[0];
+        assert_eq!(link.link, "~/.local/bin/studio");
+        assert_eq!(link.target, "~/.local/bin/studio-dev");
+    }
+
+    #[test]
+    fn test_spec_shared_path_fields_parse() {
+        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+        let shared: &SharedPathSpec = &spec.shared_paths[0];
+        assert_eq!(shared.link, "${components.studio.path}/node_modules");
+        assert_eq!(shared.target, "~/Developer/studio/node_modules");
+    }
+
+    #[test]
+    fn test_spec_minimal_only_required_fields() {
+        let json = r#"{"id": "tiny"}"#;
+        let spec: RigSpec = serde_json::from_str(json).expect("parse");
+        assert_eq!(spec.id, "tiny");
+        assert!(spec.components.is_empty());
+        assert!(spec.services.is_empty());
+        assert!(spec.symlinks.is_empty());
+        assert!(spec.shared_paths.is_empty());
+        assert!(spec.resources.is_empty());
+        assert!(spec.pipeline.is_empty());
+    }
+
+    #[test]
+    fn test_spec_trace_variants_parse_multi_component_overlays() {
+        let json = r#"{
+            "id": "studio-playground-dev",
+            "components": {
+                "studio": { "path": "/tmp/studio" },
+                "wordpress-playground": { "path": "/tmp/playground" }
+            },
+            "trace_variants": {
+                "fast-create-site": {
+                    "overlays": [
+                        { "component": "studio", "overlay": "overlays/studio.patch" },
+                        { "component": "wordpress-playground", "overlay": "overlays/playground.patch" }
+                    ]
+                }
+            }
+        }"#;
+        let spec: RigSpec = serde_json::from_str(json).expect("parse");
+        let variant = spec
+            .trace_variants
+            .get("fast-create-site")
+            .expect("variant");
+
+        assert_eq!(variant.overlays.len(), 2);
+        assert_eq!(variant.overlays[0].component, "studio");
+        assert_eq!(variant.overlays[0].overlay, "overlays/studio.patch");
+        assert_eq!(variant.overlays[1].component, "wordpress-playground");
+        assert_eq!(variant.overlays[1].overlay, "overlays/playground.patch");
+    }
+
+    #[test]
+    fn test_spec_resources_block_parses_full_shape() {
+        let json = r#"{
+            "id": "studio-bfb",
+            "resources": {
+                "exclusive": ["studio-runtime"],
+                "paths": ["~/Developer/studio@bfb-mu-plugin-agent-output"],
+                "ports": [9724],
+                "process_patterns": ["app-server-child.mjs"]
+            }
+        }"#;
+        let spec: RigSpec = serde_json::from_str(json).expect("parse");
+        assert_eq!(spec.resources.exclusive, vec!["studio-runtime"]);
+        assert_eq!(
+            spec.resources.paths,
+            vec!["~/Developer/studio@bfb-mu-plugin-agent-output"]
+        );
+        assert_eq!(spec.resources.ports, vec![9724]);
+        assert_eq!(
+            spec.resources.process_patterns,
+            vec!["app-server-child.mjs"]
+        );
+    }
+
+    #[test]
+    fn test_spec_resources_defaults_and_serializes_away_when_missing() {
+        let spec: RigSpec = serde_json::from_str(r#"{"id":"tiny"}"#).expect("parse");
+        assert_eq!(spec.resources, RigResourcesSpec::default());
+        assert_eq!(spec.requirements, RigRequirementsSpec::default());
+        let json = serde_json::to_string(&spec).expect("serialize");
+        assert!(!json.contains("resources"));
+        assert!(!json.contains("requirements"));
+    }
+
+    #[test]
+    fn test_spec_requirements_parse_generic_executables_and_filesystem_assertions() {
+        let json = r#"{
+            "id": "dev-rig",
+            "requirements": {
+                "executables": [
                     {
-                        "kind": "check",
-                        "label": "compat server exists",
-                        "any_file_exists": ["lib/compat/runtime-v2/server.txt", "lib/compat/runtime-v1/server.txt"]
+                        "executable": "node",
+                        "env": "NODE_BIN",
+                        "env_aliases": ["ASDF_NODE_BIN", "VOLTA_NODE_BIN"],
+                        "remediation": "install Node.js"
                     }
                 ],
-                "bench_prepare": [
+                "filesystem_assertions": [
                     {
-                        "kind": "command-if-missing",
-                        "label": "Install dependencies when project-env is missing",
-                        "cwd": "/tmp/project",
-                        "missing": "node_modules/.bin/project-env",
-                        "command": "npm install"
+                        "path": "${components.app.path}/package.json",
+                        "kind": "file",
+                        "label": "app package manifest exists"
                     }
-                ]
+                ],
+                "extensions": {
+                    "example-provider": { "capability": "custom" }
+                }
             }
-        }"#,
-    )
-    .expect("parse declarative primitives");
+        }"#;
 
-    let declarative_check = declarative_spec
-        .pipeline
-        .get("check")
-        .expect("check pipeline");
-    match &declarative_check[0] {
-        PipelineStep::Check { spec, .. } => assert_eq!(spec.any_file_exists.len(), 2),
-        other => panic!("expected check step, got {other:?}"),
+        let spec: RigSpec = serde_json::from_str(json).expect("parse requirements");
+
+        assert_eq!(spec.requirements.executables[0].executable, "node");
+        assert_eq!(
+            spec.requirements.executables[0].env.as_deref(),
+            Some("NODE_BIN")
+        );
+        assert_eq!(
+            spec.requirements.executables[0].env_aliases,
+            vec!["ASDF_NODE_BIN", "VOLTA_NODE_BIN"]
+        );
+        assert_eq!(
+            spec.requirements.filesystem_assertions[0].kind,
+            FilesystemAssertionKind::File
+        );
+        assert!(spec
+            .requirements
+            .extensions
+            .contains_key("example-provider"));
     }
 
-    let prepare = declarative_spec
-        .pipeline
-        .get("bench_prepare")
-        .expect("prepare pipeline");
-    match &prepare[0] {
-        PipelineStep::CommandIfMissing {
-            missing, cmd, cwd, ..
-        } => {
-            assert_eq!(missing, "node_modules/.bin/project-env");
-            assert_eq!(cmd, "npm install");
-            assert_eq!(cwd.as_deref(), Some("/tmp/project"));
-        }
-        other => panic!("expected command-if-missing step, got {other:?}"),
+    #[test]
+    fn test_spec_resources_rejects_invalid_port_shape() {
+        let json = r#"{"id":"bad","resources":{"ports":[70000]}}"#;
+        let err = serde_json::from_str::<RigSpec>(json).expect_err("u16 port rejected");
+        assert!(err.to_string().contains("70000"));
     }
-}
-
-#[test]
-fn test_spec_symlink_fields_parse() {
-    let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
-    let link: &SymlinkSpec = &spec.symlinks[0];
-    assert_eq!(link.link, "~/.local/bin/studio");
-    assert_eq!(link.target, "~/.local/bin/studio-dev");
-}
-
-#[test]
-fn test_spec_shared_path_fields_parse() {
-    let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
-    let shared: &SharedPathSpec = &spec.shared_paths[0];
-    assert_eq!(shared.link, "${components.studio.path}/node_modules");
-    assert_eq!(shared.target, "~/Developer/studio/node_modules");
-}
-
-#[test]
-fn test_spec_minimal_only_required_fields() {
-    let json = r#"{"id": "tiny"}"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    assert_eq!(spec.id, "tiny");
-    assert!(spec.components.is_empty());
-    assert!(spec.services.is_empty());
-    assert!(spec.symlinks.is_empty());
-    assert!(spec.shared_paths.is_empty());
-    assert!(spec.resources.is_empty());
-    assert!(spec.pipeline.is_empty());
-}
-
-#[test]
-fn test_spec_trace_variants_parse_multi_component_overlays() {
-    let json = r#"{
-        "id": "studio-playground-dev",
-        "components": {
-            "studio": { "path": "/tmp/studio" },
-            "wordpress-playground": { "path": "/tmp/playground" }
-        },
-        "trace_variants": {
-            "fast-create-site": {
-                "overlays": [
-                    { "component": "studio", "overlay": "overlays/studio.patch" },
-                    { "component": "wordpress-playground", "overlay": "overlays/playground.patch" }
-                ]
-            }
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    let variant = spec
-        .trace_variants
-        .get("fast-create-site")
-        .expect("variant");
-
-    assert_eq!(variant.overlays.len(), 2);
-    assert_eq!(variant.overlays[0].component, "studio");
-    assert_eq!(variant.overlays[0].overlay, "overlays/studio.patch");
-    assert_eq!(variant.overlays[1].component, "wordpress-playground");
-    assert_eq!(variant.overlays[1].overlay, "overlays/playground.patch");
-}
-
-#[test]
-fn test_spec_resources_block_parses_full_shape() {
-    let json = r#"{
-        "id": "studio-bfb",
-        "resources": {
-            "exclusive": ["studio-runtime"],
-            "paths": ["~/Developer/studio@bfb-mu-plugin-agent-output"],
-            "ports": [9724],
-            "process_patterns": ["app-server-child.mjs"]
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    assert_eq!(spec.resources.exclusive, vec!["studio-runtime"]);
-    assert_eq!(
-        spec.resources.paths,
-        vec!["~/Developer/studio@bfb-mu-plugin-agent-output"]
-    );
-    assert_eq!(spec.resources.ports, vec![9724]);
-    assert_eq!(
-        spec.resources.process_patterns,
-        vec!["app-server-child.mjs"]
-    );
-}
-
-#[test]
-fn test_spec_resources_defaults_and_serializes_away_when_missing() {
-    let spec: RigSpec = serde_json::from_str(r#"{"id":"tiny"}"#).expect("parse");
-    assert_eq!(spec.resources, RigResourcesSpec::default());
-    assert_eq!(spec.requirements, RigRequirementsSpec::default());
-    let json = serde_json::to_string(&spec).expect("serialize");
-    assert!(!json.contains("resources"));
-    assert!(!json.contains("requirements"));
-}
-
-#[test]
-fn test_spec_requirements_parse_generic_executables_and_filesystem_assertions() {
-    let json = r#"{
-        "id": "dev-rig",
-        "requirements": {
-            "executables": [
-                {
-                    "executable": "node",
-                    "env": "NODE_BIN",
-                    "env_aliases": ["ASDF_NODE_BIN", "VOLTA_NODE_BIN"],
-                    "remediation": "install Node.js"
-                }
-            ],
-            "filesystem_assertions": [
-                {
-                    "path": "${components.app.path}/package.json",
-                    "kind": "file",
-                    "label": "app package manifest exists"
-                }
-            ],
-            "extensions": {
-                "example-provider": { "capability": "custom" }
-            }
-        }
-    }"#;
-
-    let spec: RigSpec = serde_json::from_str(json).expect("parse requirements");
-
-    assert_eq!(spec.requirements.executables[0].executable, "node");
-    assert_eq!(
-        spec.requirements.executables[0].env.as_deref(),
-        Some("NODE_BIN")
-    );
-    assert_eq!(
-        spec.requirements.executables[0].env_aliases,
-        vec!["ASDF_NODE_BIN", "VOLTA_NODE_BIN"]
-    );
-    assert_eq!(
-        spec.requirements.filesystem_assertions[0].kind,
-        FilesystemAssertionKind::File
-    );
-    assert!(spec
-        .requirements
-        .extensions
-        .contains_key("example-provider"));
-}
-
-#[test]
-fn test_spec_resources_rejects_invalid_port_shape() {
-    let json = r#"{"id":"bad","resources":{"ports":[70000]}}"#;
-    let err = serde_json::from_str::<RigSpec>(json).expect_err("u16 port rejected");
-    assert!(err.to_string().contains("70000"));
 }
 
 #[test]
@@ -481,6 +485,7 @@ fn test_trace_variants() {
 fn workload_with_trace_metadata() -> WorkloadSpec {
     WorkloadSpec {
         path: "/tmp/scoped.trace.mjs".to_string(),
+        env_provider_extensions: Vec::new(),
         artifact_postprocess: Vec::new(),
         trace_phase_template: None,
         public_preview: None,

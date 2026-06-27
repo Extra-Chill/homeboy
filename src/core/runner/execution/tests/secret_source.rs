@@ -161,6 +161,34 @@ fn runner_secret_env_resolution_uses_provider_json_file_source_values() {
 }
 
 #[test]
+fn runner_secret_env_resolution_accepts_secret_env_plan_names() {
+    std::env::set_var("HOMEBOY_PLAN_SECRET_ENV_TEST", "plan-secret-value");
+    let plan = crate::core::secret_env_plan::SecretEnvPlan::from_secret_env_names([
+        "HOMEBOY_PLAN_SECRET_ENV_TEST".to_string(),
+    ]);
+    let secret_env = HashMap::from([(
+        "HOMEBOY_PLAN_SECRET_ENV_TEST".to_string(),
+        RunnerSecretEnvRef {
+            env: Some("HOMEBOY_PLAN_SECRET_ENV_TEST".to_string()),
+            file: None,
+            secret: None,
+        },
+    )]);
+
+    let resolved = resolve_runner_secret_env_for_plan(&secret_env, &plan, &HashMap::new())
+        .expect("plan-declared secret resolves through runner policy");
+
+    assert_eq!(
+        resolved.get("HOMEBOY_PLAN_SECRET_ENV_TEST"),
+        Some(&"plan-secret-value".to_string())
+    );
+    assert!(!serde_json::to_string(&plan.redacted())
+        .expect("redacted plan json")
+        .contains("plan-secret-value"));
+    std::env::remove_var("HOMEBOY_PLAN_SECRET_ENV_TEST");
+}
+
+#[test]
 fn provider_file_secret_source_error_is_early_clear_and_redacted() {
     let provision = ProviderFileSecretSourceProvision {
         path: "~/.provider/auth.json".to_string(),

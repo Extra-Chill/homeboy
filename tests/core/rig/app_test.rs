@@ -16,12 +16,15 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
         "studio".to_string(),
         ComponentSpec {
             path: "/tmp/studio-dev".to_string(),
+            component_id: None,
+            path_setting: None,
             checkout_root: None,
             remote_url: None,
             triage_remote_url: None,
             stack: None,
             branch: None,
             r#ref: None,
+            default_ref: None,
             extensions: None,
         },
     );

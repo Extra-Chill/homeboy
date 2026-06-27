@@ -730,6 +730,7 @@ mod tests {
             stderr: String::new(),
             success: false,
             exit_code: 126,
+            timed_out: false,
             child_resource: None,
         };
 
@@ -752,6 +753,7 @@ mod tests {
             stderr: "permission denied\n".to_string(),
             success: false,
             exit_code: 2,
+            timed_out: false,
             child_resource: None,
         };
 

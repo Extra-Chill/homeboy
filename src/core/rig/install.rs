@@ -35,6 +35,8 @@ pub(crate) struct PreparedSource {
     pub discovery_path: PathBuf,
     pub linked: bool,
     pub source_revision: Option<String>,
+    pub source_ref: Option<String>,
+    pub source_dirty: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +71,10 @@ pub struct RigSourceMetadata {
     pub materialized: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_dirty: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,10 +90,20 @@ pub struct StackSourceMetadata {
     pub source_revision: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RigPackageMetadata {
+    #[serde(default)]
+    package_dependencies: Vec<String>,
+}
+
 pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallResult> {
-    let prepared = prepare_source(source)?;
+    let mut prepared = prepare_source(source)?;
     let discovered = discover_rigs_for_install(&prepared.discovery_path, id, all)?;
     let selected = select_rigs(discovered, id, all, source)?;
+    let dependency_roots = package_source_roots_for_dependencies(&prepared, &selected)?;
+    prepared.source_root = dependency_roots.source_root;
+    prepared.package_path = dependency_roots.package_path;
+    prepared.discovery_path = dependency_roots.discovery_path;
     let discovered_stacks = if id.is_some() && !all {
         Vec::new()
     } else {
@@ -131,6 +147,8 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
             linked: prepared.linked,
             materialized,
             source_revision: prepared.source_revision.clone(),
+            source_ref: prepared.source_ref.clone(),
+            source_dirty: prepared.source_dirty,
         };
         write_source_metadata(&rig.id, &metadata)?;
 
@@ -351,6 +369,138 @@ fn remove_extends(value: &mut serde_json::Value) {
     }
 }
 
+struct PackageDependencySourceRoots {
+    source_root: PathBuf,
+    package_path: PathBuf,
+    discovery_path: PathBuf,
+}
+
+fn package_source_roots_for_dependencies(
+    prepared: &PreparedSource,
+    rigs: &[DiscoveredRig],
+) -> Result<PackageDependencySourceRoots> {
+    let mut dependency_paths = Vec::new();
+    for rig in rigs {
+        let value = read_json_value(&rig.rig_path)?;
+        let spec: RigPackageMetadata = serde_json::from_value(value).map_err(|e| {
+            Error::validation_invalid_argument(
+                "rig_spec",
+                format!(
+                    "Rig spec schema is not compatible with this Homeboy binary: {}",
+                    e
+                ),
+                Some(rig.rig_path.to_string_lossy().to_string()),
+                None,
+            )
+        })?;
+        for dependency in spec.package_dependencies {
+            dependency_paths.push((rig.id.clone(), dependency));
+        }
+    }
+
+    if dependency_paths.is_empty() {
+        return Ok(PackageDependencySourceRoots {
+            source_root: prepared.source_root.clone(),
+            package_path: prepared.package_path.clone(),
+            discovery_path: prepared.discovery_path.clone(),
+        });
+    }
+
+    let repo_root = git::repo_root(&prepared.package_path)
+        .or_else(|| materialized_runner_source_root(&prepared.package_path))
+        .unwrap_or_else(|| prepared.source_root.clone());
+    let repo_root = repo_root.canonicalize().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!(
+                "resolve rig package source root {}",
+                repo_root.display()
+            )),
+        )
+    })?;
+    let package_root = prepared.package_path.canonicalize().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!(
+                "resolve rig package path {}",
+                prepared.package_path.display()
+            )),
+        )
+    })?;
+    if !package_root.starts_with(&repo_root) {
+        return Err(Error::validation_invalid_argument(
+            "package_dependencies",
+            "Rig package dependencies require the selected package path to stay inside the package source root",
+            Some(prepared.package_path.to_string_lossy().to_string()),
+            Some(vec![format!("source root: {}", repo_root.display())]),
+        ));
+    }
+
+    for (rig_id, dependency) in dependency_paths {
+        validate_package_dependency_path(&rig_id, &dependency, &package_root, &repo_root)?;
+    }
+
+    Ok(PackageDependencySourceRoots {
+        source_root: repo_root,
+        package_path: package_root.clone(),
+        discovery_path: package_root,
+    })
+}
+
+fn validate_package_dependency_path(
+    rig_id: &str,
+    dependency: &str,
+    package_root: &Path,
+    source_root: &Path,
+) -> Result<PathBuf> {
+    let dependency = dependency.trim();
+    if dependency.is_empty() || Path::new(dependency).is_absolute() {
+        return Err(Error::validation_invalid_argument(
+            "package_dependencies",
+            "Rig package dependency paths must be non-empty relative paths",
+            Some(dependency.to_string()),
+            Some(vec![format!("rig: {rig_id}")]),
+        ));
+    }
+
+    let candidate = package_root.join(dependency);
+    let canonical = candidate.canonicalize().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!(
+                "resolve rig package dependency {} for {}",
+                candidate.display(),
+                rig_id
+            )),
+        )
+    })?;
+    if !canonical.starts_with(source_root) {
+        return Err(Error::validation_invalid_argument(
+            "package_dependencies",
+            "Rig package dependency paths must stay inside the package source root",
+            Some(dependency.to_string()),
+            Some(vec![
+                format!("rig: {rig_id}"),
+                format!("source root: {}", source_root.display()),
+            ]),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn materialized_runner_source_root(path: &Path) -> Option<PathBuf> {
+    let mut ancestors = path.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    ancestors
+        .windows(2)
+        .find(|window| {
+            window[0]
+                .file_name()
+                .is_some_and(|name| name == "_lab_workspaces")
+        })
+        .map(|window| window[1].to_path_buf())
+}
+
 fn merge_json(target: &mut serde_json::Value, overlay: serde_json::Value) {
     match (target, overlay) {
         (serde_json::Value::Object(target), serde_json::Value::Object(overlay)) => {
@@ -378,17 +528,19 @@ fn ensure_rig_refreshable(rig: &DiscoveredRig, target: &Path) -> Result<()> {
             ));
         }
     };
-    let mut spec: super::RigSpec = serde_json::from_str(&content).map_err(|e| {
+    let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
         Error::validation_invalid_json(
             e,
             Some(format!("parse existing rig spec {}", target.display())),
             Some(content.chars().take(200).collect()),
         )
     })?;
-    if spec.id.is_empty() {
-        spec.id = rig.id.clone();
-    }
-    let existing_id = extension::slugify_id(&spec.id)?;
+    let existing_id = value
+        .get("id")
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+        .unwrap_or(&rig.id);
+    let existing_id = extension::slugify_id(existing_id)?;
     if existing_id == rig.id {
         return Ok(());
     }
@@ -407,6 +559,16 @@ fn ensure_rig_refreshable(rig: &DiscoveredRig, target: &Path) -> Result<()> {
 }
 
 fn ensure_stack_refreshable(stack: &DiscoveredStack, target: &Path) -> Result<()> {
+    if !target.exists() && fs::symlink_metadata(target).is_ok() {
+        return Ok(());
+    }
+
+    if read_stack_source_metadata(&stack.id)
+        .is_some_and(|metadata| config_matches_source(target, Path::new(&metadata.stack_path)))
+    {
+        return Ok(());
+    }
+
     if config_matches_source(target, &stack.stack_path) {
         return Ok(());
     }
@@ -512,6 +674,9 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
         .map_err(|e| Error::internal_io(e.to_string(), Some("create rig packages dir".into())))?;
     git::clone_repo(root_source, &package_path)?;
     let source_revision = git::short_head_revision(&package_path);
+    let source_ref = git::current_branch(&package_path).filter(|branch| !branch.is_empty());
+    let source_dirty =
+        git::status_porcelain_bytes(&package_path).is_some_and(|status| !status.is_empty());
     let discovery_path = match subpath {
         Some(subpath) => package_path.join(subpath),
         None => package_path.clone(),
@@ -538,6 +703,8 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
         discovery_path,
         linked: false,
         source_revision,
+        source_ref,
+        source_dirty,
     })
 }
 
@@ -576,13 +743,20 @@ fn prepare_local_source(source: &str) -> Result<PreparedSource> {
             None,
         ));
     }
+    let source_revision = git::short_head_revision_at(&package_path);
+    let source_ref = git::current_branch(&package_path).filter(|branch| !branch.is_empty());
+    let source_dirty =
+        git::status_porcelain_bytes(&package_path).is_some_and(|status| !status.is_empty());
+
     Ok(PreparedSource {
         source: package_path.to_string_lossy().to_string(),
         source_root: package_path.clone(),
         discovery_path: package_path.clone(),
         package_path,
         linked: true,
-        source_revision: None,
+        source_revision,
+        source_ref,
+        source_dirty,
     })
 }
 

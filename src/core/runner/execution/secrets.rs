@@ -6,6 +6,7 @@ use crate::core::agent_tasks::{
 };
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
+use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::server::{self, SshClient};
 
 use super::super::resolve_runner_secret_env;
@@ -14,14 +15,14 @@ use super::super::{Runner, RunnerCapabilityPreflight};
 #[allow(unused_imports)]
 use super::*;
 
-pub(super) fn resolve_runner_secret_env_for_command(
+pub(super) fn resolve_runner_secret_env_for_plan(
     secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
-    required_names: &[String],
+    plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
     resolve_runner_secret_env_for_command_with_fallbacks(
         secret_env,
-        required_names,
+        &plan.secret_env_names(),
         env,
         &provider_secret_sources_for_discovered_providers(),
     )
@@ -320,7 +321,17 @@ pub(crate) fn runner_exec_secret_env_names(
     command: &[String],
     preflight: Option<&RunnerCapabilityPreflight>,
     explicit_names: &[String],
+    env: &HashMap<String, String>,
 ) -> Vec<String> {
+    runner_exec_secret_env_plan(command, preflight, explicit_names, env).secret_env_names()
+}
+
+pub(crate) fn runner_exec_secret_env_plan(
+    command: &[String],
+    preflight: Option<&RunnerCapabilityPreflight>,
+    explicit_names: &[String],
+    env: &HashMap<String, String>,
+) -> SecretEnvPlan {
     let mut names = Vec::new();
     names.extend(explicit_names.iter().cloned());
     if let Some(preflight) = preflight {
@@ -335,7 +346,47 @@ pub(crate) fn runner_exec_secret_env_names(
     names.extend(super::super::lab::secrets::declared_tunnel_secret_env(
         command,
     ));
-    names.sort();
-    names.dedup();
-    names
+    names.extend(declared_runtime_provider_secret_env(env));
+    SecretEnvPlan::from_secret_env_names(names)
+}
+
+fn declared_runtime_provider_secret_env(env: &HashMap<String, String>) -> Vec<String> {
+    let explicit = env
+        .get("HOMEBOY_AGENT_RUNTIME_SECRET_ENV")
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if !explicit.is_empty() {
+        return explicit;
+    }
+
+    match env
+        .get("HOMEBOY_AGENT_RUNTIME_PROVIDER")
+        .map(String::as_str)
+        .map(str::trim)
+    {
+        Some("codex") => [
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        Some("openai") => vec!["OPENAI_API_KEY".to_string()],
+        Some("claude-code") => [
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        _ => Vec::new(),
+    }
 }

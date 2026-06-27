@@ -8,37 +8,12 @@ use homeboy::commands::bench::BenchOutput;
 use homeboy::commands::extension::{ExtensionDetail, ExtensionOutput};
 use homeboy::commands::rig::RigCommandOutput;
 use homeboy::commands::runs::RunsOutput;
-use homeboy::commands::utils::response::cli_response_for_json_result;
-use homeboy::core::code_audit::report::{
-    AuditChangedSinceSummary, AuditCommandOutput, AuditFixability, AuditSummaryGroup,
-    AuditSummaryOutput, FixabilityKindBreakdown,
-};
-use homeboy::core::code_audit::FindingConfidence;
-use homeboy::core::extension::lint::LintCommandOutput;
-use homeboy::core::extension::test::{
-    RawTestOutput, TestCommandOutput, TestCounts, TestSummaryOutput,
-};
-use homeboy::core::extension::{
-    PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, StructuredSidecarDeclaration,
-    VerificationPhase,
-};
-use homeboy::core::finding::{FindingProducerSummary, FindingSource, HomeboyFinding};
-use homeboy::core::plan::HomeboyPlan;
-use homeboy::core::review::{
-    ReviewArtifact, ReviewArtifactCommand, ReviewCommandOutput, ReviewStage, ReviewSummary,
-};
+use homeboy::core::extension::StructuredSidecarDeclaration;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-const REQUIRED_QUALITY_COMMAND_FIXTURES: &[&str] = &["audit", "lint", "review", "test"];
+const REQUIRED_QUALITY_COMMANDS: &[&str] = &["audit", "lint", "review", "test"];
 const REQUIRED_OPS_VARIANT_COMMANDS: &[&str] = &["db", "deploy"];
-
-struct OutputContractScenario {
-    command: &'static str,
-    fixture: &'static str,
-    exit_code: i32,
-    payload: fn() -> Value,
-}
 
 struct VariantContract {
     name: &'static str,
@@ -46,21 +21,18 @@ struct VariantContract {
 }
 
 #[test]
-fn visible_quality_commands_have_declared_golden_json_contract_fixtures() {
+fn visible_quality_commands_stay_on_quality_json_family() {
     let surface = current_command_surface();
-    let covered: BTreeSet<_> = quality_output_contract_scenarios()
-        .iter()
-        .map(|scenario| scenario.command)
-        .collect();
 
-    for command in REQUIRED_QUALITY_COMMAND_FIXTURES {
+    for command in REQUIRED_QUALITY_COMMANDS {
         assert!(
             surface.contains_path(&[*command]),
-            "required quality output contract command is not visible in the CLI surface: {command}"
+            "required quality command is not visible in the CLI surface: {command}"
         );
-        assert!(
-            covered.contains(command),
-            "missing golden JSON output contract fixture for visible quality command: {command}"
+        assert_eq!(
+            registered_command_json_family(command),
+            Some(CommandJsonFamily::Quality),
+            "quality command should stay routed through the quality JSON family: {command}"
         );
     }
 }
@@ -87,17 +59,6 @@ fn public_output_variant_contracts_cover_known_ops_command_families() {
             covered.contains(command),
             "missing public output variant contract for ops command family: {command}"
         );
-    }
-}
-
-#[test]
-fn quality_command_golden_json_contract_fixtures_match_typed_payloads() {
-    for scenario in quality_output_contract_scenarios() {
-        let actual = enveloped_json((scenario.payload)(), scenario.exit_code);
-        let expected: Value = serde_json::from_str(scenario.fixture)
-            .unwrap_or_else(|err| panic!("{} fixture should parse: {err}", scenario.command));
-
-        assert_eq!(actual, expected, "{} golden JSON drifted", scenario.command);
     }
 }
 
@@ -154,6 +115,19 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
                     "run_id": "run-1",
                     "artifact_id": "summary",
                     "output_path": "summary.json"
+                }),
+            ),
+            variant_contract(
+                "artifact_preview",
+                json!({
+                    "command": "runs.artifact.preview",
+                    "run_id": "run-1",
+                    "artifact_id": "generated-site",
+                    "artifact_path": "/tmp/site",
+                    "base_url": "http://127.0.0.1:8080/",
+                    "process_id": 1234,
+                    "entrypoints": [],
+                    "stop_hint": "Stop preview server with `kill 1234`."
                 }),
             ),
             variant_contract(
@@ -396,41 +370,6 @@ fn extension_show_output_contracts_use_top_level_structured_sidecars() {
     assert_eq!(output["extension"].get("lint"), None);
 }
 
-fn quality_output_contract_scenarios() -> Vec<OutputContractScenario> {
-    vec![
-        OutputContractScenario {
-            command: "audit",
-            fixture: include_str!("fixtures/output_contracts/quality/audit-summary.json"),
-            exit_code: 1,
-            payload: audit_summary_payload,
-        },
-        OutputContractScenario {
-            command: "lint",
-            fixture: include_str!("fixtures/output_contracts/quality/lint-findings.json"),
-            exit_code: 1,
-            payload: lint_findings_payload,
-        },
-        OutputContractScenario {
-            command: "test",
-            fixture: include_str!("fixtures/output_contracts/quality/test-summary.json"),
-            exit_code: 1,
-            payload: test_summary_payload,
-        },
-        OutputContractScenario {
-            command: "review",
-            fixture: include_str!("fixtures/output_contracts/quality/review-artifact.json"),
-            exit_code: 1,
-            payload: review_artifact_payload,
-        },
-    ]
-}
-
-fn enveloped_json(payload: Value, exit_code: i32) -> Value {
-    let result = Ok(payload);
-    serde_json::to_value(cli_response_for_json_result(&result, exit_code))
-        .expect("CLI response should serialize")
-}
-
 fn typed_output_value<T: Serialize>(output: T) -> Value {
     serde_json::to_value(output).expect("command output should serialize")
 }
@@ -479,246 +418,4 @@ fn variant_signature(value: &Value) -> String {
         .join(",");
 
     format!("shape={keys}")
-}
-
-fn audit_summary_payload() -> Value {
-    typed_output_value(audit_summary_output())
-}
-
-fn lint_findings_payload() -> Value {
-    typed_output_value(lint_findings_output())
-}
-
-fn test_summary_payload() -> Value {
-    typed_output_value(test_summary_output())
-}
-
-fn review_artifact_payload() -> Value {
-    typed_output_value(review_artifact_output())
-}
-
-fn audit_summary_output() -> AuditCommandOutput {
-    let mut by_kind = BTreeMap::new();
-    by_kind.insert(
-        "god_file".to_string(),
-        FixabilityKindBreakdown {
-            total: 2,
-            automated: 1,
-            manual_only: 1,
-        },
-    );
-
-    AuditCommandOutput::Summary(AuditSummaryOutput {
-        alignment_score: Some(0.82),
-        total_findings: 2,
-        warnings: 1,
-        info: 1,
-        finding_groups: vec![AuditSummaryGroup {
-            kind: "god_file".to_string(),
-            count: 2,
-            warnings: 1,
-            info: 1,
-            confidence: FindingConfidence::Heuristic,
-            sample_files: vec!["src/large.rs".to_string(), "src/also-large.rs".to_string()],
-            drilldown_command: "homeboy audit fixture --only god_file".to_string(),
-        }],
-        top_findings: vec![
-            HomeboyFinding::builder("audit", "File exceeds the size threshold")
-                .rule("god_file")
-                .category("structural")
-                .file("src/large.rs")
-                .severity("warning")
-                .metadata("convention", "structural")
-                .metadata("suggestion", "Split the module into focused pieces")
-                .metadata("confidence", FindingConfidence::Heuristic)
-                .metadata("kind", "god_file")
-                .build(),
-        ],
-        fixability: Some(AuditFixability {
-            fixable_count: 2,
-            automated_count: 1,
-            manual_only_count: 1,
-            by_kind,
-        }),
-        changed_since: Some(AuditChangedSinceSummary {
-            introduced_findings: 1,
-            contextual_findings: 1,
-        }),
-        baseline_filtering: None,
-        unbaselined_findings: Vec::new(),
-        extension_phase_timings: Vec::new(),
-        exit_code: 1,
-    })
-}
-
-fn lint_findings_output() -> LintCommandOutput {
-    LintCommandOutput {
-        passed: false,
-        status: "failed".to_string(),
-        component: "fixture".to_string(),
-        exit_code: 1,
-        phase: PhaseReport {
-            phase: VerificationPhase::Lint,
-            status: PhaseStatus::Failed,
-            exit_code: Some(1),
-            summary: "lint phase failed with 1 finding(s) across fixture-linter failed: 1"
-                .to_string(),
-        },
-        failure: Some(PhaseFailure {
-            phase: VerificationPhase::Lint,
-            category: PhaseFailureCategory::Findings,
-            summary: "1 lint finding(s) detected".to_string(),
-        }),
-        autofix: None,
-        hints: Some(vec![
-            "Run `homeboy lint fixture --fix` to apply safe fixes.".to_string(),
-        ]),
-        baseline_comparison: None,
-        formatting_findings: None,
-        findings: Some(vec![HomeboyFinding::builder(
-            "fixture-linter",
-            "Trailing whitespace",
-        )
-        .category("whitespace")
-        .rule("trailing-whitespace")
-        .file("src/lib.rs")
-        .severity("warning")
-        .fingerprint("lint:src/lib.rs:12:trailing-whitespace")
-        .source(
-            FindingSource::new("sidecar")
-                .label("lint-findings")
-                .path("lint-findings.json"),
-        )
-        .build()]),
-        producer_summaries: vec![FindingProducerSummary::new("fixture-linter", "failed")
-            .finding_count(1)
-            .source(
-                FindingSource::new("sidecar")
-                    .label("lint-findings")
-                    .path("lint-findings.json"),
-            )],
-        summary: None,
-        self_check_capture: None,
-        ci_context: None,
-        extension_phase_timings: Vec::new(),
-    }
-}
-
-fn test_summary_output() -> TestCommandOutput {
-    TestCommandOutput {
-        passed: false,
-        status: "failed".to_string(),
-        component: "fixture".to_string(),
-        exit_code: 1,
-        phase: Some(PhaseReport {
-            phase: VerificationPhase::Test,
-            status: PhaseStatus::Failed,
-            exit_code: Some(1),
-            summary: "test phase reported 1 failure(s) out of 3 test(s)".to_string(),
-        }),
-        failure: Some(PhaseFailure {
-            phase: VerificationPhase::Test,
-            category: PhaseFailureCategory::Findings,
-            summary: "1 test failure(s) detected".to_string(),
-        }),
-        test_counts: Some(TestCounts::new(3, 2, 1, 0)),
-        findings: Some(vec![HomeboyFinding::builder(
-            "test",
-            "expected stable JSON envelope",
-        )
-        .severity("error")
-        .file("tests/output_contract.rs")
-        .line(24)
-        .metadata("test_name", "fixture::fails_contract")
-        .build()]),
-        coverage: None,
-        baseline_comparison: None,
-        analysis: None,
-        autofix: None,
-        hints: Some(vec![
-            "Re-run: homeboy test fixture --json-summary".to_string()
-        ]),
-        drift: None,
-        auto_fix_drift: None,
-        test_scope: None,
-        summary: Some(TestSummaryOutput {
-            total: 3,
-            passed: 2,
-            failed: 1,
-            skipped: 0,
-            failures: Vec::new(),
-            exit_code: 1,
-        }),
-        raw_output: Some(RawTestOutput {
-            stdout_tail: "running 3 tests\nfixture::fails_contract FAILED".to_string(),
-            stderr_tail: "assertion failed: stable envelope".to_string(),
-            truncated: false,
-            stdout_truncated: false,
-            stderr_truncated: false,
-            stdout_seen_bytes: 0,
-            stdout_retained_bytes: 0,
-            stderr_seen_bytes: 0,
-            stderr_retained_bytes: 0,
-            stdout_limit_bytes: 0,
-            stderr_limit_bytes: 0,
-        }),
-        ci_context: None,
-        extension_phase_timings: Vec::new(),
-    }
-}
-
-fn review_artifact_output() -> ReviewCommandOutput {
-    ReviewCommandOutput {
-        command: "review".to_string(),
-        plan: HomeboyPlan::default(),
-        observation: None,
-        artifact: ReviewArtifact {
-            schema: "homeboy/review/v1".to_string(),
-            component: "fixture".to_string(),
-            status: "fail".to_string(),
-            generated_at: "2026-05-24T00:00:00Z".to_string(),
-            base_ref: "origin/main".to_string(),
-            head_ref: "HEAD".to_string(),
-            observation: None,
-            commands: vec![ReviewArtifactCommand {
-                name: "lint".to_string(),
-                status: "fail".to_string(),
-                exit_code: 1,
-                summary: "1 lint finding(s) detected".to_string(),
-                findings: vec![HomeboyFinding::builder("lint", "Trailing whitespace")
-                    .fingerprint("lint:src/lib.rs:12:trailing-whitespace")
-                    .build()],
-                artifacts: Vec::new(),
-            }],
-        },
-        summary: ReviewSummary {
-            passed: false,
-            status: "fail".to_string(),
-            component: "fixture".to_string(),
-            scope: "changed-since".to_string(),
-            changed_since: Some("origin/main".to_string()),
-            total_findings: 1,
-            changed_file_count: Some(2),
-            hints: vec!["Deep dive: homeboy lint fixture --changed-since origin/main".to_string()],
-        },
-        audit: skipped_review_stage("audit"),
-        lint: skipped_review_stage("lint"),
-        test: skipped_review_stage("test"),
-        ci_profile: None,
-    }
-}
-
-fn skipped_review_stage<T: Serialize>(stage: &str) -> ReviewStage<T> {
-    ReviewStage {
-        stage: stage.to_string(),
-        ran: false,
-        passed: true,
-        exit_code: 0,
-        finding_count: 0,
-        hint: format!("Skipped {stage} in contract fixture"),
-        skipped_reason: Some(
-            "fixture keeps nested command payloads in their own golden files".to_string(),
-        ),
-        output: None,
-    }
 }

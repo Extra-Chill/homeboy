@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::core::component::Component;
 use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
@@ -20,6 +21,7 @@ pub struct RunnerOutput {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    pub timed_out: bool,
     pub child_resource: Option<ExtensionChildResourceSummary>,
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }
@@ -38,6 +40,7 @@ pub struct ExtensionRunner {
     /// conflict — strictly more expressive). See SettingArgs docstring.
     settings_json_overrides: Vec<(String, serde_json::Value)>,
     env_vars: Vec<(String, String)>,
+    env_provider_extensions: Vec<String>,
     script_args: Vec<String>,
     path_override: Option<String>,
     pre_loaded_component: Option<Component>,
@@ -52,6 +55,8 @@ pub struct ExtensionRunner {
     passthrough: bool,
     /// Tee only runner stderr to the terminal while capturing stdout/stderr.
     stderr_passthrough: bool,
+    /// Optional wall-clock budget enforced by the parent process.
+    timeout: Option<Duration>,
     /// Run directory path for recording machine-local child process evidence.
     run_dir_path: Option<PathBuf>,
     invocation_requirements: InvocationRequirements,
@@ -74,6 +79,7 @@ impl ExtensionRunner {
             settings_overrides: Vec::new(),
             settings_json_overrides: Vec::new(),
             env_vars: Vec::new(),
+            env_provider_extensions: Vec::new(),
             script_args: Vec::new(),
             path_override: None,
             pre_loaded_component: None,
@@ -81,6 +87,7 @@ impl ExtensionRunner {
             command_override: None,
             passthrough: true,
             stderr_passthrough: false,
+            timeout: None,
             run_dir_path: None,
             invocation_requirements: InvocationRequirements::default(),
         }
@@ -113,6 +120,14 @@ impl ExtensionRunner {
     /// Add an environment variable.
     pub fn env(mut self, key: &str, value: &str) -> Self {
         self.env_vars.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    pub fn env_provider_extensions(mut self, extension_ids: &[String]) -> Self {
+        self.env_provider_extensions
+            .extend(extension_ids.iter().filter(|id| !id.is_empty()).cloned());
+        self.env_provider_extensions.sort();
+        self.env_provider_extensions.dedup();
         self
     }
 
@@ -187,6 +202,11 @@ impl ExtensionRunner {
     /// live human progress while the parent process owns stdout JSON.
     pub(crate) fn stderr_passthrough(mut self, stderr_passthrough: bool) -> Self {
         self.stderr_passthrough = stderr_passthrough;
+        self
+    }
+
+    pub(crate) fn timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -267,6 +287,7 @@ impl ExtensionRunner {
             success: output.success,
             stdout: output.stdout,
             stderr: output.stderr,
+            timed_out: output.timed_out,
             child_resource: output.child_resource,
             extension_phase_timings: self
                 .run_dir_path
@@ -299,14 +320,29 @@ impl ExtensionRunner {
         extension_name: &str,
         extra_env_vars: &[(String, String)],
     ) -> Result<Vec<(String, String)>> {
-        super::execution::build_capability_env(
+        let additional_env_provider_paths = self.additional_env_provider_paths()?;
+        super::execution::build_capability_env_with_additional_providers(
             extension_name,
             &self.execution_context.component.id,
             extension_path,
             project_path,
             settings_json,
+            &additional_env_provider_paths,
             extra_env_vars,
         )
+    }
+
+    fn additional_env_provider_paths(&self) -> Result<Vec<(String, PathBuf)>> {
+        self.env_provider_extensions
+            .iter()
+            .filter(|extension_id| extension_id.as_str() != self.execution_context.extension_id)
+            .map(|extension_id| {
+                Ok((
+                    extension_id.clone(),
+                    super::registry::extension_path(extension_id),
+                ))
+            })
+            .collect()
     }
 
     fn execute_script(
@@ -324,6 +360,7 @@ impl ExtensionRunner {
             super::execution::CapabilityScriptOptions {
                 passthrough: self.passthrough,
                 stderr_passthrough: self.stderr_passthrough,
+                timeout: self.timeout,
             },
         )
     }
@@ -487,7 +524,7 @@ fn parsed_detail(output: &str) -> Option<serde_json::Value> {
     })
 }
 
-fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
+pub(in crate::core::extension) fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
     let lines: Vec<&str> = s.lines().collect();
     if lines.len() <= max_lines {
         (s.to_string(), false)
@@ -652,6 +689,7 @@ mod tests {
             stderr: "fatal setup error".to_string(),
             success: false,
             exit_code: 2,
+            timed_out: false,
             child_resource: None,
         };
 
@@ -685,6 +723,7 @@ mod tests {
             stderr: "formatter missing".to_string(),
             success: false,
             exit_code: 127,
+            timed_out: false,
             child_resource: None,
         };
 

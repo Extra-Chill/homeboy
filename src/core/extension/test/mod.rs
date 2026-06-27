@@ -556,12 +556,8 @@ fn changed_test_file_for_path(file: &str) -> Option<String> {
         return Some("tests/output_errors.rs".to_string());
     }
 
-    if file.starts_with("tests/fixtures/output_contracts/quality/") {
-        return Some("tests/output_contracts_test.rs".to_string());
-    }
-
     if file.starts_with("tests/fixtures/golden_json_contracts/") {
-        return Some("src/commands/golden_contract_tests.rs".to_string());
+        return Some("src/command_contract/public_variants.rs".to_string());
     }
 
     if is_direct_changed_test_path(file) && !file.starts_with("tests/fixtures/") {
@@ -642,14 +638,8 @@ mod tests {
             Some("tests/output_errors.rs".to_string())
         );
         assert_eq!(
-            changed_test_file_for_path(
-                "tests/fixtures/output_contracts/quality/audit-summary.json"
-            ),
-            Some("tests/output_contracts_test.rs".to_string())
-        );
-        assert_eq!(
             changed_test_file_for_path("tests/fixtures/golden_json_contracts/runs_contract.json"),
-            Some("src/commands/golden_contract_tests.rs".to_string())
+            Some("src/command_contract/public_variants.rs".to_string())
         );
         assert_eq!(
             changed_test_file_for_path("tests/fixtures/other.json"),

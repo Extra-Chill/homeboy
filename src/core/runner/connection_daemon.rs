@@ -2,15 +2,18 @@ use std::path::Path;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::core::server::{Server, SshClient};
 
+use super::super::session::RunnerStaleRuntimePath;
 use super::{
     failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, remote_daemon_start,
     remote_daemon_stop, reserve_loopback_port, terminate_pid, wait_for_tcp, RemoteDaemon,
 };
 use crate::core::runner::{RunnerConnectReport, RunnerFailureKind};
+use std::collections::BTreeMap;
 
 pub(super) fn connect_remote_daemon(
     server: &Server,
@@ -174,6 +177,20 @@ pub(super) fn daemon_http_version(local_url: &str) -> std::result::Result<String
         .ok_or_else(|| "remote daemon version response did not include a version".to_string())
 }
 
+pub(super) fn daemon_http_runtime_stale_paths(
+    local_url: &str,
+) -> std::result::Result<Vec<RunnerStaleRuntimePath>, String> {
+    let body = daemon_http_body(local_url)?;
+    Ok(daemon_runtime_stale_paths_from_body(&body))
+}
+
+pub(super) fn daemon_http_runtime_loaded_paths(
+    local_url: &str,
+) -> std::result::Result<BTreeMap<String, String>, String> {
+    let body = daemon_http_body(local_url)?;
+    Ok(daemon_runtime_loaded_paths_from_body(&body))
+}
+
 fn daemon_http_body(local_url: &str) -> std::result::Result<Value, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(2))
@@ -211,6 +228,51 @@ pub(super) fn daemon_identity_from_body(body: &Value) -> Option<&str> {
             body.pointer("/data/build_identity/display")
                 .and_then(Value::as_str)
         })
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeStalePathBody {
+    env: String,
+    path: String,
+    loaded_fingerprint: String,
+    current_fingerprint: String,
+}
+
+pub(super) fn daemon_runtime_stale_paths_from_body(body: &Value) -> Vec<RunnerStaleRuntimePath> {
+    let stale = body
+        .pointer("/runtime_paths/stale")
+        .or_else(|| body.pointer("/data/runtime_paths/stale"));
+    let Some(Value::Array(paths)) = stale else {
+        return Vec::new();
+    };
+    paths
+        .iter()
+        .filter_map(|value| serde_json::from_value::<RuntimeStalePathBody>(value.clone()).ok())
+        .map(|path| RunnerStaleRuntimePath {
+            env: path.env,
+            path: path.path,
+            loaded_fingerprint: path.loaded_fingerprint,
+            current_fingerprint: path.current_fingerprint,
+        })
+        .collect()
+}
+
+pub(super) fn daemon_runtime_loaded_paths_from_body(body: &Value) -> BTreeMap<String, String> {
+    let loaded = body
+        .pointer("/runtime_paths/loaded")
+        .or_else(|| body.pointer("/data/runtime_paths/loaded"));
+    let Some(Value::Array(paths)) = loaded else {
+        return BTreeMap::new();
+    };
+    paths
+        .iter()
+        .filter_map(|value| {
+            Some((
+                value.get("env")?.as_str()?.to_string(),
+                value.get("path")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 fn daemon_freshness_mismatch(

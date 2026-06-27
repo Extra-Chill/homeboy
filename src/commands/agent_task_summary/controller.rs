@@ -129,6 +129,20 @@ fn controller_action_label(action: &Value) -> Option<&str> {
 }
 
 fn controller_last_failure<'a>(payload: &'a Value, controller: &'a Value) -> Option<String> {
+    if let Some(summary) = first_failed_child_action(payload) {
+        let diagnostic = best_failure_diagnostic([
+            string_value(summary, &["hydrated_root_cause"]),
+            string_value(summary, &["top_diagnostic"]),
+        ])?;
+        let action_id = string_value(summary, &["action_id"]);
+        let child_run_id = string_value(summary, &["child_run_id"]);
+        return Some(match (action_id, child_run_id) {
+            (Some(action_id), Some(run_id)) => format!("{action_id} ({run_id}): {diagnostic}"),
+            (Some(action_id), None) => format!("{action_id}: {diagnostic}"),
+            _ => diagnostic.to_string(),
+        });
+    }
+
     if let Some(summary) = value_at(payload, &["failure_summary"])
         .or_else(|| last_failure_summary(payload, &["results"]))
         .or_else(|| last_failure_summary(payload, &["resume", "results"]))
@@ -166,6 +180,50 @@ fn controller_last_failure<'a>(payload: &'a Value, controller: &'a Value) -> Opt
                 None => diagnostic.to_string(),
             })
         })
+}
+
+fn best_failure_diagnostic<'a>(candidates: [Option<&'a str>; 2]) -> Option<&'a str> {
+    candidates
+        .into_iter()
+        .flatten()
+        .filter(|message| !message.trim().is_empty())
+        .min_by_key(|message| diagnostic_priority(message))
+}
+
+fn diagnostic_priority(message: &str) -> u8 {
+    let text = message.to_ascii_lowercase();
+    if text.contains("typed_artifacts_missing")
+        || text.contains("required_typed_artifacts_missing")
+        || text.contains("required typed artifacts")
+        || text.contains("declared artifact result envelope")
+    {
+        8
+    } else if text.contains("valid") || text.contains("recipe") || text.contains("schema") {
+        0
+    } else if text.contains("fatal") || text.contains("error") || text.contains("exception") {
+        1
+    } else if text.contains("registr")
+        || text.contains("provider")
+        || text.contains("discovery")
+        || text.contains("capability")
+    {
+        2
+    } else if text.contains("missing")
+        || text.contains("not_found")
+        || text.contains("path")
+        || text.contains("io")
+    {
+        3
+    } else {
+        9
+    }
+}
+
+fn first_failed_child_action(payload: &Value) -> Option<&Value> {
+    value_at(payload, &["diagnostics", "failed_child_actions"])
+        .and_then(Value::as_array)
+        .or_else(|| value_at(payload, &["failed_child_actions"]).and_then(Value::as_array))?
+        .first()
 }
 
 fn last_failure_summary<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -229,6 +287,12 @@ fn collect_controller_artifact_lines(value: &Value, path: &[&str], artifacts: &m
 }
 
 fn first_controller_recovery_command(payload: &Value) -> Option<&str> {
+    if let Some(command) = first_failed_child_action(payload)
+        .and_then(|action| string_value(action, &["next_command"]))
+    {
+        return Some(command);
+    }
+
     value_at(payload, &["diagnostics", "pending_actions"])
         .and_then(Value::as_array)
         .or_else(|| {

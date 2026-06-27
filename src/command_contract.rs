@@ -6,8 +6,10 @@
 //! `crate::command_contract::*` or `homeboy::command_contract::*` — and put
 //! implementation details in the matching submodule:
 //!
+//! - [`spec`] owns shared top-level command metadata consumed by output,
+//!   safety/docs manifests, and command lookup.
 //! - [`output`] owns response-mode, output-file, JSON-family,
-//!   command-registry, output-descriptor, aggregate-descriptor,
+//!   output-descriptor, aggregate-descriptor,
 //!   response-plan types, and the `Commands` impl that resolves them.
 //! - [`lab`] owns Lab portability contracts and the `Commands` accessors
 //!   that surface Lab fields on a descriptor.
@@ -19,30 +21,36 @@ mod lab;
 mod output;
 mod public_variants;
 pub mod safety_manifest;
+mod spec;
 
 pub use lab::{
     lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
     lab_runner_supports_contract_label, lab_runner_unsupported_hint,
-    lab_runner_unsupported_message, CommandPortabilityContract, LabCommandContract,
-    LabCommandPortability, LabCommandRequiredTool, LabCommandRouteContract,
+    lab_runner_unsupported_message, AgentTaskDispatchIdentity, CommandPortabilityContract,
+    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabCommandRouteContract,
     LabLocalExecutionPolicy, LabLocalHotPolicy, LabRoutingPolicy, LabRunnerSupportSummary,
-    LabSelectedRunnerFallbackPolicy, LabSourcePathMode, LabWorkspaceModePolicy, RunnerWorkload,
-    RunnerWorkloadArtifactRef, RunnerWorkloadAssignment, RunnerWorkloadCapability,
-    RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision, RunnerWorkloadKind,
-    RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
-    RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS,
+    LabSelectedRunnerFallbackPolicy, LabSourcePathMode, LabWorkspaceModePolicy,
+    RunnerHandoffEnvelope, RunnerHandoffFollowCommands, RunnerWorkload, RunnerWorkloadArtifactRef,
+    RunnerWorkloadAssignment, RunnerWorkloadCapability, RunnerWorkloadCommandFamily,
+    RunnerWorkloadExtensionRevision, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
+    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
+    RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS, RUNNER_HANDOFF_ENVELOPE_SCHEMA,
     RUNNER_WORKLOAD_SCHEMA,
 };
-pub(crate) use lab::{
-    AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_LAB_LABEL, LAB_NO_EXTRA_TOOLS, LINT_LAB_LABEL,
-    REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RIG_UP_LAB_UNSUPPORTED_REASON, TEST_LAB_LABEL,
-    TRACE_LAB_LABEL, TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL, TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
-    TUNNEL_SERVICE_START_LAB_LABEL,
-};
+pub(crate) use lab::{LAB_NO_EXTRA_TOOLS, RIG_UP_LAB_UNSUPPORTED_REASON};
 pub use output::{
-    registered_command, registered_command_dispatch_family, registered_command_json_family,
     CommandDescriptor, CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind,
-    CommandOutputDescriptor, CommandOutputFileMode, CommandRawOutputMode, CommandRegistryEntry,
-    CommandResponseMode, CommandResponsePlan, CommandStdoutMode, COMMAND_REGISTRY,
+    CommandOutputDescriptor, CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode,
+    CommandResponsePlan, CommandStdoutMode,
 };
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};
+pub use spec::{
+    registered_command, registered_command_dispatch_family, registered_command_json_family,
+    CommandLabSupportSummary, CommandRegistryEntry, CommandSafetySpec, CommandSpec,
+    COMMAND_REGISTRY, COMMAND_SPECS,
+};
+pub(crate) use spec::{
+    AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REVIEW_LAB_LABEL,
+    RIG_CHECK_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL, TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
+    TUNNEL_SERVICE_EXPOSE_LAB_LABEL, TUNNEL_SERVICE_START_LAB_LABEL,
+};

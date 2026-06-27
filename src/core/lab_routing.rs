@@ -355,13 +355,6 @@ pub fn lab_offload_command_from_route_contract(
     }
 }
 
-pub(crate) fn lab_route_plan_from_contract(
-    contract: LabCommandContract,
-    required_extensions: Vec<String>,
-) -> LabRoutePlan {
-    lab_route_plan_from_route_contract(contract.into_route_contract(required_extensions))
-}
-
 pub(crate) fn lab_route_plan_from_route_contract(
     route_contract: LabCommandRouteContract,
 ) -> LabRoutePlan {
@@ -548,9 +541,9 @@ mod tests {
 
     #[test]
     fn lab_route_plan_from_contract_exposes_generic_policy_shape() {
-        let plan = lab_route_plan_from_contract(
-            lab_contract(),
-            vec!["wordpress".to_string(), "playwright".to_string()],
+        let plan = lab_route_plan_from_route_contract(
+            lab_contract()
+                .into_route_contract(vec!["wordpress".to_string(), "playwright".to_string()]),
         );
 
         assert_eq!(plan.label, "trace");
@@ -577,7 +570,7 @@ mod tests {
         contract.source_path_mode = LabSourcePathMode::RunnerResident;
         contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
 
-        let plan = lab_route_plan_from_contract(contract, Vec::new());
+        let plan = lab_route_plan_from_route_contract(contract.into_route_contract(Vec::new()));
 
         assert_eq!(plan.local_only_reason(), Some("needs controller services"));
         assert_eq!(plan.source_policy, CommandSourcePolicy::RunnerResident);

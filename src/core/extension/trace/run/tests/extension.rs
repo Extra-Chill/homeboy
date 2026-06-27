@@ -297,6 +297,7 @@ fn test_run_trace_workflow() {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n"),
+        timed_out: false,
         child_resource: None,
         extension_phase_timings: Vec::new(),
     };

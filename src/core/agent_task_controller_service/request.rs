@@ -44,6 +44,7 @@ pub fn controller_request_dispatch_command(
         secret_env: optional_string_array(dispatch, "secret_env")?,
         concurrency: optional_usize(dispatch, "concurrency")?.unwrap_or(1),
         run_id: optional_string(dispatch, "run_id"),
+        task_id: optional_string(dispatch, "task_id"),
         core: DispatchCoreInputs {
             tasks_json: optional_string(dispatch, "tasks_json"),
             provider_config: optional_string(dispatch, "provider_config"),
@@ -84,7 +85,11 @@ pub fn plan_from_controller_request(request: &Value) -> Result<AgentTaskPlan> {
     })
 }
 
-pub(super) fn materialize_fan_out_request(template: &Value, entity_id: &str) -> Value {
+pub(super) fn materialize_fan_out_request(
+    template: &Value,
+    loop_id: &str,
+    entity_id: &str,
+) -> Value {
     let mut request = template.clone();
     if let Some(object) = request.as_object_mut() {
         object.insert(
@@ -93,7 +98,8 @@ pub(super) fn materialize_fan_out_request(template: &Value, entity_id: &str) -> 
         );
         object.entry("run_id".to_string()).or_insert_with(|| {
             Value::String(format!(
-                "controller-{}",
+                "controller-{}-{}",
+                sanitize_controller_identity_part(loop_id),
                 entity_id.replace([':', '/', '#'], "_")
             ))
         });
@@ -103,16 +109,22 @@ pub(super) fn materialize_fan_out_request(template: &Value, entity_id: &str) -> 
 
 pub(super) fn controller_request_run_id(
     request: &Value,
+    loop_id: &str,
     dedupe_key: &str,
     action_id: &str,
 ) -> String {
     optional_string(request, "run_id").unwrap_or_else(|| {
         format!(
-            "controller-{}-{}",
+            "controller-{}-{}-{}",
+            sanitize_controller_identity_part(loop_id),
             action_id,
             dedupe_key.replace([':', '/', '#', ' '], "_")
         )
     })
+}
+
+fn sanitize_controller_identity_part(value: &str) -> String {
+    value.replace([':', '/', '#', ' '], "_")
 }
 
 pub(super) fn required_string(value: &Value, key: &str) -> Result<String> {

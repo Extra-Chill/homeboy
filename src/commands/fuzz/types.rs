@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
+use homeboy::core::evidence_manifest::TrackerRef;
 
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use crate::command_contract::{
@@ -161,6 +162,10 @@ pub struct FuzzRunArgs {
     #[arg(long = "run-id", value_name = "ID")]
     pub(crate) run_id: Option<String>,
 
+    /// Product-agnostic tracker anchor for this fuzz run. Repeatable. Format: KIND:ID.
+    #[arg(long = "tracker-ref", value_name = "KIND:ID", value_parser = parse_tracker_ref)]
+    pub(crate) tracker_refs: Vec<TrackerRef>,
+
     /// Deterministic seed forwarded by future fuzz runners.
     #[arg(long, value_name = "SEED")]
     pub(crate) seed: Option<String>,
@@ -189,9 +194,34 @@ pub struct FuzzRunArgs {
     #[arg(long = "gate-profile", value_enum, default_value_t = FuzzGateProfileArg::Measurement)]
     pub(crate) gate_profile: FuzzGateProfileArg,
 
+    /// Require a numeric metric emitted by the fuzz campaign to equal this value.
+    /// Repeatable. Format: `--expect-metric metric_name=2`.
+    #[arg(long = "expect-metric", value_name = "METRIC=VALUE", value_parser = crate::commands::parse_key_val)]
+    pub(crate) expect_metric: Vec<(String, String)>,
+
     /// Additional runner arguments reserved for the fuzz extension script.
     #[arg(last = true)]
     pub(crate) args: Vec<String>,
+}
+
+fn parse_tracker_ref(raw: &str) -> Result<TrackerRef, String> {
+    let (kind, id) = raw
+        .split_once(':')
+        .ok_or_else(|| format!("invalid tracker ref `{raw}`; expected KIND:ID"))?;
+    let kind = kind.trim();
+    let id = id.trim();
+    if kind.is_empty() || id.is_empty() {
+        return Err(format!(
+            "invalid tracker ref `{raw}`; kind and id must be non-empty"
+        ));
+    }
+    Ok(TrackerRef {
+        kind: kind.to_string(),
+        id: id.to_string(),
+        url: None,
+        title: None,
+        state: None,
+    })
 }
 
 #[derive(Args, Clone)]

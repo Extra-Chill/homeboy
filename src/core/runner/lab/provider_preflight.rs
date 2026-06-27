@@ -29,7 +29,7 @@ use crate::core::agent_tasks::provider::{
 use crate::core::engine::shell;
 use crate::core::redaction::redact_argv_display;
 use crate::core::source_snapshot::SourceSnapshot;
-use crate::core::{Error, Result};
+use crate::core::{Error, ErrorCode, Result};
 
 use super::super::command_path::preflight_remote_argv_path_translation;
 use super::super::{
@@ -111,13 +111,11 @@ pub(super) fn preflight_agent_task_provider_on_runner(
             None,
             runner_homeboy,
             Some(format!(
-                "runner provider preflight command exited with {}: {}",
-                probe.exit_code,
-                first_non_empty_line(&probe.stderr)
-                    .or_else(|| first_non_empty_line(&probe.stdout))
-                    .unwrap_or_else(|| "no output".to_string())
+                "runner provider preflight command exited with {}; inspect details.command_output for full stdout/stderr",
+                probe.exit_code
             )),
             &command,
+            Some(&probe),
             None,
         ));
     }
@@ -131,6 +129,7 @@ pub(super) fn preflight_agent_task_provider_on_runner(
             runner_homeboy,
             Some(message),
             &command,
+            None,
             None,
         )
     })?;
@@ -176,6 +175,7 @@ pub(super) fn preflight_agent_task_provider_on_runner(
             runner_homeboy,
             Some(reason),
             &command,
+            None,
             refresh_result,
         ));
     }
@@ -407,6 +407,7 @@ fn agent_task_provider_selection_preflight_error(
     runner_homeboy: &serde_json::Value,
     reason: Option<String>,
     command: &[String],
+    probe_output: Option<&AgentTaskProviderProbeOutput>,
     refresh_result: Option<std::result::Result<(), String>>,
 ) -> Error {
     let selector = selection.selector.as_deref().unwrap_or("<default>");
@@ -422,24 +423,41 @@ fn agent_task_provider_selection_preflight_error(
         ),
         provider_preflight_homeboy_identity_hint(runner_id, runner_homeboy),
         refresh_hint(runner_id, runner_homeboy, refresh_result),
-        format!(
-            "Upgrade or sync the runner runtime/extensions with `{}`.",
-            runner_homeboy["upgrade_command"]
-                .as_str()
-                .unwrap_or("homeboy upgrade --force --upgrade-runner <runner>")
-        ),
         format!("Preflight command: `{}`.", redact_argv_display(command)),
     ];
     hints.retain(|hint| !hint.is_empty());
 
-    Error::validation_invalid_argument(
-        "backend",
-        format!(
-            "Lab runner `{runner_id}` cannot execute agent-task backend `{}` selector `{selector}` before dispatch: {reason}. No task cells were queued. This points to extension/runtime sync drift between the controller and selected runner, not a task failure.",
-            selection.backend
-        ),
-        Some(selection.backend.clone()),
-        Some(hints),
+    let problem = format!(
+        "Lab runner `{runner_id}` cannot execute agent-task backend `{}` selector `{selector}` before dispatch: {reason}. No task cells were queued. This points to extension/runtime sync drift between the controller and selected runner, not a task failure.",
+        selection.backend
+    );
+    let mut details = serde_json::json!({
+        "field": "backend",
+        "problem": problem,
+        "id": selection.backend,
+        "tried": hints,
+        "provider_availability": {
+            "controller": local_available,
+            "runner": runner_available,
+            "backend": selection.backend,
+            "selector": selection.selector,
+        },
+        "preflight_command": command,
+        "runner_remediation_command": refresh_command(runner_id, runner_homeboy),
+        "runner_homeboy": runner_homeboy,
+    });
+    if let Some(output) = probe_output {
+        details["command_output"] = serde_json::json!({
+            "exit_code": output.exit_code,
+            "stdout": output.stdout,
+            "stderr": output.stderr,
+        });
+    }
+
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!("Invalid argument 'backend': {problem}"),
+        details,
     )
 }
 
@@ -462,10 +480,7 @@ fn provider_preflight_homeboy_identity_hint(
     }
 
     format!(
-        "Controller Homeboy is `{controller}`, but runner `{runner_id}` active daemon is `{runner}`. Refresh the active binaries/session before treating this as provider drift: {}.",
-        runner_homeboy["upgrade_command"]
-            .as_str()
-            .unwrap_or("homeboy upgrade --force --upgrade-runner <runner>")
+        "Controller Homeboy is `{controller}`, but runner `{runner_id}` active daemon is `{runner}`. Refresh the active binaries/session before treating this as provider drift."
     )
 }
 
@@ -481,7 +496,7 @@ fn refresh_hint(
             refresh_command(runner_id, runner_homeboy)
         ),
         None => format!(
-            "Refresh runner `{runner_id}` with `{}`.",
+            "Refresh runner `{runner_id}` with `{}` before retrying the cook.",
             refresh_command(runner_id, runner_homeboy)
         ),
     }
@@ -490,29 +505,25 @@ fn refresh_hint(
 fn refresh_command(runner_id: &str, runner_homeboy: &serde_json::Value) -> String {
     runner_homeboy["refresh_commands"]
         .as_array()
-        .map(|commands| {
+        .and_then(|commands| {
             commands
                 .iter()
                 .filter_map(|command| command.as_str())
-                .collect::<Vec<_>>()
-                .join(" && ")
+                .next()
         })
+        .map(str::to_string)
         .filter(|command| !command.is_empty())
+        .or_else(|| {
+            runner_homeboy["upgrade_command"]
+                .as_str()
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| {
             format!(
-                "homeboy runner disconnect {} && homeboy runner connect {}",
-                shell::quote_arg(runner_id),
+                "homeboy runner refresh-homeboy {} --ref main --reconnect",
                 shell::quote_arg(runner_id)
             )
         })
-}
-
-fn first_non_empty_line(output: &str) -> Option<String> {
-    output
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -643,6 +654,7 @@ mod tests {
                 "providers".to_string(),
             ],
             None,
+            None,
         );
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
@@ -657,9 +669,13 @@ mod tests {
         assert!(tried.iter().any(|hint| hint
             .as_str()
             .is_some_and(|hint| hint.contains("runner provider availability: false"))));
-        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
-            |hint| hint.contains("homeboy upgrade --force --upgrade-runner homeboy-lab")
-        )));
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("homeboy runner disconnect homeboy-lab"))));
+        assert_eq!(
+            err.details["runner_remediation_command"],
+            serde_json::json!("homeboy runner disconnect homeboy-lab")
+        );
     }
 
     #[test]
@@ -690,6 +706,7 @@ mod tests {
                 "providers".to_string(),
             ],
             None,
+            None,
         );
 
         let tried = err.details["tried"].as_array().expect("tried hints");
@@ -699,8 +716,61 @@ mod tests {
         assert!(tried.iter().any(|hint| hint
             .as_str()
             .is_some_and(|hint| hint.contains("active daemon is `homeboy 0.0.0+old`"))));
-        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
-            |hint| hint.contains("homeboy upgrade --force --upgrade-runner homeboy-lab")
-        )));
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("Refresh runner `homeboy-lab`"))));
+    }
+
+    #[test]
+    fn provider_preflight_error_preserves_full_failed_command_output() {
+        let selection = AgentTaskProviderSelection {
+            backend: "opencode".to_string(),
+            selector: Some("opencode.agent-task-executor".to_string()),
+        };
+        let runner_homeboy = serde_json::json!({
+            "refresh_commands": [
+                "homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect"
+            ]
+        });
+        let output = AgentTaskProviderProbeOutput {
+            stdout: "{\n  \"success\": false,\n  \"error\": {\n    \"message\": \"provider unavailable\"\n  }\n}\n".to_string(),
+            stderr: "warning before json\nsecond diagnostic line\n".to_string(),
+            exit_code: 2,
+        };
+
+        let err = agent_task_provider_selection_preflight_error(
+            "homeboy-lab",
+            &selection,
+            true,
+            Some(false),
+            &runner_homeboy,
+            Some("runner provider preflight command exited with 2; inspect details.command_output for full stdout/stderr".to_string()),
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "providers".to_string(),
+            ],
+            Some(&output),
+            None,
+        );
+
+        assert!(err.message.contains("exited with 2"));
+        assert!(!err.message.contains("exited with 2: {"));
+        assert_eq!(
+            err.details["command_output"]["exit_code"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            err.details["command_output"]["stdout"],
+            serde_json::json!(output.stdout)
+        );
+        assert_eq!(
+            err.details["command_output"]["stderr"],
+            serde_json::json!(output.stderr)
+        );
+        assert_eq!(
+            err.details["runner_remediation_command"],
+            serde_json::json!("homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect")
+        );
     }
 }

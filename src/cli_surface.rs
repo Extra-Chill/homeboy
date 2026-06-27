@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
     component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, fuzz, git, http,
-    issues, lint, logs, manifest, observe, project, refactor, refs, release, report, review, rig,
-    runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
-    upgrade, version, worktree,
+    issues, lab, lint, logs, manifest, observe, project, refactor, refs, release, report, review,
+    rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel,
+    undo, upgrade, version, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -165,6 +165,8 @@ pub enum Commands {
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
     Runner(runner::RunnerArgs),
+    /// Discover Lab routing and runner refresh planning commands
+    Lab(lab::LabArgs),
     /// Inspect core-owned runtime helper assets
     Runtime(runtime::RuntimeArgs),
     /// Manage component-backed task worktrees
@@ -227,6 +229,24 @@ pub struct CommandSafetyManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandSafetyAuditReport {
+    pub report_only: bool,
+    pub missing_action_metadata: Vec<CommandSafetyAuditFinding>,
+}
+
+impl CommandSafetyAuditReport {
+    pub fn has_findings(&self) -> bool {
+        !self.missing_action_metadata.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandSafetyAuditFinding {
+    pub path: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandSurfaceDoctorReport {
     pub agrees: bool,
     pub source_registry_commands: Vec<String>,
@@ -263,6 +283,8 @@ pub struct CommandSafetyEntry {
     pub output: CommandOutputMetadata,
     pub lab: CommandLabMetadata,
     pub docs: CommandDocsMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_exemption: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<ExtensionCommandManifest>,
     pub dangerous_flags: Vec<String>,
@@ -345,79 +367,84 @@ pub struct ExtensionCommandHealth {
     pub detail: Option<String>,
 }
 
-impl CommandSurfaceEntry {
-    fn matches(&self, name: &str) -> bool {
-        self.name == name || self.visible_aliases.iter().any(|alias| alias == name)
+mod entry_command_impls {
+    use super::*;
+
+    impl CommandSurfaceEntry {
+        pub(super) fn matches(&self, name: &str) -> bool {
+            self.name == name || self.visible_aliases.iter().any(|alias| alias == name)
+        }
+
+        pub(super) fn contains_rest(&self, path: &[&str]) -> bool {
+            let Some((first, rest)) = path.split_first() else {
+                return true;
+            };
+
+            self.subcommands
+                .iter()
+                .find(|entry| !entry.hidden && entry.matches(first))
+                .is_some_and(|entry| entry.contains_rest(rest))
+        }
     }
 
-    fn contains_rest(&self, path: &[&str]) -> bool {
-        let Some((first, rest)) = path.split_first() else {
-            return true;
-        };
-
-        self.subcommands
-            .iter()
-            .find(|entry| !entry.hidden && entry.matches(first))
-            .is_some_and(|entry| entry.contains_rest(rest))
-    }
-}
-
-impl Commands {
-    pub fn top_level_name(&self) -> &'static str {
-        match self {
-            Commands::AgentTask(_) => "agent-task",
-            Commands::Project(_) => "project",
-            Commands::Ssh(_) => "ssh",
-            Commands::Server(_) => "server",
-            Commands::Test(_) => "test",
-            Commands::Bench(_) => "bench",
-            Commands::Fuzz(_) => "fuzz",
-            Commands::Trace(_) => "trace",
-            Commands::Observe(_) => "observe",
-            Commands::Lint(_) => "lint",
-            Commands::Db(_) => "db",
-            Commands::Deps(_) => "deps",
-            Commands::Ci(_) => "ci",
-            Commands::Doctor(_) => "doctor",
-            Commands::File(_) => "file",
-            Commands::Fleet(_) => "fleet",
-            Commands::Logs(_) => "logs",
-            Commands::Triage(_) => "triage",
-            Commands::Deploy(_) => "deploy",
-            Commands::Component(_) => "component",
-            Commands::Config(_) => "config",
-            Commands::Daemon(_) => "daemon",
-            Commands::Extension(_) => "extension",
-            Commands::Status(_) => "status",
-            Commands::Docs(_) => "docs",
-            Commands::Manifest(_) => "manifest",
-            Commands::Changelog(_) => "changelog",
-            Commands::Cleanup(_) => "cleanup",
-            Commands::Git(_) => "git",
-            Commands::Issues(_) => "issues",
-            Commands::Version(_) => "version",
-            Commands::Build(_) => "build",
-            Commands::Changes(_) => "changes",
-            Commands::Release(_) => "release",
-            Commands::Report(_) => "report",
-            Commands::Review(_) => "review",
-            Commands::Audit(_) => "audit",
-            Commands::AuditBaseline(_) => "audit-baseline",
-            Commands::Refactor(_) => "refactor",
-            Commands::Refs(_) => "refs",
-            Commands::Rig(_) => "rig",
-            Commands::Runner(_) => "runner",
-            Commands::Runtime(_) => "runtime",
-            Commands::Worktree(_) => "worktree",
-            Commands::Tunnel(_) => "tunnel",
-            Commands::Runs(_) => "runs",
-            Commands::SelfCmd(_) => "self",
-            Commands::Stack(_) => "stack",
-            Commands::Undo(_) => "undo",
-            Commands::Auth(_) => "auth",
-            Commands::Api(_) => "api",
-            Commands::Http(_) => "http",
-            Commands::Upgrade(_) => "upgrade",
+    impl Commands {
+        pub fn top_level_name(&self) -> &'static str {
+            match self {
+                Commands::AgentTask(_) => "agent-task",
+                Commands::Project(_) => "project",
+                Commands::Ssh(_) => "ssh",
+                Commands::Server(_) => "server",
+                Commands::Test(_) => "test",
+                Commands::Bench(_) => "bench",
+                Commands::Fuzz(_) => "fuzz",
+                Commands::Trace(_) => "trace",
+                Commands::Observe(_) => "observe",
+                Commands::Lint(_) => "lint",
+                Commands::Db(_) => "db",
+                Commands::Deps(_) => "deps",
+                Commands::Ci(_) => "ci",
+                Commands::Doctor(_) => "doctor",
+                Commands::File(_) => "file",
+                Commands::Fleet(_) => "fleet",
+                Commands::Logs(_) => "logs",
+                Commands::Triage(_) => "triage",
+                Commands::Deploy(_) => "deploy",
+                Commands::Component(_) => "component",
+                Commands::Config(_) => "config",
+                Commands::Daemon(_) => "daemon",
+                Commands::Extension(_) => "extension",
+                Commands::Status(_) => "status",
+                Commands::Docs(_) => "docs",
+                Commands::Manifest(_) => "manifest",
+                Commands::Changelog(_) => "changelog",
+                Commands::Cleanup(_) => "cleanup",
+                Commands::Git(_) => "git",
+                Commands::Issues(_) => "issues",
+                Commands::Version(_) => "version",
+                Commands::Build(_) => "build",
+                Commands::Changes(_) => "changes",
+                Commands::Release(_) => "release",
+                Commands::Report(_) => "report",
+                Commands::Review(_) => "review",
+                Commands::Audit(_) => "audit",
+                Commands::AuditBaseline(_) => "audit-baseline",
+                Commands::Refactor(_) => "refactor",
+                Commands::Refs(_) => "refs",
+                Commands::Rig(_) => "rig",
+                Commands::Runner(_) => "runner",
+                Commands::Lab(_) => "lab",
+                Commands::Runtime(_) => "runtime",
+                Commands::Worktree(_) => "worktree",
+                Commands::Tunnel(_) => "tunnel",
+                Commands::Runs(_) => "runs",
+                Commands::SelfCmd(_) => "self",
+                Commands::Stack(_) => "stack",
+                Commands::Undo(_) => "undo",
+                Commands::Auth(_) => "auth",
+                Commands::Api(_) => "api",
+                Commands::Http(_) => "http",
+                Commands::Upgrade(_) => "upgrade",
+            }
         }
     }
 }
@@ -431,33 +458,6 @@ pub struct DynamicCommandDescriptor {
     pub safety: Option<DynamicCommandSafety>,
 }
 
-impl DynamicCommandDescriptor {
-    pub fn extension_command(name: String, about: String) -> Self {
-        Self {
-            docs_path: Some(format!("docs/commands/{name}.md")),
-            name,
-            about,
-            extension: None,
-            safety: None,
-        }
-    }
-
-    pub fn installed_extension_command(
-        name: String,
-        about: String,
-        docs_path: Option<String>,
-        extension: ExtensionCommandManifest,
-    ) -> Self {
-        Self {
-            name,
-            about,
-            docs_path,
-            extension: Some(extension),
-            safety: Some(DynamicCommandSafety::extension_cli_passthrough()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DynamicCommandSafety {
     pub mutates: bool,
@@ -467,137 +467,46 @@ pub struct DynamicCommandSafety {
     pub dangerous_flags: Vec<&'static str>,
 }
 
-impl DynamicCommandSafety {
-    fn extension_cli_passthrough() -> Self {
-        Self {
-            mutates: true,
-            operator: true,
-            output_notes: "extension-provided CLI passthrough; forwarded arguments may mutate the target system",
-            lab_notes: "not declared as Lab-routable in the safety manifest",
-            dangerous_flags: vec!["passthrough args"],
+mod dynamic_impls {
+    use super::*;
+
+    impl DynamicCommandDescriptor {
+        pub fn extension_command(name: String, about: String) -> Self {
+            Self {
+                docs_path: Some(format!("docs/commands/{name}.md")),
+                name,
+                about,
+                extension: None,
+                safety: None,
+            }
+        }
+
+        pub fn installed_extension_command(
+            name: String,
+            about: String,
+            docs_path: Option<String>,
+            extension: ExtensionCommandManifest,
+        ) -> Self {
+            Self {
+                name,
+                about,
+                docs_path,
+                extension: Some(extension),
+                safety: Some(DynamicCommandSafety::extension_cli_passthrough()),
+            }
         }
     }
-}
 
-pub fn current_command_surface() -> CommandSurface {
-    command_surface_from(Cli::command())
-}
-
-pub fn command_surface_from(command: Command) -> CommandSurface {
-    command_surface_from_with_depth(command, DEFAULT_COMMAND_SURFACE_DEPTH)
-}
-
-pub fn command_surface_from_with_depth(command: Command, depth: usize) -> CommandSurface {
-    CommandSurface {
-        commands: visible_subcommands(&command, depth),
-    }
-}
-
-pub fn current_command_surface_doctor_report() -> CommandSurfaceDoctorReport {
-    let surface = current_command_surface();
-    let manifest = command_safety_manifest_from(surface.clone());
-    let source_registry_commands = manifest
-        .commands
-        .iter()
-        .filter(|entry| visible_manifest_entry_with_docs_path(entry))
-        .map(|entry| entry.name.clone())
-        .collect();
-    let help_commands = surface
-        .commands
-        .iter()
-        .filter(|entry| !entry.hidden)
-        .map(|entry| entry.name.clone())
-        .collect();
-    let docs_index_commands =
-        documented_command_index_entries(include_str!("../docs/commands/commands-index.md"));
-
-    command_surface_doctor_report(
-        source_registry_commands,
-        docs_index_commands,
-        help_commands,
-        runtime_extension_doc_commands(),
-    )
-}
-
-pub fn command_surface_doctor_report(
-    source_registry_commands: BTreeSet<String>,
-    docs_index_commands: BTreeSet<String>,
-    help_commands: BTreeSet<String>,
-    runtime_extension_docs: BTreeSet<String>,
-) -> CommandSurfaceDoctorReport {
-    let documented_core_commands: BTreeSet<String> = docs_index_commands
-        .difference(&runtime_extension_docs)
-        .cloned()
-        .collect();
-
-    let missing_from_docs_index =
-        sorted_difference(&source_registry_commands, &docs_index_commands);
-    let stale_docs_index = sorted_difference(&documented_core_commands, &source_registry_commands);
-    let missing_from_help = sorted_difference(&source_registry_commands, &help_commands);
-    let missing_from_source_registry = sorted_difference(&help_commands, &source_registry_commands);
-
-    let mut drift_notes = Vec::new();
-    push_drift_note(
-        &mut drift_notes,
-        &missing_from_docs_index,
-        "source registry commands missing from docs/commands/commands-index.md",
-    );
-    push_drift_note(
-        &mut drift_notes,
-        &stale_docs_index,
-        "docs/commands/commands-index.md lists stale commands",
-    );
-    push_drift_note(
-        &mut drift_notes,
-        &missing_from_help,
-        "source registry commands missing from help-facing command surface",
-    );
-    push_drift_note(
-        &mut drift_notes,
-        &missing_from_source_registry,
-        "help-facing commands missing from source registry",
-    );
-
-    CommandSurfaceDoctorReport {
-        agrees: drift_notes.is_empty(),
-        source_registry_commands: source_registry_commands.into_iter().collect(),
-        docs_index_commands: docs_index_commands.into_iter().collect(),
-        help_commands: help_commands.into_iter().collect(),
-        runtime_extension_docs: runtime_extension_docs.into_iter().collect(),
-        missing_from_docs_index,
-        stale_docs_index,
-        missing_from_help,
-        missing_from_source_registry,
-        drift_notes,
-    }
-}
-
-fn visible_manifest_entry_with_docs_path(entry: &CommandSafetyEntry) -> bool {
-    !entry.hidden && entry.docs.path.is_some()
-}
-
-fn documented_command_index_entries(index: &str) -> BTreeSet<String> {
-    let command_section = index.split("Related:").next().unwrap_or(index);
-
-    command_section
-        .lines()
-        .filter_map(|line| line.strip_prefix("- ["))
-        .filter_map(|rest| rest.split(']').next())
-        .map(str::to_string)
-        .collect()
-}
-
-fn runtime_extension_doc_commands() -> BTreeSet<String> {
-    BTreeSet::from(["cargo".to_string(), "wp".to_string()])
-}
-
-fn sorted_difference(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
-    left.difference(right).cloned().collect()
-}
-
-fn push_drift_note(notes: &mut Vec<String>, commands: &[String], label: &str) {
-    if !commands.is_empty() {
-        notes.push(format!("{label}: {}", commands.join(", ")));
+    impl DynamicCommandSafety {
+        pub(super) fn extension_cli_passthrough() -> Self {
+            Self {
+                mutates: true,
+                operator: true,
+                output_notes: "extension-provided CLI passthrough; forwarded arguments may mutate the target system",
+                lab_notes: "not declared as Lab-routable in the safety manifest",
+                dangerous_flags: vec!["passthrough args"],
+            }
+        }
     }
 }
 
@@ -606,28 +515,160 @@ fn push_drift_note(notes: &mut Vec<String>, commands: &[String], label: &str) {
 // entry points here so existing call sites keep importing them from
 // `crate::cli_surface` unchanged while this module leans toward clap shapes.
 pub use crate::command_contract::safety_manifest::{
-    command_safety_manifest_from, command_safety_manifest_from_dynamic,
-    current_command_safety_manifest,
+    command_safety_manifest_audit, command_safety_manifest_from,
+    command_safety_manifest_from_dynamic, current_command_safety_manifest,
 };
 
-fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
-    command
-        .get_subcommands()
-        .map(|subcommand| CommandSurfaceEntry {
-            name: subcommand.get_name().to_string(),
-            visible_aliases: subcommand
-                .get_visible_aliases()
-                .map(str::to_string)
-                .collect(),
-            hidden: subcommand.is_hide_set(),
-            subcommands: if remaining_depth == 0 {
-                Vec::new()
-            } else {
-                visible_subcommands(subcommand, remaining_depth - 1)
-            },
-        })
-        .collect()
+mod surface {
+    use super::*;
+
+    pub fn current_command_surface() -> CommandSurface {
+        command_surface_from(Cli::command())
+    }
+
+    pub fn command_surface_from(command: Command) -> CommandSurface {
+        command_surface_from_with_depth(command, DEFAULT_COMMAND_SURFACE_DEPTH)
+    }
+
+    pub fn command_surface_from_with_depth(command: Command, depth: usize) -> CommandSurface {
+        CommandSurface {
+            commands: visible_subcommands(&command, depth),
+        }
+    }
+
+    pub fn current_command_surface_doctor_report() -> CommandSurfaceDoctorReport {
+        let surface = current_command_surface();
+        let manifest = command_safety_manifest_from(surface.clone());
+        let source_registry_commands = manifest
+            .commands
+            .iter()
+            .filter(|entry| visible_manifest_entry_with_docs_path(entry))
+            .map(|entry| entry.name.clone())
+            .collect();
+        let help_commands = surface
+            .commands
+            .iter()
+            .filter(|entry| !entry.hidden)
+            .map(|entry| entry.name.clone())
+            .collect();
+        let docs_index_commands =
+            documented_command_index_entries(include_str!("../docs/commands/commands-index.md"));
+
+        command_surface_doctor_report(
+            source_registry_commands,
+            docs_index_commands,
+            help_commands,
+            runtime_extension_doc_commands(),
+        )
+    }
+
+    pub fn command_surface_doctor_report(
+        source_registry_commands: BTreeSet<String>,
+        docs_index_commands: BTreeSet<String>,
+        help_commands: BTreeSet<String>,
+        runtime_extension_docs: BTreeSet<String>,
+    ) -> CommandSurfaceDoctorReport {
+        let documented_core_commands: BTreeSet<String> = docs_index_commands
+            .difference(&runtime_extension_docs)
+            .cloned()
+            .collect();
+
+        let missing_from_docs_index =
+            sorted_difference(&source_registry_commands, &docs_index_commands);
+        let stale_docs_index =
+            sorted_difference(&documented_core_commands, &source_registry_commands);
+        let missing_from_help = sorted_difference(&source_registry_commands, &help_commands);
+        let missing_from_source_registry =
+            sorted_difference(&help_commands, &source_registry_commands);
+
+        let mut drift_notes = Vec::new();
+        push_drift_note(
+            &mut drift_notes,
+            &missing_from_docs_index,
+            "source registry commands missing from docs/commands/commands-index.md",
+        );
+        push_drift_note(
+            &mut drift_notes,
+            &stale_docs_index,
+            "docs/commands/commands-index.md lists stale commands",
+        );
+        push_drift_note(
+            &mut drift_notes,
+            &missing_from_help,
+            "source registry commands missing from help-facing command surface",
+        );
+        push_drift_note(
+            &mut drift_notes,
+            &missing_from_source_registry,
+            "help-facing commands missing from source registry",
+        );
+
+        CommandSurfaceDoctorReport {
+            agrees: drift_notes.is_empty(),
+            source_registry_commands: source_registry_commands.into_iter().collect(),
+            docs_index_commands: docs_index_commands.into_iter().collect(),
+            help_commands: help_commands.into_iter().collect(),
+            runtime_extension_docs: runtime_extension_docs.into_iter().collect(),
+            missing_from_docs_index,
+            stale_docs_index,
+            missing_from_help,
+            missing_from_source_registry,
+            drift_notes,
+        }
+    }
+
+    fn visible_manifest_entry_with_docs_path(entry: &CommandSafetyEntry) -> bool {
+        !entry.hidden && entry.docs.path.is_some()
+    }
+
+    fn documented_command_index_entries(index: &str) -> BTreeSet<String> {
+        let command_section = index.split("Related:").next().unwrap_or(index);
+
+        command_section
+            .lines()
+            .filter_map(|line| line.strip_prefix("- ["))
+            .filter_map(|rest| rest.split(']').next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn runtime_extension_doc_commands() -> BTreeSet<String> {
+        BTreeSet::from(["cargo".to_string(), "wp".to_string()])
+    }
+
+    fn sorted_difference(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
+        left.difference(right).cloned().collect()
+    }
+
+    fn push_drift_note(notes: &mut Vec<String>, commands: &[String], label: &str) {
+        if !commands.is_empty() {
+            notes.push(format!("{label}: {}", commands.join(", ")));
+        }
+    }
+
+    pub fn visible_subcommands(
+        command: &Command,
+        remaining_depth: usize,
+    ) -> Vec<CommandSurfaceEntry> {
+        command
+            .get_subcommands()
+            .map(|subcommand| CommandSurfaceEntry {
+                name: subcommand.get_name().to_string(),
+                visible_aliases: subcommand
+                    .get_visible_aliases()
+                    .map(str::to_string)
+                    .collect(),
+                hidden: subcommand.is_hide_set(),
+                subcommands: if remaining_depth == 0 {
+                    Vec::new()
+                } else {
+                    visible_subcommands(subcommand, remaining_depth - 1)
+                },
+            })
+            .collect()
+    }
 }
+pub use surface::*;
 
 #[cfg(test)]
 mod tests {
@@ -705,6 +746,7 @@ mod tests {
         assert!(surface.contains_path(&["doctor", "resources"]));
         assert!(surface.contains_path(&["ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
+        assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
         assert!(surface.contains_path(&["observe"]));
     }
 
@@ -717,6 +759,7 @@ mod tests {
         assert!(surface.contains_path(&["doctor", "resources"]));
         assert!(surface.contains_path(&["ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
+        assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
         assert!(surface.contains_path(&["observe"]));
     }
 
@@ -880,6 +923,21 @@ mod tests {
             ["homeboy", "runner", "connect", "homeboy-lab"].as_slice(),
             ["homeboy", "runner", "status", "homeboy-lab"].as_slice(),
             ["homeboy", "runner", "disconnect", "homeboy-lab"].as_slice(),
+            [
+                "homeboy",
+                "runner",
+                "workspace",
+                "pull",
+                "homeboy-lab",
+                "--remote-path",
+                "/srv/homeboy/workspace",
+                "--include",
+                "fixtures/*.fig",
+                "--to",
+                "fixtures",
+                "--dry-run",
+            ]
+            .as_slice(),
             [
                 "homeboy",
                 "db",

@@ -581,78 +581,83 @@ fn observe_command(args: &ObserveArgs) -> String {
     parts.join(" ")
 }
 
-fn event<K, V, I>(t_ms: u64, source: &str, name: &str, data: I) -> TraceEvent
-where
-    K: Into<String>,
-    V: Into<serde_json::Value>,
-    I: IntoIterator<Item = (K, V)>,
-{
-    TraceEvent {
-        t_ms,
-        source: source.to_string(),
-        event: name.to_string(),
-        data: data
-            .into_iter()
-            .map(|(key, value)| (key.into(), value.into()))
-            .collect::<BTreeMap<_, _>>(),
-    }
-}
+mod helpers {
+    use super::*;
 
-fn empty_event(t_ms: u64, source: &str, name: &str) -> TraceEvent {
-    TraceEvent {
-        t_ms,
-        source: source.to_string(),
-        event: name.to_string(),
-        data: BTreeMap::new(),
-    }
-}
-
-fn parse_duration(raw: &str) -> Result<Duration, String> {
-    let raw = raw.trim();
-    let split = raw
-        .find(|c: char| !c.is_ascii_digit())
-        .ok_or_else(|| "expected duration like 500ms, 30s, 5m, or 1h".to_string())?;
-    let (amount_raw, unit) = raw.split_at(split);
-    let amount = amount_raw
-        .parse::<u64>()
-        .map_err(|_| "duration amount must be a positive integer".to_string())?;
-    if amount == 0 {
-        return Err("duration amount must be greater than zero".to_string());
+    pub fn event<K, V, I>(t_ms: u64, source: &str, name: &str, data: I) -> TraceEvent
+    where
+        K: Into<String>,
+        V: Into<serde_json::Value>,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        TraceEvent {
+            t_ms,
+            source: source.to_string(),
+            event: name.to_string(),
+            data: data
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect::<BTreeMap<_, _>>(),
+        }
     }
 
-    match unit {
-        "ms" => Ok(Duration::from_millis(amount)),
-        "s" => Ok(Duration::from_secs(amount)),
-        "m" => Ok(Duration::from_secs(amount * 60)),
-        "h" => Ok(Duration::from_secs(amount * 60 * 60)),
-        _ => Err("duration unit must be one of ms, s, m, or h".to_string()),
+    pub fn empty_event(t_ms: u64, source: &str, name: &str) -> TraceEvent {
+        TraceEvent {
+            t_ms,
+            source: source.to_string(),
+            event: name.to_string(),
+            data: BTreeMap::new(),
+        }
+    }
+
+    pub fn parse_duration(raw: &str) -> Result<Duration, String> {
+        let raw = raw.trim();
+        let split = raw
+            .find(|c: char| !c.is_ascii_digit())
+            .ok_or_else(|| "expected duration like 500ms, 30s, 5m, or 1h".to_string())?;
+        let (amount_raw, unit) = raw.split_at(split);
+        let amount = amount_raw
+            .parse::<u64>()
+            .map_err(|_| "duration amount must be a positive integer".to_string())?;
+        if amount == 0 {
+            return Err("duration amount must be greater than zero".to_string());
+        }
+
+        match unit {
+            "ms" => Ok(Duration::from_millis(amount)),
+            "s" => Ok(Duration::from_secs(amount)),
+            "m" => Ok(Duration::from_secs(amount * 60)),
+            "h" => Ok(Duration::from_secs(amount * 60 * 60)),
+            _ => Err("duration unit must be one of ms, s, m, or h".to_string()),
+        }
+    }
+
+    pub fn format_duration(duration: Duration) -> String {
+        if duration.as_millis() < 1000 {
+            format!("{}ms", duration.as_millis())
+        } else {
+            format!("{}s", duration.as_secs())
+        }
+    }
+
+    pub fn duration_millis(duration: Duration) -> u64 {
+        duration.as_millis().try_into().unwrap_or(u64::MAX)
+    }
+
+    pub fn elapsed_ms(start: Instant) -> u64 {
+        duration_millis(start.elapsed())
+    }
+
+    pub fn invalid_regex(field: &str, pattern: &str, error: regex::Error) -> Error {
+        Error::validation_invalid_argument(
+            field,
+            format!("invalid regex `{pattern}`: {error}"),
+            Some(pattern.to_string()),
+            None,
+        )
     }
 }
-
-fn format_duration(duration: Duration) -> String {
-    if duration.as_millis() < 1000 {
-        format!("{}ms", duration.as_millis())
-    } else {
-        format!("{}s", duration.as_secs())
-    }
-}
-
-fn duration_millis(duration: Duration) -> u64 {
-    duration.as_millis().try_into().unwrap_or(u64::MAX)
-}
-
-fn elapsed_ms(start: Instant) -> u64 {
-    duration_millis(start.elapsed())
-}
-
-fn invalid_regex(field: &str, pattern: &str, error: regex::Error) -> Error {
-    Error::validation_invalid_argument(
-        field,
-        format!("invalid regex `{pattern}`: {error}"),
-        Some(pattern.to_string()),
-        None,
-    )
-}
+pub use helpers::*;
 
 #[cfg(test)]
 mod tests {

@@ -129,6 +129,28 @@ pub fn run(
         } => map_registry(connect(&id, reverse, reverse_runner, broker_url)),
         RunnerCommand::Status { id } => map_registry(status_mod::status(id.as_deref())),
         RunnerCommand::Disconnect { id } => map_registry(registry::disconnect(&id)),
+        RunnerCommand::RefreshHomeboy {
+            runner_id,
+            select,
+            source,
+            git_ref,
+            target_dir,
+            reconnect,
+            dry_run,
+        } => map_refresh_homeboy(runner::refresh_homeboy_binary(
+            runner::HomeboyBinaryRefreshOptions {
+                runner_id,
+                mode: match select {
+                    Some(binary_path) => runner::HomeboyBinaryRefreshMode::Select { binary_path },
+                    None => runner::HomeboyBinaryRefreshMode::Materialize,
+                },
+                source,
+                git_ref,
+                target_dir,
+                reconnect,
+                dry_run,
+            },
+        )),
         RunnerCommand::Exec {
             id,
             cwd,
@@ -141,6 +163,7 @@ pub fn run(
             dry_run,
             run_id,
             artifact_outputs,
+            artifact_dir_outputs,
             summary_outputs,
             raw: _,
             command,
@@ -156,6 +179,7 @@ pub fn run(
             dry_run,
             run_id,
             artifact_outputs,
+            artifact_dir_outputs,
             summary_outputs,
             command,
         )),
@@ -215,6 +239,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             dry_run,
             run_id,
             artifact_outputs,
+            artifact_dir_outputs,
             summary_outputs,
             raw: true,
             command,
@@ -230,6 +255,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             dry_run,
             run_id,
             artifact_outputs,
+            artifact_dir_outputs,
             summary_outputs,
             command,
         ),
@@ -257,6 +283,7 @@ fn run_raw_exec(
     dry_run: bool,
     run_id: Option<String>,
     artifact_outputs: Vec<String>,
+    artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
     command: Vec<String>,
 ) -> JsonCommandRun {
@@ -272,6 +299,7 @@ fn run_raw_exec(
         dry_run,
         run_id,
         artifact_outputs,
+        artifact_dir_outputs,
         summary_outputs,
         command,
     ) {
@@ -333,6 +361,12 @@ fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<Runner
 
 fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| (RunnerCommandOutput::Execution(output), exit_code))
+}
+
+fn map_refresh_homeboy(
+    result: CmdResult<runner::HomeboyBinaryRefreshOutput>,
+) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| (RunnerCommandOutput::RefreshHomeboy(output), exit_code))
 }
 
 fn map_env(result: CmdResult<RunnerEnvOutput>) -> CmdResult<RunnerCommandOutput> {

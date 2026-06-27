@@ -73,8 +73,32 @@ pub struct TraceProfileSpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, serde_json::Value>,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_env: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare_bundle: Option<TraceCompareBundleProfileSpec>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_preview: Option<TracePublicPreviewSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceCompareBundleProfileSpec {
+    pub component: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenarios: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<usize>,
+
+    #[serde(default)]
+    pub canonical: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

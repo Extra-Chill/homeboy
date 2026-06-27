@@ -68,6 +68,10 @@ pub(crate) fn run_runner_resident_lab_offload(
         request.normalized_args,
         remote_output_file.as_deref(),
     );
+    let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
+    let (remapped_args, agent_task_run_id) =
+        ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())
+            .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
     let mut command = vec![homeboy_path.to_string()];
     if remote_output_file.is_some() && !args_contain_output_file(request.normalized_args) {
         command.push("--output".to_string());
@@ -119,15 +123,34 @@ pub(crate) fn run_runner_resident_lab_offload(
     lab_metadata["job_scoped_overrides"] = job_scoped_overrides_metadata(&request.job_overrides);
     let secret_env_handoff = build_lab_secret_env_handoff_plan(&remapped_args, Default::default())?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
+    let base_env = build_lab_offload_env_with_passthroughs(&lab_metadata);
+    lab_metadata["env_resolution"] = lab_env_resolution_report(vec![
+        LabEnvResolutionLayer {
+            source: "lab_metadata_and_passthroughs",
+            env: base_env,
+            secret_names: Vec::new(),
+        },
+        LabEnvResolutionLayer {
+            source: "secret_env_plan_env_delta",
+            env: secret_env_handoff.env_delta.clone(),
+            secret_names: secret_env_handoff.secret_env_names.clone(),
+        },
+        LabEnvResolutionLayer {
+            source: "job_override",
+            env: request.job_overrides.env.clone(),
+            secret_names: request.job_overrides.secret_env_names.clone(),
+        },
+    ]);
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    env.extend(secret_env_handoff.env_delta);
+    env.extend(secret_env_handoff.env_delta.clone());
     for (name, value) in &request.job_overrides.env {
         env.insert(name.clone(), value.clone());
     }
-    let mut secret_env_names = secret_env_handoff.secret_env_names;
+    let mut secret_env_names = secret_env_handoff.secret_env_plan.secret_env_names();
     secret_env_names.extend(request.job_overrides.secret_env_names.clone());
     secret_env_names.sort();
     secret_env_names.dedup();
+    preflight_lab_secret_env_handoff(runner_id, None, &env, &secret_env_handoff)?;
 
     let exec_timer = overhead.phase(LabOffloadPhase::RemoteExec);
     let (exec_output, exit_code) = exec(
@@ -146,7 +169,7 @@ pub(crate) fn run_runner_resident_lab_offload(
             required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
             runner_workload: None,
-            run_id: None,
+            run_id: agent_task_run_id,
             detach_after_handoff: false,
         },
     )?;

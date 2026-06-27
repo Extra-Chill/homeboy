@@ -11,7 +11,7 @@ pub struct RuntimeArgs {
 
 #[derive(Subcommand)]
 enum RuntimeCommand {
-    /// Resolve core-owned runner runtime helper paths.
+    /// Inspect core-bundled runtime helper paths exposed to extension runners.
     Helper {
         #[command(subcommand)]
         command: RuntimeHelperCommand,
@@ -20,13 +20,13 @@ enum RuntimeCommand {
 
 #[derive(Subcommand)]
 enum RuntimeHelperCommand {
-    /// Print the materialized path for a runtime helper.
+    /// Print the materialized path for a known core runtime helper.
     Path {
         /// Print only the path, for shell bootstrap usage.
         #[arg(long)]
         plain: bool,
 
-        /// Helper filename or HOMEBOY_RUNTIME_* env var name.
+        /// Known helper filename or injected HOMEBOY_RUNTIME_* env var name.
         helper: String,
     },
 }

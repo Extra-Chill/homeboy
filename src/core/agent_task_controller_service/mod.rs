@@ -12,6 +12,7 @@ use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskTypedArtifact, AgentTaskWorkflowEvidence,
@@ -379,11 +380,11 @@ pub fn init_from_spec_for_resume_with_resolution(
     }
 }
 
-/// Derive a deterministic fork loop id from the requested id and spec fingerprint.
+/// Derive an isolated fork loop id from the requested id and spec fingerprint.
 ///
-/// Using the fingerprint keeps reruns of the same changed spec collapsing onto a
-/// single fork instead of multiplying controllers, while still isolating the
-/// fork from the original loop id's stale state.
+/// Forks are operator-requested fresh runs. Include a nonce so repeated forks of
+/// the same spec cannot collapse onto an earlier fork controller and inherit its
+/// terminal child outcomes.
 fn derive_fork_loop_id(requested_loop_id: &str, spec_fingerprint: &str) -> String {
     let short = spec_fingerprint
         .strip_prefix("sha256:")
@@ -391,10 +392,12 @@ fn derive_fork_loop_id(requested_loop_id: &str, spec_fingerprint: &str) -> Strin
         .chars()
         .take(12)
         .collect::<String>();
+    let nonce = Uuid::new_v4().simple().to_string();
+    let nonce = &nonce[..12];
     // Use a sanitization-stable separator: the loop_id becomes a single path
     // segment (slashes are collapsed to `_` by sanitize_path_segment), so the
     // persisted `record.loop_id` would otherwise diverge from the derived id.
-    format!("{requested_loop_id}-fork-{short}")
+    format!("{requested_loop_id}-fork-{short}-{nonce}")
 }
 
 /// Remove a persisted controller record (and its directory) so a replace

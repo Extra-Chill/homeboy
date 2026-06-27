@@ -328,6 +328,7 @@ mod tests {
             success: exit_code == 0,
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
+            timed_out: false,
             child_resource: None,
             extension_phase_timings: Vec::new(),
         }

@@ -30,12 +30,13 @@ pub use args::{
     AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
     AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs,
-    AgentTaskFanoutCommand, AgentTaskFanoutInputArgs, AgentTaskFanoutPlanArgs,
-    AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
-    AgentTaskLoopArgs, AgentTaskLoopCommand, AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs,
-    AgentTaskLoopStatusArgs, CancelArgs, CompileLoopArgs, ContractArgs, ContractFormat,
-    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, ProvidersArgs, RetryArgs,
-    ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs,
+    AgentTaskFanoutPlanArgs, AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
+    AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
+    AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
+    CompileLoopArgs, ContractArgs, ContractFormat, DiagnoseArgs, EvidenceArgs, FinalizePrArgs,
+    GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, ProvidersArgs, RetryArgs, ReviewArgs,
+    RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -66,6 +67,8 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         ),
         AgentTaskCommand::Logs(status_args) => status::logs(status_args),
         AgentTaskCommand::Artifacts(status_args) => status::artifacts(status_args),
+        AgentTaskCommand::Evidence(evidence_args) => status::evidence(evidence_args),
+        AgentTaskCommand::Diagnose(diagnose_args) => status::diagnose(diagnose_args),
         AgentTaskCommand::Cancel(cancel_args) => status::cancel(cancel_args),
         AgentTaskCommand::Resume(status_args) => run::resume(status_args),
         AgentTaskCommand::Retry(retry_args) => run::retry(retry_args),

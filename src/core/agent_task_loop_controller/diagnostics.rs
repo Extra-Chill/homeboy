@@ -38,6 +38,8 @@ pub struct AgentTaskLoopControllerDiagnostics {
     pub stale_pending_threshold_seconds: i64,
     pub summary: AgentTaskLoopControllerDiagnosticSummary,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_child_actions: Vec<AgentTaskLoopFailedChildActionDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_actions: Vec<AgentTaskLoopPendingActionDiagnostic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acceptance_gates: Vec<AgentTaskLoopAcceptanceGateDiagnostic>,
@@ -46,11 +48,38 @@ pub struct AgentTaskLoopControllerDiagnostics {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskLoopControllerDiagnosticSummary {
     pub pending_action_count: usize,
+    pub failed_child_action_count: usize,
     pub stale_pending_action_count: usize,
     pub orphaned_pending_action_count: usize,
     pub acceptance_gate_count: usize,
     pub missing_acceptance_gate_count: usize,
     pub failed_acceptance_gate_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopFailedChildActionDiagnostic {
+    pub action_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_run_status: Option<String>,
+    pub top_diagnostic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hydrated_root_cause: Option<String>,
+    pub owner_surface: String,
+    pub next_command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<AgentTaskLoopFailedChildEvidenceRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopFailedChildEvidenceRef {
+    pub kind: String,
+    pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
