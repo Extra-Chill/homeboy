@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.266.3] - 2026-06-27
+
+### Changed
+- extract trace observation persistence to core/observation/lifecycle
+- move trace-experiment-bundle fs writes from command layer to core/trace_experiment
+- move trace-matrix fs writes from command layer to core/trace_compare
+- make six recurring local test reds deterministic
+- move compare-variant fs writes from command layer to core/trace_compare
+
 ## [0.266.2] - 2026-06-27
 
 ### Changed
