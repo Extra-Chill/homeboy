@@ -208,6 +208,8 @@ pub(super) fn exec_via_reverse_broker(
             patch,
             mutation_artifacts,
             artifacts,
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
             metrics,
             capture,
             runner_result: Some(runner_result),

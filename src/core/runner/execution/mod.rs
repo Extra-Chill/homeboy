@@ -137,6 +137,10 @@ pub struct RunnerExecOutput {
     pub mutation_artifacts: Option<RunnerMutationArtifacts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<JobArtifactMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub promoted_outputs: Vec<RunnerExecPromotedOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structured_summaries: Vec<RunnerExecStructuredSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<RunnerResourceMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,6 +151,30 @@ pub struct RunnerExecOutput {
     pub handoff: Option<RunnerHandoff>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerExecDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RunnerExecPromotedOutput {
+    pub role: String,
+    pub run_id: String,
+    pub runner_id: String,
+    pub command: Vec<String>,
+    pub declared_path: String,
+    pub runner_path: String,
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    pub artifact_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RunnerExecStructuredSummary {
+    pub run_id: String,
+    pub runner_id: String,
+    pub command: Vec<String>,
+    pub declared_path: String,
+    pub artifact_id: String,
+    pub artifact_path: String,
+    pub summary: Value,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

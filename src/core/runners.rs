@@ -52,16 +52,17 @@ pub use super::runner::{
     ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerActiveJobSource,
     RunnerActiveJobState, RunnerArtifactRef, RunnerAvailability, RunnerCapabilityPreflight,
     RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerExecDiagnostics,
-    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerFailureKind, RunnerHandoff,
-    RunnerJob, RunnerKind, RunnerLifecycleOwner, RunnerMutationArtifacts,
-    RunnerNamedWorkspaceLease, RunnerRequiredTool, RunnerResourceMetrics, RunnerResult,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerSpec, RunnerStaleDaemonWarning,
-    RunnerStaleRuntimePath, RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec,
-    RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceApplyStatus, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
-    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspacePruneEntry,
-    RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
+    RunnerExecStructuredSummary, RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerKind,
+    RunnerLifecycleOwner, RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRequiredTool,
+    RunnerResourceMetrics, RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState,
+    RunnerSpec, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
+    RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode, RunnerWorkspaceApplyOptions,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus, RunnerWorkspaceLease,
+    RunnerWorkspaceLeaseSet, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
+    RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
@@ -103,7 +104,8 @@ pub mod connection {
 pub mod execution {
     pub use super::super::runner::{
         exec, runner_exec_failure_error, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
-        RunnerExecOutput, RunnerResourceMetrics,
+        RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
+        RunnerResourceMetrics,
     };
 }
 

@@ -32,6 +32,8 @@ fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
             patch: None,
             mutation_artifacts: None,
             artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
             metrics: None,
             capture: None,
             runner_result: None,
@@ -203,7 +205,7 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             )
             .expect("run");
 
-        let (_output, exit_code) = exec(
+        let (output, exit_code) = exec(
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
@@ -233,6 +235,77 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
         assert_eq!(artifacts[0].metadata_json["evidence_role"], "summary");
         assert_eq!(artifacts[0].metadata_json["promoted_by"], "runner.exec");
         assert!(std::path::Path::new(&artifacts[0].path).is_file());
+        assert_eq!(output.promoted_outputs.len(), 1);
+        assert_eq!(output.promoted_outputs[0].role, "summary");
+        assert_eq!(output.promoted_outputs[0].run_id, run.id);
+        assert_eq!(output.promoted_outputs[0].runner_id, "lab-local");
+        assert_eq!(output.promoted_outputs[0].declared_path, "summary.json");
+        assert_eq!(output.promoted_outputs[0].artifact_kind, "summary");
+        assert_eq!(
+            output.promoted_outputs[0].runner_path,
+            workspace.path().join("summary.json").display().to_string()
+        );
+        assert_eq!(output.structured_summaries.len(), 1);
+        assert_eq!(
+            output.structured_summaries[0].summary["matrix"]["passed"],
+            1
+        );
+        assert_eq!(
+            output.structured_summaries[0].artifact_id,
+            output.promoted_outputs[0].artifact_id
+        );
+    });
+}
+
+#[test]
+fn runner_exec_structured_summary_is_independent_of_large_stdout() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        runner::create(
+            &format!(
+                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                workspace.path().display()
+            ),
+            false,
+        )
+        .expect("create local runner");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec lab-local".to_string())
+                    .cwd_path(workspace.path())
+                    .metadata(serde_json::json!({}))
+                    .build(),
+            )
+            .expect("run");
+
+        let (output, exit_code) = exec(
+            "lab-local",
+            Some(workspace.path().display().to_string()),
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            false,
+            Some(run.id.clone()),
+            Vec::new(),
+            vec!["summary.json".to_string()],
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                r#"yes noisy | head -n 2000; printf '{"status":"pass","count":2000}' > summary.json"#.to_string(),
+            ],
+        )
+        .expect("runner exec");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.stdout.len() > 10_000);
+        assert_eq!(output.structured_summaries.len(), 1);
+        assert_eq!(output.structured_summaries[0].summary["status"], "pass");
+        assert_eq!(output.structured_summaries[0].summary["count"], 2000);
     });
 }
 
@@ -395,6 +468,8 @@ fn runner_exec_output(runner_id: &str, mode: RunnerExecMode, remote_cwd: &str) -
         patch: None,
         mutation_artifacts: None,
         artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
         metrics: None,
         capture: None,
         runner_result: None,

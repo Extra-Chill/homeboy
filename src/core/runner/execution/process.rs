@@ -376,6 +376,8 @@ pub(super) fn exec_output(
             patch: None,
             mutation_artifacts: None,
             artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
             metrics: output.metrics,
             capture: output.capture,
             runner_result: Some(runner_result),
