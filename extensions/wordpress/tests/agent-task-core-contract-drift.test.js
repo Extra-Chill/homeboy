@@ -30,14 +30,15 @@ const {
   GENERIC_FINDING_PACKET_FANOUT_CONFIG_SCHEMA,
 } = require('../../runtime-agent-ci/lib/generic-fanout-reconcile-workflow');
 
-const contract = JSON.parse(fs.readFileSync(path.join(
-  __dirname,
-  '..',
-  '..',
-  'agent-runtimes',
-  'fixtures',
-  'homeboy-agent-task-core-contract.json'
-), 'utf8'));
+const {
+  FIXTURE_PATH,
+  buildCoreContractFixture,
+  canonicalJson,
+  fetchCoreContractData,
+} = require('../../agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs');
+
+const committedFixtureText = fs.readFileSync(FIXTURE_PATH, 'utf8');
+const contract = JSON.parse(committedFixtureText);
 const wpCodeboxManifest = JSON.parse(fs.readFileSync(path.join(
   __dirname,
   '..',
@@ -68,7 +69,12 @@ assert.deepEqual(AGENT_TASK_REDACTED_METADATA_KEYS, providerFields.redacted_meta
 assert.deepEqual(FANOUT_RECONCILE_RECORD_STATUSES, contract.enums.fanout_record_status);
 assert.deepEqual(FANOUT_RECONCILE_RUN_STATUSES, contract.enums.fanout_run_status);
 assert.deepEqual(GENERIC_FANOUT_RECONCILE_SUCCESS_STATUSES, contract.orchestration.fanout_success_statuses);
-assert.deepEqual(Object.keys(contract.orchestration.agent_task_outcome_to_fanout_record_status), AGENT_TASK_OUTCOME_STATUSES);
+// The fixture is canonically serialized with sorted object keys, so compare the
+// mapping's key set to the outcome statuses order-independently.
+assert.deepEqual(
+  Object.keys(contract.orchestration.agent_task_outcome_to_fanout_record_status).slice().sort(),
+  AGENT_TASK_OUTCOME_STATUSES.slice().sort()
+);
 assert.deepEqual(
   Object.values(contract.orchestration.agent_task_outcome_to_fanout_record_status).filter((status) => !FANOUT_RECONCILE_RECORD_STATUSES.includes(status)),
   []
@@ -89,4 +95,33 @@ assert.deepEqual(wpCodeboxProvider.outcome_statuses, providerFields.outcome_stat
 assert.deepEqual(wpCodeboxProvider.failure_classifications, providerFields.failure_classifications);
 assert.deepEqual(wpCodeboxProvider.redacted_metadata_keys, providerFields.redacted_metadata_keys);
 
-process.stdout.write('Agent task core contract drift check passed\n');
+// Strong anti-drift guarantee: the fixture is a generated artifact derived from
+// Homeboy core's published contract (`homeboy agent-task contract --format
+// json`) merged with the extensions-owned fanout/orchestration overlay. When
+// the homeboy binary is available, assert the committed fixture is byte-for-byte
+// what the generator produces from core. This catches any core contract change
+// (added, removed, renamed, or reordered keys) that the static checks above
+// cannot see. Regenerate with:
+//   node agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs
+const coreData = fetchCoreContractData();
+if (coreData === null) {
+  process.stdout.write(
+    'Agent task core contract drift check passed (homeboy binary unavailable; '
+      + 'core-region byte-equality check skipped)\n'
+  );
+} else {
+  const expectedFixture = buildCoreContractFixture(coreData);
+  assert.deepEqual(
+    contract,
+    expectedFixture,
+    'Fixture drifted from core: regenerate with '
+      + 'node agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs'
+  );
+  assert.equal(
+    committedFixtureText,
+    canonicalJson(expectedFixture),
+    'Fixture serialization drifted from the generator: regenerate with '
+      + 'node agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs'
+  );
+  process.stdout.write('Agent task core contract drift check passed (verified against core)\n');
+}

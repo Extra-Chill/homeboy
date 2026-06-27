@@ -159,6 +159,17 @@ execution. Homeboy core owns durable queueing, fanout, progress, retries,
 artifacts, and promotion. Runtime packages own the executor command and backend
 translation behind the provider manifest.
 
+This fixture is a generated artifact, not a hand-maintained mirror. Its core
+region is consumed directly from Homeboy core's published contract via
+`homeboy agent-task contract --format json` (core's `agent_task_core_contract()`),
+and the extensions-owned fanout/reconcile + orchestration overlay below is
+derived from the runtime's own JS constant modules. Regenerate it with
+`node agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs`
+(or `npm run fixture:agent-task-core-contract` from `wordpress/`). The
+`agent-task-core-contract-drift` test asserts byte-for-byte equality between the
+committed fixture and the generator output whenever the homeboy binary is
+available, so the fixture can never silently drift from core.
+
 Generic fanout/reconcile schemas are part of that fixture:
 
 - `homeboy/generic-fanout-reconcile-config/v1`
