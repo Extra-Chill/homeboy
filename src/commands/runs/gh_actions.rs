@@ -141,7 +141,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
     let mut artifact_rows = Vec::new();
 
     for gh_run in runs_to_process {
-        let homeboy_run_id = deterministic_run_id(&repo, gh_run.id);
+        let homeboy_run_id = deterministic_run_id(&repo, gh_run.common.id);
         let existed = store.get_run(&homeboy_run_id)?.is_some();
         if !existed {
             let run_record = build_run_record(&homeboy_run_id, &args.component_id, &repo, gh_run);
@@ -155,7 +155,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
         // artifacts can land late (e.g. retried jobs) and we still want them
         // ingested. Existing artifact rows are detected via deterministic
         // (run_id, gh_artifact_id, file_name) IDs.
-        let artifacts = list_run_artifacts(&gh, gh_run.id)?;
+        let artifacts = list_run_artifacts(&gh, gh_run.common.id)?;
         let existing_artifacts: HashMap<String, homeboy::core::observation::ArtifactRecord> = store
             .list_artifacts(&homeboy_run_id)?
             .into_iter()
@@ -188,7 +188,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                     artifacts_skipped_existing += 1;
                     artifact_rows.push(GhActionsImportedArtifact {
                         run_id: homeboy_run_id.clone(),
-                        gh_run_id: gh_run.id,
+                        gh_run_id: gh_run.common.id,
                         artifact_id,
                         gh_artifact_id: artifact.id,
                         artifact_name: artifact.name.clone(),
@@ -218,7 +218,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                     mime: Some("application/json".to_string()),
                     metadata_json: serde_json::json!({
                         "source": "github_actions",
-                        "gh_run_id": gh_run.id,
+                        "gh_run_id": gh_run.common.id,
                         "gh_artifact_id": artifact.id,
                         "artifact_name": artifact.name,
                     }),
@@ -227,7 +227,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                 store.import_artifact(&artifact_record)?;
                 artifact_rows.push(GhActionsImportedArtifact {
                     run_id: homeboy_run_id.clone(),
-                    gh_run_id: gh_run.id,
+                    gh_run_id: gh_run.common.id,
                     artifact_id: artifact_record.id.clone(),
                     gh_artifact_id: artifact.id,
                     artifact_name: artifact.name.clone(),
@@ -272,18 +272,18 @@ fn build_run_record(
     let metadata = serde_json::json!({
         "gh": {
             "repo": repo,
-            "run_id": gh_run.id,
-            "run_number": gh_run.run_number,
+            "run_id": gh_run.common.id,
+            "run_number": gh_run.common.run_number,
             "workflow_name": gh_run.workflow_name,
-            "workflow_id": gh_run.workflow_id,
-            "branch": gh_run.head_branch,
-            "head_sha": gh_run.head_sha,
-            "event": gh_run.event,
+            "workflow_id": gh_run.common.workflow_id,
+            "branch": gh_run.common.head_branch,
+            "head_sha": gh_run.common.head_sha,
+            "event": gh_run.common.event,
             "pull_request_numbers": gh_run.pull_request_numbers.clone(),
-            "html_url": gh_run.html_url,
-            "conclusion": gh_run.conclusion,
-            "status": gh_run.status,
-            "run_attempt": gh_run.run_attempt,
+            "html_url": gh_run.common.html_url,
+            "conclusion": gh_run.common.conclusion,
+            "status": gh_run.common.status,
+            "run_attempt": gh_run.common.run_attempt,
         },
         "homeboy_ingest": {
             "kind": "gh-actions",
@@ -296,19 +296,20 @@ fn build_run_record(
         kind: GH_RUN_KIND.to_string(),
         component_id: Some(component_id.to_string()),
         started_at: gh_run
+            .common
             .run_started_at
             .clone()
-            .or_else(|| gh_run.created_at.clone())
+            .or_else(|| gh_run.common.created_at.clone())
             .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
-        finished_at: gh_run.updated_at.clone(),
+        finished_at: gh_run.common.updated_at.clone(),
         status: map_gh_conclusion_to_status(gh_run),
         command: Some(format!(
             "homeboy runs import --from-gh-actions --repo {repo} --run-id {}",
-            gh_run.id
+            gh_run.common.id
         )),
         cwd: None,
         homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        git_sha: gh_run.head_sha.clone(),
+        git_sha: gh_run.common.head_sha.clone(),
         rig_id: None,
         metadata_json: metadata,
     }
@@ -318,12 +319,12 @@ fn build_run_record(
 /// unknown conclusions become `error` so we never accidentally label a
 /// running/cancelled GH run as `pass`.
 fn map_gh_conclusion_to_status(gh_run: &GhWorkflowRun) -> String {
-    match gh_run.conclusion.as_deref() {
+    match gh_run.common.conclusion.as_deref() {
         Some("success") => "pass".to_string(),
         Some("failure") => "fail".to_string(),
         Some("cancelled" | "skipped" | "neutral") => "skipped".to_string(),
         Some(_) => "error".to_string(),
-        None => match gh_run.status.as_deref() {
+        None => match gh_run.common.status.as_deref() {
             Some("completed") => "pass".to_string(),
             _ => "running".to_string(),
         },
@@ -338,12 +339,14 @@ fn get_workflow_run(gh: &GhClient, run_id: u64) -> homeboy::core::Result<GhWorkf
         .map(GhWorkflowRun::from)
 }
 
-/// One GitHub Actions workflow run, projected to the fields we persist.
+/// Fields shared verbatim (identical names + types) between the raw GitHub
+/// API projection (`GhWorkflowRunRaw`) and the persisted projection
+/// (`GhWorkflowRun`). Flattened into both so the JSON wire format on the
+/// `Deserialize` side is unchanged.
 #[derive(Debug, Clone, Deserialize)]
-struct GhWorkflowRunRaw {
+struct GhWorkflowRunCommon {
     id: u64,
     run_number: Option<u64>,
-    name: Option<String>,
     workflow_id: Option<u64>,
     head_branch: Option<String>,
     head_sha: Option<String>,
@@ -355,6 +358,14 @@ struct GhWorkflowRunRaw {
     created_at: Option<String>,
     updated_at: Option<String>,
     run_attempt: Option<u64>,
+}
+
+/// One GitHub Actions workflow run, projected to the fields we persist.
+#[derive(Debug, Clone, Deserialize)]
+struct GhWorkflowRunRaw {
+    #[serde(flatten)]
+    common: GhWorkflowRunCommon,
+    name: Option<String>,
     #[serde(default)]
     pull_requests: Vec<GhPullRequestRef>,
 }
@@ -366,40 +377,16 @@ struct GhPullRequestRef {
 
 #[derive(Debug, Clone)]
 struct GhWorkflowRun {
-    id: u64,
-    run_number: Option<u64>,
+    common: GhWorkflowRunCommon,
     workflow_name: Option<String>,
-    workflow_id: Option<u64>,
-    head_branch: Option<String>,
-    head_sha: Option<String>,
-    event: Option<String>,
-    status: Option<String>,
-    conclusion: Option<String>,
-    html_url: Option<String>,
-    run_started_at: Option<String>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
-    run_attempt: Option<u64>,
     pull_request_numbers: Vec<u64>,
 }
 
 impl From<GhWorkflowRunRaw> for GhWorkflowRun {
     fn from(raw: GhWorkflowRunRaw) -> Self {
         Self {
-            id: raw.id,
-            run_number: raw.run_number,
+            common: raw.common,
             workflow_name: raw.name,
-            workflow_id: raw.workflow_id,
-            head_branch: raw.head_branch,
-            head_sha: raw.head_sha,
-            event: raw.event,
-            status: raw.status,
-            conclusion: raw.conclusion,
-            html_url: raw.html_url,
-            run_started_at: raw.run_started_at,
-            created_at: raw.created_at,
-            updated_at: raw.updated_at,
-            run_attempt: raw.run_attempt,
             pull_request_numbers: raw.pull_requests.into_iter().map(|pr| pr.number).collect(),
         }
     }
@@ -589,9 +576,10 @@ fn filter_runs_by_since(
         .into_iter()
         .filter(|run| {
             let candidate = run
+                .common
                 .run_started_at
                 .as_deref()
-                .or(run.created_at.as_deref())
+                .or(run.common.created_at.as_deref())
                 .unwrap_or("");
             candidate >= threshold.as_str()
         })
@@ -838,29 +826,31 @@ mod tests {
     #[test]
     fn map_gh_conclusion_to_status_handles_known_outcomes() {
         let mut run = GhWorkflowRun {
-            id: 1,
-            run_number: None,
+            common: GhWorkflowRunCommon {
+                id: 1,
+                run_number: None,
+                workflow_id: None,
+                head_branch: None,
+                head_sha: None,
+                event: None,
+                status: Some("completed".into()),
+                conclusion: Some("success".into()),
+                html_url: None,
+                run_started_at: None,
+                created_at: None,
+                updated_at: None,
+                run_attempt: None,
+            },
             workflow_name: None,
-            workflow_id: None,
-            head_branch: None,
-            head_sha: None,
-            event: None,
-            status: Some("completed".into()),
-            conclusion: Some("success".into()),
-            html_url: None,
-            run_started_at: None,
-            created_at: None,
-            updated_at: None,
-            run_attempt: None,
             pull_request_numbers: vec![],
         };
         assert_eq!(map_gh_conclusion_to_status(&run), "pass");
-        run.conclusion = Some("failure".into());
+        run.common.conclusion = Some("failure".into());
         assert_eq!(map_gh_conclusion_to_status(&run), "fail");
-        run.conclusion = Some("cancelled".into());
+        run.common.conclusion = Some("cancelled".into());
         assert_eq!(map_gh_conclusion_to_status(&run), "skipped");
-        run.conclusion = None;
-        run.status = Some("in_progress".into());
+        run.common.conclusion = None;
+        run.common.status = Some("in_progress".into());
         assert_eq!(map_gh_conclusion_to_status(&run), "running");
     }
 
@@ -886,7 +876,7 @@ mod tests {
         .unwrap();
         let runs = parse_runs_payload(raw.as_bytes()).expect("parse");
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].id, 100);
+        assert_eq!(runs[0].common.id, 100);
         assert_eq!(runs[0].pull_request_numbers, vec![98]);
     }
 
@@ -911,12 +901,12 @@ mod tests {
         .unwrap();
 
         let run = parse_run_payload(&raw).expect("parse run");
-        assert_eq!(run.id, 26731420339);
+        assert_eq!(run.common.id, 26731420339);
         assert_eq!(
             run.workflow_name.as_deref(),
             Some("Static site validation iterator")
         );
-        assert_eq!(run.workflow_id, Some(123));
+        assert_eq!(run.common.workflow_id, Some(123));
         assert_eq!(map_gh_conclusion_to_status(&run), "fail");
     }
 
