@@ -376,6 +376,31 @@ fn prepare_lab_offload_workspace_stage_inner(
             synced_entry.step_id,
         );
     }
+    let late_path_setting_workspaces = path_setting_extra_workspaces(
+        &remapped_args,
+        Path::new(&synced.local_path),
+    )?;
+    let late_synced_path_settings = sync_extra_lab_workspaces(
+        runner_id,
+        &synced.local_path,
+        late_path_setting_workspaces,
+        &mut workspace_mapping,
+    )?;
+    if !late_synced_path_settings.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready(
+                "lab.sync_late_path_settings",
+                "lab.sync_late_path_settings",
+            )
+            .inputs(
+                PlanValues::new()
+                    .json("count", late_synced_path_settings.len())
+                    .json("workspaces", &late_synced_path_settings),
+            )
+            .build(),
+        );
+    }
     let path_remaps = path_remaps_from_workspace_mapping(&workspace_mapping);
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
