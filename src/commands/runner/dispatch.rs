@@ -11,7 +11,9 @@ use super::exec::exec;
 use super::jobs::RunnerJobCommandOutput;
 use super::registry::{add, connect, enable, list, remove, set, show, RunnerAddInput};
 use super::types::{RunnerCommandOutput, RunnerEnvOutput, RunnerOutput};
-use super::{doctor, env as env_mod, jobs, policy, registry, status as status_mod, workspace};
+use super::{
+    doctor, env as env_mod, jobs, policy, refresh_plan, registry, status as status_mod, workspace,
+};
 
 pub fn run(
     args: RunnerArgs,
@@ -219,6 +221,8 @@ pub fn run(
         }
         RunnerCommand::Workspace { command } => workspace::run(command)
             .map(|(output, exit_code)| (RunnerCommandOutput::Workspace(output), exit_code)),
+        RunnerCommand::RefreshPlan(args) => refresh_plan::refresh_plan(args)
+            .map(|output| (RunnerCommandOutput::RefreshPlan(output), 0)),
         RunnerCommand::Broker { command } => {
             run_broker(command).map(|output| (RunnerCommandOutput::Broker(output), 0))
         }

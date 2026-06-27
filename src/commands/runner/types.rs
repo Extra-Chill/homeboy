@@ -11,6 +11,7 @@ use homeboy::core::EntityCrudOutput;
 use std::collections::BTreeMap;
 
 use super::doctor;
+use super::refresh_plan;
 use super::workspace;
 
 #[derive(Debug, Serialize)]
@@ -266,6 +267,7 @@ pub enum RunnerCommandOutput {
     RefreshHomeboy(homeboy::core::runners::HomeboyBinaryRefreshOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
+    RefreshPlan(refresh_plan::LabRefreshPlanOutput),
     Broker(RunnerBrokerOutput),
 }
 

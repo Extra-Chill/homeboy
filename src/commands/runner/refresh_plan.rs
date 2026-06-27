@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use clap::{Args, Subcommand};
+use clap::Args;
 use serde::Serialize;
 
 use homeboy::core::build_identity::BuildIdentity;
@@ -11,20 +11,6 @@ use homeboy::core::runner_execution_envelope::{
 use homeboy::core::runners;
 use homeboy::core::runners::{RunnerSession, RunnerStaleDaemonWarning, RunnerWorkspaceSyncMode};
 use homeboy::core::secret_env_plan::SecretEnvPlan;
-
-use super::{CmdResult, GlobalArgs};
-
-#[derive(Args)]
-pub struct LabArgs {
-    #[command(subcommand)]
-    command: LabCommand,
-}
-
-#[derive(Subcommand)]
-enum LabCommand {
-    /// Plan a runner-backed refresh loop before dispatching matrix-style work
-    RefreshPlan(RefreshPlanArgs),
-}
 
 #[derive(Args, Debug, Clone)]
 pub struct RefreshPlanArgs {
@@ -243,13 +229,7 @@ pub struct LabRefreshPlanCommand {
     pub purpose: &'static str,
 }
 
-pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabRefreshPlanOutput> {
-    match args.command {
-        LabCommand::RefreshPlan(args) => refresh_plan(args).map(|output| (output, 0)),
-    }
-}
-
-fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOutput> {
+pub fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOutput> {
     validate_sync_mode(&args.sync_mode)?;
 
     if args.command.is_empty() {
@@ -258,7 +238,7 @@ fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOu
             "refresh-plan requires a command after --",
             None,
             Some(vec![
-                "Example: homeboy lab refresh-plan --runner lab --workspace . --runner-cwd /workspace/app --run-id run-1 --output artifacts/review -- npm test".to_string(),
+                "Example: homeboy runner refresh-plan --runner lab --workspace . --runner-cwd /workspace/app --run-id run-1 --output artifacts/review -- npm test".to_string(),
             ]),
         ));
     }
@@ -277,7 +257,7 @@ fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOu
     let next_commands = next_commands(&args, &evidence_paths);
     let docs = vec![
         "docs/operators/artifact-loop-runner-matrix.md".to_string(),
-        "docs/commands/lab.md".to_string(),
+        "docs/commands/runner.md".to_string(),
     ];
     let execution_envelope =
         execution_envelope_plan(&args, &evidence_paths, &docs, &homeboy_provenance);
@@ -996,7 +976,7 @@ mod tests {
         };
         let evidence = evidence_paths(&args);
         let commands = next_commands(&args, &evidence);
-        let docs = vec!["docs/commands/lab.md".to_string()];
+        let docs = vec!["docs/commands/runner.md".to_string()];
         let provenance = test_provenance();
         let envelope = execution_envelope_plan(&args, &evidence, &docs, &provenance);
 
@@ -1090,7 +1070,7 @@ mod tests {
             command: vec!["cargo".to_string(), "test".to_string()],
         };
         let evidence = evidence_paths(&args);
-        let docs = vec!["docs/commands/lab.md".to_string()];
+        let docs = vec!["docs/commands/runner.md".to_string()];
         let provenance = test_provenance();
 
         let envelope = execution_envelope_plan(&args, &evidence, &docs, &provenance);

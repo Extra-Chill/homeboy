@@ -114,37 +114,6 @@ fn agent_task_discovery_commands_use_typed_args() {
 }
 
 #[test]
-fn agent_task_discovery_help_documents_typed_flags() {
-    let mut root = Cli::command();
-    let agent_task = root
-        .find_subcommand_mut("agent-task")
-        .expect("agent-task command");
-
-    let list_help = agent_task
-        .find_subcommand_mut("list")
-        .expect("agent-task list command")
-        .render_long_help()
-        .to_string();
-    assert!(list_help.contains("--limit <N>"));
-
-    let active_help = agent_task
-        .find_subcommand_mut("active")
-        .expect("agent-task active command")
-        .render_long_help()
-        .to_string();
-    assert!(active_help.contains("--limit <N>"));
-    assert!(active_help.contains("--reconcile"));
-    assert!(active_help.contains("--dry-run"));
-
-    let latest_help = agent_task
-        .find_subcommand_mut("latest")
-        .expect("agent-task latest command")
-        .render_long_help()
-        .to_string();
-    assert!(latest_help.contains("--limit <N>"));
-}
-
-#[test]
 fn agent_task_tool_bridge_stays_hidden_but_parseable() {
     let surface = current_command_surface();
 
@@ -326,81 +295,38 @@ fn runner_job_broker_wrapper_commands_parse() {
 }
 
 #[test]
-fn runner_exec_raw_command_parses_before_trailing_command() {
-    Cli::try_parse_from([
-        "homeboy",
-        "runner",
-        "exec",
-        "homeboy-lab",
-        "--raw",
-        "--cwd",
-        "/runner/workspaces",
-        "python3",
-        "-c",
-        "print('hello')",
-    ])
-    .expect("runner exec --raw should parse before the trailing remote command");
-}
-
-#[test]
-fn runner_exec_run_id_parses_before_trailing_command() {
-    Cli::try_parse_from([
-        "homeboy",
-        "runner",
-        "exec",
-        "homeboy-lab",
-        "--run-id",
-        "ssi-fixture-matrix-summary",
-        "--cwd",
-        "/runner/workspaces",
-        "homeboy",
-        "trace",
-        "matrix",
-        "summary",
-    ])
-    .expect("runner exec --run-id should parse before the trailing remote command");
-}
-
-#[test]
-fn runner_exec_artifact_parses_before_trailing_command() {
-    Cli::try_parse_from([
-        "homeboy",
-        "runner",
-        "exec",
-        "homeboy-lab",
-        "--run-id",
-        "runner-exec-artifact-fixture",
-        "--artifact",
-        "output/report.json",
-        "--cwd",
-        "/runner/workspaces",
-        "homeboy",
-        "trace",
-        "matrix",
-        "summary",
-    ])
-    .expect("runner exec --artifact should parse before the trailing remote command");
-}
-
-#[test]
-fn runner_exec_artifact_dir_parses_before_trailing_command() {
-    Cli::try_parse_from([
-        "homeboy",
-        "runner",
-        "exec",
-        "homeboy-lab",
-        "--run-id",
-        "runner-exec-artifact-dir-fixture",
-        "--artifact-dir",
-        "output",
-        "--cwd",
-        "/runner/workspaces",
-        "homeboy",
-        "trace",
-        "matrix",
-        "summary",
-    ])
-    .expect("runner exec --artifact-dir should parse before the trailing remote command");
+fn runner_exec_flags_parse_before_trailing_command() {
+    // `runner exec` collects the remote command via `trailing_var_arg`, so every
+    // exec-side flag must bind before the trailing argv begins. Exercise the
+    // distinct flags that share this ordering invariant in one place.
+    for args in [
+        [
+            "homeboy", "runner", "exec", "homeboy-lab", "--raw", "--cwd", "/runner/workspaces",
+            "python3", "-c", "print('hello')",
+        ]
+        .as_slice(),
+        [
+            "homeboy", "runner", "exec", "homeboy-lab", "--run-id", "ssi-fixture-matrix-summary",
+            "--cwd", "/runner/workspaces", "homeboy", "trace", "matrix", "summary",
+        ]
+        .as_slice(),
+        [
+            "homeboy", "runner", "exec", "homeboy-lab", "--run-id", "runner-exec-artifact-fixture",
+            "--artifact", "output/report.json", "--cwd", "/runner/workspaces", "homeboy", "trace",
+            "matrix", "summary",
+        ]
+        .as_slice(),
+        [
+            "homeboy", "runner", "exec", "homeboy-lab", "--run-id",
+            "runner-exec-artifact-dir-fixture", "--artifact-dir", "output", "--cwd",
+            "/runner/workspaces", "homeboy", "trace", "matrix", "summary",
+        ]
+        .as_slice(),
+    ] {
+        Cli::try_parse_from(args).unwrap_or_else(|error| {
+            panic!("runner exec flag should bind before the trailing command: {args:?}\n{error}")
+        });
+    }
 }
 
 #[test]

@@ -4,6 +4,7 @@ use homeboy::core::runners::RunnerKind;
 
 use super::super::DynamicSetArgs;
 use super::doctor;
+use super::refresh_plan;
 use super::workspace;
 
 #[derive(Args)]
@@ -368,6 +369,9 @@ pub(super) enum RunnerCommand {
         #[command(subcommand)]
         command: workspace::RunnerWorkspaceCommand,
     },
+    /// Plan a runner-backed refresh loop before dispatching matrix-style work
+    #[command(name = "refresh-plan")]
+    RefreshPlan(refresh_plan::RefreshPlanArgs),
     /// Manage reverse runner broker authentication and pairing
     Broker {
         #[command(subcommand)]

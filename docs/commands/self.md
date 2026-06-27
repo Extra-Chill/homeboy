@@ -12,7 +12,7 @@ homeboy self <COMMAND>
 
 - `status` — report the active binary, version, and install/update signals
 - `identity` — report the active binary build identity without external probes
-- `doctor` — report one authoritative binary/runtime view and command-surface drift checks
+- `doctor` — report one authoritative binary/runtime view, command-surface drift checks, and host resource pressure
 - `cleanup-runtime-tmp` — plan or delete orphaned Homeboy runtime temp entries
 
 ### `status`
@@ -59,6 +59,13 @@ command exits `0`. When any runner reports a different version or a stale daemon
 `agrees` is `false`, the disagreement is described in `drift_notes`, and the
 command exits non-zero so cook loops can detect binary-identity or command
 surface drift.
+
+The report also carries a `resources` section with read-only host diagnostics —
+machine load relative to CPU count, memory pressure, the hottest
+Homeboy-adjacent processes, and active rig run leases — with an overall
+`recommendation` of `ok`, `warm`, or `hot`. Resource pressure is diagnostic
+context only and does not affect the `agrees` exit code. This consolidates host
+and resource diagnostics under `self`; there is no standalone `doctor` command.
 
 ### `cleanup-runtime-tmp`
 

@@ -153,7 +153,7 @@ fn run_with_mode(mode: ResourceProbeMode) -> CmdResult<DoctorOutput> {
 
     Ok((
         DoctorOutput {
-            command: "doctor.resources",
+            command: "self.resources",
             recommendation,
             load,
             memory,

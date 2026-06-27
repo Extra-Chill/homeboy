@@ -202,7 +202,6 @@ pub mod db;
 pub mod deploy;
 pub mod deps;
 pub mod docs;
-pub mod doctor;
 pub mod extension;
 pub mod file;
 pub mod fleet;
@@ -211,7 +210,6 @@ pub mod git;
 pub mod http;
 pub mod issues;
 pub mod json_output;
-pub mod lab;
 pub mod lint;
 pub mod logs;
 pub mod observe;
@@ -221,6 +219,7 @@ pub mod refactor;
 pub mod refs;
 pub mod release;
 pub mod report;
+pub mod resources;
 pub mod review;
 pub mod rig;
 pub mod runner;
@@ -241,10 +240,14 @@ pub mod utils;
 pub mod version;
 pub mod worktree;
 
-// CLI-infrastructure / plumbing modules live in the `infra` submodule to keep
-// this directory under the structural file-count threshold. They are re-exported
-// below at their original `crate::commands::*` paths (matching original
-// visibility) so this relocation is a pure move with zero API change.
+// Command-runtime infrastructure: the routing, adapter, output/response,
+// manifest, and summary plumbing that turns a parsed `Commands` value into a
+// dispatched, serialized result. This is a deliberate architectural boundary —
+// distinct from the per-command modules above, which each own one user-facing
+// command — so shared dispatch/runtime plumbing has a single semantic home
+// rather than being interleaved with command implementations. Items are
+// re-exported below at their original `crate::commands::*` paths (matching
+// original visibility) so callers import them unchanged.
 mod infra;
 
 pub(crate) use infra::adapter;

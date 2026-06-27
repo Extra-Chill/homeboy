@@ -6,6 +6,7 @@ use types::RunnerOutput;
 
 pub mod doctor;
 mod policy;
+mod refresh_plan;
 mod workspace;
 
 mod broker;

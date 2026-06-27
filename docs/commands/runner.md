@@ -258,6 +258,22 @@ workspace sync with a `runner_capabilities` validation error and remediation.
 The same central policy returns a local fallback reason for future automatic
 Lab offload selection.
 
+### `refresh-plan`
+
+```sh
+homeboy runner refresh-plan --runner <runner-id> --workspace . --runner-cwd /runner/workspaces/app --run-id matrix-refresh-1 --output artifacts/review --summary artifacts/review/summary.json -- npm test
+```
+
+Plans a runner-backed refresh loop before dispatching matrix-style work, without
+executing the workload. It composes the existing runner/workspace/run artifact
+primitives into one envelope: a `RunnerExecutionEnvelope`, a handoff describing
+workspace mapping and Homeboy binary provenance (controller CLI vs. runner
+configured binary vs. active daemon, with version/build drift diagnostics),
+declared evidence/artifact paths, and the ordered `next_commands` to verify the
+runner, sync the workspace, run the refresh, and inspect the produced evidence.
+Source and fixture paths passed with `--source`/`--fixture` must exist before the
+plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
+
 ### `connect`
 
 ```sh

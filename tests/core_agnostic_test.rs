@@ -24,7 +24,7 @@ struct ViolationKey {
 const CORE_OWNED_SOURCE_ROOTS: &[&str] = &[
     "src/core",
     "src/commands/component.rs",
-    "src/commands/doctor/resources.rs",
+    "src/commands/resources/mod.rs",
     "src/commands/extension.rs",
     "src/commands/lint.rs",
     "src/commands/report.rs",
