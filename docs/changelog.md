@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.265.2] - 2026-06-27
+
+### Changed
+- prune stale field_patterns baseline row (batch 3)
+- extract shared cleanup size totals via serde flatten (field_patterns)
+- extract shared fields via serde flatten (field_patterns)
+- Clean product terms from generic runtime boundaries
+- Make fuzz measurement profile non-blocking
+
+### Fixed
+- complete #6705 runtime->tool rename cleanup (unbreak main test build)
+
 ## [0.265.1] - 2026-06-27
 
 ### Changed
