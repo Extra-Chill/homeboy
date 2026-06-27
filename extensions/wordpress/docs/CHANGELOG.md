@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.22] - 2026-06-27
+
+### Changed
+- Write empty WordPress hotspot artifacts
+
 ## [3.19.21] - 2026-06-27
 
 ### Changed
