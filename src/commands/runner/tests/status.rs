@@ -12,7 +12,7 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_run_followups_for_legacy, declared_runtime_diagnostics,
-    declared_runtime_source_diagnostics, declared_tool_diagnostics,
+    declared_runtime_source_diagnostics, declared_tool_diagnostics, lab_runner_homeboy_output,
     runner_artifact_feature_diagnostics, runner_status_operator_commands,
 };
 
@@ -366,6 +366,54 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
     assert!(serialized
         .contains("homeboy runner exec homeboy-lab -- homeboy runs artifact attach --help"));
     assert!(serialized.contains("version/build drift"));
+}
+
+#[test]
+fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
+    let report = RunnerStatusReport {
+        runner_id: "homeboy-lab".to_string(),
+        connected: true,
+        state: runner::RunnerSessionState::Connected,
+        session: Some(RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: runner::RunnerSessionRole::Controller,
+            server_id: Some("homeboy-lab".to_string()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:7357".to_string()),
+            local_port: Some(7357),
+            local_url: Some("http://127.0.0.1:7357".to_string()),
+            tunnel_pid: Some(123),
+            remote_daemon_pid: Some(456),
+            homeboy_version: "0.262.0".to_string(),
+            homeboy_build_identity: Some("0.262.0 old-build".to_string()),
+            connected_at: "2026-06-19T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+        }),
+        stale_daemon: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_jobs: Vec::new(),
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Available,
+        active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
+        active_job_error: None,
+        session_path: "/tmp/session.json".to_string(),
+    };
+
+    let output = lab_runner_homeboy_output("homeboy-lab", "/opt/homeboy/bin/homeboy", &report);
+    let serialized = serde_json::to_string(&output).expect("serialize runner homeboy output");
+
+    assert!(serialized.contains("controller_cli"));
+    assert!(serialized.contains("active_daemon"));
+    assert!(serialized.contains("job_command_binary"));
+    assert!(serialized.contains("runner_config.settings.homeboy_path"));
+    assert!(serialized.contains("/opt/homeboy/bin/homeboy tunnel artifact-origin dom-boxes --help"));
+    assert_eq!(output.active_daemon_version.as_deref(), Some("0.262.0"));
 }
 
 fn wp_codebox_tool_declaration() -> AgentRuntimeToolDiagnosticDeclaration {

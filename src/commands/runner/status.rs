@@ -13,8 +13,8 @@ use homeboy::core::runners::{
 use super::super::CmdResult;
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
-    RunnerConnectionOutput, RunnerExtra, RunnerOperatorCommand, RunnerOutput,
-    RunnerToolDiagnostics, WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue,
+    RunnerConnectionOutput, RunnerExtra, RunnerHomeboyBinaryRole, RunnerOperatorCommand,
+    RunnerOutput, RunnerToolDiagnostics, WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue,
     WpCodeboxRuntimeDiagnostic, WpCodeboxRuntimeOutput,
 };
 
@@ -119,7 +119,7 @@ fn selected_lab_runner_status(
     }))
 }
 
-fn lab_runner_homeboy_output(
+pub(super) fn lab_runner_homeboy_output(
     runner_id: &str,
     configured_executable: &str,
     status: &RunnerStatusReport,
@@ -137,6 +137,11 @@ fn lab_runner_homeboy_output(
         controller_version,
         controller_build_identity,
         configured_executable: configured_executable.to_string(),
+        binary_roles: runner_homeboy_binary_roles(
+            configured_executable,
+            &status.session,
+            &active_daemon_version,
+        ),
         active_daemon_version,
         active_daemon_build_identity: status
             .session
@@ -408,9 +413,50 @@ fn lab_command_availability_checks(homeboy_path: &str) -> Vec<String> {
         format!("{binary} --version"),
         format!("{binary} runner exec --help"),
         format!("{binary} runs artifact --help"),
+        format!("{binary} tunnel artifact-origin dom-boxes --help"),
         format!("{binary} fuzz --help"),
         format!("{binary} runs evidence --help"),
         format!("{binary} extension list"),
+    ]
+}
+
+fn runner_homeboy_binary_roles(
+    configured_executable: &str,
+    session: &Option<RunnerSession>,
+    active_daemon_version: &Option<String>,
+) -> Vec<RunnerHomeboyBinaryRole> {
+    let controller_identity = homeboy::core::build_identity::current();
+    vec![
+        RunnerHomeboyBinaryRole {
+            role: "controller_cli",
+            owner: "operator_command",
+            path: std::env::current_exe()
+                .ok()
+                .map(|path| path.display().to_string()),
+            version: Some(controller_identity.version),
+            build_identity: Some(controller_identity.display),
+            purpose: "Renders this status output and submits runner jobs; it does not prove what the runner daemon or job command binary supports.",
+        },
+        RunnerHomeboyBinaryRole {
+            role: "active_daemon",
+            owner: "runner_session",
+            path: session
+                .as_ref()
+                .and_then(|session| session.remote_daemon_address.clone()),
+            version: active_daemon_version.clone(),
+            build_identity: session
+                .as_ref()
+                .and_then(|session| session.homeboy_build_identity.clone()),
+            purpose: "Accepts connected daemon jobs until the runner is disconnected/reconnected; it can lag behind the configured job binary after refresh-homeboy.",
+        },
+        RunnerHomeboyBinaryRole {
+            role: "job_command_binary",
+            owner: "runner_config.settings.homeboy_path",
+            path: Some(configured_executable.to_string()),
+            version: None,
+            build_identity: None,
+            purpose: "Binary path selected for runner-side Homeboy subcommands and capability checks; use command_availability_checks to verify required subcommands on the runner.",
+        },
     ]
 }
 
