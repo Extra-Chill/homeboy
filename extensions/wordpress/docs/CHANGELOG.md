@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.12] - 2026-06-27
+
+### Changed
+- Emit Codebox runtime package artifact declarations
+
 ## [3.19.11] - 2026-06-27
 
 ### Changed
