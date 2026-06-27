@@ -702,8 +702,6 @@
         "structural::src/core/code_audit/conventions.rs::GodFile",
         "structural::src/core/code_audit/core_fingerprint.rs::GodFile",
         "structural::src/core/code_audit/detectors/field_patterns.rs::GodFile",
-        "structural::src/core/component/inventory.rs::GodFile",
-        "structural::src/core/component/inventory.rs::HighItemCount",
         "structural::src/core/extension/trace/report.rs::HighItemCount",
         "structural::src/core/observation/runs_service.rs::HighItemCount",
         "structural::src/core/observation/store.rs::GodFile",
