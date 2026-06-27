@@ -686,8 +686,7 @@
         "thin_command_adapter::src/commands/trace/matrix.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/trace/observation_lifecycle.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/trace/test_fixture.rs::ThinCommandAdapterViolation",
-        "thin_command_adapter::src/commands/utils/observed_workflow.rs::ThinCommandAdapterViolation",
-        "thin_command_adapter::src/commands/utils/output.rs::ThinCommandAdapterViolation"
+        "thin_command_adapter::src/commands/utils/observed_workflow.rs::ThinCommandAdapterViolation"
       ],
       "metadata": {
         "alignment_score": 0.9021739363670349,
