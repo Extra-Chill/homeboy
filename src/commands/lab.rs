@@ -3,8 +3,13 @@ use std::path::Path;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::core::runner_execution_envelope::{
+    RunnerExecutionArtifactDeclaration, RunnerExecutionEnvelope, RunnerExecutionLifecyclePolicy,
+    RunnerExecutionResultRefs,
+};
 use homeboy::core::runners;
 use homeboy::core::runners::RunnerWorkspaceSyncMode;
+use homeboy::core::secret_env_plan::SecretEnvPlan;
 
 use super::{CmdResult, GlobalArgs};
 
@@ -63,13 +68,14 @@ pub struct RefreshPlanArgs {
     command: Vec<String>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 pub struct LabRefreshPlanOutput {
     pub variant: &'static str,
     pub runner: String,
     pub workspace: String,
     pub runner_cwd: String,
     pub run_id: String,
+    pub execution_envelope: RunnerExecutionEnvelope,
     pub handoff: LabRefreshPlanHandoff,
     pub checks: Vec<LabRefreshPlanCheck>,
     pub evidence_paths: Vec<LabRefreshPlanEvidencePath>,
@@ -215,6 +221,7 @@ fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOu
         "docs/commands/lab.md".to_string(),
     ];
     let handoff = handoff_plan(&args, &evidence_paths, &next_commands, &docs);
+    let execution_envelope = execution_envelope_plan(&args, &handoff, &evidence_paths, &docs);
 
     Ok(LabRefreshPlanOutput {
         variant: "refresh_plan",
@@ -222,6 +229,7 @@ fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOu
         workspace: args.workspace,
         runner_cwd: args.runner_cwd,
         run_id: args.run_id,
+        execution_envelope,
         handoff,
         checks,
         evidence_paths,
@@ -392,6 +400,78 @@ fn handoff_plan(
             unknown: false,
         },
     }
+}
+
+fn execution_envelope_plan(
+    args: &RefreshPlanArgs,
+    handoff: &LabRefreshPlanHandoff,
+    evidence_paths: &[LabRefreshPlanEvidencePath],
+    docs: &[String],
+) -> RunnerExecutionEnvelope {
+    RunnerExecutionEnvelope::planned(&handoff.handoff_id, "lab_refresh_plan")
+        .with_source_ref(&args.run_id)
+        .with_secret_env(SecretEnvPlan::default())
+        .with_lifecycle_policy(RunnerExecutionLifecyclePolicy {
+            cleanup: Some("operator_retains_runner_workspace_until_evidence_verified".to_string()),
+            retry: Some("rerun_refresh_plan_then_runner_exec".to_string()),
+            gates: vec![
+                "runner_doctor_lab_offload".to_string(),
+                "workspace_sync".to_string(),
+                "evidence_inspection".to_string(),
+            ],
+        })
+        .with_artifact_declarations(artifact_declarations(evidence_paths))
+        .with_result_refs(RunnerExecutionResultRefs {
+            plan_id: Some(handoff.handoff_id.clone()),
+            run_id: Some(args.run_id.clone()),
+            ..RunnerExecutionResultRefs::default()
+        })
+        .with_metadata(serde_json::json!({
+            "runner": {
+                "id": args.runner,
+            },
+            "workspace": {
+                "controller_path": args.workspace,
+                "runner_cwd": args.runner_cwd,
+                "sync_mode": args.sync_mode,
+            },
+            "runtime": {
+                "command": args.command,
+            },
+            "docs": docs,
+        }))
+}
+
+fn artifact_declarations(
+    evidence_paths: &[LabRefreshPlanEvidencePath],
+) -> Vec<RunnerExecutionArtifactDeclaration> {
+    evidence_paths
+        .iter()
+        .enumerate()
+        .map(
+            |(index, evidence_path)| RunnerExecutionArtifactDeclaration {
+                name: artifact_name(evidence_path, index),
+                artifact_type: Some(evidence_path.kind.to_string()),
+                artifact_schema: None,
+                path: Some(evidence_path.path.clone()),
+                required: true,
+                description: Some(format!(
+                    "{} produced by the lab refresh workload",
+                    evidence_path.kind
+                )),
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .collect()
+}
+
+fn artifact_name(evidence_path: &LabRefreshPlanEvidencePath, index: usize) -> String {
+    Path::new(&evidence_path.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}-{}", evidence_path.kind, index + 1))
 }
 
 fn next_commands(
@@ -576,6 +656,82 @@ mod tests {
         assert_eq!(handoff.evidence.paths, evidence);
         assert_eq!(handoff.result.status, "planned");
         assert_eq!(handoff.inspection.commands.len(), 2);
+    }
+
+    #[test]
+    fn refresh_plan_compiles_canonical_execution_envelope() {
+        let args = RefreshPlanArgs {
+            runner: "lab-runner".to_string(),
+            workspace: "/workspace/source".to_string(),
+            runner_cwd: "/runner/source".to_string(),
+            run_id: "matrix-refresh-1".to_string(),
+            outputs: vec!["artifacts/matrix".to_string()],
+            summaries: vec!["artifacts/matrix/matrix-summary.json".to_string()],
+            sources: Vec::new(),
+            fixtures: Vec::new(),
+            sync_mode: "snapshot".to_string(),
+            command: vec!["cargo".to_string(), "test".to_string()],
+        };
+        let evidence = evidence_paths(&args);
+        let commands = next_commands(&args, &evidence);
+        let docs = vec!["docs/commands/lab.md".to_string()];
+        let handoff = handoff_plan(&args, &evidence, &commands, &docs);
+
+        let envelope = execution_envelope_plan(&args, &handoff, &evidence, &docs);
+
+        assert_eq!(
+            envelope.schema,
+            homeboy::core::runner_execution_envelope::RUNNER_EXECUTION_ENVELOPE_SCHEMA
+        );
+        assert_eq!(
+            envelope.envelope_id,
+            "lab-refresh:lab-runner:matrix-refresh-1"
+        );
+        assert_eq!(envelope.source.kind, "lab_refresh_plan");
+        assert_eq!(envelope.source.ref_id.as_deref(), Some("matrix-refresh-1"));
+        assert_eq!(
+            envelope.result_refs.plan_id.as_deref(),
+            Some(handoff.handoff_id.as_str())
+        );
+        assert_eq!(
+            envelope.result_refs.run_id.as_deref(),
+            Some("matrix-refresh-1")
+        );
+        assert_eq!(
+            envelope.lifecycle_policy.cleanup.as_deref(),
+            Some("operator_retains_runner_workspace_until_evidence_verified")
+        );
+        assert_eq!(
+            envelope
+                .secret_env
+                .expect("secret env plan")
+                .secret_env_names(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            envelope
+                .artifact_declarations
+                .iter()
+                .map(|artifact| (
+                    artifact.name.as_str(),
+                    artifact.artifact_type.as_deref(),
+                    artifact.path.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("matrix", Some("artifact"), Some("artifacts/matrix")),
+                (
+                    "matrix-summary.json",
+                    Some("summary"),
+                    Some("artifacts/matrix/matrix-summary.json")
+                ),
+            ]
+        );
+        assert_eq!(envelope.metadata["runner"]["id"], "lab-runner");
+        assert_eq!(
+            envelope.metadata["runtime"]["command"],
+            serde_json::json!(["cargo", "test"])
+        );
     }
 
     #[test]

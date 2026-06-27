@@ -122,6 +122,65 @@ pub struct RunnerExecutionResultRefs {
 }
 
 impl RunnerExecutionEnvelope {
+    pub fn planned(envelope_id: impl Into<String>, source_kind: impl Into<String>) -> Self {
+        let envelope_id = envelope_id.into();
+
+        Self {
+            schema: RUNNER_EXECUTION_ENVELOPE_SCHEMA.to_string(),
+            envelope_id: envelope_id.clone(),
+            source: RunnerExecutionSource {
+                kind: source_kind.into(),
+                ref_id: Some(envelope_id),
+            },
+            runner_workload: None,
+            agent_task: None,
+            secret_env: None,
+            lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
+            artifact_declarations: Vec::new(),
+            loop_policy: RunnerExecutionLoopPolicy::default(),
+            mutation_policy: RunnerExecutionMutationPolicy::default(),
+            publication_intent: RunnerExecutionPublicationIntent::default(),
+            result_refs: RunnerExecutionResultRefs::default(),
+            metadata: Value::Null,
+        }
+    }
+
+    pub fn with_source_ref(mut self, ref_id: impl Into<String>) -> Self {
+        self.source.ref_id = Some(ref_id.into());
+        self
+    }
+
+    pub fn with_secret_env(mut self, secret_env: SecretEnvPlan) -> Self {
+        self.secret_env = Some(secret_env);
+        self
+    }
+
+    pub fn with_lifecycle_policy(
+        mut self,
+        lifecycle_policy: RunnerExecutionLifecyclePolicy,
+    ) -> Self {
+        self.lifecycle_policy = lifecycle_policy;
+        self
+    }
+
+    pub fn with_artifact_declarations(
+        mut self,
+        artifact_declarations: impl IntoIterator<Item = RunnerExecutionArtifactDeclaration>,
+    ) -> Self {
+        self.artifact_declarations = artifact_declarations.into_iter().collect();
+        self
+    }
+
+    pub fn with_result_refs(mut self, result_refs: RunnerExecutionResultRefs) -> Self {
+        self.result_refs = result_refs;
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: Value) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
     pub fn from_runner_workload(workload: RunnerWorkload) -> Self {
         let mutation_policy = RunnerExecutionMutationPolicy {
             capture_patch: workload.mutation_policy.capture_patch,
