@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
 use super::*;
