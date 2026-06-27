@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use homeboy::core::artifact_ref::EvidenceRef;
 use homeboy::core::artifacts::{
     record_artifact_postprocess_outputs, run_artifact_postprocess_steps, ArtifactPostprocessContext,
 };
@@ -16,7 +17,8 @@ use uuid::Uuid;
 
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
-    fuzz_result_envelope_from_campaign, gate_status, persist_fuzz_run_result_envelope,
+    fuzz_result_envelope_evidence_ref, fuzz_result_envelope_from_campaign, gate_status,
+    persist_fuzz_run_result_envelope,
 };
 use super::types::{
     FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzExecutionOutput, FuzzRunArgs,
@@ -133,7 +135,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         .map(|workload| workload.id.clone())
         .or_else(|| args.workload_id.clone());
     let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
-    persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+    let persisted_evidence = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
         run_id: args.run_id.as_deref(),
         component_id: &ctx.component_id,
         rig_id: rig_id.as_deref(),
@@ -192,6 +194,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             results,
             campaign_contract,
             runner_contract: default_runner_contract(),
+            evidence_refs: persisted_evidence.evidence_refs,
             evidence_followups,
         },
         exit_code,
@@ -659,9 +662,15 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) postprocess: &'a [FuzzArtifactPostprocessOutput],
 }
 
+pub(super) struct FuzzRunPersistedEvidence {
+    #[allow(dead_code)]
+    pub(super) run: Option<RunRecord>,
+    pub(super) evidence_refs: Vec<EvidenceRef>,
+}
+
 pub(super) fn persist_fuzz_run_evidence(
     input: FuzzRunEvidenceInput<'_>,
-) -> homeboy::core::Result<Option<RunRecord>> {
+) -> homeboy::core::Result<FuzzRunPersistedEvidence> {
     let run_id = input
         .run_id
         .filter(|run_id| !run_id.trim().is_empty())
@@ -714,6 +723,7 @@ pub(super) fn persist_fuzz_run_evidence(
         metadata_json: metadata,
     };
     store.upsert_imported_run(&run)?;
+    let mut evidence_refs = Vec::new();
     if input.results_path.is_file() {
         store.record_artifact(&run_id, "fuzz_results", input.results_path)?;
     }
@@ -721,7 +731,9 @@ pub(super) fn persist_fuzz_run_evidence(
         let mut envelope =
             fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
         envelope.status = gate_status(&evaluate_fuzz_gates(campaign));
-        persist_fuzz_run_result_envelope(Some(&run_id), &envelope)?;
+        if let Some(artifact) = persist_fuzz_run_result_envelope(Some(&run_id), &envelope)? {
+            evidence_refs.push(fuzz_result_envelope_evidence_ref(&artifact));
+        }
     }
     if input.artifacts_dir.is_dir() {
         store.record_directory_artifact_with_metadata(
@@ -755,7 +767,10 @@ pub(super) fn persist_fuzz_run_evidence(
         )
         .collect::<Vec<_>>();
     record_artifact_postprocess_outputs(&store, &run_id, &generic_postprocess_outputs)?;
-    Ok(Some(run))
+    Ok(FuzzRunPersistedEvidence {
+        run: Some(run),
+        evidence_refs,
+    })
 }
 
 #[derive(Default)]

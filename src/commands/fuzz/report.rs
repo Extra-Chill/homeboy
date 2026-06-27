@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use homeboy::core::artifact_ref::EvidenceRef;
 use homeboy::core::fuzz::{
     default_fuzz_gates, fuzz_gate_profile_contract, parse_fuzz_case_log_file,
     parse_fuzz_observation_set_value, parse_fuzz_results_file, parse_fuzz_target_inventory_file,
@@ -73,11 +74,16 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
             homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?;
     }
-    persist_fuzz_result_envelope(
+    let persisted_envelope = persist_fuzz_result_envelope(
         args.run.run_id.as_deref(),
         &envelope,
         args.output_envelope.as_deref(),
     )?;
+    let evidence_refs = persisted_envelope
+        .as_ref()
+        .map(fuzz_result_envelope_evidence_ref)
+        .into_iter()
+        .collect();
 
     Ok(FuzzReportOutput {
         command: "fuzz.report".to_string(),
@@ -86,6 +92,7 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
         envelope_file: args
             .output_envelope
             .map(|path| path.to_string_lossy().to_string()),
+        evidence_refs,
         envelope,
         coverage_completeness,
         performance_hotspots,
@@ -214,20 +221,29 @@ fn record_fuzz_result_envelope_artifact(
     envelope: &FuzzResultEnvelope,
     source: &str,
 ) -> homeboy::core::Result<Option<ArtifactRecord>> {
+    let metadata = serde_json::json!({
+        "schema": envelope.schema.as_str(),
+        "envelope_id": envelope.id.as_str(),
+        "status": envelope.status.as_str(),
+        "campaign_id": envelope.campaign.as_ref().map(|campaign| campaign.id.as_str()),
+        "source": source,
+        "evidence": {
+            "role": "result",
+            "semantic_key": "fuzz.result_envelope",
+        },
+    });
     store
-        .record_artifact_with_metadata(
-            run_id,
-            FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
-            path,
-            serde_json::json!({
-                "schema": envelope.schema.as_str(),
-                "envelope_id": envelope.id.as_str(),
-                "status": envelope.status.as_str(),
-                "campaign_id": envelope.campaign.as_ref().map(|campaign| campaign.id.as_str()),
-                "source": source,
-            }),
-        )
+        .record_artifact_with_metadata(run_id, FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND, path, metadata)
         .map(Some)
+}
+
+pub(super) fn fuzz_result_envelope_evidence_ref(artifact: &ArtifactRecord) -> EvidenceRef {
+    EvidenceRef::for_artifact(
+        artifact,
+        "Fuzz result envelope",
+        Some("result".to_string()),
+        Some("fuzz.result_envelope".to_string()),
+    )
 }
 
 fn fuzz_result_envelope_json(envelope: &FuzzResultEnvelope) -> homeboy::core::Result<String> {

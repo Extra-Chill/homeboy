@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+use homeboy::core::artifact_ref::EvidenceRef;
 use homeboy::core::fuzz::{
     FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzHotspotSet, FuzzReplayMetadata,
     FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory,
@@ -75,6 +76,10 @@ pub struct FuzzInspectOutput {
     pub artifact_id: String,
     pub artifact_kind: String,
     pub artifact_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_ref: Option<EvidenceRef>,
     pub fetch_command: Option<String>,
     /// Parsed JSON body when the raw result is valid JSON; otherwise null.
     pub result: Option<serde_json::Value>,
@@ -94,6 +99,7 @@ pub struct FuzzInspectCandidate {
     pub kind: String,
     pub artifact_type: String,
     pub path: String,
+    pub canonical_ref: String,
     pub exists: bool,
 }
 
@@ -162,6 +168,7 @@ pub struct FuzzRunOutput {
     pub results: Option<FuzzCampaign>,
     pub campaign_contract: FuzzCampaignContract,
     pub runner_contract: FuzzRunnerContract,
+    pub evidence_refs: Vec<EvidenceRef>,
     pub evidence_followups: Vec<String>,
 }
 
@@ -215,6 +222,7 @@ pub struct FuzzReportOutput {
     pub status: String,
     pub results_file: String,
     pub envelope_file: Option<String>,
+    pub evidence_refs: Vec<EvidenceRef>,
     pub envelope: FuzzResultEnvelope,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
     pub performance_hotspots: PerformanceHotspotSummary,
