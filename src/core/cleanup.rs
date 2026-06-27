@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -18,6 +20,8 @@ const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[
     ("node_modules", "node_modules"),
     ("dist", "generated_dist"),
 ];
+const ARTIFACT_DIR_REMOVE_ATTEMPTS: usize = 3;
+const ARTIFACT_DIR_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactCleanupOptions {
@@ -444,12 +448,7 @@ fn remove_artifact_path(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("stat {}", path.display()))))?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(path).map_err(|e| {
-            Error::internal_io(
-                e.to_string(),
-                Some(format!("remove directory {}", path.display())),
-            )
-        })
+        remove_artifact_directory(path)
     } else {
         fs::remove_file(path).map_err(|e| {
             Error::internal_io(
@@ -458,6 +457,41 @@ fn remove_artifact_path(path: &Path) -> Result<()> {
             )
         })
     }
+}
+
+fn remove_artifact_directory(path: &Path) -> Result<()> {
+    remove_artifact_directory_with(path, |path| fs::remove_dir_all(path), std::thread::sleep)
+}
+
+fn remove_artifact_directory_with<Remove, Sleep>(
+    path: &Path,
+    mut remove_dir_all: Remove,
+    mut sleep: Sleep,
+) -> Result<()>
+where
+    Remove: FnMut(&Path) -> io::Result<()>,
+    Sleep: FnMut(Duration),
+{
+    for attempt in 1..=ARTIFACT_DIR_REMOVE_ATTEMPTS {
+        match remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if error.kind() == io::ErrorKind::DirectoryNotEmpty
+                    && attempt < ARTIFACT_DIR_REMOVE_ATTEMPTS =>
+            {
+                sleep(ARTIFACT_DIR_REMOVE_RETRY_DELAY);
+            }
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("remove directory {}", path.display())),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn git_root(path: &Path) -> Result<PathBuf> {
@@ -902,6 +936,61 @@ mod tests {
         assert!(output.skipped.iter().any(|row| {
             row.relative_path == "target" && row.reason.contains("tracked or staged source changes")
         }));
+    }
+
+    #[test]
+    fn artifact_directory_removal_retries_transient_non_empty_errors() {
+        let artifact = PathBuf::from("target");
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+
+        remove_artifact_directory_with(
+            &artifact,
+            |_| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty))
+                } else {
+                    Ok(())
+                }
+            },
+            |duration| sleeps.push(duration),
+        )
+        .expect("transient non-empty directory removal should retry");
+
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![ARTIFACT_DIR_REMOVE_RETRY_DELAY]);
+    }
+
+    #[test]
+    fn artifact_directory_removal_reports_persistent_non_empty_errors() {
+        let artifact = PathBuf::from("target");
+        let mut attempts = 0;
+
+        let err = remove_artifact_directory_with(
+            &artifact,
+            |_| {
+                attempts += 1;
+                Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty))
+            },
+            |_| {},
+        )
+        .expect_err("persistent non-empty directory removal should fail");
+
+        assert_eq!(attempts, ARTIFACT_DIR_REMOVE_ATTEMPTS);
+        assert_eq!(err.code, crate::core::ErrorCode::InternalIoError);
+    }
+
+    #[test]
+    fn artifact_directory_removal_tolerates_already_removed_artifact() {
+        let artifact = PathBuf::from("target");
+
+        remove_artifact_directory_with(
+            &artifact,
+            |_| Err(io::Error::from(io::ErrorKind::NotFound)),
+            |_| {},
+        )
+        .expect("already removed artifact should be treated as removed");
     }
 
     #[test]
