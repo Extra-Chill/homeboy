@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.22.3] - 2026-06-27
+
+### Changed
+- drop dead per-language runtime helper shims
+
 ## [1.22.2] - 2026-06-27
 
 ### Changed
