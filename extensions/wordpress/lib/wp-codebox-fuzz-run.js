@@ -1813,7 +1813,7 @@ function normalizeWpCodeboxFuzzArtifacts(source = {}, result = {}) {
 }
 
 function appendInlineResultEnvelopeArtifact(artifacts, source = {}) {
-	if (artifacts.length > 0 || !objectOrUndefined(source) || !source.schema || hasFuzzArtifactRole(artifacts, 'result_envelope')) {
+	if (!objectOrUndefined(source) || !source.schema || hasFuzzArtifactRole(artifacts, 'result_envelope')) {
 		return;
 	}
 	artifacts.push({
