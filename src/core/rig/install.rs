@@ -35,6 +35,8 @@ pub(crate) struct PreparedSource {
     pub discovery_path: PathBuf,
     pub linked: bool,
     pub source_revision: Option<String>,
+    pub source_ref: Option<String>,
+    pub source_dirty: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +71,10 @@ pub struct RigSourceMetadata {
     pub materialized: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_dirty: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +147,8 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
             linked: prepared.linked,
             materialized,
             source_revision: prepared.source_revision.clone(),
+            source_ref: prepared.source_ref.clone(),
+            source_dirty: prepared.source_dirty,
         };
         write_source_metadata(&rig.id, &metadata)?;
 
@@ -666,6 +674,9 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
         .map_err(|e| Error::internal_io(e.to_string(), Some("create rig packages dir".into())))?;
     git::clone_repo(root_source, &package_path)?;
     let source_revision = git::short_head_revision(&package_path);
+    let source_ref = git::current_branch(&package_path).filter(|branch| !branch.is_empty());
+    let source_dirty =
+        git::status_porcelain_bytes(&package_path).is_some_and(|status| !status.is_empty());
     let discovery_path = match subpath {
         Some(subpath) => package_path.join(subpath),
         None => package_path.clone(),
@@ -692,6 +703,8 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
         discovery_path,
         linked: false,
         source_revision,
+        source_ref,
+        source_dirty,
     })
 }
 
@@ -730,13 +743,20 @@ fn prepare_local_source(source: &str) -> Result<PreparedSource> {
             None,
         ));
     }
+    let source_revision = git::short_head_revision_at(&package_path);
+    let source_ref = git::current_branch(&package_path).filter(|branch| !branch.is_empty());
+    let source_dirty =
+        git::status_porcelain_bytes(&package_path).is_some_and(|status| !status.is_empty());
+
     Ok(PreparedSource {
         source: package_path.to_string_lossy().to_string(),
         source_root: package_path.clone(),
         discovery_path: package_path.clone(),
         package_path,
         linked: true,
-        source_revision: None,
+        source_revision,
+        source_ref,
+        source_dirty,
     })
 }
 

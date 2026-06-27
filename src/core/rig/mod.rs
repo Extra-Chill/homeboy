@@ -136,6 +136,9 @@ pub fn package_evidence(id: &str) -> Option<RigPackageEvidence> {
 fn local_package_evidence(id: &str, package_root: PathBuf) -> RigPackageEvidence {
     let source = package_root.to_string_lossy().to_string();
     let current_source_revision = git::short_head_revision_at(&package_root);
+    let source_ref = git::current_branch(&package_root).filter(|branch| !branch.is_empty());
+    let source_dirty =
+        git::status_porcelain_bytes(&package_root).is_some_and(|status| !status.is_empty());
     RigPackageEvidence {
         rig_id: id.to_string(),
         package_root: source.clone(),
@@ -152,6 +155,8 @@ fn local_package_evidence(id: &str, package_root: PathBuf) -> RigPackageEvidence
         discovery_path: Some(package_root.to_string_lossy().to_string()),
         installed_source_revision: current_source_revision.clone(),
         current_source_revision,
+        source_ref,
+        source_dirty,
         linked: true,
         materialized: false,
         freshness: RigPackageFreshness::Verified,
@@ -215,6 +220,8 @@ fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigP
         discovery_path: metadata.discovery_path,
         installed_source_revision: metadata.source_revision,
         current_source_revision,
+        source_ref: metadata.source_ref,
+        source_dirty: metadata.source_dirty,
         linked: metadata.linked,
         materialized: metadata.materialized,
         freshness,
