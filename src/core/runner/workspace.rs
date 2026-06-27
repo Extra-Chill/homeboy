@@ -861,7 +861,7 @@ fn materialize_git_command(
 
 fn dirty_lab_workspace_guard(dest: &str, allow_dirty_lab_workspace: bool) -> String {
     let status = format!(
-        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; case \"$path\" in .homeboy|.homeboy/*) ;; *) printf '%s\\n' \"$line\";; esac; done || true",
+        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; if [ \"$path\" = .homeboy ]; then continue; fi; prefix_stripped=${{path#.homeboy/}}; if [ \"$prefix_stripped\" != \"$path\" ]; then continue; fi; printf '%s\\n' \"$line\"; done || true",
         dest = dest,
     );
     if allow_dirty_lab_workspace {

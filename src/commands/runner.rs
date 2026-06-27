@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -13,6 +14,7 @@ use homeboy::core::runners::{
     RunnerDisconnectReport, RunnerExecOutput, RunnerKind, RunnerStatusReport,
 };
 use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
+use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::output_runtime::JsonCommandRun;
@@ -306,6 +308,10 @@ enum RunnerCommand {
         #[arg(long)]
         cwd: Option<String>,
 
+        /// Snapshot a local worktree to the runner first and execute from the materialized remote path.
+        #[arg(long)]
+        sync_workspace: Option<String>,
+
         /// Project ID used for runner trust policy checks
         #[arg(long)]
         project: Option<String>,
@@ -566,6 +572,7 @@ pub fn run(
         RunnerCommand::Exec {
             id,
             cwd,
+            sync_workspace,
             project,
             ssh,
             capture_patch,
@@ -575,6 +582,7 @@ pub fn run(
         } => map_execution(exec(
             &id,
             cwd,
+            sync_workspace,
             project,
             ssh,
             capture_patch,
@@ -616,13 +624,23 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::GlobalArgs) -> Json
         RunnerCommand::Exec {
             id,
             cwd,
+            sync_workspace,
             project,
             ssh,
             capture_patch,
             require_paths,
             raw: true,
             command,
-        } => run_raw_exec(id, cwd, project, ssh, capture_patch, require_paths, command),
+        } => run_raw_exec(
+            id,
+            cwd,
+            sync_workspace,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            command,
+        ),
         command => {
             let (stdout_result, exit_code) =
                 crate::commands::utils::response::map_cmd_result_to_json(run(
@@ -637,6 +655,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::GlobalArgs) -> Json
 fn run_raw_exec(
     id: String,
     cwd: Option<String>,
+    sync_workspace: Option<String>,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -646,6 +665,7 @@ fn run_raw_exec(
     match exec(
         &id,
         cwd,
+        sync_workspace,
         project,
         ssh,
         capture_patch,
@@ -1016,12 +1036,14 @@ fn disconnect(id: &str) -> CmdResult<RunnerOutput> {
 fn exec(
     runner_id: &str,
     cwd: Option<String>,
+    sync_workspace: Option<String>,
     project_id: Option<String>,
     allow_diagnostic_ssh: bool,
     capture_patch: bool,
     require_paths: Vec<String>,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
+    let (cwd, source_snapshot) = exec_workspace_context(runner_id, cwd, sync_workspace)?;
     let required_commands = command.first().cloned().into_iter().collect();
     runner::exec(
         runner_id,
@@ -1034,7 +1056,7 @@ fn exec(
             secret_env_names: Vec::new(),
             capture_patch,
             raw_exec: true,
-            source_snapshot: None,
+            source_snapshot,
             capability_preflight: Some(runner::RunnerCapabilityPreflight {
                 command: "runner.exec".to_string(),
                 required_commands,
@@ -1044,6 +1066,49 @@ fn exec(
             require_paths,
         },
     )
+}
+
+fn exec_workspace_context(
+    runner_id: &str,
+    cwd: Option<String>,
+    sync_workspace: Option<String>,
+) -> homeboy::core::Result<(Option<String>, Option<SourceSnapshot>)> {
+    let Some(local_path) = sync_workspace else {
+        return Ok((cwd, None));
+    };
+
+    if cwd.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "cwd",
+            "--cwd and --sync-workspace are mutually exclusive; --sync-workspace executes from the materialized runner path",
+            None,
+            Some(vec![
+                "Use --sync-workspace <local-worktree> when the command should run from that worktree snapshot.".to_string(),
+                "Use --cwd <runner-path> when the runner-side path already exists.".to_string(),
+            ]),
+        ));
+    }
+
+    let (synced, _) = runner::sync_workspace(
+        runner_id,
+        runner::RunnerWorkspaceSyncOptions {
+            path: local_path,
+            mode: runner::RunnerWorkspaceSyncMode::Snapshot,
+            controller_routed_git: false,
+            changed_since_base: None,
+            git_fetch_refs: Vec::new(),
+            snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: false,
+        },
+    )?;
+    let source_snapshot = SourceSnapshot::collect_local(
+        runner_id,
+        Path::new(&synced.local_path),
+        Some(&synced.remote_path),
+        synced.sync_mode.label(),
+    );
+
+    Ok((Some(synced.remote_path), Some(source_snapshot)))
 }
 
 fn env(runner_id: &str, show_values: bool) -> CmdResult<RunnerEnvOutput> {
@@ -1304,6 +1369,20 @@ mod tests {
         assert_eq!(value["stdout"], "hello\n");
         assert_eq!(value["stderr"], "warn\n");
         assert_eq!(value["job_id"], "job-123");
+    }
+
+    #[test]
+    fn sync_workspace_exec_rejects_explicit_cwd() {
+        let err = exec_workspace_context(
+            "lab",
+            Some("/runner/workspace/project".to_string()),
+            Some("/local/project".to_string()),
+        )
+        .expect_err("cwd and sync-workspace must conflict");
+
+        assert!(err
+            .to_string()
+            .contains("--cwd and --sync-workspace are mutually exclusive"));
     }
 
     #[test]

@@ -400,6 +400,7 @@ homeboy runner remove <id>
 ```sh
 homeboy runner exec <runner-id> -- <command...>
 homeboy runner exec <runner-id> --project <project-id> --cwd /runner/workspace/project -- <command...>
+homeboy runner exec <runner-id> --sync-workspace /local/project@patch --require-path /runner/resources/input -- <command...>
 homeboy runner exec <runner-id> --ssh --cwd /runner/workspace/project -- <command...>
 homeboy runner exec <runner-id> --cwd /runner/workspace/project --require-path /runner/workspace/project -- <command...>
 homeboy runner env <runner-id>
@@ -413,11 +414,24 @@ Path rules:
 - SSH runners require `workspace_root` so local paths are not silently reused remotely.
 - SSH `--cwd` must be an absolute path under the configured `workspace_root`.
 - Omitting `--cwd` on an SSH runner uses the runner `workspace_root`.
+- `--sync-workspace <local-worktree>` snapshots a controller-side worktree first, including dirty edits allowed by the normal snapshot safety excludes, then executes from the returned runner `remote_path`. It is mutually exclusive with `--cwd` because Homeboy owns the execution cwd for that one command.
 - `--require-path <path>` preflights one or more runner-side paths before execution. Use it when a command references a lab worktree path so missing controller-only paths fail with a structured `require_path` error instead of an empty command failure.
 - `--project <id>` feeds the runner trust policy project allowlist check.
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
 - Diagnostic SSH output serializes as `mode: "diagnostic_ssh"` and does not include job/event evidence.
 - Raw SSH execution remains intentionally explicit and should not be used as production Lab/offload evidence; use connected daemon or reverse broker execution for job/event/artifact-compatible output.
+
+Dirty local worktree against runner-side resources:
+
+```sh
+homeboy runner exec <runner-id> \
+  --sync-workspace /local/project@patch \
+  --require-path /runner/resources/input \
+  --capture-patch \
+  -- ./run-workload --input /runner/resources/input
+```
+
+This is the generic one-command form for “run my local patch on the runner”: Homeboy snapshots the local source, runs the command from the materialized runner copy, preflights any runner-owned resource paths the caller declares, and attaches source snapshot metadata to patch capture output. The resource path meaning remains caller-owned; Homeboy only checks that the path exists on the runner.
 
 Runner job environment:
 
