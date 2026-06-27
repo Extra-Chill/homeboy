@@ -43,6 +43,21 @@ const OPENCODE_CAPABILITIES = [
 ];
 
 const OPENCODE_COMMAND = 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs';
+const OPENCODE_PROCESS_ENV_ALLOWLIST = [
+	'CI',
+	'HOME',
+	'LANG',
+	'LC_ALL',
+	'LOGNAME',
+	'NODE_OPTIONS',
+	'PATH',
+	'PWD',
+	'SHELL',
+	'TMPDIR',
+	'USER',
+	'HOMEBOY_OPENCODE_COMMAND',
+	'HOMEBOY_OPENCODE_COMMAND_ARGS',
+];
 
 const OPENCODE_INVOCATION = {
 	schema: 'homeboy/command-invocation/v1',
@@ -194,7 +209,7 @@ function providerContract(options = {}) {
 }
 
 function outcome(request = {}, values = {}) {
-	return normalizeAgentTaskOutcome(outcomeRequest(request), values, {
+	return withDeclaredArtifactDiagnostics(outcomeRequest(request), normalizeAgentTaskOutcome(outcomeRequest(request), values, {
 		provider: OPENCODE_PROVIDER_ID,
 		providerLabel: 'OpenCode agent',
 		status: values.status || 'provider_error',
@@ -204,7 +219,7 @@ function outcome(request = {}, values = {}) {
 		artifacts: values.artifacts || [],
 		evidenceRefs: values.evidence_refs || [],
 		metadata: values.metadata || {},
-	});
+	}));
 }
 
 function outcomeRequest(request = {}) {
@@ -251,7 +266,7 @@ function executeOpenCodeAgentTask(request = {}, options = {}) {
 	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
 	const spawnResult = spawnSync(commandSpec.command, args, {
 		cwd: resolveCwd(request, config),
-		env: process.env,
+		env: opencodeSpawnEnv(request, options),
 		encoding: 'utf8',
 		maxBuffer: options.maxBuffer || 10 * 1024 * 1024,
 		...(timeoutSeconds > 0 ? { timeout: timeoutSeconds * 1000 } : {}),
@@ -298,6 +313,83 @@ function executeOpenCodeAgentTask(request = {}, options = {}) {
 			...(spawnResult.signal ? { signal: spawnResult.signal } : {}),
 		},
 	});
+}
+
+function opencodeSpawnEnv(request = {}, options = {}) {
+	const ambient = options.env && typeof options.env === 'object' && !Array.isArray(options.env) ? options.env : process.env;
+	const config = request.executor?.config || {};
+	if (config.inherit_env === true || config.inheritEnv === true) {
+		return { ...ambient, ...objectValue(config.runtime_env), ...objectValue(options.envOverrides || options.env_overrides) };
+	}
+	const names = new Set([
+		...OPENCODE_PROCESS_ENV_ALLOWLIST,
+		...arrayValue(config.env_allowlist || config.envAllowlist),
+		...arrayValue(config.runtime_env_allowlist || config.runtimeEnvAllowlist),
+		...arrayValue(config.secret_env),
+		...arrayValue(request.executor?.secret_env),
+	]);
+	const env = {};
+	for (const name of names) {
+		if (typeof name === 'string' && name && ambient[name] !== undefined) {
+			env[name] = ambient[name];
+		}
+	}
+	return { ...env, ...objectValue(config.runtime_env), ...objectValue(options.envOverrides || options.env_overrides) };
+}
+
+function withDeclaredArtifactDiagnostics(request = {}, normalized = {}) {
+	const missing = missingDeclaredArtifacts(request, normalized.artifacts || []);
+	if (missing.length === 0) {
+		return normalized;
+	}
+	const diagnostic = {
+		class: 'opencode.missing_declared_artifacts',
+		message: `OpenCode completed without producing declared artifact(s): ${missing.map((artifact) => artifact.name).join(', ')}. Check executor artifact paths or runtime artifact collection.`,
+		data: { missing_artifacts: missing },
+	};
+	return {
+		...normalized,
+		status: normalized.status === 'succeeded' ? 'failed' : normalized.status,
+		summary: normalized.status === 'succeeded' ? diagnostic.message : normalized.summary,
+		failure_classification: normalized.status === 'succeeded' ? 'execution_failed' : normalized.failure_classification,
+		failure_code: normalized.status === 'succeeded' ? 'agent_task.opencode_missing_declared_artifacts' : normalized.failure_code,
+		diagnostics: [...(Array.isArray(normalized.diagnostics) ? normalized.diagnostics : []), diagnostic],
+		metadata: {
+			...(normalized.metadata || {}),
+			missing_declared_artifacts: missing,
+		},
+	};
+}
+
+function missingDeclaredArtifacts(request = {}, artifacts = []) {
+	return declaredArtifactRequirements(request).filter((declaration) => !findArtifact(artifacts, declaration));
+}
+
+function declaredArtifactRequirements(request = {}) {
+	const expected = arrayValue(request.expected_artifacts).map((name) => ({ name: String(name), required: true }));
+	const declared = arrayValue(request.artifact_declarations || request.executor?.artifact_declarations)
+		.filter((artifact) => artifact && typeof artifact === 'object' && artifact.required === true)
+		.map((artifact) => ({ name: artifact.name || artifact.id || artifact.output_key, kind: artifact.kind, required: true }))
+		.filter((artifact) => artifact.name);
+	return [...expected, ...declared];
+}
+
+function findArtifact(artifacts, declaration) {
+	return arrayValue(artifacts).find((artifact) => {
+		if (!artifact || typeof artifact !== 'object') {
+			return false;
+		}
+		const names = [artifact.name, artifact.id, artifact.output_key, artifact.role].filter(Boolean);
+		return names.includes(declaration.name) && (!declaration.kind || artifact.kind === declaration.kind || artifact.type === declaration.kind);
+	});
+}
+
+function arrayValue(value) {
+	return Array.isArray(value) ? value : [];
+}
+
+function objectValue(value) {
+	return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
 function validateRequest(request) {

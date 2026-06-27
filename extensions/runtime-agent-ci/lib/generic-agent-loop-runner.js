@@ -17,6 +17,19 @@ const { assertLoopSuccess, loopEvidence, loopIteration, loopRun } = require('./l
 const { runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
 
 const DEFAULT_STDIO_SUMMARY_BYTES = 8192;
+const DEFAULT_RUNTIME_ENV_ALLOWLIST = [
+  'CI',
+  'HOME',
+  'LANG',
+  'LC_ALL',
+  'LOGNAME',
+  'NODE_OPTIONS',
+  'PATH',
+  'PWD',
+  'SHELL',
+  'TMPDIR',
+  'USER',
+];
 
 function buildGenericAgentLoopRequest(options = {}) {
   const plan = requiredObject(options.plan, 'plan');
@@ -319,7 +332,7 @@ function executeRuntimeProvider(options = {}) {
     encoding: 'utf8',
     cwd: invocation.cwd || process.cwd(),
     input: invocationStdin(invocation, options.request),
-    env: { ...(options.env || process.env), ...(invocation.env || {}) },
+    env: runtimeInvocationEnv({ ...options, invocation }),
     maxBuffer: 1024 * 1024 * 20,
   });
   const stderrArtifact = handleRuntimeInvocationStderr(result.stderr, { ...options, invocation, result });
@@ -340,6 +353,32 @@ function executeRuntimeProvider(options = {}) {
   }
   const outcome = JSON.parse(stdout);
   return captureInvocationResult(outcome, invocation, result, { stderrArtifact });
+}
+
+function runtimeInvocationEnv(options = {}) {
+  const ambient = optionalObject(options.env || process.env);
+  const request = optionalObject(options.request);
+  const executor = optionalObject(request.executor);
+  const config = optionalObject(executor.config);
+  const invocation = optionalObject(options.invocation);
+  if (invocation.inherit_env === true || invocation.inheritEnv === true || config.inherit_env === true || config.inheritEnv === true) {
+    return { ...ambient, ...optionalObject(config.runtime_env), ...optionalObject(invocation.env) };
+  }
+
+  const names = new Set([
+    ...DEFAULT_RUNTIME_ENV_ALLOWLIST,
+    ...normalizeArray(config.env_allowlist || config.envAllowlist || invocation.env_allowlist || invocation.envAllowlist),
+    ...normalizeArray(config.runtime_env_allowlist || config.runtimeEnvAllowlist),
+    ...normalizeArray(config.secret_env),
+    ...normalizeArray(executor.secret_env),
+  ]);
+  const env = {};
+  for (const name of names) {
+    if (typeof name === 'string' && name && ambient[name] !== undefined) {
+      env[name] = ambient[name];
+    }
+  }
+  return { ...env, ...optionalObject(config.runtime_env), ...optionalObject(invocation.env) };
 }
 
 function handleRuntimeInvocationStderr(stderr, options = {}) {

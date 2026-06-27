@@ -1,10 +1,14 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const {
   AGENT_TASK_PLAN_SCHEMA,
   materializeArtifactFanout,
+  runArtifactFanout,
 } = require('../lib/artifact-fanout-materializer');
 
 const controllerInput = {
@@ -63,5 +67,55 @@ assert.equal(result.plan.tasks[0].executor.backend, 'fixture');
 assert.equal(result.plan.tasks[0].metadata.fanout_item_count, 2);
 
 assert.throws(() => materializeArtifactFanout({ config: { artifact: 'missing', requires_non_empty: true }, controller_input: controllerInput }), /did not produce any items/);
+
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-artifact-fanout-test-'));
+try {
+  const fakeHomeboy = path.join(tmpRoot, 'fake-homeboy.cjs');
+  fs.writeFileSync(fakeHomeboy, `#!/usr/bin/env node
+const fs = require('node:fs');
+const inputIndex = process.argv.indexOf('--input');
+if (inputIndex === -1 || !fs.existsSync(process.argv[inputIndex + 1])) {
+  process.exit(2);
+}
+process.stdout.write(JSON.stringify({ batch: { batch_id: 'fanout-batch-1' } }));
+`);
+  fs.chmodSync(fakeHomeboy, 0o755);
+  const fanoutSubmitInput = {
+    items: [{ id: 'a', owner: 'alpha', kind: 'css' }],
+    config: {
+      group_by: ['owner', 'kind'],
+      plan_id: 'generic-artifact-fanout',
+      task_request_template: {
+        task_id: 'repair-{{group.key}}',
+        executor: { backend: 'fixture' },
+        instructions: 'Handle {{group.item_count}} item(s) for {{group.key}}.',
+      },
+    },
+  };
+  const submitted = runArtifactFanout({
+    ...fanoutSubmitInput,
+    mode: 'submit',
+    homeboy_bin: fakeHomeboy,
+    batch_id: 'fanout-batch-1',
+  });
+  assert.equal(submitted.status, 'submitted');
+  assert.equal(submitted.plan_location.storage, 'scratch');
+  assert.equal(submitted.plan_location.cleanup, 'caller');
+  assert.equal(submitted.scratch.kind, 'caller-owned-temporary-directory');
+  assert.equal(fs.existsSync(submitted.plan_path), true);
+
+  const persistentDir = path.join(tmpRoot, 'persisted-plan');
+  const persisted = runArtifactFanout({
+    ...fanoutSubmitInput,
+    mode: 'submit',
+    homeboy_bin: fakeHomeboy,
+    plan_dir: persistentDir,
+  });
+  assert.equal(persisted.plan_location.storage, 'persistent');
+  assert.equal(persisted.plan_path, path.join(persistentDir, 'plan.json'));
+  assert.equal(Object.prototype.hasOwnProperty.call(persisted, 'scratch'), false);
+} finally {
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+}
 
 console.log('artifact fanout materializer ok');
