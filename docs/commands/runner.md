@@ -151,12 +151,19 @@ It does not upgrade binaries, rewrite runner paths, or refresh Sample Runtime ca
 those remain explicit operator actions because they can be expensive or depend
 on environment-specific paths.
 
+`runner status` includes generic `selected_lab_runner.executable_requirements`
+from declared agent runtime manifests. Each entry names the runtime, requirement
+id, non-secret env vars, candidate executable names/paths, optional version
+arguments, and install hint. Homeboy owns the generic semantics: runtimes declare
+the executable they need; runner diagnostics expose the declaration without
+embedding product-specific checks in core.
+
 `runner status` also includes `selected_lab_runner.wp_codebox_runtime` for the
-runner job environment. That block shows the configured WP Codebox CLI, managed
-cache source/binary, expected `@automattic/wp-codebox-playground` and
-`@automattic/wp-codebox-core` paths, a runner-side probe command that prints the
-exact effective runtime and git SHA, and warnings when configured paths mix a
-stale checkout with the managed cache.
+legacy runner job environment projection. That block shows the configured WP
+Codebox CLI, managed cache source/binary, expected
+`@automattic/wp-codebox-playground` and `@automattic/wp-codebox-core` paths, a
+runner-side probe command that prints the exact effective runtime and git SHA,
+and warnings when configured paths mix a stale checkout with the managed cache.
 
 ### `refresh-homeboy`
 

@@ -192,11 +192,7 @@ mod required_artifacts {
         }
     }
 
-    pub fn execution_contains_artifact(
-        value: &Value,
-        artifact_id: &str,
-        kind: &str,
-    ) -> bool {
+    pub fn execution_contains_artifact(value: &Value, artifact_id: &str, kind: &str) -> bool {
         match value {
             Value::Object(object) => {
                 let id_matches = object
@@ -341,10 +337,7 @@ mod hydration {
             .cloned()
     }
 
-    pub fn artifact_from_history_payload(
-        payload: &Value,
-        artifact_id: &str,
-    ) -> Option<Value> {
+    pub fn artifact_from_history_payload(payload: &Value, artifact_id: &str) -> Option<Value> {
         let result = payload.get("execution")?.get("result")?;
         if let Some(artifact) = artifact_from_outputs(result, artifact_id) {
             return Some(artifact);
@@ -468,10 +461,7 @@ pub(super) use hydration::*;
 mod runtime_bundle {
     use super::*;
 
-    pub fn execution_with_request_workflow_artifacts(
-        execution: Value,
-        request: &Value,
-    ) -> Value {
+    pub fn execution_with_request_workflow_artifacts(execution: Value, request: &Value) -> Value {
         let runtime_bundle = runtime_bundle_evidence(request, &execution);
         let workflow_artifacts = request
             .get("workflow_artifacts")
@@ -954,9 +944,7 @@ mod evidence_index {
         })
     }
 
-    pub fn artifact_ref_from_artifact(
-        artifact: &AgentTaskArtifact,
-    ) -> AgentTaskLoopArtifactRef {
+    pub fn artifact_ref_from_artifact(artifact: &AgentTaskArtifact) -> AgentTaskLoopArtifactRef {
         AgentTaskLoopArtifactRef {
             uri: artifact
                 .url
@@ -1120,10 +1108,7 @@ mod runtime_evidence {
         .then_some(evidence)
     }
 
-    pub fn collect_runtime_evidence(
-        value: &Value,
-        evidence: &mut ControllerActionRuntimeEvidence,
-    ) {
+    pub fn collect_runtime_evidence(value: &Value, evidence: &mut ControllerActionRuntimeEvidence) {
         match value {
             Value::Object(object) => {
                 set_first_string(
@@ -1224,9 +1209,7 @@ mod runtime_evidence {
         }
     }
 
-    pub fn first_pending_action_id(
-        record: &AgentTaskLoopControllerRecord,
-    ) -> Option<String> {
+    pub fn first_pending_action_id(record: &AgentTaskLoopControllerRecord) -> Option<String> {
         if !matches!(record.state, AgentTaskLoopControllerState::Running) {
             return None;
         }

@@ -181,7 +181,10 @@ mod run_lookup {
         missing_run_guidance_for_runner_ids(run_id, connected)
     }
 
-    pub(crate) fn missing_run_guidance_for_runner_ids(run_id: &str, runner_ids: Vec<String>) -> Vec<String> {
+    pub(crate) fn missing_run_guidance_for_runner_ids(
+        run_id: &str,
+        runner_ids: Vec<String>,
+    ) -> Vec<String> {
         let mut hints = Vec::new();
         for runner_id in runner_ids {
             hints.push(format!(

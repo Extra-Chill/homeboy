@@ -5,8 +5,9 @@ Plan Lab-oriented runner workflows without executing the workload.
 ## Refresh Plan
 
 `homeboy lab refresh-plan` validates the runner configuration and local source
-inputs for a matrix-style refresh, then prints the existing Homeboy commands to
-run next:
+inputs for a matrix-style refresh, then prints a canonical
+`homeboy/runner-execution-envelope/v1` plus the existing Homeboy commands to run
+next:
 
 ```sh
 homeboy lab refresh-plan \
@@ -29,6 +30,12 @@ The plan is intentionally read-only. It composes the current primitives:
 - `homeboy runner exec <runner> --artifact <path> --summary <path> ...`
 - `homeboy runs artifacts <run-id>`
 - `homeboy runs evidence <run-id>`
+
+The `execution_envelope` field is the durable lab handoff shape. It includes the
+planned lifecycle gates, cleanup/retry guidance, artifact declarations derived
+from `--output` and `--summary`, an explicit secret env plan, result refs, and
+runner/workspace/runtime metadata. The older `handoff` object remains operator
+context for the same plan instead of the only contract.
 
 Use the artifact loop guide for the evidence shape expected from runner and
 matrix workflows: `docs/operators/artifact-loop-runner-matrix.md`.

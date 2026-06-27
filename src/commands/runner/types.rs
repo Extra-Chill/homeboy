@@ -61,6 +61,8 @@ pub struct LabSelectedRunnerOutput {
     pub configured_executable: String,
     pub runner_homeboy: LabRunnerHomeboyOutput,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub executable_requirements: Vec<RunnerExecutableRequirementDiagnostics>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runtime_diagnostics: Vec<RunnerRuntimeDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wp_codebox_runtime: Option<WpCodeboxRuntimeOutput>,
@@ -135,6 +137,23 @@ pub struct RunnerToolDiagnostics {
     pub managed_cache_binary: String,
     pub effective_binary_rule: String,
     pub diagnostic_command: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerExecutableRequirementDiagnostics {
+    pub runtime: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub version_command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
+    pub diagnostic_state: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

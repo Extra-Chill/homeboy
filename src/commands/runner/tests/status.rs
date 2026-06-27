@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use homeboy::core::agent_runtime_manifest::{
-    AgentRuntimePackageDiagnosticDeclaration, AgentRuntimeProbeDiagnosticDeclaration,
-    AgentRuntimeRuntimeDiagnosticDeclaration, AgentRuntimeSourceConsistencyDiagnostic,
-    AgentRuntimeToolDiagnosticDeclaration,
+    AgentRuntimeExecutableRequirement, AgentRuntimePackageDiagnosticDeclaration,
+    AgentRuntimeProbeDiagnosticDeclaration, AgentRuntimeRuntimeDiagnosticDeclaration,
+    AgentRuntimeSourceConsistencyDiagnostic, AgentRuntimeToolDiagnosticDeclaration,
 };
 use homeboy::core::api_jobs::{JobEvent, JobStatus};
 use homeboy::core::runner::{RunnerActiveJobSource, RunnerActiveJobState};
@@ -11,10 +11,10 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 
 use super::super::jobs::format_job_event;
 use super::super::status::{
-    declared_run_followups_for_legacy, declared_runtime_diagnostics,
-    declared_runtime_diagnostics_for_legacy, declared_runtime_source_diagnostics,
-    declared_tool_diagnostics, lab_runner_homeboy_output, runner_artifact_feature_diagnostics,
-    runner_status_operator_commands,
+    declared_executable_requirement_diagnostics, declared_run_followups_for_legacy,
+    declared_runtime_diagnostics, declared_runtime_diagnostics_for_legacy,
+    declared_runtime_source_diagnostics, declared_tool_diagnostics, lab_runner_homeboy_output,
+    runner_artifact_feature_diagnostics, runner_status_operator_commands,
 };
 
 #[test]
@@ -329,6 +329,33 @@ fn unknown_runtime_declaration_does_not_emit_wp_specific_guidance() {
     assert!(serialized.contains("other-runtime"));
     assert!(!serialized.contains("wp-codebox"));
     assert!(!serialized.contains("HOMEBOY_WP_CODEBOX"));
+}
+
+#[test]
+fn declared_executable_requirement_status_projection_is_generic() {
+    let diagnostics = declared_executable_requirement_diagnostics(
+        "example-runtime",
+        AgentRuntimeExecutableRequirement {
+            id: "example-runtime-cli".to_string(),
+            label: Some("Example Runtime CLI".to_string()),
+            env: vec!["EXAMPLE_RUNTIME_BIN".to_string()],
+            candidates: vec!["example-runtime".to_string()],
+            version_command: vec!["--version".to_string()],
+            install_hint: Some("Install example-runtime on the runner PATH.".to_string()),
+            extra: BTreeMap::new(),
+        },
+    );
+
+    assert_eq!(diagnostics.runtime, "example-runtime");
+    assert_eq!(diagnostics.id, "example-runtime-cli");
+    assert_eq!(diagnostics.label.as_deref(), Some("Example Runtime CLI"));
+    assert_eq!(diagnostics.env, vec!["EXAMPLE_RUNTIME_BIN".to_string()]);
+    assert_eq!(diagnostics.candidates, vec!["example-runtime".to_string()]);
+    assert_eq!(diagnostics.version_command, vec!["--version".to_string()]);
+    assert_eq!(diagnostics.diagnostic_state, "declared");
+    let serialized = serde_json::to_string(&diagnostics).expect("serialize diagnostics");
+    assert!(serialized.contains("example-runtime"));
+    assert!(!serialized.contains("wp-codebox"));
 }
 
 #[test]

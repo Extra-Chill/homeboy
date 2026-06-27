@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use homeboy::core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, AgentRuntimeDiagnosticFollowup,
-    AgentRuntimeDiagnosticsContract, AgentRuntimeRuntimeDiagnosticDeclaration,
-    AgentRuntimeSourceConsistencyDiagnostic, AgentRuntimeToolDiagnosticDeclaration,
+    AgentRuntimeDiagnosticsContract, AgentRuntimeExecutableRequirement,
+    AgentRuntimeRuntimeDiagnosticDeclaration, AgentRuntimeSourceConsistencyDiagnostic,
+    AgentRuntimeToolDiagnosticDeclaration,
 };
 use homeboy::core::runners::{
     self as runner, RunnerActiveJobState, RunnerAvailability, RunnerSession, RunnerStatusReport,
@@ -13,10 +14,11 @@ use homeboy::core::runners::{
 use super::super::CmdResult;
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
-    RunnerConnectionOutput, RunnerExtra, RunnerHomeboyBinaryRole, RunnerOperatorCommand,
-    RunnerOutput, RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics, RunnerToolDiagnostics,
-    RunnerWorkflowBinaryGuidance, WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue,
-    WpCodeboxRuntimeDiagnostic, WpCodeboxRuntimeOutput,
+    RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
+    RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOutput, RunnerRuntimeDiagnostics,
+    RunnerRuntimePackageDiagnostics, RunnerToolDiagnostics, RunnerWorkflowBinaryGuidance,
+    WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue, WpCodeboxRuntimeDiagnostic,
+    WpCodeboxRuntimeOutput,
 };
 
 pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
@@ -96,11 +98,13 @@ fn selected_lab_runner_status(
         .collect::<BTreeMap<_, _>>();
     let runtime_diagnostics =
         declared_runtime_diagnostics_collection(Some(runner_id), &effective_env);
+    let executable_requirements = declared_executable_requirement_diagnostics_collection();
     Ok(Some(LabSelectedRunnerOutput {
         runner_id: runner_id.to_string(),
         kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
         configured_executable: configured_executable.clone(),
         runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
+        executable_requirements,
         wp_codebox_runtime: runtime_diagnostics
             .iter()
             .find(|diagnostics| diagnostics.legacy_output.as_deref() == Some("wp_codebox_runtime"))
@@ -120,6 +124,40 @@ fn selected_lab_runner_status(
         ),
         status,
     }))
+}
+
+pub(super) fn declared_executable_requirement_diagnostics_collection(
+) -> Vec<RunnerExecutableRequirementDiagnostics> {
+    discover_agent_runtime_catalog()
+        .manifests
+        .into_iter()
+        .flat_map(|manifest| {
+            let runtime = manifest.id;
+            manifest
+                .materialization
+                .executable_requirements
+                .into_iter()
+                .map(move |requirement| {
+                    declared_executable_requirement_diagnostics(&runtime, requirement)
+                })
+        })
+        .collect()
+}
+
+pub(super) fn declared_executable_requirement_diagnostics(
+    runtime: &str,
+    requirement: AgentRuntimeExecutableRequirement,
+) -> RunnerExecutableRequirementDiagnostics {
+    RunnerExecutableRequirementDiagnostics {
+        runtime: runtime.to_string(),
+        id: requirement.id,
+        label: requirement.label,
+        env: requirement.env,
+        candidates: requirement.candidates,
+        version_command: requirement.version_command,
+        install_hint: requirement.install_hint,
+        diagnostic_state: "declared",
+    }
 }
 
 pub(super) fn lab_runner_homeboy_output(
