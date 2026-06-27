@@ -40,6 +40,18 @@ const discovery = normalizeWordPressRuntimeSurfaceDiscovery({
 			surfaces: [{ id: 'front:home', type: 'frontend-url', path: '/' }],
 			blocks: [{ name: 'example/card', title: 'Card' }],
 		},
+		{
+			options: [{ option: 'blogname', autoload: 'yes' }],
+			settings: [{ setting: 'blogname', type: 'string' }],
+			postTypes: [{ name: 'post', label: 'Posts' }],
+			taxonomies: [{ name: 'category', label: 'Categories' }],
+			roles: [{ role: 'administrator', capabilityCount: 10 }],
+			capabilities: [{ capability: 'edit_posts', roleCount: 1 }],
+			users: [{ user: 'all', count: 2 }],
+			media: [{ media: 'image/jpeg', count: 3 }],
+			wpCliCommands: [{ command: 'plugin list' }],
+			cronEvents: [{ event: 'wp_version_check' }],
+		},
 	],
 });
 
@@ -53,6 +65,19 @@ assert.deepEqual(discovery.surfaces.map((surface) => surface.id), [
 	'rest:/wp/v2/posts',
 ]);
 assert.equal(discovery.surfaces.find((surface) => surface.id === 'rest:/wp/v2/posts').metadata.sources.includes('rest-index'), true);
+assert.deepEqual(discovery.unsupported_surfaces.map((surface) => surface.id), [
+	'capability:edit_posts',
+	'cron:wp_version_check',
+	'media:image/jpeg',
+	'option:blogname',
+	'post-type:post',
+	'role:administrator',
+	'setting:blogname',
+	'taxonomy:category',
+	'user:all',
+	'wp-cli:plugin list',
+]);
+assert.equal(discovery.diagnostics.length, 10);
 
 const manifest = buildWordPressRuntimeSurfaceCoverageManifest(discovery);
 assert.equal(manifest.schema, 'homeboy/wordpress-fuzz-coverage-manifest/v1');
