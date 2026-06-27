@@ -6,8 +6,8 @@ use super::schemas::{
     FUZZ_COVERAGE_SUMMARY_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_FINDING_SCHEMA,
     FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_PROVENANCE_SCHEMA,
     FUZZ_REPLAY_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
-    FUZZ_SEED_SCHEMA, FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA,
-    FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
+    FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEED_SCHEMA, FUZZ_SURFACE_SCHEMA,
+    FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
 };
 
 pub(super) fn fuzz_core_contract_schema() -> String {
@@ -80,6 +80,10 @@ pub(super) fn fuzz_target_inventory_schema() -> String {
 
 pub(super) fn fuzz_execution_request_schema() -> String {
     FUZZ_EXECUTION_REQUEST_SCHEMA.to_string()
+}
+
+pub(super) fn fuzz_sampling_request_schema() -> String {
+    FUZZ_SAMPLING_REQUEST_SCHEMA.to_string()
 }
 
 pub(super) fn fuzz_result_envelope_schema() -> String {

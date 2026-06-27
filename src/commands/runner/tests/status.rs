@@ -12,9 +12,9 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_executable_requirement_diagnostics, declared_run_followups_for_legacy,
-    declared_runtime_diagnostics, declared_runtime_diagnostics_for_legacy,
-    declared_runtime_source_diagnostics, declared_tool_diagnostics, lab_runner_homeboy_output,
-    runner_artifact_feature_diagnostics, runner_status_operator_commands,
+    declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
+    lab_runner_homeboy_output, runner_artifact_feature_diagnostics,
+    runner_status_operator_commands,
 };
 
 #[test]
@@ -258,25 +258,8 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
 }
 
 #[test]
-fn declared_runtime_legacy_projection_preserves_selected_runtime_status_shape() {
-    let runtime = declared_runtime_diagnostics_for_legacy(
-        "sample_runtime",
-        Some("homeboy-lab"),
-        &BTreeMap::from([(
-            "HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string(),
-            "/home/chubes/.cache/homeboy/sample-runtime".to_string(),
-        )]),
-    );
-
-    let runtime = runtime.expect("catalog declares legacy sample runtime projection");
-    assert_eq!(runtime.tool, "sample-runtime");
-    assert_eq!(
-        runtime.playground_package.package,
-        "@automattic/sample-runtime-playground"
-    );
-    assert_eq!(runtime.source_git_sha.source, "runtime_probe_command");
-
-    let generic = declared_runtime_diagnostics(
+fn declared_runtime_diagnostics_preserve_generic_runtime_status_shape() {
+    let runtime = declared_runtime_diagnostics(
         &sample_runtime_declaration(),
         Some("homeboy-lab"),
         &BTreeMap::from([(
@@ -284,7 +267,26 @@ fn declared_runtime_legacy_projection_preserves_selected_runtime_status_shape() 
             "/home/chubes/.cache/homeboy/sample-runtime".to_string(),
         )]),
     );
-    let serialized = serde_json::to_string(&generic).expect("serialize generic diagnostics");
+
+    assert_eq!(runtime.runtime, "sample-runtime");
+    assert_eq!(
+        runtime
+            .packages
+            .iter()
+            .find(|package| package.field == "playground_package")
+            .expect("playground package diagnostics")
+            .package,
+        "@automattic/sample-runtime-playground"
+    );
+    assert_eq!(
+        runtime
+            .probes
+            .get("source_git_sha")
+            .expect("source git sha probe")
+            .source,
+        "runtime_probe_command"
+    );
+    let serialized = serde_json::to_string(&runtime).expect("serialize generic diagnostics");
 
     assert!(serialized.contains("\"runtime\":\"sample-runtime\""));
     assert!(serialized.contains("\"packages\""));

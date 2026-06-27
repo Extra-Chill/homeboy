@@ -84,6 +84,36 @@ fn fuzz_plan_selects_inventory_targets_operations_seeds_and_budgets() {
         metadata["budgets"]["duration_budget_seconds"],
         serde_json::json!(120)
     );
+    assert_eq!(
+        metadata["sampling"]["schema"],
+        serde_json::json!(homeboy::core::fuzz::FUZZ_SAMPLING_REQUEST_SCHEMA)
+    );
+    assert_eq!(metadata["sampling"]["strategy"], serde_json::json!("all"));
+    assert_eq!(metadata["sampling"]["case_budget"], serde_json::json!(25));
+    assert_eq!(
+        metadata["sampling"]["duration_budget_seconds"],
+        serde_json::json!(120)
+    );
+    assert_eq!(
+        metadata["sampling"]["target_strata"][0]["values"],
+        serde_json::json!(["api.users"])
+    );
+    assert_eq!(
+        metadata["sampling"]["operation_strata"][0]["values"],
+        serde_json::json!(["create", "read"])
+    );
+    assert_eq!(
+        metadata["sampling"]["corpus_refs"][0]["id"],
+        serde_json::json!("seed-a")
+    );
+    assert_eq!(
+        metadata["sampling"]["replay"],
+        serde_json::json!({
+            "deterministic": true,
+            "seed_source": "corpus",
+            "replay_batch_id": "proof-1-sampling"
+        })
+    );
     assert_eq!(metadata["isolation"]["required"], serde_json::json!(true));
     assert_eq!(
         metadata["planner"]["gate_profile"],
@@ -160,6 +190,29 @@ fn fuzz_plan_budget_flags_override_inventory_workload_budgets() {
     assert_eq!(
         metadata["budgets"]["max_duration"],
         serde_json::json!("30s")
+    );
+    assert_eq!(metadata["sampling"]["case_budget"], serde_json::json!(5));
+    assert_eq!(
+        metadata["sampling"]["duration_budget_seconds"],
+        serde_json::json!(10)
+    );
+}
+
+#[test]
+fn fuzz_plan_sampling_metadata_records_caller_seed_deterministically() {
+    let mut args = planner_args();
+    args.run.seed = Some("seed-123".to_string());
+
+    let metadata = super::plan_inventory_selection(&args, &planner_inventory()).unwrap();
+
+    assert_eq!(metadata["sampling"]["seed"], serde_json::json!("seed-123"));
+    assert_eq!(
+        metadata["sampling"]["replay"],
+        serde_json::json!({
+            "deterministic": true,
+            "seed_source": "caller",
+            "replay_batch_id": "proof-1-sampling"
+        })
     );
 }
 

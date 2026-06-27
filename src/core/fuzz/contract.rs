@@ -13,8 +13,9 @@ use super::schemas::{
     FUZZ_COVERAGE_SCHEMA, FUZZ_COVERAGE_SUMMARY_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA,
     FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,
     FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA,
-    FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SEED_SCHEMA, FUZZ_SURFACE_SCHEMA,
-    FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
+    FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEED_SCHEMA,
+    FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA,
+    FUZZ_WORKLOAD_SCHEMA,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +52,8 @@ pub struct FuzzContractSchemas {
     pub coverage_summary: String,
     pub target_inventory: String,
     pub execution_request: String,
+    #[serde(default = "super::schema_defaults::fuzz_sampling_request_schema")]
+    pub sampling_request: String,
     pub result_envelope: String,
     pub required_artifact: String,
     pub gate: String,
@@ -194,6 +197,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             coverage_summary: FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
             target_inventory: FUZZ_TARGET_INVENTORY_SCHEMA.to_string(),
             execution_request: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
+            sampling_request: FUZZ_SAMPLING_REQUEST_SCHEMA.to_string(),
             result_envelope: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
             required_artifact: FUZZ_REQUIRED_ARTIFACT_SCHEMA.to_string(),
             gate: FUZZ_GATE_SCHEMA.to_string(),

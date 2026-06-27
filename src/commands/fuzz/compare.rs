@@ -1017,6 +1017,7 @@ mod tests {
                 args: Vec::new(),
                 required_artifacts: default_fuzz_required_artifacts(),
                 gates: default_fuzz_gates(),
+                sampling: Default::default(),
                 metadata: serde_json::Value::Null,
                 extra: BTreeMap::new(),
             },

@@ -27,6 +27,10 @@ fn core_contract_lists_product_neutral_schema_ids() {
         FUZZ_EXECUTION_REQUEST_SCHEMA
     );
     assert_eq!(
+        contract.schemas.sampling_request,
+        FUZZ_SAMPLING_REQUEST_SCHEMA
+    );
+    assert_eq!(
         contract.schemas.result_envelope,
         FUZZ_RESULT_ENVELOPE_SCHEMA
     );
@@ -133,6 +137,25 @@ fn core_contract_deserializes_without_operation_families() {
     assert!(contract
         .operation_families
         .contains(&FuzzOperationFamily::Render));
+    assert_eq!(
+        contract.schemas.sampling_request,
+        FUZZ_SAMPLING_REQUEST_SCHEMA
+    );
+}
+
+#[test]
+fn execution_request_deserializes_without_sampling_contract() {
+    let request: FuzzExecutionRequest = serde_json::from_value(json!({
+        "schema": FUZZ_EXECUTION_REQUEST_SCHEMA,
+        "version": FUZZ_CONTRACT_VERSION,
+        "id": "request-1",
+        "component": "component-a"
+    }))
+    .expect("legacy execution request payload");
+
+    assert_eq!(request.sampling.schema, FUZZ_SAMPLING_REQUEST_SCHEMA);
+    assert_eq!(request.sampling.strategy, "all");
+    assert!(request.sampling.replay.deterministic);
 }
 
 #[test]

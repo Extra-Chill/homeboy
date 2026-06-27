@@ -9,7 +9,8 @@ use super::coverage::{FuzzArtifact, FuzzProvenance, FuzzThresholdOperator};
 use super::normalize::{require_schema, required_trimmed, trim_or_default};
 use super::schema_defaults::{
     fuzz_contract_version, fuzz_execution_request_schema, fuzz_gate_schema,
-    fuzz_required_artifact_schema, fuzz_result_envelope_schema, fuzz_target_inventory_schema,
+    fuzz_required_artifact_schema, fuzz_result_envelope_schema, fuzz_sampling_request_schema,
+    fuzz_target_inventory_schema,
 };
 use super::schemas::{FUZZ_CONTRACT_VERSION, FUZZ_TARGET_INVENTORY_SCHEMA};
 use super::types::{FuzzCampaign, FuzzSeed, FuzzSurface, FuzzTarget, FuzzWorkload};
@@ -97,10 +98,106 @@ pub struct FuzzExecutionRequest {
     pub required_artifacts: Vec<FuzzRequiredArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<FuzzGate>,
+    #[serde(default)]
+    pub sampling: FuzzSamplingRequest,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzSamplingRequest {
+    #[serde(default = "fuzz_sampling_request_schema")]
+    pub schema: String,
+    #[serde(default = "default_sampling_strategy")]
+    pub strategy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_budget_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_strata: Vec<FuzzSamplingStratum>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operation_strata: Vec<FuzzSamplingStratum>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corpus_refs: Vec<FuzzSamplingCorpusRef>,
+    #[serde(default)]
+    pub replay: FuzzSamplingReplayDeterminism,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for FuzzSamplingRequest {
+    fn default() -> Self {
+        Self {
+            schema: fuzz_sampling_request_schema(),
+            strategy: default_sampling_strategy(),
+            seed: None,
+            case_budget: None,
+            duration_budget_seconds: None,
+            target_strata: Vec::new(),
+            operation_strata: Vec::new(),
+            corpus_refs: Vec::new(),
+            replay: FuzzSamplingReplayDeterminism::default(),
+            metadata: Value::Null,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_sampling_strategy() -> String {
+    "all".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FuzzSamplingStratum {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzSamplingCorpusRef {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_inline_value: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FuzzSamplingReplayDeterminism {
+    #[serde(default = "default_replay_deterministic")]
+    pub deterministic: bool,
+    #[serde(default = "default_replay_seed_source")]
+    pub seed_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_batch_id: Option<String>,
+}
+
+impl Default for FuzzSamplingReplayDeterminism {
+    fn default() -> Self {
+        Self {
+            deterministic: default_replay_deterministic(),
+            seed_source: default_replay_seed_source(),
+            replay_batch_id: None,
+        }
+    }
+}
+
+fn default_replay_deterministic() -> bool {
+    true
+}
+
+fn default_replay_seed_source() -> String {
+    "unspecified".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
