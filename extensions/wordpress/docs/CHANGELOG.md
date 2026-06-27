@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.26] - 2026-06-27
+
+### Changed
+- Single-source shared shell runner libs to top-level scripts/lib
+
 ## [3.19.25] - 2026-06-27
 
 ### Fixed
