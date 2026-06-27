@@ -222,10 +222,12 @@ function adminPageTargetFromSurface(surface, options = {}) {
 
 function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReasons, surfaceDestructiveReasons, options = {}) {
 	const safeMethod = SAFE_REST_METHODS.has(method);
-	const operation = { ...operationForSurface(surface), method };
+	const fixtureBinding = fixtureBindingForSurfaceAction(surface, method.toLowerCase(), options);
+	const operation = bindRestOperationFixtures({ ...operationForSurface(surface), method }, fixtureBinding);
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
 	const skipReasons = safeMethod || mutationMode === 'isolated' ? surfaceSkipReasons : reasonList([...surfaceSkipReasons, 'mutating_rest_method_requires_explicit_opt_in']);
 	const destructiveReasons = safeMethod ? surfaceDestructiveReasons : reasonList([...surfaceDestructiveReasons, 'rest_method_mutates_state']);
+	const fixtureMetadata = fixtureBindingMetadata(fixtureBinding);
 	const testCase = annotateWordPressFuzzCaseExecutionTier({
 		id: `${surface.id}-${method.toLowerCase()}-generic-fuzz`,
 		intent: 'request-rest-route',
@@ -237,6 +239,7 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 		metadata: {
 			surface,
 			rest_method: method,
+			fixture_binding: fixtureMetadata,
 			auth: surface.auth || surface.authentication || surface.authorization || null,
 			safety: safeMethod ? { level: 'safe', mutates: false } : { level: 'mutating', mutates: true, requires_explicit_opt_in: true },
 			planned: !safeMethod,
@@ -295,12 +298,12 @@ function genericCaseForSurface(surface, options = {}) {
 }
 
 function crudCaseForSurface(surface, resource, action, options = {}) {
-	const operation = crudOperationForSurface(surface, resource, action);
+	const fixtureBinding = fixtureBindingForSurfaceAction(surface, action.action, options);
+	const operation = bindCrudOperationFixtures(crudOperationForSurface(surface, resource, action), fixtureBinding);
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
 	const mutates = mutatingCrudAction(action.action);
-	const gateReasons = mutates && !mutationMode
-		? (!allowsCrudMutation(surface, action.action) ? ['crud_mutation_requires_explicit_allow'] : ['requires-isolated-mutation-runtime'])
-		: [];
+	const gateReasons = crudMutationGateReasons(surface, action.action, mutates, mutationMode);
+	const fixtureMetadata = fixtureBindingMetadata(fixtureBinding);
 	const testCase = {
 		id: `${surface.id}-${action.intent}-crud-fuzz`,
 		intent: action.intent,
@@ -313,7 +316,7 @@ function crudCaseForSurface(surface, resource, action, options = {}) {
 			...gateReasons,
 		],
 		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
-		metadata: { surface, crud: { resource_type: resource.type, intent: action.intent, action: action.action } },
+		metadata: { surface, crud: { resource_type: resource.type, intent: action.intent, action: action.action }, fixture_binding: fixtureMetadata },
 	};
 	if (!mutates || gateReasons.length > 0) {
 		return annotateWordPressFuzzCaseExecutionTier(testCase, { mutates, executable: !mutates && testCase.skip_reasons.length === 0 });
@@ -323,6 +326,16 @@ function crudCaseForSurface(surface, resource, action, options = {}) {
 		mutation_mode: mutationMode,
 		mutates: true,
 	});
+}
+
+function crudMutationGateReasons(surface, action, mutates, mutationMode) {
+	if (!mutates || mutationMode) {
+		return [];
+	}
+	if (!allowsCrudMutation(surface, action)) {
+		return ['crud_mutation_requires_explicit_allow'];
+	}
+	return ['requires-isolated-mutation-runtime'];
 }
 
 function crudOperationForSurface(surface, resource, action) {
@@ -450,6 +463,191 @@ function inputForCrudAction(surface, resource, action) {
 		Object.assign(input, surface.delete_input || surface.deleteInput || {});
 	}
 	return Object.keys(input).length > 0 ? input : undefined;
+}
+
+function fixtureBindingForSurfaceAction(surface, action, options = {}) {
+	const plannerBinding = fixtureBindingFromPlannerOptions(surface, options);
+	const surfaceBinding = surface.fixture_bindings || surface.fixtureBindings || surface.fixture_binding || surface.fixtureBinding || surface.fixtures;
+	const binding = mergeFixtureBindings(normalizeFixtureBinding(plannerBinding, action), normalizeFixtureBinding(surfaceBinding, action));
+	return bindingHasValues(binding) ? binding : undefined;
+}
+
+function fixtureBindingFromPlannerOptions(surface, options = {}) {
+	const bindings = options.fixture_bindings || options.fixtureBindings || options.rest_fixture_bindings || options.restFixtureBindings;
+	if (!isObject(bindings)) {
+		return undefined;
+	}
+	return bindings[surface.id]
+		|| bindings[surface.route]
+		|| bindings[surface.path]
+		|| bindings[surface.name]
+		|| bindings[surface.resource_type]
+		|| bindings[surface.resourceType]
+		|| bindings.default;
+}
+
+function normalizeFixtureBinding(binding, action) {
+	if (!isObject(binding)) {
+		return {};
+	}
+	const scoped = isObject(binding[action]) ? binding[action] : {};
+	const routeParams = binding.route_params || binding.routeParams || binding.path_params || binding.pathParams || binding.params;
+	const scopedRouteParams = scoped.route_params || scoped.routeParams || scoped.path_params || scoped.pathParams || scoped.params;
+	const payloads = binding.request_bodies || binding.requestBodies || binding.payloads || binding.bodies || binding.body;
+	const scopedPayloads = scoped.request_bodies || scoped.requestBodies || scoped.payloads || scoped.bodies || scoped.body;
+	return stripUndefined({
+		fixture_id: binding.fixture_id || binding.fixtureId || scoped.fixture_id || scoped.fixtureId,
+		artifact_ref: binding.artifact_ref || binding.artifactRef || scoped.artifact_ref || scoped.artifactRef,
+		route_params: normalizeFixtureBindingMap({ ...(isObject(routeParams) ? routeParams : {}), ...(isObject(scopedRouteParams) ? scopedRouteParams : {}) }),
+		request_body: normalizeFixtureValue(actionScopedMapValue(payloads, action) ?? actionScopedMapValue(scopedPayloads, action)),
+	});
+}
+
+function actionScopedMapValue(value, action) {
+	if (value === undefined || value === null) {
+		return undefined;
+	}
+	if (!isObject(value)) {
+		return value;
+	}
+	const actionKeys = ['create', 'read', 'update', 'delete', 'get', 'post', 'put', 'patch'];
+	if (actionKeys.some((key) => Object.prototype.hasOwnProperty.call(value, key))) {
+		return value[action];
+	}
+	return value;
+}
+
+function mergeFixtureBindings(base, override) {
+	return stripUndefined({
+		fixture_id: override.fixture_id || base.fixture_id,
+		artifact_ref: override.artifact_ref || base.artifact_ref,
+		route_params: normalizeFixtureBindingMap({ ...(base.route_params || {}), ...(override.route_params || {}) }),
+		request_body: override.request_body || base.request_body,
+	});
+}
+
+function normalizeFixtureBindingMap(value) {
+	if (!isObject(value)) {
+		return undefined;
+	}
+	const entries = Object.entries(value).map(([key, entry]) => [key, normalizeFixtureValue(entry)]).filter(([, entry]) => entry !== undefined);
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function normalizeFixtureValue(entry) {
+	if (entry === undefined || entry === null) {
+		return undefined;
+	}
+	if (!isObject(entry) || Array.isArray(entry)) {
+		return { value: entry };
+	}
+	const hasReferenceShape = ['value', 'id', 'ref', 'fixture_id', 'fixtureId', 'artifact_ref', 'artifactRef', 'artifact', 'source_artifact', 'sourceArtifact', 'path', 'json_path', 'jsonPath', 'pointer', 'metadata']
+		.some((key) => Object.prototype.hasOwnProperty.call(entry, key));
+	if (!hasReferenceShape) {
+		return { value: entry };
+	}
+	return stripUndefined({
+		value: entry.value ?? entry.id ?? entry.ref,
+		fixture_id: entry.fixture_id || entry.fixtureId,
+		artifact_ref: entry.artifact_ref || entry.artifactRef || entry.artifact || entry.source_artifact || entry.sourceArtifact,
+		path: entry.path || entry.json_path || entry.jsonPath || entry.pointer,
+		metadata: isObject(entry.metadata) ? entry.metadata : undefined,
+	});
+}
+
+function bindingHasValues(binding) {
+	return Boolean(binding && (binding.fixture_id || binding.artifact_ref || binding.request_body || Object.keys(binding.route_params || {}).length > 0));
+}
+
+function bindCrudOperationFixtures(operation, binding) {
+	if (!bindingHasValues(binding)) {
+		return operation;
+	}
+	return normalizeWordPressCrudOperation({
+		...operation,
+		transport: bindRestTransportFixtures(operation.transport, binding),
+		input: stripUndefined({
+			...(operation.input || {}),
+			route_params: fixtureValues(binding.route_params),
+			request_body: binding.request_body?.value,
+		}),
+		metadata: stripUndefined({
+			...(operation.metadata || {}),
+			fixture_binding: fixtureBindingMetadata(binding),
+		}),
+	});
+}
+
+function bindRestOperationFixtures(operation, binding) {
+	if (!bindingHasValues(binding)) {
+		return operation;
+	}
+	return stripUndefined({
+		...operation,
+		...bindRestPathFields(operation, binding),
+		route_params: fixtureValues(binding.route_params),
+		request_body: binding.request_body?.value,
+	});
+}
+
+function bindRestTransportFixtures(transport, binding) {
+	if (!isObject(transport)) {
+		return transport;
+	}
+	const boundFields = bindRestPathFields(transport, binding);
+	const routeTemplates = stripUndefined({
+		route_template: boundFields.route_template,
+		path_template: boundFields.path_template,
+	});
+	return stripUndefined({
+		...transport,
+		...boundFields,
+		metadata: Object.keys(routeTemplates).length > 0 ? stripUndefined({ ...(transport.metadata || {}), ...routeTemplates }) : transport.metadata,
+	});
+}
+
+function bindRestPathFields(container, binding) {
+	const routeParams = fixtureValues(binding.route_params);
+	if (!routeParams || Object.keys(routeParams).length === 0) {
+		return {};
+	}
+	const bound = {};
+	for (const key of ['route', 'path']) {
+		if (container[key] !== undefined) {
+			bound[`${key}_template`] = container[key];
+			bound[key] = bindRouteTemplate(container[key], routeParams);
+		}
+	}
+	return bound;
+}
+
+function bindRouteTemplate(route, params = {}) {
+	return String(route).replace(/\(\?P<([^>]+)>[^)]+\)/g, (match, name) => {
+		if (params[name] === undefined || params[name] === null) {
+			return match;
+		}
+		return encodeURIComponent(String(params[name]));
+	});
+}
+
+function fixtureValues(map = {}) {
+	if (!isObject(map)) {
+		return undefined;
+	}
+	const entries = Object.entries(map).filter(([, entry]) => entry && entry.value !== undefined).map(([key, entry]) => [key, entry.value]);
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function fixtureBindingMetadata(binding) {
+	if (!bindingHasValues(binding)) {
+		return undefined;
+	}
+	return stripUndefined({
+		fixture_id: binding.fixture_id,
+		artifact_ref: binding.artifact_ref,
+		route_params: binding.route_params,
+		request_body: binding.request_body,
+	});
 }
 
 function rollbackPolicyForCrudAction(action) {
