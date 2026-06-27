@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::core::error::{Error, Result};
 
+use super::lab_args::LabPathRemap;
+
 const HOME_BIN_DIRS: &[&str] = &[".local/bin"];
 const ABSOLUTE_BIN_DIRS: &[&str] = &[
     "/opt/homebrew/bin",
@@ -84,6 +86,403 @@ pub fn preflight_remote_argv_path_translation(
             "This is a path-translation defect in the remote dispatch argv pipeline; the argument must be remapped to the remote workspace path before dispatch.".to_string(),
         ]),
     ))
+}
+
+pub(crate) fn preflight_remote_path_bearing_surfaces(
+    context: &str,
+    runner_id: &str,
+    command: &[String],
+    env: &HashMap<String, String>,
+    source_path: &Path,
+    remote_cwd: &str,
+    mappings: &[LabPathRemap],
+) -> Result<()> {
+    let mut failures = Vec::new();
+    collect_path_setting_failures(command, source_path, remote_cwd, mappings, &mut failures);
+    collect_path_env_failures(env, source_path, remote_cwd, mappings, &mut failures);
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    failures.sort_by(|left, right| left.surface.cmp(&right.surface));
+    let preview = failures
+        .iter()
+        .take(5)
+        .map(|failure| {
+            format!(
+                "{} `{}` -> `{}` (exists locally: {})",
+                failure.kind, failure.surface, failure.path, failure.exists_locally
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut hints = vec![
+        format!("Selected runner: {runner_id}"),
+        format!("Remote workspace: {remote_cwd}"),
+    ];
+    hints.extend(failures.iter().take(5).map(|failure| {
+        format!(
+            "Missing workspace mapping candidate: `{}` from `{}`",
+            failure.path, failure.surface
+        )
+    }));
+    hints.push("Materialize each controller-local path through Lab workspace sync/remapping before dispatch, or replace it with a runner-local path that is valid on the selected runner.".to_string());
+
+    Err(Error::validation_invalid_argument(
+        "path",
+        format!(
+            "{context} refused to dispatch to runner `{runner_id}`: {} path-bearing remote surface(s) still reference controller-local absolute paths",
+            failures.len()
+        ),
+        Some(preview),
+        Some(hints),
+    ))
+}
+
+#[derive(Debug)]
+struct PathSurfaceFailure {
+    kind: &'static str,
+    surface: String,
+    path: String,
+    exists_locally: bool,
+}
+
+fn collect_path_setting_failures(
+    command: &[String],
+    source_path: &Path,
+    remote_cwd: &str,
+    mappings: &[LabPathRemap],
+    failures: &mut Vec<PathSurfaceFailure>,
+) {
+    let mut iter = command.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            continue;
+        }
+        if arg == "--setting" {
+            if let Some(raw) = iter.next() {
+                collect_setting_pair_failures(
+                    "--setting",
+                    raw,
+                    source_path,
+                    remote_cwd,
+                    mappings,
+                    failures,
+                );
+            }
+            continue;
+        }
+        if arg == "--setting-json" {
+            if let Some(raw) = iter.next() {
+                collect_json_setting_pair_failures(
+                    "--setting-json",
+                    raw,
+                    source_path,
+                    remote_cwd,
+                    mappings,
+                    failures,
+                );
+            }
+            continue;
+        }
+        if let Some(raw) = arg.strip_prefix("--setting=") {
+            collect_setting_pair_failures(
+                "--setting",
+                raw,
+                source_path,
+                remote_cwd,
+                mappings,
+                failures,
+            );
+        } else if let Some(raw) = arg.strip_prefix("--setting-json=") {
+            collect_json_setting_pair_failures(
+                "--setting-json",
+                raw,
+                source_path,
+                remote_cwd,
+                mappings,
+                failures,
+            );
+        } else if let Some((flag, value)) = arg.split_once('=') {
+            if is_path_bearing_flag(flag) {
+                collect_value_path_failures(
+                    "arg",
+                    flag,
+                    value,
+                    source_path,
+                    remote_cwd,
+                    mappings,
+                    failures,
+                );
+            }
+        } else if is_path_bearing_flag(arg) {
+            if let Some(value) = iter.peek() {
+                collect_value_path_failures(
+                    "arg",
+                    arg,
+                    value,
+                    source_path,
+                    remote_cwd,
+                    mappings,
+                    failures,
+                );
+            }
+        }
+    }
+}
+
+fn collect_setting_pair_failures(
+    flag: &str,
+    raw: &str,
+    source_path: &Path,
+    remote_cwd: &str,
+    mappings: &[LabPathRemap],
+    failures: &mut Vec<PathSurfaceFailure>,
+) {
+    let Some((key, value)) = raw.split_once('=') else {
+        return;
+    };
+    if !is_path_bearing_key(key) {
+        return;
+    }
+    collect_value_path_failures(
+        "setting",
+        &format!("{flag} {key}"),
+        value,
+        source_path,
+        remote_cwd,
+        mappings,
+        failures,
+    );
+}
+
+fn collect_json_setting_pair_failures(
+    flag: &str,
+    raw: &str,
+    source_path: &Path,
+    remote_cwd: &str,
+    mappings: &[LabPathRemap],
+    failures: &mut Vec<PathSurfaceFailure>,
+) {
+    let Some((key, value)) = raw.split_once('=') else {
+        return;
+    };
+    if !is_path_bearing_key(key) {
+        return;
+    }
+    match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(json) => collect_json_value_path_failures(
+            "setting-json",
+            &format!("{flag} {key}"),
+            &json,
+            source_path,
+            remote_cwd,
+            mappings,
+            failures,
+        ),
+        Err(_) => collect_value_path_failures(
+            "setting-json",
+            &format!("{flag} {key}"),
+            value,
+            source_path,
+            remote_cwd,
+            mappings,
+            failures,
+        ),
+    }
+}
+
+fn collect_json_value_path_failures(
+    kind: &'static str,
+    surface: &str,
+    value: &serde_json::Value,
+    source_path: &Path,
+    remote_cwd: &str,
+    mappings: &[LabPathRemap],
+    failures: &mut Vec<PathSurfaceFailure>,
+) {
+    match value {
+        serde_json::Value::String(text) => collect_value_path_failures(
+            kind,
+            surface,
+            text,
+            source_path,
+            remote_cwd,
+            mappings,
+            failures,
+        ),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_json_value_path_failures(
+                    kind,
+                    surface,
+                    item,
+                    source_path,
+                    remote_cwd,
+                    mappings,
+                    failures,
+                );
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                collect_json_value_path_failures(
+                    kind,
+                    surface,
+                    item,
+                    source_path,
+                    remote_cwd,
+                    mappings,
+                    failures,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_path_env_failures(
+    env: &HashMap<String, String>,
+    source_path: &Path,
+    remote_cwd: &str,
+    mappings: &[LabPathRemap],
+    failures: &mut Vec<PathSurfaceFailure>,
+) {
+    for (key, value) in env {
+        if !is_path_bearing_env_key(key) {
+            continue;
+        }
+        collect_value_path_failures(
+            "env",
+            key,
+            value,
+            source_path,
+            remote_cwd,
+            mappings,
+            failures,
+        );
+    }
+}
+
+fn collect_value_path_failures(
+    kind: &'static str,
+    surface: &str,
+    value: &str,
+    source_path: &Path,
+    remote_cwd: &str,
+    mappings: &[LabPathRemap],
+    failures: &mut Vec<PathSurfaceFailure>,
+) {
+    for path in path_candidates(value) {
+        if !is_unmapped_controller_path(&path, source_path, remote_cwd, mappings) {
+            continue;
+        }
+        failures.push(PathSurfaceFailure {
+            kind,
+            surface: surface.to_string(),
+            exists_locally: expanded_path(&path).exists(),
+            path,
+        });
+    }
+}
+
+fn path_candidates(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with("~/") {
+        return vec![trimmed.to_string()];
+    }
+    trimmed
+        .split(':')
+        .filter(|part| part.starts_with('/') || part.starts_with("~/"))
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_unmapped_controller_path(
+    value: &str,
+    source_path: &Path,
+    remote_cwd: &str,
+    mappings: &[LabPathRemap],
+) -> bool {
+    if path_is_under_remote_root(value, remote_cwd, mappings) {
+        return false;
+    }
+    if path_is_under_local_root(value, &source_path.display().to_string()) {
+        return true;
+    }
+    if mappings
+        .iter()
+        .any(|mapping| path_is_under_local_root(value, &mapping.local))
+    {
+        return true;
+    }
+    let expanded = expanded_path(value);
+    if expanded.exists() {
+        return true;
+    }
+    std::env::var_os("HOME").is_some_and(|home| {
+        path_is_under_local_root(value, &PathBuf::from(home).display().to_string())
+    })
+}
+
+fn path_is_under_remote_root(value: &str, remote_cwd: &str, mappings: &[LabPathRemap]) -> bool {
+    path_is_under_local_root(value, remote_cwd)
+        || mappings
+            .iter()
+            .any(|mapping| path_is_under_local_root(value, &mapping.remote))
+}
+
+fn path_is_under_local_root(value: &str, root: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    !root.is_empty() && (value == root || value.starts_with(&format!("{root}/")))
+}
+
+fn expanded_path(value: &str) -> PathBuf {
+    PathBuf::from(shellexpand::tilde(value).to_string())
+}
+
+fn is_path_bearing_key(key: &str) -> bool {
+    let key = key.rsplit('.').next().unwrap_or(key).to_ascii_lowercase();
+    key == "path"
+        || key == "paths"
+        || key == "cwd"
+        || key == "dir"
+        || key == "dirs"
+        || key == "file"
+        || key == "files"
+        || key == "root"
+        || key == "roots"
+        || key.ends_with("_path")
+        || key.ends_with("_paths")
+        || key.ends_with("_dir")
+        || key.ends_with("_dirs")
+        || key.ends_with("_file")
+        || key.ends_with("_files")
+        || key.ends_with("_root")
+        || key.ends_with("_roots")
+}
+
+fn is_path_bearing_env_key(key: &str) -> bool {
+    if key == "PATH" || key.starts_with("HOMEBOY_") {
+        return false;
+    }
+    is_path_bearing_key(key)
+}
+
+fn is_path_bearing_flag(flag: &str) -> bool {
+    let Some(name) = flag.strip_prefix("--") else {
+        return false;
+    };
+    is_path_bearing_key(&name.replace('-', "_"))
 }
 
 /// True when `arg` embeds the controller-local source root but has not been
@@ -259,5 +658,175 @@ mod tests {
             quote_runner_env_value("TOKEN", "hello world"),
             "'hello world'"
         );
+    }
+
+    #[test]
+    fn preflight_rejects_split_path_setting_with_unmapped_controller_path() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let fixture = controller.path().join("fixture-root");
+        fs::create_dir_all(&source).expect("source");
+        fs::create_dir_all(&fixture).expect("fixture");
+        let command = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--setting".to_string(),
+            format!("fixture_root={}", fixture.display()),
+        ];
+
+        let err = preflight_remote_path_bearing_surfaces(
+            "Lab offload",
+            "lab-runner",
+            &command,
+            &HashMap::new(),
+            &source,
+            "/runner/workspaces/primary",
+            &[],
+        )
+        .expect_err("unmapped path setting must fail locally");
+
+        assert!(err.message.contains("lab-runner"));
+        assert!(err.message.contains("controller-local absolute paths"));
+        assert!(err
+            .details
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| id.contains("--setting fixture_root")));
+        assert!(err
+            .details
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| id.contains("exists locally: true")));
+    }
+
+    #[test]
+    fn preflight_rejects_inline_json_setting_with_unmapped_controller_path() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let nested = controller.path().join("nested");
+        fs::create_dir_all(&source).expect("source");
+        fs::create_dir_all(&nested).expect("nested");
+        let command = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            format!(
+                "--setting-json=config_paths={}",
+                serde_json::json!({ "fixtures": [nested.display().to_string()] })
+            ),
+        ];
+
+        let err = preflight_remote_path_bearing_surfaces(
+            "Lab offload",
+            "lab-runner",
+            &command,
+            &HashMap::new(),
+            &source,
+            "/runner/workspaces/primary",
+            &[],
+        )
+        .expect_err("unmapped json path setting must fail locally");
+
+        let id = err
+            .details
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(id.contains("--setting-json config_paths"));
+        assert!(id.contains(&nested.display().to_string()));
+    }
+
+    #[test]
+    fn preflight_rejects_path_like_env_override_with_controller_path() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let tools = controller.path().join("tools");
+        fs::create_dir_all(&source).expect("source");
+        fs::create_dir_all(&tools).expect("tools");
+        let env = HashMap::from([("TOOL_ROOT".to_string(), tools.display().to_string())]);
+
+        let err = preflight_remote_path_bearing_surfaces(
+            "Lab offload",
+            "lab-runner",
+            &["homeboy".to_string(), "test".to_string()],
+            &env,
+            &source,
+            "/runner/workspaces/primary",
+            &[],
+        )
+        .expect_err("unmapped path env must fail locally");
+
+        let id = err
+            .details
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(id.contains("env `TOOL_ROOT`"));
+        assert!(id.contains(&tools.display().to_string()));
+    }
+
+    #[test]
+    fn preflight_rejects_path_bearing_argv_flag_with_controller_path() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let cwd = controller.path().join("workload");
+        fs::create_dir_all(&source).expect("source");
+        fs::create_dir_all(&cwd).expect("cwd");
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--cwd".to_string(),
+            cwd.display().to_string(),
+        ];
+
+        let err = preflight_remote_path_bearing_surfaces(
+            "Lab offload",
+            "lab-runner",
+            &command,
+            &HashMap::new(),
+            &source,
+            "/runner/workspaces/primary",
+            &[],
+        )
+        .expect_err("unmapped argv path flag must fail locally");
+
+        let id = err
+            .details
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(id.contains("arg `--cwd`"));
+        assert!(id.contains(&cwd.display().to_string()));
+    }
+
+    #[test]
+    fn preflight_accepts_mapped_remote_paths_and_non_path_settings() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let local_tools = controller.path().join("tools");
+        fs::create_dir_all(&source).expect("source");
+        fs::create_dir_all(&local_tools).expect("tools");
+        let command = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--setting=tool_root=/runner/workspaces/tools".to_string(),
+            "--setting".to_string(),
+            format!("mode={}", local_tools.display()),
+        ];
+        let mappings = vec![LabPathRemap {
+            local: local_tools.display().to_string(),
+            remote: "/runner/workspaces/tools".to_string(),
+        }];
+
+        preflight_remote_path_bearing_surfaces(
+            "Lab offload",
+            "lab-runner",
+            &command,
+            &HashMap::new(),
+            &source,
+            "/runner/workspaces/primary",
+            &mappings,
+        )
+        .expect("remote mapped paths and non-path settings should pass");
     }
 }
