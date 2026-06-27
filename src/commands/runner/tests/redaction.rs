@@ -71,7 +71,7 @@ fn runner_env_output_redacts_values_by_default() {
         diagnostics: RunnerEnvDiagnostics {
             server_shell_env: "shell".to_string(),
             runner_job_env: "runner".to_string(),
-            wp_codebox: None,
+            selected_runtime: None,
         },
     };
 
@@ -108,7 +108,7 @@ fn runner_env_output_reports_secret_env_refs_without_values() {
         diagnostics: RunnerEnvDiagnostics {
             server_shell_env: "shell".to_string(),
             runner_job_env: "runner".to_string(),
-            wp_codebox: None,
+            selected_runtime: None,
         },
     };
 
@@ -150,7 +150,7 @@ fn runner_env_output_reports_secret_store_refs_without_values() {
         diagnostics: RunnerEnvDiagnostics {
             server_shell_env: "shell".to_string(),
             runner_job_env: "runner".to_string(),
-            wp_codebox: None,
+            selected_runtime: None,
         },
     };
 

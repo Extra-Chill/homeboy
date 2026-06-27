@@ -2,8 +2,8 @@
 //! Lab proofs.
 //!
 //! WPSG (and other runtime-package loops) are thin wrappers around Homeboy's
-//! agent-task dispatch architecture. A runtime proof — e.g. driving a WP Codebox
-//! loop through `agents-api`, `data-machine`, `data-machine-code`, and the WPSG
+//! agent-task dispatch architecture. A runtime proof — e.g. driving a Managed Sandbox
+//! loop through `agents-api`, `sample-component`, `workspace-registry`, and the WPSG
 //! component — declares those runtime substrate components as
 //! [`AgentTaskComponentContract`]s on the dispatch request (`component_contracts`
 //! / `runtime_component_contracts` in provider-config or client-context).
@@ -11,7 +11,7 @@
 //! Historically those contracts only carried a *declared* path and ref. Nothing
 //! resolved the declared graph before dispatch, so proofs spent their time
 //! fighting stale or missing checkouts and manually exporting substrate path env
-//! vars (`WP_CODEBOX_AGENTS_API_PATH`, …) instead of testing loop behavior
+//! vars (`SAMPLE_RUNTIME_AGENTS_API_PATH`, …) instead of testing loop behavior
 //! (#6121).
 //!
 //! This module gives dispatch a first-class, preflight-time materialization path:
@@ -19,7 +19,7 @@
 //! - Resolve each declared component contract to a concrete on-disk path.
 //! - Materialize each component at a **known ref** — the resolved git HEAD (or an
 //!   explicitly pinned ref) of the checkout — so run evidence records exactly the
-//!   `agents-api` / `data-machine` / `data-machine-code` / `wp-codebox` / WPSG
+//!   `agents-api` / `sample-component` / `workspace-registry` / `sample-runtime` / WPSG
 //!   ref under test.
 //! - Surface an **actionable preflight failure** when a required runtime
 //!   dependency cannot be resolved (missing path) or is stale (dirty working
@@ -48,11 +48,11 @@ pub const RUNTIME_DEPENDENCY_GRAPH_SCHEMA: &str = "homeboy/agent-task-runtime-de
 /// A single component dependency resolved and materialized at a known ref.
 ///
 /// Serialized into dispatch plan/task metadata so `homeboy runs evidence` and
-/// `agent-task status` surface exactly which `agents-api`, `data-machine`,
-/// `data-machine-code`, `wp-codebox`, and WPSG refs/paths a proof ran against.
+/// `agent-task status` surface exactly which `agents-api`, `sample-component`,
+/// `workspace-registry`, `sample-runtime`, and WPSG refs/paths a proof ran against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedRuntimeDependency {
-    /// Component slug (`agents-api`, `data-machine`, `wp-codebox`, `wpsg`, …).
+    /// Component slug (`agents-api`, `sample-component`, `sample-runtime`, `wpsg`, …).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
     /// Canonical absolute path of the materialized component checkout.
@@ -440,7 +440,7 @@ mod tests {
         let head = commit_file(repo.path(), "plugin.php", "<?php");
 
         let contracts = vec![contract(
-            "data-machine",
+            "sample-component",
             &repo.path().display().to_string(),
             Value::Null,
         )];
@@ -449,7 +449,7 @@ mod tests {
 
         assert_eq!(graph.dependencies.len(), 1);
         let dep = &graph.dependencies[0];
-        assert_eq!(dep.slug.as_deref(), Some("data-machine"));
+        assert_eq!(dep.slug.as_deref(), Some("sample-component"));
         assert_eq!(dep.resolved_ref.as_deref(), Some(head.as_str()));
         assert_eq!(dep.branch.as_deref(), Some("main"));
         assert!(dep.git_provenance);
@@ -487,7 +487,7 @@ mod tests {
         fs::write(repo.path().join("dirty.txt"), "dirty").expect("write dirty");
 
         let contracts = vec![contract(
-            "wp-codebox",
+            "sample-runtime",
             &repo.path().display().to_string(),
             Value::Null,
         )];
@@ -579,7 +579,7 @@ mod tests {
         commit_file(repo.path(), "a.txt", "a");
 
         let contracts = vec![contract(
-            "data-machine-code",
+            "workspace-registry",
             &repo.path().display().to_string(),
             Value::Null,
         )];
@@ -587,7 +587,7 @@ mod tests {
         let graph = resolve_runtime_dependency_graph(&contracts).expect("resolved graph");
         let value = graph.to_evidence_value();
         assert_eq!(value["schema"], RUNTIME_DEPENDENCY_GRAPH_SCHEMA);
-        assert_eq!(value["dependencies"][0]["slug"], "data-machine-code");
+        assert_eq!(value["dependencies"][0]["slug"], "workspace-registry");
         assert!(value["dependencies"][0]["git_provenance"]
             .as_bool()
             .unwrap());

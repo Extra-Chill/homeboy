@@ -1312,8 +1312,8 @@ mod tests {
             "version": "0.228.13",
             "runtime_paths": {
                 "stale": [{
-                    "env": "HOMEBOY_WP_CODEBOX_COMPONENT_PATH",
-                    "path": "/home/chubes/Developer/wp-codebox",
+                    "env": "HOMEBOY_SAMPLE_RUNTIME_COMPONENT_PATH",
+                    "path": "/home/chubes/Developer/sample-runtime",
                     "loaded_fingerprint": "files=10",
                     "current_fingerprint": "files=11"
                 }]
@@ -1321,7 +1321,7 @@ mod tests {
         }));
 
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].env, "HOMEBOY_WP_CODEBOX_COMPONENT_PATH");
+        assert_eq!(paths[0].env, "HOMEBOY_SAMPLE_RUNTIME_COMPONENT_PATH");
         assert_eq!(paths[0].loaded_fingerprint, "files=10");
         assert_eq!(paths[0].current_fingerprint, "files=11");
     }
@@ -1330,14 +1330,14 @@ mod tests {
     fn changed_runtime_paths_reports_runner_config_changes_since_daemon_start() {
         let mut runner_env = HashMap::new();
         runner_env.insert(
-            "HOMEBOY_WP_CODEBOX_COMPONENT_PATH".to_string(),
-            "/home/chubes/Developer/wp-codebox@new".to_string(),
+            "HOMEBOY_SAMPLE_RUNTIME_COMPONENT_PATH".to_string(),
+            "/home/chubes/Developer/sample-runtime@new".to_string(),
         );
         let loaded = daemon_runtime_loaded_paths_from_body(&serde_json::json!({
             "runtime_paths": {
                 "loaded": [{
-                    "env": "HOMEBOY_WP_CODEBOX_COMPONENT_PATH",
-                    "path": "/home/chubes/Developer/wp-codebox@old",
+                    "env": "HOMEBOY_SAMPLE_RUNTIME_COMPONENT_PATH",
+                    "path": "/home/chubes/Developer/sample-runtime@old",
                     "fingerprint": "files=10"
                 }]
             }
@@ -1346,14 +1346,14 @@ mod tests {
         let changed = changed_runtime_paths(&runner_env, &loaded);
 
         assert_eq!(changed.len(), 1);
-        assert_eq!(changed[0].env, "HOMEBOY_WP_CODEBOX_COMPONENT_PATH");
+        assert_eq!(changed[0].env, "HOMEBOY_SAMPLE_RUNTIME_COMPONENT_PATH");
         assert_eq!(
             changed[0].loaded_path.as_deref(),
-            Some("/home/chubes/Developer/wp-codebox@old")
+            Some("/home/chubes/Developer/sample-runtime@old")
         );
         assert_eq!(
             changed[0].configured_path.as_deref(),
-            Some("/home/chubes/Developer/wp-codebox@new")
+            Some("/home/chubes/Developer/sample-runtime@new")
         );
     }
 
@@ -1369,8 +1369,8 @@ mod tests {
         .with_runtime_paths(
             "homeboy-lab",
             vec![RunnerStaleRuntimePath {
-                env: "HOMEBOY_WP_CODEBOX_COMPONENT_PATH".to_string(),
-                path: "/home/chubes/Developer/wp-codebox".to_string(),
+                env: "HOMEBOY_SAMPLE_RUNTIME_COMPONENT_PATH".to_string(),
+                path: "/home/chubes/Developer/sample-runtime".to_string(),
                 loaded_fingerprint: "files=10".to_string(),
                 current_fingerprint: "files=11".to_string(),
             }],

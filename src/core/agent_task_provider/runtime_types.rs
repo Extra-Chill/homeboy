@@ -58,7 +58,7 @@ pub struct AgentTaskRuntimeStagingContract {
     pub remediation: Option<String>,
     /// When true (default), Homeboy validates staged plugins against this
     /// contract before dispatch. Set false to declare the contract for evidence
-    /// without enforcing the pre-dispatch gate (e.g. when WP Codebox owns the
+    /// without enforcing the pre-dispatch gate (e.g. when Managed Sandbox owns the
     /// authoritative readiness check and returns a structured result).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validate_before_dispatch: Option<bool>,
@@ -77,7 +77,7 @@ impl AgentTaskRuntimeStagingContract {
     /// Whether the pre-dispatch validation gate is enforced. Defaults to true
     /// when any reconciled package is declared, so declaring a package is enough
     /// to opt into the gate; an explicit `validate_before_dispatch: false`
-    /// records the contract for evidence/Codebox delegation without gating.
+    /// records the contract for evidence/Sandbox delegation without gating.
     pub fn enforces_pre_dispatch(&self) -> bool {
         self.validate_before_dispatch.unwrap_or(true) && !self.reconciled_packages.is_empty()
     }

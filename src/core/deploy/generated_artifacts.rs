@@ -283,7 +283,7 @@ mod tests {
             "generated",
         )
         .expect("dist artifact");
-        std::fs::write(dir.join("wp-codebox-workspace-0.9.0.tgz"), "package")
+        std::fs::write(dir.join("sample-runtime-workspace-0.9.0.tgz"), "package")
             .expect("package artifact");
         std::fs::create_dir_all(dir.join("runtime/generated-fixture")).expect("runtime artifact");
         std::fs::write(
@@ -311,7 +311,7 @@ mod tests {
             .contains(&"plugins/agentic-ui-block/app/tools/common/dist/".to_string()));
         assert!(report
             .known_generated
-            .contains(&"wp-codebox-workspace-0.9.0.tgz".to_string()));
+            .contains(&"sample-runtime-workspace-0.9.0.tgz".to_string()));
         assert!(report
             .known_generated
             .contains(&"runtime/generated-fixture/".to_string()));

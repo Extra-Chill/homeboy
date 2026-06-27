@@ -576,8 +576,8 @@ fn stale_runtime_path_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
     .with_runtime_paths(
         runner_id,
         vec![RunnerStaleRuntimePath {
-            env: "HOMEBOY_WP_CODEBOX_COMPONENT_PATH".to_string(),
-            path: "/home/chubes/Developer/wp-codebox".to_string(),
+            env: "HOMEBOY_SAMPLE_RUNTIME_COMPONENT_PATH".to_string(),
+            path: "/home/chubes/Developer/sample-runtime".to_string(),
             loaded_fingerprint: "files=10".to_string(),
             current_fingerprint: "files=11".to_string(),
         }],

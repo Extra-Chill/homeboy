@@ -4,7 +4,6 @@ use homeboy::core::runners::{self as runner};
 use homeboy::core::server::RunnerSecretEnvRef;
 
 use super::super::CmdResult;
-use super::status::declared_tool_diagnostics_for_legacy;
 use super::types::{
     RunnerEnvDiagnostics, RunnerEnvOutput, RunnerSecretEnvReferenceOutput, REDACTED_ENV_VALUE,
 };
@@ -19,8 +18,13 @@ pub(super) fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
         .map(|key| (key, REDACTED_ENV_VALUE.to_string()))
         .collect();
 
-    let wp_codebox =
-        declared_tool_diagnostics_for_legacy("wp_codebox", Some(runner_id), &diagnostic_env);
+    let selected_tool = super::status::declared_diagnostics_contracts()
+        .iter()
+        .flat_map(|contract| contract.tools.iter())
+        .next()
+        .map(|declaration| {
+            super::status::declared_tool_diagnostics(declaration, Some(runner_id), &diagnostic_env)
+        });
 
     let secret_env = runner
         .secret_env
@@ -40,7 +44,7 @@ pub(super) fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "Use `homeboy ssh <server> -- printenv NAME` to inspect the server login shell environment; it does not include runner job env by default.".to_string(),
                 runner_job_env: "This output shows configured public env Homeboy injects into runner jobs. secret_env entries are shown as refs only; their values resolve on the runner at execution time and are never printed here.".to_string(),
-                wp_codebox,
+                selected_tool,
             },
         },
         0,

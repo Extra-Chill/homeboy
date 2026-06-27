@@ -271,7 +271,7 @@ Bench artifacts can attach a `viewer` descriptor when a file artifact has a
 browser-based reviewer view. Homeboy keeps link generation generic: descriptors
 name the viewer kind, base URL, and query parameter whose value is the public
 artifact URL. Built-in viewer descriptors live in `core::artifact_links` so new
-viewer families, such as Codebox artifact viewers, can be added without
+viewer families, such as Sandbox artifact viewers, can be added without
 duplicating URL construction at call sites.
 
 The command is read-only and exits successfully for a valid comparison even when the numbers regress. Repeat `--metric <name>` to keep the comparison focused; omit it to compare all shared numeric scenario metrics.

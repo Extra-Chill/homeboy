@@ -779,7 +779,7 @@ fn dmc_add_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) -> Vec<Str
     vec![
         args.dmc_bin.clone(),
         "wp".to_string(),
-        "datamachine-code".to_string(),
+        "workspace-registry".to_string(),
         "workspace".to_string(),
         "worktree".to_string(),
         "add".to_string(),
@@ -1020,8 +1020,8 @@ mod tests {
             branch_prefix: "fix".to_string(),
             fanout_id: Some("issue-wave".to_string()),
             prompt_template: None,
-            backend: Some("codebox".to_string()),
-            selector: Some("wordpress.codebox-agent-task-executor".to_string()),
+            backend: Some("sandbox".to_string()),
+            selector: Some("wordpress.sandbox-agent-task-executor".to_string()),
             model: Some("gpt-5.5".to_string()),
             secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_TOKEN".to_string()],
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),
@@ -1059,7 +1059,7 @@ mod tests {
             .expect("prompt")
             .contains("https://github.com/Extra-Chill/homeboy/issues/6453"));
         assert_eq!(plan.cooks[0].verify, vec!["cargo test --lib"]);
-        assert_eq!(plan.cooks[0].backend.as_deref(), Some("codebox"));
+        assert_eq!(plan.cooks[0].backend.as_deref(), Some("sandbox"));
     }
 
     #[test]

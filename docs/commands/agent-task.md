@@ -86,8 +86,8 @@ one structured status envelope with the generated plan plus resume commands.
 homeboy agent-task fanout cook-batch \
   --repo homeboy \
   --verify 'cargo test --lib' \
-  --backend codebox \
-  --selector wordpress.codebox-agent-task-executor \
+  --backend sandbox \
+  --selector wordpress.sandbox-agent-task-executor \
   https://github.com/Extra-Chill/homeboy/issues/6453 \
   https://github.com/Extra-Chill/homeboy/issues/6454
 ```

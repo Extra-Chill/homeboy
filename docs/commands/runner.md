@@ -158,10 +158,10 @@ arguments, and install hint. Homeboy owns the generic semantics: runtimes declar
 the executable they need; runner diagnostics expose the declaration without
 embedding product-specific checks in core.
 
-`runner status` also includes `selected_lab_runner.wp_codebox_runtime` for the
+`runner status` also includes `selected_lab_runner.selected_runtime_runtime` for the
 legacy runner job environment projection. That block shows the configured WP
-Codebox CLI, managed cache source/binary, expected
-`@automattic/wp-codebox-playground` and `@automattic/wp-codebox-core` paths, a
+Sandbox CLI, managed cache source/binary, expected
+`@automattic/sample-runtime-playground` and `@automattic/sample-runtime-core` paths, a
 runner-side probe command that prints the exact effective runtime and git SHA,
 and warnings when configured paths mix a stale checkout with the managed cache.
 

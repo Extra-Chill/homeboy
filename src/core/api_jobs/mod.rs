@@ -687,8 +687,8 @@ mod tests {
         let store = JobStore::default();
         let mut first = remote_runner_request("homeboy-lab", Some("extrachill"));
         first.env.insert(
-            "STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH".to_string(),
-            "/tmp/wp-codebox".to_string(),
+            "STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH".to_string(),
+            "/tmp/sample-runtime".to_string(),
         );
         let second = remote_runner_request("homeboy-lab", Some("extrachill"));
 
@@ -712,13 +712,13 @@ mod tests {
             first_claim
                 .request
                 .env
-                .get("STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH"),
-            Some(&"/tmp/wp-codebox".to_string())
+                .get("STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH"),
+            Some(&"/tmp/sample-runtime".to_string())
         );
         assert!(!second_claim
             .request
             .env
-            .contains_key("STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH"));
+            .contains_key("STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH"));
     }
 
     #[test]

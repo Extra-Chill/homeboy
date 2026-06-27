@@ -248,9 +248,9 @@ mod install_flows {
         let _home = HomeGuard::new();
         let repo = tempfile::tempdir().expect("repo");
         let nested = repo.path().join("WordPress/static-site-importer");
-        fs::create_dir_all(repo.path().join("shared/wp-codebox")).expect("shared dir");
+        fs::create_dir_all(repo.path().join("shared/sample-runtime")).expect("shared dir");
         fs::write(
-            repo.path().join("shared/wp-codebox/recipe.mjs"),
+            repo.path().join("shared/sample-runtime/recipe.mjs"),
             "export default {};\n",
         )
         .expect("shared recipe");
@@ -259,7 +259,7 @@ mod install_flows {
             "static-site-importer-fixture-matrix",
             r#"{
                 "id": "static-site-importer-fixture-matrix",
-                "package_dependencies": ["../../shared/wp-codebox"],
+                "package_dependencies": ["../../shared/sample-runtime"],
                 "bench_workloads": {
                     "static-site-importer": [
                         { "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs" }
@@ -293,9 +293,9 @@ mod install_flows {
             .path()
             .join("_lab_workspaces/homeboy-rigs-fixture-123");
         let nested = snapshot.join("WordPress/static-site-importer");
-        fs::create_dir_all(snapshot.join("shared/wp-codebox")).expect("shared dir");
+        fs::create_dir_all(snapshot.join("shared/sample-runtime")).expect("shared dir");
         fs::write(
-            snapshot.join("shared/wp-codebox/recipe.mjs"),
+            snapshot.join("shared/sample-runtime/recipe.mjs"),
             "export default {};\n",
         )
         .expect("shared recipe");
@@ -304,7 +304,7 @@ mod install_flows {
             "static-site-importer-fixture-matrix",
             r#"{
                 "id": "static-site-importer-fixture-matrix",
-                "package_dependencies": ["../../shared/wp-codebox"],
+                "package_dependencies": ["../../shared/sample-runtime"],
                 "bench_workloads": {
                     "static-site-importer": [
                         { "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs" }

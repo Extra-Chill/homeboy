@@ -8,16 +8,16 @@ fn test_scan() -> ResolvedFieldScan {
     ResolvedFieldScan {
         scan_tokens: vec![
             "rs".to_string(),
-            "php".to_string(),
+            "cls".to_string(),
             "ts".to_string(),
             "js".to_string(),
             "go".to_string(),
         ],
-        type_before_name_tokens: vec!["php".to_string()],
+        type_before_name_tokens: vec!["cls".to_string()],
         inline_test_strip_tokens: vec!["rs".to_string()],
         test_file_suffixes: vec![
             "_test.rs".to_string(),
-            "_test.php".to_string(),
+            "_test.cls".to_string(),
             ".test.ts".to_string(),
             ".test.js".to_string(),
         ],
@@ -34,7 +34,7 @@ fn snapshot_of(root: &std::path::Path) -> CodebaseSnapshot {
         &ScanConfig {
             extensions: ExtensionFilter::Only(vec![
                 "rs".to_string(),
-                "php".to_string(),
+                "cls".to_string(),
                 "ts".to_string(),
                 "js".to_string(),
                 "go".to_string(),
@@ -128,7 +128,7 @@ impl Foo {
 }
 
 #[test]
-fn skips_call_arguments_inside_php_methods() {
+fn skips_call_arguments_inside_type_before_name_methods() {
     let content = r#"
 class AIStep {
     public static function register(): void {
@@ -141,7 +141,7 @@ class AIStep {
 }
 "#;
 
-    let structs = extract_structs(content, "test.php", FieldSyntax::TypeBeforeName);
+    let structs = extract_structs(content, "test.cls", FieldSyntax::TypeBeforeName);
     assert!(
         structs.is_empty(),
         "call-site named arguments inside methods should not create field-bearing structs"
@@ -149,7 +149,7 @@ class AIStep {
 }
 
 #[test]
-fn extracts_php_class_properties_without_named_arguments() {
+fn extracts_type_before_name_class_properties_without_named_arguments() {
     let content = r#"
 class Config {
     public string $label;
@@ -164,7 +164,7 @@ class Config {
 }
 "#;
 
-    let structs = extract_structs(content, "test.php", FieldSyntax::TypeBeforeName);
+    let structs = extract_structs(content, "test.cls", FieldSyntax::TypeBeforeName);
     assert_eq!(structs.len(), 1);
     assert_eq!(structs[0].fields.len(), 2);
     assert_eq!(structs[0].fields[0].name, "label");
@@ -174,12 +174,12 @@ class Config {
 }
 
 #[test]
-fn does_not_report_repeated_php_presentation_or_command_call_shapes() {
+fn does_not_report_repeated_type_before_name_presentation_or_command_call_shapes() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
 
-    for name in &["callback.php", "authorize.php", "webhook.php"] {
+    for name in &["callback.cls", "authorize.cls", "webhook.cls"] {
         std::fs::write(
             src.join(name),
             format!(
@@ -194,7 +194,7 @@ class {} {{
     }}
 }}
 "#,
-                name.replace(".php", "").to_uppercase()
+                name.replace(".cls", "").to_uppercase()
             ),
         )
         .unwrap();
@@ -255,12 +255,12 @@ class Widget {
 }
 
 #[test]
-fn does_not_report_repeated_php_self_registration_arguments() {
+fn does_not_report_repeated_type_before_name_self_registration_arguments() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
 
-    for name in &["ai.php", "fetch.php", "publish.php"] {
+    for name in &["ai.cls", "fetch.cls", "publish.cls"] {
         std::fs::write(
             src.join(name),
             format!(
@@ -274,7 +274,7 @@ class {} {{
     }}
 }}
 "#,
-                name.replace(".php", "").to_uppercase()
+                name.replace(".cls", "").to_uppercase()
             ),
         )
         .unwrap();
@@ -283,7 +283,7 @@ class {} {{
     let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
     assert!(
         findings.is_empty(),
-        "PHP self::class registration arguments should not be reported as fields"
+        "self::class registration arguments should not be reported as fields"
     );
 }
 

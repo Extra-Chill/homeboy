@@ -45,7 +45,7 @@ pub struct StagingReconciliationConflict {
 }
 
 /// Structured readiness outcome of reconciling a staged plugin against the
-/// runtime staging contract. Mirrors the shape a runtime/Codebox can return so
+/// runtime staging contract. Mirrors the shape a runtime/Sandbox can return so
 /// Homeboy can either compute readiness itself or accept a structured result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct StagingReadiness {
@@ -327,7 +327,7 @@ mod tests {
             ..AgentTaskRuntimeStagingContract::default()
         };
 
-        // Codebox-delegated readiness: the contract is recorded and conflicts are
+        // Sandbox-delegated readiness: the contract is recorded and conflicts are
         // still computed for evidence, but Homeboy does not hard-gate dispatch.
         let readiness = ensure_staged_plugins_reconciled(
             &contract,

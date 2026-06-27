@@ -80,12 +80,12 @@ fn required_extension_ids_follow_selected_agent_task_providers() {
 fn lab_runtime_component_ids_follow_selected_agent_task_providers() {
     let (request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
     provider_a.id = "provider-a".to_string();
-    provider_a.lab_runtime_components = vec!["agents-api".to_string(), "data-machine".to_string()];
+    provider_a.lab_runtime_components = vec!["agents-api".to_string(), "sample-component".to_string()];
     let (mut request_b, mut provider_b) = request("task-b", "node provider-b.js".to_string());
     request_b.executor.selector = Some("provider-b".to_string());
     provider_b.id = "provider-b".to_string();
     provider_b.lab_runtime_components =
-        vec!["data-machine".to_string(), "php-ai-client".to_string()];
+        vec!["sample-component".to_string(), "php-ai-client".to_string()];
     let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
 
     let component_ids = executor.lab_runtime_component_ids_for_plan(&AgentTaskPlan::new(
@@ -95,7 +95,7 @@ fn lab_runtime_component_ids_follow_selected_agent_task_providers() {
 
     assert_eq!(
         component_ids,
-        vec!["agents-api", "data-machine", "php-ai-client"]
+        vec!["agents-api", "sample-component", "php-ai-client"]
     );
 }
 
@@ -419,7 +419,7 @@ fn provider_manifest_parses_runner_and_dependency_contracts() {
             "error_contains_any": ["enoent", "no such file or directory"],
             "remediation": "Refresh prepared dependencies."
         }],
-        "lab_runtime_components": ["agents-api", "data-machine"]
+        "lab_runtime_components": ["agents-api", "sample-component"]
     }))
     .expect("provider manifest");
 
@@ -438,7 +438,7 @@ fn provider_manifest_parses_runner_and_dependency_contracts() {
     );
     assert_eq!(
         provider.lab_runtime_components,
-        vec!["agents-api", "data-machine"]
+        vec!["agents-api", "sample-component"]
     );
 }
 

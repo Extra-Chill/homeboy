@@ -155,12 +155,12 @@ mod tests {
     #[test]
     fn settings_env_adds_shell_safe_dotted_keys() {
         let env = settings_env(&[(
-            "components.woocommerce.extensions.wordpress.wp_codebox_source_root".to_string(),
+            "components.woocommerce.extensions.wordpress.selected_runtime_source_root".to_string(),
             "/workspace/source".to_string(),
         )]);
 
         assert!(env.iter().any(|(key, value)| {
-            key == "HOMEBOY_SETTINGS_COMPONENTS_WOOCOMMERCE_EXTENSIONS_WORDPRESS_WP_CODEBOX_SOURCE_ROOT"
+            key == "HOMEBOY_SETTINGS_COMPONENTS_WOOCOMMERCE_EXTENSIONS_WORDPRESS_SAMPLE_RUNTIME_SOURCE_ROOT"
                 && value == "/workspace/source"
         }));
     }

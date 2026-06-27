@@ -482,7 +482,7 @@ pub fn plan_from_spec(request: ControllerPlanRequest) -> Result<ControllerPlanRe
 /// spec's workflows and `artifact_flow` (artifact_graph) edges, validates task
 /// bindings against those edges, and represents Homeboy-owned runtime artifacts
 /// (e.g. `static_validation_run`) as synthetic runtime stages so downstream
-/// callers never hard-code Homeboy/Codebox internals. No controller state is
+/// callers never hard-code Homeboy/Sandbox internals. No controller state is
 /// written.
 pub fn compile_plan_from_spec(
     request: ControllerPlanRequest,

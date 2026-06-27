@@ -132,39 +132,39 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
 }
 
 #[test]
-fn wp_codebox_diagnostics_distinguish_configured_managed_and_effective() {
-    let declaration = wp_codebox_tool_declaration();
+fn selected_runtime_diagnostics_distinguish_configured_managed_and_effective() {
+    let declaration = selected_runtime_tool_declaration();
     let diagnostics = declared_tool_diagnostics(
         &declaration,
         Some("homeboy-lab"),
         &BTreeMap::from([
             (
-                "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-                "/stale/wp-codebox/packages/cli/dist/index.js".to_string(),
+                "HOMEBOY_SAMPLE_RUNTIME_BIN".to_string(),
+                "/stale/sample-runtime/packages/cli/dist/index.js".to_string(),
             ),
             (
-                "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
-                "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+                "HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string(),
+                "/home/chubes/.cache/homeboy/sample-runtime".to_string(),
             ),
         ]),
     );
 
-    assert_eq!(diagnostics.tool, "wp-codebox");
+    assert_eq!(diagnostics.tool, "sample-runtime");
     assert_eq!(
         diagnostics.configured_binary.as_deref(),
-        Some("/stale/wp-codebox/packages/cli/dist/index.js")
+        Some("/stale/sample-runtime/packages/cli/dist/index.js")
     );
     assert_eq!(
         diagnostics.configured_binary_source,
-        "HOMEBOY_WP_CODEBOX_BIN"
+        "HOMEBOY_SAMPLE_RUNTIME_BIN"
     );
     assert_eq!(
         diagnostics.managed_cache_source,
-        "/home/chubes/.cache/homeboy/wp-codebox/source"
+        "/home/chubes/.cache/homeboy/sample-runtime/source"
     );
     assert_eq!(
         diagnostics.managed_cache_binary,
-        "/home/chubes/.cache/homeboy/wp-codebox/source/packages/cli/dist/index.js"
+        "/home/chubes/.cache/homeboy/sample-runtime/source/packages/cli/dist/index.js"
     );
     assert!(diagnostics
         .effective_binary_rule
@@ -176,31 +176,31 @@ fn wp_codebox_diagnostics_distinguish_configured_managed_and_effective() {
 
 #[test]
 fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warnings() {
-    let declaration = wp_codebox_runtime_declaration();
+    let declaration = sample_runtime_declaration();
     let runtime = declared_runtime_diagnostics(
         &declaration,
         Some("homeboy-lab"),
         &BTreeMap::from([
             (
-                "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-                "/stale/wp-codebox/packages/cli/dist/index.js".to_string(),
+                "HOMEBOY_SAMPLE_RUNTIME_BIN".to_string(),
+                "/stale/sample-runtime/packages/cli/dist/index.js".to_string(),
             ),
             (
-                "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
-                "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+                "HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string(),
+                "/home/chubes/.cache/homeboy/sample-runtime".to_string(),
             ),
             (
-                "HOMEBOY_WP_CODEBOX_CORE_MODULE".to_string(),
-                "/other/wp-codebox/packages/core/dist/index.js".to_string(),
+                "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
+                "/other/sample-runtime/packages/core/dist/index.js".to_string(),
             ),
         ]),
     );
 
-    assert_eq!(runtime.runtime, "wp-codebox");
-    assert_eq!(runtime.legacy_output.as_deref(), Some("wp_codebox_runtime"));
+    assert_eq!(runtime.runtime, "sample-runtime");
+    assert_eq!(runtime.legacy_output.as_deref(), Some("sample_runtime"));
     assert_eq!(
         runtime.managed_cache_source,
-        "/home/chubes/.cache/homeboy/wp-codebox/source"
+        "/home/chubes/.cache/homeboy/sample-runtime/source"
     );
     let playground_package = runtime
         .packages
@@ -209,21 +209,21 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
         .expect("playground package diagnostics");
     assert_eq!(
         playground_package.package,
-        "@automattic/wp-codebox-playground"
+        "@automattic/sample-runtime-playground"
     );
     assert_eq!(
         playground_package.expected_path,
-        "/home/chubes/.cache/homeboy/wp-codebox/source/packages/playground"
+        "/home/chubes/.cache/homeboy/sample-runtime/source/packages/playground"
     );
     let core_package = runtime
         .packages
         .iter()
         .find(|package| package.field == "core_package")
         .expect("core package diagnostics");
-    assert_eq!(core_package.package, "@automattic/wp-codebox-core");
+    assert_eq!(core_package.package, "@automattic/sample-runtime-core");
     assert_eq!(
         core_package.expected_path,
-        "/other/wp-codebox/packages/core/dist/index.js"
+        "/other/sample-runtime/packages/core/dist/index.js"
     );
     assert_eq!(
         runtime
@@ -243,65 +243,65 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
     );
     assert!(runtime
         .runtime_probe_command
-        .contains("@automattic/wp-codebox-playground"));
+        .contains("@automattic/sample-runtime-playground"));
     assert!(runtime
         .runtime_probe_command
         .contains("dist_build_freshness=%s"));
     assert!(runtime
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.id == "wp_codebox.mixed_cli_source"));
+        .any(|diagnostic| diagnostic.id == "selected_runtime.mixed_cli_source"));
     assert!(runtime
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.id == "wp_codebox.mixed_core_source"));
+        .any(|diagnostic| diagnostic.id == "selected_runtime.mixed_core_source"));
 }
 
 #[test]
-fn declared_runtime_legacy_projection_preserves_wp_codebox_status_shape() {
+fn declared_runtime_legacy_projection_preserves_selected_runtime_status_shape() {
     let runtime = declared_runtime_diagnostics_for_legacy(
-        "wp_codebox_runtime",
+        "sample_runtime",
         Some("homeboy-lab"),
         &BTreeMap::from([(
-            "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
-            "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+            "HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string(),
+            "/home/chubes/.cache/homeboy/sample-runtime".to_string(),
         )]),
     );
 
-    let runtime = runtime.expect("catalog declares legacy wp_codebox_runtime projection");
-    assert_eq!(runtime.tool, "wp-codebox");
+    let runtime = runtime.expect("catalog declares legacy sample runtime projection");
+    assert_eq!(runtime.tool, "sample-runtime");
     assert_eq!(
         runtime.playground_package.package,
-        "@automattic/wp-codebox-playground"
+        "@automattic/sample-runtime-playground"
     );
     assert_eq!(runtime.source_git_sha.source, "runtime_probe_command");
 
     let generic = declared_runtime_diagnostics(
-        &wp_codebox_runtime_declaration(),
+        &sample_runtime_declaration(),
         Some("homeboy-lab"),
         &BTreeMap::from([(
-            "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
-            "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+            "HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string(),
+            "/home/chubes/.cache/homeboy/sample-runtime".to_string(),
         )]),
     );
     let serialized = serde_json::to_string(&generic).expect("serialize generic diagnostics");
 
-    assert!(serialized.contains("\"runtime\":\"wp-codebox\""));
+    assert!(serialized.contains("\"runtime\":\"sample-runtime\""));
     assert!(serialized.contains("\"packages\""));
     assert!(!serialized.contains("\"playground_package\":{"));
 }
 
 #[test]
-fn wp_codebox_runtime_diagnostics_accept_single_managed_checkout() {
+fn sample_runtime_diagnostics_accept_single_managed_checkout() {
     let diagnostics = declared_runtime_source_diagnostics(
-        &wp_codebox_runtime_declaration().source_consistency,
+        &sample_runtime_declaration().source_consistency,
         &BTreeMap::from([(
-            "HOMEBOY_WP_CODEBOX_CORE_MODULE".to_string(),
-            "/cache/wp-codebox/source/packages/core/dist/index.js".to_string(),
+            "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
+            "/cache/sample-runtime/source/packages/core/dist/index.js".to_string(),
         )]),
-        Some("/cache/wp-codebox/source/packages/cli/dist/index.js"),
-        "/cache/wp-codebox",
-        "/cache/wp-codebox/source",
+        Some("/cache/sample-runtime/source/packages/cli/dist/index.js"),
+        "/cache/sample-runtime",
+        "/cache/sample-runtime/source",
     );
 
     assert!(diagnostics.is_empty());
@@ -327,8 +327,8 @@ fn unknown_runtime_declaration_does_not_emit_wp_specific_guidance() {
     let serialized = serde_json::to_string(&diagnostics).expect("serialize diagnostics");
 
     assert!(serialized.contains("other-runtime"));
-    assert!(!serialized.contains("wp-codebox"));
-    assert!(!serialized.contains("HOMEBOY_WP_CODEBOX"));
+    assert!(!serialized.contains("sample-runtime"));
+    assert!(!serialized.contains("HOMEBOY_SAMPLE_RUNTIME"));
 }
 
 #[test]
@@ -355,7 +355,7 @@ fn declared_executable_requirement_status_projection_is_generic() {
     assert_eq!(diagnostics.diagnostic_state, "declared");
     let serialized = serde_json::to_string(&diagnostics).expect("serialize diagnostics");
     assert!(serialized.contains("example-runtime"));
-    assert!(!serialized.contains("wp-codebox"));
+    assert!(!serialized.contains("sample-runtime"));
 }
 
 #[test]
@@ -511,36 +511,36 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
     assert_eq!(output.active_daemon_version.as_deref(), Some("0.262.0"));
 }
 
-fn wp_codebox_tool_declaration() -> AgentRuntimeToolDiagnosticDeclaration {
+fn selected_runtime_tool_declaration() -> AgentRuntimeToolDiagnosticDeclaration {
     AgentRuntimeToolDiagnosticDeclaration {
-        tool: "wp-codebox".to_string(),
-        legacy_output: Some("wp_codebox".to_string()),
+        tool: "sample-runtime".to_string(),
+        legacy_output: Some("selected_runtime".to_string()),
         configured_binary_env: vec![
-            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-            "HOMEBOY_SETTINGS_WP_CODEBOX_BIN".to_string(),
+            "HOMEBOY_SAMPLE_RUNTIME_BIN".to_string(),
+            "HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN".to_string(),
         ],
-        install_dir_env: Some("HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string()),
-        default_install_dir: Some("${HOME}/.cache/homeboy/wp-codebox".to_string()),
+        install_dir_env: Some("HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string()),
+        default_install_dir: Some("${HOME}/.cache/homeboy/sample-runtime".to_string()),
         managed_cache_source: "${install_dir}/source".to_string(),
         managed_cache_binary: "${managed_cache_source}/packages/cli/dist/index.js".to_string(),
         effective_binary_rule:
             "managed cache binary wins when executable; otherwise configured binary, then PATH"
                 .to_string(),
-        diagnostic_script: "configured=${HOMEBOY_WP_CODEBOX_BIN:-${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}}; install_dir=${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-$HOME/.cache/homeboy/wp-codebox}; managed_source=$install_dir/source; managed_binary=$managed_source/packages/cli/dist/index.js; if [ -x \"$managed_binary\" ]; then effective=$managed_binary; source=managed_cache; elif [ -n \"$configured\" ]; then effective=$configured; source=configured; else effective=$(command -v wp-codebox 2>/dev/null || true); source=path; fi; revision=$(git -C \"$managed_source\" rev-parse --short HEAD 2>/dev/null || true); printf 'configured_binary=%s\nmanaged_cache_source=%s\nmanaged_cache_binary=%s\neffective_binary=%s\neffective_source=%s\nmanaged_cache_revision=%s\n' \"${configured:-}\" \"$managed_source\" \"$managed_binary\" \"${effective:-}\" \"$source\" \"${revision:-}\"".to_string(),
+        diagnostic_script: "configured=${HOMEBOY_SAMPLE_RUNTIME_BIN:-${HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN:-}}; install_dir=${HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR:-$HOME/.cache/homeboy/sample-runtime}; managed_source=$install_dir/source; managed_binary=$managed_source/packages/cli/dist/index.js; if [ -x \"$managed_binary\" ]; then effective=$managed_binary; source=managed_cache; elif [ -n \"$configured\" ]; then effective=$configured; source=configured; else effective=$(command -v sample-runtime 2>/dev/null || true); source=path; fi; revision=$(git -C \"$managed_source\" rev-parse --short HEAD 2>/dev/null || true); printf 'configured_binary=%s\nmanaged_cache_source=%s\nmanaged_cache_binary=%s\neffective_binary=%s\neffective_source=%s\nmanaged_cache_revision=%s\n' \"${configured:-}\" \"$managed_source\" \"$managed_binary\" \"${effective:-}\" \"$source\" \"${revision:-}\"".to_string(),
         extra: BTreeMap::new(),
     }
 }
 
-fn wp_codebox_runtime_declaration() -> AgentRuntimeRuntimeDiagnosticDeclaration {
+fn sample_runtime_declaration() -> AgentRuntimeRuntimeDiagnosticDeclaration {
     AgentRuntimeRuntimeDiagnosticDeclaration {
-        tool: "wp-codebox".to_string(),
-        legacy_output: Some("wp_codebox_runtime".to_string()),
+        tool: "sample-runtime".to_string(),
+        legacy_output: Some("sample_runtime".to_string()),
         configured_binary_env: vec![
-            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-            "HOMEBOY_SETTINGS_WP_CODEBOX_BIN".to_string(),
+            "HOMEBOY_SAMPLE_RUNTIME_BIN".to_string(),
+            "HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN".to_string(),
         ],
-        install_dir_env: Some("HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string()),
-        default_install_dir: Some("${HOME}/.cache/homeboy/wp-codebox".to_string()),
+        install_dir_env: Some("HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string()),
+        default_install_dir: Some("${HOME}/.cache/homeboy/sample-runtime".to_string()),
         managed_cache_source: "${install_dir}/source".to_string(),
         managed_cache_binary: "${managed_cache_source}/packages/cli/dist/index.js".to_string(),
         effective_binary_rule:
@@ -549,15 +549,15 @@ fn wp_codebox_runtime_declaration() -> AgentRuntimeRuntimeDiagnosticDeclaration 
         packages: vec![
             AgentRuntimePackageDiagnosticDeclaration {
                 field: "playground_package".to_string(),
-                package: "@automattic/wp-codebox-playground".to_string(),
+                package: "@automattic/sample-runtime-playground".to_string(),
                 expected_path: "${managed_cache_source}/packages/playground".to_string(),
                 env_override: None,
             },
             AgentRuntimePackageDiagnosticDeclaration {
                 field: "core_package".to_string(),
-                package: "@automattic/wp-codebox-core".to_string(),
+                package: "@automattic/sample-runtime-core".to_string(),
                 expected_path: "${managed_cache_source}/packages/core".to_string(),
-                env_override: Some("HOMEBOY_WP_CODEBOX_CORE_MODULE".to_string()),
+                env_override: Some("HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string()),
             },
         ],
         probes: vec![
@@ -570,23 +570,23 @@ fn wp_codebox_runtime_declaration() -> AgentRuntimeRuntimeDiagnosticDeclaration 
                 source: "runtime_probe_command".to_string(),
             },
         ],
-        runtime_probe_script: "configured=${HOMEBOY_WP_CODEBOX_BIN:-${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}}; install_dir=${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-$HOME/.cache/homeboy/wp-codebox}; managed_source=$install_dir/source; managed_binary=$managed_source/packages/cli/dist/index.js; if [ -x \"$managed_binary\" ]; then effective=$managed_binary; source=managed_cache; elif [ -n \"$configured\" ]; then effective=$configured; source=configured; else effective=$(command -v wp-codebox 2>/dev/null || true); source=path; fi; resolve_pkg() { node -e 'const path=require(\"path\"); try { const p=require.resolve(process.argv[2] + \"/package.json\", { paths: [process.argv[1]] }); process.stdout.write(path.dirname(p)); } catch (error) {}' \"$managed_source\" \"$1\" 2>/dev/null || true; }; playground=$(resolve_pkg @automattic/wp-codebox-playground); core=$(resolve_pkg @automattic/wp-codebox-core); if [ -z \"$core\" ] && [ -n \"${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}\" ]; then core=$HOMEBOY_WP_CODEBOX_CORE_MODULE; fi; revision=$(git -C \"$managed_source\" rev-parse HEAD 2>/dev/null || true); if [ ! -e \"$managed_binary\" ]; then dist_state=missing; elif find \"$managed_source/packages/cli/src\" -type f -newer \"$managed_binary\" 2>/dev/null | read newer; then dist_state=stale; else dist_state=fresh; fi; printf 'cli_binary=%s\ncli_binary_source=%s\nmanaged_cache_source=%s\nmanaged_cache_binary=%s\nplayground_path=%s\ncore_path=%s\nsource_git_sha=%s\ndist_build_freshness=%s\n' \"${effective:-}\" \"$source\" \"$managed_source\" \"$managed_binary\" \"${playground:-}\" \"${core:-}\" \"${revision:-}\" \"$dist_state\"".to_string(),
+        runtime_probe_script: "configured=${HOMEBOY_SAMPLE_RUNTIME_BIN:-${HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN:-}}; install_dir=${HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR:-$HOME/.cache/homeboy/sample-runtime}; managed_source=$install_dir/source; managed_binary=$managed_source/packages/cli/dist/index.js; if [ -x \"$managed_binary\" ]; then effective=$managed_binary; source=managed_cache; elif [ -n \"$configured\" ]; then effective=$configured; source=configured; else effective=$(command -v sample-runtime 2>/dev/null || true); source=path; fi; resolve_pkg() { node -e 'const path=require(\"path\"); try { const p=require.resolve(process.argv[2] + \"/package.json\", { paths: [process.argv[1]] }); process.stdout.write(path.dirname(p)); } catch (error) {}' \"$managed_source\" \"$1\" 2>/dev/null || true; }; playground=$(resolve_pkg @automattic/sample-runtime-playground); core=$(resolve_pkg @automattic/sample-runtime-core); if [ -z \"$core\" ] && [ -n \"${HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE:-}\" ]; then core=$HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE; fi; revision=$(git -C \"$managed_source\" rev-parse HEAD 2>/dev/null || true); if [ ! -e \"$managed_binary\" ]; then dist_state=missing; elif find \"$managed_source/packages/cli/src\" -type f -newer \"$managed_binary\" 2>/dev/null | read newer; then dist_state=stale; else dist_state=fresh; fi; printf 'cli_binary=%s\ncli_binary_source=%s\nmanaged_cache_source=%s\nmanaged_cache_binary=%s\nplayground_path=%s\ncore_path=%s\nsource_git_sha=%s\ndist_build_freshness=%s\n' \"${effective:-}\" \"$source\" \"$managed_source\" \"$managed_binary\" \"${playground:-}\" \"${core:-}\" \"${revision:-}\" \"$dist_state\"".to_string(),
         source_consistency: vec![
             AgentRuntimeSourceConsistencyDiagnostic {
-                id: "wp_codebox.mixed_cli_source".to_string(),
+                id: "selected_runtime.mixed_cli_source".to_string(),
                 severity: "warning".to_string(),
                 path: "configured_binary".to_string(),
                 root: "${managed_cache_source}".to_string(),
-                message: "Configured WP Codebox CLI `${path}` is outside managed cache `${root}`; runner jobs may mix a stale CLI with managed package sources.".to_string(),
-                remediation: "Unset HOMEBOY_WP_CODEBOX_BIN/HOMEBOY_SETTINGS_WP_CODEBOX_BIN or point it at the managed cache binary reported here.".to_string(),
+                message: "Configured Managed Sandbox CLI `${path}` is outside managed cache `${root}`; runner jobs may mix a stale CLI with managed package sources.".to_string(),
+                remediation: "Unset HOMEBOY_SAMPLE_RUNTIME_BIN/HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN or point it at the managed cache binary reported here.".to_string(),
             },
             AgentRuntimeSourceConsistencyDiagnostic {
-                id: "wp_codebox.mixed_core_source".to_string(),
+                id: "selected_runtime.mixed_core_source".to_string(),
                 severity: "warning".to_string(),
-                path: "HOMEBOY_WP_CODEBOX_CORE_MODULE".to_string(),
+                path: "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
                 root: "${managed_cache_source}".to_string(),
-                message: "Resolved WP Codebox core path `${path}` is outside managed cache `${root}`; runner jobs may mix core and playground builds.".to_string(),
-                remediation: "Refresh the WordPress extension setup/runtime env so HOMEBOY_WP_CODEBOX_CORE_MODULE resolves from the same managed WP Codebox checkout used by the CLI.".to_string(),
+                message: "Resolved Managed Sandbox core path `${path}` is outside managed cache `${root}`; runner jobs may mix core and playground builds.".to_string(),
+                remediation: "Refresh the extension setup/runtime env so HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE resolves from the same managed sandbox checkout used by the CLI.".to_string(),
             },
         ],
         extra: BTreeMap::new(),

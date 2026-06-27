@@ -1436,8 +1436,8 @@ mod tests {
                 provider_config: Some(
                     serde_json::json!({
                         "component_contracts": [{
-                            "slug": "data-machine",
-                            "path": "/nonexistent/data-machine/checkout",
+                            "slug": "sample-component",
+                            "path": "/nonexistent/sample-component/checkout",
                             "loadAs": "plugin",
                             "activate": true
                         }]
@@ -1451,7 +1451,7 @@ mod tests {
         .expect_err("missing runtime dependency fails dispatch preflight");
 
         assert!(error.message.contains("could not be resolved"));
-        assert!(error.message.contains("data-machine"));
+        assert!(error.message.contains("sample-component"));
     }
 
     struct NoopExecutor;

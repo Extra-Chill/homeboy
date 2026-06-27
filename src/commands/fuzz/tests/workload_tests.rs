@@ -185,9 +185,9 @@ fn fuzz_runner_contract_includes_extension_declared_env_settings() {
         extension_script: Some("fuzz.sh".to_string()),
         env: vec![
             "HOMEBOY_SETTINGS_JSON".to_string(),
-            "HOMEBOY_SETTINGS_WP_CODEBOX_BIN".to_string(),
-            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
-            "WP_CODEBOX_BIN".to_string(),
+            "HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN".to_string(),
+            "HOMEBOY_SAMPLE_RUNTIME_BIN".to_string(),
+            "SAMPLE_RUNTIME_BIN".to_string(),
             "HOMEBOY_FUZZ_WORKLOAD_ID".to_string(),
         ],
         ..FuzzConfig::default()
@@ -201,9 +201,9 @@ fn fuzz_runner_contract_includes_extension_declared_env_settings() {
         "HOMEBOY_FUZZ_RESULTS_FILE",
         "HOMEBOY_FUZZ_WORKLOAD_ID",
         "HOMEBOY_SETTINGS_JSON",
-        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN",
-        "HOMEBOY_WP_CODEBOX_BIN",
-        "WP_CODEBOX_BIN",
+        "HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN",
+        "HOMEBOY_SAMPLE_RUNTIME_BIN",
+        "SAMPLE_RUNTIME_BIN",
     ] {
         assert!(
             env.iter().any(|value| value == key),

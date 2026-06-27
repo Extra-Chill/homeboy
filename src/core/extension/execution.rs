@@ -110,7 +110,7 @@ pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
 
     // Persist the runtime env the extension's provider discovers now that setup
     // has run. On a Lab runner, setup configures runner-local state (e.g. a
-    // freshly built WP Codebox core module path); persisting the resolved env
+    // freshly built Managed Sandbox core module path); persisting the resolved env
     // lets a later capability execution (`homeboy fuzz run`) replay the same
     // effective runtime env without manual operator injection. Persistence is
     // best-effort: a discovery failure must not fail an otherwise-successful
@@ -371,7 +371,7 @@ pub(crate) fn build_capability_env_with_additional_providers(
     // the live env provider. On a Lab runner, fuzz execution runs in a fresh
     // process from the one that ran setup; the persisted setup env guarantees
     // capability execution receives the same effective runtime env (e.g. the
-    // configured WP Codebox core module path) without manual injection. Live
+    // configured Managed Sandbox core module path) without manual injection. Live
     // provider discovery below still overrides any value it can re-resolve.
     let persisted_setup_env = super::setup_env::load(extension_name);
     env.extend(persisted_setup_env.iter().cloned());
@@ -934,7 +934,7 @@ mod tests {
     #[test]
     fn build_capability_env_replays_persisted_setup_runtime_env() {
         // Regression for #5919: a Lab runner that discovers runtime env during
-        // extension setup (e.g. the WP Codebox core module path) must replay
+        // extension setup (e.g. the Managed Sandbox core module path) must replay
         // that same effective env into capability execution (fuzz) — without
         // manual operator injection — even when the env provider does not
         // re-resolve the value in the fresh capability process.
@@ -953,8 +953,8 @@ mod tests {
             super::super::setup_env::persist(
                 &extension_id,
                 &[(
-                    "HOMEBOY_WP_CODEBOX_CORE_MODULE".to_string(),
-                    "/runner/wp-codebox/core.mjs".to_string(),
+                    "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
+                    "/runner/sample-runtime/core.mjs".to_string(),
                 )],
             )
             .expect("persist setup env");
@@ -971,8 +971,8 @@ mod tests {
 
             assert!(
                 env.iter()
-                    .any(|(key, value)| key == "HOMEBOY_WP_CODEBOX_CORE_MODULE"
-                        && value == "/runner/wp-codebox/core.mjs"),
+                    .any(|(key, value)| key == "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE"
+                        && value == "/runner/sample-runtime/core.mjs"),
                 "fuzz capability env must replay persisted extension setup runtime env"
             );
         });
