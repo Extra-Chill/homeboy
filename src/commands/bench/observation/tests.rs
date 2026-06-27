@@ -552,6 +552,96 @@ fn bench_observation_rewrites_invocation_artifacts_to_persisted_paths() {
 }
 
 #[test]
+fn bench_observation_mirrors_url_artifact_from_run_artifacts_dir() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let run_dir = RunDir::create().expect("run dir");
+        fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
+        let runtime_artifact = run_dir.path().join("artifacts/finding-packets.json");
+        fs::create_dir_all(runtime_artifact.parent().expect("artifact parent")).expect("mkdir");
+        fs::write(
+            &runtime_artifact,
+            b"{\"finding_packets\":[{\"diagnostic_kind\":\"missing_block\"}]}",
+        )
+        .expect("artifact");
+
+        let mut results = bench_results("homeboy", "cold", 42.0);
+        results.scenarios[0].artifacts.insert(
+            "finding_packets".to_string(),
+            BenchArtifact {
+                path: None,
+                url: Some(
+                    "https://homeboy-artifacts.example.test/finding-packets.json".to_string(),
+                ),
+                artifact_type: Some("url".to_string()),
+                kind: Some("finding_packets".to_string()),
+                label: Some("Finding packets".to_string()),
+                observation_artifact_id: None,
+                ..BenchArtifact::default()
+            },
+        );
+        let mut workflow = BenchRunWorkflowResult {
+            status: "passed".to_string(),
+            component: "homeboy".to_string(),
+            exit_code: 0,
+            iterations: 10,
+            results: Some(results),
+            gate_results: Vec::new(),
+            gate_failures: Vec::new(),
+            baseline_comparison: None,
+            hints: None,
+            failure: None,
+            diagnostics: Vec::new(),
+        };
+
+        let args = bench_args();
+        let observation = start(BenchObservationStart {
+            component_id: "homeboy",
+            component_label: "homeboy",
+            source_path: home.path(),
+            args: &args,
+            selected_scenarios: &["cold".to_string()],
+            rig_id: None,
+            rig_snapshot: None,
+            run_dir: &run_dir,
+        })
+        .expect("start observation");
+        let run_id = observation.run_id().to_string();
+
+        finish_success(Some(observation), &mut workflow, &run_dir).expect("observation summary");
+        run_dir.cleanup();
+
+        let artifact =
+            &workflow.results.as_ref().unwrap().scenarios[0].artifacts["finding_packets"];
+        let persisted_path = artifact.path.as_deref().expect("persisted artifact path");
+        assert!(PathBuf::from(persisted_path).is_file());
+        assert_eq!(
+            fs::read_to_string(persisted_path).expect("read persisted"),
+            "{\"finding_packets\":[{\"diagnostic_kind\":\"missing_block\"}]}"
+        );
+
+        let store = ObservationStore::open_initialized().expect("store");
+        let artifacts = store.list_artifacts(&run_id).expect("artifacts");
+        let observation_artifact_id = artifact
+            .observation_artifact_id
+            .as_deref()
+            .expect("observation artifact id");
+        let record = artifacts
+            .iter()
+            .find(|artifact| artifact.id == observation_artifact_id)
+            .expect("artifact record");
+        assert_eq!(record.artifact_type, "file");
+        assert_eq!(record.url, None);
+        assert_eq!(record.metadata_json["source"], "bench");
+        assert_eq!(record.metadata_json["name"], "finding_packets");
+        assert_eq!(
+            record.metadata_json["url"],
+            "https://homeboy-artifacts.example.test/finding-packets.json"
+        );
+    });
+}
+
+#[test]
 fn bench_observation_rewrites_cleaned_short_invocation_artifact_paths() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();

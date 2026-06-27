@@ -182,6 +182,58 @@ fn runs_artifacts_surfaces_matrix_summary_from_typed_packets() {
 }
 
 #[test]
+fn runs_artifacts_classifies_persisted_bench_artifact_from_metadata() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "bench",
+                "homeboy",
+                "matrix-rig",
+                serde_json::json!({ "scenario_id": "fixture-matrix" }),
+            ))
+            .expect("matrix run");
+        store
+            .finish_run(&run.id, RunStatus::Pass, None)
+            .expect("finish matrix run");
+        let packets = home.path().join("finding-packets.json");
+        std::fs::write(
+            &packets,
+            serde_json::to_vec(&serde_json::json!({
+                "finding_packets": [
+                    { "diagnostic_kind": "missing_block", "fixture_id": "home" }
+                ]
+            }))
+            .expect("packet json"),
+        )
+        .expect("write packets");
+        store
+            .record_artifact_with_metadata(
+                &run.id,
+                "bench_artifact",
+                &packets,
+                serde_json::json!({
+                    "source": "bench",
+                    "name": "finding_packets",
+                    "url": "https://homeboy-artifacts.example.test/finding-packets.json"
+                }),
+            )
+            .expect("record packets");
+
+        let (output, _) = handlers::artifacts(&run.id).expect("artifacts");
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("expected artifacts output");
+        };
+        let summary = output.matrix_summary.expect("matrix summary");
+
+        assert_eq!(summary.finding_count, 1);
+        assert_eq!(summary.finding_packet_refs.len(), 1);
+        assert!(summary.parse_diagnostics.is_empty());
+    });
+}
+
+#[test]
 fn runs_artifacts_recognizes_canonical_fuzz_result_envelope() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
