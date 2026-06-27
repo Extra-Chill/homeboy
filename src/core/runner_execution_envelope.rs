@@ -55,10 +55,31 @@ pub struct RunnerExecutionRecord {
     pub agent_task_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<RunnerExecutionArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<RunnerExecutionNextAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathMaterializationPlan {
+    #[serde(default = "path_materialization_plan_schema")]
+    pub schema: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<PathMaterializationEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathMaterializationEntry {
+    pub role: String,
+    pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    pub remote_path: String,
+    pub materialization_mode: String,
+    pub validation_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +122,7 @@ impl RunnerExecutionRecord {
             remote_run_id: None,
             agent_task_run_id: None,
             mirror_run_id: None,
+            path_materialization_plan: None,
             artifact_refs: Vec::new(),
             next_actions: Vec::new(),
         }
@@ -122,6 +144,14 @@ impl RunnerExecutionRecord {
         artifact_refs: impl IntoIterator<Item = RunnerExecutionArtifactRef>,
     ) -> Self {
         self.artifact_refs = artifact_refs.into_iter().collect();
+        self
+    }
+
+    pub fn with_path_materialization_plan(
+        mut self,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+    ) -> Self {
+        self.path_materialization_plan = path_materialization_plan;
         self
     }
 
@@ -370,6 +400,10 @@ fn runner_execution_record_schema() -> String {
     RUNNER_EXECUTION_RECORD_SCHEMA.to_string()
 }
 
+fn path_materialization_plan_schema() -> String {
+    "homeboy/path-materialization-plan/v1".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -459,6 +493,17 @@ mod tests {
                 path: Some("artifacts/report.json".to_string()),
                 url: None,
             }])
+            .with_path_materialization_plan(Some(PathMaterializationPlan {
+                schema: path_materialization_plan_schema(),
+                entries: vec![PathMaterializationEntry {
+                    role: "primary_workspace".to_string(),
+                    owner: "runner_exec.source_snapshot".to_string(),
+                    local_path: Some("/local/project".to_string()),
+                    remote_path: "/runner/project".to_string(),
+                    materialization_mode: "snapshot".to_string(),
+                    validation_status: "materialized".to_string(),
+                }],
+            }))
             .with_next_actions(vec![RunnerExecutionNextAction {
                 label: "runner_job_logs".to_string(),
                 command: vec![
@@ -479,6 +524,14 @@ mod tests {
         assert_eq!(value["status"], "succeeded");
         assert_eq!(value["job_id"], "job-1");
         assert_eq!(value["remote_run_id"], "run-1");
+        assert_eq!(
+            value["path_materialization_plan"]["schema"],
+            "homeboy/path-materialization-plan/v1"
+        );
+        assert_eq!(
+            value["path_materialization_plan"]["entries"][0]["remote_path"],
+            "/runner/project"
+        );
         assert_eq!(value["artifact_refs"][0]["id"], "artifact-1");
         assert_eq!(value["next_actions"][0]["label"], "runner_job_logs");
     }

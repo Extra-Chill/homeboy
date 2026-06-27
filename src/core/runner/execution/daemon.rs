@@ -197,6 +197,8 @@ pub(super) fn exec_via_daemon(
         exit_code,
         Some(job.id.to_string()),
         mirror_run_id.clone(),
+        Some(&source_snapshot),
+        &require_paths,
         &artifacts,
         Some(&runner_result),
     );
@@ -425,6 +427,8 @@ pub(super) fn detached_handoff_output(
                 0,
                 Some(job.id.to_string()),
                 mirror_run_id.clone(),
+                Some(&source_snapshot),
+                &require_paths,
                 &[],
                 Some(&runner_result),
             )),
