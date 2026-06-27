@@ -6,7 +6,7 @@ use crate::command_contract::{
 
 use crate::cli_surface::Commands;
 
-use super::{fleet, observe, version, GlobalArgs};
+use crate::commands::{fleet, observe, version, GlobalArgs};
 
 pub(crate) type JsonCommandRun = (homeboy::core::Result<Value>, i32);
 pub(crate) type JsonCommandExecutor<Args> = fn(Args, &GlobalArgs) -> JsonCommandRun;

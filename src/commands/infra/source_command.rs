@@ -3,7 +3,7 @@ use homeboy::core::component::Component;
 use homeboy::core::engine::execution_context::{self, ExecutionContext, ResolveOptions};
 use homeboy::core::extension::ExtensionCapability;
 
-use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
+use crate::commands::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 
 pub(crate) fn resolve_source_context(
     comp: &PositionalComponentArgs,

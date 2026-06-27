@@ -697,7 +697,6 @@
         "near-duplication::src/core/fuzz/types.rs::NearDuplicate",
         "parallel-implementation::src/core/agent_task_prompts.rs::ParallelImplementation",
         "parallel-implementation::src/core/extension/trace/attach.rs::ParallelImplementation",
-        "structural::src/commands::DirectorySprawl",
         "structural::src/core::DirectorySprawl",
         "test_quality::src/commands/bench/tests/scenario_run_tests.rs::VacuousTest",
         "test_quality::src/core/agent_task_scheduler/tests/outcome_tests.rs::VacuousTest",
