@@ -3,12 +3,11 @@
 /**
  * External dependencies
  */
-const { execFile } = require('node:child_process');
+const { spawn } = require('node:child_process');
+const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { promisify } = require('node:util');
 
-const execFileAsync = promisify(execFile);
 const WP_CODEBOX_RECIPE_RUN_CLI_COMMAND = 'recipe-run';
 const DEFAULT_MAX_BUFFER = 1024 * 1024 * 50;
 const DEFAULT_EVENT_SOURCE = 'wp_codebox';
@@ -47,6 +46,98 @@ function parseWpCodeboxJson(stdout) {
   }
 
   return JSON.parse(trimmed);
+}
+
+function appendBounded(chunks, currentSize, chunk, maxBuffer, streamName) {
+  const nextSize = currentSize + chunk.length;
+  if (nextSize > maxBuffer) {
+    const error = new Error(`${streamName} maxBuffer length exceeded`);
+    error.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+    error.stream = streamName;
+    throw error;
+  }
+  chunks.push(chunk);
+  return nextSize;
+}
+
+async function runCommandStreaming(command, args, { cwd, env, maxBuffer, outputFile }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutSize = 0;
+    let stderrSize = 0;
+    let settled = false;
+    let stdoutWriter = null;
+
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (child.exitCode === null && !child.killed) {
+        child.kill('SIGTERM');
+      }
+      reject(error);
+    };
+
+    if (outputFile) {
+      stdoutWriter = fsSync.createWriteStream(outputFile, { encoding: 'utf8' });
+      stdoutWriter.on('error', fail);
+    }
+
+    child.stdout.on('data', (chunk) => {
+      try {
+        if (stdoutWriter) {
+          stdoutWriter.write(chunk);
+          return;
+        }
+        stdoutSize = appendBounded(stdoutChunks, stdoutSize, chunk, maxBuffer, 'stdout');
+      } catch (error) {
+        error.stdout = Buffer.concat(stdoutChunks).toString('utf8');
+        error.stderr = Buffer.concat(stderrChunks).toString('utf8');
+        fail(error);
+      }
+    });
+
+    child.stderr.on('data', (chunk) => {
+      try {
+        stderrSize = appendBounded(stderrChunks, stderrSize, chunk, maxBuffer, 'stderr');
+      } catch (error) {
+        error.stdout = Buffer.concat(stdoutChunks).toString('utf8');
+        error.stderr = Buffer.concat(stderrChunks).toString('utf8');
+        fail(error);
+      }
+    });
+
+    child.on('error', fail);
+    child.on('close', (code, signal) => {
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        const stdout = outputFile ? '' : Buffer.concat(stdoutChunks).toString('utf8');
+        const stderr = Buffer.concat(stderrChunks).toString('utf8');
+        if (code === 0) {
+          resolve({ stdout, stderr });
+          return;
+        }
+        const error = new Error(`Command failed: ${command} ${args.join(' ')}`);
+        error.code = code;
+        error.signal = signal;
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+      };
+
+      if (stdoutWriter) {
+        stdoutWriter.end(finish);
+      } else {
+        finish();
+      }
+    });
+  });
 }
 
 function normalizePluginStateList(value, field) {
@@ -133,18 +224,12 @@ async function runWpCodeboxRecipe({
   emitRecipeEvent(event, 'start', { recipe_file: recipeFile, artifacts_dir: artifactsDir }, eventOptions);
 
   try {
-    const result = await execFileAsync(command, commandArgs, { cwd, env, maxBuffer });
-    if (outputFile) {
-      await fs.writeFile(outputFile, result.stdout);
-    }
-    const json = parseWpCodeboxJson(result.stdout);
+    const result = await runCommandStreaming(command, commandArgs, { cwd, env, maxBuffer, outputFile });
+    const stdout = outputFile ? await fs.readFile(outputFile, 'utf8') : result.stdout;
+    const json = parseWpCodeboxJson(stdout);
     emitRecipeEvent(event, 'done', { output_file: outputFile || null, artifacts_dir: artifactsDir }, eventOptions);
-    return { ...result, json };
+    return { ...result, stdout, json };
   } catch (error) {
-    if (outputFile && typeof error?.stdout === 'string' && error.stdout) {
-      await fs.writeFile(outputFile, error.stdout);
-    }
-
     emitRecipeEvent(event, 'failed', {
       output_file: outputFile || null,
       artifacts_dir: artifactsDir,
