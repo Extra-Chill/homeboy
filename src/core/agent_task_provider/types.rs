@@ -4,12 +4,21 @@ pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-execut
 pub const AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA: &str =
     "homeboy/agent-task-provider-capability-contract/v1";
 
+/// Shared request/outcome schema identifiers carried by provider capability
+/// contracts. Flattened into parents so the on-wire JSON keeps the
+/// `request_schema` / `outcome_schema` keys inline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderSchemaContract {
+    pub request_schema: String,
+    pub outcome_schema: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskProviderCapabilityContract {
     pub schema: String,
     pub provider_schema: String,
-    pub request_schema: String,
-    pub outcome_schema: String,
+    #[serde(flatten)]
+    pub schemas: ProviderSchemaContract,
     pub tool_request_schema: String,
     pub tool_result_schema: String,
     pub tool_policy_schema: String,
@@ -19,8 +28,10 @@ pub fn provider_capability_contract() -> AgentTaskProviderCapabilityContract {
     AgentTaskProviderCapabilityContract {
         schema: AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA.to_string(),
         provider_schema: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string(),
-        request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-        outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        schemas: ProviderSchemaContract {
+            request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        },
         tool_request_schema: AGENT_TOOL_REQUEST_SCHEMA.to_string(),
         tool_result_schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
         tool_policy_schema: AGENT_TOOL_POLICY_SCHEMA.to_string(),

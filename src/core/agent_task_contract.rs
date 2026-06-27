@@ -17,7 +17,7 @@ use crate::core::agent_task_loop_controller::{
 use crate::core::agent_task_loop_definition::AGENT_TASK_LOOP_DEFINITION_SCHEMA;
 use crate::core::agent_task_promotion::AGENT_TASK_PROMOTION_REPORT_SCHEMA;
 use crate::core::agent_task_provider::{
-    provider_capability_contract, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+    provider_capability_contract, ProviderSchemaContract, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
 };
 use crate::core::agent_task_schedule::{
@@ -94,8 +94,8 @@ pub struct AgentTaskCoreContractSchemas {
 pub struct AgentTaskCoreProviderCapabilityContract {
     pub schema: String,
     pub provider_schema: String,
-    pub request_schema: String,
-    pub outcome_schema: String,
+    #[serde(flatten)]
+    pub schemas: ProviderSchemaContract,
     pub request_required_fields: Vec<String>,
     pub outcome_statuses: Vec<String>,
     pub failure_classifications: Vec<String>,
@@ -172,8 +172,10 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
         provider_capability: AgentTaskCoreProviderCapabilityContract {
             schema: provider_capability.schema,
             provider_schema: provider_capability.provider_schema,
-            request_schema: provider_capability.request_schema,
-            outcome_schema: provider_capability.outcome_schema,
+            schemas: ProviderSchemaContract {
+                request_schema: provider_capability.schemas.request_schema,
+                outcome_schema: provider_capability.schemas.outcome_schema,
+            },
             request_required_fields: agent_task_request_required_fields(),
             outcome_statuses: agent_task_outcome_statuses(),
             failure_classifications: agent_task_failure_classifications(),
