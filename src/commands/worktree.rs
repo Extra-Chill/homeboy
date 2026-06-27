@@ -5,9 +5,9 @@ use homeboy::core::cleanup::{
     self as artifact_cleanup, ArtifactCleanupOptions, ArtifactCleanupOutput,
 };
 use homeboy::core::worktree::{
-    self, CleanupPolicy, WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput,
-    WorktreeListOutput, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
-    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
+    self, CleanupPolicy, WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeCleanupOutput,
+    WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput, WorktreeQueueCreateOptions,
+    WorktreeQueueCreateOutput, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 
 use super::CmdResult;
@@ -39,6 +39,19 @@ enum WorktreeCommand {
         /// Cleanup policy for lifecycle cleanup
         #[arg(long, value_enum)]
         cleanup_policy: Option<CliCleanupPolicy>,
+    },
+    /// Adopt an existing local workspace path for @workspace:<handle> refs
+    Adopt {
+        /// Workspace handle resolved by @workspace:<handle>
+        handle: String,
+        /// Existing local directory to resolve for this handle
+        path: String,
+        /// Optional generic kind label recorded as provenance
+        #[arg(long)]
+        kind: Option<String>,
+        /// Optional JSON provenance payload recorded with the adopted path
+        #[arg(long)]
+        provenance_json: Option<String>,
     },
     /// Create multiple DMC worktrees one-at-a-time with lock-aware queue status JSON
     QueueCreate {
@@ -111,6 +124,7 @@ impl From<CliCleanupPolicy> for CleanupPolicy {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum WorktreeOutput {
     Create(WorktreeCreateOutput),
+    Adopt(WorktreeAdoptOutput),
     QueueCreate(WorktreeQueueCreateOutput),
     List(WorktreeListOutput),
     Status(WorktreeStatusOutput),
@@ -142,6 +156,29 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
             run_id,
             cleanup_policy: cleanup_policy.map(Into::into),
         })?),
+        WorktreeCommand::Adopt {
+            handle,
+            path,
+            kind,
+            provenance_json,
+        } => {
+            let provenance = provenance_json
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(|err| {
+                    homeboy::core::Error::validation_invalid_json(
+                        err,
+                        Some("provenance_json".to_string()),
+                        None,
+                    )
+                })?;
+            WorktreeOutput::Adopt(worktree::adopt(WorktreeAdoptOptions {
+                handle,
+                path,
+                kind,
+                provenance,
+            })?)
+        }
         WorktreeCommand::QueueCreate {
             repo,
             branches,
