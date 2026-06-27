@@ -289,6 +289,18 @@ const preflightReadinessPassed = preflightWpCodeboxFuzzCapabilityContract({
 		: { status: 1, stderr: 'unexpected command' },
 });
 assert.equal(preflightReadinessPassed.ok, true);
+const preflightReadinessOnlyPassed = preflightWpCodeboxFuzzCapabilityContract({
+	request: taskRequest,
+	loadRuntimeContractSource: () => null,
+	runPublicCli: ({ args }) => args.join(' ') === 'fuzz readiness --format=json'
+		? { status: 0, stdout: JSON.stringify(readinessContract) }
+		: { status: 1, stderr: 'unexpected command' },
+});
+assert.equal(preflightReadinessOnlyPassed.ok, true);
+assert.equal(
+	preflightReadinessOnlyPassed.missing_contracts.some((contract) => contract.type === 'runtime_contract_manifest' || contract.type === 'ability'),
+	false,
+);
 
 const unsupportedReadiness = {
 	...readinessContract,

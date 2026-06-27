@@ -1138,6 +1138,10 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 	const requiredAbilities = { ...WP_CODEBOX_FUZZ_PUBLIC_ABILITIES };
 	const requiredCommands = requiredPublicCommandsForRequest(request, requiredPlanContracts);
 	const missingContracts = [];
+	const readinessStatus = capabilities.readiness?.status;
+	const publicReadinessSatisfied = capabilities.readiness?.command_available !== false
+		&& readinessStatus === 'ready'
+		&& capabilities.readiness?.mode === 'runtime-backed';
 	if (capabilities.readiness?.command_available === false) {
 		missingContracts.push({
 			type: 'public_cli_readiness_command',
@@ -1163,7 +1167,7 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 	}
 
 	const missingManifestPaths = missingWpCodeboxFuzzRuntimeContractPaths(manifest);
-	if (missingManifestPaths.length > 0) {
+	if (!publicReadinessSatisfied && missingManifestPaths.length > 0) {
 		missingContracts.push({
 			type: 'runtime_contract_manifest',
 			missing_paths: missingManifestPaths,
@@ -1192,14 +1196,14 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 		}
 	}
 
-	if (wordpressRuntimeAbilities.runFuzzSuite !== requiredAbilities.runFuzzSuite) {
+	if (!publicReadinessSatisfied && wordpressRuntimeAbilities.runFuzzSuite !== requiredAbilities.runFuzzSuite) {
 		missingContracts.push({
 			type: 'ability',
 			ability: requiredAbilities.runFuzzSuite,
 			message: `WP Codebox runtime contract must declare \`${requiredAbilities.runFuzzSuite}\` for fuzz-suite dispatch.`,
 		});
 	}
-	if (wordpressRuntimeAbilities.runWorkload !== requiredAbilities.runWorkload) {
+	if (!publicReadinessSatisfied && wordpressRuntimeAbilities.runWorkload !== requiredAbilities.runWorkload) {
 		missingContracts.push({
 			type: 'ability',
 			ability: requiredAbilities.runWorkload,
