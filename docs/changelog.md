@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.266.2] - 2026-06-27
+
+### Changed
+- move compare-bundle fs writes from command layer to core/trace_compare
+- refactor(git,release): unify CI-check classification and advanced-remote rebase recovery
+- Table-drive code_audit Manual detectors onto descriptor dispatch
+- unmask api_jobs dead-code, disambiguate db/deps module names
+- move system-memory probing from command layer to core/resources
+- refactor(agent_task): add shared From bridges for status enums and a single run-state setter
+- move atomic output-file helpers from command layer to core/io
+- own runs evidence assembly in evidence_report facade
+- Symlink shared monorepo assets for linked extension installs
+- clear field_patterns in triage/watch via serde flatten
+- code_audit: de-hardcode WP/Automattic literals from core + audit bug fixes
+- git/release/deploy: make remote name and GitHub host generic
+- reap run-scoped offload workspaces with a MaterializedWorkspace RAII handle
+
+### Fixed
+- Fix fuzz run status reconciliation
+- keep secret env off SSH argv; drop hardcoded provider tokens; close offload orphan
+- resolve compiler warnings (dead code, unused imports, privacy)
+- fix(agent-task): correct loop-controller correctness bugs
+
 ## [0.266.1] - 2026-06-27
 
 ### Changed
