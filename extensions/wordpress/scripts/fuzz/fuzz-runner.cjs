@@ -16,6 +16,7 @@ const {
 	buildWordPressFuzzRunnerResult,
 	readWordPressFuzzRunnerEnv,
 	runWordPressFuzzRunnerResult,
+	writeHomeboyFuzzArtifactFiles,
 	writeHomeboyFuzzResultsFile,
 } = require('../../lib/wordpress-fuzz-runner');
 const { loadWpCodeboxCoreFunction } = require('../../lib/wp-codebox-core-loader');
@@ -37,6 +38,7 @@ async function main() {
 	const env = readWordPressFuzzRunnerEnv();
 	const result = await buildRunnerResult(env);
 	writeHomeboyFuzzResultsFile(env.resultsFile, result.homeboy_fuzz_campaign);
+	writeHomeboyFuzzArtifactFiles(env.artifactRoot, result);
 	process.stdout.write(`${JSON.stringify(fuzzRunnerStdoutSummary(result), null, 2)}\n`);
 	if (!result.succeeded) {
 		process.exitCode = 1;

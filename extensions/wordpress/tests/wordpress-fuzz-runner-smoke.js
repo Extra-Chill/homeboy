@@ -509,6 +509,25 @@ const dispatchResultsPath = path.join(tempDir, 'dispatch-results.json');
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 const subcommand = process.argv[2];
+if (subcommand === 'fuzz' && process.argv[3] === 'readiness' && process.argv.includes('--format=json')) {
+  process.stdout.write(JSON.stringify({
+    schema: 'wp-codebox/fuzz-runner-readiness/v1',
+    status: 'ready',
+    mode: 'runtime-backed',
+    entrypoint: 'run-fuzz-suite --runner-mode=runtime-backed',
+    capabilities: {
+      schema: 'wp-codebox/fuzz-runner-capabilities/v1',
+      mode: 'runtime-backed',
+      capabilities: ['target:runtime', 'runtime'],
+      targetKinds: ['runtime'],
+      operationKinds: ['read'],
+      commands: ['run-fuzz-suite', 'wordpress.run-workload'],
+      unsupportedRequiredCapabilities: []
+    },
+    unsupportedRequiredCapabilities: []
+  }));
+  process.exit(0);
+}
 if (subcommand === 'run-fuzz-suite' && process.argv.includes('--help')) {
   process.stdout.write('usage: wp-codebox run-fuzz-suite');
   process.exit(0);
@@ -539,12 +558,16 @@ process.stdout.write(JSON.stringify({
     { name: 'result-envelope', path: 'fake/envelope.json', contentType: 'application/json' },
     { name: 'case-log', path: 'fake/cases.jsonl', contentType: 'application/jsonl' },
     { name: 'replay-data', path: 'fake/replay.json', contentType: 'application/json' },
-    { name: 'coverage-summary', path: 'fake/summary.json', contentType: 'application/json' }
+    { name: 'coverage-summary', path: 'fake/summary.json', contentType: 'application/json' },
+    { name: 'wordpress-hotspots', path: 'fake/wordpress-hotspots.json', contentType: 'application/json', schema: 'wp-codebox/wordpress-hotspots/v1', semantic_key: 'fuzz.hotspot.codebox' }
   ],
+  hotspot_summary: { schema: 'wp-codebox/wordpress-hotspots/v1', api: [{ route: '/wc/store/products', method: 'GET', metric: 'duration_ms', duration_ms: 42 }] },
   coverage_summary: { surface_count: 1, exercised_count: 1 }
 }));
 `);
 fs.chmodSync(fakeCodeboxBin, 0o755);
+
+const dispatchArtifactsDir = path.join(tempDir, 'dispatch-artifacts');
 
 const dispatchCli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
@@ -555,14 +578,18 @@ const dispatchCli = spawnSync(runnerPath, [], {
 		HOMEBOY_FUZZ_WORKLOAD_ID: 'dispatch-cli-workload',
 		HOMEBOY_FUZZ_RUN_ID: 'dispatch-cli-run',
 		HOMEBOY_FUZZ_RESULTS_FILE: dispatchResultsPath,
+		HOMEBOY_FUZZ_ARTIFACTS_DIR: dispatchArtifactsDir,
 	},
 });
 
-assert.equal(dispatchCli.status, 0, dispatchCli.stderr);
+assert.equal(dispatchCli.status, 0, dispatchCli.stderr || dispatchCli.stdout);
 const dispatchCliResult = JSON.parse(dispatchCli.stdout);
 assert.equal(dispatchCliResult.succeeded, true, JSON.stringify(dispatchCliResult.wp_codebox_result));
 assert.equal(dispatchCliResult.wp_codebox_result.request_id, 'dispatch-cli-run');
 assert.equal(dispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'fake/fuzz-report.json');
+const dispatchHotspots = JSON.parse(fs.readFileSync(path.join(dispatchArtifactsDir, 'files', 'wordpress-hotspots.json'), 'utf8'));
+assert.equal(dispatchHotspots.schema, 'homeboy/fuzz-hotspot-set/v1');
+assert.equal(dispatchHotspots.items[0].value, 42);
 
 const taskAdapterCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-task-adapter-wp-codebox.js');
 fs.writeFileSync(taskAdapterCodeboxBin, `#!/usr/bin/env node
