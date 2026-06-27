@@ -132,6 +132,66 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
 }
 
 #[test]
+fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
+    with_isolated_home(|home| {
+        let args = fuzz_run_args_with_run_id("proof-envelope");
+        let campaign = empty_fuzz_campaign();
+        let results_path = home.path().join("fuzz-results.json");
+        let artifacts_dir = home.path().join("fuzz-artifacts");
+        std::fs::write(
+            &results_path,
+            serde_json::to_string(&campaign).expect("campaign json"),
+        )
+        .expect("results file");
+        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
+
+        persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+            run_id: args.run_id.as_deref(),
+            component_id: "component-a",
+            rig_id: args.rig.as_deref(),
+            workload_id: args.workload_id.as_deref(),
+            workload_path: Some("/tmp/fuzz/parser.json"),
+            status: "passed",
+            exit_code: 0,
+            success: true,
+            args: &args,
+            results_path: &results_path,
+            artifacts_dir: &artifacts_dir,
+            results: Some(&campaign),
+            expected_metric_gates: &[],
+            results_error: None,
+            missing_artifact_refs: &[],
+        })
+        .expect("persist fuzz run");
+
+        let store = ObservationStore::open_initialized().expect("store");
+        let artifacts = store.list_artifacts("proof-envelope").expect("artifacts");
+        let envelope_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND)
+            .expect("fuzz result envelope artifact");
+        assert_eq!(envelope_artifact.artifact_type, "file");
+        assert_eq!(
+            envelope_artifact.metadata_json["schema"],
+            "homeboy/fuzz-result-envelope/v1"
+        );
+        assert_eq!(
+            envelope_artifact.metadata_json["source"],
+            "homeboy fuzz run"
+        );
+
+        let envelope: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&envelope_artifact.path).expect("envelope artifact"),
+        )
+        .expect("envelope json");
+        assert_eq!(envelope["schema"], "homeboy/fuzz-result-envelope/v1");
+        assert_eq!(envelope["id"], "proof-envelope");
+        assert_eq!(envelope["request"]["component"], "component-a");
+        assert_eq!(envelope["campaign"]["id"], "campaign-1");
+    });
+}
+
+#[test]
 fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
     let mut campaign = empty_fuzz_campaign();
     campaign.metadata = serde_json::json!({

@@ -16,7 +16,7 @@ pub(super) const FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND: &str = "fuzz_result_envelop
 
 use super::types::{
     FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput, FuzzGateEvaluation,
-    FuzzReportArgs, FuzzReportOutput, FuzzValidateArgs, FuzzValidateOutput,
+    FuzzReportArgs, FuzzReportOutput, FuzzRunArgs, FuzzValidateArgs, FuzzValidateOutput,
 };
 
 pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<FuzzValidateOutput> {
@@ -52,50 +52,13 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
     let campaign = parse_fuzz_results_file(&args.results_file)?;
     let coverage_completeness = fuzz_coverage_completeness(&campaign);
     let performance_hotspots = fuzz_performance_hotspots(&campaign);
-    let run_id = args.run.run_id.clone();
-    let component = args.run.comp.id().unwrap_or("unknown").to_string();
-    let request_id = args
-        .run
-        .run_id
-        .clone()
-        .or_else(|| args.run.workload_id.clone())
-        .unwrap_or_else(|| format!("{}-request", campaign.id));
-    let envelope_id = args
-        .envelope_id
-        .clone()
-        .or_else(|| args.run.run_id.clone())
-        .unwrap_or_else(|| campaign.id.clone());
-    let (required_artifacts, gates) = report_gate_contract(args.run.gate_profile);
-    let metadata = fuzz_result_metadata(args.run.inventory.as_deref())?;
-    let mut envelope = FuzzResultEnvelope {
-        schema: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
-        version: FUZZ_CONTRACT_VERSION,
-        id: envelope_id,
-        status: "pending".to_string(),
-        request: FuzzExecutionRequest {
-            schema: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
-            version: FUZZ_CONTRACT_VERSION,
-            id: request_id,
-            component,
-            rig_id: args.run.rig,
-            workload_id: args.run.workload_id,
-            case_ids: campaign.cases.iter().map(|case| case.id.clone()).collect(),
-            seed: args.run.seed,
-            max_duration: args.run.max_duration,
-            args: args.run.args,
-            required_artifacts: required_artifacts.clone(),
-            gates: gates.clone(),
-            metadata: serde_json::Value::Null,
-            extra: std::collections::BTreeMap::new(),
-        },
-        campaign: Some(campaign.clone()),
-        artifacts: campaign.artifacts.clone(),
-        required_artifacts,
-        gates,
-        provenance: Some(fuzz_provenance(run_id)),
-        metadata,
-        extra: std::collections::BTreeMap::new(),
-    };
+    let component = args.run.comp.id().unwrap_or("unknown");
+    let mut envelope = fuzz_result_envelope_from_campaign(
+        &args.run,
+        component,
+        &campaign,
+        args.envelope_id.as_deref(),
+    )?;
     let gates = evaluate_fuzz_result_envelope_gates(&envelope);
     let status = gate_status(&gates);
     envelope.status = status.clone();
@@ -126,6 +89,55 @@ pub(super) fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzRepo
     })
 }
 
+pub(super) fn fuzz_result_envelope_from_campaign(
+    run: &FuzzRunArgs,
+    component: &str,
+    campaign: &FuzzCampaign,
+    envelope_id: Option<&str>,
+) -> homeboy::core::Result<FuzzResultEnvelope> {
+    let request_id = run
+        .run_id
+        .clone()
+        .or_else(|| run.workload_id.clone())
+        .unwrap_or_else(|| format!("{}-request", campaign.id));
+    let envelope_id = envelope_id
+        .map(str::to_string)
+        .or_else(|| run.run_id.clone())
+        .unwrap_or_else(|| campaign.id.clone());
+    let (required_artifacts, gates) = report_gate_contract(run.gate_profile);
+    let metadata = fuzz_result_metadata(run.inventory.as_deref())?;
+
+    Ok(FuzzResultEnvelope {
+        schema: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
+        version: FUZZ_CONTRACT_VERSION,
+        id: envelope_id,
+        status: "pending".to_string(),
+        request: FuzzExecutionRequest {
+            schema: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
+            version: FUZZ_CONTRACT_VERSION,
+            id: request_id,
+            component: component.to_string(),
+            rig_id: run.rig.clone(),
+            workload_id: run.workload_id.clone(),
+            case_ids: campaign.cases.iter().map(|case| case.id.clone()).collect(),
+            seed: run.seed.clone(),
+            max_duration: run.max_duration.clone(),
+            args: run.args.clone(),
+            required_artifacts: required_artifacts.clone(),
+            gates: gates.clone(),
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        },
+        campaign: Some(campaign.clone()),
+        artifacts: campaign.artifacts.clone(),
+        required_artifacts,
+        gates,
+        provenance: Some(fuzz_provenance(run.run_id.clone())),
+        metadata,
+        extra: std::collections::BTreeMap::new(),
+    })
+}
+
 fn report_gate_contract(
     profile: super::types::FuzzGateProfileArg,
 ) -> (
@@ -140,6 +152,22 @@ pub(super) fn persist_fuzz_result_envelope(
     envelope: &FuzzResultEnvelope,
     envelope_path: Option<&Path>,
 ) -> homeboy::core::Result<Option<ArtifactRecord>> {
+    persist_fuzz_result_envelope_with_source(run_id, envelope, envelope_path, "homeboy fuzz report")
+}
+
+pub(super) fn persist_fuzz_run_result_envelope(
+    run_id: Option<&str>,
+    envelope: &FuzzResultEnvelope,
+) -> homeboy::core::Result<Option<ArtifactRecord>> {
+    persist_fuzz_result_envelope_with_source(run_id, envelope, None, "homeboy fuzz run")
+}
+
+fn persist_fuzz_result_envelope_with_source(
+    run_id: Option<&str>,
+    envelope: &FuzzResultEnvelope,
+    envelope_path: Option<&Path>,
+    source: &str,
+) -> homeboy::core::Result<Option<ArtifactRecord>> {
     let Some(run_id) = run_id.filter(|run_id| !run_id.trim().is_empty()) else {
         return Ok(None);
     };
@@ -149,7 +177,7 @@ pub(super) fn persist_fuzz_result_envelope(
     }
 
     if let Some(path) = envelope_path.filter(|path| path.is_file()) {
-        return record_fuzz_result_envelope_artifact(&store, run_id, path, envelope);
+        return record_fuzz_result_envelope_artifact(&store, run_id, path, envelope, source);
     }
 
     let mut artifact_file = tempfile::Builder::new()
@@ -166,7 +194,7 @@ pub(super) fn persist_fuzz_result_envelope(
             "failed to encode fuzz result envelope: {error}"
         ))
     })?;
-    record_fuzz_result_envelope_artifact(&store, run_id, artifact_file.path(), envelope)
+    record_fuzz_result_envelope_artifact(&store, run_id, artifact_file.path(), envelope, source)
 }
 
 fn record_fuzz_result_envelope_artifact(
@@ -174,6 +202,7 @@ fn record_fuzz_result_envelope_artifact(
     run_id: &str,
     path: &Path,
     envelope: &FuzzResultEnvelope,
+    source: &str,
 ) -> homeboy::core::Result<Option<ArtifactRecord>> {
     store
         .record_artifact_with_metadata(
@@ -185,7 +214,7 @@ fn record_fuzz_result_envelope_artifact(
                 "envelope_id": envelope.id.as_str(),
                 "status": envelope.status.as_str(),
                 "campaign_id": envelope.campaign.as_ref().map(|campaign| campaign.id.as_str()),
-                "source": "homeboy fuzz report",
+                "source": source,
             }),
         )
         .map(Some)
