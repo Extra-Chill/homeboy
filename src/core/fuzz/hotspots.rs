@@ -9,7 +9,7 @@ use super::normalize::{
 };
 use super::schema_defaults::{fuzz_contract_version, fuzz_hotspot_set_schema};
 use super::schemas::{FUZZ_CONTRACT_VERSION, FUZZ_HOTSPOT_SET_SCHEMA};
-use super::FuzzProvenance;
+use super::{FuzzObservation, FuzzObservationFamily, FuzzObservationSet, FuzzProvenance};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FuzzHotspotSet {
@@ -130,4 +130,95 @@ pub fn parse_fuzz_hotspot_set_value(value: &Value) -> Option<FuzzHotspotSet> {
             .cloned()
     }?;
     FuzzHotspotSet::from_value(candidate).ok()
+}
+
+pub fn rank_fuzz_observation_set_hotspots(observation_set: &FuzzObservationSet) -> FuzzHotspotSet {
+    let mut items = observation_set
+        .observations
+        .iter()
+        .map(hotspot_from_observation)
+        .collect::<Vec<_>>();
+    let max_score = items
+        .iter()
+        .map(|item| item.value.abs())
+        .fold(0.0_f64, f64::max);
+
+    items.sort_by(|a, b| {
+        b.value
+            .abs()
+            .total_cmp(&a.value.abs())
+            .then_with(|| a.dimension.cmp(&b.dimension))
+            .then_with(|| a.metric.cmp(&b.metric))
+            .then_with(|| a.unit.cmp(&b.unit))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    for (index, item) in items.iter_mut().enumerate() {
+        item.rank = Some(index as u64 + 1);
+        item.relative_score = Some(if max_score == 0.0 {
+            0.0
+        } else {
+            item.value.abs() / max_score
+        });
+    }
+
+    FuzzHotspotSet {
+        schema: FUZZ_HOTSPOT_SET_SCHEMA.to_string(),
+        version: FUZZ_CONTRACT_VERSION,
+        id: format!("{}-hotspots", observation_set.id),
+        label: observation_set.label.clone(),
+        items,
+        provenance: None,
+        metadata: serde_json::json!({
+            "basis": "fuzz_observation_set",
+            "source_observation_set_id": observation_set.id,
+        }),
+        extra: BTreeMap::new(),
+    }
+}
+
+fn hotspot_from_observation(observation: &FuzzObservation) -> FuzzHotspot {
+    let dimension = observation_family_dimension(observation.family).to_string();
+    FuzzHotspot {
+        id: observation.fingerprint.clone().unwrap_or_else(|| {
+            [
+                Some(dimension.as_str()),
+                Some(observation.subject.as_str()),
+                Some(observation.metric.as_str()),
+                observation.operation_id.as_deref(),
+                observation.case_id.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(":")
+        }),
+        dimension,
+        kind: Some("observation".to_string()),
+        metric: observation.metric.clone(),
+        value: observation.value,
+        unit: observation.unit.clone(),
+        basis: Some("fuzz_observation_set".to_string()),
+        sample_count: observation.sample_count,
+        rank: None,
+        relative_score: None,
+        label: Some(observation.subject.clone()),
+        labels: Vec::new(),
+        evidence_refs: vec![observation.id.clone()],
+        artifact_refs: Vec::new(),
+        source_refs: Vec::new(),
+        provenance: None,
+        metadata: observation.metadata.clone(),
+        extra: observation.extra.clone(),
+    }
+}
+
+fn observation_family_dimension(family: FuzzObservationFamily) -> &'static str {
+    match family {
+        FuzzObservationFamily::Action => "action",
+        FuzzObservationFamily::Query => "query",
+        FuzzObservationFamily::Resource => "resource",
+        FuzzObservationFamily::Timing => "timing",
+        FuzzObservationFamily::Counter => "counter",
+    }
 }

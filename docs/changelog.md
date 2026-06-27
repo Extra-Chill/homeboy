@@ -4,6 +4,47 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.265.0] - 2026-06-27
+
+### Added
+- surface extension iteration diagnostics
+
+### Changed
+- Add generic agent-task contract fixtures
+- Expose runner envelope in lab refresh handoff
+- extract shared controller args into flattened sub-struct (field_patterns)
+- group infra modules into runtime/ to clear DirectorySprawl
+- Clean up stale command contract tests
+- Add lab runner execution envelope output
+- Surface generic runtime diagnostics
+- extract test modules from core_fingerprint + field_patterns to clear GodFiles
+- Add typed fuzz evidence refs
+- extract conventions test module into tests.rs to clear GodFile
+- Add generic artifact postprocess runner
+- Add fuzz observation hotspot ranker
+- Add runner execution envelope foundation
+- Persist fuzz result envelopes from runs
+- Add fuzz run tracker refs
+- Hydrate controller workflow artifact inputs
+- Support controller dynamic artifact fanout
+
+### Fixed
+- clarify daemon versus job binary versions
+- recover fuzz artifacts after stdout truncation
+- include extension env in runner contract
+
+## [0.264.2] - 2026-06-27
+
+### Changed
+- Add runs dossier command
+- Decouple runtime diagnostics from WP Codebox status
+- Add typed lab refresh handoff plan
+- Add runner workspace snapshot discovery
+- Add Lab refresh planning command
+- Add runner workspace pull recovery
+- Clarify runner workflow binary status
+- Add runner exec artifact dir promotion
+
 ## [0.264.1] - 2026-06-27
 
 ### Changed

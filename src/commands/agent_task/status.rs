@@ -217,7 +217,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         }
     }
 
-    let root_cause = nested_reasons
+    let root_cause = ranked_diagnostics(nested_reasons)
         .into_iter()
         .map(collected_diagnostic_value)
         .next()
@@ -280,6 +280,7 @@ struct HydratedEvidence {
     kind: String,
     label: Option<String>,
     task_id: Option<String>,
+    uri: String,
     source: String,
     status: String,
     truncated: bool,
@@ -300,6 +301,8 @@ fn hydrate_evidence_ref(
         hydrate_homeboy_evidence_ref(run_id, &evidence_ref.uri, task_id, plan, aggregate)
     } else if evidence_ref.uri.starts_with("file://") {
         hydrate_file_evidence_ref(&evidence_ref.uri)
+    } else if let Some(path) = local_evidence_path(&evidence_ref.uri) {
+        hydrate_local_path_evidence_ref(&path)
     } else {
         Ok(HydratedContent {
             source: "unsupported".to_string(),
@@ -308,6 +311,9 @@ fn hydrate_evidence_ref(
             omitted_bytes: None,
             content: json!({
                 "summary": "Evidence ref is recorded but this URI scheme is not hydratable by agent-task evidence yet.",
+                "unsupported_ref": evidence_ref.uri,
+                "supported_refs": ["homeboy://agent-task/run/<run-id>/<section>", "file://<absolute-path>", "local filesystem path"],
+                "next_action": "Use a file:// URI or local path for evidence stored on this machine; otherwise inspect the producing provider or artifact store for this ref.",
             }),
         })
     };
@@ -317,6 +323,7 @@ fn hydrate_evidence_ref(
             kind: evidence_ref.kind.clone(),
             label: evidence_ref.label.clone(),
             task_id: task_id.map(str::to_string),
+            uri: evidence_ref.uri.clone(),
             source: content.source,
             status: "ok".to_string(),
             truncated: content.truncated,
@@ -329,6 +336,7 @@ fn hydrate_evidence_ref(
             kind: evidence_ref.kind.clone(),
             label: evidence_ref.label.clone(),
             task_id: task_id.map(str::to_string),
+            uri: evidence_ref.uri.clone(),
             source: "error".to_string(),
             status: "error".to_string(),
             truncated: false,
@@ -428,6 +436,10 @@ fn hydrate_homeboy_evidence_ref(
 
 fn hydrate_file_evidence_ref(uri: &str) -> homeboy::core::Result<HydratedContent> {
     let path = file_uri_path(uri)?;
+    hydrate_local_path_evidence_ref(&path)
+}
+
+fn hydrate_local_path_evidence_ref(path: &Path) -> homeboy::core::Result<HydratedContent> {
     let metadata = fs::metadata(&path)
         .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
     if !metadata.is_file() {
@@ -456,6 +468,18 @@ fn hydrate_file_evidence_ref(uri: &str) -> homeboy::core::Result<HydratedContent
         omitted_bytes: truncated.then_some(bytes.len().saturating_sub(EVIDENCE_TEXT_LIMIT) as u64),
         content,
     })
+}
+
+fn local_evidence_path(uri: &str) -> Option<PathBuf> {
+    if uri.contains("://") || uri.contains('\0') || uri.trim().is_empty() {
+        return None;
+    }
+    let path = Path::new(uri);
+    if path.is_absolute() || path.exists() {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
 }
 
 fn file_uri_path(uri: &str) -> homeboy::core::Result<PathBuf> {
@@ -645,14 +669,7 @@ pub(crate) fn completed_run_aggregate(
 }
 
 pub(crate) fn diagnostic_summary_from_aggregate(aggregate: &AgentTaskAggregate) -> Option<Value> {
-    aggregate.outcomes.iter().find_map(|outcome| {
-        let diagnostic = outcome.diagnostics.first()?;
-        Some(json!({
-            "task_id": outcome.task_id,
-            "class": diagnostic.class,
-            "message": diagnostic.message,
-        }))
-    })
+    failure_reasons_from_aggregate(aggregate).into_iter().next()
 }
 
 /// Cap the number of surfaced failure reasons so a pathological run with
@@ -717,8 +734,23 @@ pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> 
         );
     }
 
+    ranked_diagnostics(collected)
+        .into_iter()
+        .take(FAILURE_REASON_LIMIT)
+        .map(|item| {
+            json!({
+                "task_id": item.task_id,
+                "class": item.class,
+                "message": item.message,
+                "source": item.source,
+            })
+        })
+        .collect()
+}
+
+fn ranked_diagnostics(collected: Vec<CollectedDiagnostic>) -> Vec<CollectedDiagnostic> {
     // Dedupe by (class, message) keeping the first occurrence, then order the
-    // most actionable root-cause classes first.
+    // most actionable root-cause diagnostics first.
     let mut seen = std::collections::HashSet::new();
     let mut deduped: Vec<CollectedDiagnostic> = Vec::new();
     for item in collected {
@@ -733,20 +765,8 @@ pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> 
         deduped.push(item);
     }
 
-    deduped.sort_by_key(|item| class_priority(&item.class));
-
+    deduped.sort_by_key(|item| diagnostic_priority(&item.class, &item.message));
     deduped
-        .into_iter()
-        .take(FAILURE_REASON_LIMIT)
-        .map(|item| {
-            json!({
-                "task_id": item.task_id,
-                "class": item.class,
-                "message": item.message,
-                "source": item.source,
-            })
-        })
-        .collect()
 }
 
 struct CollectedDiagnostic {
@@ -760,22 +780,28 @@ struct CollectedDiagnostic {
 /// (validation/fatal/registration/missing-path) are surfaced before generic or
 /// transient noise so the first reason an operator sees is the one worth acting
 /// on.
-fn class_priority(class: &str) -> u8 {
-    let class = class.to_ascii_lowercase();
-    if class.contains("valid") || class.contains("recipe") || class.contains("schema") {
+fn diagnostic_priority(class: &str, message: &str) -> u8 {
+    let text = format!("{} {}", class, message).to_ascii_lowercase();
+    if text.contains("typed_artifacts_missing")
+        || text.contains("required_typed_artifacts_missing")
+        || text.contains("required typed artifacts")
+        || text.contains("declared artifact result envelope")
+    {
+        8
+    } else if text.contains("valid") || text.contains("recipe") || text.contains("schema") {
         0
-    } else if class.contains("fatal") || class.contains("error") || class.contains("exception") {
+    } else if text.contains("fatal") || text.contains("error") || text.contains("exception") {
         1
-    } else if class.contains("registr")
-        || class.contains("provider")
-        || class.contains("discovery")
-        || class.contains("capability")
+    } else if text.contains("registr")
+        || text.contains("provider")
+        || text.contains("discovery")
+        || text.contains("capability")
     {
         2
-    } else if class.contains("missing")
-        || class.contains("not_found")
-        || class.contains("path")
-        || class.contains("io")
+    } else if text.contains("missing")
+        || text.contains("not_found")
+        || text.contains("path")
+        || text.contains("io")
     {
         3
     } else {

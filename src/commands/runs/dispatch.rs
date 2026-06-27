@@ -7,8 +7,8 @@ use homeboy::core::Error;
 
 use super::types::{RunsArgs, RunsArtifactArgs, RunsArtifactCommand, RunsCommand, RunsOutput};
 use super::{
-    bench, compare, distribution, drift, evidence, findings, fuzz_compare, handlers, hotspots,
-    latest, loop_sync, query, reconcile, refs,
+    bench, compare, distribution, dossier, drift, evidence, findings, fuzz_compare, handlers,
+    hotspots, latest, loop_sync, query, reconcile, refs,
 };
 use super::{CmdResult, GlobalArgs};
 
@@ -17,6 +17,10 @@ impl RunsArgs {
     /// compact human summary (i.e. the caller did not pass `--json`).
     pub fn show_summary_eligible(&self) -> bool {
         matches!(self.command, RunsCommand::Show { json: false, .. })
+    }
+
+    pub fn dossier_summary_eligible(&self) -> bool {
+        matches!(self.command, RunsCommand::Dossier { json: false, .. })
     }
 
     pub fn absorb_global_runner_for_list(&mut self, runner: Option<String>) -> Option<String> {
@@ -79,6 +83,7 @@ impl RunsArgs {
                 ],
             ),
             RunsCommand::Show { run_id, .. }
+            | RunsCommand::Dossier { run_id, .. }
             | RunsCommand::ResumePlan { run_id }
             | RunsCommand::Evidence { run_id }
             | RunsCommand::Env { run_id } => (
@@ -133,6 +138,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Hotspots(args) => hotspots::runs_hotspots(args),
         RunsCommand::Reconcile(args) => reconcile::reconcile_runs(args),
         RunsCommand::Show { run_id, json: _ } => handlers::show_run(&run_id),
+        RunsCommand::Dossier { run_id, json: _ } => dossier::runs_dossier(&run_id),
         RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&run_id),
         RunsCommand::Evidence { run_id } => evidence::evidence(&run_id),
         RunsCommand::Env { run_id } => handlers::env(&run_id),

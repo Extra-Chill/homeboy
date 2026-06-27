@@ -1269,12 +1269,33 @@ mod tests {
 
         assert_eq!(warning.session_homeboy_version, "homeboy 0.201.3");
         assert_eq!(warning.current_homeboy_version, "homeboy 0.204.0");
+        assert_eq!(warning.severity, "warning");
+        assert_eq!(
+            warning.active_daemon_control_plane_version,
+            "homeboy 0.201.3"
+        );
+        assert_eq!(warning.job_command_binary_version, "homeboy 0.204.0");
         assert_eq!(
             warning.session_homeboy_build_identity.as_deref(),
             Some("homeboy 0.201.3+old")
         );
-        assert!(warning.message.contains("different Homeboy build"));
-        assert!(warning.message.contains("run recovery_commands in order"));
+        assert_eq!(
+            warning
+                .active_daemon_control_plane_build_identity
+                .as_deref(),
+            Some("homeboy 0.201.3+old")
+        );
+        assert_eq!(
+            warning.job_command_binary_build_identity.as_deref(),
+            Some("homeboy 0.204.0+new")
+        );
+        assert_eq!(
+            warning.refresh_command,
+            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
+        );
+        assert!(warning.message.contains("daemon control plane"));
+        assert!(warning.message.contains("job command binary"));
+        assert!(warning.message.contains("run refresh_command"));
         assert_eq!(
             warning.recovery_commands,
             vec![

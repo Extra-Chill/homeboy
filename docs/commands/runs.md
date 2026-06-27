@@ -12,6 +12,7 @@ homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario 
 homeboy runs bench-compare --from-run <run-id> --to-run <run-id> [--metric <name>]
 homeboy runs fuzz-compare --from-run <run-id> --to-run <run-id> [--hotspot-policy <advisory|blocking|off>]
 homeboy runs show <run-id> [--json]
+homeboy runs dossier <run-id> [--json]
 homeboy runs resume-plan <run-id>
 homeboy runs evidence <run-id>
 homeboy runs artifacts <run-id> [--runner <runner-id>]
@@ -42,6 +43,8 @@ homeboy runs loop-sync <archive-root> [--component <id>] [--rig <id>] [--label <
 The JSON output includes stable run fields: run id, kind, status, timestamps, component id, rig id, git SHA, command, cwd, metadata, and artifact records where relevant.
 
 `homeboy runs show <run-id>` prints a compact human summary by default: run identity, status, component/rig/SHA, timestamps, bench hotspots, generic coverage summaries when present, key case artifacts, and each recorded artifact's locator with a concise `homeboy runs artifact get <run-id> <artifact-id>` command to inspect it. This makes bench artifacts, scenario outputs, slow/hot metric families, and fuzzer coverage gaps/case artifacts easy to find without spelunking temp directories. Coverage rendering is schema-blind and only uses generic metadata fields such as `coverage_summary`, `coverage_gaps`, `surface_count`, `operation_count`, `exercised_count`, `skipped_count`, `failed_count`, `declared_count`, `executable_count`, `proven_count`, `skipped_reason_counts`, and `skipped_reasons`; key case artifact detection uses generic artifact id/kind/name markers such as `key_case`, `fuzz_case`, `failing_case`, `case_artifact`, and `repro_case`. Pass `--json` for the full structured payload on stdout; it is also always written to `--output <file>`.
+
+`homeboy runs dossier <run-id>` aggregates the existing read-only run inspection surfaces into one actionable report. It includes status and stale/failure category, failure/gate data when recorded, run/job/handoff/result refs when present in generic metadata, redacted environment provenance counts, artifact/evidence refs with reviewer-visible versus operator-local hints, inspection commands, and repair/next commands only when existing data supports them. The command reads the observation store and artifact registry; it does not mutate runs, artifacts, or external systems. Pass `--json` for the full structured payload.
 
 For full-coverage claims, prefer persisted evidence that distinguishes declared, executable, and proven states. A declared surface/workload is inventory, an executable surface/workload has a runnable command or manifest path, and a proven surface/workload has a persisted run plus reviewer-visible coverage/case artifacts or fetch commands. `runs show`, `runs artifacts`, and `runs evidence` surface those cues generically; missing proven counts or missing artifacts should be treated as incomplete proof.
 
@@ -121,6 +124,7 @@ Metric lookup supports top-level run metadata such as `results.total_elapsed_ms`
 
 ```bash
 homeboy runs list --kind bench --component <component> [--scenario <id>] [--rig <id>] [--limit 20]
+homeboy runs dossier <run-id>
 homeboy runs distribution --kind bench --component <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
 homeboy runs bench-compare --from-run <run-id> --to-run <run-id>
 homeboy rig runs <id> [--limit 20]

@@ -334,8 +334,11 @@ pub enum BenchReportFormat {
 fn warn_unknown_setting_keys(
     ctx: &execution_context::ExecutionContext,
     setting_args: &SettingArgs,
+    rig_accepted_setting_keys: &[String],
 ) {
-    if let Some(message) = unknown_setting_keys_warning(ctx, setting_args) {
+    if let Some(message) =
+        unknown_setting_keys_warning(ctx, setting_args, rig_accepted_setting_keys)
+    {
         eprintln!("{message}");
     }
 }
@@ -348,23 +351,39 @@ fn warn_unknown_setting_keys(
 fn unknown_setting_keys_warning(
     ctx: &execution_context::ExecutionContext,
     setting_args: &SettingArgs,
+    rig_accepted_setting_keys: &[String],
 ) -> Option<String> {
     let unknown = ctx.unknown_setting_overrides(
         setting_args.setting.iter().map(|(k, _)| k.as_str()),
         setting_args.setting_json.iter().map(|(k, _)| k.as_str()),
     );
+    let rig_accepted: std::collections::HashSet<&str> = rig_accepted_setting_keys
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let unknown: Vec<String> = unknown
+        .into_iter()
+        .filter(|key| !rig_accepted.contains(key.as_str()))
+        .collect();
     if unknown.is_empty() {
         return None;
     }
 
     let mut accepted = ctx.accepted_setting_keys.clone();
+    accepted.extend(rig_accepted_setting_keys.iter().cloned());
     accepted.sort();
+    accepted.dedup();
     let extension = ctx.extension_id.as_deref().unwrap_or("<unknown>");
+    let owner_scope = if rig_accepted_setting_keys.is_empty() {
+        format!("extension '{extension}'")
+    } else {
+        format!("extension '{extension}' or active rig")
+    };
     Some(format!(
-        "warning: bench ignored {} unknown setting key(s) not declared by extension '{}': {}. \
+        "warning: bench ignored {} unknown setting key(s) not declared by {}: {}. \
          Accepted settings: {}. Check for a typo before relying on this run.",
         unknown.len(),
-        extension,
+        owner_scope,
         unknown.join(", "),
         if accepted.is_empty() {
             "<none declared>".to_string()
@@ -651,7 +670,15 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
         effective_extension_overrides(&args.extension_override.extensions, rig_spec.as_deref());
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
-    warn_unknown_setting_keys(&ctx, &args.setting_args);
+    warn_unknown_setting_keys(
+        &ctx,
+        &args.setting_args,
+        rig_spec
+            .as_ref()
+            .and_then(|spec| spec.bench.as_ref())
+            .map(|bench| bench.accepted_settings.as_slice())
+            .unwrap_or(&[]),
+    );
     let extra_workloads = rig_spec
         .as_ref()
         .and_then(|spec| {

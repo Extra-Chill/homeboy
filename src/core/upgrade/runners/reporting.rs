@@ -102,7 +102,7 @@ pub fn runner_upgrade_final_detail(
             remediation
         };
         parts.push(format!(
-            "connected runner daemon is stale: session reports {}, configured executable reports {}; restart the active daemon with `{}`",
+            "connected runner daemon is stale: active daemon control plane reports {}, job command binary reports {}; refresh with `{}`",
             stale_daemon.session_homeboy_version,
             stale_daemon.current_homeboy_version,
             remediation

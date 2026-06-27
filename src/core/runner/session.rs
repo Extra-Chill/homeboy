@@ -506,12 +506,20 @@ pub struct RunnerStatusReport {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerStaleDaemonWarning {
+    pub severity: &'static str,
     pub session_homeboy_version: String,
     pub current_homeboy_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_homeboy_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_homeboy_build_identity: Option<String>,
+    pub active_daemon_control_plane_version: String,
+    pub job_command_binary_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_daemon_control_plane_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_command_binary_build_identity: Option<String>,
+    pub refresh_command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stale_runtime_paths: Vec<RunnerStaleRuntimePath>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -545,12 +553,22 @@ impl RunnerStaleDaemonWarning {
         session_homeboy_build_identity: Option<String>,
         current_homeboy_build_identity: Option<String>,
     ) -> Self {
+        let recovery_commands = vec![
+            format!("homeboy runner disconnect {}", runner_id),
+            format!("homeboy runner connect {}", runner_id),
+        ];
         Self {
+            severity: "warning",
+            active_daemon_control_plane_version: session_homeboy_version.clone(),
+            job_command_binary_version: current_homeboy_version.clone(),
+            active_daemon_control_plane_build_identity: session_homeboy_build_identity.clone(),
+            job_command_binary_build_identity: current_homeboy_build_identity.clone(),
             session_homeboy_version,
             current_homeboy_version,
             session_homeboy_build_identity,
             current_homeboy_build_identity,
-            message: "connected runner daemon was started by a different Homeboy build than the configured runner executable; run recovery_commands in order to restart the active daemon".to_string(),
+            refresh_command: recovery_commands.join(" && "),
+            message: "connected runner daemon control plane was started by a different Homeboy build than the configured job command binary; run refresh_command to restart the active daemon".to_string(),
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
             recovery_commands: vec![

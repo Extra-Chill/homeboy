@@ -239,9 +239,8 @@ fn status_diagnostics_surface_failed_child_run_root_cause() {
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: vec![AgentTaskDiagnostic {
-                    class: "runtime_task_ability_unavailable".to_string(),
-                    message: "runtime_task_ability_unavailable: required ability is not registered"
-                        .to_string(),
+                    class: "runtime.provider_import_failed".to_string(),
+                    message: "Provider runtime import failed: module not found".to_string(),
                     data: Value::Null,
                 }],
                 outputs: Value::Null,
@@ -272,7 +271,9 @@ fn status_diagnostics_surface_failed_child_run_root_cause() {
             .diagnostics
             .push(AgentTaskLoopActionDiagnostic {
                 code: "child_run_failed".to_string(),
-                message: "child run failed".to_string(),
+                message:
+                    "Agent runtime did not produce required typed artifacts: concept_packet, design_packet."
+                        .to_string(),
                 runner: None,
                 details: Value::Null,
             });
@@ -292,12 +293,15 @@ fn status_diagnostics_surface_failed_child_run_root_cause() {
         assert_eq!(failed.dedupe_key.as_deref(), Some("finding:abc:repair"));
         assert_eq!(failed.child_run_id.as_deref(), Some("agent-task-child-1"));
         assert_eq!(failed.child_run_status.as_deref(), Some("failed"));
-        assert_eq!(failed.top_diagnostic, "child run failed");
+        assert_eq!(
+            failed.top_diagnostic,
+            "Agent runtime did not produce required typed artifacts: concept_packet, design_packet."
+        );
         assert_eq!(
             failed.hydrated_root_cause.as_deref(),
-            Some("runtime_task_ability_unavailable: required ability is not registered")
+            Some("Provider runtime import failed: module not found")
         );
-        assert_eq!(failed.owner_surface, "wp_codebox");
+        assert_eq!(failed.owner_surface, "agent_runtime");
         assert_eq!(
             failed.next_command,
             "homeboy agent-task status agent-task-child-1 --full"
@@ -646,6 +650,9 @@ fn policy_transitions_can_match_structured_event_jsonpath() {
             actions: vec![AgentTaskLoopPolicyAction::FanOut {
                 dedupe_key: "validation:run-1:actionable-findings".to_string(),
                 entity_ids: vec!["finding:a".to_string()],
+                dynamic_artifact: None,
+                group_by: Vec::new(),
+                requires_non_empty: false,
                 max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
                 fail_fast: true,
                 request_template: json!({ "kind": "repair" }),
@@ -764,6 +771,9 @@ fn runner_policy_blocks_remote_materialization_failures() {
     let action = AgentTaskLoopPolicyAction::FanOut {
         dedupe_key: "fanout:lab".to_string(),
         entity_ids: vec!["finding:1".to_string()],
+        dynamic_artifact: None,
+        group_by: Vec::new(),
+        requires_non_empty: false,
         max_items: DEFAULT_FAN_OUT_MAX_ITEMS,
         fail_fast: true,
         request_template: json!({

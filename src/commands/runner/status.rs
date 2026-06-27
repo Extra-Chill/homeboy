@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use homeboy::core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, AgentRuntimeDiagnosticFollowup,
-    AgentRuntimeDiagnosticsContract, AgentRuntimeRuntimeDiagnosticDeclaration,
-    AgentRuntimeSourceConsistencyDiagnostic, AgentRuntimeToolDiagnosticDeclaration,
+    AgentRuntimeDiagnosticsContract, AgentRuntimeExecutableRequirement,
+    AgentRuntimeRuntimeDiagnosticDeclaration, AgentRuntimeSourceConsistencyDiagnostic,
+    AgentRuntimeToolDiagnosticDeclaration,
 };
 use homeboy::core::runners::{
     self as runner, RunnerActiveJobState, RunnerAvailability, RunnerSession, RunnerStatusReport,
@@ -13,8 +14,9 @@ use homeboy::core::runners::{
 use super::super::CmdResult;
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
-    RunnerConnectionOutput, RunnerExtra, RunnerHomeboyBinaryRole, RunnerOperatorCommand,
-    RunnerOutput, RunnerToolDiagnostics, RunnerWorkflowBinaryGuidance,
+    RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
+    RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOutput, RunnerRuntimeDiagnostics,
+    RunnerRuntimePackageDiagnostics, RunnerToolDiagnostics, RunnerWorkflowBinaryGuidance,
     WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue, WpCodeboxRuntimeDiagnostic,
     WpCodeboxRuntimeOutput,
 };
@@ -94,16 +96,20 @@ fn selected_lab_runner_status(
     let effective_env = runner::effective_env(runner_id)?
         .into_iter()
         .collect::<BTreeMap<_, _>>();
+    let runtime_diagnostics =
+        declared_runtime_diagnostics_collection(Some(runner_id), &effective_env);
+    let executable_requirements = declared_executable_requirement_diagnostics_collection();
     Ok(Some(LabSelectedRunnerOutput {
         runner_id: runner_id.to_string(),
         kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
         configured_executable: configured_executable.clone(),
         runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
-        wp_codebox_runtime: declared_runtime_diagnostics_for_legacy(
-            "wp_codebox_runtime",
-            Some(runner_id),
-            &effective_env,
-        ),
+        executable_requirements,
+        wp_codebox_runtime: runtime_diagnostics
+            .iter()
+            .find(|diagnostics| diagnostics.legacy_output.as_deref() == Some("wp_codebox_runtime"))
+            .map(wp_codebox_runtime_output_from_generic),
+        runtime_diagnostics,
         daemon_enabled: runner_config.settings.daemon,
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
@@ -120,6 +126,40 @@ fn selected_lab_runner_status(
     }))
 }
 
+pub(super) fn declared_executable_requirement_diagnostics_collection(
+) -> Vec<RunnerExecutableRequirementDiagnostics> {
+    discover_agent_runtime_catalog()
+        .manifests
+        .into_iter()
+        .flat_map(|manifest| {
+            let runtime = manifest.id;
+            manifest
+                .materialization
+                .executable_requirements
+                .into_iter()
+                .map(move |requirement| {
+                    declared_executable_requirement_diagnostics(&runtime, requirement)
+                })
+        })
+        .collect()
+}
+
+pub(super) fn declared_executable_requirement_diagnostics(
+    runtime: &str,
+    requirement: AgentRuntimeExecutableRequirement,
+) -> RunnerExecutableRequirementDiagnostics {
+    RunnerExecutableRequirementDiagnostics {
+        runtime: runtime.to_string(),
+        id: requirement.id,
+        label: requirement.label,
+        env: requirement.env,
+        candidates: requirement.candidates,
+        version_command: requirement.version_command,
+        install_hint: requirement.install_hint,
+        diagnostic_state: "declared",
+    }
+}
+
 pub(super) fn lab_runner_homeboy_output(
     runner_id: &str,
     configured_executable: &str,
@@ -134,6 +174,7 @@ pub(super) fn lab_runner_homeboy_output(
     let version_drift = active_daemon_version
         .as_ref()
         .is_some_and(|version| version != &controller_version);
+    let stale_daemon = status.stale_daemon.as_ref();
     let binary_roles = runner_homeboy_binary_roles(
         configured_executable,
         &status.session,
@@ -156,10 +197,13 @@ pub(super) fn lab_runner_homeboy_output(
             .session
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone()),
-        stale_daemon: status
-            .stale_daemon
-            .as_ref()
-            .and_then(|warning| serde_json::to_value(warning).ok()),
+        job_command_binary_version: stale_daemon
+            .map(|warning| warning.job_command_binary_version.clone()),
+        job_command_binary_build_identity: stale_daemon
+            .and_then(|warning| warning.job_command_binary_build_identity.clone()),
+        stale_daemon_severity: stale_daemon.map(|warning| warning.severity.to_string()),
+        stale_daemon_refresh_command: stale_daemon.map(|warning| warning.refresh_command.clone()),
+        stale_daemon: stale_daemon.and_then(|warning| serde_json::to_value(warning).ok()),
         version_drift,
         command_availability_checks: lab_command_availability_checks(configured_executable),
         artifact_features: runner_artifact_feature_diagnostics(
@@ -198,6 +242,7 @@ pub(crate) fn declared_runtime_diagnostics_for_legacy(
         .flat_map(|contract| contract.runtimes.iter())
         .find(|declaration| declaration.legacy_output.as_deref() == Some(legacy_output))
         .map(|declaration| declared_runtime_diagnostics(declaration, runner_id, env))
+        .map(|diagnostics| wp_codebox_runtime_output_from_generic(&diagnostics))
 }
 
 pub(crate) fn declared_tool_diagnostics(
@@ -234,7 +279,7 @@ pub(crate) fn declared_runtime_diagnostics(
     declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
     runner_id: Option<&str>,
     env: &BTreeMap<String, String>,
-) -> WpCodeboxRuntimeOutput {
+) -> RunnerRuntimeDiagnostics {
     let (configured, configured_binary_source) =
         configured_value(env, &declaration.configured_binary_env);
     let install_dir = install_dir(
@@ -258,19 +303,78 @@ pub(crate) fn declared_runtime_diagnostics(
         &managed_cache_source,
     );
 
-    WpCodeboxRuntimeOutput {
-        tool: declaration.tool.clone(),
+    RunnerRuntimeDiagnostics {
+        runtime: declaration.tool.clone(),
+        legacy_output: declaration.legacy_output.clone(),
         configured_binary: configured,
         configured_binary_source,
         managed_cache_source: managed_cache_source.clone(),
         managed_cache_binary,
         effective_binary_rule: declaration.effective_binary_rule.clone(),
-        playground_package: packages.first().cloned().unwrap_or_else(empty_package),
-        core_package: packages.get(1).cloned().unwrap_or_else(empty_package),
-        source_git_sha: declared_probe_value(declaration, "source_git_sha"),
-        dist_build_freshness: declared_probe_value(declaration, "dist_build_freshness"),
+        packages,
+        probes: declared_probe_values(declaration),
         runtime_probe_command: diagnostic_command(runner_id, &declaration.runtime_probe_script),
         diagnostics,
+    }
+}
+
+pub(crate) fn declared_runtime_diagnostics_collection(
+    runner_id: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Vec<RunnerRuntimeDiagnostics> {
+    declared_diagnostics_contracts()
+        .iter()
+        .flat_map(|contract| contract.runtimes.iter())
+        .map(|declaration| declared_runtime_diagnostics(declaration, runner_id, env))
+        .collect()
+}
+
+fn wp_codebox_runtime_output_from_generic(
+    diagnostics: &RunnerRuntimeDiagnostics,
+) -> WpCodeboxRuntimeOutput {
+    WpCodeboxRuntimeOutput {
+        tool: diagnostics.runtime.clone(),
+        configured_binary: diagnostics.configured_binary.clone(),
+        configured_binary_source: diagnostics.configured_binary_source.clone(),
+        managed_cache_source: diagnostics.managed_cache_source.clone(),
+        managed_cache_binary: diagnostics.managed_cache_binary.clone(),
+        effective_binary_rule: diagnostics.effective_binary_rule.clone(),
+        playground_package: diagnostics
+            .packages
+            .iter()
+            .find(|package| package.field == "playground_package")
+            .or_else(|| diagnostics.packages.first())
+            .map(wp_codebox_package_output_from_generic)
+            .unwrap_or_else(empty_package),
+        core_package: diagnostics
+            .packages
+            .iter()
+            .find(|package| package.field == "core_package")
+            .or_else(|| diagnostics.packages.get(1))
+            .map(wp_codebox_package_output_from_generic)
+            .unwrap_or_else(empty_package),
+        source_git_sha: diagnostics
+            .probes
+            .get("source_git_sha")
+            .cloned()
+            .unwrap_or_else(default_runtime_probe_value),
+        dist_build_freshness: diagnostics
+            .probes
+            .get("dist_build_freshness")
+            .cloned()
+            .unwrap_or_else(default_runtime_probe_value),
+        runtime_probe_command: diagnostics.runtime_probe_command.clone(),
+        diagnostics: diagnostics.diagnostics.clone(),
+    }
+}
+
+fn wp_codebox_package_output_from_generic(
+    package: &RunnerRuntimePackageDiagnostics,
+) -> WpCodeboxPackageRuntimeOutput {
+    WpCodeboxPackageRuntimeOutput {
+        package: package.package.clone(),
+        expected_path: package.expected_path.clone(),
+        resolution: package.resolution.clone(),
     }
 }
 
@@ -353,11 +457,12 @@ fn declared_runtime_packages(
     env: &BTreeMap<String, String>,
     install_dir: &str,
     managed_cache_source: &str,
-) -> Vec<WpCodeboxPackageRuntimeOutput> {
+) -> Vec<RunnerRuntimePackageDiagnostics> {
     declaration
         .packages
         .iter()
-        .map(|package| WpCodeboxPackageRuntimeOutput {
+        .map(|package| RunnerRuntimePackageDiagnostics {
+            field: package.field.clone(),
             package: package.package.clone(),
             expected_path: package
                 .env_override
@@ -389,19 +494,28 @@ fn empty_package() -> WpCodeboxPackageRuntimeOutput {
     }
 }
 
-fn declared_probe_value(
+fn declared_probe_values(
     declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-    field: &str,
-) -> WpCodeboxProbeValue {
-    let source = declaration
+) -> BTreeMap<String, WpCodeboxProbeValue> {
+    declaration
         .probes
         .iter()
-        .find(|probe| probe.field == field)
-        .map(|probe| probe.source.clone())
-        .unwrap_or_else(|| "runtime_probe_command".to_string());
+        .map(|probe| {
+            (
+                probe.field.clone(),
+                WpCodeboxProbeValue {
+                    value: None,
+                    source: probe.source.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn default_runtime_probe_value() -> WpCodeboxProbeValue {
     WpCodeboxProbeValue {
         value: None,
-        source,
+        source: "runtime_probe_command".to_string(),
     }
 }
 
@@ -746,6 +860,20 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
             report.runner_id, report.stale_runner_job_count
         ));
     }
+    if let Some(warning) = report.stale_daemon.as_ref() {
+        let active_daemon = warning
+            .active_daemon_control_plane_build_identity
+            .as_deref()
+            .unwrap_or(&warning.active_daemon_control_plane_version);
+        let job_binary = warning
+            .job_command_binary_build_identity
+            .as_deref()
+            .unwrap_or(&warning.job_command_binary_version);
+        hints.push(format!(
+            "Runner `{}` stale daemon severity={}: active daemon control plane is `{active_daemon}`, but the job command binary is `{job_binary}`. Refresh with `{}` before using runner/Lab status as version evidence.",
+            report.runner_id, warning.severity, warning.refresh_command
+        ));
+    }
     match session.mode {
         RunnerTunnelMode::DirectSsh => {
             if report.active_job_count > 0 {
@@ -862,5 +990,100 @@ pub(super) fn runner_status_operator_commands(
         }
     }
 
+    if let Some(warning) = report.stale_daemon.as_ref() {
+        commands.push(RunnerOperatorCommand {
+            scope: "daemon_refresh",
+            runner_id: report.runner_id.clone(),
+            job_id: None,
+            command: warning.refresh_command.clone(),
+            description: "Restart the active runner daemon so the control plane uses the configured job command binary.".to_string(),
+        });
+    }
+
     commands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy::core::runner::{
+        RunnerActiveJobState, RunnerSessionRole, RunnerStaleDaemonWarning,
+    };
+    use homeboy::core::runners::{RunnerSessionState, RunnerTunnelMode};
+
+    #[test]
+    fn stale_daemon_status_hint_labels_control_plane_and_job_binary() {
+        let report = stale_daemon_report();
+
+        let hints = runner_status_operator_hints(&report);
+        let commands = runner_status_operator_commands(&report);
+
+        let hint = hints
+            .iter()
+            .find(|hint| hint.contains("stale daemon"))
+            .expect("stale daemon hint");
+        assert!(hint.contains("severity=warning"));
+        assert!(hint.contains("active daemon control plane"));
+        assert!(hint.contains("homeboy 0.259.0+daemon"));
+        assert!(hint.contains("job command binary"));
+        assert!(hint.contains("homeboy 0.262.0+binary"));
+        assert!(hint.contains(
+            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
+        ));
+
+        let refresh = commands
+            .iter()
+            .find(|command| command.scope == "daemon_refresh")
+            .expect("daemon refresh command");
+        assert_eq!(
+            refresh.command,
+            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
+        );
+        assert!(refresh
+            .description
+            .contains("configured job command binary"));
+    }
+
+    fn stale_daemon_report() -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: Some(RunnerSession {
+                runner_id: "homeboy-lab".to_string(),
+                mode: RunnerTunnelMode::DirectSsh,
+                role: RunnerSessionRole::Controller,
+                server_id: Some("lab-server".to_string()),
+                controller_id: None,
+                broker_url: None,
+                remote_daemon_address: Some("127.0.0.1:7331".to_string()),
+                local_port: Some(7331),
+                local_url: Some("http://127.0.0.1:7331".to_string()),
+                tunnel_pid: Some(12345),
+                remote_daemon_pid: Some(23456),
+                homeboy_version: "homeboy 0.259.0".to_string(),
+                homeboy_build_identity: Some("homeboy 0.259.0+daemon".to_string()),
+                connected_at: "2026-06-26T00:00:00Z".to_string(),
+                worker_identity: None,
+                worker_pid: None,
+                last_seen_at: None,
+            }),
+            stale_daemon: Some(RunnerStaleDaemonWarning::new(
+                "homeboy-lab",
+                "homeboy 0.259.0".to_string(),
+                "homeboy 0.262.0".to_string(),
+                Some("homeboy 0.259.0+daemon".to_string()),
+                Some("homeboy 0.262.0+binary".to_string()),
+            )),
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            session_path: "/tmp/homeboy-lab.json".to_string(),
+        }
+    }
 }

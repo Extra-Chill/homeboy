@@ -111,16 +111,18 @@ pub fn run_command_output(
             )
         }
         Commands::Runs(args) => {
-            let summarize = runs_show_summary_eligible(&args);
+            let summarize_show = runs_show_summary_eligible(&args);
+            let summarize_dossier = runs_dossier_summary_eligible(&args);
             let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
-            let summary_stdout = summarize
-                .then(|| {
-                    stdout_result
-                        .as_ref()
-                        .ok()
-                        .and_then(super::runs_summary::render_runs_show_summary)
-                })
-                .flatten();
+            let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
+                if summarize_show {
+                    super::runs_summary::render_runs_show_summary(payload)
+                } else if summarize_dossier {
+                    super::runs_dossier_summary::render_runs_dossier_summary(payload)
+                } else {
+                    None
+                }
+            });
 
             JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
                 CommandPresentation {
@@ -250,6 +252,10 @@ fn runs_show_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
     args.show_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
+fn runs_dossier_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
+    args.dossier_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
+}
+
 fn ci_triage_summary_eligible(args: &crate::commands::ci::CiArgs) -> bool {
     matches!(&args.command, crate::commands::ci::CiCommand::Triage(_))
         && !homeboy::core::lab_routing::is_lab_offload_subprocess()
@@ -339,7 +345,7 @@ mod tests {
     use crate::command_contract::CommandDispatchFamily;
     use crate::commands::agent_task::{
         AgentTaskArgs, AgentTaskCommand, AgentTaskControllerArgs, AgentTaskControllerCommand,
-        AgentTaskControllerRunFromSpecArgs, StatusArgs,
+        AgentTaskControllerDispatchArgs, AgentTaskControllerRunFromSpecArgs, StatusArgs,
     };
 
     #[test]
@@ -461,10 +467,12 @@ mod tests {
                         replace: false,
                         fork: false,
                         resume_existing: false,
-                        dispatch_backend: None,
-                        dispatch_selector: None,
-                        dispatch_model: None,
-                        dispatch_provider_config: None,
+                        dispatch: AgentTaskControllerDispatchArgs {
+                            dispatch_backend: None,
+                            dispatch_selector: None,
+                            dispatch_model: None,
+                            dispatch_provider_config: None,
+                        },
                     },
                 ),
             }),

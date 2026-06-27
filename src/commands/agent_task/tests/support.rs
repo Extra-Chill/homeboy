@@ -9,9 +9,9 @@ pub(in crate::commands::agent_task) use super::super::super::agent_task_dispatch
     DispatchArgs, DispatchCoreArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskControllerApplyEventArgs, AgentTaskControllerFromSpecArgs,
-    AgentTaskControllerMaterializeArgs, AgentTaskControllerProofArgs,
-    AgentTaskControllerRunFromSpecArgs,
+    AgentTaskControllerApplyEventArgs, AgentTaskControllerDispatchArgs,
+    AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
+    AgentTaskControllerProofArgs, AgentTaskControllerRunFromSpecArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, ReviewArgs, StatusArgs,
@@ -212,7 +212,7 @@ impl AgentTaskExecutorAdapter for ExecutorResultEvidenceFailureExecutor {
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::ProviderError,
             summary: Some(
-                "WP Codebox agent task did not produce required typed artifacts: concept_packet, design_packet."
+                "Agent runtime did not produce required typed artifacts: concept_packet, design_packet."
                     .to_string(),
             ),
             failure_classification: Some(AgentTaskFailureClassification::Provider),
@@ -225,11 +225,24 @@ impl AgentTaskExecutorAdapter for ExecutorResultEvidenceFailureExecutor {
             }],
             diagnostics: vec![AgentTaskDiagnostic {
                 class: "missing_required_typed_artifacts".to_string(),
-                message: "WP Codebox agent task did not produce required typed artifacts: concept_packet, design_packet."
+                message: "Agent runtime did not produce required typed artifacts: concept_packet, design_packet."
                     .to_string(),
                 data: json!({ "missing": ["concept_packet", "design_packet"] }),
             }],
-            outputs: Value::Null,
+            outputs: json!({
+                "provider_result": {
+                    "diagnostics": [
+                        {
+                            "class": "runtime.required_typed_artifacts_missing",
+                            "message": "Agent runtime did not produce required typed artifacts: concept_packet, design_packet."
+                        },
+                        {
+                            "class": "agent_runtime.task_run_failed",
+                            "message": "RecipeValidationError: configured provider runtime path does not exist"
+                        }
+                    ]
+                }
+            }),
             workflow: None,
             follow_up: None,
             metadata: json!({ "expected_artifacts": ["concept_packet", "design_packet"] }),

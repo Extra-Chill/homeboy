@@ -1,0 +1,36 @@
+{
+  "schema": "homeboy/agent-task-outcome/v1",
+  "task_id": "task-contract-import-failure",
+  "status": "provider_error",
+  "summary": "Provider returned a structurally valid outcome with nested runtime diagnostics.",
+  "failure_classification": "provider",
+  "diagnostics": [
+    {
+      "class": "missing_required_artifact",
+      "message": "Required artifact answer_packet was not produced.",
+      "data": {
+        "missing": ["answer_packet"]
+      }
+    }
+  ],
+  "outputs": {
+    "provider_outcome_contract": "homeboy/agent-task-provider-outcome-contract/v1",
+    "provider_status": "succeeded",
+    "runtime": {
+      "status": "failed",
+      "diagnostics": [
+        {
+          "class": "runtime.import_failed",
+          "message": "ImportError: cannot import runtime package module 'neutral_runtime.adapter'"
+        },
+        {
+          "class": "runtime.required_artifact_missing",
+          "message": "Required artifact answer_packet was not produced."
+        }
+      ]
+    }
+  },
+  "metadata": {
+    "expected_artifacts": ["answer_packet"]
+  }
+}

@@ -83,6 +83,7 @@ pub(super) fn add_candidate_extra_workspace(
         path: canon,
         snapshot_includes,
         bootstrap_node_dependencies,
+        source_provenance: None,
     });
     Ok(())
 }
@@ -283,6 +284,7 @@ pub(super) fn accepted_extra_lab_workspaces() -> Result<Vec<ExtraLabWorkspace>> 
                 path: canonical_existing_dir(&path, "extra_workspace")?,
                 snapshot_includes: Vec::new(),
                 bootstrap_node_dependencies: false,
+                source_provenance: None,
             })
         })
         .collect()
@@ -322,6 +324,7 @@ pub(super) fn discovered_validation_dependency_workspaces(
                 path,
                 snapshot_includes: Vec::new(),
                 bootstrap_node_dependencies: false,
+                source_provenance: None,
             });
         }
     }

@@ -180,10 +180,12 @@ fn controller_run_from_spec_materializes_runs_bounded_actions_and_returns_status
                 replace: false,
                 fork: false,
                 resume_existing: false,
-                dispatch_backend: Some("fixture".to_string()),
-                dispatch_selector: None,
-                dispatch_model: None,
-                dispatch_provider_config: None,
+                dispatch: AgentTaskControllerDispatchArgs {
+                    dispatch_backend: Some("fixture".to_string()),
+                    dispatch_selector: None,
+                    dispatch_model: None,
+                    dispatch_provider_config: None,
+                },
             },
             ArtifactCapturingExecutor::default(),
         )
@@ -237,12 +239,14 @@ fn controller_run_from_spec_persists_dispatch_defaults_for_generated_actions() {
                 replace: false,
                 fork: false,
                 resume_existing: false,
-                dispatch_backend: Some("fixture".to_string()),
-                dispatch_selector: None,
-                dispatch_model: Some("gpt-test".to_string()),
-                dispatch_provider_config: Some(
-                    r#"{"runtime_wordpress_version":"6.9"}"#.to_string(),
-                ),
+                dispatch: AgentTaskControllerDispatchArgs {
+                    dispatch_backend: Some("fixture".to_string()),
+                    dispatch_selector: None,
+                    dispatch_model: Some("gpt-test".to_string()),
+                    dispatch_provider_config: Some(
+                        r#"{"runtime_wordpress_version":"6.9"}"#.to_string(),
+                    ),
+                },
             },
             CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
@@ -328,17 +332,19 @@ fn controller_run_from_spec_preserves_runtime_execution_and_components() {
                 replace: false,
                 fork: false,
                 resume_existing: false,
-                dispatch_backend: Some("fixture".to_string()),
-                dispatch_selector: None,
-                dispatch_model: Some("gpt-cli".to_string()),
-                dispatch_provider_config: Some(
-                    json!({
-                        "provider": "codex",
-                        "model": "gpt-config",
-                        "options": { "reasoning_effort": "high" }
-                    })
-                    .to_string(),
-                ),
+                dispatch: AgentTaskControllerDispatchArgs {
+                    dispatch_backend: Some("fixture".to_string()),
+                    dispatch_selector: None,
+                    dispatch_model: Some("gpt-cli".to_string()),
+                    dispatch_provider_config: Some(
+                        json!({
+                            "provider": "codex",
+                            "model": "gpt-config",
+                            "options": { "reasoning_effort": "high" }
+                        })
+                        .to_string(),
+                    ),
+                },
             },
             CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
@@ -403,10 +409,12 @@ fn controller_run_from_spec_rejects_unbounded_zero_max_actions() {
                 replace: false,
                 fork: false,
                 resume_existing: false,
-                dispatch_backend: Some("fixture".to_string()),
-                dispatch_selector: None,
-                dispatch_model: None,
-                dispatch_provider_config: None,
+                dispatch: AgentTaskControllerDispatchArgs {
+                    dispatch_backend: Some("fixture".to_string()),
+                    dispatch_selector: None,
+                    dispatch_model: None,
+                    dispatch_provider_config: None,
+                },
             },
             CapturingExecutor::default(),
         )
@@ -442,10 +450,12 @@ fn controller_run_from_spec_rejects_command_runtime_without_command_kind() {
                 replace: false,
                 fork: false,
                 resume_existing: false,
-                dispatch_backend: Some("fixture".to_string()),
-                dispatch_selector: None,
-                dispatch_model: None,
-                dispatch_provider_config: None,
+                dispatch: AgentTaskControllerDispatchArgs {
+                    dispatch_backend: Some("fixture".to_string()),
+                    dispatch_selector: None,
+                    dispatch_model: None,
+                    dispatch_provider_config: None,
+                },
             },
             CapturingExecutor {
                 observed_request: Arc::clone(&observed_request),
@@ -482,10 +492,12 @@ fn run_from_spec_proof_args(
         replace: false,
         fork: false,
         resume_existing: false,
-        dispatch_backend: Some("fixture".to_string()),
-        dispatch_selector: None,
-        dispatch_model: None,
-        dispatch_provider_config: None,
+        dispatch: AgentTaskControllerDispatchArgs {
+            dispatch_backend: Some("fixture".to_string()),
+            dispatch_selector: None,
+            dispatch_model: None,
+            dispatch_provider_config: None,
+        },
     }
 }
 

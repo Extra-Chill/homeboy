@@ -29,6 +29,8 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let matrix_summary = evidence_report::evidence_matrix_summary(&run, &artifacts);
     let (evidence_manifest, evidence_manifest_errors) =
         evidence_report::evidence_manifest(&run, &artifacts);
+    let tracker_refs =
+        evidence_report::evidence_tracker_refs(&run.metadata_json, evidence_manifest.as_ref());
 
     Ok((
         RunsOutput::Evidence(RunsEvidenceOutput {
@@ -37,6 +39,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
             run: run_summary(run.clone()),
             homeboy_version: run.homeboy_version.clone(),
             metadata,
+            tracker_refs,
             heartbeat: evidence_report::EvidenceHeartbeat {
                 status: run.status.clone(),
                 stale: stale_reason.is_some(),
@@ -143,6 +146,10 @@ mod tests {
                         "error": "boom",
                         "gate_failures": ["p95_ms exceeded"],
                         "hints": ["inspect artifacts"],
+                        "tracker_refs": [{
+                            "kind": "linear",
+                            "id": "HB-42"
+                        }],
                         "evidence_manifest": {
                             "schema": "homeboy/evidence-manifest/v1",
                             "status": { "state": "blocked" },
@@ -208,6 +215,11 @@ mod tests {
             assert_eq!(output.command, "runs.evidence");
             assert_eq!(output.run_id, run.id);
             assert_eq!(output.run.kind, "bench");
+            assert_eq!(output.tracker_refs.len(), 2);
+            assert_eq!(output.tracker_refs[0].kind, "linear");
+            assert_eq!(output.tracker_refs[0].id, "HB-42");
+            assert_eq!(output.tracker_refs[1].kind, "github_issue");
+            assert_eq!(output.tracker_refs[1].id, "Extra-Chill/homeboy#123");
             assert_eq!(output.artifact_index.count, 2);
             assert_eq!(output.artifact_index.file_count, 1);
             assert_eq!(output.artifact_index.url_count, 1);

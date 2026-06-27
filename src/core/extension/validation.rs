@@ -14,10 +14,10 @@ pub fn validate_required_extensions(component: &crate::core::component::Componen
         _ => return Ok(()),
     };
 
-    let mut missing: Vec<String> = Vec::new();
-    for extension_id in extensions.keys() {
+    let mut missing: Vec<(&String, &crate::core::component::ScopedExtensionConfig)> = Vec::new();
+    for (extension_id, ext_config) in extensions {
         if load_extension(extension_id).is_err() {
-            missing.push(extension_id.clone());
+            missing.push((extension_id, ext_config));
         }
     }
 
@@ -25,23 +25,19 @@ pub fn validate_required_extensions(component: &crate::core::component::Componen
         return Ok(());
     }
 
-    missing.sort();
+    missing.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-    let extension_list = missing.join(", ");
+    let missing_ids: Vec<String> = missing.iter().map(|(id, _)| (*id).clone()).collect();
+    let extension_list = missing_ids.join(", ");
     let install_hints: Vec<String> = missing
         .iter()
-        .map(|id| {
-            format!(
-                "homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id {}",
-                id
-            )
-        })
+        .map(|(id, ext_config)| extension_install_hint(id, ext_config))
         .collect();
 
     let message = if missing.len() == 1 {
         format!(
             "Component '{}' requires extension '{}' which is not installed",
-            component.id, missing[0]
+            component.id, missing_ids[0]
         )
     } else {
         format!(
@@ -55,7 +51,7 @@ pub fn validate_required_extensions(component: &crate::core::component::Componen
         message,
         serde_json::json!({
             "component_id": component.id,
-            "missing_extensions": missing,
+            "missing_extensions": missing_ids,
         }),
     );
 
@@ -64,7 +60,7 @@ pub fn validate_required_extensions(component: &crate::core::component::Componen
     }
 
     err = err.with_hint(
-        "Browse available extensions: https://github.com/Extra-Chill/homeboy-extensions"
+        "Provide an extension source with `homeboy extension install <source> --id <extension-id>` or add `source`/`source_url` to the component extension settings."
             .to_string(),
     );
 
@@ -126,10 +122,7 @@ pub fn validate_extension_requirements(
             },
             Err(_) => {
                 errors.push(format!("Extension '{}' is not installed", extension_id));
-                hints.push(format!(
-                    "homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id {}",
-                    extension_id
-                ));
+                hints.push(extension_install_hint(extension_id, ext_config));
             }
         }
     }
@@ -166,6 +159,31 @@ pub fn validate_extension_requirements(
     }
 
     Err(err)
+}
+
+fn extension_install_hint(
+    extension_id: &str,
+    ext_config: &crate::core::component::ScopedExtensionConfig,
+) -> String {
+    match extension_source(ext_config) {
+        Some(source) => format!("homeboy extension install {} --id {}", source, extension_id),
+        None => format!(
+            "homeboy extension install <source> --id {} (declare `source` or `source_url` in this component's extension settings to make this command exact)",
+            extension_id
+        ),
+    }
+}
+
+fn extension_source(ext_config: &crate::core::component::ScopedExtensionConfig) -> Option<&str> {
+    ["source", "source_url", "install_source"]
+        .iter()
+        .find_map(|key| {
+            ext_config
+                .settings
+                .get(*key)
+                .and_then(|value| value.as_str())
+        })
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Check if any of the component's linked extensions provide build configuration.

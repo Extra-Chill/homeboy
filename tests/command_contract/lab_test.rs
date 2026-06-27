@@ -244,7 +244,7 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
                 "start",
                 "preview",
                 "--cwd",
-                "/home/user/Developer/_lab_workspaces/site",
+                "/runner/workspaces/site",
                 "--command",
                 "npm run dev",
             ]),
@@ -267,7 +267,6 @@ fn unsupported_lab_command_cases() -> Vec<Commands> {
         ]),
         parsed_command(&["homeboy", "status"]),
         parsed_command(&["homeboy", "bench", "list"]),
-        parsed_command(&["homeboy", "bench", "history", "homeboy"]),
     ]
 }
 
@@ -656,7 +655,7 @@ fn test_lab_command_contracts_cover_hot_commands() {
         "start",
         "preview",
         "--cwd",
-        "/home/user/Developer/_lab_workspaces/site",
+        "/runner/workspaces/site",
         "--command",
         "npm run dev",
     ])

@@ -3,8 +3,8 @@ use serde_json::Value;
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandOutputFileMode;
 
-use super::utils::response as output;
-use super::{review, trace, GlobalArgs};
+use crate::commands::utils::response as output;
+use crate::commands::{review, trace, GlobalArgs};
 
 pub struct JsonCommandRun {
     pub stdout_result: homeboy::core::Result<Value>,
@@ -35,7 +35,7 @@ impl JsonCommandRun {
     }
 
     pub fn from_raw(
-        raw_run: super::raw_output::RawCommandRun,
+        raw_run: crate::commands::raw_output::RawCommandRun,
     ) -> (Self, homeboy::core::Result<String>) {
         let exit_code = raw_run.exit_code;
         let raw_stdout = raw_run.stdout_result;
@@ -90,7 +90,7 @@ impl<'a> OutputService<'a> {
 
     pub fn emit_raw_run(
         &self,
-        raw_run: super::raw_output::RawCommandRun,
+        raw_run: crate::commands::raw_output::RawCommandRun,
         mode: CommandOutputFileMode,
     ) -> i32 {
         let (json_run, raw_stdout) = JsonCommandRun::from_raw(raw_run);
@@ -121,13 +121,13 @@ pub fn run_command(
     let plan = command.response_plan(output_file.is_some());
     let output_service = OutputService::new(output_file);
 
-    match super::raw_output::prepare_command_run(command, global, plan.stdout) {
-        super::raw_output::CommandRunPreparation::Handled(exit_code) => exit_code,
-        super::raw_output::CommandRunPreparation::Json(command) => {
+    match crate::commands::raw_output::prepare_command_run(command, global, plan.stdout) {
+        crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => exit_code,
+        crate::commands::raw_output::CommandRunPreparation::Json(command) => {
             let run = run_json(*command, global, plan.output_file, output_file);
             output_service.emit_run(run, plan.output_file)
         }
-        super::raw_output::CommandRunPreparation::Raw(raw_run) => {
+        crate::commands::raw_output::CommandRunPreparation::Raw(raw_run) => {
             output_service.emit_raw_run(raw_run, plan.output_file)
         }
     }
@@ -195,7 +195,9 @@ pub fn run_json(
                 presentation: CommandPresentation::default(),
             }
         }
-        (_, command) => super::json_output::run_command_output(command, global, output_file),
+        (_, command) => {
+            crate::commands::json_output::run_command_output(command, global, output_file)
+        }
     }
 }
 
@@ -253,7 +255,7 @@ mod tests {
 
     #[test]
     fn raw_command_run_without_artifact_uses_raw_stdout_for_file_payload() {
-        let raw_run = super::super::raw_output::RawCommandRun {
+        let raw_run = crate::commands::raw_output::RawCommandRun {
             stdout_result: Ok("plain output".to_string()),
             exit_code: 0,
             output_file_result: None,
@@ -267,7 +269,7 @@ mod tests {
 
     #[test]
     fn raw_command_run_with_artifact_uses_artifact_for_file_payload() {
-        let raw_run = super::super::raw_output::RawCommandRun {
+        let raw_run = crate::commands::raw_output::RawCommandRun {
             stdout_result: Ok("markdown output".to_string()),
             exit_code: 0,
             output_file_result: Some(Ok(json!({ "artifact": true }))),

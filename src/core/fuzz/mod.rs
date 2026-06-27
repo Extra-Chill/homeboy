@@ -39,7 +39,9 @@ pub use defaults::{
 pub use envelope::{
     FuzzExecutionRequest, FuzzGate, FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory,
 };
-pub use hotspots::{parse_fuzz_hotspot_set_value, FuzzHotspot, FuzzHotspotSet};
+pub use hotspots::{
+    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot, FuzzHotspotSet,
+};
 pub use observations::{
     parse_fuzz_observation_set_value, FuzzObservation, FuzzObservationFamily, FuzzObservationSet,
 };

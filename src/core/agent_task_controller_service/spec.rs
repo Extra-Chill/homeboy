@@ -230,6 +230,12 @@ pub struct AgentTaskRepoLoopSpecWorkflow {
 pub struct AgentTaskRepoLoopSpecFanOut {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_non_empty: bool,
     #[serde(default, alias = "items", skip_serializing_if = "Vec::is_empty")]
     pub entity_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

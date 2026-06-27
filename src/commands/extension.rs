@@ -1,6 +1,9 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::core::agent_runtime_manifest::{
+    discover_agent_runtime_catalog, AgentRuntimeDiagnosticsContract,
+};
 use homeboy::core::extension::{
     self, extension_ready_status, is_extension_linked, load_extension, run_setup, ExtensionSummary,
     UpdateEntry,
@@ -8,8 +11,9 @@ use homeboy::core::extension::{
 use homeboy::core::project::{self, Project};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Command;
 
-use crate::commands::runner::{declared_tool_diagnostics_for_legacy, RunnerToolDiagnostics};
+use crate::commands::runner::{declared_tool_diagnostics, RunnerToolDiagnostics};
 use crate::commands::CmdResult;
 
 #[derive(Args)]
@@ -25,6 +29,11 @@ enum ExtensionCommand {
         /// Project ID to filter compatible extensions
         #[arg(short, long)]
         project: Option<String>,
+    },
+    /// Compare installed extension revisions with their current checkout HEADs
+    DiffInstalled {
+        /// Optional extension ID to inspect
+        extension_id: Option<String>,
     },
     /// Show detailed information about a extension
     Show {
@@ -168,6 +177,7 @@ pub fn run(
 ) -> CmdResult<ExtensionOutput> {
     match args.command {
         ExtensionCommand::List { project } => list(project),
+        ExtensionCommand::DiffInstalled { extension_id } => diff_installed(extension_id.as_deref()),
         ExtensionCommand::Show { extension_id } => show_extension(&extension_id),
         ExtensionCommand::Run {
             extension_id,
@@ -253,6 +263,12 @@ pub enum ExtensionOutput {
         project_id: Option<String>,
         extensions: Vec<ExtensionSummary>,
     },
+    #[serde(rename = "extension.diff_installed")]
+    DiffInstalled {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        extension_id: Option<String>,
+        extensions: Vec<InstalledExtensionDiff>,
+    },
     #[serde(rename = "extension.show")]
     Show { extension: ExtensionDetail },
     #[serde(rename = "extension.run")]
@@ -266,8 +282,7 @@ pub enum ExtensionOutput {
     #[serde(rename = "extension.setup")]
     Setup {
         extension_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        wp_codebox: Option<RunnerToolDiagnostics>,
+        runtime_diagnostics: ExtensionRuntimeDiagnostics,
     },
     #[serde(rename = "extension.install")]
     Install {
@@ -289,8 +304,7 @@ pub enum ExtensionOutput {
         uninstalled_previous: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_revision: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        wp_codebox: Option<RunnerToolDiagnostics>,
+        runtime_diagnostics: ExtensionRuntimeDiagnostics,
     },
     #[serde(rename = "extension.replace")]
     Replace {
@@ -446,6 +460,51 @@ pub struct RequiresDetail {
     pub components: Vec<String>,
 }
 
+#[derive(Serialize)]
+pub struct ExtensionRuntimeDiagnostics {
+    pub extension_id: String,
+    pub path: String,
+    pub linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    pub runtime_manifest_found: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runtime_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<RunnerToolDiagnostics>,
+    pub freshness: ExtensionRuntimeFreshness,
+    pub path_behavior: String,
+    pub commands: ExtensionRuntimeDiagnosticCommands,
+}
+
+#[derive(Serialize)]
+pub struct ExtensionRuntimeFreshness {
+    pub source_revision_source: String,
+    pub refresh_behavior: String,
+}
+
+#[derive(Serialize)]
+pub struct ExtensionRuntimeDiagnosticCommands {
+    pub show: String,
+    pub refresh: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct InstalledExtensionDiff {
+    pub extension_id: String,
+    pub path: String,
+    pub linked: bool,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkout_head_revision: Option<String>,
+    pub status: String,
+    pub next_command: String,
+}
+
 fn list(project: Option<String>) -> CmdResult<ExtensionOutput> {
     let project_config: Option<Project> = project.as_ref().and_then(|id| project::load(id).ok());
     let summaries = extension::list_summaries(project_config.as_ref());
@@ -457,6 +516,98 @@ fn list(project: Option<String>) -> CmdResult<ExtensionOutput> {
         },
         0,
     ))
+}
+
+fn diff_installed(extension_id: Option<&str>) -> CmdResult<ExtensionOutput> {
+    let rows = extension::list_summaries(None)
+        .into_iter()
+        .filter(|summary| extension_id.is_none_or(|id| summary.id == id))
+        .map(installed_extension_diff)
+        .collect::<Vec<_>>();
+
+    if rows.is_empty() {
+        if let Some(id) = extension_id {
+            load_extension(id)?;
+        }
+    }
+
+    Ok((
+        ExtensionOutput::DiffInstalled {
+            extension_id: extension_id.map(str::to_string),
+            extensions: rows,
+        },
+        0,
+    ))
+}
+
+fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff {
+    let checkout_head_revision = git_head_revision(Path::new(&summary.path));
+    let status = installed_extension_diff_status(
+        summary.ready,
+        summary.source_revision.as_deref(),
+        checkout_head_revision.as_deref(),
+    );
+    let next_command = installed_extension_diff_next_command(&summary, &status);
+
+    InstalledExtensionDiff {
+        extension_id: summary.id,
+        path: summary.path,
+        linked: summary.linked,
+        ready: summary.ready,
+        ready_reason: summary.ready_reason,
+        installed_source_revision: summary.source_revision,
+        checkout_head_revision,
+        status,
+        next_command,
+    }
+}
+
+fn installed_extension_diff_status(
+    ready: bool,
+    installed_revision: Option<&str>,
+    checkout_revision: Option<&str>,
+) -> String {
+    if !ready {
+        return "unready".to_string();
+    }
+    match (installed_revision, checkout_revision) {
+        (Some(installed), Some(checkout)) if installed == checkout => "current".to_string(),
+        (Some(_), Some(_)) => "stale".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn installed_extension_diff_next_command(summary: &ExtensionSummary, status: &str) -> String {
+    match status {
+        "current" => format!("homeboy extension show {}", shell_arg(&summary.id)),
+        "stale" if summary.linked => format!(
+            "homeboy extension relink {} {}",
+            shell_arg(&summary.id),
+            shell_arg(&summary.path)
+        ),
+        "stale" => format!("homeboy extension update {}", shell_arg(&summary.id)),
+        "unready" => format!("homeboy extension setup {}", shell_arg(&summary.id)),
+        _ => format!("homeboy extension show {}", shell_arg(&summary.id)),
+    }
+}
+
+fn git_head_revision(path: &Path) -> Option<String> {
+    if path.as_os_str().is_empty() || !path.exists() {
+        return None;
+    }
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(path)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
@@ -633,7 +784,10 @@ fn refresh_extension(
 
     Ok((
         ExtensionOutput::Refresh {
-            wp_codebox: extension_wp_codebox_diagnostics(&result.extension_id),
+            runtime_diagnostics: extension_runtime_diagnostics(
+                &result.extension_id,
+                result.source_revision.clone(),
+            ),
             extension_id: result.extension_id,
             source: result.url,
             path: result.path.to_string_lossy().to_string(),
@@ -789,30 +943,108 @@ fn setup_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     Ok((
         ExtensionOutput::Setup {
             extension_id: extension_id.to_string(),
-            wp_codebox: extension_wp_codebox_diagnostics(extension_id),
+            runtime_diagnostics: extension_runtime_diagnostics(extension_id, None),
         },
         result.exit_code,
     ))
 }
 
-fn extension_wp_codebox_diagnostics(extension_id: &str) -> Option<RunnerToolDiagnostics> {
-    if load_extension(extension_id).is_err() {
-        return None;
-    }
-    let env = [
-        "HOMEBOY_WP_CODEBOX_BIN",
-        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN",
-        "HOMEBOY_WP_CODEBOX_INSTALL_DIR",
-    ]
-    .into_iter()
-    .filter_map(|name| {
-        std::env::var(name)
-            .ok()
-            .map(|value| (name.to_string(), value))
-    })
-    .collect::<BTreeMap<_, _>>();
+fn extension_runtime_diagnostics(
+    extension_id: &str,
+    source_revision: Option<String>,
+) -> ExtensionRuntimeDiagnostics {
+    let extension = load_extension(extension_id).ok();
+    let linked = is_extension_linked(extension_id);
+    let path = extension
+        .as_ref()
+        .and_then(|extension| extension.extension_path.clone())
+        .unwrap_or_default();
+    let source_revision =
+        source_revision.or_else(|| homeboy::core::extension::read_source_revision(extension_id));
+    let matching_manifests = discover_agent_runtime_catalog()
+        .manifests
+        .into_iter()
+        .filter(|manifest| manifest.extension_id.as_deref() == Some(extension_id))
+        .collect::<Vec<_>>();
+    let runtime_ids = matching_manifests
+        .iter()
+        .map(|manifest| manifest.id.clone())
+        .collect::<Vec<_>>();
+    let env = runtime_diagnostic_env(
+        matching_manifests
+            .iter()
+            .map(|manifest| &manifest.materialization.diagnostics),
+    );
+    let tools = matching_manifests
+        .iter()
+        .flat_map(|manifest| manifest.materialization.diagnostics.tools.iter())
+        .map(|declaration| declared_tool_diagnostics(declaration, None, &env))
+        .collect::<Vec<_>>();
 
-    declared_tool_diagnostics_for_legacy("wp_codebox", None, &env)
+    ExtensionRuntimeDiagnostics {
+        extension_id: extension_id.to_string(),
+        path,
+        linked,
+        source_revision,
+        runtime_manifest_found: !runtime_ids.is_empty(),
+        runtime_ids,
+        tools,
+        freshness: ExtensionRuntimeFreshness {
+            source_revision_source: "installed extension source metadata".to_string(),
+            refresh_behavior: "extension refresh replaces the installed extension from the supplied source/ref and reports the installed source revision when available".to_string(),
+        },
+        path_behavior: "Shared agent runtime paths come from the extension manifest and generic runtime materialization declarations; Homeboy core does not special-case individual providers.".to_string(),
+        commands: ExtensionRuntimeDiagnosticCommands {
+            show: format!("homeboy extension show {}", shell_arg(extension_id)),
+            refresh: format!("homeboy extension refresh <source> --id {}", shell_arg(extension_id)),
+        },
+    }
+}
+
+fn runtime_diagnostic_env<'a>(
+    contracts: impl Iterator<Item = &'a AgentRuntimeDiagnosticsContract>,
+) -> BTreeMap<String, String> {
+    let mut names = Vec::new();
+    for contract in contracts {
+        for declaration in &contract.tools {
+            names.extend(declaration.configured_binary_env.iter().cloned());
+            if let Some(name) = &declaration.install_dir_env {
+                names.push(name.clone());
+            }
+        }
+        for declaration in &contract.runtimes {
+            names.extend(declaration.configured_binary_env.iter().cloned());
+            if let Some(name) = &declaration.install_dir_env {
+                names.push(name.clone());
+            }
+            for package in &declaration.packages {
+                if let Some(name) = &package.env_override {
+                    names.push(name.clone());
+                }
+            }
+            for diagnostic in &declaration.source_consistency {
+                if !diagnostic.path.contains("${") && diagnostic.path != "configured_binary" {
+                    names.push(diagnostic.path.clone());
+                }
+            }
+        }
+    }
+
+    names
+        .into_iter()
+        .filter_map(|name| std::env::var(&name).ok().map(|value| (name, value)))
+        .collect()
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn run_action(
@@ -873,4 +1105,134 @@ fn exec_extension_tool(
         },
         exit_code,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::with_isolated_home;
+    use std::fs;
+
+    #[test]
+    fn extension_runtime_diagnostics_reports_generic_materialization_guidance() {
+        with_isolated_home(|home| {
+            let extension_id = "generic-runtime";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{
+  "name": "Generic runtime extension",
+  "version": "1.0.0",
+  "agent_runtimes": [{
+    "id": "generic-runtime/v1",
+    "agent_task_executors": [{
+      "id": "generic-runtime.default",
+      "backend": "generic-runtime"
+    }],
+    "materialization": {
+      "diagnostics": {
+        "tools": [{
+          "tool": "generic-tool",
+          "configured_binary_env": ["HOMEBOY_GENERIC_TOOL_BIN"],
+          "install_dir_env": "HOMEBOY_GENERIC_TOOL_INSTALL_DIR",
+          "default_install_dir": "/tmp/homeboy/generic-tool",
+          "managed_cache_source": "${install_dir}/source",
+          "managed_cache_binary": "${managed_cache_source}/bin/generic-tool",
+          "effective_binary_rule": "managed cache binary, configured binary, then PATH",
+          "diagnostic_script": "generic-tool --version"
+        }]
+      }
+    }
+  }]
+}"#,
+            )
+            .expect("extension manifest");
+            std::env::set_var("HOMEBOY_GENERIC_TOOL_BIN", "/custom/bin/generic-tool");
+
+            let diagnostics =
+                extension_runtime_diagnostics(extension_id, Some("abc1234".to_string()));
+
+            assert_eq!(diagnostics.extension_id, extension_id);
+            assert_eq!(diagnostics.source_revision.as_deref(), Some("abc1234"));
+            assert!(diagnostics.runtime_manifest_found);
+            assert_eq!(diagnostics.runtime_ids, vec!["generic-runtime/v1"]);
+            assert_eq!(diagnostics.tools.len(), 1);
+            assert_eq!(diagnostics.tools[0].tool, "generic-tool");
+            assert_eq!(
+                diagnostics.tools[0].configured_binary.as_deref(),
+                Some("/custom/bin/generic-tool")
+            );
+            assert!(diagnostics
+                .path_behavior
+                .contains("does not special-case individual providers"));
+            assert!(diagnostics.freshness.refresh_behavior.contains("reports"));
+
+            std::env::remove_var("HOMEBOY_GENERIC_TOOL_BIN");
+        });
+    }
+
+    #[test]
+    fn installed_extension_diff_status_reports_stale_current_and_unknown() {
+        assert_eq!(
+            installed_extension_diff_status(true, Some("abc1234"), Some("abc1234")),
+            "current"
+        );
+        assert_eq!(
+            installed_extension_diff_status(true, Some("abc1234"), Some("def5678")),
+            "stale"
+        );
+        assert_eq!(
+            installed_extension_diff_status(true, Some("abc1234"), None),
+            "unknown"
+        );
+        assert_eq!(
+            installed_extension_diff_status(false, Some("abc1234"), Some("abc1234")),
+            "unready"
+        );
+    }
+
+    #[test]
+    fn installed_extension_diff_next_command_guides_stale_local_iteration() {
+        let mut summary = ExtensionSummary {
+            id: "rust".to_string(),
+            name: "Rust".to_string(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            runtime: "platform".to_string(),
+            compatible: true,
+            ready: true,
+            ready_reason: None,
+            ready_detail: None,
+            linked: true,
+            path: "/tmp/homeboy-extensions/rust".to_string(),
+            error: None,
+            symlink_target: None,
+            source_revision: Some("abc1234".to_string()),
+            cli_tool: None,
+            cli_display_name: None,
+            actions: Vec::new(),
+            has_setup: None,
+            has_ready_check: None,
+        };
+
+        assert_eq!(
+            installed_extension_diff_next_command(&summary, "stale"),
+            "homeboy extension relink rust /tmp/homeboy-extensions/rust"
+        );
+
+        summary.linked = false;
+        assert_eq!(
+            installed_extension_diff_next_command(&summary, "stale"),
+            "homeboy extension update rust"
+        );
+
+        assert_eq!(
+            installed_extension_diff_next_command(&summary, "unready"),
+            "homeboy extension setup rust"
+        );
+    }
 }

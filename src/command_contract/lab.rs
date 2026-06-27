@@ -704,15 +704,23 @@ mod agent_task_checkout {
                     agent_task::AgentTaskControllerCommand::FromSpec(
                         agent_task::AgentTaskControllerFromSpecArgs {
                             resume: true,
-                            dispatch_backend,
-                            dispatch_selector,
+                            dispatch:
+                                agent_task::AgentTaskControllerDispatchArgs {
+                                    dispatch_backend,
+                                    dispatch_selector,
+                                    ..
+                                },
                             ..
                         },
                     )
                     | agent_task::AgentTaskControllerCommand::RunFromSpec(
                         agent_task::AgentTaskControllerRunFromSpecArgs {
-                            dispatch_backend,
-                            dispatch_selector,
+                            dispatch:
+                                agent_task::AgentTaskControllerDispatchArgs {
+                                    dispatch_backend,
+                                    dispatch_selector,
+                                    ..
+                                },
                             ..
                         },
                     ),

@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
+use homeboy::core::artifact_ref::EvidenceRef;
+use homeboy::core::artifacts::{
+    record_artifact_postprocess_outputs, run_artifact_postprocess_steps, ArtifactPostprocessContext,
+};
 use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
@@ -13,7 +16,9 @@ use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
 use super::report::{
-    evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status,
+    evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
+    fuzz_result_envelope_evidence_ref, fuzz_result_envelope_from_campaign, gate_status,
+    persist_fuzz_run_result_envelope,
 };
 use super::types::{
     FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzExecutionOutput, FuzzRunArgs,
@@ -130,7 +135,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         .map(|workload| workload.id.clone())
         .or_else(|| args.workload_id.clone());
     let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
-    persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+    let persisted_evidence = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
         run_id: args.run_id.as_deref(),
         component_id: &ctx.component_id,
         rig_id: rig_id.as_deref(),
@@ -146,6 +151,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         expected_metric_gates: &expected_metric_gates,
         results_error: combined_results_error,
         missing_artifact_refs: &artifact_ref_validation.missing_refs,
+        postprocess: &postprocess,
     })?;
     let evidence_followups = fuzz_evidence_followups(
         args.run_id.as_deref(),
@@ -187,7 +193,8 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             postprocess,
             results,
             campaign_contract,
-            runner_contract: default_runner_contract(),
+            runner_contract: fuzz_runner_contract(fuzz_config.as_ref()),
+            evidence_refs: persisted_evidence.evidence_refs,
             evidence_followups,
         },
         exit_code,
@@ -338,24 +345,20 @@ pub(super) fn run_fuzz_artifact_postprocess(
     if steps.is_empty() {
         return Ok(Vec::new());
     }
-    std::fs::create_dir_all(artifacts_dir).map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some(artifacts_dir.display().to_string()),
-        )
-    })?;
-
-    let mut outputs = Vec::new();
-    for (index, step) in steps.iter().enumerate() {
-        outputs.push(run_fuzz_artifact_postprocess_step(
-            index,
-            step,
-            rig_context,
-            results_path,
-            artifacts_dir,
-        )?);
-    }
-    Ok(outputs)
+    let expand =
+        |value: &str| expand_postprocess_path(value, rig_context, results_path, artifacts_dir);
+    let outputs = run_artifact_postprocess_steps(
+        &steps,
+        &ArtifactPostprocessContext {
+            artifact_root: artifacts_dir,
+            input_root: Some(results_path),
+            path_expander: Some(&expand),
+        },
+    )?;
+    Ok(outputs
+        .into_iter()
+        .map(FuzzArtifactPostprocessOutput::from)
+        .collect())
 }
 
 fn fuzz_artifact_postprocess_steps(
@@ -392,129 +395,6 @@ fn fuzz_artifact_postprocess_steps(
         .unwrap_or_default()
 }
 
-fn run_fuzz_artifact_postprocess_step(
-    index: usize,
-    step: &homeboy::core::rig::ArtifactPostprocessSpec,
-    rig_context: Option<&FuzzRigContext>,
-    results_path: &Path,
-    artifacts_dir: &Path,
-) -> homeboy::core::Result<FuzzArtifactPostprocessOutput> {
-    let id = step
-        .id
-        .clone()
-        .unwrap_or_else(|| format!("artifact-postprocess-{}", index + 1));
-    let output_path = resolve_postprocess_output_path(&step.output, artifacts_dir)?;
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            homeboy::core::Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-        })?;
-    }
-    let input = step
-        .input
-        .as_ref()
-        .map(|input| expand_postprocess_path(input, rig_context, results_path, artifacts_dir));
-    let parameters_json = serde_json::to_string(&step.parameters).map_err(|error| {
-        homeboy::core::Error::internal_unexpected(format!(
-            "failed to serialize artifact postprocess parameters: {error}"
-        ))
-    })?;
-
-    let mut command = Command::new(&step.helper);
-    command.arg(&step.action);
-    if let Some(args) = step
-        .parameters
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-    {
-        for arg in args.iter().filter_map(serde_json::Value::as_str) {
-            command.arg(arg);
-        }
-    }
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_ID", &id);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_HELPER", &step.helper);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_ACTION", &step.action);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT", &output_path);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT", artifacts_dir);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_PARAMETERS", parameters_json);
-    if let Some(input) = input.as_ref() {
-        command.env("HOMEBOY_ARTIFACT_POSTPROCESS_INPUT", input);
-    }
-    for (key, value) in &step.parameters {
-        if let Some(value) = postprocess_parameter_env_value(value) {
-            command.env(postprocess_parameter_env_key(key), value);
-        }
-    }
-
-    let output = command.output().map_err(|error| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "failed to run artifact postprocess `{}` via helper `{}`: {error}",
-                id, step.helper
-            ),
-            Some("fuzz.artifact_postprocess".to_string()),
-        )
-    })?;
-    let exit_code = output.status.code();
-    let mut success = output.status.success();
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let mut error = (!success).then(|| {
-        format!(
-            "artifact postprocess `{id}` failed with exit code {}",
-            exit_code
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        )
-    });
-    if success && !output_path.exists() {
-        success = false;
-        error = Some(format!(
-            "artifact postprocess `{id}` did not create required output {}",
-            output_path.display()
-        ));
-    }
-
-    Ok(FuzzArtifactPostprocessOutput {
-        id,
-        helper: step.helper.clone(),
-        action: step.action.clone(),
-        input: input.map(|path| path.to_string_lossy().to_string()),
-        output: output_path.to_string_lossy().to_string(),
-        required: step.required,
-        exit_code,
-        success,
-        stdout,
-        stderr,
-        error,
-    })
-}
-
-fn resolve_postprocess_output_path(
-    output: &str,
-    artifacts_dir: &Path,
-) -> homeboy::core::Result<PathBuf> {
-    let trimmed = output.trim();
-    let path = Path::new(trimmed);
-    if trimmed.is_empty() || path.is_absolute() || trimmed.starts_with("..") {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "artifact_postprocess.output",
-            "artifact postprocess output must be a non-empty path relative to HOMEBOY_FUZZ_ARTIFACTS_DIR",
-            Some(output.to_string()),
-            None,
-        ));
-    }
-    let resolved = artifacts_dir.join(path);
-    if !resolved.starts_with(artifacts_dir) {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "artifact_postprocess.output",
-            "artifact postprocess output must stay within HOMEBOY_FUZZ_ARTIFACTS_DIR",
-            Some(output.to_string()),
-            None,
-        ));
-    }
-    Ok(resolved)
-}
-
 fn expand_postprocess_path(
     value: &str,
     rig_context: Option<&FuzzRigContext>,
@@ -530,27 +410,23 @@ fn expand_postprocess_path(
     })
 }
 
-fn postprocess_parameter_env_value(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(value) => Some(value.clone()),
-        serde_json::Value::Bool(value) => Some(value.to_string()),
-        serde_json::Value::Number(value) => Some(value.to_string()),
-        _ => None,
+impl From<homeboy::core::artifacts::ArtifactPostprocessOutput> for FuzzArtifactPostprocessOutput {
+    fn from(output: homeboy::core::artifacts::ArtifactPostprocessOutput) -> Self {
+        Self {
+            id: output.id,
+            helper: output.helper,
+            action: output.action,
+            input: output.input,
+            output: output.output,
+            required: output.required,
+            exit_code: output.exit_code,
+            success: output.success,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            error: output.error,
+            artifacts: output.artifacts,
+        }
     }
-}
-
-fn postprocess_parameter_env_key(key: &str) -> String {
-    let suffix = key
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("HOMEBOY_ARTIFACT_POSTPROCESS_PARAMETER_{suffix}")
 }
 
 pub(super) fn fuzz_postprocess_error(outputs: &[FuzzArtifactPostprocessOutput]) -> Option<String> {
@@ -783,11 +659,18 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) expected_metric_gates: &'a [super::types::FuzzGateEvaluation],
     pub(super) results_error: Option<&'a str>,
     pub(super) missing_artifact_refs: &'a [String],
+    pub(super) postprocess: &'a [FuzzArtifactPostprocessOutput],
+}
+
+pub(super) struct FuzzRunPersistedEvidence {
+    #[allow(dead_code)]
+    pub(super) run: Option<RunRecord>,
+    pub(super) evidence_refs: Vec<EvidenceRef>,
 }
 
 pub(super) fn persist_fuzz_run_evidence(
     input: FuzzRunEvidenceInput<'_>,
-) -> homeboy::core::Result<Option<RunRecord>> {
+) -> homeboy::core::Result<FuzzRunPersistedEvidence> {
     let run_id = input
         .run_id
         .filter(|run_id| !run_id.trim().is_empty())
@@ -802,6 +685,7 @@ pub(super) fn persist_fuzz_run_evidence(
         "seed": input.args.seed.clone(),
         "max_duration": input.args.max_duration.clone(),
         "passthrough_args": input.args.args.clone(),
+        "tracker_refs": input.args.tracker_refs,
         "exit_code": input.exit_code,
         "success": input.success,
         "status": input.status,
@@ -839,8 +723,17 @@ pub(super) fn persist_fuzz_run_evidence(
         metadata_json: metadata,
     };
     store.upsert_imported_run(&run)?;
+    let mut evidence_refs = Vec::new();
     if input.results_path.is_file() {
         store.record_artifact(&run_id, "fuzz_results", input.results_path)?;
+    }
+    if let Some(campaign) = input.results {
+        let mut envelope =
+            fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
+        envelope.status = gate_status(&evaluate_fuzz_gates(campaign));
+        if let Some(artifact) = persist_fuzz_run_result_envelope(Some(&run_id), &envelope)? {
+            evidence_refs.push(fuzz_result_envelope_evidence_ref(&artifact));
+        }
     }
     if input.artifacts_dir.is_dir() {
         store.record_directory_artifact_with_metadata(
@@ -853,7 +746,31 @@ pub(super) fn persist_fuzz_run_evidence(
             }),
         )?;
     }
-    Ok(Some(run))
+    let generic_postprocess_outputs = input
+        .postprocess
+        .iter()
+        .map(
+            |output| homeboy::core::artifacts::ArtifactPostprocessOutput {
+                id: output.id.clone(),
+                helper: output.helper.clone(),
+                action: output.action.clone(),
+                input: output.input.clone(),
+                output: output.output.clone(),
+                required: output.required,
+                exit_code: output.exit_code,
+                success: output.success,
+                stdout: output.stdout.clone(),
+                stderr: output.stderr.clone(),
+                error: output.error.clone(),
+                artifacts: output.artifacts.clone(),
+            },
+        )
+        .collect::<Vec<_>>();
+    record_artifact_postprocess_outputs(&store, &run_id, &generic_postprocess_outputs)?;
+    Ok(FuzzRunPersistedEvidence {
+        run: Some(run),
+        evidence_refs,
+    })
 }
 
 #[derive(Default)]
@@ -999,6 +916,12 @@ fn fuzz_run_command(
     if let Some(run_id) = args.run_id.as_ref() {
         parts.extend(["--run-id".to_string(), run_id.clone()]);
     }
+    for tracker_ref in &args.tracker_refs {
+        parts.extend([
+            "--tracker-ref".to_string(),
+            format!("{}:{}", tracker_ref.kind, tracker_ref.id),
+        ]);
+    }
     if let Some(seed) = args.seed.as_ref() {
         parts.extend(["--seed".to_string(), seed.clone()]);
     }
@@ -1055,28 +978,46 @@ pub(super) fn fuzz_evidence_followups(
 }
 
 pub(super) fn default_runner_contract() -> FuzzRunnerContract {
+    fuzz_runner_contract(None)
+}
+
+pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerContract {
+    let mut env: Vec<String> = [
+        "HOMEBOY_FUZZ_RESULTS_FILE",
+        "HOMEBOY_FUZZ_ARTIFACTS_DIR",
+        "HOMEBOY_FUZZ_WORKLOAD_ID",
+        "HOMEBOY_FUZZ_WORKLOAD_PATH",
+        "HOMEBOY_FUZZ_WORKLOAD_ROOT",
+        "HOMEBOY_FUZZ_RUN_ID",
+        "HOMEBOY_FUZZ_SEED",
+        "HOMEBOY_FUZZ_INVENTORY_FILE",
+        "HOMEBOY_FUZZ_MAX_DURATION",
+        "HOMEBOY_FUZZ_GATE_PROFILE",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_ID",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_HELPER",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_ACTION",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_INPUT",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_PARAMETERS",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect();
+
+    if let Some(config) = config {
+        for key in &config.env {
+            let key = key.trim();
+            if !key.is_empty() && !env.iter().any(|existing| existing == key) {
+                env.push(key.to_string());
+            }
+        }
+    }
+
     FuzzRunnerContract {
         capability: "fuzz".to_string(),
         extension_script_required: true,
-        env: vec![
-            "HOMEBOY_FUZZ_RESULTS_FILE",
-            "HOMEBOY_FUZZ_ARTIFACTS_DIR",
-            "HOMEBOY_FUZZ_WORKLOAD_ID",
-            "HOMEBOY_FUZZ_WORKLOAD_PATH",
-            "HOMEBOY_FUZZ_WORKLOAD_ROOT",
-            "HOMEBOY_FUZZ_RUN_ID",
-            "HOMEBOY_FUZZ_SEED",
-            "HOMEBOY_FUZZ_INVENTORY_FILE",
-            "HOMEBOY_FUZZ_MAX_DURATION",
-            "HOMEBOY_FUZZ_GATE_PROFILE",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_ID",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_HELPER",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_ACTION",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_INPUT",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_PARAMETERS",
-        ],
+        env,
     }
 }
 

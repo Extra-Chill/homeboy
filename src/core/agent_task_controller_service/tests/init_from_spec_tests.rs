@@ -299,7 +299,7 @@ fn init_from_spec_compiles_workflow_fan_out_items_into_deduped_dispatch_action()
 }
 
 #[test]
-fn init_from_spec_rejects_dynamic_artifact_fan_out_until_artifact_expansion_exists() {
+fn init_from_spec_compiles_dynamic_artifact_fan_out_for_controller_expansion() {
     with_isolated_home(|_| {
         let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
             "loop_id": "repo-loop-artifact-fan-out",
@@ -316,15 +316,32 @@ fn init_from_spec_rejects_dynamic_artifact_fan_out_until_artifact_expansion_exis
         }))
         .expect("spec deserializes");
 
-        let error = init_from_spec(ControllerFromSpecRequest { spec })
-            .expect_err("dynamic artifact fan-out needs controller artifact expansion");
+        let report = init_from_spec(ControllerFromSpecRequest { spec })
+            .expect("dynamic artifact fan-out compiles for controller expansion");
 
-        let message = error.to_string();
-        assert!(message.contains("workflows[].fan_out"), "{message}");
-        assert!(
-            message.contains("artifact-to-entity expansion"),
-            "{message}"
-        );
+        assert_eq!(report.actions.len(), 1);
+        match &report.actions[0].action {
+            AgentTaskLoopPolicyAction::FanOut {
+                dynamic_artifact,
+                group_by,
+                requires_non_empty,
+                entity_ids,
+                ..
+            } => {
+                assert_eq!(entity_ids, &Vec::<String>::new());
+                assert_eq!(dynamic_artifact.as_deref(), Some("finding_group"));
+                assert_eq!(
+                    group_by,
+                    &vec![
+                        "owner_repo".to_string(),
+                        "root_cause".to_string(),
+                        "group_id".to_string()
+                    ]
+                );
+                assert!(*requires_non_empty);
+            }
+            other => panic!("expected dynamic fan_out workflow action, got {other:?}"),
+        }
     });
 }
 
