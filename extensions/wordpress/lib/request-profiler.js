@@ -28,6 +28,8 @@ const DEFAULT_PRIORITY_BAND_HOOKS = [
 	'current_screen',
 	'admin_enqueue_scripts',
 ];
+const FUZZ_OBSERVATION_SET_SCHEMA = 'homeboy/fuzz-observation-set/v1';
+const FUZZ_HOTSPOT_SET_SCHEMA = 'homeboy/fuzz-hotspot-set/v1';
 
 function normalizeSitePath(sitePath) {
 	if (!sitePath || typeof sitePath !== 'string') {
@@ -127,6 +129,7 @@ define( 'HOMEBOY_REQUEST_PROFILER_LOADED', true );
 $homeboy_request_profiler_start = microtime( true );
 $homeboy_request_profiler_id    = substr( hash( 'sha256', ( $_SERVER['REQUEST_METHOD'] ?? 'CLI' ) . '|' . ( $_SERVER['REQUEST_URI'] ?? '' ) . '|' . $homeboy_request_profiler_start ), 0, 16 );
 $homeboy_request_profiler_file  = ABSPATH . ${phpString(artifactRelativePath)};
+$homeboy_request_profiler_query_phases = array();
 
 if ( ! function_exists( 'homeboy_request_profiler_write' ) ) {
 	function homeboy_request_profiler_write( $event, $data = array() ) {
@@ -156,7 +159,183 @@ if ( ! function_exists( 'homeboy_request_profiler_write' ) ) {
 	}
 }
 
+if ( ! function_exists( 'homeboy_request_profiler_query_count' ) ) {
+	function homeboy_request_profiler_query_count() {
+		global $wpdb;
+
+		return isset( $wpdb->queries ) && is_array( $wpdb->queries ) ? count( $wpdb->queries ) : 0;
+	}
+}
+
+if ( ! function_exists( 'homeboy_request_profiler_query_time' ) ) {
+	function homeboy_request_profiler_query_time( $start = 0 ) {
+		global $wpdb;
+
+		$total   = 0.0;
+		$queries = isset( $wpdb->queries ) && is_array( $wpdb->queries ) ? array_slice( $wpdb->queries, max( 0, (int) $start ) ) : array();
+		foreach ( $queries as $query ) {
+			if ( isset( $query[1] ) && is_numeric( $query[1] ) ) {
+				$total += (float) $query[1];
+			}
+		}
+
+		return $total;
+	}
+}
+
+if ( ! function_exists( 'homeboy_request_profiler_normalize_sql' ) ) {
+	function homeboy_request_profiler_normalize_sql( $sql ) {
+		$shape = preg_replace( '/\s+/', ' ', trim( (string) $sql ) );
+		$shape = preg_replace( '/\b0x[0-9a-f]+\b/i', '?', $shape );
+		$shape = preg_replace( "/'(?:''|[^'])*'/", '?', $shape );
+		$shape = preg_replace( '/"(?:\\\\"|[^"])*"/', '?', $shape );
+		$shape = preg_replace( '/\b\d+(?:\.\d+)?\b/', '?', $shape );
+		$shape = preg_replace( '/\(\s*\?(?:\s*,\s*\?)+\s*\)/', '(?)', $shape );
+
+		return $shape;
+	}
+}
+
+if ( ! function_exists( 'homeboy_request_profiler_top_query_shapes' ) ) {
+	function homeboy_request_profiler_top_query_shapes( $start = 0, $limit = 5 ) {
+		global $wpdb;
+
+		$queries = isset( $wpdb->queries ) && is_array( $wpdb->queries ) ? array_slice( $wpdb->queries, max( 0, (int) $start ) ) : array();
+		$shapes  = array();
+		foreach ( $queries as $query ) {
+			$sql = isset( $query[0] ) ? (string) $query[0] : '';
+			if ( '' === trim( $sql ) ) {
+				continue;
+			}
+
+			$shape = homeboy_request_profiler_normalize_sql( $sql );
+			if ( ! isset( $shapes[ $shape ] ) ) {
+				$shapes[ $shape ] = array(
+					'sql'     => $shape,
+					'count'   => 0,
+					'time_ms' => 0.0,
+				);
+			}
+
+			$shapes[ $shape ]['count'] += 1;
+			if ( isset( $query[1] ) && is_numeric( $query[1] ) ) {
+				$shapes[ $shape ]['time_ms'] += (float) $query[1] * 1000;
+			}
+		}
+
+		usort(
+			$shapes,
+			static function ( $a, $b ) {
+				if ( $a['time_ms'] === $b['time_ms'] ) {
+					return $b['count'] <=> $a['count'];
+				}
+
+				return $b['time_ms'] <=> $a['time_ms'];
+			}
+		);
+
+		return array_map(
+			static function ( $shape ) {
+				$shape['time_ms'] = round( $shape['time_ms'], 3 );
+
+				return $shape;
+			},
+			array_slice( $shapes, 0, max( 0, (int) $limit ) )
+		);
+	}
+}
+
+if ( ! function_exists( 'homeboy_request_profiler_context' ) ) {
+	function homeboy_request_profiler_context() {
+		if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+			return 'rest';
+		}
+		if ( wp_doing_ajax() ) {
+			return 'ajax';
+		}
+		if ( wp_doing_cron() ) {
+			return 'cron';
+		}
+		if ( is_admin() ) {
+			return 'admin';
+		}
+
+		return 'frontend';
+	}
+}
+
+if ( ! function_exists( 'homeboy_request_profiler_phase_key' ) ) {
+	function homeboy_request_profiler_phase_key( $phase, $data = array() ) {
+		return $phase . ':' . substr( hash( 'sha256', wp_json_encode( $data, JSON_UNESCAPED_SLASHES ) ), 0, 12 );
+	}
+}
+
+if ( ! function_exists( 'homeboy_request_profiler_query_phase_start' ) ) {
+	function homeboy_request_profiler_query_phase_start( $phase, $data = array() ) {
+		global $wpdb, $homeboy_request_profiler_query_phases;
+
+		if ( is_object( $wpdb ) ) {
+			$wpdb->save_queries = true;
+		}
+
+		$key = homeboy_request_profiler_phase_key( $phase, $data );
+		$homeboy_request_profiler_query_phases[ $key ] = array(
+			'phase'       => $phase,
+			'data'        => $data,
+			'start_time'  => microtime( true ),
+			'start_count' => homeboy_request_profiler_query_count(),
+		);
+
+		homeboy_request_profiler_write( 'db_query.phase.start', array_merge( array( 'phase' => $phase ), $data ) );
+
+		return $key;
+	}
+}
+
+if ( ! function_exists( 'homeboy_request_profiler_query_phase_stop' ) ) {
+	function homeboy_request_profiler_query_phase_stop( $phase, $data = array(), $key = null ) {
+		global $homeboy_request_profiler_query_phases;
+
+		$key = $key ? $key : homeboy_request_profiler_phase_key( $phase, $data );
+		if ( ! isset( $homeboy_request_profiler_query_phases[ $key ] ) ) {
+			foreach ( $homeboy_request_profiler_query_phases as $candidate_key => $candidate ) {
+				if ( isset( $candidate['phase'] ) && $phase === $candidate['phase'] ) {
+					$key = $candidate_key;
+					break;
+				}
+			}
+		}
+
+		$start = isset( $homeboy_request_profiler_query_phases[ $key ] ) ? $homeboy_request_profiler_query_phases[ $key ] : array(
+			'phase'       => $phase,
+			'data'        => $data,
+			'start_time'  => microtime( true ),
+			'start_count' => homeboy_request_profiler_query_count(),
+		);
+		unset( $homeboy_request_profiler_query_phases[ $key ] );
+
+		$start_count = isset( $start['start_count'] ) ? (int) $start['start_count'] : 0;
+		$end_count   = homeboy_request_profiler_query_count();
+		$phase_data  = array_merge(
+			array(
+				'phase'            => $phase,
+				'context'          => homeboy_request_profiler_context(),
+				'duration_ms'      => round( ( microtime( true ) - (float) $start['start_time'] ) * 1000, 3 ),
+				'query_count'      => max( 0, $end_count - $start_count ),
+				'query_time_ms'    => round( homeboy_request_profiler_query_time( $start_count ) * 1000, 3 ),
+				'top_query_shapes' => homeboy_request_profiler_top_query_shapes( $start_count, 5 ),
+				'total_queries'    => $end_count,
+			),
+			isset( $start['data'] ) && is_array( $start['data'] ) ? $start['data'] : array(),
+			$data
+		);
+
+		homeboy_request_profiler_write( 'db_query.phase.stop', $phase_data );
+	}
+}
+
 homeboy_request_profiler_write( 'request.start', array( 'php_sapi' => PHP_SAPI ) );
+homeboy_request_profiler_query_phase_start( 'request', array( 'surface_type' => homeboy_request_profiler_context() ) );
 
 foreach ( ${phpArray(hooks)} as $homeboy_request_profiler_hook ) {
 	add_action(
@@ -204,6 +383,115 @@ add_filter(
 	},
 	10,
 	3
+);
+
+add_filter(
+	'rest_pre_dispatch',
+	static function ( $result, $server, $request ) {
+		$route = is_object( $request ) && method_exists( $request, 'get_route' ) ? $request->get_route() : '';
+		$method = is_object( $request ) && method_exists( $request, 'get_method' ) ? $request->get_method() : '';
+		homeboy_request_profiler_query_phase_start( 'rest.request', array( 'surface_type' => 'rest', 'route' => $route, 'method' => $method ) );
+
+		return $result;
+	},
+	0,
+	3
+);
+
+add_filter(
+	'rest_post_dispatch',
+	static function ( $response, $server, $request ) {
+		$route  = is_object( $request ) && method_exists( $request, 'get_route' ) ? $request->get_route() : '';
+		$method = is_object( $request ) && method_exists( $request, 'get_method' ) ? $request->get_method() : '';
+		$status = is_object( $response ) && method_exists( $response, 'get_status' ) ? (int) $response->get_status() : null;
+		homeboy_request_profiler_query_phase_stop( 'rest.request', array( 'surface_type' => 'rest', 'route' => $route, 'method' => $method, 'status' => $status ) );
+
+		return $response;
+	},
+	1000000,
+	3
+);
+
+add_action(
+	'template_redirect',
+	static function () {
+		if ( 'frontend' === homeboy_request_profiler_context() ) {
+			homeboy_request_profiler_query_phase_start( 'frontend.page', array( 'surface_type' => 'frontend', 'path' => wp_parse_url( $_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH ) ) );
+		}
+	},
+	0,
+	0
+);
+
+add_action(
+	'admin_init',
+	static function () {
+		if ( wp_doing_ajax() ) {
+			homeboy_request_profiler_query_phase_start( 'ajax.request', array( 'surface_type' => 'ajax', 'action' => $_REQUEST['action'] ?? '' ) );
+			return;
+		}
+
+		if ( is_admin() ) {
+			homeboy_request_profiler_query_phase_start( 'admin.page', array( 'surface_type' => 'admin', 'path' => wp_parse_url( $_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH ) ) );
+		}
+	},
+	0,
+	0
+);
+
+add_action(
+	'init',
+	static function () {
+		if ( wp_doing_cron() ) {
+			homeboy_request_profiler_query_phase_start( 'cron.request', array( 'surface_type' => 'cron' ) );
+		}
+	},
+	0,
+	0
+);
+
+add_filter(
+	'pre_render_block',
+	static function ( $pre_render, $parsed_block ) {
+		$block_name = isset( $parsed_block['blockName'] ) ? (string) $parsed_block['blockName'] : '';
+		homeboy_request_profiler_query_phase_start( 'block.render', array( 'surface_type' => 'block', 'block_name' => $block_name ) );
+
+		return $pre_render;
+	},
+	0,
+	2
+);
+
+add_filter(
+	'render_block',
+	static function ( $block_content, $parsed_block ) {
+		$block_name = isset( $parsed_block['blockName'] ) ? (string) $parsed_block['blockName'] : '';
+		homeboy_request_profiler_query_phase_stop( 'block.render', array( 'surface_type' => 'block', 'block_name' => $block_name ) );
+
+		return $block_content;
+	},
+	1000000,
+	2
+);
+
+add_action(
+	'shutdown',
+	static function () {
+		$context = homeboy_request_profiler_context();
+		if ( 'frontend' === $context ) {
+			homeboy_request_profiler_query_phase_stop( 'frontend.page', array( 'surface_type' => 'frontend', 'path' => wp_parse_url( $_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH ) ) );
+		} elseif ( 'ajax' === $context ) {
+			homeboy_request_profiler_query_phase_stop( 'ajax.request', array( 'surface_type' => 'ajax', 'action' => $_REQUEST['action'] ?? '' ) );
+		} elseif ( 'admin' === $context ) {
+			homeboy_request_profiler_query_phase_stop( 'admin.page', array( 'surface_type' => 'admin', 'path' => wp_parse_url( $_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH ) ) );
+		} elseif ( 'cron' === $context ) {
+			homeboy_request_profiler_query_phase_stop( 'cron.request', array( 'surface_type' => 'cron' ) );
+		}
+
+		homeboy_request_profiler_query_phase_stop( 'request', array( 'surface_type' => $context, 'status' => http_response_code() ) );
+	},
+	1000000,
+	0
 );
 `;
 }
@@ -375,17 +663,160 @@ function summarizeWordPressRequestProfilerRows(rows = [], options = {}) {
 	};
 }
 
+function phaseSubject(data = {}) {
+	return data.route || data.action || data.path || data.block_name || data.hook || data.phase || 'request';
+}
+
+function normalizeDbQueryPhaseRow(row = {}, options = {}) {
+	if (row?.event !== 'db_query.phase.stop') {
+		return undefined;
+	}
+	const data = row.data || {};
+	const phase = data.phase || row.phase || 'request';
+	const surfaceType = data.surface_type || data.context || 'wordpress';
+	const subject = phaseSubject(data);
+	const queryCount = numericValue(data.query_count, 0);
+	const queryTimeMs = numericValue(data.query_time_ms, 0);
+	const durationMs = numericValue(data.duration_ms, requestRowTime(row));
+	const requestId = row.request_id || 'unknown';
+	const operationId = [surfaceType, phase, subject].filter(Boolean).join(':');
+
+	return {
+		id: [requestId, phase, subject].filter(Boolean).join(':').replace(/\s+/g, '-'),
+		request_id: requestId,
+		surface_type: surfaceType,
+		phase,
+		subject: formatSummaryUrl(subject, options),
+		operation_id: operationId,
+		method: data.method || row.method || '',
+		uri: formatSummaryUrl(row.uri || data.path || data.route || '', options),
+		status: data.status ?? requestRowStatus(row) ?? null,
+		duration_ms: durationMs,
+		query_count: queryCount,
+		query_time_ms: queryTimeMs,
+		total_queries: numericValue(data.total_queries, 0),
+		top_query_shapes: Array.isArray(data.top_query_shapes) ? data.top_query_shapes : [],
+		metadata: {
+			context: data.context,
+			route: data.route,
+			action: data.action,
+			path: data.path,
+			block_name: data.block_name,
+		},
+	};
+}
+
+function normalizeWordPressRequestDbQueryPhases(rows = [], options = {}) {
+	if (!Array.isArray(rows)) {
+		throw new TypeError('rows must be an array');
+	}
+
+	return rows
+		.map((row) => normalizeDbQueryPhaseRow(row, options))
+		.filter(Boolean)
+		.sort((a, b) => (b.query_time_ms - a.query_time_ms) || (b.query_count - a.query_count) || (b.duration_ms - a.duration_ms));
+}
+
+function dbQueryPhaseObservation(phase, metric, value, unit, defaults = {}) {
+	return {
+		id: [defaults.idPrefix || 'wordpress-request-profiler', phase.id, metric].filter(Boolean).join(':'),
+		family: metric === 'duration_ms' ? 'timing' : 'query',
+		target_id: phase.surface_type,
+		operation_id: phase.operation_id,
+		phase: phase.phase,
+		subject: phase.subject,
+		metric,
+		value,
+		unit,
+		sample_count: 1,
+		metadata: {
+			request_id: phase.request_id,
+			uri: phase.uri,
+			method: phase.method,
+			status: phase.status,
+			...phase.metadata,
+		},
+	};
+}
+
+function wordPressRequestDbQueryPhasesToFuzzObservationSet(rows = [], options = {}) {
+	const phases = normalizeWordPressRequestDbQueryPhases(rows, options);
+	const observations = phases.flatMap((phase) => [
+		dbQueryPhaseObservation(phase, 'query_count', phase.query_count, 'count', options),
+		dbQueryPhaseObservation(phase, 'query_time_ms', phase.query_time_ms, 'ms', options),
+		dbQueryPhaseObservation(phase, 'duration_ms', phase.duration_ms, 'ms', options),
+	]);
+
+	return {
+		schema: FUZZ_OBSERVATION_SET_SCHEMA,
+		version: 1,
+		id: options.id || 'wordpress-request-db-query-observations',
+		label: options.label || 'WordPress request DB query observations',
+		observations,
+		metadata: {
+			profiler: 'wordpress-request-profiler',
+			phase_count: phases.length,
+			...(options.metadata || {}),
+		},
+	};
+}
+
+function wordPressRequestDbQueryPhasesToFuzzHotspotSet(rows = [], options = {}) {
+	const phases = normalizeWordPressRequestDbQueryPhases(rows, options).slice(0, normalizeLimit(options.limit, 20));
+	const maxScore = phases.reduce((max, phase) => Math.max(max, phase.query_time_ms || phase.duration_ms || phase.query_count), 0) || 1;
+	const items = phases.map((phase, index) => ({
+		rank: index + 1,
+		surface_key: phase.surface_type,
+		operation_key: phase.operation_id,
+		dimension: 'query',
+		metric: options.metric || 'query_time_ms',
+		value: phase.query_time_ms,
+		unit: 'ms',
+		sample_count: 1,
+		relative_score: Number(((phase.query_time_ms || phase.duration_ms || phase.query_count) / maxScore).toFixed(6)),
+		metadata: {
+			request_id: phase.request_id,
+			phase: phase.phase,
+			subject: phase.subject,
+			query_count: phase.query_count,
+			duration_ms: phase.duration_ms,
+			top_query_shapes: phase.top_query_shapes,
+		},
+	}));
+
+	return {
+		schema: FUZZ_HOTSPOT_SET_SCHEMA,
+		version: 1,
+		id: options.id || 'wordpress-request-db-query-hotspots',
+		label: options.label || 'WordPress request DB query hotspots',
+		dimension: 'query',
+		metric: options.metric || 'query_time_ms',
+		unit: 'ms',
+		items,
+		metadata: {
+			profiler: 'wordpress-request-profiler',
+			phase_count: phases.length,
+			...(options.metadata || {}),
+		},
+	};
+}
+
 module.exports = {
 	DEFAULT_ARTIFACT_RELATIVE_PATH,
 	DEFAULT_HOOKS,
 	DEFAULT_PLUGIN_FILE_NAME,
 	DEFAULT_PRIORITY_BAND_HOOKS,
+	FUZZ_HOTSPOT_SET_SCHEMA,
+	FUZZ_OBSERVATION_SET_SCHEMA,
 	collectWordPressRequestProfiles,
 	generateProfilerPlugin,
 	groupWordPressRequestProfilerRows,
 	installWordPressRequestProfiler,
+	normalizeWordPressRequestDbQueryPhases,
 	parseWordPressRequestProfileJsonl,
 	resolveProfilerPaths,
 	summarizeWordPressRequestProfilerRows,
 	uninstallWordPressRequestProfiler,
+	wordPressRequestDbQueryPhasesToFuzzHotspotSet,
+	wordPressRequestDbQueryPhasesToFuzzObservationSet,
 };
