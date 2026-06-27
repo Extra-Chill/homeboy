@@ -15,7 +15,7 @@ homeboy runs show <run-id> [--json]
 homeboy runs dossier <run-id> [--json]
 homeboy runs resume-plan <run-id>
 homeboy runs evidence <run-id>
-homeboy runs artifacts <run-id> [--runner <runner-id>]
+homeboy runs artifacts <run-id> [--runner <runner-id>] [--pull] [--pull-dir <dir>]
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
 homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>
 homeboy runs artifact get <run-id> <artifact-id> [--runner <runner-id>] [--output <path>]
@@ -65,6 +65,8 @@ then promote or attach artifacts through the command-specific surface when it is
 available. See
 [Artifact loop for runner and matrix workflows](../operators/artifact-loop-runner-matrix.md)
 for generic runner, static HTML, and matrix examples.
+
+`homeboy runs artifacts <run-id> --pull` retrieves every retrievable artifact's bytes for a run to the operator-local artifact root in one pass, so a completed run is self-contained instead of pointing only at runner-resident paths or non-resolving tunnel URLs. The retrieval is best-effort and per-artifact: the listing still prints, and the JSON output gains a `pull` summary where each artifact reports `already_local` (file/directory already on the controller), `pulled` (bytes copied from a runner/remote store), `skipped` (metadata-only or non-file artifacts), or `failed` (with the error message) — so it is clear exactly which diagnostics are unreachable and why. Pass `--pull-dir <dir>` to write pulled bytes into a chosen directory instead of the default run-scoped path under the artifact root. `--pull` operates on the local mirrored observation store and is mutually exclusive with `--runner`.
 
 `homeboy runs artifacts <run-id> --runner <runner-id>` queries a connected runner daemon for the run's artifact records from the controller machine. `homeboy runs artifact get <run-id> <artifact-id> --runner <runner-id>` pulls selected runner-side artifact bytes through that connection into the local artifact cache, or into `--output` when provided, and reports the runner id plus source content path in JSON output. Use these commands when a controller-side agent has a run id and artifact id but should not SSH into the runner or know runner filesystem paths.
 

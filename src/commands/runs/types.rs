@@ -212,6 +212,46 @@ pub struct RunsArtifactsOutput {
     pub matrix_summary: Option<MatrixArtifactSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fuzz_result_envelopes: Vec<FuzzResultEnvelopeArtifactInspection>,
+    /// Present only when `--pull` was requested. Summarizes the best-effort
+    /// retrieval of each artifact's bytes to the operator-local artifact root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull: Option<RunsArtifactPullSummary>,
+}
+
+/// Result of a `runs artifacts <run-id> --pull` retrieval pass.
+#[derive(Serialize)]
+pub struct RunsArtifactPullSummary {
+    /// Operator-local artifact root that retrieved bytes are written under.
+    pub pull_root: String,
+    /// Artifacts copied from a runner/remote store to the local root this run.
+    pub pulled_count: usize,
+    /// Artifacts that were already operator-local and self-contained.
+    pub already_local_count: usize,
+    /// Artifacts that could not be pulled (metadata-only, directories, urls).
+    pub skipped_count: usize,
+    /// Artifacts whose retrieval was attempted but failed.
+    pub failed_count: usize,
+    pub entries: Vec<RunsArtifactPullEntry>,
+}
+
+/// Per-artifact outcome for a `--pull` retrieval pass.
+#[derive(Serialize)]
+pub struct RunsArtifactPullEntry {
+    pub artifact_id: String,
+    /// Storage class observed for the artifact (local_file, remote, metadata_only, other).
+    pub storage: &'static str,
+    /// Retrieval status: pulled, already_local, skipped, or failed.
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -256,6 +296,15 @@ pub struct RunsArtifactsArgs {
     /// Query artifacts from a connected execution runner daemon
     #[arg(long)]
     pub runner: Option<String>,
+    /// Pull runner/remote artifact bytes to the operator-local artifact root so
+    /// the completed run is self-contained. Best-effort and per-artifact: the
+    /// listing still prints, and each artifact reports a pull status.
+    #[arg(long)]
+    pub pull: bool,
+    /// Optional directory to write pulled artifact bytes into. Defaults to a
+    /// run-scoped path under the operator-local artifact root.
+    #[arg(long, requires = "pull")]
+    pub pull_dir: Option<PathBuf>,
 }
 
 #[derive(Serialize)]

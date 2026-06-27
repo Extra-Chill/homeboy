@@ -103,6 +103,7 @@ impl RunsArgs {
                 ),
                 vec![
                     format!("Run `homeboy runs artifacts {}` to list mirrored artifact records.", args.run_id),
+                    format!("Run `homeboy runs artifacts {} --pull` to retrieve runner/remote artifact bytes to the operator-local artifact root.", args.run_id),
                     format!("Run `homeboy runs artifacts {} --runner {runner_id}` to query the connected runner daemon directly.", args.run_id),
                     "Use `homeboy runs artifact get <run-id> <artifact-id> --runner <id>` to pull selected runner-side artifact bytes.".to_string(),
                 ],
