@@ -705,7 +705,6 @@
         "structural::src/core/extension/trace/report.rs::HighItemCount",
         "structural::src/core/observation/runs_service.rs::HighItemCount",
         "structural::src/core::DirectorySprawl",
-        "structural::tests/core_agnostic_test.rs::HighItemCount",
         "test_quality::src/commands/bench/tests/scenario_run_tests.rs::VacuousTest",
         "test_quality::src/core/agent_task_scheduler/tests/outcome_tests.rs::VacuousTest",
         "test_quality::src/core/code_audit/duplication/tests.rs::VacuousTest",
