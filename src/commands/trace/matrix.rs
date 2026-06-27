@@ -5,8 +5,8 @@ use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::TraceCommandOutput;
 
 use super::output::{
-    compare_trace_aggregates_with_focus, render_matrix_markdown, TraceAggregateInput,
-    TraceAggregateMetricInput, TraceAggregateSpanInput,
+    compare_trace_aggregates_with_focus, render_matrix_markdown, TraceAggregateIdentity,
+    TraceAggregateInput, TraceAggregateMetricInput, TraceAggregateSpanInput,
 };
 use super::{
     apply_command_target_component, execute_trace_run, required_trace_scenario, run_repeat,
@@ -577,8 +577,10 @@ pub(super) fn aggregate_to_compare_input(
             .spans
             .iter()
             .map(|span| TraceAggregateSpanInput {
-                id: span.id.clone(),
-                n: span.n,
+                identity: TraceAggregateIdentity {
+                    id: span.id.clone(),
+                    n: span.n,
+                },
                 median_ms: span.median_ms,
                 avg_ms: span.avg_ms,
                 max_ms: span.max_ms,
@@ -592,8 +594,10 @@ pub(super) fn aggregate_to_compare_input(
             .metrics
             .iter()
             .map(|metric| TraceAggregateMetricInput {
-                id: metric.id.clone(),
-                n: metric.n,
+                identity: TraceAggregateIdentity {
+                    id: metric.id.clone(),
+                    n: metric.n,
+                },
                 min: metric.min,
                 median: metric.median,
                 max: metric.max,

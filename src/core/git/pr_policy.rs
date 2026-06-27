@@ -43,15 +43,22 @@ pub struct PrPolicyRules {
     pub title: Option<String>,
 }
 
+/// Shared PR target references (`base`, `head`, `head_repository`,
+/// `repository`) carried by the policy context and the open/merge options.
+#[derive(Debug, Clone, Default)]
+pub struct PrPolicyTargetRefs {
+    pub base: Option<String>,
+    pub head: Option<String>,
+    pub head_repository: Option<String>,
+    pub repository: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PrPolicyContext {
     pub mode: PrPolicyMode,
     pub source: Option<String>,
     pub author: Option<String>,
-    pub base: Option<String>,
-    pub head: Option<String>,
-    pub head_repository: Option<String>,
-    pub repository: Option<String>,
+    pub refs: PrPolicyTargetRefs,
     pub merge_method: Option<String>,
     pub files: Vec<String>,
     pub path: Option<String>,
@@ -89,10 +96,7 @@ pub struct PrPolicyOpenOptions {
     pub path: Option<String>,
     pub policy_path: String,
     pub source: Option<String>,
-    pub base: Option<String>,
-    pub head: Option<String>,
-    pub head_repository: Option<String>,
-    pub repository: Option<String>,
+    pub refs: PrPolicyTargetRefs,
     pub files: Vec<String>,
     pub files_from_git: bool,
 }
@@ -104,10 +108,7 @@ pub struct PrPolicyMergeOptions {
     pub policy_path: String,
     pub number: u64,
     pub author: Option<String>,
-    pub base: Option<String>,
-    pub head: Option<String>,
-    pub head_repository: Option<String>,
-    pub repository: Option<String>,
+    pub refs: PrPolicyTargetRefs,
     pub merge: bool,
     pub merge_method: Option<String>,
 }
@@ -181,10 +182,12 @@ pub fn evaluate_open_policy(options: PrPolicyOpenOptions) -> Result<PrPolicyDeci
     let context = PrPolicyContext {
         mode: PrPolicyMode::Open,
         source: non_empty(options.source),
-        base: non_empty(options.base),
-        head: non_empty(options.head),
-        head_repository: non_empty(options.head_repository),
-        repository: non_empty(options.repository),
+        refs: PrPolicyTargetRefs {
+            base: non_empty(options.refs.base),
+            head: non_empty(options.refs.head),
+            head_repository: non_empty(options.refs.head_repository),
+            repository: non_empty(options.refs.repository),
+        },
         files,
         path: options.path,
         ..Default::default()
@@ -210,10 +213,13 @@ pub fn evaluate_merge_policy(options: PrPolicyMergeOptions) -> Result<PrPolicyDe
         PrPolicyContext {
             mode: PrPolicyMode::Merge,
             author: non_empty(options.author).or(pr.author),
-            base: non_empty(options.base).or(Some(pr.base)),
-            head: non_empty(options.head).or(Some(pr.head)),
-            head_repository: non_empty(options.head_repository).or(pr.head_repository),
-            repository: non_empty(options.repository).or(Some(format!("{}/{}", pr.owner, pr.repo))),
+            refs: PrPolicyTargetRefs {
+                base: non_empty(options.refs.base).or(Some(pr.base)),
+                head: non_empty(options.refs.head).or(Some(pr.head)),
+                head_repository: non_empty(options.refs.head_repository).or(pr.head_repository),
+                repository: non_empty(options.refs.repository)
+                    .or(Some(format!("{}/{}", pr.owner, pr.repo))),
+            },
             merge_method: Some(merge_method.clone()),
             files,
             path: options.path.clone(),
@@ -307,19 +313,19 @@ fn evaluate_rules(rules: &PrPolicyRules, context: PrPolicyContext) -> PrPolicyDe
     );
     require_allowed(
         "base branch",
-        context.base.as_deref(),
+        context.refs.base.as_deref(),
         &rules.allowed_base_branches,
         &mut failures,
     );
     require_allowed(
         "head branch",
-        context.head.as_deref(),
+        context.refs.head.as_deref(),
         &rules.allowed_head_branches,
         &mut failures,
     );
     require_allowed(
         "head repository",
-        context.head_repository.as_deref(),
+        context.refs.head_repository.as_deref(),
         &rules.allowed_head_repositories,
         &mut failures,
     );
@@ -331,7 +337,7 @@ fn evaluate_rules(rules: &PrPolicyRules, context: PrPolicyContext) -> PrPolicyDe
     );
 
     if rules.require_same_repository.unwrap_or(false) {
-        match (&context.repository, &context.head_repository) {
+        match (&context.refs.repository, &context.refs.head_repository) {
             (Some(repo), Some(head_repo)) if repo == head_repo => {}
             (Some(repo), Some(head_repo)) => failures.push(format!(
                 "head repository {} does not match {}",
@@ -486,7 +492,10 @@ mod tests {
             PrPolicyContext {
                 mode: PrPolicyMode::Open,
                 source: Some("autofix".into()),
-                head: Some("chore/homeboy-autofix".into()),
+                refs: PrPolicyTargetRefs {
+                    head: Some("chore/homeboy-autofix".into()),
+                    ..Default::default()
+                },
                 files: vec!["src/lib.rs".into(), "tests/lib.rs".into()],
                 ..Default::default()
             },
@@ -527,8 +536,11 @@ mod tests {
         let decision = evaluate_rules(
             &rules,
             PrPolicyContext {
-                repository: Some("Extra-Chill/homeboy".into()),
-                head_repository: Some("someone/homeboy".into()),
+                refs: PrPolicyTargetRefs {
+                    repository: Some("Extra-Chill/homeboy".into()),
+                    head_repository: Some("someone/homeboy".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         );

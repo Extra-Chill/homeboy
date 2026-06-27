@@ -14,12 +14,21 @@ pub const AGENT_TASK_FANOUT_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-fanout-
 pub const AGENT_TASK_FANOUT_CANONICAL_PATH: &str = "homeboy-durable-scheduler-to-runtime-executor";
 pub const AGENT_TASK_FANOUT_RUNTIME_BOUNDARY: &str = "manifest_declared_runtime_executor";
 
+/// Shared fanout identity (`fanout_id`, `plane`) carried by fanout plans and
+/// aggregates. Flattened into parents so the on-wire JSON keeps the `fanout_id`
+/// and `plane` keys inline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskFanoutIdentity {
+    pub fanout_id: String,
+    pub plane: AgentTaskFanoutPlane,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskFanoutPlan {
     #[serde(default = "fanout_plan_schema")]
     pub schema: String,
-    pub fanout_id: String,
-    pub plane: AgentTaskFanoutPlane,
+    #[serde(flatten)]
+    pub identity: AgentTaskFanoutIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_key: Option<String>,
     pub tasks: Vec<AgentTaskRequest>,
@@ -44,8 +53,8 @@ pub enum AgentTaskFanoutPlane {
 pub struct AgentTaskFanoutAggregate {
     #[serde(default = "fanout_aggregate_schema")]
     pub schema: String,
-    pub fanout_id: String,
-    pub plane: AgentTaskFanoutPlane,
+    #[serde(flatten)]
+    pub identity: AgentTaskFanoutIdentity,
     pub schedule: AgentTaskAggregate,
     pub reconciliation: AgentTaskAggregateReport,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -64,8 +73,10 @@ impl AgentTaskFanoutPlan {
     ) -> Self {
         Self {
             schema: AGENT_TASK_FANOUT_PLAN_SCHEMA.to_string(),
-            fanout_id: fanout_id.into(),
-            plane,
+            identity: AgentTaskFanoutIdentity {
+                fanout_id: fanout_id.into(),
+                plane,
+            },
             group_key: None,
             tasks,
             output_dependencies: HashMap::new(),
@@ -80,21 +91,24 @@ impl AgentTaskFanoutPlan {
 
     fn to_schedule_plan(&self) -> AgentTaskPlan {
         let mut plan = AgentTaskPlan::new(
-            self.fanout_id.clone(),
+            self.identity.fanout_id.clone(),
             self.tasks
                 .iter()
                 .cloned()
                 .map(|mut request| {
                     request
                         .parent_plan_id
-                        .get_or_insert_with(|| self.fanout_id.clone());
+                        .get_or_insert_with(|| self.identity.fanout_id.clone());
                     request.group_key.get_or_insert_with(|| {
                         self.group_key
                             .clone()
-                            .unwrap_or_else(|| self.fanout_id.clone())
+                            .unwrap_or_else(|| self.identity.fanout_id.clone())
                     });
-                    request.metadata =
-                        metadata_with_fanout(request.metadata, &self.fanout_id, self.plane);
+                    request.metadata = metadata_with_fanout(
+                        request.metadata,
+                        &self.identity.fanout_id,
+                        self.identity.plane,
+                    );
                     request
                 })
                 .collect(),
@@ -102,24 +116,30 @@ impl AgentTaskFanoutPlan {
         plan.group_key = self.group_key.clone();
         plan.output_dependencies = self.output_dependencies.clone();
         plan.options = self.options.clone();
-        plan.metadata = metadata_with_fanout(self.metadata.clone(), &self.fanout_id, self.plane);
+        plan.metadata = metadata_with_fanout(
+            self.metadata.clone(),
+            &self.identity.fanout_id,
+            self.identity.plane,
+        );
         plan
     }
 
     pub fn to_homeboy_plan(&self) -> HomeboyPlan {
-        let mut plan =
-            HomeboyPlan::for_description(PlanKind::AgentTaskFanout, self.fanout_id.clone());
-        plan.id = self.fanout_id.clone();
+        let mut plan = HomeboyPlan::for_description(
+            PlanKind::AgentTaskFanout,
+            self.identity.fanout_id.clone(),
+        );
+        plan.id = self.identity.fanout_id.clone();
         plan.mode = Some("agent_task_fanout".to_string());
         plan.inputs
             .insert("schema".to_string(), Value::String(self.schema.clone()));
         plan.inputs.insert(
             "fanout_id".to_string(),
-            Value::String(self.fanout_id.clone()),
+            Value::String(self.identity.fanout_id.clone()),
         );
         plan.inputs.insert(
             "plane".to_string(),
-            serde_json::to_value(self.plane).expect("fanout plane serializes"),
+            serde_json::to_value(self.identity.plane).expect("fanout plane serializes"),
         );
         plan.inputs.insert(
             "canonical_path".to_string(),
@@ -233,8 +253,7 @@ impl AgentTaskFanoutPlan {
                 .and_then(Value::as_str)
                 .unwrap_or(AGENT_TASK_FANOUT_PLAN_SCHEMA)
                 .to_string(),
-            fanout_id,
-            plane,
+            identity: AgentTaskFanoutIdentity { fanout_id, plane },
             group_key: plan
                 .inputs
                 .get("group_key")
@@ -263,11 +282,17 @@ impl AgentTaskFanoutAggregate {
         let reconciliation = AgentTaskAggregateReport::from(schedule.outcomes.as_slice());
         Self {
             schema: AGENT_TASK_FANOUT_AGGREGATE_SCHEMA.to_string(),
-            fanout_id: plan.fanout_id.clone(),
-            plane: plan.plane,
+            identity: AgentTaskFanoutIdentity {
+                fanout_id: plan.identity.fanout_id.clone(),
+                plane: plan.identity.plane,
+            },
             schedule,
             reconciliation,
-            metadata: metadata_with_fanout(plan.metadata.clone(), &plan.fanout_id, plan.plane),
+            metadata: metadata_with_fanout(
+                plan.metadata.clone(),
+                &plan.identity.fanout_id,
+                plan.identity.plane,
+            ),
         }
     }
 }
@@ -342,8 +367,11 @@ mod tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(aggregate.schema, AGENT_TASK_FANOUT_AGGREGATE_SCHEMA);
-        assert_eq!(aggregate.fanout_id, "fanout/audit-batch");
-        assert_eq!(aggregate.plane, AgentTaskFanoutPlane::IsolatedTasks);
+        assert_eq!(aggregate.identity.fanout_id, "fanout/audit-batch");
+        assert_eq!(
+            aggregate.identity.plane,
+            AgentTaskFanoutPlane::IsolatedTasks
+        );
         assert_eq!(aggregate.schedule.totals.succeeded, 2);
         assert_eq!(aggregate.reconciliation.summary.total, 2);
         assert_eq!(aggregate.reconciliation.summary.review_candidates, 2);
@@ -389,7 +417,7 @@ mod tests {
             .find(|request| request.task_id == "diagnose")
             .expect("diagnose request dispatched");
 
-        assert_eq!(aggregate.plane, AgentTaskFanoutPlane::Workflow);
+        assert_eq!(aggregate.identity.plane, AgentTaskFanoutPlane::Workflow);
         assert_eq!(aggregate.schedule.totals.succeeded, 2);
         assert_eq!(diagnose.instructions, "Diagnose artifact artifact-123");
         assert_eq!(
