@@ -7,6 +7,7 @@
 //! runner subsystem so the historical `workspace::*` paths keep resolving.
 
 mod git;
+mod materialized;
 mod pull;
 mod snapshot;
 mod sync;
@@ -25,6 +26,7 @@ pub use types::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
+pub(crate) use materialized::{MaterializedWorkspace, WorkspaceCleanupPolicy};
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, local_snapshot_stats,
     materialize_snapshot, materialize_snapshot_git, snapshot_identity,

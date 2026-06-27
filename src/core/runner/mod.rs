@@ -58,6 +58,7 @@ mod worker;
 pub(crate) mod workload;
 mod workspace;
 pub(crate) use workspace::copy_snapshot_to_directory;
+pub(crate) use workspace::{MaterializedWorkspace, WorkspaceCleanupPolicy};
 
 pub use apply::{
     apply_change_artifact, apply_workspace_patch, RunnerWorkspaceApplyOptions,
