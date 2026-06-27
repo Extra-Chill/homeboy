@@ -18,6 +18,7 @@ const {
 	wordpressSurfaceTypeFromCollectionKey,
 } = require('./wordpress-surface-types');
 const {
+	annotateWordPressFuzzCaseExecutionTier,
 	gateWordPressFuzzCaseForRuntimeCapabilities,
 	normalizeWordPressFuzzMutationMode,
 	requiredCapabilitiesForWordPressFuzzCase,
@@ -35,17 +36,19 @@ function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 		label: input.label || options.label || 'WordPress surface discovery',
 		surfaces: collectWordPressFuzzPlanSurfaces(input),
 	});
+	const targets = discovery.surfaces.map((surface) => targetFromSurface(surface, targetOptions));
 
 	return normalizeWordPressFuzzPlan({
 		schema: WORDPRESS_FUZZ_PLAN_SCHEMA,
 		id: options.id || input.plan_id || input.planId || `${discovery.id}-fuzz-plan`,
 		discovery_id: discovery.id,
-		targets: discovery.surfaces.map((surface) => targetFromSurface(surface, targetOptions)),
+		targets,
 		budget: options.budget || input.budget || {},
 		metadata: {
 			...(input.metadata || {}),
 			planner: 'homeboy/wordpress-fuzz-plan-from-surfaces/v1',
 			mutation_mode: mutationMode || undefined,
+			execution_tiers: summarizeExecutionTiers(targets),
 		},
 	});
 }
@@ -139,7 +142,7 @@ function restRouteTargetFromSurface(surface, options = {}) {
 	const operationId = surface.operation_id || surface.operationId || `${surface.id}:request-rest-route`;
 	const surfaceSkipReasons = reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason);
 	const surfaceDestructiveReasons = reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons);
-	return {
+	const target = {
 		id: surface.id,
 		surface_id: surface.id,
 		type: surface.type,
@@ -154,12 +157,14 @@ function restRouteTargetFromSurface(surface, options = {}) {
 			...(surface.metadata || {}),
 		},
 	};
+	target.metadata.execution_tiers = summarizeExecutionTiers([target]);
+	return target;
 }
 
 function genericTargetFromSurface(surface, options = {}) {
 	const cases = casesForSurface(surface, options);
 	const operationId = cases[0]?.operation_id || surface.operation_id || surface.operationId || `${surface.id}:${caseIntent(surface.type)}`;
-	return {
+	const target = {
 		id: surface.id,
 		surface_id: surface.id,
 		type: surface.type,
@@ -173,6 +178,8 @@ function genericTargetFromSurface(surface, options = {}) {
 			...(surface.metadata || {}),
 		},
 	};
+	target.metadata.execution_tiers = summarizeExecutionTiers([target]);
+	return target;
 }
 
 function adminPageTargetFromSurface(surface, options = {}) {
@@ -180,7 +187,7 @@ function adminPageTargetFromSurface(surface, options = {}) {
 	const operationId = surface.operation_id || surface.operationId || `${surface.id}:request-admin-page`;
 	const skipReasons = reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason);
 	const destructiveReasons = reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons);
-	const cases = [{
+	const cases = [annotateWordPressFuzzCaseExecutionTier({
 		id: `${surface.id}-generic-fuzz`,
 		intent: 'request-admin-page',
 		operation_id: operationId,
@@ -189,13 +196,13 @@ function adminPageTargetFromSurface(surface, options = {}) {
 		skip_reasons: skipReasons,
 		destructive_reasons: destructiveReasons,
 		metadata: { surface, executable: skipReasons.length === 0 && destructiveReasons.length === 0 },
-	}];
+	}, { executable: skipReasons.length === 0 && destructiveReasons.length === 0 })];
 
 	for (const interaction of collectAdminPageInteractions(surface)) {
 		cases.push(adminPageInteractionCase(surface, interaction, options));
 	}
 
-	return {
+	const target = {
 		id: surface.id,
 		surface_id: surface.id,
 		type: surface.type,
@@ -209,6 +216,8 @@ function adminPageTargetFromSurface(surface, options = {}) {
 			...(surface.metadata || {}),
 		},
 	};
+	target.metadata.execution_tiers = summarizeExecutionTiers([target]);
+	return target;
 }
 
 function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReasons, surfaceDestructiveReasons, options = {}) {
@@ -217,7 +226,7 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
 	const skipReasons = safeMethod || mutationMode === 'isolated' ? surfaceSkipReasons : reasonList([...surfaceSkipReasons, 'mutating_rest_method_requires_explicit_opt_in']);
 	const destructiveReasons = safeMethod ? surfaceDestructiveReasons : reasonList([...surfaceDestructiveReasons, 'rest_method_mutates_state']);
-	const testCase = {
+	const testCase = annotateWordPressFuzzCaseExecutionTier({
 		id: `${surface.id}-${method.toLowerCase()}-generic-fuzz`,
 		intent: 'request-rest-route',
 		operation_id: operationId,
@@ -233,7 +242,7 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 			planned: !safeMethod,
 			gated: !safeMethod,
 		},
-	};
+	}, { mutates: !safeMethod, executable: skipReasons.length === 0 && (safeMethod || mutationMode === 'isolated') });
 	if (safeMethod) {
 		return testCase;
 	}
@@ -273,7 +282,7 @@ function casesForSurface(surface, options = {}) {
 function genericCaseForSurface(surface, options = {}) {
 	const operation = operationForSurface(surface);
 	const operationId = surface.operation_id || surface.operationId || `${surface.id}:${caseIntent(surface.type)}`;
-	return {
+	return annotateWordPressFuzzCaseExecutionTier({
 		id: `${surface.id}-generic-fuzz`,
 		intent: caseIntent(surface.type),
 		operation_id: operationId,
@@ -282,19 +291,23 @@ function genericCaseForSurface(surface, options = {}) {
 		skip_reasons: reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
 		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
 		metadata: { surface },
-	};
+	}, { mutates: false });
 }
 
 function crudCaseForSurface(surface, resource, action, options = {}) {
 	const operation = crudOperationForSurface(surface, resource, action);
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
-	const gateReasons = mutatingCrudAction(action.action) && !allowsCrudMutation(surface, action.action) && mutationMode !== 'isolated' ? ['crud_mutation_requires_explicit_allow'] : [];
+	const mutates = mutatingCrudAction(action.action);
+	const gateReasons = mutates && !mutationMode
+		? (!allowsCrudMutation(surface, action.action) ? ['crud_mutation_requires_explicit_allow'] : ['requires-isolated-mutation-runtime'])
+		: [];
 	const testCase = {
 		id: `${surface.id}-${action.intent}-crud-fuzz`,
 		intent: action.intent,
 		operation_id: operation.id,
 		operation,
 		seed: options.seed,
+		required_capabilities: mutates ? requiredCapabilitiesForWordPressFuzzCase('mutating_crud') : undefined,
 		skip_reasons: [
 			...reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
 			...gateReasons,
@@ -302,8 +315,8 @@ function crudCaseForSurface(surface, resource, action, options = {}) {
 		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
 		metadata: { surface, crud: { resource_type: resource.type, intent: action.intent, action: action.action } },
 	};
-	if (!mutatingCrudAction(action.action) || gateReasons.length > 0) {
-		return testCase;
+	if (!mutates || gateReasons.length > 0) {
+		return annotateWordPressFuzzCaseExecutionTier(testCase, { mutates, executable: !mutates && testCase.skip_reasons.length === 0 });
 	}
 	return gateWordPressFuzzCaseForRuntimeCapabilities(testCase, options.runtimeCapabilities || options.runtime_capabilities, {
 		required_capabilities: requiredCapabilitiesForWordPressFuzzCase('mutating_crud'),
@@ -458,28 +471,28 @@ function blockCasesFromSurface(surface, operation, operationId, options = {}) {
 	const attributeSample = blockAttributeSample(surface);
 	const surfaceMetadata = blockSurfaceMetadata(surface, attributeSample);
 	const cases = [
-		{
+		annotateWordPressFuzzCaseExecutionTier({
 			id: `${surface.id}-render-block`,
 			intent: 'render-block',
 			operation_id: `${operationId}:render`,
 			operation: stripUndefined({ ...operation, lifecycle: 'render', attributes_sample: attributeSample }),
 			...shared,
 			metadata: stripUndefined({ surface, safety: { mutation: 'read_only' }, attributes_sample: attributeSample }),
-		},
+		}, { mutates: false }),
 	];
 
 	if (Object.keys(surfaceMetadata).length > 0) {
-		cases.push({
+		cases.push(annotateWordPressFuzzCaseExecutionTier({
 			id: `${surface.id}-serialize-parse-block`,
 			intent: 'serialize-parse-block',
 			operation_id: `${operationId}:serialize-parse`,
 			operation: stripUndefined({ ...operation, lifecycle: 'serialize-parse', attributes_sample: attributeSample }),
 			...shared,
 			metadata: stripUndefined({ surface, safety: { mutation: 'read_only' }, ...surfaceMetadata }),
-		});
+		}, { mutates: false }));
 	}
 
-	cases.push({
+	cases.push(annotateWordPressFuzzCaseExecutionTier({
 		id: `${surface.id}-editor-insert-block`,
 		intent: 'insert-block-in-editor',
 		operation_id: `${operationId}:editor-insert`,
@@ -494,7 +507,7 @@ function blockCasesFromSurface(surface, operation, operationId, options = {}) {
 			safety: { mutation: 'requires_isolated_editor_draft' },
 			attributes_sample: attributeSample,
 		}),
-	});
+	}, { mutates: true, executable: false }));
 
 	return cases;
 }
@@ -600,7 +613,7 @@ function adminPageInteractionCase(surface, interaction, options = {}) {
 		}),
 	};
 	if (!gated) {
-		return testCase;
+		return annotateWordPressFuzzCaseExecutionTier(testCase, { mutates: false });
 	}
 	return gateWordPressFuzzCaseForRuntimeCapabilities(testCase, options.runtimeCapabilities || options.runtime_capabilities, {
 		required_capabilities: requiredCapabilitiesForWordPressFuzzCase('admin_mutation'),
@@ -718,6 +731,17 @@ function safeIdPart(value) {
 
 function stripUndefined(value) {
 	return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
+function summarizeExecutionTiers(targets) {
+	const summary = {};
+	for (const target of targets) {
+		for (const testCase of target.cases || []) {
+			const tier = testCase.execution_tier || testCase.metadata?.execution_tier || 'discovered';
+			summary[tier] = (summary[tier] || 0) + 1;
+		}
+	}
+	return summary;
 }
 
 function isObject(value) {

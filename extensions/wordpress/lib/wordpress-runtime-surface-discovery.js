@@ -65,6 +65,7 @@ function buildWordPressRuntimeSurfaceCoverageManifest(input = {}, options = {}) 
 			type: surface.type,
 			label: surface.label,
 			required: surface.required !== false,
+			execution_tier: surface.execution_tier || 'read_only_executable',
 			metadata: surface.metadata || {},
 		})),
 	};
@@ -199,9 +200,12 @@ function normalizeRuntimeSurface(surface, index) {
 		type,
 		label: stringValue(surface.label || surface.title || surface.name || surface.path || surface.url || surface.route || surface.action || surface.table || surface.value, value),
 		required: surface.required !== false,
+		executable: true,
+		execution_tier: 'read_only_executable',
 		metadata: {
 			...(isPlainObject(surface.metadata) ? surface.metadata : {}),
 			source: stringValue(surface.source || surface.artifact, 'input'),
+			execution_tier: 'read_only_executable',
 			value,
 		},
 	};
@@ -227,10 +231,12 @@ function normalizeUnsupportedSurface(surface, index) {
 		canonical_type: canonicalType,
 		label: stringValue(surface.label || surface.title || surface.name || surface.path || surface.url || surface.route || surface.action || surface.hook || surface.option || surface.setting || surface.role || surface.capability || surface.table || surface.value, value),
 		executable: false,
+		execution_tier: 'discovered',
 		coverage_counted: false,
 		metadata: {
 			...(isPlainObject(surface.metadata) ? surface.metadata : {}),
 			source: stringValue(surface.source || surface.artifact, 'input'),
+			execution_tier: 'discovered',
 			value,
 		},
 	};

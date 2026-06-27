@@ -3,6 +3,7 @@
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA = 'homeboy/wordpress-fuzz-runtime-capabilities/v1';
 const WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA = 'homeboy/wordpress-fuzz-mutation-policy/v1';
 const WORDPRESS_FUZZ_MUTATION_MODES = Object.freeze(['isolated', 'read_only', 'destructive-deny']);
+const WORDPRESS_FUZZ_EXECUTION_TIERS = Object.freeze(['discovered', 'plan_only', 'read_only_executable', 'isolated_mutating_executable']);
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITIES = Object.freeze([
 	'snapshot',
@@ -120,17 +121,28 @@ function gateWordPressFuzzCaseForRuntimeCapabilities(testCase, runtimeCapabiliti
 	const metadata = isObject(testCase.metadata) ? { ...testCase.metadata } : {};
 
 	if (missing.length === 0) {
-		const executable = testCase.executable !== false && skipReasons.length === 0;
+		const mutates = fuzzCaseMutates(testCase, options);
+		const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
+		const mutationTierGated = mutates && mutationMode !== 'isolated';
+		const gatedSkipReasons = mutationTierGated ? reasonList([...skipReasons, 'requires-isolated-mutation-runtime']) : skipReasons;
+		const executable = testCase.executable !== false && gatedSkipReasons.length === 0 && !mutationTierGated;
+		const executionTier = normalizeWordPressFuzzExecutionTier(
+			testCase.execution_tier || testCase.executionTier || testCase.metadata?.execution_tier || testCase.metadata?.executionTier,
+			{ executable, mutates }
+		);
 		return {
 			...testCase,
 			executable,
+			execution_tier: executionTier,
 			required_capabilities: required,
-			skip_reasons: skipReasons,
+			skip_reasons: gatedSkipReasons,
 			metadata: {
 				...metadata,
 				executable,
-				gated: metadata.gated === true && !executable,
+				execution_tier: executionTier,
+				gated: (metadata.gated === true || mutationTierGated) && !executable,
 				runtime_capability_gated: false,
+				execution_tier_gated: mutationTierGated,
 				runtime_capability_contract: WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA,
 				required_capabilities: required,
 			},
@@ -140,11 +152,13 @@ function gateWordPressFuzzCaseForRuntimeCapabilities(testCase, runtimeCapabiliti
 	return {
 		...testCase,
 		executable: false,
+		execution_tier: 'plan_only',
 		required_capabilities: required,
 		skip_reasons: reasonList([...skipReasons, 'missing-runtime-fuzz-capabilities']),
 		metadata: {
 			...metadata,
 			executable: false,
+			execution_tier: 'plan_only',
 			planned: true,
 			gated: true,
 			runtime_capability_gated: true,
@@ -162,7 +176,7 @@ function gateWordPressFuzzCaseForMutationPolicy(testCase = {}, options = {}) {
 	}
 
 	const destructiveReasons = reasonList(testCase.destructive_reasons || testCase.destructiveReasons || testCase.destructive_reason || testCase.destructiveReason);
-	const mutates = options.mutates === true || destructiveReasons.length > 0 || testCase.metadata?.safety?.mutates === true;
+	const mutates = fuzzCaseMutates(testCase, { mutates: options.mutates, destructive_reasons: destructiveReasons });
 	const policy = {
 		schema: WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA,
 		mode: mutationMode,
@@ -186,17 +200,62 @@ function gateWordPressFuzzCaseForMutationPolicy(testCase = {}, options = {}) {
 	return {
 		...testCase,
 		executable: false,
+		execution_tier: 'plan_only',
 		skip_reasons: reasonList([...skipReasons, denyReason]),
 		destructive_reasons: destructiveReasons,
 		metadata: {
 			...metadata,
 			executable: false,
+			execution_tier: 'plan_only',
 			planned: true,
 			gated: true,
 			mutation_policy_gated: true,
 			mutation_policy: policy,
 		},
 	};
+}
+
+function normalizeWordPressFuzzExecutionTier(value, context = {}) {
+	const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+	if (WORDPRESS_FUZZ_EXECUTION_TIERS.includes(normalized)) {
+		return normalized;
+	}
+	if (context.discovered === true) {
+		return 'discovered';
+	}
+	if (context.executable === false || context.planned === true || context.gated === true) {
+		return 'plan_only';
+	}
+	return context.mutates === true ? 'isolated_mutating_executable' : 'read_only_executable';
+}
+
+function annotateWordPressFuzzCaseExecutionTier(testCase = {}, context = {}) {
+	const skipReasons = reasonList(testCase.skip_reasons || testCase.skipReasons || testCase.skip_reason || testCase.skipReason);
+	const mutates = fuzzCaseMutates(testCase, context);
+	const executable = context.executable ?? testCase.executable ?? (skipReasons.length === 0 && !mutates);
+	const executionTier = normalizeWordPressFuzzExecutionTier(
+		context.execution_tier || context.executionTier || testCase.execution_tier || testCase.executionTier || testCase.metadata?.execution_tier || testCase.metadata?.executionTier,
+		{ ...context, executable, mutates }
+	);
+	return {
+		...testCase,
+		executable,
+		execution_tier: executionTier,
+		metadata: {
+			...(isObject(testCase.metadata) ? testCase.metadata : {}),
+			executable,
+			execution_tier: executionTier,
+		},
+	};
+}
+
+function fuzzCaseMutates(testCase = {}, context = {}) {
+	const destructiveReasons = reasonList(context.destructive_reasons || context.destructiveReasons || testCase.destructive_reasons || testCase.destructiveReasons || testCase.destructive_reason || testCase.destructiveReason);
+	return context.mutates === true
+		|| destructiveReasons.length > 0
+		|| testCase.metadata?.safety?.mutates === true
+		|| testCase.metadata?.safety?.mutation === 'requires_isolated_editor_draft'
+		|| testCase.operation?.safety?.mutates === true;
 }
 
 function requiredCapabilitiesForWordPressFuzzCase(kind) {
@@ -230,11 +289,14 @@ function isObject(value) {
 module.exports = {
 	WORDPRESS_FUZZ_MUTATION_MODES,
 	WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA,
+	WORDPRESS_FUZZ_EXECUTION_TIERS,
 	WORDPRESS_FUZZ_RUNTIME_CAPABILITIES,
 	WORDPRESS_FUZZ_RUNTIME_CAPABILITY_REQUIREMENTS,
 	WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA,
+	annotateWordPressFuzzCaseExecutionTier,
 	gateWordPressFuzzCaseForMutationPolicy,
 	gateWordPressFuzzCaseForRuntimeCapabilities,
+	normalizeWordPressFuzzExecutionTier,
 	normalizeWordPressFuzzMutationMode,
 	normalizeWordPressFuzzRuntimeCapabilities,
 	normalizeWordPressFuzzRuntimeCapability,
