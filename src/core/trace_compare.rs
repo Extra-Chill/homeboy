@@ -323,3 +323,49 @@ impl CompareObservation {
         let _ = self.store.finish_run(&self.run_id, status, Some(metadata));
     }
 }
+
+/// Create the output directory for a compare-variant run, mirroring `mkdir -p`.
+/// Owns the filesystem orchestration so the command layer only computes the
+/// directory it needs and delegates persistence to core.
+pub fn prepare_compare_variant_dir(output_dir: &Path) -> crate::core::Result<()> {
+    std::fs::create_dir_all(output_dir).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!(
+                "Failed to create trace compare-variant output directory {}: {}",
+                output_dir.display(),
+                err
+            ),
+            Some("trace.compare_variant.output_dir".to_string()),
+        )
+    })
+}
+
+/// Serialize `value` to pretty JSON (with a trailing newline) and write it to
+/// `path`. Owns the filesystem write so the command layer never touches
+/// `std::fs` directly for compare-variant artifacts.
+pub fn write_compare_variant_json<T: Serialize>(path: &Path, value: &T) -> crate::core::Result<()> {
+    let json = serde_json::to_string_pretty(value).map_err(|err| {
+        crate::core::Error::internal_json(
+            err.to_string(),
+            Some(format!("serialize {}", path.display())),
+        )
+    })?;
+    std::fs::write(path, format!("{}\n", json)).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!("Failed to write {}: {}", path.display(), err),
+            Some("trace.compare_variant.write".to_string()),
+        )
+    })
+}
+
+/// Write the pre-rendered compare-variant summary markdown to `path`. The
+/// command layer renders the markdown; this owns the filesystem write so
+/// persistence orchestration never accumulates in the command.
+pub fn write_compare_variant_summary(path: &Path, summary: &str) -> crate::core::Result<()> {
+    std::fs::write(path, summary).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!("Failed to write {}: {}", path.display(), err),
+            Some("trace.compare_variant.summary".to_string()),
+        )
+    })
+}

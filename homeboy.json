@@ -679,7 +679,6 @@
         "thin_command_adapter::src/commands/runs/loop_sync.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/trace/bundle.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/trace/compare_targets.rs::ThinCommandAdapterViolation",
-        "thin_command_adapter::src/commands/trace/compare_variant.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/trace/matrix.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/trace/observation_lifecycle.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/trace/test_fixture.rs::ThinCommandAdapterViolation",
