@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const {
 	createCodeboxClient,
+	publicArtifactApplyPreflightArgs,
 	publicJsonArgs,
 } = require('../lib/codebox-client');
 
@@ -65,6 +66,10 @@ try {
 	assert.equal(client.identity().bin, bin);
 	assert.deepEqual(client.publicCliInvocation(), { command: process.execPath, args: [bin] });
 	assert.deepEqual(publicJsonArgs('run-fuzz-suite', '/tmp/input.json', { runnerMode: 'runtime-backed' }), ['run-fuzz-suite', '--runner-mode=runtime-backed', '--input-file', '/tmp/input.json', '--json']);
+	assert.deepEqual(publicArtifactApplyPreflightArgs({
+		bundlePath: '/tmp/bundle',
+		approvedFiles: ['wp-content/plugins/example/readme.txt'],
+	}), ['artifacts', 'apply-preflight', '--bundle', '/tmp/bundle', '--json', '--approved-file', 'wp-content/plugins/example/readme.txt']);
 
 	const cliResult = client.runPublicCliCommand(['run-fuzz-suite', '--help']);
 	assert.equal(cliResult.status, 0);
@@ -75,6 +80,30 @@ try {
 		runPublicCli: ({ command, args }) => ({ status: 0, stdout: JSON.stringify({ command, args }) }),
 	}).runPublicCliCommand(['run-wordpress-workload', '--help']);
 	assert.equal(JSON.parse(delegatedResult.stdout).command, 'wp');
+
+	const preflightResult = createCodeboxClient({
+		wpCodeboxBin: bin,
+		runPublicCli: ({ command, args }) => ({
+			status: 0,
+			stdout: JSON.stringify({ ready: true, command, args }),
+		}),
+	}).runArtifactApplyPreflight({
+		bundlePath: '/tmp/bundle',
+		approvedFiles: ['wp-content/plugins/example/readme.txt'],
+	});
+	assert.equal(preflightResult.ready, true);
+	assert.deepEqual(preflightResult.args, ['artifacts', 'apply-preflight', '--bundle', '/tmp/bundle', '--json', '--approved-file', 'wp-content/plugins/example/readme.txt']);
+
+	const discoveryResult = createCodeboxClient({
+		wpCodeboxBin: bin,
+		runPublicCli: ({ args }) => ({ status: 0, stdout: JSON.stringify({ artifacts: [], args }) }),
+	}).runArtifactsDiscoverPartial({
+		artifactsRoot: '/tmp/artifacts',
+		sessionId: 'session-1',
+		startedAt: '2026-01-01T00:00:00.000Z',
+		finishedAt: '2026-01-01T00:00:01.000Z',
+	});
+	assert.deepEqual(discoveryResult.args, ['artifacts', 'discover-partial', '--artifacts', '/tmp/artifacts', '--json', '--session-id', 'session-1', '--started-at', '2026-01-01T00:00:00.000Z', '--finished-at', '2026-01-01T00:00:01.000Z']);
 
 	console.log('codebox client boundary passed');
 } finally {

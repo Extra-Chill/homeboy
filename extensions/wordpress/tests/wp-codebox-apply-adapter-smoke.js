@@ -250,39 +250,21 @@ async function main() {
   assert.deepEqual(requestCliResult.files_changed, ['readme.txt']);
   assert.equal(fs.readFileSync(path.join(requestCliRepo, 'readme.txt'), 'utf8'), 'after\n');
 
-  const coreModulePath = path.join(root, 'wp-codebox-core-fixture.mjs');
-  fs.writeFileSync(coreModulePath, [
-    'export async function normalizeArtifactApplyPreflight(input) {',
-    '  const payload = input.preflight?.payload || input.payload || input;',
-    '  if (payload.force_not_ready) {',
-    '    return { schema: "wp-codebox/artifact-apply-preflight/v1", ready: false, violations: [{ code: "missing-patch", message: "Fixture core preflight rejected the payload." }] };',
-    '  }',
-    '  return { schema: "wp-codebox/artifact-apply-preflight/v1", ready: true, violations: [], payload };',
-    '}',
-    'export async function createArtifactApplyRequest(input) {',
-    '  const preflight = await normalizeArtifactApplyPreflight(input);',
-    '  return { id: `core-request-${preflight.payload.artifact_id}`, artifact: { id: preflight.payload.artifact_id, type: "wp_codebox_patch" }, approval_scope: { scope: "artifact", artifact_id: preflight.payload.artifact_id }, inputs: { preflight }, policy: { approved_files: preflight.payload.approved_files, content_digest: preflight.payload.artifact_content_digest, patch_sha256: preflight.payload.patch_sha256, publish: { push: false, open_pull_request: false } } };',
-    '}',
-    '',
-  ].join('\n'));
   const corePreflight = await normalizeWpCodeboxPreflightAsync({
-    wpCodeboxCoreModule: coreModulePath,
     preflight,
   });
   assert.equal(corePreflight.ready, true);
   assert.equal(corePreflight.payload.artifact_id, fixture.artifactId);
   await assert.rejects(
     normalizeWpCodeboxPreflightAsync({
-      wpCodeboxCoreModule: coreModulePath,
       payload: { force_not_ready: true },
     }),
-    /Fixture core preflight rejected the payload/
+    /payload.patch must contain the approved canonical patch/
   );
   const coreRequest = await wpCodeboxApplyRequestFromBundleAsync({
-    wpCodeboxCoreModule: coreModulePath,
     preflight,
   });
-  assert.equal(coreRequest.id, `core-request-${fixture.artifactId}`);
+  assert.equal(coreRequest.id, `apply-request-${fixture.artifactId}`);
   assert.deepEqual(coreRequest.policy.approved_files, ['/wordpress/wp-content/plugins/fixture-plugin/readme.txt']);
 
   const fakeWpCli = path.join(root, 'fake-wp-cli.cjs');
@@ -307,8 +289,8 @@ async function main() {
   });
   assert.equal(delegatedResult.status, 'applied');
   const delegatedArgs = JSON.parse(fs.readFileSync(fakeWpCliCapture, 'utf8'));
-  assert.deepEqual(delegatedArgs.slice(0, 4), ['codebox', 'artifacts', 'preflight-apply', fixture.artifactId]);
-  assert.equal(delegatedArgs.some((arg) => arg.startsWith('--approved-files=')), true);
+  assert.deepEqual(delegatedArgs.slice(0, 5), ['codebox', 'artifacts', 'apply-preflight', '--bundle', fs.realpathSync(fixture.bundle)]);
+  assert.equal(delegatedArgs.includes('--approved-file'), true);
 
   console.log('WP Codebox apply adapter smoke passed');
   } finally {
