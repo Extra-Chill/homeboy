@@ -92,6 +92,11 @@ impl JobStore {
         Ok(store)
     }
 
+    /// Snapshot-less job creation convenience. Production code creates jobs via
+    /// [`JobStore::run_background_with_source_snapshot`] →
+    /// [`JobStore::create_with_source_snapshot`]; this shorthand is only used by
+    /// the store's unit tests.
+    #[cfg(test)]
     pub(crate) fn create(&self, operation: impl Into<String>) -> Job {
         self.create_with_source_snapshot(operation, None)
     }

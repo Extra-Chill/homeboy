@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod persistence;
 mod remote_runner;
 mod store;

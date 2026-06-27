@@ -4,10 +4,10 @@ use crate::core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-mod stack;
+mod dependency_graph;
 
 use crate::extensions::deps_provider as provider;
-pub use stack::{
+pub use dependency_graph::{
     stack_apply, stack_apply_plan, stack_plan, stack_plan_from_components, stack_status,
     DependencyStackApplyResult, DependencyStackApplyStep, DependencyStackCommandResult,
     DependencyStackEdgeStatus, DependencyStackPlan, DependencyStackPlanStep, DependencyStackStatus,
