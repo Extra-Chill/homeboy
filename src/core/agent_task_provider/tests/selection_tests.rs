@@ -94,9 +94,14 @@ fn lab_runtime_component_ids_follow_selected_agent_task_providers() {
         vec![request_a, request_b],
     ));
 
+    // `lab_runtime_component_ids_for_plan` dedups across the selected providers
+    // into a `BTreeSet`, so the result is deterministically sorted. provider_a
+    // and provider_b both contribute `sample-component`, which collapses to one
+    // entry. (#6705's rename of `data-machine` -> `sample-component` left the
+    // expected literal in the old, no-longer-sorted order.)
     assert_eq!(
         component_ids,
-        vec!["agents-api", "sample-component", "php-ai-client"]
+        vec!["agents-api", "php-ai-client", "sample-component"]
     );
 }
 

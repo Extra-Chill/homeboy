@@ -735,13 +735,17 @@ mod tests {
 
         std::env::set_var("PATH", old_path);
         let result = result.expect("install result");
+        // `composer install` runs with `--no-progress` for deterministic,
+        // non-interactive CI installs (see `composer_install_command_args`,
+        // #6544). The test self-provides a fake `composer` on PATH, so this
+        // asserts the exact argv the provider builds, not composer availability.
         assert_eq!(
             result.command,
-            vec!["composer", "install", "--no-interaction"]
+            vec!["composer", "install", "--no-interaction", "--no-progress"]
         );
         assert_eq!(
             std::fs::read_to_string(project.path().join("composer-args.txt")).unwrap(),
-            "install\n--no-interaction\n"
+            "install\n--no-interaction\n--no-progress\n"
         );
     }
 }

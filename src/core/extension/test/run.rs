@@ -1097,70 +1097,76 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
 
     #[test]
     fn declared_result_parser_errors_with_context_on_non_zero_exit() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let extension_dir = temp_dir.path().join("extension");
-        std::fs::create_dir_all(&extension_dir).expect("extension dir");
-        let parser_script = extension_dir.join("parse-results.sh");
-        std::fs::write(
-            &parser_script,
-            r#"#!/usr/bin/env bash
+        // This test executes a capability script, which builds an env derived
+        // from HOME / homeboy paths. Run it under the shared `home_lock()` so it
+        // is globally serialized against env-mutating tests instead of racing
+        // them under default parallelism (#6760, #6804).
+        with_isolated_home(|_| {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let extension_dir = temp_dir.path().join("extension");
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            let parser_script = extension_dir.join("parse-results.sh");
+            std::fs::write(
+                &parser_script,
+                r#"#!/usr/bin/env bash
 printf 'parser stdout detail\n'
 printf 'parser stderr detail\n' >&2
 exit 23
 "#,
-        )
-        .expect("parser script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
-                .expect("parser script permissions");
-        }
+            )
+            .expect("parser script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
+                    .expect("parser script permissions");
+            }
 
-        let component = Component::new(
-            "fixture".to_string(),
-            temp_dir.path().to_string_lossy().to_string(),
-            "fixture-extension".to_string(),
-            None,
-        );
-        let context = crate::core::extension::ExtensionExecutionContext {
-            component: component.clone(),
-            capability: ExtensionCapability::Test,
-            extension_id: "fixture-extension".to_string(),
-            extension_path: extension_dir,
-            script_path: "test.sh".to_string(),
-            settings: Vec::new(),
-            accepted_setting_keys: Vec::new(),
-        };
-        let spec = ParseSpec {
-            extension_script: Some("parse-results.sh".to_string()),
-            adapters: vec!["fixture-json".to_string()],
-            rules: Vec::new(),
-            defaults: std::collections::HashMap::new(),
-            derive: Vec::new(),
-        };
-        let run_dir = RunDir::create().expect("run dir");
+            let component = Component::new(
+                "fixture".to_string(),
+                temp_dir.path().to_string_lossy().to_string(),
+                "fixture-extension".to_string(),
+                None,
+            );
+            let context = crate::core::extension::ExtensionExecutionContext {
+                component: component.clone(),
+                capability: ExtensionCapability::Test,
+                extension_id: "fixture-extension".to_string(),
+                extension_path: extension_dir,
+                script_path: "test.sh".to_string(),
+                settings: Vec::new(),
+                accepted_setting_keys: Vec::new(),
+            };
+            let spec = ParseSpec {
+                extension_script: Some("parse-results.sh".to_string()),
+                adapters: vec!["fixture-json".to_string()],
+                rules: Vec::new(),
+                defaults: std::collections::HashMap::new(),
+                derive: Vec::new(),
+            };
+            let run_dir = RunDir::create().expect("run dir");
 
-        let err = run_declared_result_parser(&component, &context, &spec, "{}", &run_dir)
-            .expect_err("declared parser non-zero exit should fail");
-        run_dir.cleanup();
+            let err = run_declared_result_parser(&component, &context, &spec, "{}", &run_dir)
+                .expect_err("declared parser non-zero exit should fail");
+            run_dir.cleanup();
 
-        assert_eq!(err.code, ErrorCode::ConfigInvalidValue);
-        assert!(err.message.contains("exit code 23"));
-        assert_eq!(err.details["script_path"], "parse-results.sh");
-        assert_eq!(err.details["exit_code"], 23);
-        assert!(err.details["command"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("parse-results.sh"));
-        assert!(err.details["stdout_tail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("parser stdout detail"));
-        assert!(err.details["stderr_tail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("parser stderr detail"));
+            assert_eq!(err.code, ErrorCode::ConfigInvalidValue);
+            assert!(err.message.contains("exit code 23"));
+            assert_eq!(err.details["script_path"], "parse-results.sh");
+            assert_eq!(err.details["exit_code"], 23);
+            assert!(err.details["command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("parse-results.sh"));
+            assert!(err.details["stdout_tail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("parser stdout detail"));
+            assert!(err.details["stderr_tail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("parser stderr detail"));
+        });
     }
 
     #[test]
