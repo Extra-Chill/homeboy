@@ -30,6 +30,10 @@ if (process.env.FIXTURE_FAIL) {
   process.stdout.write(JSON.stringify({ ok: false, failure: true }));
   process.exit(7);
 }
+if (process.env.FIXTURE_LARGE_STDOUT) {
+  process.stdout.write(JSON.stringify({ ok: true, payload: 'x'.repeat(4096) }));
+  process.exit(0);
+}
 process.stdout.write(JSON.stringify({ ok: true, artifacts: { directory: process.argv[process.argv.indexOf('--artifacts') + 1] } }));
 `);
 fs.chmodSync(fixtureBin, 0o755);
@@ -87,6 +91,19 @@ fs.chmodSync(fixtureBin, 0o755);
   );
   assert.equal(events.at(-1).name, 'recipe.failed');
   assert.deepEqual(JSON.parse(fs.readFileSync(outputFile, 'utf8')), { ok: false, failure: true });
+
+  const largeOutputFile = path.join(root, 'output', 'wp-codebox-large-output.json');
+  const largeResult = await runWpCodeboxRecipe({
+    recipeFile,
+    artifactsDir,
+    outputFile: largeOutputFile,
+    wpCodeboxBin: fixtureBin,
+    maxBuffer: 1024,
+    env: { ...process.env, FIXTURE_CAPTURE_PATH: capturePath, FIXTURE_LARGE_STDOUT: '1' },
+  });
+  assert.equal(largeResult.json.ok, true);
+  assert.equal(largeResult.json.payload.length, 4096);
+  assert.equal(JSON.parse(fs.readFileSync(largeOutputFile, 'utf8')).payload.length, 4096);
 
   console.log('wp-codebox recipe helper smoke passed');
 })().catch((error) => {
