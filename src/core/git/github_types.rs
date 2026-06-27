@@ -226,6 +226,11 @@ mod outputs {
     pub struct GithubPrCheckRollup {
         pub total: usize,
         pub passed: usize,
+        /// Checks that completed as SKIPPED. Tracked separately from `passed`
+        /// (rather than folded into it) so the fleet rollup agrees with the
+        /// readiness summary that SKIPPED is a distinct, non-blocking terminal
+        /// outcome — see [`crate::core::git::github::checks`].
+        pub skipped: usize,
         pub failed: usize,
         pub pending: usize,
         pub unknown: usize,

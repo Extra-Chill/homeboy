@@ -10,6 +10,7 @@ use super::super::github_types::{
 };
 use super::client::resolve_component_github;
 use super::pulls::{pr_view, validate_pr_merge_method};
+use super::{classify_check, CheckClass};
 
 /// Report and optionally land a fleet of PRs.
 pub fn pr_fleet(
@@ -168,20 +169,14 @@ fn summarize_check_rollup(checks: &[serde_json::Value]) -> GithubPrCheckRollup {
         ..Default::default()
     };
     for check in checks {
-        let status = check.get("status").and_then(serde_json::Value::as_str);
-        let conclusion = check
-            .get("conclusion")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        match (status, conclusion) {
-            (
-                _,
-                Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE"),
-            ) => rollup.failed += 1,
-            (Some("COMPLETED"), Some("SUCCESS" | "SKIPPED" | "NEUTRAL")) => rollup.passed += 1,
-            (Some("COMPLETED"), Some(_)) | (Some("COMPLETED"), None) => rollup.unknown += 1,
-            _ => rollup.pending += 1,
+        match classify_check(check) {
+            CheckClass::Passed => rollup.passed += 1,
+            // SKIPPED is its own non-blocking terminal bucket here, matching the
+            // readiness summary — it is no longer folded into `passed`.
+            CheckClass::Skipped => rollup.skipped += 1,
+            CheckClass::Failed | CheckClass::Rerunnable => rollup.failed += 1,
+            CheckClass::Unknown => rollup.unknown += 1,
+            CheckClass::Queued | CheckClass::Running | CheckClass::Pending => rollup.pending += 1,
         }
     }
     rollup
@@ -317,6 +312,26 @@ mod tests {
         assert_eq!(rollup.failed, 1);
         assert_eq!(rollup.pending, 1);
         assert_eq!(rollup.unknown, 1);
+        assert_eq!(rollup.skipped, 0);
+    }
+
+    #[test]
+    fn summarize_check_rollup_counts_skipped_separately_from_passed() {
+        // Regression guard for the standardized SKIPPED handling: a skipped
+        // check must land in its own bucket, not inflate the passed count the
+        // way the previous fleet-only classifier did.
+        let checks = serde_json::json!([
+            {"status":"COMPLETED","conclusion":"SUCCESS"},
+            {"status":"COMPLETED","conclusion":"SKIPPED"}
+        ]);
+        let rollup = summarize_check_rollup(checks.as_array().unwrap());
+
+        assert_eq!(rollup.total, 2);
+        assert_eq!(rollup.passed, 1);
+        assert_eq!(rollup.skipped, 1);
+        assert_eq!(rollup.failed, 0);
+        assert_eq!(rollup.pending, 0);
+        assert_eq!(rollup.unknown, 0);
     }
 
     #[test]

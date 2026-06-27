@@ -8,6 +8,7 @@ use crate::core::error::{Error, Result};
 use crate::core::git;
 use crate::core::plan::PlanStep;
 
+use super::advanced_remote;
 use super::context::load_component;
 use super::types::{ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePlan};
 use super::workflow::{format_tag, release_execution_plan, short_sha};
@@ -412,28 +413,6 @@ pub(super) fn reconcile_release_branch(
     };
     let head_commit = git::get_head_commit(path)?;
 
-    // Push HEAD to the branch (tags included), surfacing `err_label` on failure.
-    // Shared by the fast-forward and post-rebase paths below, which push the
-    // identical refspec and differ only in the error wording.
-    let push_branch = |err_label: &str| -> Result<()> {
-        let push = git::push_at(
-            Some(component_id),
-            git::PushOptions {
-                tags: true,
-                refspec: Some(format!("HEAD:refs/heads/{branch}")),
-                ..Default::default()
-            },
-            Some(path),
-        )?;
-        if !push.success {
-            return Err(Error::git_command_failed(format!(
-                "Failed to push {} branch {}: {}",
-                err_label, branch, push.stderr
-            )));
-        }
-        Ok(())
-    };
-
     // The release commit is already on the remote branch — nothing to do.
     if git::is_ancestor(path, &head_commit, &remote_commit)? {
         return Ok(None);
@@ -446,35 +425,47 @@ pub(super) fn reconcile_release_branch(
             "Pushing release commit to remote {} (remote did not advance)...",
             branch
         );
-        push_branch("release")?;
+        let push = advanced_remote::push_release_branch(component, component_id, &branch)?;
+        if !push.success {
+            return Err(Error::git_command_failed(format!(
+                "Failed to push release branch {}: {}",
+                branch, push.stderr
+            )));
+        }
         return Ok(Some(format!("pushed release commit to {}", branch)));
     }
 
     // Histories diverged: the remote advanced after the release commit. Rebase
-    // the release commit onto the advanced remote head, then push. Never force.
+    // the release commit onto the advanced remote head, then push. Never force,
+    // and never retag — `--recover` reconciles the branch only (the tag-push
+    // block above already handled the tag). Shared with the release push step's
+    // recovery so the two cannot drift (issue #3611).
     log_status!(
         "recover",
         "Remote {} advanced — rebasing release commit onto the new head and re-pushing...",
         branch
     );
-    let rebase = git::rebase_at(
-        Some(component_id),
-        git::RebaseOptions {
-            onto: Some(remote_commit.clone()),
-            ..Default::default()
-        },
-        Some(path),
-    )?;
-    if !rebase.success {
-        let _ = git::rebase_at(
-            Some(component_id),
-            git::RebaseOptions {
-                abort: true,
-                ..Default::default()
-            },
-            Some(path),
-        );
-        return Err(Error::validation_invalid_argument(
+    match advanced_remote::rebase_onto_advanced_remote_and_push(
+        component,
+        component_id,
+        &branch,
+        &head_commit,
+        &remote_commit,
+        None,
+    )? {
+        Some(recovery) => {
+            if !recovery.push.success {
+                return Err(Error::git_command_failed(format!(
+                    "Failed to push rebased release branch {}: {}",
+                    branch, recovery.push.stderr
+                )));
+            }
+            Ok(Some(format!(
+                "rebased release commit onto advanced remote and pushed {}",
+                branch
+            )))
+        }
+        None => Err(Error::validation_invalid_argument(
             "recover",
             format!(
                 "Rebasing the release commit onto the advanced remote {} hit a conflict",
@@ -487,15 +478,8 @@ pub(super) fn reconcile_release_branch(
                     component_id
                 ),
             ]),
-        ));
+        )),
     }
-
-    push_branch("rebased release")?;
-
-    Ok(Some(format!(
-        "rebased release commit onto advanced remote and pushed {}",
-        branch
-    )))
 }
 
 pub(super) fn recovery_release_plan(

@@ -6,6 +6,7 @@ use crate::core::error::{Error, Result};
 
 use super::gh_client::GhClient;
 use super::gh_client::{delete_branch_ref_api_args, pr_merge_api_args};
+use super::github::classify_check;
 
 #[derive(Debug, Clone, Default)]
 pub struct PrLandOptions {
@@ -576,21 +577,26 @@ fn non_empty(value: Option<String>) -> Option<String> {
     })
 }
 
+/// Collapse a PR's status-check rollup into the merge-gate signal this module
+/// reasons over: `FAILURE` (any blocking outcome), `PENDING` (anything still
+/// waiting), or `SUCCESS` (every check reached a non-blocking terminal state).
+///
+/// Routes through the shared [`classify_check`] classifier so the land gate
+/// agrees with the readiness summary and fleet rollup. This treats SKIPPED as a
+/// non-blocking terminal outcome (as before) and also blocks on
+/// `ACTION_REQUIRED`/`STARTUP_FAILURE`, which the previous land-only classifier
+/// silently let through.
 fn summarize_checks(items: &[Value]) -> Option<String> {
     if items.is_empty() {
         return None;
     }
     let mut pending = false;
     for item in items {
-        let conclusion = item.get("conclusion").and_then(Value::as_str).unwrap_or("");
-        let status = item.get("status").and_then(Value::as_str).unwrap_or("");
-        if matches!(
-            conclusion,
-            "FAILURE" | "failure" | "CANCELLED" | "cancelled" | "TIMED_OUT" | "timed_out"
-        ) {
+        let class = classify_check(item);
+        if class.is_blocking() {
             return Some("FAILURE".to_string());
         }
-        if conclusion.is_empty() && !matches!(status, "COMPLETED" | "completed") {
+        if class.is_waiting() {
             pending = true;
         }
     }
@@ -683,6 +689,50 @@ mod tests {
             max_base_retries: 1,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn summarize_checks_routes_through_shared_classifier() {
+        // No checks reported at all.
+        assert_eq!(summarize_checks(&[]), None);
+
+        // SKIPPED is a non-blocking terminal outcome — clean rollups read SUCCESS.
+        let success = serde_json::json!([
+            {"status":"COMPLETED","conclusion":"SUCCESS"},
+            {"status":"COMPLETED","conclusion":"SKIPPED"}
+        ]);
+        assert_eq!(
+            summarize_checks(success.as_array().unwrap()).as_deref(),
+            Some("SUCCESS")
+        );
+
+        // Any waiting check downgrades the gate to PENDING.
+        let pending = serde_json::json!([
+            {"status":"COMPLETED","conclusion":"SUCCESS"},
+            {"status":"IN_PROGRESS","conclusion":""}
+        ]);
+        assert_eq!(
+            summarize_checks(pending.as_array().unwrap()).as_deref(),
+            Some("PENDING")
+        );
+
+        // Hard and transient failures both block.
+        for conclusion in ["FAILURE", "ACTION_REQUIRED", "CANCELLED", "STARTUP_FAILURE"] {
+            let failing = serde_json::json!([{ "status": "COMPLETED", "conclusion": conclusion }]);
+            assert_eq!(
+                summarize_checks(failing.as_array().unwrap()).as_deref(),
+                Some("FAILURE"),
+                "conclusion {conclusion} must block the land gate"
+            );
+        }
+
+        // A COMPLETED check with an unrecognized conclusion blocks rather than
+        // silently merging — the land gate now agrees with readiness/fleet.
+        let unknown = serde_json::json!([{ "status": "COMPLETED", "conclusion": "MYSTERY" }]);
+        assert_eq!(
+            summarize_checks(unknown.as_array().unwrap()).as_deref(),
+            Some("FAILURE")
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod advanced_remote;
 pub mod changelog;
 mod checkout_guard;
 mod context;
