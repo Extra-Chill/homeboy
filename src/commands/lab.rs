@@ -92,7 +92,7 @@ pub struct LabRefreshPlanHandoff {
     pub runner: LabRefreshPlanRunnerHandoff,
     pub workspace: LabRefreshPlanWorkspaceHandoff,
     pub env_plan: LabRefreshPlanEnvPlan,
-    pub secret_plan: LabRefreshPlanSecretPlan,
+    pub secret_plan: SecretEnvPlan,
     pub runtime_refs: LabRefreshPlanRuntimeRefs,
     pub lifecycle: LabRefreshPlanLifecycle,
     pub artifact: LabRefreshPlanArtifactPlan,
@@ -112,17 +112,30 @@ pub struct LabRefreshPlanWorkspaceHandoff {
     pub controller_path: String,
     pub runner_cwd: String,
     pub sync_mode: String,
+    pub mapping: LabRefreshPlanWorkspaceMapping,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanWorkspaceMapping {
+    pub schema: &'static str,
+    pub ref_id: String,
+    pub controller_path: String,
+    pub runner_path: String,
+    pub sync_mode: String,
+    pub lease: LabRefreshPlanWorkspaceLease,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanWorkspaceLease {
+    pub lease_id: String,
+    pub owner_run_id: String,
+    pub cleanup_policy: &'static str,
+    pub ttl: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct LabRefreshPlanEnvPlan {
     pub vars: Vec<String>,
-    pub unknown: bool,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct LabRefreshPlanSecretPlan {
-    pub refs: Vec<String>,
     pub unknown: bool,
 }
 
@@ -345,6 +358,7 @@ fn handoff_plan(
         .filter(|command| matches!(command.label, "inspect-artifacts" | "inspect-evidence"))
         .cloned()
         .collect();
+    let workspace_mapping = workspace_mapping(args);
 
     LabRefreshPlanHandoff {
         schema: "homeboy/lab-refresh-handoff/v1",
@@ -359,15 +373,13 @@ fn handoff_plan(
             controller_path: args.workspace.clone(),
             runner_cwd: args.runner_cwd.clone(),
             sync_mode: args.sync_mode.clone(),
+            mapping: workspace_mapping,
         },
         env_plan: LabRefreshPlanEnvPlan {
             vars: Vec::new(),
             unknown: true,
         },
-        secret_plan: LabRefreshPlanSecretPlan {
-            refs: Vec::new(),
-            unknown: true,
-        },
+        secret_plan: SecretEnvPlan::default(),
         runtime_refs: LabRefreshPlanRuntimeRefs {
             command: args.command.clone(),
             docs: docs.to_vec(),
@@ -402,6 +414,27 @@ fn handoff_plan(
     }
 }
 
+fn workspace_mapping(args: &RefreshPlanArgs) -> LabRefreshPlanWorkspaceMapping {
+    let ref_id = workspace_mapping_ref(&args.runner, &args.run_id);
+    LabRefreshPlanWorkspaceMapping {
+        schema: "homeboy/runner-workspace-mapping/v1",
+        ref_id: ref_id.clone(),
+        controller_path: args.workspace.clone(),
+        runner_path: args.runner_cwd.clone(),
+        sync_mode: args.sync_mode.clone(),
+        lease: LabRefreshPlanWorkspaceLease {
+            lease_id: format!("{ref_id}:lease"),
+            owner_run_id: args.run_id.clone(),
+            cleanup_policy: "operator_retains_until_evidence_verified",
+            ttl: None,
+        },
+    }
+}
+
+fn workspace_mapping_ref(runner: &str, run_id: &str) -> String {
+    format!("runner:{runner}:workspace:{run_id}")
+}
+
 fn execution_envelope_plan(
     args: &RefreshPlanArgs,
     handoff: &LabRefreshPlanHandoff,
@@ -434,6 +467,7 @@ fn execution_envelope_plan(
                 "controller_path": args.workspace,
                 "runner_cwd": args.runner_cwd,
                 "sync_mode": args.sync_mode,
+                "mapping": handoff.workspace.mapping,
             },
             "runtime": {
                 "command": args.command,
@@ -573,6 +607,7 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA;
 
     #[test]
     fn plan_commands_include_existing_runner_artifact_primitives() {
@@ -647,10 +682,19 @@ mod tests {
         assert_eq!(handoff.workspace.controller_path, "/workspace/source");
         assert_eq!(handoff.workspace.runner_cwd, "/runner/source");
         assert_eq!(handoff.workspace.sync_mode, "snapshot-git");
+        assert_eq!(
+            handoff.workspace.mapping.ref_id,
+            "runner:lab-runner:workspace:matrix-refresh-1"
+        );
+        assert_eq!(
+            handoff.workspace.mapping.lease.cleanup_policy,
+            "operator_retains_until_evidence_verified"
+        );
+        assert_eq!(handoff.workspace.mapping.lease.ttl, None);
         assert_eq!(handoff.env_plan.vars, Vec::<String>::new());
         assert!(handoff.env_plan.unknown);
-        assert_eq!(handoff.secret_plan.refs, Vec::<String>::new());
-        assert!(handoff.secret_plan.unknown);
+        assert_eq!(handoff.secret_plan.schema, SECRET_ENV_PLAN_SCHEMA);
+        assert_eq!(handoff.secret_plan.secret_env_names(), Vec::<String>::new());
         assert_eq!(handoff.runtime_refs.command, vec!["cargo", "test"]);
         assert_eq!(handoff.artifact.paths, vec!["artifacts/matrix"]);
         assert_eq!(handoff.evidence.paths, evidence);
@@ -729,9 +773,34 @@ mod tests {
         );
         assert_eq!(envelope.metadata["runner"]["id"], "lab-runner");
         assert_eq!(
+            envelope.metadata["workspace"]["mapping"]["ref_id"],
+            "runner:lab-runner:workspace:matrix-refresh-1"
+        );
+        assert_eq!(
+            envelope.metadata["workspace"]["mapping"]["lease"]["owner_run_id"],
+            "matrix-refresh-1"
+        );
+        assert_eq!(
             envelope.metadata["runtime"]["command"],
             serde_json::json!(["cargo", "test"])
         );
+    }
+
+    #[test]
+    fn refresh_plan_secret_plan_uses_redacted_canonical_shape() {
+        let secret_plan =
+            SecretEnvPlan::from_secret_env_names(["B_SECRET".to_string(), "A_SECRET".to_string()]);
+
+        let redacted = serde_json::to_value(secret_plan.redacted()).expect("redacted json");
+        let rendered = serde_json::to_string(&redacted).expect("redacted json string");
+
+        assert_eq!(redacted["schema"], SECRET_ENV_PLAN_SCHEMA);
+        assert_eq!(
+            redacted["secret_env_names"],
+            serde_json::json!(["A_SECRET", "B_SECRET"])
+        );
+        assert!(!rendered.contains("super-secret-value"));
+        assert_eq!(secret_plan.redacted_env()["A_SECRET"], "[REDACTED]");
     }
 
     #[test]
