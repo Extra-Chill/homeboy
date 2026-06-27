@@ -417,6 +417,53 @@ fn controller_run_from_spec_rejects_unbounded_zero_max_actions() {
     });
 }
 
+#[test]
+fn controller_run_from_spec_rejects_command_runtime_without_command_kind() {
+    with_temp_home(|| {
+        let observed_request = Arc::new(Mutex::new(None));
+        let error = controller_run_from_spec_with_test_executor(
+            AgentTaskControllerRunFromSpecArgs {
+                spec: serde_json::to_string(&json!({
+                    "loop_id": "run-from-spec-command-missing-kind",
+                    "workflows": [{
+                        "workflow_id": "static-validation",
+                        "prompt": "Run static validation.",
+                        "runtime_execution": {
+                            "command": "/bin/sh",
+                            "args": ["-c", "printf ok"]
+                        }
+                    }]
+                }))
+                .expect("spec json"),
+                inputs: None,
+                policy_results: Vec::new(),
+                max_actions: 1,
+                reconcile_stale: false,
+                replace: false,
+                fork: false,
+                resume_existing: false,
+                dispatch_backend: Some("fixture".to_string()),
+                dispatch_selector: None,
+                dispatch_model: None,
+                dispatch_provider_config: None,
+            },
+            CapturingExecutor {
+                observed_request: Arc::clone(&observed_request),
+            },
+        )
+        .expect_err("command-shaped runtime execution is rejected before dispatch");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert_eq!(error.details["field"], "workflows[].runtime_execution.kind");
+        assert_eq!(error.details["id"], "static-validation");
+        assert!(error.message.contains("kind: command"), "{error}");
+        assert!(observed_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none());
+    });
+}
+
 fn run_from_spec_proof_args(
     loop_id: &str,
     prompt: &str,

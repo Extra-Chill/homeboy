@@ -2412,6 +2412,67 @@ mod run_command_workflow_tests {
     }
 
     #[test]
+    fn command_shaped_runtime_execution_requires_explicit_command_kind() {
+        with_isolated_home(|_| {
+            let spec = AgentTaskRepoLoopSpec {
+                schema: None,
+                loop_id: "repo-loop-command-missing-kind".to_string(),
+                phase: "init".to_string(),
+                config_version: "v1".to_string(),
+                metadata: Value::Null,
+                entities: Vec::new(),
+                agents: Vec::new(),
+                tools: Vec::new(),
+                abilities: Vec::new(),
+                workflows: vec![AgentTaskRepoLoopSpecWorkflow {
+                    workflow_id: "deterministic-validation".to_string(),
+                    agent_id: None,
+                    prompt: None,
+                    tasks: vec!["Run deterministic validation.".to_string()],
+                    entity_ids: Vec::new(),
+                    fan_out: None,
+                    tools: Vec::new(),
+                    abilities: Vec::new(),
+                    artifacts: vec!["validation_result".to_string()],
+                    consumes: Vec::new(),
+                    emits: Vec::new(),
+                    dependencies: Vec::new(),
+                    gates: Vec::new(),
+                    metrics: Vec::new(),
+                    runtime_execution: json!({
+                        "command": "/bin/sh",
+                        "args": ["-c", "printf ok"]
+                    }),
+                    inputs: Value::Null,
+                }],
+                artifacts: vec![AgentTaskRepoLoopSpecArtifact {
+                    artifact_id: "validation_result".to_string(),
+                    kind: "example/ValidationResult/v1".to_string(),
+                    description: None,
+                    required: true,
+                }],
+                artifact_graph: Vec::new(),
+                dependencies: Vec::new(),
+                gates: Vec::new(),
+                metrics: Vec::new(),
+                gate_bundles: Vec::new(),
+                policy: None,
+                phases: Vec::new(),
+                actions: Vec::new(),
+                initial_event: None,
+            };
+
+            let error = init_from_spec(ControllerFromSpecRequest { spec })
+                .expect_err("missing command kind is rejected before dispatch");
+
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert_eq!(error.details["field"], "workflows[].runtime_execution.kind");
+            assert_eq!(error.details["id"], "deterministic-validation");
+            assert!(error.message.contains("kind: command"), "{error}");
+        });
+    }
+
+    #[test]
     fn run_command_workflow_times_out_instead_of_blocking_controller() {
         with_isolated_home(|_| {
             let spec = AgentTaskRepoLoopSpec {
