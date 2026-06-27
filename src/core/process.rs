@@ -390,14 +390,31 @@ mod process_tree_tests {
         assert!(commands.iter().any(|cmd| cmd.contains("kill -KILL 4242")));
     }
 
+    /// Reap a test-owned child as soon as it exits, off-thread, so the kernel
+    /// clears the zombie promptly while `terminate_process_tree` is still
+    /// polling. The test process is the direct parent of these children, so it
+    /// alone is responsible for reaping them. On platforms without a /proc-based
+    /// zombie check (e.g. macOS), `pid_is_running` answers `kill(pid, 0) == 0`,
+    /// which stays `true` for an un-reaped zombie — so a child reaped only after
+    /// the assertions would be misreported as a survivor. Reaping concurrently
+    /// keeps the test honest about whether SIGTERM/SIGKILL actually took.
+    fn reap_in_background(mut child: std::process::Child) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        })
+    }
+
     #[test]
     fn terminate_process_tree_escalates_to_sigkill_on_sigterm_resistant_child() {
         // A child that ignores SIGTERM forces the SIGKILL escalation path.
-        let mut child = Command::new("sh")
+        let child = Command::new("sh")
             .args(["-c", "trap '' TERM; sleep 30"])
             .spawn()
             .expect("spawn sigterm-resistant child");
         let pid = child.id();
+        // Reap concurrently so the post-SIGKILL zombie is cleared during the
+        // reap grace window instead of lingering as a false survivor.
+        let reaper = reap_in_background(child);
 
         let termination = terminate_process_tree(pid).expect("terminate sigterm-resistant tree");
 
@@ -410,19 +427,21 @@ mod process_tree_tests {
             .iter()
             .any(|cmd| cmd.contains(&pid.to_string())));
 
-        // Reap so we do not leak a zombie into the test runner.
-        let _ = child.wait();
+        let _ = reaper.join();
         assert!(!pid_is_running(pid));
     }
 
     #[test]
     fn terminate_process_tree_uses_sigterm_for_cooperative_child() {
         // A plain sleep exits on SIGTERM, so no escalation is needed.
-        let mut child = Command::new("sleep")
+        let child = Command::new("sleep")
             .arg("30")
             .spawn()
             .expect("spawn cooperative child");
         let pid = child.id();
+        // Reap concurrently so the SIGTERM-exited zombie is cleared during the
+        // grace window and is not mistaken for a process that ignored SIGTERM.
+        let reaper = reap_in_background(child);
 
         let termination = terminate_process_tree(pid).expect("terminate cooperative tree");
 
@@ -430,7 +449,7 @@ mod process_tree_tests {
         assert!(termination.killed_pids.is_empty());
         assert!(termination.surviving_pids.is_empty());
 
-        let _ = child.wait();
+        let _ = reaper.join();
         assert!(!pid_is_running(pid));
     }
 }

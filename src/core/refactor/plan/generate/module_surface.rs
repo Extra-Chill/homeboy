@@ -256,6 +256,16 @@ mod tests {
 
     #[test]
     fn build_uses_snapshot_content_for_module_surfaces() {
+        // `ModuleSurfaceIndex::build` only walks files whose extensions the
+        // installed extension registry provides, and that registry is read from
+        // `$HOME`. Other tests swap `HOME` (via the shared `home_lock`) while
+        // this one runs; if `.rs` is not a provided extension at the instant of
+        // the walk, `producer.rs` is skipped and `index.get(...)` returns
+        // `None`. Hold the shared home lock so no `HOME`-mutating test can run
+        // concurrently — the ambient registry (with its real `.rs` grammar)
+        // stays put for the duration of the walk.
+        let _home_guard = crate::test_support::home_env_guard();
+
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src/core/example");
         std::fs::create_dir_all(&src).unwrap();

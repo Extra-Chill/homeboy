@@ -160,7 +160,7 @@ mod tests {
         )]);
 
         assert!(env.iter().any(|(key, value)| {
-            key == "HOMEBOY_SETTINGS_COMPONENTS_WOOCOMMERCE_EXTENSIONS_WORDPRESS_SAMPLE_RUNTIME_SOURCE_ROOT"
+            key == "HOMEBOY_SETTINGS_COMPONENTS_WOOCOMMERCE_EXTENSIONS_WORDPRESS_SELECTED_RUNTIME_SOURCE_ROOT"
                 && value == "/workspace/source"
         }));
     }
