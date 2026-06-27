@@ -24,7 +24,7 @@ const {
   AGENT_TASK_FAILURE_CLASSIFICATIONS,
   AGENT_TASK_OUTCOME_STATUSES,
   AGENT_TASK_REDACTED_METADATA_KEYS,
-} = require('../../runtime-agent-ci/lib/agent-task-provider-contract');
+} = require('../../agent-task-contracts/agent-task-provider-contract');
 
 const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
 const wpCodeboxRuntimeExecutor = path.join(wpCodeboxRuntimeRoot, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');

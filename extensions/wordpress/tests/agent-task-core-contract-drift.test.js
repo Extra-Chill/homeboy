@@ -15,7 +15,7 @@ const {
   AGENT_TASK_REDACTED_METADATA_KEYS,
   AGENT_TASK_REQUEST_SCHEMA,
   agentTaskProviderContractFields,
-} = require('../../runtime-agent-ci/lib/agent-task-provider-contract');
+} = require('../../agent-task-contracts/agent-task-provider-contract');
 const {
   FANOUT_RECONCILE_PLAN_SCHEMA,
   FANOUT_RECONCILE_RECORD_STATUSES,

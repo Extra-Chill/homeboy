@@ -11,13 +11,13 @@ const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci/index.js'))
 const {
   genericAgentTaskPlan,
   genericAgentTaskRequest,
-} = require(path.join(repoRoot, 'runtime-agent-ci/lib/generic-agent-task-plan.js'));
+} = require(path.join(repoRoot, 'agent-task-contracts/generic-agent-task-plan.js'));
 
 const genericBoundaryTerms = /Data Machine|DataMachine|datamachine|data-machine|wp-site-generator|WPSG|site-generator|site generator/;
 const genericFiles = [
   'runtime-agent-ci/index.js',
   'runtime-agent-ci/lib/runtime-agent-ci-plan.js',
-  'runtime-agent-ci/lib/generic-agent-task-plan.js',
+  'agent-task-contracts/generic-agent-task-plan.js',
   '.github/workflows/runtime-agent-ci.yml',
 ];
 
