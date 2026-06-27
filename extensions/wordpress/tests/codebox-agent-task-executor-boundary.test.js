@@ -1514,6 +1514,62 @@ assert.deepEqual(plannedSecretEnvTaskInput.secret_env, [
   'EXPLICIT_CODEBOX_SECRET',
 ]);
 
+// Regression: the consumer must honor the FULL authoritative aggregation that
+// core's SecretEnvPlan::secret_env_names() folds (secret_env_plan.rs:214-235) —
+// provider-credential names and requirement-derived names were previously
+// dropped, so those declared secrets silently never reached the sandbox.
+const previousFullPlan = process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON;
+process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON = JSON.stringify({
+  schema: 'homeboy/secret-env-plan/v1',
+  secret_env_names: ['HOMEBOY_PLANNED_CODEBOX_SECRET'],
+  requirements: [
+    { name: 'HOMEBOY_REQUIRED_CODEBOX_SECRET', required: true },
+    { name: 'HOMEBOY_OPTIONAL_CODEBOX_SECRET', required: false },
+  ],
+  provider_credentials: {
+    codex: {
+      secret_env: ['AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN', 'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
+    },
+  },
+  env_name_mapping: {
+    'wordpress.codebox-agent-task-executor': ['HOMEBOY_MAPPED_CODEBOX_SECRET'],
+  },
+  status: [{ name: 'HOMEBOY_PLANNED_CODEBOX_SECRET', configured: true, source: 'env' }],
+});
+let fullPlanSecretEnvTaskInput;
+try {
+  fullPlanSecretEnvTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+    schema: 'homeboy/agent-task-request/v1',
+    task_id: 'full-plan-secret-env-codebox-task-1',
+    executor: {
+      backend: 'codebox',
+      config: { provider: 'codex' },
+    },
+    instructions: 'Run a Codex-backed Codebox task with a fully aggregated secret env plan.',
+    inputs: {},
+  });
+} finally {
+  if (previousFullPlan === undefined) {
+    delete process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON;
+  } else {
+    process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON = previousFullPlan;
+  }
+}
+for (const declaredSecret of [
+  'HOMEBOY_PLANNED_CODEBOX_SECRET',
+  'HOMEBOY_REQUIRED_CODEBOX_SECRET',
+  'HOMEBOY_OPTIONAL_CODEBOX_SECRET',
+  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+  'HOMEBOY_MAPPED_CODEBOX_SECRET',
+]) {
+  assert.equal(
+    fullPlanSecretEnvTaskInput.secret_env.includes(declaredSecret),
+    true,
+    `expected forwarded secret_env to include ${declaredSecret}`,
+  );
+}
+
 const claudeCodeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'claude-code-codebox-task-1',
