@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.2] - 2026-06-27
+
+### Changed
+- Clarify fuzz runtime artifact normalization
+
 ## [3.19.1] - 2026-06-27
 
 ### Changed
