@@ -667,7 +667,6 @@
         "field_patterns::src/core/fuzz/types.rs::RepeatedFieldPattern",
         "field_patterns::src/core/observation/records.rs::RepeatedFieldPattern",
         "field_patterns::src/core/runner/execution/mod.rs::RepeatedFieldPattern",
-        "field_patterns::src/core/triage/watch.rs::RepeatedFieldPattern",
         "near-duplication::src/core/fuzz/types.rs::NearDuplicate",
         "parallel-implementation::src/core/agent_task_prompts.rs::ParallelImplementation",
         "parallel-implementation::src/core/extension/trace/attach.rs::ParallelImplementation",
