@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.29] - 2026-06-27
+
+### Fixed
+- generate agent-task core contract fixture from core's published contract
+
 ## [3.19.28] - 2026-06-27
 
 ### Changed
