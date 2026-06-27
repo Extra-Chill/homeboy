@@ -90,7 +90,7 @@ homeboy_wp_codebox_resolve_bin() {
             echo "Error: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox." >&2
         fi
     else
-        echo "Error: wp-codebox was found, but no candidate passed 'wp-codebox --version'. Remove stale wrappers or set HOMEBOY_WP_CODEBOX_BIN to a working binary." >&2
+        echo "Error: wp-codebox was found, but no candidate passed 'wp-codebox commands'. Remove stale wrappers or set HOMEBOY_WP_CODEBOX_BIN to a working binary." >&2
     fi
 
     return 1
@@ -145,7 +145,7 @@ homeboy_wp_codebox_bin_is_runnable() {
         esac
     fi
 
-    "$bin" --version >/dev/null 2>&1
+    "$bin" commands >/dev/null 2>&1
 }
 
 homeboy_wp_codebox_set_command() {

@@ -43,11 +43,11 @@ SH
 chmod +x "${stale_path}/wp-codebox"
 cat > "${valid_path}/wp-codebox" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = "--version" ]; then
-    echo "fixture-wp-codebox 1.0.0"
+if [ "${1:-}" = "commands" ]; then
+    echo "fixture-wp-codebox commands"
     exit 0
 fi
-exit 0
+exit 1
 SH
 chmod +x "${valid_path}/wp-codebox"
 
