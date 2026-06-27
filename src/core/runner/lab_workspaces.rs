@@ -1506,6 +1506,42 @@ mod provider_config_candidate_paths_tests {
     }
 
     #[test]
+    fn path_setting_bench_env_directory_values_sync_extra_workspaces() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let fixture_root = controller
+            .path()
+            .join("blocks-engine@matrix/fixtures/websites");
+        let transformer_root = controller.path().join("blocks-engine@matrix");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(&fixture_root).expect("fixture root");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--rig".to_string(),
+            "static-site-importer-fixture-matrix".to_string(),
+            "--setting".to_string(),
+            format!(
+                "bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT={}",
+                fixture_root.display()
+            ),
+            format!(
+                "--setting=bench_env.SSI_FIXTURE_MATRIX_BLOCKS_ENGINE_PHP_TRANSFORMER_PATH={}",
+                transformer_root.display()
+            ),
+        ];
+
+        let workspaces = path_setting_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces[0].role, "path_setting");
+        assert_eq!(workspaces[0].path, fixture_root.canonicalize().unwrap());
+        assert_eq!(workspaces[1].role, "path_setting");
+        assert_eq!(workspaces[1].path, transformer_root.canonicalize().unwrap());
+    }
+
+    #[test]
     fn rig_component_path_env_extra_workspaces_syncs_existing_component_path() {
         crate::test_support::with_isolated_home(|home| {
             let source = home.path().join("primary");

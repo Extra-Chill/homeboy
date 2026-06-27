@@ -1325,6 +1325,40 @@ mod path_settings_tests {
     }
 
     #[test]
+    fn remap_path_settings_rewrites_bench_env_directory_values() {
+        let mappings = vec![
+            LabPathRemap {
+                local: "/Users/user/Developer/blocks-engine@matrix/fixtures/websites".to_string(),
+                remote: "/home/user/_lab_workspaces/websites".to_string(),
+            },
+            LabPathRemap {
+                local: "/Users/user/Developer/blocks-engine@matrix".to_string(),
+                remote: "/home/user/_lab_workspaces/blocks-engine".to_string(),
+            },
+        ];
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--rig".to_string(),
+            "static-site-importer-fixture-matrix".to_string(),
+            "--setting".to_string(),
+            "bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT=/Users/user/Developer/blocks-engine@matrix/fixtures/websites".to_string(),
+            "--setting=bench_env.SSI_FIXTURE_MATRIX_BLOCKS_ENGINE_PHP_TRANSFORMER_PATH=/Users/user/Developer/blocks-engine@matrix".to_string(),
+        ];
+
+        let out = remap_path_settings_in_args(&args, &mappings);
+
+        assert_eq!(
+            out[5],
+            "bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT=/home/user/_lab_workspaces/websites"
+        );
+        assert_eq!(
+            out[6],
+            "--setting=bench_env.SSI_FIXTURE_MATRIX_BLOCKS_ENGINE_PHP_TRANSFORMER_PATH=/home/user/_lab_workspaces/blocks-engine"
+        );
+    }
+
+    #[test]
     fn remap_path_settings_rewrites_json_array_path_values() {
         let mappings = vec![LabPathRemap {
             local: "/Users/user/Developer/woocommerce-gateway-stripe".to_string(),

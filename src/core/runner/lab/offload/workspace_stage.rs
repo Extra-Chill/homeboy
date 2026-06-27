@@ -353,13 +353,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     // to their synced remote locations, using every local->remote pair recorded
     // during workspace sync. Without this the remote sandbox cannot resolve the
     // workspace or runtime components a hand-authored cook config references.
-    let path_remaps: Vec<LabPathRemap> = workspace_mapping
-        .iter()
-        .map(|entry| LabPathRemap {
-            local: entry.local_path().to_string(),
-            remote: entry.remote_path().to_string(),
-        })
-        .collect();
+    let path_remaps = path_remaps_from_workspace_mapping(&workspace_mapping);
     preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
     preflight_provider_config_paths_materialized_in_args(&offload_args, &path_remaps)?;
     let remapped_args = rig_materialization::remap_bench_rig_default_component_to_primary_snapshot(
@@ -382,6 +376,7 @@ fn prepare_lab_offload_workspace_stage_inner(
             synced_entry.step_id,
         );
     }
+    let path_remaps = path_remaps_from_workspace_mapping(&workspace_mapping);
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
     let (remapped_args, agent_task_run_id) =
@@ -434,4 +429,16 @@ fn prepare_lab_offload_workspace_stage_inner(
         runtime_overlay_env,
         runtime_overlay_metadata,
     })
+}
+
+fn path_remaps_from_workspace_mapping(
+    workspace_mapping: &[LabWorkspaceMappingEntry],
+) -> Vec<LabPathRemap> {
+    workspace_mapping
+        .iter()
+        .map(|entry| LabPathRemap {
+            local: entry.local_path().to_string(),
+            remote: entry.remote_path().to_string(),
+        })
+        .collect()
 }
