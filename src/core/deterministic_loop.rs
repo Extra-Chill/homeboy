@@ -6,18 +6,21 @@ use serde_json::Value;
 
 use crate::core::{Error, Result};
 
-pub const DETERMINISTIC_LOOP_PLAN_SCHEMA: &str = "homeboy/deterministic-loop-plan/v1";
-pub const DETERMINISTIC_LOOP_RUN_IDENTITY_SCHEMA: &str =
-    "homeboy/deterministic-loop-run-identity/v1";
-pub const DETERMINISTIC_FANOUT_PLAN_SCHEMA: &str = "homeboy/deterministic-fanout-plan/v1";
-pub const DETERMINISTIC_FANOUT_RESULT_SCHEMA: &str = "homeboy/deterministic-fanout-result/v1";
-pub const DETERMINISTIC_EVIDENCE_SNAPSHOT_SCHEMA: &str =
-    "homeboy/deterministic-evidence-snapshot/v1";
-pub const DETERMINISTIC_LOOP_SPEC_SCHEMA: &str = "homeboy/deterministic-loop-spec/v1";
-pub const DETERMINISTIC_LOOP_STATE_SCHEMA: &str = "homeboy/deterministic-loop-state/v1";
-pub const DETERMINISTIC_LOOP_EVENT_SCHEMA: &str = "homeboy/deterministic-loop-event/v1";
-pub const DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA: &str =
-    "homeboy/deterministic-loop-artifact-declaration/v1";
+mod schema_ids {
+    pub const DETERMINISTIC_LOOP_PLAN_SCHEMA: &str = "homeboy/deterministic-loop-plan/v1";
+    pub const DETERMINISTIC_LOOP_RUN_IDENTITY_SCHEMA: &str =
+        "homeboy/deterministic-loop-run-identity/v1";
+    pub const DETERMINISTIC_FANOUT_PLAN_SCHEMA: &str = "homeboy/deterministic-fanout-plan/v1";
+    pub const DETERMINISTIC_FANOUT_RESULT_SCHEMA: &str = "homeboy/deterministic-fanout-result/v1";
+    pub const DETERMINISTIC_EVIDENCE_SNAPSHOT_SCHEMA: &str =
+        "homeboy/deterministic-evidence-snapshot/v1";
+    pub const DETERMINISTIC_LOOP_SPEC_SCHEMA: &str = "homeboy/deterministic-loop-spec/v1";
+    pub const DETERMINISTIC_LOOP_STATE_SCHEMA: &str = "homeboy/deterministic-loop-state/v1";
+    pub const DETERMINISTIC_LOOP_EVENT_SCHEMA: &str = "homeboy/deterministic-loop-event/v1";
+    pub const DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA: &str =
+        "homeboy/deterministic-loop-artifact-declaration/v1";
+}
+pub use schema_ids::*;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -233,241 +236,250 @@ pub struct DeterministicLoopRunOptions {
     pub resume_from: Option<DeterministicLoopState>,
 }
 
-pub trait DeterministicLoopHooks {
-    type IterationPlan;
-    type IterationOutput;
+mod hooks {
+    use super::*;
 
-    fn materialize_iteration(
-        &mut self,
-        state: &DeterministicLoopState,
-    ) -> Result<Self::IterationPlan>;
+    pub trait DeterministicLoopHooks {
+        type IterationPlan;
+        type IterationOutput;
 
-    fn execute_iteration(
-        &mut self,
-        state: &DeterministicLoopState,
-        plan: Self::IterationPlan,
-    ) -> Result<Self::IterationOutput>;
+        fn materialize_iteration(
+            &mut self,
+            state: &DeterministicLoopState,
+        ) -> Result<Self::IterationPlan>;
 
-    fn reconcile_iteration(
-        &mut self,
-        state: &DeterministicLoopState,
-        output: Self::IterationOutput,
-    ) -> Result<DeterministicLoopReconcileResult>;
-}
+        fn execute_iteration(
+            &mut self,
+            state: &DeterministicLoopState,
+            plan: Self::IterationPlan,
+        ) -> Result<Self::IterationOutput>;
 
-pub type DeterministicLoopFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
-
-pub trait AsyncDeterministicLoopHooks {
-    type IterationPlan;
-    type IterationOutput;
-
-    fn materialize_iteration_async<'a>(
-        &'a mut self,
-        state: &'a DeterministicLoopState,
-    ) -> DeterministicLoopFuture<'a, Self::IterationPlan>;
-
-    fn execute_iteration_async<'a>(
-        &'a mut self,
-        state: &'a DeterministicLoopState,
-        plan: Self::IterationPlan,
-    ) -> DeterministicLoopFuture<'a, Self::IterationOutput>;
-
-    fn reconcile_iteration_async<'a>(
-        &'a mut self,
-        state: &'a DeterministicLoopState,
-        output: Self::IterationOutput,
-    ) -> DeterministicLoopFuture<'a, DeterministicLoopReconcileResult>;
-}
-
-pub trait DeterministicLoopEventSink {
-    fn record_checkpoint(&mut self, state: &DeterministicLoopState) -> Result<()>;
-    fn record_event(&mut self, event: &DeterministicLoopEvent) -> Result<()>;
-}
-
-pub trait DeterministicLoopCancellation {
-    fn is_canceled(&self, state: &DeterministicLoopState) -> Result<bool>;
-}
-
-#[derive(Debug, Default)]
-pub struct NoopDeterministicLoopEventSink;
-
-#[derive(Debug, Default)]
-pub struct NeverCancelDeterministicLoop;
-
-impl DeterministicLoopEventSink for NoopDeterministicLoopEventSink {
-    fn record_checkpoint(&mut self, _state: &DeterministicLoopState) -> Result<()> {
-        Ok(())
+        fn reconcile_iteration(
+            &mut self,
+            state: &DeterministicLoopState,
+            output: Self::IterationOutput,
+        ) -> Result<DeterministicLoopReconcileResult>;
     }
 
-    fn record_event(&mut self, _event: &DeterministicLoopEvent) -> Result<()> {
-        Ok(())
-    }
-}
+    pub type DeterministicLoopFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
 
-impl DeterministicLoopCancellation for NeverCancelDeterministicLoop {
-    fn is_canceled(&self, _state: &DeterministicLoopState) -> Result<bool> {
-        Ok(false)
-    }
-}
+    pub trait AsyncDeterministicLoopHooks {
+        type IterationPlan;
+        type IterationOutput;
 
-impl DeterministicLoopRunIdentity {
-    pub fn new(loop_id: impl Into<String>, run_id: impl Into<String>) -> Self {
-        Self {
-            schema: DETERMINISTIC_LOOP_RUN_IDENTITY_SCHEMA.to_string(),
-            loop_id: loop_id.into(),
-            run_id: run_id.into(),
-            task_id: None,
-            group_key: None,
-            attempt_id: None,
-            parent_run_id: None,
-            attempt: 0,
-            seed: None,
+        fn materialize_iteration_async<'a>(
+            &'a mut self,
+            state: &'a DeterministicLoopState,
+        ) -> DeterministicLoopFuture<'a, Self::IterationPlan>;
+
+        fn execute_iteration_async<'a>(
+            &'a mut self,
+            state: &'a DeterministicLoopState,
+            plan: Self::IterationPlan,
+        ) -> DeterministicLoopFuture<'a, Self::IterationOutput>;
+
+        fn reconcile_iteration_async<'a>(
+            &'a mut self,
+            state: &'a DeterministicLoopState,
+            output: Self::IterationOutput,
+        ) -> DeterministicLoopFuture<'a, DeterministicLoopReconcileResult>;
+    }
+
+    pub trait DeterministicLoopEventSink {
+        fn record_checkpoint(&mut self, state: &DeterministicLoopState) -> Result<()>;
+        fn record_event(&mut self, event: &DeterministicLoopEvent) -> Result<()>;
+    }
+
+    pub trait DeterministicLoopCancellation {
+        fn is_canceled(&self, state: &DeterministicLoopState) -> Result<bool>;
+    }
+
+    #[derive(Debug, Default)]
+    pub struct NoopDeterministicLoopEventSink;
+
+    #[derive(Debug, Default)]
+    pub struct NeverCancelDeterministicLoop;
+}
+pub use hooks::*;
+
+mod type_impls {
+    use super::*;
+
+    impl DeterministicLoopEventSink for NoopDeterministicLoopEventSink {
+        fn record_checkpoint(&mut self, _state: &DeterministicLoopState) -> Result<()> {
+            Ok(())
         }
-    }
-}
 
-impl DeterministicLoopPlan {
-    pub fn new(identity: DeterministicLoopRunIdentity) -> Self {
-        Self {
-            schema: DETERMINISTIC_LOOP_PLAN_SCHEMA.to_string(),
-            identity,
-            status: DeterministicLoopStatus::Planned,
-            fanouts: Vec::new(),
-            metadata: Value::Null,
-        }
-    }
-}
-
-impl DeterministicFanoutPlan {
-    pub fn new(fanout_id: impl Into<String>) -> Self {
-        Self {
-            schema: DETERMINISTIC_FANOUT_PLAN_SCHEMA.to_string(),
-            fanout_id: fanout_id.into(),
-            loop_id: None,
-            records: Vec::new(),
-            metadata: Value::Null,
-        }
-    }
-}
-
-impl DeterministicFanoutResultRecord {
-    pub fn new(
-        fanout_id: impl Into<String>,
-        record_id: impl Into<String>,
-        status: DeterministicLoopStatus,
-    ) -> Self {
-        Self {
-            schema: DETERMINISTIC_FANOUT_RESULT_SCHEMA.to_string(),
-            fanout_id: fanout_id.into(),
-            record_id: record_id.into(),
-            status,
-            evidence: Vec::new(),
-            output: Value::Null,
-            diagnostics: Value::Null,
-        }
-    }
-}
-
-impl DeterministicEvidenceSnapshot {
-    pub fn new(
-        snapshot_id: impl Into<String>,
-        identity: DeterministicLoopRunIdentity,
-        status: DeterministicLoopStatus,
-    ) -> Self {
-        Self {
-            schema: DETERMINISTIC_EVIDENCE_SNAPSHOT_SCHEMA.to_string(),
-            snapshot_id: snapshot_id.into(),
-            identity,
-            status,
-            fanout_results: Vec::new(),
-            evidence: Vec::new(),
-            metadata: Value::Null,
-        }
-    }
-}
-
-impl Default for DeterministicLoopSpec {
-    fn default() -> Self {
-        Self {
-            schema: DETERMINISTIC_LOOP_SPEC_SCHEMA.to_string(),
-            loop_id: String::new(),
-            max_iterations: default_max_iterations(),
-            stop: DeterministicLoopStopCriteria::default(),
-            retry: DeterministicLoopRetryPolicy::default(),
-            artifacts: Vec::new(),
-            validation: DeterministicLoopValidationPolicy::default(),
-            metadata: Value::Null,
-        }
-    }
-}
-
-impl Default for DeterministicLoopStopCriteria {
-    fn default() -> Self {
-        Self {
-            statuses: default_stop_statuses(),
-        }
-    }
-}
-
-impl Default for DeterministicLoopRetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: default_max_attempts(),
-            statuses: default_retry_statuses(),
-        }
-    }
-}
-
-impl DeterministicLoopArtifactDeclaration {
-    pub fn new(artifact_id: impl Into<String>) -> Self {
-        Self {
-            schema: DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA.to_string(),
-            artifact_id: artifact_id.into(),
-            kind: None,
-            required: false,
-            local_evidence_required: false,
-        }
-    }
-}
-
-impl DeterministicLoopState {
-    pub fn new(identity: DeterministicLoopRunIdentity) -> Self {
-        Self {
-            schema: DETERMINISTIC_LOOP_STATE_SCHEMA.to_string(),
-            identity,
-            status: DeterministicLoopStatus::Planned,
-            iteration: 0,
-            events: Vec::new(),
-            artifact_lineage: Vec::new(),
-            metadata: Value::Null,
+        fn record_event(&mut self, _event: &DeterministicLoopEvent) -> Result<()> {
+            Ok(())
         }
     }
 
-    pub fn push_event(
-        &mut self,
-        event_type: impl Into<String>,
-        status: DeterministicLoopStatus,
-        artifact_refs: Vec<DeterministicEvidenceRef>,
-        payload: Value,
-    ) {
-        self.events.push(DeterministicLoopEvent {
-            schema: DETERMINISTIC_LOOP_EVENT_SCHEMA.to_string(),
-            sequence: self.events.len() as u32 + 1,
-            iteration: self.iteration,
-            event_type: event_type.into(),
-            status,
-            artifact_refs,
-            payload,
-        });
+    impl DeterministicLoopCancellation for NeverCancelDeterministicLoop {
+        fn is_canceled(&self, _state: &DeterministicLoopState) -> Result<bool> {
+            Ok(false)
+        }
     }
-}
 
-impl DeterministicLoopReconcileResult {
-    pub fn new(status: DeterministicLoopStatus) -> Self {
-        Self {
-            status,
-            artifact_refs: Vec::new(),
-            metadata: Value::Null,
+    impl DeterministicLoopRunIdentity {
+        pub fn new(loop_id: impl Into<String>, run_id: impl Into<String>) -> Self {
+            Self {
+                schema: DETERMINISTIC_LOOP_RUN_IDENTITY_SCHEMA.to_string(),
+                loop_id: loop_id.into(),
+                run_id: run_id.into(),
+                task_id: None,
+                group_key: None,
+                attempt_id: None,
+                parent_run_id: None,
+                attempt: 0,
+                seed: None,
+            }
+        }
+    }
+
+    impl DeterministicLoopPlan {
+        pub fn new(identity: DeterministicLoopRunIdentity) -> Self {
+            Self {
+                schema: DETERMINISTIC_LOOP_PLAN_SCHEMA.to_string(),
+                identity,
+                status: DeterministicLoopStatus::Planned,
+                fanouts: Vec::new(),
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    impl DeterministicFanoutPlan {
+        pub fn new(fanout_id: impl Into<String>) -> Self {
+            Self {
+                schema: DETERMINISTIC_FANOUT_PLAN_SCHEMA.to_string(),
+                fanout_id: fanout_id.into(),
+                loop_id: None,
+                records: Vec::new(),
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    impl DeterministicFanoutResultRecord {
+        pub fn new(
+            fanout_id: impl Into<String>,
+            record_id: impl Into<String>,
+            status: DeterministicLoopStatus,
+        ) -> Self {
+            Self {
+                schema: DETERMINISTIC_FANOUT_RESULT_SCHEMA.to_string(),
+                fanout_id: fanout_id.into(),
+                record_id: record_id.into(),
+                status,
+                evidence: Vec::new(),
+                output: Value::Null,
+                diagnostics: Value::Null,
+            }
+        }
+    }
+
+    impl DeterministicEvidenceSnapshot {
+        pub fn new(
+            snapshot_id: impl Into<String>,
+            identity: DeterministicLoopRunIdentity,
+            status: DeterministicLoopStatus,
+        ) -> Self {
+            Self {
+                schema: DETERMINISTIC_EVIDENCE_SNAPSHOT_SCHEMA.to_string(),
+                snapshot_id: snapshot_id.into(),
+                identity,
+                status,
+                fanout_results: Vec::new(),
+                evidence: Vec::new(),
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    impl Default for DeterministicLoopSpec {
+        fn default() -> Self {
+            Self {
+                schema: DETERMINISTIC_LOOP_SPEC_SCHEMA.to_string(),
+                loop_id: String::new(),
+                max_iterations: default_max_iterations(),
+                stop: DeterministicLoopStopCriteria::default(),
+                retry: DeterministicLoopRetryPolicy::default(),
+                artifacts: Vec::new(),
+                validation: DeterministicLoopValidationPolicy::default(),
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    impl Default for DeterministicLoopStopCriteria {
+        fn default() -> Self {
+            Self {
+                statuses: default_stop_statuses(),
+            }
+        }
+    }
+
+    impl Default for DeterministicLoopRetryPolicy {
+        fn default() -> Self {
+            Self {
+                max_attempts: default_max_attempts(),
+                statuses: default_retry_statuses(),
+            }
+        }
+    }
+
+    impl DeterministicLoopArtifactDeclaration {
+        pub fn new(artifact_id: impl Into<String>) -> Self {
+            Self {
+                schema: DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA.to_string(),
+                artifact_id: artifact_id.into(),
+                kind: None,
+                required: false,
+                local_evidence_required: false,
+            }
+        }
+    }
+
+    impl DeterministicLoopState {
+        pub fn new(identity: DeterministicLoopRunIdentity) -> Self {
+            Self {
+                schema: DETERMINISTIC_LOOP_STATE_SCHEMA.to_string(),
+                identity,
+                status: DeterministicLoopStatus::Planned,
+                iteration: 0,
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                metadata: Value::Null,
+            }
+        }
+
+        pub fn push_event(
+            &mut self,
+            event_type: impl Into<String>,
+            status: DeterministicLoopStatus,
+            artifact_refs: Vec<DeterministicEvidenceRef>,
+            payload: Value,
+        ) {
+            self.events.push(DeterministicLoopEvent {
+                schema: DETERMINISTIC_LOOP_EVENT_SCHEMA.to_string(),
+                sequence: self.events.len() as u32 + 1,
+                iteration: self.iteration,
+                event_type: event_type.into(),
+                status,
+                artifact_refs,
+                payload,
+            });
+        }
+    }
+
+    impl DeterministicLoopReconcileResult {
+        pub fn new(status: DeterministicLoopStatus) -> Self {
+            Self {
+                status,
+                artifact_refs: Vec::new(),
+                metadata: Value::Null,
+            }
         }
     }
 }
@@ -492,367 +504,377 @@ where
     )
 }
 
-fn run_deterministic_loop_with_runtime<H, S, C>(
-    spec: DeterministicLoopSpec,
-    identity: DeterministicLoopRunIdentity,
-    hooks: &mut H,
-    options: DeterministicLoopRunOptions,
-    sink: &mut S,
-    cancellation: &C,
-) -> Result<DeterministicLoopState>
-where
-    H: DeterministicLoopHooks,
-    S: DeterministicLoopEventSink,
-    C: DeterministicLoopCancellation,
-{
-    validate_loop_spec(&spec)?;
-    if identity.loop_id != spec.loop_id {
-        return Err(Error::validation_invalid_argument(
-            "identity.loop_id",
-            "deterministic loop identity must match spec loop_id",
-            Some(identity.loop_id),
-            Some(vec![spec.loop_id]),
-        ));
-    }
+mod execution {
+    use super::*;
 
-    let mut state = options
-        .resume_from
-        .unwrap_or_else(|| DeterministicLoopState::new(identity.clone()));
-    if state.identity != identity {
-        return Err(Error::validation_invalid_argument(
-            "resume_from.identity",
-            "resume state identity must match requested loop identity",
-            Some(state.identity.run_id.clone()),
-            Some(vec![identity.run_id]),
-        ));
-    }
-    if state.iteration > spec.max_iterations {
-        return Err(Error::validation_invalid_argument(
-            "resume_from.iteration",
-            "resume state iteration cannot exceed spec max_iterations",
-            Some(state.iteration.to_string()),
-            Some(vec![spec.max_iterations.to_string()]),
-        ));
-    }
-    if state.events.is_empty() {
-        state.metadata = spec.metadata.clone();
-        state.status = DeterministicLoopStatus::Running;
-        push_event_and_checkpoint(
-            &mut state,
-            sink,
-            "loop.started",
-            DeterministicLoopStatus::Running,
-            Vec::new(),
-            serde_json::json!({ "max_iterations": spec.max_iterations }),
-        )?;
-    } else {
-        state.status = DeterministicLoopStatus::Running;
-        push_event_and_checkpoint(
-            &mut state,
-            sink,
-            "loop.resumed",
-            DeterministicLoopStatus::Running,
-            Vec::new(),
-            serde_json::json!({ "max_iterations": spec.max_iterations }),
-        )?;
-    }
+    pub(super) fn run_deterministic_loop_with_runtime<H, S, C>(
+        spec: DeterministicLoopSpec,
+        identity: DeterministicLoopRunIdentity,
+        hooks: &mut H,
+        options: DeterministicLoopRunOptions,
+        sink: &mut S,
+        cancellation: &C,
+    ) -> Result<DeterministicLoopState>
+    where
+        H: DeterministicLoopHooks,
+        S: DeterministicLoopEventSink,
+        C: DeterministicLoopCancellation,
+    {
+        validate_loop_spec(&spec)?;
+        if identity.loop_id != spec.loop_id {
+            return Err(Error::validation_invalid_argument(
+                "identity.loop_id",
+                "deterministic loop identity must match spec loop_id",
+                Some(identity.loop_id),
+                Some(vec![spec.loop_id]),
+            ));
+        }
 
-    while state.iteration < spec.max_iterations {
-        if cancellation.is_canceled(&state)? {
-            state.status = DeterministicLoopStatus::Canceled;
+        let mut state = options
+            .resume_from
+            .unwrap_or_else(|| DeterministicLoopState::new(identity.clone()));
+        if state.identity != identity {
+            return Err(Error::validation_invalid_argument(
+                "resume_from.identity",
+                "resume state identity must match requested loop identity",
+                Some(state.identity.run_id.clone()),
+                Some(vec![identity.run_id]),
+            ));
+        }
+        if state.iteration > spec.max_iterations {
+            return Err(Error::validation_invalid_argument(
+                "resume_from.iteration",
+                "resume state iteration cannot exceed spec max_iterations",
+                Some(state.iteration.to_string()),
+                Some(vec![spec.max_iterations.to_string()]),
+            ));
+        }
+        if state.events.is_empty() {
+            state.metadata = spec.metadata.clone();
+            state.status = DeterministicLoopStatus::Running;
             push_event_and_checkpoint(
                 &mut state,
                 sink,
-                "loop.canceled",
-                DeterministicLoopStatus::Canceled,
+                "loop.started",
+                DeterministicLoopStatus::Running,
                 Vec::new(),
+                serde_json::json!({ "max_iterations": spec.max_iterations }),
+            )?;
+        } else {
+            state.status = DeterministicLoopStatus::Running;
+            push_event_and_checkpoint(
+                &mut state,
+                sink,
+                "loop.resumed",
+                DeterministicLoopStatus::Running,
+                Vec::new(),
+                serde_json::json!({ "max_iterations": spec.max_iterations }),
+            )?;
+        }
+
+        while state.iteration < spec.max_iterations {
+            if cancellation.is_canceled(&state)? {
+                state.status = DeterministicLoopStatus::Canceled;
+                push_event_and_checkpoint(
+                    &mut state,
+                    sink,
+                    "loop.canceled",
+                    DeterministicLoopStatus::Canceled,
+                    Vec::new(),
+                    Value::Null,
+                )?;
+                break;
+            }
+            state.iteration += 1;
+            let mut attempts = 0;
+            let reconciliation = loop {
+                attempts += 1;
+                let plan = hooks.materialize_iteration(&state)?;
+                push_event_and_checkpoint(
+                    &mut state,
+                    sink,
+                    "iteration.materialized",
+                    DeterministicLoopStatus::Running,
+                    Vec::new(),
+                    serde_json::json!({ "attempt": attempts }),
+                )?;
+                let output = hooks.execute_iteration(&state, plan)?;
+                push_event_and_checkpoint(
+                    &mut state,
+                    sink,
+                    "iteration.executed",
+                    DeterministicLoopStatus::Running,
+                    Vec::new(),
+                    serde_json::json!({ "attempt": attempts }),
+                )?;
+                let reconciliation = hooks.reconcile_iteration(&state, output)?;
+                if attempts >= spec.retry.max_attempts
+                    || !spec.retry.statuses.contains(&reconciliation.status)
+                {
+                    break reconciliation;
+                }
+                push_event_and_checkpoint(
+                    &mut state,
+                    sink,
+                    "iteration.retry_scheduled",
+                    reconciliation.status,
+                    reconciliation.artifact_refs.clone(),
+                    serde_json::json!({
+                        "attempt": attempts,
+                        "max_attempts": spec.retry.max_attempts,
+                    }),
+                )?;
+            };
+            state.status = reconciliation.status;
+            state
+                .artifact_lineage
+                .extend(reconciliation.artifact_refs.clone());
+            if !reconciliation.metadata.is_null() {
+                state.metadata = merge_metadata(state.metadata, reconciliation.metadata);
+            }
+            let reconciled_status = state.status;
+            push_event_and_checkpoint(
+                &mut state,
+                sink,
+                "iteration.reconciled",
+                reconciled_status,
+                reconciliation.artifact_refs,
                 Value::Null,
             )?;
-            break;
-        }
-        state.iteration += 1;
-        let mut attempts = 0;
-        let reconciliation = loop {
-            attempts += 1;
-            let plan = hooks.materialize_iteration(&state)?;
-            push_event_and_checkpoint(
-                &mut state,
-                sink,
-                "iteration.materialized",
-                DeterministicLoopStatus::Running,
-                Vec::new(),
-                serde_json::json!({ "attempt": attempts }),
-            )?;
-            let output = hooks.execute_iteration(&state, plan)?;
-            push_event_and_checkpoint(
-                &mut state,
-                sink,
-                "iteration.executed",
-                DeterministicLoopStatus::Running,
-                Vec::new(),
-                serde_json::json!({ "attempt": attempts }),
-            )?;
-            let reconciliation = hooks.reconcile_iteration(&state, output)?;
-            if attempts >= spec.retry.max_attempts
-                || !spec.retry.statuses.contains(&reconciliation.status)
-            {
-                break reconciliation;
+            if spec.stop.statuses.contains(&state.status) {
+                break;
             }
+        }
+
+        if state.iteration >= spec.max_iterations && !spec.stop.statuses.contains(&state.status) {
+            state.status = DeterministicLoopStatus::Blocked;
+            let blocked_status = state.status;
             push_event_and_checkpoint(
                 &mut state,
                 sink,
-                "iteration.retry_scheduled",
-                reconciliation.status,
-                reconciliation.artifact_refs.clone(),
-                serde_json::json!({
-                    "attempt": attempts,
-                    "max_attempts": spec.retry.max_attempts,
-                }),
+                "loop.max_iterations_reached",
+                blocked_status,
+                Vec::new(),
+                serde_json::json!({ "max_iterations": spec.max_iterations }),
             )?;
-        };
-        state.status = reconciliation.status;
-        state
-            .artifact_lineage
-            .extend(reconciliation.artifact_refs.clone());
-        if !reconciliation.metadata.is_null() {
-            state.metadata = merge_metadata(state.metadata, reconciliation.metadata);
         }
-        let reconciled_status = state.status;
+        validate_deterministic_loop_result(&state, &spec)?;
+        let finished_status = state.status;
         push_event_and_checkpoint(
             &mut state,
             sink,
-            "iteration.reconciled",
-            reconciled_status,
-            reconciliation.artifact_refs,
+            "loop.finished",
+            finished_status,
+            Vec::new(),
             Value::Null,
         )?;
-        if spec.stop.statuses.contains(&state.status) {
-            break;
+        Ok(state)
+    }
+
+    fn validate_deterministic_loop_result(
+        state: &DeterministicLoopState,
+        spec: &DeterministicLoopSpec,
+    ) -> Result<()> {
+        for artifact in spec.artifacts.iter().filter(|artifact| artifact.required) {
+            let matched = state.artifact_lineage.iter().any(|reference| {
+                reference.label.as_deref() == Some(artifact.artifact_id.as_str())
+                    || reference.uri == artifact.artifact_id
+                    || artifact
+                        .kind
+                        .as_ref()
+                        .is_some_and(|kind| reference.kind.as_deref() == Some(kind.as_str()))
+            });
+            if spec.validation.require_declared_artifacts && !matched {
+                return Err(Error::validation_invalid_argument(
+                    "artifacts",
+                    format!(
+                        "required artifact '{}' was not produced",
+                        artifact.artifact_id
+                    ),
+                    Some(state.identity.run_id.clone()),
+                    None,
+                ));
+            }
         }
-    }
 
-    if state.iteration >= spec.max_iterations && !spec.stop.statuses.contains(&state.status) {
-        state.status = DeterministicLoopStatus::Blocked;
-        let blocked_status = state.status;
-        push_event_and_checkpoint(
-            &mut state,
-            sink,
-            "loop.max_iterations_reached",
-            blocked_status,
-            Vec::new(),
-            serde_json::json!({ "max_iterations": spec.max_iterations }),
-        )?;
-    }
-    validate_deterministic_loop_result(&state, &spec)?;
-    let finished_status = state.status;
-    push_event_and_checkpoint(
-        &mut state,
-        sink,
-        "loop.finished",
-        finished_status,
-        Vec::new(),
-        Value::Null,
-    )?;
-    Ok(state)
-}
-
-fn validate_deterministic_loop_result(
-    state: &DeterministicLoopState,
-    spec: &DeterministicLoopSpec,
-) -> Result<()> {
-    for artifact in spec.artifacts.iter().filter(|artifact| artifact.required) {
-        let matched = state.artifact_lineage.iter().any(|reference| {
-            reference.label.as_deref() == Some(artifact.artifact_id.as_str())
-                || reference.uri == artifact.artifact_id
-                || artifact
-                    .kind
-                    .as_ref()
-                    .is_some_and(|kind| reference.kind.as_deref() == Some(kind.as_str()))
-        });
-        if spec.validation.require_declared_artifacts && !matched {
-            return Err(Error::validation_invalid_argument(
-                "artifacts",
-                format!(
-                    "required artifact '{}' was not produced",
-                    artifact.artifact_id
-                ),
-                Some(state.identity.run_id.clone()),
-                None,
-            ));
+        if spec.validation.require_local_evidence
+            || spec
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.local_evidence_required)
+        {
+            let has_local_evidence = state.artifact_lineage.iter().any(|reference| {
+                reference.uri.starts_with("file://")
+                    || reference.uri.starts_with("./")
+                    || reference.uri.starts_with('/')
+            });
+            if !has_local_evidence {
+                return Err(Error::validation_invalid_argument(
+                    "artifact_lineage",
+                    "loop result requires at least one local evidence reference",
+                    Some(state.identity.run_id.clone()),
+                    None,
+                ));
+            }
         }
+
+        Ok(())
     }
 
-    if spec.validation.require_local_evidence
-        || spec
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.local_evidence_required)
+    fn push_event_and_checkpoint<S>(
+        state: &mut DeterministicLoopState,
+        sink: &mut S,
+        event_type: impl Into<String>,
+        status: DeterministicLoopStatus,
+        artifact_refs: Vec<DeterministicEvidenceRef>,
+        payload: Value,
+    ) -> Result<()>
+    where
+        S: DeterministicLoopEventSink,
     {
-        let has_local_evidence = state.artifact_lineage.iter().any(|reference| {
-            reference.uri.starts_with("file://")
-                || reference.uri.starts_with("./")
-                || reference.uri.starts_with('/')
-        });
-        if !has_local_evidence {
+        state.push_event(event_type, status, artifact_refs, payload);
+        let event = state
+            .events
+            .last()
+            .expect("push_event always appends one event")
+            .clone();
+        sink.record_event(&event)?;
+        sink.record_checkpoint(state)
+    }
+
+    fn validate_loop_spec(spec: &DeterministicLoopSpec) -> Result<()> {
+        if spec.schema != DETERMINISTIC_LOOP_SPEC_SCHEMA {
             return Err(Error::validation_invalid_argument(
-                "artifact_lineage",
-                "loop result requires at least one local evidence reference",
-                Some(state.identity.run_id.clone()),
-                None,
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn push_event_and_checkpoint<S>(
-    state: &mut DeterministicLoopState,
-    sink: &mut S,
-    event_type: impl Into<String>,
-    status: DeterministicLoopStatus,
-    artifact_refs: Vec<DeterministicEvidenceRef>,
-    payload: Value,
-) -> Result<()>
-where
-    S: DeterministicLoopEventSink,
-{
-    state.push_event(event_type, status, artifact_refs, payload);
-    let event = state
-        .events
-        .last()
-        .expect("push_event always appends one event")
-        .clone();
-    sink.record_event(&event)?;
-    sink.record_checkpoint(state)
-}
-
-fn validate_loop_spec(spec: &DeterministicLoopSpec) -> Result<()> {
-    if spec.schema != DETERMINISTIC_LOOP_SPEC_SCHEMA {
-        return Err(Error::validation_invalid_argument(
-            "schema",
-            format!(
-                "expected {DETERMINISTIC_LOOP_SPEC_SCHEMA}, got {}",
-                spec.schema
-            ),
-            Some(spec.loop_id.clone()),
-            None,
-        ));
-    }
-    if spec.loop_id.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "loop_id",
-            "deterministic loop spec requires a non-empty loop_id",
-            None,
-            None,
-        ));
-    }
-    if spec.max_iterations == 0 {
-        return Err(Error::validation_invalid_argument(
-            "max_iterations",
-            "deterministic loop spec requires max_iterations greater than zero",
-            Some(spec.loop_id.clone()),
-            None,
-        ));
-    }
-    if spec.retry.max_attempts == 0 {
-        return Err(Error::validation_invalid_argument(
-            "retry.max_attempts",
-            "deterministic loop retry policy requires max_attempts greater than zero",
-            Some(spec.loop_id.clone()),
-            None,
-        ));
-    }
-    for artifact in &spec.artifacts {
-        if artifact.schema != DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA {
-            return Err(Error::validation_invalid_argument(
-                "artifacts.schema",
+                "schema",
                 format!(
-                    "expected {DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA}, got {}",
-                    artifact.schema
+                    "expected {DETERMINISTIC_LOOP_SPEC_SCHEMA}, got {}",
+                    spec.schema
                 ),
                 Some(spec.loop_id.clone()),
                 None,
             ));
         }
-        if artifact.artifact_id.trim().is_empty() {
+        if spec.loop_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
-                "artifacts.artifact_id",
-                "deterministic loop artifact declarations require a non-empty artifact_id",
+                "loop_id",
+                "deterministic loop spec requires a non-empty loop_id",
+                None,
+                None,
+            ));
+        }
+        if spec.max_iterations == 0 {
+            return Err(Error::validation_invalid_argument(
+                "max_iterations",
+                "deterministic loop spec requires max_iterations greater than zero",
                 Some(spec.loop_id.clone()),
                 None,
             ));
         }
-    }
-    Ok(())
-}
-
-fn merge_metadata(current: Value, next: Value) -> Value {
-    match (current, next) {
-        (Value::Object(mut current), Value::Object(next)) => {
-            current.extend(next);
-            Value::Object(current)
+        if spec.retry.max_attempts == 0 {
+            return Err(Error::validation_invalid_argument(
+                "retry.max_attempts",
+                "deterministic loop retry policy requires max_attempts greater than zero",
+                Some(spec.loop_id.clone()),
+                None,
+            ));
         }
-        (_, next) => next,
+        for artifact in &spec.artifacts {
+            if artifact.schema != DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA {
+                return Err(Error::validation_invalid_argument(
+                    "artifacts.schema",
+                    format!(
+                        "expected {DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA}, got {}",
+                        artifact.schema
+                    ),
+                    Some(spec.loop_id.clone()),
+                    None,
+                ));
+            }
+            if artifact.artifact_id.trim().is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    "artifacts.artifact_id",
+                    "deterministic loop artifact declarations require a non-empty artifact_id",
+                    Some(spec.loop_id.clone()),
+                    None,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn merge_metadata(current: Value, next: Value) -> Value {
+        match (current, next) {
+            (Value::Object(mut current), Value::Object(next)) => {
+                current.extend(next);
+                Value::Object(current)
+            }
+            (_, next) => next,
+        }
     }
 }
+use execution::run_deterministic_loop_with_runtime;
 
-fn loop_plan_schema() -> String {
-    DETERMINISTIC_LOOP_PLAN_SCHEMA.to_string()
-}
+mod schema_and_defaults {
+    use super::*;
 
-fn run_identity_schema() -> String {
-    DETERMINISTIC_LOOP_RUN_IDENTITY_SCHEMA.to_string()
-}
+    pub(super) fn loop_plan_schema() -> String {
+        DETERMINISTIC_LOOP_PLAN_SCHEMA.to_string()
+    }
 
-fn fanout_plan_schema() -> String {
-    DETERMINISTIC_FANOUT_PLAN_SCHEMA.to_string()
-}
+    pub(super) fn run_identity_schema() -> String {
+        DETERMINISTIC_LOOP_RUN_IDENTITY_SCHEMA.to_string()
+    }
 
-fn fanout_result_schema() -> String {
-    DETERMINISTIC_FANOUT_RESULT_SCHEMA.to_string()
-}
+    pub(super) fn fanout_plan_schema() -> String {
+        DETERMINISTIC_FANOUT_PLAN_SCHEMA.to_string()
+    }
 
-fn evidence_snapshot_schema() -> String {
-    DETERMINISTIC_EVIDENCE_SNAPSHOT_SCHEMA.to_string()
-}
+    pub(super) fn fanout_result_schema() -> String {
+        DETERMINISTIC_FANOUT_RESULT_SCHEMA.to_string()
+    }
 
-fn loop_spec_schema() -> String {
-    DETERMINISTIC_LOOP_SPEC_SCHEMA.to_string()
-}
+    pub(super) fn evidence_snapshot_schema() -> String {
+        DETERMINISTIC_EVIDENCE_SNAPSHOT_SCHEMA.to_string()
+    }
 
-fn loop_state_schema() -> String {
-    DETERMINISTIC_LOOP_STATE_SCHEMA.to_string()
-}
+    pub(super) fn loop_spec_schema() -> String {
+        DETERMINISTIC_LOOP_SPEC_SCHEMA.to_string()
+    }
 
-fn loop_event_schema() -> String {
-    DETERMINISTIC_LOOP_EVENT_SCHEMA.to_string()
-}
+    pub(super) fn loop_state_schema() -> String {
+        DETERMINISTIC_LOOP_STATE_SCHEMA.to_string()
+    }
 
-fn artifact_declaration_schema() -> String {
-    DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA.to_string()
-}
+    pub(super) fn loop_event_schema() -> String {
+        DETERMINISTIC_LOOP_EVENT_SCHEMA.to_string()
+    }
 
-fn default_max_iterations() -> u32 {
-    1
-}
+    pub(super) fn artifact_declaration_schema() -> String {
+        DETERMINISTIC_LOOP_ARTIFACT_DECLARATION_SCHEMA.to_string()
+    }
 
-fn default_max_attempts() -> u32 {
-    1
-}
+    pub(super) fn default_max_iterations() -> u32 {
+        1
+    }
 
-fn default_stop_statuses() -> Vec<DeterministicLoopStatus> {
-    vec![
-        DeterministicLoopStatus::Succeeded,
-        DeterministicLoopStatus::Failed,
-        DeterministicLoopStatus::Canceled,
-        DeterministicLoopStatus::Blocked,
-    ]
-}
+    pub(super) fn default_max_attempts() -> u32 {
+        1
+    }
 
-fn default_retry_statuses() -> Vec<DeterministicLoopStatus> {
-    vec![DeterministicLoopStatus::Failed]
+    pub(super) fn default_stop_statuses() -> Vec<DeterministicLoopStatus> {
+        vec![
+            DeterministicLoopStatus::Succeeded,
+            DeterministicLoopStatus::Failed,
+            DeterministicLoopStatus::Canceled,
+            DeterministicLoopStatus::Blocked,
+        ]
+    }
+
+    pub(super) fn default_retry_statuses() -> Vec<DeterministicLoopStatus> {
+        vec![DeterministicLoopStatus::Failed]
+    }
 }
+use schema_and_defaults::*;
 
 #[cfg(test)]
 mod tests {

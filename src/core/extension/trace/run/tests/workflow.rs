@@ -94,6 +94,7 @@ fn trace_failure_records_child_cleanup_context() {
         success: false,
         stdout: String::new(),
         stderr: "Homeboy interrupted by signal 15".to_string(),
+        timed_out: false,
         child_resource: Some(
             crate::core::engine::resource::ExtensionChildResourceSummary {
                 child: crate::core::engine::resource::ChildProcessIdentity {

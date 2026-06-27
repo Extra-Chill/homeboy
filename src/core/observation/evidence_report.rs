@@ -26,7 +26,7 @@ use crate::core::artifact_address::{ArtifactAddress, ArtifactAddressKind};
 use crate::core::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 use crate::core::artifact_ref::{ArtifactRef, EvidenceRef};
 use crate::core::artifacts::{generic_matrix_summary_from_artifacts, GenericMatrixSummary};
-use crate::core::evidence_manifest::{EvidenceManifest, EVIDENCE_MANIFEST_SCHEMA};
+use crate::core::evidence_manifest::{EvidenceManifest, TrackerRef, EVIDENCE_MANIFEST_SCHEMA};
 use crate::core::observation::disk_budget::DiskBudget;
 
 /// Default retention window (days) surfaced in evidence retention guidance.
@@ -44,12 +44,16 @@ pub struct RunEvidenceReport<S: Serialize> {
     pub run: S,
     pub homeboy_version: Option<String>,
     pub metadata: EvidenceMetadata,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracker_refs: Vec<TrackerRef>,
     pub heartbeat: EvidenceHeartbeat,
     pub artifact_index: EvidenceArtifactIndex,
     pub retention: EvidenceRetention,
     pub failure: EvidenceFailureSummary,
     pub disk_budget: DiskBudget,
     pub evidence_links: Vec<EvidenceLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_task_lifecycle_event: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matrix_summary: Option<GenericMatrixSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,6 +165,57 @@ pub fn evidence_metadata(metadata: &Value) -> EvidenceMetadata {
         ),
         runtime: pick_metadata(metadata, &["runtime", "runner", "ci_context", "rig_state"]),
     }
+}
+
+pub fn evidence_agent_task_lifecycle_event(metadata: &Value) -> Option<Value> {
+    agent_task_lifecycle_event_value(metadata).cloned()
+}
+
+pub fn evidence_tracker_refs(
+    metadata: &Value,
+    manifest: Option<&EvidenceManifest>,
+) -> Vec<TrackerRef> {
+    let mut refs = metadata_tracker_refs(metadata);
+    if let Some(manifest) = manifest {
+        refs.extend(manifest.tracker_refs.clone());
+    }
+    refs
+}
+
+fn metadata_tracker_refs(metadata: &Value) -> Vec<TrackerRef> {
+    metadata
+        .get("tracker_refs")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<TrackerRef>>(value).ok())
+        .unwrap_or_default()
+}
+
+fn agent_task_lifecycle_event_value(value: &Value) -> Option<&Value> {
+    if value.get("schema").and_then(Value::as_str)
+        == Some("homeboy/agent-task-run-plan-lifecycle-event/v1")
+    {
+        return Some(value);
+    }
+    if let Some(event) = value
+        .get("agent_task_lifecycle_event")
+        .and_then(agent_task_lifecycle_event_value)
+    {
+        return Some(event);
+    }
+    if let Some(event) = value.get("data").and_then(agent_task_lifecycle_event_value) {
+        return Some(event);
+    }
+    value
+        .get("lab")
+        .and_then(|lab| lab.get("remote_events"))
+        .and_then(Value::as_array)
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .filter_map(|event| event.get("data"))
+                .find_map(agent_task_lifecycle_event_value)
+        })
 }
 
 fn pick_metadata(metadata: &Value, keys: &[&str]) -> Value {

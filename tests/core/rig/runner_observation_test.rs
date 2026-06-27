@@ -197,12 +197,15 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
             "component".to_string(),
             ComponentSpec {
                 path: repo.to_string_lossy().to_string(),
+                component_id: None,
+                path_setting: None,
                 checkout_root: None,
                 remote_url: None,
                 triage_remote_url: None,
                 stack: None,
                 branch: None,
                 r#ref: None,
+                default_ref: None,
                 extensions: None,
             },
         );
@@ -309,6 +312,8 @@ fn write_rig_source_metadata(rig_id: &str) {
             linked: false,
             materialized: false,
             source_revision: Some("abc123".to_string()),
+            source_ref: Some("main".to_string()),
+            source_dirty: false,
         })
         .expect("serialize source metadata"),
     )

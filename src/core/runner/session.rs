@@ -4,86 +4,151 @@ use crate::core::redaction::redact_argv_display;
 
 use crate::core::api_jobs::{ActiveRunnerJobSummary, Job, JobArtifactMetadata, JobStatus};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerLifecycleOwner {
-    Controller,
-    Runner,
-    Broker,
-    Local,
-}
+mod session_enums {
+    use super::*;
 
-impl RunnerLifecycleOwner {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Controller => "controller",
-            Self::Runner => "runner",
-            Self::Broker => "broker",
-            Self::Local => "local",
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerLifecycleOwner {
+        Controller,
+        Runner,
+        Broker,
+        Local,
+    }
+
+    impl RunnerLifecycleOwner {
+        pub fn as_str(&self) -> &'static str {
+            match self {
+                Self::Controller => "controller",
+                Self::Runner => "runner",
+                Self::Broker => "broker",
+                Self::Local => "local",
+            }
         }
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerTunnelMode {
-    DirectSsh,
-    Reverse,
-}
-
-impl RunnerTunnelMode {
-    pub fn label(&self) -> &'static str {
-        self.labels().0
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerTunnelMode {
+        DirectSsh,
+        Reverse,
     }
 
-    pub fn metadata_value(&self) -> &'static str {
-        self.labels().1
-    }
+    impl RunnerTunnelMode {
+        pub fn label(&self) -> &'static str {
+            self.labels().0
+        }
 
-    fn labels(&self) -> (&'static str, &'static str) {
-        match self {
-            RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
-            RunnerTunnelMode::Reverse => ("reverse-connected", "reverse"),
+        pub fn metadata_value(&self) -> &'static str {
+            self.labels().1
+        }
+
+        fn labels(&self) -> (&'static str, &'static str) {
+            match self {
+                RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
+                RunnerTunnelMode::Reverse => ("reverse-connected", "reverse"),
+            }
         }
     }
-}
 
-fn default_tunnel_mode() -> RunnerTunnelMode {
-    RunnerTunnelMode::DirectSsh
+    pub(super) fn default_tunnel_mode() -> RunnerTunnelMode {
+        RunnerTunnelMode::DirectSsh
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerSessionRole {
+        Controller,
+        Runner,
+    }
+
+    pub(super) fn default_session_role() -> RunnerSessionRole {
+        RunnerSessionRole::Controller
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerSessionState {
+        Connected,
+        Disconnected,
+        Recorded,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerActiveJobState {
+        Available,
+        Unavailable,
+        NotQueried,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerActiveJobSource {
+        DirectDaemon,
+        ReverseBroker,
+    }
 }
+pub use session_enums::*;
+use session_enums::{default_session_role, default_tunnel_mode};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerSessionRole {
-    Controller,
-    Runner,
+pub struct RunnerAvailability {
+    pub runner_id: String,
+    pub connected: bool,
+    pub accepts_jobs: bool,
+    pub active_job_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
 }
 
-fn default_session_role() -> RunnerSessionRole {
-    RunnerSessionRole::Controller
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerSessionState {
-    Connected,
-    Disconnected,
-    Recorded,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerActiveJobState {
-    Available,
-    Unavailable,
-    NotQueried,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerActiveJobSource {
-    DirectDaemon,
-    ReverseBroker,
+impl RunnerAvailability {
+    pub fn from_status_parts(
+        runner_id: impl Into<String>,
+        connected: bool,
+        stale_daemon: bool,
+        active_job_count: usize,
+        active_job_state: &RunnerActiveJobState,
+        capacity: Option<usize>,
+    ) -> Self {
+        let mut reasons = Vec::new();
+        if !connected {
+            reasons.push("not_connected".to_string());
+        }
+        if stale_daemon {
+            reasons.push("stale_daemon".to_string());
+        }
+        if *active_job_state != RunnerActiveJobState::Available {
+            reasons.push(
+                match active_job_state {
+                    RunnerActiveJobState::Unavailable => "active_jobs_unavailable",
+                    RunnerActiveJobState::NotQueried => "active_jobs_not_queried",
+                    RunnerActiveJobState::Available => unreachable!(),
+                }
+                .to_string(),
+            );
+        }
+        match capacity {
+            Some(capacity) if active_job_count >= capacity => {
+                reasons.push("capacity_reached".to_string());
+            }
+            None if active_job_count > 0 => {
+                reasons.push("capacity_unknown".to_string());
+            }
+            _ => {}
+        }
+        let accepts_jobs = reasons.is_empty();
+        Self {
+            runner_id: runner_id.into(),
+            connected,
+            accepts_jobs,
+            active_job_count,
+            capacity,
+            reasons,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,6 +244,8 @@ pub struct RunnerJob {
     pub source: String,
     pub lifecycle_owner: RunnerLifecycleOwner,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<crate::core::api_jobs::RunnerJobLifecycleMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at_ms: Option<u64>,
@@ -230,6 +297,7 @@ impl From<&ActiveRunnerJobSummary> for RunnerJob {
                     RunnerLifecycleOwner::Controller
                 }
             },
+            lifecycle: job.lifecycle.clone(),
             started_at_ms: Some(job.started_at_ms),
             updated_at_ms: Some(job.updated_at_ms),
             elapsed_ms: Some(job.elapsed_ms),
@@ -269,6 +337,7 @@ impl RunnerJob {
             } else {
                 RunnerLifecycleOwner::Controller
             },
+            lifecycle: None,
             started_at_ms: job.started_at_ms,
             updated_at_ms: Some(job.updated_at_ms),
             elapsed_ms: None,
@@ -443,8 +512,29 @@ pub struct RunnerStaleDaemonWarning {
     pub session_homeboy_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_homeboy_build_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_runtime_paths: Vec<RunnerStaleRuntimePath>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_runtime_paths: Vec<RunnerChangedRuntimePath>,
     pub message: String,
     pub recovery_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerStaleRuntimePath {
+    pub env: String,
+    pub path: String,
+    pub loaded_fingerprint: String,
+    pub current_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerChangedRuntimePath {
+    pub env: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_path: Option<String>,
 }
 
 impl RunnerStaleDaemonWarning {
@@ -461,11 +551,32 @@ impl RunnerStaleDaemonWarning {
             session_homeboy_build_identity,
             current_homeboy_build_identity,
             message: "connected runner daemon was started by a different Homeboy build than the configured runner executable; run recovery_commands in order to restart the active daemon".to_string(),
+            stale_runtime_paths: Vec::new(),
+            changed_runtime_paths: Vec::new(),
             recovery_commands: vec![
+                format!("homeboy runner refresh-homeboy {} --ref main --reconnect", runner_id),
                 format!("homeboy runner disconnect {}", runner_id),
                 format!("homeboy runner connect {}", runner_id),
             ],
         }
+    }
+
+    pub fn with_runtime_paths(
+        mut self,
+        runner_id: &str,
+        stale_runtime_paths: Vec<RunnerStaleRuntimePath>,
+        changed_runtime_paths: Vec<RunnerChangedRuntimePath>,
+    ) -> Self {
+        self.stale_runtime_paths = stale_runtime_paths;
+        self.changed_runtime_paths = changed_runtime_paths;
+        if !self.stale_runtime_paths.is_empty() || !self.changed_runtime_paths.is_empty() {
+            self.message = "connected runner daemon runtime paths are stale; run recovery_commands in order to restart the active daemon after runner-side rebuilds or path changes".to_string();
+            self.recovery_commands = vec![
+                format!("homeboy runner disconnect {}", runner_id),
+                format!("homeboy runner connect {}", runner_id),
+            ];
+        }
+        self
     }
 }
 

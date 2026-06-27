@@ -3,7 +3,9 @@
 pub(super) use super::super::super::lab_capabilities::lab_runner_capability_contract;
 pub(super) use super::super::super::lab_env::build_lab_offload_env;
 pub(super) use super::super::super::lab_plan::base_lab_plan;
-pub(super) use super::super::super::lab_selection::resolve_lab_runner_selection_from_default;
+pub(super) use super::super::super::lab_selection::{
+    lab_runner_availability_error, resolve_lab_runner_selection_from_default,
+};
 pub(super) use super::super::super::lab_workspaces::{
     workspace_mapping_entry, LAB_WORKSPACE_MAPPING_SCHEMA,
 };
@@ -12,9 +14,9 @@ pub(super) use crate::core::engine::command::{CaptureMetadata, CommandCaptureMet
 pub(super) use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
 pub(super) use crate::core::plan::PlanKind;
 pub(super) use crate::core::runner::{
-    RunnerActiveJobSource, RunnerActiveJobState, RunnerExecMode, RunnerExecOutput,
-    RunnerRequiredTool, RunnerSession, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerTunnelMode, RunnerWorkspaceSyncOutput,
+    RunnerActiveJobSource, RunnerActiveJobState, RunnerAvailability, RunnerExecMode,
+    RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
+    RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
 };
 
 mod capability_metadata;
@@ -130,6 +132,8 @@ pub(super) fn truncated_runner_exec_output() -> RunnerExecOutput {
         patch: None,
         mutation_artifacts: None,
         artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
         metrics: None,
         capture: Some(crate::core::engine::command::CommandCaptureMetadata {
             stdout: crate::core::engine::command::CaptureMetadata {

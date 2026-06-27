@@ -168,21 +168,11 @@ impl TracePublicPreviewSession {
             ));
         }
 
-        let required_assets = match preflight_required_assets(spec, &public_origin) {
-            Ok(checks) => checks,
-            Err(error) => {
-                stop_child(&mut child);
-                return Err(error);
-            }
-        };
+        let required_assets =
+            stop_child_on_err(preflight_required_assets(spec, &public_origin), &mut child)?;
 
-        let asset_fanout = match validate_asset_fanout(spec, &public_origin) {
-            Ok(report) => report,
-            Err(error) => {
-                stop_child(&mut child);
-                return Err(error);
-            }
-        };
+        let asset_fanout =
+            stop_child_on_err(validate_asset_fanout(spec, &public_origin), &mut child)?;
 
         let process_id = child.as_ref().map(|child| child.id().to_string());
         Ok(Self {
@@ -263,21 +253,11 @@ impl TracePublicPreviewSession {
             return Err(error);
         }
 
-        let required_assets = match preflight_required_assets(spec, &public_origin) {
-            Ok(checks) => checks,
-            Err(error) => {
-                stop_child(&mut child);
-                return Err(error);
-            }
-        };
+        let required_assets =
+            stop_child_on_err(preflight_required_assets(spec, &public_origin), &mut child)?;
 
-        let asset_fanout = match validate_asset_fanout(spec, &public_origin) {
-            Ok(report) => report,
-            Err(error) => {
-                stop_child(&mut child);
-                return Err(error);
-            }
-        };
+        let asset_fanout =
+            stop_child_on_err(validate_asset_fanout(spec, &public_origin), &mut child)?;
 
         let process_id = child.as_ref().map(|child| child.id().to_string());
         Ok(Self {
@@ -1000,6 +980,18 @@ fn first_https_origin(line: &str) -> Option<String> {
         .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>' | ')'))
         .unwrap_or(rest.len());
     Some(rest[..end].trim_end_matches('/').to_string())
+}
+
+/// Unwrap `result`, stopping the preview `child` process before propagating
+/// any error so a failed preflight/validation step never leaks the child.
+fn stop_child_on_err<T>(result: Result<T>, child: &mut Option<Child>) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            stop_child(child);
+            Err(error)
+        }
+    }
 }
 
 fn stop_child(child: &mut Option<Child>) -> bool {

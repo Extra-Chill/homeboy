@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 pub(crate) fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { dedupe_key, .. }
+        | AgentTaskLoopPolicyAction::RunCommand { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::FanOut { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::SpawnController { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::SpawnSubloop { dedupe_key, .. }
@@ -63,6 +64,7 @@ pub(crate) fn jsonpath_match_is_truthy(value: &Value) -> bool {
 pub(crate) fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { entity_id, .. }
+        | AgentTaskLoopPolicyAction::RunCommand { entity_id, .. }
         | AgentTaskLoopPolicyAction::SpawnController { entity_id, .. }
         | AgentTaskLoopPolicyAction::SpawnSubloop { entity_id, .. }
         | AgentTaskLoopPolicyAction::WaitForController { entity_id, .. }
@@ -77,6 +79,7 @@ pub(crate) fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<Str
 pub(crate) fn action_name(action: &AgentTaskLoopPolicyAction) -> &'static str {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { .. } => "spawn_task",
+        AgentTaskLoopPolicyAction::RunCommand { .. } => "run_command",
         AgentTaskLoopPolicyAction::FanOut { .. } => "fan_out",
         AgentTaskLoopPolicyAction::SpawnController { .. } => "spawn_controller",
         AgentTaskLoopPolicyAction::SpawnSubloop { .. } => "spawn_subloop",

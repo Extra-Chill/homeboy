@@ -92,6 +92,17 @@ pub struct SecretEnvResolutionError {
     pub status: Vec<SecretEnvStatus>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvHandoffEntry {
+    pub name: String,
+    pub owner: String,
+    pub source: String,
+    pub destination: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
 pub struct SecretEnvValueProvider<'a> {
     source: String,
     resolve: Box<dyn FnMut(&str) -> Option<String> + 'a>,

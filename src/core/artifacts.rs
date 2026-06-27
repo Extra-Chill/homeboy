@@ -10,6 +10,10 @@ pub use super::artifact_address::{
 pub use super::artifact_contract::{
     ArtifactContract, EvidenceContract, ARTIFACT_CONTRACT_SCHEMA, EVIDENCE_CONTRACT_SCHEMA,
 };
+pub use super::artifact_dom_boxes::{
+    capture as capture_dom_boxes, plan_capture as plan_dom_box_capture, DomBoxCaptureSpec,
+    DomBoxElement, DomBoxEntrypointReport, DomBoxReport, DomBoxViewport, ARTIFACT_DOM_BOXES_SCHEMA,
+};
 pub use super::artifact_inputs::ResolvedArtifactInput;
 pub use super::artifact_links::{
     annotate_public_artifact_url_validation, cached_validated_viewer_links,
@@ -26,6 +30,10 @@ pub use super::artifact_manifest::{
 pub use super::artifact_origin::{
     inspect, serve, status, status_with_command, ArtifactOriginInspect, ArtifactOriginServeSpec,
     ArtifactOriginStatus,
+};
+pub use super::artifact_postprocess::{
+    record_artifact_postprocess_outputs, run_artifact_postprocess_steps,
+    ArtifactPostprocessContext, ArtifactPostprocessOutput, ArtifactPostprocessProducedArtifact,
 };
 pub use super::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 pub use super::artifact_ref::{

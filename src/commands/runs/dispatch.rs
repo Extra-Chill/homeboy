@@ -7,8 +7,8 @@ use homeboy::core::Error;
 
 use super::types::{RunsArgs, RunsArtifactArgs, RunsArtifactCommand, RunsCommand, RunsOutput};
 use super::{
-    bench, compare, distribution, drift, evidence, findings, fuzz_compare, handlers, hotspots,
-    latest, loop_sync, query, reconcile, refs,
+    bench, compare, distribution, dossier, drift, evidence, findings, fuzz_compare, handlers,
+    hotspots, latest, loop_sync, query, reconcile, refs,
 };
 use super::{CmdResult, GlobalArgs};
 
@@ -17,6 +17,10 @@ impl RunsArgs {
     /// compact human summary (i.e. the caller did not pass `--json`).
     pub fn show_summary_eligible(&self) -> bool {
         matches!(self.command, RunsCommand::Show { json: false, .. })
+    }
+
+    pub fn dossier_summary_eligible(&self) -> bool {
+        matches!(self.command, RunsCommand::Dossier { json: false, .. })
     }
 
     pub fn absorb_global_runner_for_list(&mut self, runner: Option<String>) -> Option<String> {
@@ -58,6 +62,15 @@ impl RunsArgs {
         )
     }
 
+    pub fn has_command_local_runner_option(&self) -> bool {
+        matches!(
+            self.command,
+            RunsCommand::Artifact(RunsArtifactArgs {
+                command: RunsArtifactCommand::Attach(_),
+            })
+        )
+    }
+
     fn global_runner_guidance(&self, runner_id: &str) -> (String, Vec<String>) {
         match &self.command {
             RunsCommand::List(_) => (
@@ -70,9 +83,10 @@ impl RunsArgs {
                 ],
             ),
             RunsCommand::Show { run_id, .. }
+            | RunsCommand::Dossier { run_id, .. }
             | RunsCommand::ResumePlan { run_id }
             | RunsCommand::Evidence { run_id }
-            | RunsCommand::Artifacts { run_id } => (
+            | RunsCommand::Env { run_id } => (
                 format!(
                     "Lab-offloaded run records are mirrored locally; inspect run `{run_id}` with `homeboy runs show {run_id}` without --runner."
                 ),
@@ -80,6 +94,17 @@ impl RunsArgs {
                     format!("Run `homeboy runs show {run_id}` to inspect the mirrored local run record."),
                     format!("Run `homeboy runs artifacts {run_id}` to list mirrored artifact records."),
                     "Use `homeboy runs artifact get <run-id> <artifact-id>` for retrievable runner artifacts recorded in the local observation store.".to_string(),
+                ],
+            ),
+            RunsCommand::Artifacts(args) => (
+                format!(
+                    "Lab-offloaded run records are mirrored locally; inspect run `{}` with `homeboy runs show {}` without top-level --runner.",
+                    args.run_id, args.run_id
+                ),
+                vec![
+                    format!("Run `homeboy runs artifacts {}` to list mirrored artifact records.", args.run_id),
+                    format!("Run `homeboy runs artifacts {} --runner {runner_id}` to query the connected runner daemon directly.", args.run_id),
+                    "Use `homeboy runs artifact get <run-id> <artifact-id> --runner <id>` to pull selected runner-side artifact bytes.".to_string(),
                 ],
             ),
             RunsCommand::Artifact(_) => (
@@ -113,9 +138,11 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Hotspots(args) => hotspots::runs_hotspots(args),
         RunsCommand::Reconcile(args) => reconcile::reconcile_runs(args),
         RunsCommand::Show { run_id, json: _ } => handlers::show_run(&run_id),
+        RunsCommand::Dossier { run_id, json: _ } => dossier::runs_dossier(&run_id),
         RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&run_id),
         RunsCommand::Evidence { run_id } => evidence::evidence(&run_id),
-        RunsCommand::Artifacts { run_id } => handlers::artifacts(&run_id),
+        RunsCommand::Env { run_id } => handlers::env(&run_id),
+        RunsCommand::Artifacts(args) => handlers::artifacts_from_args(args),
         RunsCommand::Artifact(args) => handlers::artifact_command(args),
         RunsCommand::Findings(args) => findings::findings(args),
         RunsCommand::Finding { finding_id } => findings::finding(&finding_id),

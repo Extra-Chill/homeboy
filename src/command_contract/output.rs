@@ -17,6 +17,7 @@ use crate::commands::{
 };
 
 use super::lab::apply_lab_contract_to_descriptor;
+use super::spec::registered_command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandResponseMode {
@@ -84,171 +85,6 @@ pub struct CommandOutputDescriptor {
     pub output_file_mode: CommandOutputFileMode,
     pub json_family: CommandJsonFamily,
     pub output_contract: CommandOutputContractKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommandRegistryEntry {
-    pub name: &'static str,
-    pub json_family: CommandJsonFamily,
-    pub docs_slug: Option<&'static str>,
-    pub output_notes: &'static str,
-    pub lab_supported: bool,
-    pub lab_notes: &'static str,
-}
-
-const DEFAULT_LAB_UNSUPPORTED_NOTES: &str = "not declared as Lab-routable in the command registry";
-
-impl CommandRegistryEntry {
-    pub fn docs_path(&self) -> Option<String> {
-        self.docs_slug
-            .map(|slug| format!("docs/commands/{slug}.md"))
-    }
-}
-
-const fn command_registry_entry(
-    name: &'static str,
-    json_family: CommandJsonFamily,
-) -> CommandRegistryEntry {
-    CommandRegistryEntry {
-        name,
-        json_family,
-        docs_slug: Some(name),
-        output_notes: "standard CLI output contract",
-        lab_supported: false,
-        lab_notes: DEFAULT_LAB_UNSUPPORTED_NOTES,
-    }
-}
-
-const fn lab_command_registry_entry(
-    name: &'static str,
-    json_family: CommandJsonFamily,
-    lab_notes: &'static str,
-) -> CommandRegistryEntry {
-    CommandRegistryEntry {
-        lab_supported: true,
-        lab_notes,
-        ..command_registry_entry(name, json_family)
-    }
-}
-
-const fn manifest_command_registry_entry() -> CommandRegistryEntry {
-    CommandRegistryEntry {
-        output_notes:
-            "recursive command safety, docs, output, and Lab metadata in the standard JSON envelope",
-        ..command_registry_entry("manifest", CommandJsonFamily::Workspace)
-    }
-}
-
-pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
-    lab_command_registry_entry(
-        "agent-task",
-        CommandJsonFamily::Workspace,
-        "Lab runner routing covers portable, explicit-runner, and runner-resident agent-task workflows",
-    ),
-    command_registry_entry("project", CommandJsonFamily::Workspace),
-    command_registry_entry("ssh", CommandJsonFamily::Ops),
-    command_registry_entry("server", CommandJsonFamily::Ops),
-    lab_command_registry_entry(
-        "test",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for test runs",
-    ),
-    lab_command_registry_entry(
-        "bench",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for benchmark runs",
-    ),
-    lab_command_registry_entry(
-        "fuzz",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for fuzz runs",
-    ),
-    lab_command_registry_entry(
-        "trace",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for trace runs",
-    ),
-    command_registry_entry("observe", CommandJsonFamily::Quality),
-    lab_command_registry_entry(
-        "lint",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for changed-scope lint runs",
-    ),
-    command_registry_entry("db", CommandJsonFamily::Ops),
-    command_registry_entry("deps", CommandJsonFamily::Ops),
-    command_registry_entry("ci", CommandJsonFamily::Ops),
-    command_registry_entry("doctor", CommandJsonFamily::Ops),
-    command_registry_entry("file", CommandJsonFamily::Ops),
-    command_registry_entry("fleet", CommandJsonFamily::Ops),
-    command_registry_entry("logs", CommandJsonFamily::Ops),
-    command_registry_entry("triage", CommandJsonFamily::Ops),
-    command_registry_entry("deploy", CommandJsonFamily::Ops),
-    command_registry_entry("component", CommandJsonFamily::Workspace),
-    command_registry_entry("config", CommandJsonFamily::Workspace),
-    command_registry_entry("daemon", CommandJsonFamily::Ops),
-    command_registry_entry("extension", CommandJsonFamily::Workspace),
-    command_registry_entry("status", CommandJsonFamily::Ops),
-    command_registry_entry("docs", CommandJsonFamily::Workspace),
-    manifest_command_registry_entry(),
-    command_registry_entry("changelog", CommandJsonFamily::Workspace),
-    command_registry_entry("cleanup", CommandJsonFamily::Workspace),
-    command_registry_entry("git", CommandJsonFamily::Ops),
-    command_registry_entry("issues", CommandJsonFamily::Ops),
-    command_registry_entry("version", CommandJsonFamily::Workspace),
-    command_registry_entry("build", CommandJsonFamily::Workspace),
-    command_registry_entry("changes", CommandJsonFamily::Workspace),
-    command_registry_entry("release", CommandJsonFamily::Workspace),
-    command_registry_entry("report", CommandJsonFamily::Workspace),
-    lab_command_registry_entry(
-        "review",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for release-gate review runs",
-    ),
-    lab_command_registry_entry(
-        "audit",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for audit source runs",
-    ),
-    command_registry_entry("audit-baseline", CommandJsonFamily::Quality),
-    lab_command_registry_entry(
-        "refactor",
-        CommandJsonFamily::Workspace,
-        "portable Lab offload is available for refactor source runs",
-    ),
-    command_registry_entry("refs", CommandJsonFamily::Workspace),
-    lab_command_registry_entry(
-        "rig",
-        CommandJsonFamily::Workspace,
-        "portable Lab offload is available for rig check workflows",
-    ),
-    command_registry_entry("runner", CommandJsonFamily::Workspace),
-    command_registry_entry("runtime", CommandJsonFamily::Workspace),
-    command_registry_entry("worktree", CommandJsonFamily::Workspace),
-    lab_command_registry_entry(
-        "tunnel",
-        CommandJsonFamily::Workspace,
-        "Lab runner routing covers tunnel preview and service workflows",
-    ),
-    command_registry_entry("runs", CommandJsonFamily::Workspace),
-    command_registry_entry("self", CommandJsonFamily::Ops),
-    command_registry_entry("stack", CommandJsonFamily::Workspace),
-    command_registry_entry("undo", CommandJsonFamily::Workspace),
-    command_registry_entry("auth", CommandJsonFamily::Ops),
-    command_registry_entry("api", CommandJsonFamily::Ops),
-    command_registry_entry("http", CommandJsonFamily::Ops),
-    command_registry_entry("upgrade", CommandJsonFamily::Ops),
-];
-
-pub fn registered_command(name: &str) -> Option<&'static CommandRegistryEntry> {
-    COMMAND_REGISTRY.iter().find(|entry| entry.name == name)
-}
-
-pub fn registered_command_json_family(name: &str) -> Option<CommandJsonFamily> {
-    registered_command(name).map(|entry| entry.json_family)
-}
-
-pub fn registered_command_dispatch_family(name: &str) -> Option<CommandDispatchFamily> {
-    registered_command_json_family(name).map(Into::into)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,6 +239,7 @@ impl Commands {
             | Commands::Release(_)
             | Commands::Report(_)
             | Commands::Runner(_)
+            | Commands::Lab(_)
             | Commands::Runtime(_)
             | Commands::Worktree(_)
             | Commands::Tunnel(_)
@@ -490,27 +327,18 @@ fn markdown_or_json_response(markdown: bool) -> CommandResponseMode {
     }
 }
 
-/// Builds the common JSON-envelope descriptor: a JSON response mode paired with
-/// the [`CommandOutputContractKind::JsonEnvelope`] contract, varying only by
-/// [`CommandJsonFamily`] and output-file mode.
-fn json_envelope_descriptor(
-    json_family: CommandJsonFamily,
-    output_file_mode: CommandOutputFileMode,
-) -> CommandOutputDescriptor {
-    CommandOutputDescriptor::json_envelope(json_family, output_file_mode)
-}
-
 fn registered_json_envelope_descriptor(
     command: &Commands,
     output_file_mode: CommandOutputFileMode,
 ) -> CommandOutputDescriptor {
-    let json_family = registered_command_json_family(command.top_level_name())
-        .expect("top-level command should be registered");
-    json_envelope_descriptor(json_family, output_file_mode)
+    registered_command(command.top_level_name())
+        .expect("top-level command should be registered")
+        .output_descriptor(output_file_mode)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::spec::{COMMAND_REGISTRY, DEFAULT_LAB_UNSUPPORTED_NOTES};
     use super::*;
     use crate::cli_surface::{Cli, Commands};
     use clap::CommandFactory;
@@ -731,16 +559,15 @@ mod tests {
     }
 
     #[test]
-    fn json_envelope_descriptor_uses_shared_contract_shape() {
+    fn command_spec_output_descriptor_uses_shared_contract_shape() {
+        let spec = crate::command_contract::registered_command("status")
+            .expect("status command should be registered");
+
         assert_eq!(
+            spec.output_descriptor(CommandOutputFileMode::GenericEnvelope),
             CommandOutputDescriptor::json_envelope(
-                CommandJsonFamily::Workspace,
+                CommandJsonFamily::Ops,
                 CommandOutputFileMode::GenericEnvelope,
-            ),
-            workspace_descriptor(
-                CommandResponseMode::Json,
-                CommandOutputFileMode::GenericEnvelope,
-                CommandOutputContractKind::JsonEnvelope,
             )
         );
     }

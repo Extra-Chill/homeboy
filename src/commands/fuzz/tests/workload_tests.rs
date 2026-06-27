@@ -115,6 +115,7 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         },
         workload_id: Some("parser".to_string()),
         run_id: Some("proof-1".to_string()),
+        tracker_refs: vec![],
         seed: Some("1234".to_string()),
         inventory: Some(PathBuf::from("/tmp/fuzz-inventory.json")),
         require_case_log: false,
@@ -122,6 +123,7 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         require_result_envelope: false,
         max_duration: Some("60s".to_string()),
         gate_profile: FuzzGateProfileArg::Measurement,
+        expect_metric: vec![],
         args: vec![],
     };
     let workload = FuzzWorkloadOutput {
@@ -258,6 +260,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         },
         workload_id: Some("parser".to_string()),
         run_id: Some("proof-1".to_string()),
+        tracker_refs: vec![],
         seed: None,
         inventory: None,
         require_case_log: false,
@@ -265,6 +268,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         require_result_envelope: false,
         max_duration: None,
         gate_profile: FuzzGateProfileArg::Measurement,
+        expect_metric: vec![],
         args: vec![],
     };
     let workload = FuzzWorkloadOutput {

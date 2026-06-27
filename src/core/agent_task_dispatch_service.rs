@@ -88,6 +88,7 @@ pub struct AgentTaskDispatchRequest {
     pub secret_env: Vec<String>,
     pub concurrency: usize,
     pub run_id: Option<String>,
+    pub task_id: Option<String>,
     pub core: DispatchCoreInputs,
     /// Effective backend selection metadata, surfaced before dispatch (#5685).
     pub backend_selection: Option<BackendSelection>,
@@ -244,6 +245,7 @@ pub struct AgentTaskDispatchCommand {
     pub secret_env: Vec<String>,
     pub concurrency: usize,
     pub run_id: Option<String>,
+    pub task_id: Option<String>,
     pub core: DispatchCoreInputs,
 }
 
@@ -339,6 +341,7 @@ fn resolve_dispatch_request_with_default_and_config(
         secret_env: command.secret_env,
         concurrency: command.concurrency,
         run_id: command.run_id,
+        task_id: command.task_id,
         core: command.core,
         backend_selection,
     })

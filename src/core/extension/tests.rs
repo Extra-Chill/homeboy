@@ -551,16 +551,50 @@ fn validate_required_extensions_fails_with_missing_module() {
     assert_eq!(err.code, crate::core::error::ErrorCode::ExtensionNotFound);
     assert!(err.message.contains("nonexistent-extension-abc123"));
     assert!(err.message.contains("test-component"));
-    // Should have install hint + browse hint
+    // Should have install hint + source guidance hint.
     assert!(err.hints.len() >= 2);
     assert!(err
         .hints
         .iter()
         .any(|h| h.message.contains("homeboy extension install")));
-    assert!(err
+    assert!(!err
         .hints
         .iter()
-        .any(|h| h.message.contains("homeboy-extensions")));
+        .any(|h| h.message.contains("Extra-Chill/homeboy-extensions")));
+    assert!(err.hints.iter().any(|h| h.message.contains("<source>")));
+}
+
+#[test]
+fn validate_required_extensions_uses_declared_extension_source_hint() {
+    let mut extensions = HashMap::new();
+    extensions.insert(
+        "nonexistent-extension-abc123".to_string(),
+        ScopedExtensionConfig {
+            version: None,
+            settings: HashMap::from([(
+                "source".to_string(),
+                serde_json::Value::String("https://example.test/extensions.git".to_string()),
+            )]),
+        },
+    );
+    let comp = Component {
+        id: "test-component".to_string(),
+        extensions: Some(extensions),
+        ..Default::default()
+    };
+
+    let err = validate_required_extensions(&comp).unwrap_err();
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(hints.contains(
+        "homeboy extension install https://example.test/extensions.git --id nonexistent-extension-abc123"
+    ));
+    assert!(!hints.contains("Extra-Chill/homeboy-extensions"));
 }
 
 #[test]

@@ -36,8 +36,12 @@ pub struct BenchGateResult {
 }
 
 impl BenchGate {
-    fn evaluate(&self, scenario_id: &str, metrics: &BenchMetrics) -> BenchGateResult {
+    pub(crate) fn evaluate(&self, scenario_id: &str, metrics: &BenchMetrics) -> BenchGateResult {
         let actual = metrics.get(&self.metric);
+        self.evaluate_actual(&format!("scenario `{}`", scenario_id), actual)
+    }
+
+    pub(crate) fn evaluate_actual(&self, scope: &str, actual: Option<f64>) -> BenchGateResult {
         let passed = actual
             .map(|value| match self.op {
                 BenchGateOp::Eq => value == self.value,
@@ -50,17 +54,14 @@ impl BenchGate {
         } else {
             Some(match actual {
                 Some(value) => format!(
-                    "scenario `{}` gate failed: {} {} {} (actual {})",
-                    scenario_id,
+                    "{} gate failed: {} {} {} (actual {})",
+                    scope,
                     self.metric,
                     self.op.as_str(),
                     self.value,
                     value
                 ),
-                None => format!(
-                    "scenario `{}` gate failed: metric `{}` is missing",
-                    scenario_id, self.metric
-                ),
+                None => format!("{} gate failed: metric `{}` is missing", scope, self.metric),
             })
         };
 

@@ -37,6 +37,8 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
         inventory_file: None,
         max_duration: None,
         passthrough_args: Vec::new(),
+        requested_settings: serde_json::Value::Null,
+        gates: Vec::new(),
         target_inventory: None,
         execution: Some(FuzzExecutionOutput {
             kind: "fuzz".to_string(),
@@ -56,6 +58,7 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
             extension_script_required: true,
             env: vec!["HOMEBOY_FUZZ_RESULTS_FILE".to_string()],
         },
+        evidence_refs: Vec::new(),
         evidence_followups: Vec::new(),
     }))
     .unwrap();
@@ -184,6 +187,46 @@ fn fuzz_performance_hotspots_extracts_generic_metadata_metrics() {
         .hottest_metric_families
         .iter()
         .any(|family| family.family == "coverage" && family.total == 7.0));
+}
+
+#[test]
+fn fuzz_observation_hotspots_rank_observation_set_metrics() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.metadata = serde_json::json!({
+        "observation_set": {
+            "schema": homeboy::core::fuzz::FUZZ_OBSERVATION_SET_SCHEMA,
+            "version": 1,
+            "id": "report-observations",
+            "observations": [
+                {
+                    "id": "low",
+                    "family": "timing",
+                    "subject": "case-low",
+                    "metric": "duration",
+                    "value": 10,
+                    "unit": "ms"
+                },
+                {
+                    "id": "high",
+                    "family": "timing",
+                    "subject": "case-high",
+                    "metric": "duration",
+                    "value": 40,
+                    "unit": "ms"
+                }
+            ]
+        }
+    });
+
+    let hotspots = fuzz_observation_hotspots(&campaign).expect("observation hotspots");
+
+    assert_eq!(hotspots.id, "report-observations-hotspots");
+    assert_eq!(hotspots.items[0].id, "timing:case-high:duration");
+    assert_eq!(hotspots.items[0].rank, Some(1));
+    assert_eq!(hotspots.items[0].relative_score, Some(1.0));
+    assert_eq!(hotspots.items[1].id, "timing:case-low:duration");
+    assert_eq!(hotspots.items[1].rank, Some(2));
+    assert_eq!(hotspots.items[1].relative_score, Some(0.25));
 }
 
 #[test]

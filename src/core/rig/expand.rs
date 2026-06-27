@@ -109,6 +109,9 @@ fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {
         if field != "path" {
             return None;
         }
+        if let Ok(path) = super::component_resolution::resolve_component_path(rig, id) {
+            return Some(path);
+        }
         let component = rig.components.get(id)?;
         // A caller may pin a component to an effective filesystem path via a
         // generic per-component override env var. Lab offload uses this to point
@@ -139,7 +142,7 @@ fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {
 /// non-empty, it pins `${components.<id>.path}` to that filesystem path. Tilde
 /// is expanded against the local home of the process reading it (the runner,
 /// when the check executes on the runner), so a portable value still resolves.
-fn component_path_override_from_env(rig_id: &str, component_id: &str) -> Option<String> {
+pub(crate) fn component_path_override_from_env(rig_id: &str, component_id: &str) -> Option<String> {
     let name = rig_component_path_override_env_name(rig_id, component_id);
     let value = std::env::var(name).ok()?;
     let trimmed = value.trim();

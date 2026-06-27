@@ -134,14 +134,19 @@ pub fn build_run_failure_summary(
 
     let action_status = failed_action.and_then(|result| string_field(result, "status"));
 
-    let root_blocker = failure_summary
-        .and_then(|summary| string_field(summary, "diagnostic"))
-        .or_else(|| deep_diagnostic_message(failed_action))
-        .or_else(|| stopped_reason_blocker(stopped_reason, action_status.as_deref()))
-        .unwrap_or_else(|| "controller run failed".to_string());
+    let explicit_diagnostic =
+        failure_summary.and_then(|summary| string_field(summary, "diagnostic"));
+    let deep_diagnostic = best_diagnostic_message(failed_action);
+    let root_blocker = best_root_blocker(
+        explicit_diagnostic.as_deref(),
+        deep_diagnostic.as_deref(),
+        stopped_reason_blocker(stopped_reason, action_status.as_deref()).as_deref(),
+    )
+    .unwrap_or_else(|| "controller run failed".to_string());
 
-    let first_diagnostic =
-        deep_diagnostic_message(failed_action).filter(|diagnostic| *diagnostic != root_blocker);
+    let first_diagnostic = deep_diagnostic
+        .or(explicit_diagnostic)
+        .filter(|diagnostic| *diagnostic != root_blocker);
 
     let owner_surface = classify_owner_surface(
         provider.as_deref(),
@@ -254,19 +259,26 @@ fn collect_evidence_refs(
         &mut refs,
         ControllerRunEvidenceRef {
             kind: "run_evidence".to_string(),
-            uri: format!("homeboy agent-task controller status {loop_id} --json"),
+            uri: format!("homeboy agent-task controller status {loop_id}"),
             label: Some("persisted controller run evidence".to_string()),
         },
     );
 
     if let Some(action) = failed_action {
         // Runner job logs.
+        let runner_id = find_all_strings(action, &["runner_id"])
+            .into_iter()
+            .next()
+            .or_else(|| find_all_strings(status, &["runner_id"]).into_iter().next());
         for job_id in find_all_strings(action, &["runner_job_id", "job_id"]) {
             push_ref(
                 &mut refs,
                 ControllerRunEvidenceRef {
                     kind: "runner_job_log".to_string(),
-                    uri: format!("homeboy logs runner-job {job_id}"),
+                    uri: runner_id
+                        .as_ref()
+                        .map(|runner_id| format!("homeboy runner job logs {runner_id} {job_id}"))
+                        .unwrap_or_else(|| format!("runner-job://{job_id}")),
                     label: Some(format!("runner job {job_id} log")),
                 },
             );
@@ -278,7 +290,7 @@ fn collect_evidence_refs(
                 &mut refs,
                 ControllerRunEvidenceRef {
                     kind: "run_evidence".to_string(),
-                    uri: format!("homeboy agent-task show {run_id} --json"),
+                    uri: format!("homeboy agent-task status {run_id} --full"),
                     label: Some(format!("agent-task run {run_id} evidence")),
                 },
             );
@@ -288,10 +300,16 @@ fn collect_evidence_refs(
         for evidence in collect_declared_refs(action) {
             push_ref(&mut refs, evidence);
         }
+        for evidence in collect_source_like_refs(action) {
+            push_ref(&mut refs, evidence);
+        }
     }
 
     // Evidence index recorded on the controller status (artifact bundles).
     for evidence in collect_declared_refs(status) {
+        push_ref(&mut refs, evidence);
+    }
+    for evidence in collect_source_like_refs(status) {
         push_ref(&mut refs, evidence);
     }
 
@@ -355,6 +373,83 @@ fn declared_ref_from_item(container_key: &str, item: &Value) -> Option<Controlle
     Some(ControllerRunEvidenceRef { kind, uri, label })
 }
 
+fn collect_source_like_refs(value: &Value) -> Vec<ControllerRunEvidenceRef> {
+    let mut out = Vec::new();
+    collect_source_like_refs_into(value, &mut out);
+    out
+}
+
+fn collect_source_like_refs_into(value: &Value, out: &mut Vec<ControllerRunEvidenceRef>) {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                if let Some(kind) = source_like_ref_kind(key) {
+                    collect_source_like_ref_value(kind, key, nested, out);
+                }
+                collect_source_like_refs_into(nested, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_source_like_refs_into(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn source_like_ref_kind(key: &str) -> Option<&'static str> {
+    let lower = key.to_ascii_lowercase();
+    if lower.contains("provider") && lower.contains("path") {
+        Some("provider_source")
+    } else if lower.contains("prepared") && lower.contains("source") {
+        Some("prepared_source")
+    } else if (lower.contains("runtime") || lower.contains("overlay"))
+        && (lower.contains("source") || lower.contains("ref"))
+    {
+        Some("runtime_overlay_source")
+    } else {
+        None
+    }
+}
+
+fn collect_source_like_ref_value(
+    kind: &str,
+    key: &str,
+    value: &Value,
+    out: &mut Vec<ControllerRunEvidenceRef>,
+) {
+    match value {
+        Value::String(text) if !text.trim().is_empty() => out.push(ControllerRunEvidenceRef {
+            kind: kind.to_string(),
+            uri: text.trim().to_string(),
+            label: Some(key.to_string()),
+        }),
+        Value::Object(map) => {
+            if let Some(uri) = string_field(value, "uri")
+                .or_else(|| string_field(value, "url"))
+                .or_else(|| string_field(value, "path"))
+                .or_else(|| string_field(value, "ref"))
+            {
+                out.push(ControllerRunEvidenceRef {
+                    kind: kind.to_string(),
+                    uri,
+                    label: string_field(value, "label").or_else(|| Some(key.to_string())),
+                });
+            }
+            for nested in map.values() {
+                collect_source_like_ref_value(kind, key, nested, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_source_like_ref_value(kind, key, item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Next recommended Homeboy command, tailored to the owning surface.
 fn next_command(loop_id: &str, owner: OwnerSurface, action_status: Option<&str>) -> String {
     if action_status
@@ -362,17 +457,19 @@ fn next_command(loop_id: &str, owner: OwnerSurface, action_status: Option<&str>)
         .unwrap_or(false)
     {
         return format!(
-            "homeboy agent-task controller status {loop_id} --json  # resolve the runner block, then re-run with --resume"
+            "homeboy agent-task controller status {loop_id}  # resolve the runner block, then re-run with --resume"
         );
     }
     match owner {
         OwnerSurface::LabRunner => {
-            format!("homeboy runner status  # then `homeboy agent-task controller status {loop_id} --json`")
+            format!(
+                "homeboy runner status  # then `homeboy agent-task controller status {loop_id}`"
+            )
         }
         OwnerSurface::WpCodebox | OwnerSurface::WordPressRuntime | OwnerSurface::ProviderPlugin => {
-            format!("homeboy agent-task controller status {loop_id} --json  # inspect provider/runtime evidence refs above")
+            format!("homeboy agent-task controller status {loop_id}  # inspect provider/runtime evidence refs above")
         }
-        _ => format!("homeboy agent-task controller status {loop_id} --json"),
+        _ => format!("homeboy agent-task controller status {loop_id}"),
     }
 }
 
@@ -392,29 +489,81 @@ fn stopped_reason_blocker(stopped_reason: &str, action_status: Option<&str>) -> 
     }
 }
 
-/// Find the deepest/first diagnostic message inside a result's nested
-/// `diagnostics` arrays (provider/runtime envelopes bury these).
-fn deep_diagnostic_message(value: Option<&Value>) -> Option<String> {
-    let value = value?;
-    find_diagnostic_message(value)
+fn best_root_blocker(
+    explicit: Option<&str>,
+    nested: Option<&str>,
+    fallback: Option<&str>,
+) -> Option<String> {
+    [explicit, nested, fallback]
+        .into_iter()
+        .flatten()
+        .filter(|message| !message.trim().is_empty())
+        .min_by_key(|message| diagnostic_message_priority(message))
+        .map(str::to_string)
 }
 
-fn find_diagnostic_message(value: &Value) -> Option<String> {
+fn diagnostic_message_priority(message: &str) -> u8 {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("fatal") || lower.contains("exception") || lower.contains("uncaught") {
+        0
+    } else if lower.contains("stale")
+        || lower.contains("not found")
+        || lower.contains("missing path")
+        || lower.contains("required ability")
+        || lower.contains("unavailable")
+    {
+        1
+    } else if lower.contains("missing required")
+        || lower.contains("required typed artifact")
+        || lower.contains("typed artifact")
+        || lower.contains("artifact")
+    {
+        8
+    } else {
+        4
+    }
+}
+
+fn best_diagnostic_message(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    let mut candidates = Vec::new();
+    collect_diagnostic_messages(value, 0, &mut candidates);
+    candidates
+        .into_iter()
+        .min_by_key(|candidate| {
+            (
+                diagnostic_message_priority(&candidate.message),
+                candidate.depth,
+            )
+        })
+        .map(|candidate| candidate.message)
+}
+
+struct DiagnosticCandidate {
+    message: String,
+    depth: usize,
+}
+
+fn collect_diagnostic_messages(value: &Value, depth: usize, out: &mut Vec<DiagnosticCandidate>) {
     match value {
         Value::Object(map) => {
             if let Some(Value::Array(diagnostics)) = map.get("diagnostics") {
                 for diagnostic in diagnostics {
                     if let Some(message) = string_field(diagnostic, "message") {
-                        if !message.trim().is_empty() {
-                            return Some(message);
-                        }
+                        out.push(DiagnosticCandidate { message, depth });
                     }
                 }
             }
-            map.values().find_map(find_diagnostic_message)
+            for nested in map.values() {
+                collect_diagnostic_messages(nested, depth + 1, out);
+            }
         }
-        Value::Array(items) => items.iter().find_map(find_diagnostic_message),
-        _ => None,
+        Value::Array(items) => {
+            for nested in items {
+                collect_diagnostic_messages(nested, depth + 1, out);
+            }
+        }
+        _ => {}
     }
 }
 

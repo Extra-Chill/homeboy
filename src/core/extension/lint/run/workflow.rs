@@ -301,6 +301,7 @@ fn run_scoped_lint_runs(
         success,
         stdout,
         stderr,
+        timed_out: false,
         child_resource: None,
         extension_phase_timings,
     })

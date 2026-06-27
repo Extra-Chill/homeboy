@@ -61,6 +61,20 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             )?;
             Ok((command_json_value(report)?, 0))
         }
+        AgentTaskControllerCommand::Diagnose(status_args) => {
+            let report = homeboy::core::agent_tasks::loop_controller::controller_status_report(
+                &status_args.loop_id,
+            )?;
+            Ok((
+                command_json_value(serde_json::json!({
+                    "schema": "homeboy/agent-task-loop-controller-diagnose-result/v1",
+                    "loop_id": status_args.loop_id,
+                    "failed_child_actions": report.diagnostics.failed_child_actions,
+                    "next_command": format!("homeboy agent-task controller status {}", status_args.loop_id),
+                }))?,
+                0,
+            ))
+        }
         AgentTaskControllerCommand::List => {
             let report = agent_task_controller_service::list()?;
             Ok((command_json_value(report)?, 0))
@@ -616,20 +630,39 @@ fn resume_state_resolution(
 }
 
 pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> CmdResult<Value> {
-    let raw = config::read_json_spec_to_string(&args.spec)?;
-    let mut spec: AgentTaskRepoLoopSpec = serde_json::from_str(&raw).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "spec",
-            error.to_string(),
-            Some(args.spec.clone()),
-            None,
-        )
-    })?;
-    agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
     let defaults = ControllerDispatchDefaults::from_from_spec_args(&args);
-    defaults.apply_to_spec(&mut spec);
+    let spec = if args.inputs.is_some() || !args.policy_results.is_empty() {
+        materialize_controller_spec(
+            &args.spec,
+            args.inputs.as_deref(),
+            &args.policy_results,
+            Some(&defaults),
+        )?
+        .spec
+    } else {
+        let raw = config::read_json_spec_to_string(&args.spec)?;
+        let mut spec: AgentTaskRepoLoopSpec = serde_json::from_str(&raw).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "spec",
+                error.to_string(),
+                Some(args.spec.clone()),
+                None,
+            )
+        })?;
+        agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
+        defaults.apply_to_spec(&mut spec);
+        spec
+    };
     if args.doctor {
         return controller_from_spec_doctor(spec, &args);
+    }
+    if args.max_actions == Some(0) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "max-actions",
+            "agent-task controller from-spec --resume requires --max-actions greater than zero",
+            Some(args.spec),
+            None,
+        ));
     }
     let report = if args.resume {
         init_from_spec_for_resume_with_resolution(
@@ -643,16 +676,25 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
         return Ok((command_json_value(report)?, 0));
     }
 
-    let (resume_report, exit_code) = controller_resume_with_executor(
-        report.loop_id.clone(),
-        ExtensionProviderAgentTaskExecutor::discover(),
+    let dispatch = CliDispatchHook {
+        executor: ExtensionProviderAgentTaskExecutor::discover(),
         defaults,
+    };
+    let resume_result = agent_task_controller_service::resume_with_options(
+        &report.loop_id,
+        ExtensionProviderAgentTaskExecutor::discover(),
+        &dispatch,
+        agent_task_controller_service::ControllerResumeOptions {
+            max_actions: args.max_actions.unwrap_or(100) as usize,
+            stop_on_terminal: true,
+        },
     )?;
+    let exit_code = resume_result.exit_code;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-controller-from-spec-and-resume-result/v1",
             "from_spec": report,
-            "resume": resume_report,
+            "resume": resume_result.value,
         }),
         exit_code,
     ))
@@ -1294,17 +1336,6 @@ where
     let result =
         agent_task_controller_service::run_action(&loop_id, &action_id, executor, &dispatch)?;
     Ok((command_json_value(result.value)?, result.exit_code))
-}
-
-fn controller_resume_with_executor<E>(
-    loop_id: String,
-    executor: E,
-    defaults: ControllerDispatchDefaults,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
-    controller_resume_with_executor_and_defaults(loop_id, executor, defaults)
 }
 
 fn controller_resume_with_executor_and_defaults<E>(

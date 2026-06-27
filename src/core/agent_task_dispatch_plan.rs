@@ -103,10 +103,13 @@ pub fn build_dispatch_plan_with_provider_requirements(
             read_text_spec(&prompt_spec.prompt, "prompt")?,
             request.task_url.as_deref(),
         );
-        let task_id = prompt_spec
-            .task_id
-            .clone()
-            .unwrap_or_else(|| dispatch_task_id(repo.as_deref(), index));
+        let task_id = prompt_spec.task_id.clone().unwrap_or_else(|| {
+            request
+                .task_id
+                .as_deref()
+                .map(|task_id| explicit_dispatch_task_id(task_id, index))
+                .unwrap_or_else(|| dispatch_task_id(repo.as_deref(), index))
+        });
         let mut source_refs = Vec::new();
         if let Some(task_url) = &request.task_url {
             source_refs.push(AgentTaskSourceRef {
@@ -765,6 +768,15 @@ fn dispatch_task_id(repo: Option<&str>, index: usize) -> String {
     }
 }
 
+fn explicit_dispatch_task_id(task_id: &str, index: usize) -> String {
+    let base = sanitize_slug(task_id);
+    if index == 0 {
+        base
+    } else {
+        format!("{base}-{}", index + 1)
+    }
+}
+
 fn sanitize_slug(value: &str) -> String {
     let slug: String = value
         .chars()
@@ -869,6 +881,35 @@ mod tests {
                 "# Review fix\nCook from stored markdown.\n"
             );
         });
+    }
+
+    #[test]
+    fn explicit_dispatch_task_id_overrides_repo_default() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook the controller action.".to_string()),
+            repo: Some("sample-plugin".to_string()),
+            task_id: Some("controller-loop-action-1".to_string()),
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(plan.group_key.as_deref(), Some("sample-plugin"));
+        assert_eq!(plan.tasks[0].task_id, "controller-loop-action-1");
+        assert_eq!(plan.tasks[0].group_key.as_deref(), Some("sample-plugin"));
+    }
+
+    #[test]
+    fn explicit_dispatch_task_id_suffixes_wave_tasks() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            tasks: vec!["First task".to_string(), "Second task".to_string()],
+            repo: Some("sample-plugin".to_string()),
+            task_id: Some("controller-loop-action".to_string()),
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(plan.tasks[0].task_id, "controller-loop-action");
+        assert_eq!(plan.tasks[1].task_id, "controller-loop-action-2");
     }
 
     #[test]
@@ -1442,6 +1483,7 @@ mod tests {
     #[derive(Default)]
     struct DispatchRequestOverrides {
         prompt: Option<String>,
+        tasks: Vec<String>,
         cwd: Option<String>,
         workspace: Option<String>,
         repo: Option<String>,
@@ -1450,6 +1492,7 @@ mod tests {
         required_capabilities: Vec<String>,
         concurrency: usize,
         run_id: Option<String>,
+        task_id: Option<String>,
         backend: Option<String>,
         core: DispatchCoreInputs,
     }
@@ -1457,7 +1500,7 @@ mod tests {
     fn dispatch_request(overrides: DispatchRequestOverrides) -> AgentTaskDispatchRequest {
         AgentTaskDispatchRequest {
             prompt: overrides.prompt,
-            tasks: Vec::new(),
+            tasks: overrides.tasks,
             cwd: overrides.cwd,
             workspace: overrides.workspace,
             repo: overrides.repo,
@@ -1473,6 +1516,7 @@ mod tests {
                 overrides.concurrency
             },
             run_id: overrides.run_id,
+            task_id: overrides.task_id,
             core: DispatchCoreInputs {
                 tasks_json: overrides.core.tasks_json,
                 provider_config: overrides.core.provider_config,

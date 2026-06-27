@@ -186,6 +186,57 @@ fn runner_exec_failure_error_keeps_rig_not_found_without_contract_field() {
 }
 
 #[test]
+fn runner_exec_failure_error_omits_unknown_contract_field_sentinel() {
+    let output = failed_runner_exec_output(
+        "",
+        r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Invalid argument 'unknown contract field': file does not exist: /home/chubes/Developer/static-site-importer/static-site-importer.php","details":{"field":"unknown contract field","problem":"file does not exist: /home/chubes/Developer/static-site-importer/static-site-importer.php"}}}"#,
+    );
+
+    let err = runner_exec_failure_error(&output).expect("runner failure error");
+
+    assert!(err.details["failure_context"]
+        .get("contract_field")
+        .is_none());
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(hints.iter().any(|hint| hint.contains(
+        "file does not exist: /home/chubes/Developer/static-site-importer/static-site-importer.php"
+    )));
+    assert!(!hints
+        .iter()
+        .any(|hint| hint.contains("unknown contract field")));
+}
+
+#[test]
+fn runner_exec_failure_error_names_specific_unknown_contract_field() {
+    let output = failed_runner_exec_output(
+        "",
+        r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Invalid argument 'unknown contract field': unknown field `failure_context`, expected `schema` or `status`","details":{"field":"unknown contract field","problem":"unknown field `failure_context`, expected `schema` or `status`"}}}"#,
+    );
+
+    let err = runner_exec_failure_error(&output).expect("runner failure error");
+
+    assert_eq!(
+        err.details["failure_context"]["contract_field"].as_str(),
+        Some("failure_context")
+    );
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("contract field: `failure_context`")));
+    assert!(!hints
+        .iter()
+        .any(|hint| hint.contains("contract field: `unknown contract field`")));
+}
+
+#[test]
 fn runner_exec_failure_error_promotes_homeboy_job_event_message_error() {
     let mut output = failed_runner_exec_output("", "generic stderr");
     output.job_events = Some(vec![crate::core::api_jobs::JobEvent {

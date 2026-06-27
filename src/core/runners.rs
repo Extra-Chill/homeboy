@@ -36,27 +36,34 @@ pub use super::runner::{
     is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, list_workspaces, mirror_connected_runner_run,
-    mirrored_runner_job_identity, plan_managed_runner_source_sync,
-    plan_managed_runner_source_syncs, preflight_lab_offload_changed_since,
+    mirrored_runner_job_identity, plan_homeboy_binary_refresh, plan_managed_runner_source_sync,
+    plan_managed_runner_source_syncs, plan_workspace_pull, preflight_lab_offload_changed_since,
     preflight_remote_argv_path_translation, prepare_git_lab_offload_changed_since,
-    prepare_lab_runner_capability, refresh_mirrored_daemon_evidence,
-    reportable_artifact_evidence_path, resolve_default_lab_runner, run_reverse_worker,
-    runner_artifact_store_token, runner_exec_failure_error, runner_job_cancel,
-    runner_job_log_snapshot, status, statuses, sync_workspace, LabJobOverrides,
-    LabLocalExecutionPolicy, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
-    LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy, LabRunnerCapabilityContract,
-    LabRunnerGateDecision, LabRunnerGateMode, LabRunnerSelectionSource,
-    ManagedRunnerSourceSyncPlan, PreparedLabRunnerCapability, RemoteArtifactDownload,
-    ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner,
-    RunnerActiveJobSource, RunnerActiveJobState, RunnerArtifactRef, RunnerCapabilityPreflight,
-    RunnerConnectReport, RunnerDisconnectReport, RunnerExecDiagnostics, RunnerExecMode,
-    RunnerExecOptions, RunnerExecOutput, RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerKind,
+    prepare_lab_runner_capability, prune_workspaces, pull_workspace, refresh_homeboy_binary,
+    refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
+    resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token,
+    runner_exec_failure_error, runner_job_cancel, runner_job_log_snapshot, status, statuses,
+    sync_workspace, workspace_snapshots, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
+    HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, LabJobOverrides, LabLocalExecutionPolicy,
+    LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode,
+    LabOffloadWorkspaceModePolicy, LabRunnerCapabilityContract, LabRunnerGateDecision,
+    LabRunnerGateMode, LabRunnerSelectionSource, ManagedRunnerSourceSyncPlan,
+    PreparedLabRunnerCapability, RemoteArtifactDownload, ReverseRunnerConnectOptions,
+    ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerActiveJobSource,
+    RunnerActiveJobState, RunnerArtifactRef, RunnerAvailability, RunnerCapabilityPreflight,
+    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerExecDiagnostics,
+    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
+    RunnerExecStructuredSummary, RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerKind,
     RunnerLifecycleOwner, RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRequiredTool,
     RunnerResourceMetrics, RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState,
-    RunnerSpec, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec,
-    RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceApplyStatus, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
-    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceSyncMode,
+    RunnerSpec, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
+    RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode, RunnerWorkspaceApplyOptions,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus, RunnerWorkspaceLease,
+    RunnerWorkspaceLeaseSet, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
+    RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+    RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions, RunnerWorkspacePullOutput,
+    RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
@@ -89,9 +96,9 @@ pub mod connection {
     pub use super::super::runner::{
         connect, connect_reverse, disconnect, run_reverse_worker, status, statuses,
         ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput,
-        RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerSession,
-        RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
-        RunnerTunnelMode,
+        RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport,
+        RunnerFailureKind, RunnerSession, RunnerSessionRole, RunnerSessionState,
+        RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
     };
 }
 
@@ -99,7 +106,8 @@ pub mod connection {
 pub mod execution {
     pub use super::super::runner::{
         exec, runner_exec_failure_error, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
-        RunnerExecOutput, RunnerResourceMetrics,
+        RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
+        RunnerResourceMetrics,
     };
 }
 
@@ -107,10 +115,16 @@ pub mod execution {
 pub mod workspace {
     pub use super::super::runner::{
         apply_change_artifact, apply_workspace_patch, list_workspaces,
-        plan_managed_runner_source_sync, plan_managed_runner_source_syncs, sync_workspace,
+        plan_managed_runner_source_sync, plan_managed_runner_source_syncs, plan_workspace_pull,
+        prune_workspaces, pull_workspace, sync_workspace, workspace_snapshots,
         ManagedRunnerSourceSyncPlan, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
         RunnerWorkspaceApplyStatus, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
-        RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+        RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+        RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions, RunnerWorkspacePullOutput,
+        RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters,
+        RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters,
+        RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+        RunnerWorkspaceSyncOutput,
     };
 }
 

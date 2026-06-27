@@ -644,6 +644,55 @@ pub(super) fn agent_task_plan_extra_workspaces(
     Ok(workspaces)
 }
 
+/// Discover controller-local workspaces embedded in a batch-cook fanout input
+/// before the offloaded `agent-task fanout run-plan` command reaches the runner.
+/// Child cooks often carry controller paths in `cwd` or `workspace`; syncing
+/// them here lets the later argument remapper rewrite the JSON to runner paths.
+pub(super) fn agent_task_fanout_extra_workspaces(
+    args: &[String],
+    source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let Some(spec) = agent_task_fanout_input_spec(args) else {
+        return Ok(Vec::new());
+    };
+    let raw = match read_fanout_input_spec_to_string(&spec, source_path) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let Some(cooks) = value.get("cooks").and_then(serde_json::Value::as_array) else {
+        return Ok(Vec::new());
+    };
+
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    let mut seen = BTreeSet::new();
+    let mut workspaces = Vec::new();
+    for cook in cooks {
+        for field in ["cwd", "workspace"] {
+            let Some(candidate) = cook.get(field).and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(path) = fanout_workspace_candidate_path(candidate, source_path) else {
+                continue;
+            };
+            add_candidate_extra_workspace(
+                &path.display().to_string(),
+                "agent_task_fanout_cook_workspace",
+                &source_canon,
+                &mut seen,
+                &mut workspaces,
+            )?;
+        }
+    }
+
+    Ok(workspaces)
+}
+
 /// Resolve runtime components declared by the selected agent-task provider and
 /// add their controller-local checkouts to the Lab workspace handoff.
 pub(super) fn agent_task_provider_runtime_component_extra_workspaces(
@@ -871,6 +920,30 @@ fn agent_task_plan_spec(args: &[String]) -> Option<String> {
     None
 }
 
+fn agent_task_fanout_input_spec(args: &[String]) -> Option<String> {
+    let fanout_index = subcommand_index(args, "agent-task").and_then(|index| {
+        args.get(index + 1)
+            .filter(|arg| arg.as_str() == "fanout")
+            .and_then(|_| args.get(index + 2))
+            .filter(|arg| arg.as_str() == "run-plan")
+            .map(|_| index + 2)
+    })?;
+
+    let mut iter = args.iter().skip(fanout_index + 1).peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--input" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--input=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 fn agent_task_plan_file_path(spec: &str, source_path: &Path) -> Option<PathBuf> {
     let path = spec.strip_prefix('@')?;
     if path.trim().is_empty() || path.contains("://") {
@@ -903,6 +976,38 @@ fn read_agent_task_plan_spec_to_string(spec: &str, source_path: &Path) -> Result
             Some(format!("read agent-task plan {}", path.display())),
         )
     })
+}
+
+fn read_fanout_input_spec_to_string(spec: &str, source_path: &Path) -> Result<String> {
+    let Some(_) = spec.strip_prefix('@') else {
+        return crate::core::config::read_json_spec_to_string(spec);
+    };
+    let Some(path) = agent_task_plan_file_path(spec, source_path) else {
+        return crate::core::config::read_json_spec_to_string(spec);
+    };
+    std::fs::read_to_string(&path).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("read agent-task fanout input {}", path.display())),
+        )
+    })
+}
+
+fn fanout_workspace_candidate_path(value: &str, source_path: &Path) -> Option<PathBuf> {
+    let path = PathBuf::from(shellexpand::tilde(value).to_string());
+    if path.is_dir() {
+        return Some(path);
+    }
+    if path.is_relative() {
+        let source_relative = source_path.join(&path);
+        if source_relative.is_dir() {
+            return Some(source_relative);
+        }
+    }
+    crate::core::worktree::resolve(value)
+        .ok()
+        .map(|record| PathBuf::from(record.worktree_path))
+        .filter(|path| path.is_dir())
 }
 
 fn path_setting_values(args: &[String]) -> Vec<String> {
@@ -952,9 +1057,10 @@ mod provider_config_candidate_paths_tests {
     use std::process::Command;
 
     use super::{
-        agent_task_plan_extra_workspaces, agent_task_plan_spec, path_setting_extra_workspaces,
-        preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
-        provider_config_extra_workspaces, rig_component_path_env_extra_workspaces_from_entries,
+        agent_task_fanout_extra_workspaces, agent_task_plan_extra_workspaces, agent_task_plan_spec,
+        path_setting_extra_workspaces, preflight_provider_config_source_cli_dependencies,
+        provider_config_candidate_paths, provider_config_extra_workspaces,
+        rig_component_path_env_extra_workspaces_from_entries,
         workspace_mapping_entries_for_git_dependency,
     };
     use crate::core::runner::{
@@ -1210,6 +1316,48 @@ mod provider_config_candidate_paths_tests {
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));
         assert!(workspaces[1].bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn agent_task_fanout_extra_workspaces_syncs_child_cook_paths() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let child = controller.path().join("homeboy@cook-one");
+        let spec = source.join("fanout.json");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(&child).expect("child dir");
+        std::fs::write(
+            &spec,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-batch-cook-fanout-plan/v1",
+                "fanout_id": "fanout/test",
+                "cooks": [{
+                    "cook_id": "one",
+                    "prompt": "fix it",
+                    "cwd": child,
+                    "to_worktree": "homeboy@fix-one",
+                    "head": "fix/one",
+                    "verify": ["cargo test -p homeboy"]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("fanout spec");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "fanout".to_string(),
+            "run-plan".to_string(),
+            "--input".to_string(),
+            format!("@{}", spec.display()),
+        ];
+
+        let workspaces = agent_task_fanout_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "agent_task_fanout_cook_workspace");
+        assert_eq!(workspaces[0].path, child.canonicalize().unwrap());
     }
 
     #[test]

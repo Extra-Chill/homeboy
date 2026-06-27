@@ -227,9 +227,58 @@ fn runner_exec_secret_env_names_include_tunnel_preview_client_token() {
         ],
         None,
         &[],
+        &HashMap::new(),
     );
 
     assert_eq!(names, vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]);
+}
+
+#[test]
+fn runner_exec_secret_env_names_include_runtime_provider_defaults() {
+    let names = runner_exec_secret_env_names(
+        &["node".to_string(), "run-headless-loop.cjs".to_string()],
+        None,
+        &[],
+        &HashMap::from([(
+            "HOMEBOY_AGENT_RUNTIME_PROVIDER".to_string(),
+            "codex".to_string(),
+        )]),
+    );
+
+    assert_eq!(
+        names,
+        vec![
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn runner_exec_secret_env_names_prefer_explicit_runtime_secret_env() {
+    let names = runner_exec_secret_env_names(
+        &["node".to_string(), "run-headless-loop.cjs".to_string()],
+        None,
+        &[],
+        &HashMap::from([
+            (
+                "HOMEBOY_AGENT_RUNTIME_PROVIDER".to_string(),
+                "codex".to_string(),
+            ),
+            (
+                "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
+                "CUSTOM_REFRESH,CUSTOM_ACCESS".to_string(),
+            ),
+        ]),
+    );
+
+    assert_eq!(
+        names,
+        vec!["CUSTOM_ACCESS".to_string(), "CUSTOM_REFRESH".to_string()]
+    );
 }
 
 #[test]
@@ -460,6 +509,70 @@ fn test_exec_preserves_explicit_request_env() {
 
         assert_eq!(exit_code, 0);
         assert_eq!(output.stdout, "planned");
+    });
+}
+
+#[test]
+fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
+    crate::test_support::with_isolated_home(|_| {
+        super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+            .expect("create local runner");
+
+        let (output, exit_code) = exec(
+            "lab-local",
+            RunnerExecOptions {
+                cwd: None,
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf '%s|%s|%s|%s' \"$HOMEBOY_ACTIVE_RUN_ID\" \"$HOMEBOY_RUN_ID\" \"$HOMEBOY_BENCH_RUN_ID\" \"${WORKFLOW_BENCH_RUN_ID-unset}\"".to_string(),
+                ],
+                env: HashMap::from([
+                    (
+                        "HOMEBOY_ACTIVE_RUN_ID".to_string(),
+                        "ambient-active".to_string(),
+                    ),
+                    ("HOMEBOY_RUN_ID".to_string(), "ambient-homeboy".to_string()),
+                    (
+                        "HOMEBOY_BENCH_RUN_ID".to_string(),
+                        "ambient-bench".to_string(),
+                    ),
+                    (
+                        "WORKFLOW_BENCH_RUN_ID".to_string(),
+                        "ambient-workflow".to_string(),
+                    ),
+                ]),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: Vec::new(),
+                runner_workload: None,
+                run_id: Some("explicit-run".to_string()),
+                detach_after_handoff: false,
+            },
+        )
+        .expect("exec local runner");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            output.stdout,
+            "explicit-run|explicit-run|explicit-run|unset"
+        );
+        let hints = output
+            .diagnostics
+            .expect("run-id diagnostics")
+            .hints
+            .join("\n");
+        assert!(hints.contains("runner exec --run-id took precedence"));
+        assert!(hints.contains("HOMEBOY_ACTIVE_RUN_ID"));
+        assert!(hints.contains("HOMEBOY_RUN_ID"));
+        assert!(hints.contains("HOMEBOY_BENCH_RUN_ID"));
+        assert!(hints.contains("WORKFLOW_BENCH_RUN_ID"));
     });
 }
 

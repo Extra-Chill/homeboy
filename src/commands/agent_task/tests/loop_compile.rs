@@ -711,6 +711,9 @@ fn controller_from_spec_doctor_reports_missing_provider_before_resume() {
         }))
         .expect("spec json"),
         resume: false,
+        inputs: None,
+        policy_results: Vec::new(),
+        max_actions: None,
         replace: false,
         fork: false,
         resume_existing: false,
@@ -754,6 +757,9 @@ fn controller_from_spec_doctor_accepts_fixture_provider() {
         }))
         .expect("spec json"),
         resume: false,
+        inputs: None,
+        policy_results: Vec::new(),
+        max_actions: None,
         replace: false,
         fork: false,
         resume_existing: false,

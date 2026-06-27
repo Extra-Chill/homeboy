@@ -41,6 +41,8 @@ fn lab_offload_rejects_truncated_runner_stdout() {
         patch: None,
         mutation_artifacts: None,
         artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
         metrics: None,
         capture: Some(CommandCaptureMetadata {
             stdout: CaptureMetadata {
@@ -88,6 +90,8 @@ fn lab_offload_failure_summary_uses_runner_failure_context() {
         patch: None,
         mutation_artifacts: None,
         artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
         metrics: None,
         capture: None,
         runner_result: None,
@@ -132,6 +136,8 @@ fn lab_offload_failure_summary_keeps_rig_not_found_without_contract_field() {
         patch: None,
         mutation_artifacts: None,
         artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
         metrics: None,
         capture: None,
         runner_result: None,
@@ -179,6 +185,8 @@ fn missing_mutation_patch_error_points_to_runner_evidence_and_retry() {
         patch: None,
         mutation_artifacts: None,
         artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
         metrics: None,
         capture: None,
         runner_result: None,
@@ -496,6 +504,7 @@ fn lab_stream_truncation_fails_without_structured_output_file() {
 
     assert_eq!(err.code, ErrorCode::InternalUnexpected);
     assert!(err.message.contains("retained stream limit"));
+    assert_eq!(err.details["reason"], "output_too_large");
 }
 
 #[test]
@@ -526,6 +535,42 @@ fn lab_stream_truncation_is_allowed_with_structured_output_file() {
     assert!(
         allowed.is_ok(),
         "structured output file must permit truncated streams, got: {allowed:?}"
+    );
+}
+
+#[test]
+fn lab_stream_truncation_is_allowed_with_structured_runner_result() {
+    let mut output = truncated_runner_exec_output();
+    output.runner_result = Some(crate::core::runner::RunnerResult {
+        exit_code: 0,
+        status: crate::core::api_jobs::JobStatus::Succeeded,
+        stdout_bytes: Some(5 * 1024 * 1024),
+        stderr_bytes: Some(0),
+        mirror_run_id: Some("fuzz-run-123".to_string()),
+        mutation_artifacts: None,
+        artifact_refs: vec![crate::core::runner::RunnerArtifactRef {
+            artifact_id: "artifact-123".to_string(),
+            name: Some("fuzz_results".to_string()),
+            path: Some("runner-artifact://homeboy-lab/fuzz-run-123/artifact-123".to_string()),
+            url: None,
+            mime: Some("application/json".to_string()),
+            size_bytes: Some(2048),
+            sha256: None,
+            transport: Some("runner_artifact".to_string()),
+        }],
+    });
+
+    let structured_result_available = lab_offload_structured_result_available(&output, None);
+    assert!(structured_result_available);
+    assert_eq!(
+        output.runner_result.as_ref().expect("runner result").status,
+        crate::core::api_jobs::JobStatus::Succeeded
+    );
+    let allowed = ensure_lab_offload_streams_not_truncated(&output, structured_result_available);
+
+    assert!(
+        allowed.is_ok(),
+        "structured runner result must permit truncated streams, got: {allowed:?}"
     );
 }
 

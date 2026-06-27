@@ -7,10 +7,16 @@ pub enum AgentTaskControllerCommand {
     /// Create a durable loop controller record.
     Init(AgentTaskControllerInitArgs),
     /// Initialize or resume a durable loop controller from a repo-authored JSON spec.
+    ///
+    /// With a configured default Lab runner, --resume uses automatic Lab offload unless local execution is explicitly forced.
     FromSpec(AgentTaskControllerFromSpecArgs),
     /// Materialize, initialize, and run a bounded controller loop from a repo-authored JSON spec.
+    ///
+    /// With a configured default Lab runner, this uses automatic Lab offload unless local execution is explicitly forced.
     RunFromSpec(AgentTaskControllerRunFromSpecArgs),
     /// Materialize a repo-authored loop spec with explicit run inputs.
+    ///
+    /// With a configured default Lab runner, this uses automatic Lab offload unless local execution is explicitly forced.
     Materialize(AgentTaskControllerMaterializeArgs),
     /// Validate a proof, materialized spec, or controller record for deterministic handoff.
     ValidateProof(AgentTaskControllerValidateProofArgs),
@@ -18,6 +24,8 @@ pub enum AgentTaskControllerCommand {
     Plan(AgentTaskControllerPlanArgs),
     /// Read a durable loop controller record.
     Status(AgentTaskControllerStatusArgs),
+    /// Render the controller failure tree for failed child actions.
+    Diagnose(AgentTaskControllerStatusArgs),
     /// List durable loop controller records.
     List,
     /// Apply a generic external controller event.
@@ -59,6 +67,22 @@ pub struct AgentTaskControllerFromSpecArgs {
     /// Execute pending actions after applying the spec.
     #[arg(long)]
     pub resume: bool,
+
+    /// Explicit controller run inputs JSON, @file, or - for stdin. Supports `inputs` and `metadata` objects.
+    #[arg(long, value_name = "JSON")]
+    pub inputs: Option<String>,
+
+    /// Declarative policy result JSON, @file, or - for stdin. Repeatable.
+    #[arg(long = "policy-result", value_name = "JSON")]
+    pub policy_results: Vec<String>,
+
+    /// Maximum controller actions to execute when --resume is supplied.
+    #[arg(
+        long = "max-actions",
+        visible_alias = "max-iterations",
+        value_name = "N"
+    )]
+    pub max_actions: Option<u32>,
 
     /// On --resume, discard stale persisted controller state and re-create it from this spec.
     #[arg(long, conflicts_with_all = ["fork", "resume_existing"])]

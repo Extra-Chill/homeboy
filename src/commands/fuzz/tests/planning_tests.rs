@@ -207,6 +207,10 @@ fn fuzz_run_parses_generic_contract_flags() {
         "parser",
         "--run-id",
         "proof-1",
+        "--tracker-ref",
+        "github_issue:Extra-Chill/homeboy#123",
+        "--tracker-ref",
+        "linear:HB-42",
         "--seed",
         "1234",
         "--inventory",
@@ -216,6 +220,8 @@ fn fuzz_run_parses_generic_contract_flags() {
         "--require-result-envelope",
         "--max-duration",
         "60s",
+        "--expect-metric",
+        "side_effect_grouped_created_count=2",
         "--",
         "--engine",
         "libfuzzer",
@@ -227,6 +233,11 @@ fn fuzz_run_parses_generic_contract_flags() {
             assert_eq!(run.rig.as_deref(), Some("package-fuzz"));
             assert_eq!(run.workload_id.as_deref(), Some("parser"));
             assert_eq!(run.run_id.as_deref(), Some("proof-1"));
+            assert_eq!(run.tracker_refs.len(), 2);
+            assert_eq!(run.tracker_refs[0].kind, "github_issue");
+            assert_eq!(run.tracker_refs[0].id, "Extra-Chill/homeboy#123");
+            assert_eq!(run.tracker_refs[1].kind, "linear");
+            assert_eq!(run.tracker_refs[1].id, "HB-42");
             assert_eq!(run.seed.as_deref(), Some("1234"));
             assert_eq!(
                 run.inventory.as_deref(),
@@ -236,6 +247,13 @@ fn fuzz_run_parses_generic_contract_flags() {
             assert!(run.require_coverage_summary);
             assert!(run.require_result_envelope);
             assert_eq!(run.max_duration.as_deref(), Some("60s"));
+            assert_eq!(
+                run.expect_metric,
+                vec![(
+                    "side_effect_grouped_created_count".to_string(),
+                    "2".to_string()
+                )]
+            );
             assert_eq!(run.args, vec!["--engine", "libfuzzer"]);
         }
         _ => panic!("expected fuzz run command"),
@@ -384,6 +402,8 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
         inventory_file: None,
         max_duration: None,
         passthrough_args: Vec::new(),
+        requested_settings: serde_json::Value::Null,
+        gates: Vec::new(),
         target_inventory: None,
         execution: None,
         postprocess: Vec::new(),
@@ -394,6 +414,7 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
             extension_script_required: true,
             env: Vec::new(),
         },
+        evidence_refs: Vec::new(),
         evidence_followups: Vec::new(),
     }))
     .unwrap();

@@ -8,6 +8,7 @@ use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runners::{self, RunnerExecOptions};
 use homeboy::core::Error;
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::commands::utils::output::write_output_file;
 
@@ -21,7 +22,7 @@ pub fn route_after_parse(
     }
 
     if let (Some(runner_id), Commands::Runs(args)) = (cli.runner.as_deref(), &cli.command) {
-        if !is_runs_list_runner_option(normalized_args) {
+        if !is_runs_list_runner_option(normalized_args) && !args.has_command_local_runner_option() {
             return Err(crate::commands::runs::global_runner_error(args, runner_id));
         }
 
@@ -104,7 +105,7 @@ pub fn route_after_parse(
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             capture_patch: capture_mutation_patch,
             mutation_flag,
-            timeout: None,
+            timeout: lab_route_dispatch_timeout(&cli.command),
             active_run_id: active_run_id.as_deref(),
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
@@ -141,16 +142,31 @@ pub fn route_after_parse(
     }
 }
 
+fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration> {
+    matches!(command, Commands::Trace(_)).then(lab_routing::lab_trace_dispatch_timeout)
+}
+
+/// Insert one env pair into the overrides, recording the key as secret when
+/// the redaction policy considers the key sensitive or the value redacted.
+fn insert_lab_env_override(
+    overrides: &mut runners::LabJobOverrides,
+    policy: &RedactionPolicy,
+    name: String,
+    value: String,
+) {
+    if policy.is_sensitive_key(&name) || policy.redact_string(&value) != value {
+        overrides.secret_env_names.push(name.clone());
+    }
+    overrides.env.insert(name, value);
+}
+
 fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverrides> {
     let mut overrides = runners::LabJobOverrides::default();
     let policy = RedactionPolicy::default();
 
     for raw in &cli.runner_env {
         let (name, value) = parse_lab_env_pair("runner-env", raw)?;
-        if policy.is_sensitive_key(&name) || policy.redact_string(&value) != value {
-            overrides.secret_env_names.push(name.clone());
-        }
-        overrides.env.insert(name, value);
+        insert_lab_env_override(&mut overrides, &policy, name, value);
     }
 
     if let Some(raw_json) = cli.lab_env_json.as_deref() {
@@ -184,10 +200,7 @@ fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverride
                     ));
                 }
             };
-            if policy.is_sensitive_key(&name) || policy.redact_string(&value) != value {
-                overrides.secret_env_names.push(name.clone());
-            }
-            overrides.env.insert(name, value);
+            insert_lab_env_override(&mut overrides, &policy, name, value);
         }
     }
 
@@ -364,7 +377,25 @@ fn run_rig_source_management_on_runner(
 ) -> homeboy::core::Result<(String, String, i32)> {
     let runner = runners::load(runner_id)?;
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
-    let command = runner_rig_source_management_command(homeboy_path, normalized_args);
+    let mut command = runner_rig_source_management_command(homeboy_path, normalized_args);
+    let mut translated_remote_root = runner.workspace_root.clone().unwrap_or_default();
+    let local_cwd = std::env::current_dir().ok();
+    if let Some(local_cwd) = local_cwd.as_deref() {
+        if command_contains_path_prefix(&command, local_cwd) {
+            let (synced, sync_exit_code) = runners::sync_workspace(
+                runner_id,
+                runners::RunnerWorkspaceSyncOptions {
+                    path: local_cwd.display().to_string(),
+                    mode: runners::RunnerWorkspaceSyncMode::Snapshot,
+                    ..Default::default()
+                },
+            )?;
+            if sync_exit_code == 0 {
+                command = translate_command_path_prefix(&command, local_cwd, &synced.remote_path);
+                translated_remote_root = synced.remote_path;
+            }
+        }
+    }
 
     // Remote-execution preflight before dispatching caller-derived argv to the
     // runner (#5093):
@@ -374,14 +405,13 @@ fn run_rig_source_management_on_runner(
     // 2. Capability parity: validate the runner can run the forwarded `homeboy`
     //    binary before execution starts (enforced by `runners::exec` against the
     //    supplied `RunnerCapabilityPreflight`).
-    let remote_cwd = runner.workspace_root.clone().unwrap_or_default();
-    if let Ok(local_cwd) = std::env::current_dir() {
+    if let Some(local_cwd) = local_cwd.as_deref() {
         runners::preflight_remote_argv_path_translation(
             "Rig source management",
             runner_id,
             &command,
-            &local_cwd,
-            &remote_cwd,
+            local_cwd,
+            &translated_remote_root,
         )?;
     }
     let required_commands: Vec<String> = command
@@ -425,6 +455,32 @@ fn run_rig_source_management_on_runner(
     Ok((output.stdout, output.stderr, exit_code))
 }
 
+fn command_contains_path_prefix(command: &[String], local_root: &Path) -> bool {
+    let local_root = local_root.display().to_string();
+    let local_root = local_root.trim_end_matches('/');
+    !local_root.is_empty() && command.iter().any(|arg| arg.contains(local_root))
+}
+
+fn translate_command_path_prefix(
+    command: &[String],
+    local_root: &Path,
+    remote_root: &str,
+) -> Vec<String> {
+    let local_root = local_root.display().to_string();
+    let local_root = local_root.trim_end_matches('/');
+    let remote_root = remote_root.trim_end_matches('/');
+    command
+        .iter()
+        .map(|arg| {
+            if local_root.is_empty() || remote_root.is_empty() {
+                arg.clone()
+            } else {
+                arg.replace(local_root, remote_root)
+            }
+        })
+        .collect()
+}
+
 fn runner_rig_source_management_command(
     homeboy_path: &str,
     normalized_args: &[String],
@@ -439,6 +495,10 @@ fn runner_rig_source_management_command(
         if arg == "--allow-local-fallback"
             || arg == "--allow-dirty-lab-workspace"
             || arg == "--allow-local-hot"
+            || arg == "--lab-only"
+            || arg == "--no-local-execution"
+            || arg == "--force-hot"
+            || arg == "--detach-after-handoff"
         {
             continue;
         }
@@ -661,8 +721,7 @@ mod tests {
     use tempfile::tempdir;
 
     struct EnvGuard {
-        name: &'static str,
-        previous: Option<String>,
+        previous: Vec<(&'static str, Option<String>)>,
         _guard: MutexGuard<'static, ()>,
     }
 
@@ -673,22 +732,24 @@ mod tests {
 
     impl EnvGuard {
         fn set(name: &'static str, value: &str) -> Self {
-            let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-            let previous = std::env::var(name).ok();
-            std::env::set_var(name, value);
-            Self {
-                name,
-                previous,
-                _guard: guard,
-            }
+            Self::set_many(&[(name, Some(value))])
         }
 
         fn remove(name: &'static str) -> Self {
+            Self::set_many(&[(name, None)])
+        }
+
+        fn set_many(changes: &[(&'static str, Option<&str>)]) -> Self {
             let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-            let previous = std::env::var(name).ok();
-            std::env::remove_var(name);
+            let mut previous = Vec::with_capacity(changes.len());
+            for (name, value) in changes {
+                previous.push((*name, std::env::var(name).ok()));
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
             Self {
-                name,
                 previous,
                 _guard: guard,
             }
@@ -702,9 +763,11 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
+            for (name, previous) in self.previous.iter().rev() {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
             }
         }
     }
@@ -983,6 +1046,18 @@ mod tests {
     }
 
     #[test]
+    fn lab_route_dispatch_timeout_plumbs_core_timeout() {
+        let trace_cli = Cli::parse_from(["homeboy", "trace", "list"]);
+        let lint_cli = Cli::parse_from(["homeboy", "lint"]);
+
+        assert_eq!(
+            lab_route_dispatch_timeout(&trace_cli.command),
+            Some(lab_routing::lab_trace_dispatch_timeout())
+        );
+        assert_eq!(lab_route_dispatch_timeout(&lint_cli.command), None);
+    }
+
+    #[test]
     fn offloaded_stdout_write_preserves_bytes_for_output_file() {
         let dir = tempdir().unwrap();
         let output_path = dir.path().join("out.json");
@@ -1006,6 +1081,9 @@ mod tests {
             "homeboy-lab".to_string(),
             "--output=./sources.json".to_string(),
             "--allow-local-fallback".to_string(),
+            "--lab-only".to_string(),
+            "--force-hot".to_string(),
+            "--detach-after-handoff".to_string(),
         ];
 
         assert_eq!(
@@ -1016,6 +1094,27 @@ mod tests {
                 "sources".to_string(),
                 "list".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn runner_rig_source_management_translates_local_subdir_paths() {
+        let command = vec![
+            "/runner/bin/homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            "/Users/chubes/Developer/homeboy-rigs@run/WordPress/static-site-importer".to_string(),
+        ];
+
+        let translated = translate_command_path_prefix(
+            &command,
+            std::path::Path::new("/Users/chubes/Developer/homeboy-rigs@run"),
+            "/home/chubes/Developer/_lab_workspaces/homeboy-rigs-run-abc",
+        );
+
+        assert_eq!(
+            translated[3],
+            "/home/chubes/Developer/_lab_workspaces/homeboy-rigs-run-abc/WordPress/static-site-importer"
         );
     }
 
@@ -1039,9 +1138,11 @@ mod tests {
     fn linked_local_rig_check_stays_local_without_runner() {
         // Scope the offload-metadata env var so a parallel test that sets it
         // (process-global) cannot leak into this local/no-runner assertion.
-        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let temp_home = tempdir().expect("temp home");
-        let _home = EnvGuard::set("HOME", temp_home.path().to_str().expect("home path"));
+        let _env = EnvGuard::set_many(&[
+            (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+            ("HOME", Some(temp_home.path().to_str().expect("home path"))),
+        ]);
         write_rig_source_metadata(temp_home.path(), "linked-local", true);
         let normalized = vec![
             "homeboy".to_string(),
@@ -1257,6 +1358,44 @@ mod tests {
     }
 
     #[test]
+    fn runs_artifact_attach_runner_option_routes_locally() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+
+        for normalized in [
+            vec![
+                "homeboy".to_string(),
+                "runs".to_string(),
+                "artifact".to_string(),
+                "attach".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "--path".to_string(),
+                "/tmp/matrix-summary.json".to_string(),
+                "--name".to_string(),
+                "matrix-summary".to_string(),
+                "run-123".to_string(),
+            ],
+            vec![
+                "homeboy".to_string(),
+                "runs".to_string(),
+                "artifact".to_string(),
+                "attach".to_string(),
+                "--runner=homeboy-lab".to_string(),
+                "--path=/tmp/matrix-summary.json".to_string(),
+                "--name=matrix-summary".to_string(),
+                "run-123".to_string(),
+            ],
+        ] {
+            let cli = Cli::parse_from(&normalized);
+
+            let outcome = route_after_parse(&cli, &normalized, None)
+                .expect("runs artifact attach command-local runner option should not be rejected");
+
+            assert_eq!(outcome, None);
+        }
+    }
+
+    #[test]
     fn agent_task_inspection_commands_support_runner_resident_recovery() {
         for args in [
             ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
@@ -1362,11 +1501,64 @@ mod tests {
             "agent-task controller from-spec --resume/run-from-spec/materialize"
         );
         assert!(command.portable);
-        assert!(!command.routing_policy.default_lab_offload);
+        assert!(command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.requires_extension_parity);
         assert_eq!(
             command.workspace_mode_policy,
             runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
         );
+    }
+
+    #[test]
+    fn agent_task_controller_materialization_family_auto_selects_default_lab_runner() {
+        for args in [
+            [
+                "homeboy",
+                "agent-task",
+                "controller",
+                "from-spec",
+                "loop.json",
+                "--resume",
+                "--max-actions",
+                "1",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "controller",
+                "run-from-spec",
+                "loop.json",
+                "--max-actions",
+                "1",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "controller",
+                "materialize",
+                "loop.json",
+            ]
+            .as_slice(),
+        ] {
+            let cli = Cli::parse_from(args);
+
+            let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+            assert_eq!(
+                command.hot_label,
+                "agent-task controller from-spec --resume/run-from-spec/materialize"
+            );
+            assert!(command.portable);
+            assert!(command.routing_policy.default_lab_offload);
+            assert!(command.routing_policy.infer_source_path_tools);
+            assert!(!command.routing_policy.requires_extension_parity);
+            assert_eq!(
+                command.workspace_mode_policy,
+                runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
+            );
+        }
     }
 
     #[test]
@@ -1738,6 +1930,7 @@ mod tests {
     fn rewrite_ad_hoc_lab_workspace_adds_path_for_pathless_lint() {
         let dir = tempdir().unwrap();
         let _cwd = CwdGuard::set(dir.path());
+        let cwd = std::env::current_dir().expect("current dir");
         let cli = Cli::parse_from(["homeboy", "lint"]);
         let normalized = vec!["homeboy".to_string(), "lint".to_string()];
 
@@ -1750,7 +1943,7 @@ mod tests {
                 "homeboy".to_string(),
                 "lint".to_string(),
                 "--path".to_string(),
-                dir.path().to_string_lossy().to_string(),
+                cwd.to_string_lossy().to_string(),
             ]
         );
     }
@@ -1759,6 +1952,7 @@ mod tests {
     fn rewrite_ad_hoc_lab_workspace_inserts_path_before_passthrough() {
         let dir = tempdir().unwrap();
         let _cwd = CwdGuard::set(dir.path());
+        let cwd = std::env::current_dir().expect("current dir");
         let cli = Cli::parse_from(["homeboy", "test", "--", "--filter", "ExampleTest"]);
         let normalized = vec![
             "homeboy".to_string(),
@@ -1777,7 +1971,7 @@ mod tests {
                 "homeboy".to_string(),
                 "test".to_string(),
                 "--path".to_string(),
-                dir.path().to_string_lossy().to_string(),
+                cwd.to_string_lossy().to_string(),
                 "--".to_string(),
                 "--filter".to_string(),
                 "ExampleTest".to_string(),

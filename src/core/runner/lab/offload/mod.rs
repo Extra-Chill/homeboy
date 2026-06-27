@@ -48,7 +48,6 @@ use crate::core::agent_tasks::provider::provider_runner_source_contracts;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::redaction::{redact_argv, redact_argv_display, RedactionPolicy};
-use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
 
@@ -76,17 +75,18 @@ use super::super::lab_env::{
 };
 use super::super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 use super::super::lab_selection::{
+    fail_if_no_default_runner_accepts_jobs, preflight_lab_runner_availability,
     prepare_lab_runner_for_offload, release_gate_local_hot_denied_error,
     resolve_lab_runner_selection, status_tunnel_mode, LabRunnerPreparation, LabRunnerSelection,
     LabRunnerSelectionSource,
 };
 use super::super::lab_workspaces::{
-    agent_task_plan_extra_workspaces, agent_task_provider_runtime_component_extra_workspaces,
-    lab_extra_workspaces, lab_runtime_overlay_metadata, lab_runtime_overlays,
-    lab_workspace_mapping_metadata, path_setting_extra_workspaces,
-    preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
-    rig_component_path_env_extra_workspaces, runtime_overlay_env_overrides,
-    sync_extra_lab_workspaces, sync_lab_runtime_overlays,
+    agent_task_fanout_extra_workspaces, agent_task_plan_extra_workspaces,
+    agent_task_provider_runtime_component_extra_workspaces, lab_extra_workspaces,
+    lab_runtime_overlay_metadata, lab_runtime_overlays, lab_workspace_mapping_metadata,
+    path_setting_extra_workspaces, preflight_provider_config_source_cli_dependencies,
+    provider_config_extra_workspaces, rig_component_path_env_extra_workspaces,
+    runtime_overlay_env_overrides, sync_extra_lab_workspaces, sync_lab_runtime_overlays,
     workspace_mapping_entries_for_git_dependency, workspace_mapping_entry,
     workspace_mapping_entry_for_validation_dependency, LabWorkspaceMappingEntry,
 };
@@ -97,7 +97,7 @@ use super::super::{
     plan_managed_runner_source_syncs, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
     status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
@@ -113,7 +113,10 @@ use super::fallback::{
     skipped_automatic_run_local_with_overhead, unsupported_build_lab_error,
 };
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
-use super::secrets::{build_lab_secret_env_handoff_plan, preflight_agent_task_runner_secret_env};
+use super::secrets::{
+    build_lab_secret_env_handoff_plan, preflight_agent_task_runner_secret_env_plan,
+    preflight_lab_secret_env_handoff,
+};
 use super::trace_fetch_refs::lab_offload_git_fetch_refs;
 use super::workspace_plan::{lab_workspace_sync_mode, preflight_required_git_checkout_workspace};
 #[cfg(test)]

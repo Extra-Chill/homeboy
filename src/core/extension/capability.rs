@@ -125,6 +125,7 @@ pub struct ScenarioRunnerOptions<'a> {
     pub artifact_env: Option<(&'a str, &'a Path)>,
     pub list_only_env: Option<(&'a str, bool)>,
     pub extra_workloads_env: Option<(&'a str, &'a [PathBuf], &'a str)>,
+    pub env_provider_extensions: &'a [String],
     pub invocation_requirements: crate::core::engine::invocation::InvocationRequirements,
 }
 
@@ -135,6 +136,7 @@ pub fn build_scenario_runner(options: ScenarioRunnerOptions<'_>) -> Result<Exten
         .settings(options.settings)
         .settings_json(options.settings_json)
         .with_run_dir(options.run_dir)
+        .env_provider_extensions(options.env_provider_extensions)
         .invocation_requirements(options.invocation_requirements);
 
     if let Some((key, path)) = options.results_env {

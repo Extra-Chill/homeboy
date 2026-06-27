@@ -27,6 +27,7 @@
 - [git](git.md)
 - [http](http.md) — generic proxied authenticated HTTP requests
 - [issues](issues.md) — reconcile findings against issue trackers
+- [lab](lab.md) — read-only Lab runner refresh planning
 - [lint](lint.md)
 - [logs](logs.md)
 - [manifest](manifest.md) — recursive command safety, docs, output, and Lab metadata

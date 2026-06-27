@@ -147,6 +147,8 @@ mod tests {
             rig_id: Some("studio-bfb".to_string()),
             shared_state: None,
             extra_workloads: Vec::new(),
+            env_provider_extensions: Vec::new(),
+            rig_package: None,
             invocation_requirements:
                 crate::core::engine::invocation::InvocationRequirements::default(),
         }

@@ -178,6 +178,14 @@ fn test_composer_command_args() {
 }
 
 #[test]
+fn composer_install_command_args_are_runtime_prep_safe() {
+    assert_eq!(
+        deps_provider::composer_install_command_args(),
+        vec!["install", "--no-interaction", "--no-progress"]
+    );
+}
+
+#[test]
 fn stack_plan_walks_declared_downstream_edges_in_order() {
     let components = vec![
         stack_component(

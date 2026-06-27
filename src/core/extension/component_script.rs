@@ -16,6 +16,7 @@ pub struct ComponentScriptOutput {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    pub timed_out: bool,
     pub child_resource: Option<ExtensionChildResourceSummary>,
     pub extension_phase_timings: Vec<ExtensionPhaseTiming>,
 }
@@ -27,6 +28,7 @@ impl From<RunnerOutput> for ComponentScriptOutput {
             success: output.success,
             stdout: output.stdout,
             stderr: output.stderr,
+            timed_out: output.timed_out,
             child_resource: output.child_resource,
             extension_phase_timings: output.extension_phase_timings,
         }
@@ -40,6 +42,7 @@ impl From<ComponentScriptOutput> for RunnerOutput {
             success: output.success,
             stdout: output.stdout,
             stderr: output.stderr,
+            timed_out: output.timed_out,
             child_resource: output.child_resource,
             extension_phase_timings: output.extension_phase_timings,
         }
@@ -79,6 +82,7 @@ pub(crate) fn run_component_scripts_with_env(
 
     let mut stdout = String::new();
     let mut stderr = String::new();
+    let mut timed_out = false;
     let mut child_resource = None;
     let env = component_script_env(component, source_path, extra_env)?;
 
@@ -104,11 +108,13 @@ pub(crate) fn run_component_scripts_with_env(
             super::execution::CapabilityScriptOptions {
                 passthrough,
                 stderr_passthrough: false,
+                timeout: None,
             },
         )?;
 
         stdout.push_str(&output.stdout);
         stderr.push_str(&output.stderr);
+        timed_out |= output.timed_out;
         child_resource = output.child_resource.clone();
 
         if !output.success {
@@ -117,6 +123,7 @@ pub(crate) fn run_component_scripts_with_env(
                 success: false,
                 stdout,
                 stderr,
+                timed_out,
                 child_resource,
                 extension_phase_timings: Vec::new(),
             });
@@ -128,6 +135,7 @@ pub(crate) fn run_component_scripts_with_env(
         success: true,
         stdout,
         stderr,
+        timed_out,
         child_resource,
         extension_phase_timings: Vec::new(),
     })

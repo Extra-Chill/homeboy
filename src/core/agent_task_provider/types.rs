@@ -75,6 +75,11 @@ pub struct AgentTaskExecutorProvider {
         skip_serializing_if = "AgentTaskProviderRoleAliases::is_empty"
     )]
     pub role_aliases: AgentTaskProviderRoleAliases,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskProviderResultContract::is_empty"
+    )]
+    pub result_contract: AgentTaskProviderResultContract,
     #[serde(default, skip_serializing_if = "AgentTaskRuntimeContract::is_empty")]
     pub runtime_contract: AgentTaskRuntimeContract,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,6 +92,50 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_path: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderResultContract {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed_artifact_envelope: Option<AgentTaskProviderTypedArtifactEnvelopeContract>,
+}
+
+impl AgentTaskProviderResultContract {
+    pub(super) fn is_empty(&self) -> bool {
+        self.typed_artifact_envelope.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderTypedArtifactEnvelopeContract {
+    pub schema: String,
+    #[serde(default = "default_provider_run_result_output")]
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_class_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_shape_markers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_typed_artifacts: Option<bool>,
+}
+
+impl Default for AgentTaskProviderTypedArtifactEnvelopeContract {
+    fn default() -> Self {
+        Self {
+            schema: String::new(),
+            output: default_provider_run_result_output(),
+            provider_label: None,
+            diagnostic_class_prefix: None,
+            private_shape_markers: Vec::new(),
+            require_typed_artifacts: None,
+        }
+    }
+}
+
+fn default_provider_run_result_output() -> String {
+    "provider_run_result".to_string()
 }
 
 fn default_provider_schema() -> String {

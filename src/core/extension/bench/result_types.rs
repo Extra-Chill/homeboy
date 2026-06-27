@@ -98,9 +98,50 @@ pub struct BenchRunMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner: Option<BenchRunnerMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rig_package: Option<RigPackageEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<LifecycleResultMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RigPackageEvidence {
+    pub rig_id: String,
+    pub package_root: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rig_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_dirty: bool,
+    pub linked: bool,
+    pub materialized: bool,
+    pub freshness: RigPackageFreshness,
+    pub freshness_verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RigPackageFreshness {
+    Verified,
+    Stale,
+    Missing,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
