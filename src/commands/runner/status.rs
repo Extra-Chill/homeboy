@@ -17,8 +17,7 @@ use super::types::{
     RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
     RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOutput, RunnerRuntimeDiagnostics,
     RunnerRuntimePackageDiagnostics, RunnerToolDiagnostics, RunnerWorkflowBinaryGuidance,
-    WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue, WpCodeboxRuntimeDiagnostic,
-    WpCodeboxRuntimeOutput,
+    RuntimeDiagnostic, RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
 };
 
 pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
@@ -105,10 +104,9 @@ fn selected_lab_runner_status(
         configured_executable: configured_executable.clone(),
         runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
         executable_requirements,
-        wp_codebox_runtime: runtime_diagnostics
-            .iter()
-            .find(|diagnostics| diagnostics.legacy_output.as_deref() == Some("wp_codebox_runtime"))
-            .map(wp_codebox_runtime_output_from_generic),
+        selected_runtime: runtime_diagnostics
+            .first()
+            .map(selected_runtime_output_from_generic),
         runtime_diagnostics,
         daemon_enabled: runner_config.settings.daemon,
         workspace_root: runner_config.workspace_root.clone(),
@@ -220,31 +218,6 @@ pub(super) fn lab_runner_homeboy_output(
     }
 }
 
-pub(crate) fn declared_tool_diagnostics_for_legacy(
-    legacy_output: &str,
-    runner_id: Option<&str>,
-    env: &BTreeMap<String, String>,
-) -> Option<RunnerToolDiagnostics> {
-    declared_diagnostics_contracts()
-        .iter()
-        .flat_map(|contract| contract.tools.iter())
-        .find(|declaration| declaration.legacy_output.as_deref() == Some(legacy_output))
-        .map(|declaration| declared_tool_diagnostics(declaration, runner_id, env))
-}
-
-pub(crate) fn declared_runtime_diagnostics_for_legacy(
-    legacy_output: &str,
-    runner_id: Option<&str>,
-    env: &BTreeMap<String, String>,
-) -> Option<WpCodeboxRuntimeOutput> {
-    declared_diagnostics_contracts()
-        .iter()
-        .flat_map(|contract| contract.runtimes.iter())
-        .find(|declaration| declaration.legacy_output.as_deref() == Some(legacy_output))
-        .map(|declaration| declared_runtime_diagnostics(declaration, runner_id, env))
-        .map(|diagnostics| wp_codebox_runtime_output_from_generic(&diagnostics))
-}
-
 pub(crate) fn declared_tool_diagnostics(
     declaration: &AgentRuntimeToolDiagnosticDeclaration,
     runner_id: Option<&str>,
@@ -329,29 +302,29 @@ pub(crate) fn declared_runtime_diagnostics_collection(
         .collect()
 }
 
-fn wp_codebox_runtime_output_from_generic(
+fn selected_runtime_output_from_generic(
     diagnostics: &RunnerRuntimeDiagnostics,
-) -> WpCodeboxRuntimeOutput {
-    WpCodeboxRuntimeOutput {
+) -> SelectedRuntimeOutput {
+    SelectedRuntimeOutput {
         tool: diagnostics.runtime.clone(),
         configured_binary: diagnostics.configured_binary.clone(),
         configured_binary_source: diagnostics.configured_binary_source.clone(),
         managed_cache_source: diagnostics.managed_cache_source.clone(),
         managed_cache_binary: diagnostics.managed_cache_binary.clone(),
         effective_binary_rule: diagnostics.effective_binary_rule.clone(),
-        playground_package: diagnostics
+        primary_package: diagnostics
             .packages
             .iter()
-            .find(|package| package.field == "playground_package")
+            .find(|package| package.field == "primary_package")
             .or_else(|| diagnostics.packages.first())
-            .map(wp_codebox_package_output_from_generic)
+            .map(runtime_package_output_from_generic)
             .unwrap_or_else(empty_package),
-        core_package: diagnostics
+        secondary_package: diagnostics
             .packages
             .iter()
-            .find(|package| package.field == "core_package")
+            .find(|package| package.field == "secondary_package")
             .or_else(|| diagnostics.packages.get(1))
-            .map(wp_codebox_package_output_from_generic)
+            .map(runtime_package_output_from_generic)
             .unwrap_or_else(empty_package),
         source_git_sha: diagnostics
             .probes
@@ -368,10 +341,10 @@ fn wp_codebox_runtime_output_from_generic(
     }
 }
 
-fn wp_codebox_package_output_from_generic(
+fn runtime_package_output_from_generic(
     package: &RunnerRuntimePackageDiagnostics,
-) -> WpCodeboxPackageRuntimeOutput {
-    WpCodeboxPackageRuntimeOutput {
+) -> RuntimePackageOutput {
+    RuntimePackageOutput {
         package: package.package.clone(),
         expected_path: package.expected_path.clone(),
         resolution: package.resolution.clone(),
@@ -384,7 +357,7 @@ pub(crate) fn declared_runtime_source_diagnostics(
     configured_binary: Option<&str>,
     install_dir: &str,
     managed_cache_source: &str,
-) -> Vec<WpCodeboxRuntimeDiagnostic> {
+) -> Vec<RuntimeDiagnostic> {
     let mut diagnostics = Vec::new();
     for declaration in declarations {
         let path = match declaration.path.as_str() {
@@ -396,7 +369,7 @@ pub(crate) fn declared_runtime_source_diagnostics(
         });
         let root = render_diagnostic_template(&declaration.root, install_dir, managed_cache_source);
         if !path.starts_with(&root) {
-            diagnostics.push(WpCodeboxRuntimeDiagnostic {
+            diagnostics.push(RuntimeDiagnostic {
                 id: declaration.id.clone(),
                 severity: declaration.severity.clone(),
                 message: render_path_message(&declaration.message, &path, &root),
@@ -407,7 +380,7 @@ pub(crate) fn declared_runtime_source_diagnostics(
     diagnostics
 }
 
-fn declared_diagnostics_contracts() -> Vec<AgentRuntimeDiagnosticsContract> {
+pub(crate) fn declared_diagnostics_contracts() -> Vec<AgentRuntimeDiagnosticsContract> {
     discover_agent_runtime_catalog()
         .manifests
         .into_iter()
@@ -475,7 +448,7 @@ fn declared_runtime_packages(
                         managed_cache_source,
                     )
                 }),
-            resolution: WpCodeboxProbeValue {
+            resolution: RuntimeProbeValue {
                 value: None,
                 source: "runtime_probe_command".to_string(),
             },
@@ -483,11 +456,11 @@ fn declared_runtime_packages(
         .collect()
 }
 
-fn empty_package() -> WpCodeboxPackageRuntimeOutput {
-    WpCodeboxPackageRuntimeOutput {
+fn empty_package() -> RuntimePackageOutput {
+    RuntimePackageOutput {
         package: String::new(),
         expected_path: String::new(),
-        resolution: WpCodeboxProbeValue {
+        resolution: RuntimeProbeValue {
             value: None,
             source: "runtime_probe_command".to_string(),
         },
@@ -496,14 +469,14 @@ fn empty_package() -> WpCodeboxPackageRuntimeOutput {
 
 fn declared_probe_values(
     declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-) -> BTreeMap<String, WpCodeboxProbeValue> {
+) -> BTreeMap<String, RuntimeProbeValue> {
     declaration
         .probes
         .iter()
         .map(|probe| {
             (
                 probe.field.clone(),
-                WpCodeboxProbeValue {
+                RuntimeProbeValue {
                     value: None,
                     source: probe.source.clone(),
                 },
@@ -512,8 +485,8 @@ fn declared_probe_values(
         .collect()
 }
 
-fn default_runtime_probe_value() -> WpCodeboxProbeValue {
-    WpCodeboxProbeValue {
+fn default_runtime_probe_value() -> RuntimeProbeValue {
+    RuntimeProbeValue {
         value: None,
         source: "runtime_probe_command".to_string(),
     }

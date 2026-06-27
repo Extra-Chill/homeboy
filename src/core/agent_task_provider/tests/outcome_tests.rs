@@ -238,10 +238,10 @@ fn provider_outcome_roles_normalize_from_declared_aliases() {
 }
 
 #[test]
-fn declared_codebox_result_contract_rejects_private_runtime_result_shape() {
-    let (_, mut provider) = request("task-codebox-private", "node provider.js".to_string());
+fn declared_sandbox_result_contract_rejects_private_runtime_result_shape() {
+    let (_, mut provider) = request("task-sandbox-private", "node provider.js".to_string());
     provider.backend = "runtime-provider".to_string();
-    provider.result_contract = codebox_result_contract();
+    provider.result_contract = sandbox_result_contract();
     let mut outcome = failed_outcome_with_run_result(json!({
         "agent_result": { "status": "succeeded" },
         "metadata": { "agent_runtime": { "id": "runtime-private" } }
@@ -259,24 +259,24 @@ fn declared_codebox_result_contract_rejects_private_runtime_result_shape() {
     let diagnostic = outcome
         .diagnostics
         .iter()
-        .find(|diagnostic| diagnostic.class == "codebox.public_result_envelope_missing")
+        .find(|diagnostic| diagnostic.class == "sandbox.public_result_envelope_missing")
         .expect("missing public envelope diagnostic");
     assert_eq!(diagnostic.data["private_shape_detected"], true);
     assert!(outcome.typed_artifacts.is_empty());
 }
 
 #[test]
-fn declared_codebox_result_contract_consumes_public_typed_artifacts() {
-    let (_, mut provider) = request("task-codebox-public", "node provider.js".to_string());
+fn declared_sandbox_result_contract_consumes_public_typed_artifacts() {
+    let (_, mut provider) = request("task-sandbox-public", "node provider.js".to_string());
     provider.backend = "runtime-provider".to_string();
-    provider.result_contract = codebox_result_contract();
+    provider.result_contract = sandbox_result_contract();
     let mut outcome = failed_outcome_with_run_result(json!({
-        "schema": "wp-codebox/artifact-result-envelope/v1",
+        "schema": "sample-runtime/artifact-result-envelope/v1",
         "status": "succeeded",
         "typed_artifacts": [{
             "name": "agent_result",
             "type": "agent_result",
-            "artifact_schema": "wp-codebox/agent-result/v1",
+            "artifact_schema": "sample-runtime/agent-result/v1",
             "payload": { "summary": "created patch" }
         }]
     }));
@@ -291,7 +291,7 @@ fn declared_codebox_result_contract_consumes_public_typed_artifacts() {
     assert_eq!(outcome.typed_artifacts[0].name, "agent_result");
     assert_eq!(
         outcome.typed_artifacts[0].artifact_schema.as_deref(),
-        Some("wp-codebox/agent-result/v1")
+        Some("sample-runtime/agent-result/v1")
     );
     assert_eq!(
         outcome.typed_artifacts[0].payload["summary"],
@@ -300,12 +300,12 @@ fn declared_codebox_result_contract_consumes_public_typed_artifacts() {
 }
 
 #[test]
-fn declared_codebox_result_contract_reports_missing_typed_artifacts() {
-    let (_, mut provider) = request("task-codebox-empty", "node provider.js".to_string());
+fn declared_sandbox_result_contract_reports_missing_typed_artifacts() {
+    let (_, mut provider) = request("task-sandbox-empty", "node provider.js".to_string());
     provider.backend = "runtime-provider".to_string();
-    provider.result_contract = codebox_result_contract();
+    provider.result_contract = sandbox_result_contract();
     let mut outcome = failed_outcome_with_run_result(json!({
-        "schema": "wp-codebox/artifact-result-envelope/v1",
+        "schema": "sample-runtime/artifact-result-envelope/v1",
         "status": "succeeded",
         "typed_artifacts": []
     }));
@@ -316,7 +316,7 @@ fn declared_codebox_result_contract_reports_missing_typed_artifacts() {
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
     assert!(outcome.diagnostics.iter().any(|diagnostic| {
-        diagnostic.class == "codebox.public_result_typed_artifacts_missing"
+        diagnostic.class == "sandbox.public_result_typed_artifacts_missing"
             && diagnostic.message.contains("typed artifacts")
     }));
 }
@@ -339,18 +339,18 @@ fn unknown_provider_without_result_contract_keeps_generic_outcome() {
     assert!(outcome.typed_artifacts.is_empty());
 }
 
-fn codebox_result_contract() -> AgentTaskProviderResultContract {
+fn sandbox_result_contract() -> AgentTaskProviderResultContract {
     serde_json::from_value(json!({
         "typed_artifact_envelope": {
-            "schema": "wp-codebox/artifact-result-envelope/v1",
+            "schema": "sample-runtime/artifact-result-envelope/v1",
             "output": "provider_run_result",
-            "provider_label": "WP Codebox",
-            "diagnostic_class_prefix": "codebox",
+            "provider_label": "Managed Sandbox",
+            "diagnostic_class_prefix": "sandbox",
             "private_shape_markers": ["agent_result", "metadata.agent_runtime"],
             "require_typed_artifacts": true
         }
     }))
-    .expect("codebox result contract")
+    .expect("sandbox result contract")
 }
 
 fn failed_outcome_with_run_result(run_result: Value) -> AgentTaskOutcome {

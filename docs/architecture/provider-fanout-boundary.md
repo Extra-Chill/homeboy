@@ -16,15 +16,15 @@ providers own backend-specific execution details. The seam is the
 
 ## Narrow seam
 
-The canonical Codebox product-facing path is:
+The canonical Sandbox product-facing path is:
 
 ```text
-Agents API substrate -> Homeboy durable scheduler/fanout plan -> Homeboy Extensions executor adapter -> WP Codebox sandbox worker runtime/artifact contracts
+Agents API substrate -> Homeboy durable scheduler/fanout plan -> Homeboy Extensions executor adapter -> Managed Sandbox sandbox worker runtime/artifact contracts
 ```
 
 Homeboy persists the plan/run ids, deterministic scheduling order, dependency
 skip state, child run refs, and artifact/evidence refs. Homeboy Extensions maps
-one normalized task request to the selected runtime provider. WP Codebox owns the
+one normalized task request to the selected runtime provider. Managed Sandbox owns the
 lower-level sandbox-native fanout request/result/event/artifact contracts inside
 the isolated worker runtime.
 

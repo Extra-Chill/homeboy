@@ -630,12 +630,12 @@ mod tests {
     #[test]
     fn failed_lab_show_summary_promotes_nested_recipe_and_browser_artifact_failures() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let artifact_path = dir.path().join("wp-codebox-result.json");
+        let artifact_path = dir.path().join("sample-runtime-result.json");
         std::fs::write(
             &artifact_path,
             serde_json::to_vec(&json!({
                 "success": false,
-                "provider": "wp-codebox",
+                "provider": "sample-runtime",
                 "result": {
                     "recipe": {
                         "status": "failed",
@@ -665,9 +665,9 @@ mod tests {
                     "status": "fail",
                     "metadata": {},
                     "artifacts": [{
-                        "id": "codebox-result",
+                        "id": "sandbox-result",
                         "run_id": "lab-run-1",
-                        "kind": "wp_codebox_result",
+                        "kind": "selected_runtime_result",
                         "type": "file",
                         "mime": "application/json",
                         "path": artifact_path.display().to_string()
@@ -680,10 +680,10 @@ mod tests {
 
         assert!(summary.contains("Failure summary:\n"));
         assert!(summary.contains(
-            "  recipe: Recipe validation failed: missing required step id (artifact codebox-result [wp_codebox_result])\n"
+            "  recipe: Recipe validation failed: missing required step id (artifact sandbox-result [selected_runtime_result])\n"
         ));
         assert!(summary.contains(
-            "  browser: Browser assertion failed: expected checkout button (artifact codebox-result [wp_codebox_result])\n"
+            "  browser: Browser assertion failed: expected checkout button (artifact sandbox-result [selected_runtime_result])\n"
         ));
         let failure_index = summary.find("Failure summary:\n").expect("failure summary");
         let artifact_index = summary.find("Artifacts (1):\n").expect("artifacts");
@@ -708,14 +708,14 @@ mod tests {
                             "status": "failed",
                             "error": {
                                 "code": "structured_output.parse_failed",
-                                "message": "Could not parse WP Codebox structured output"
+                                "message": "Could not parse Managed Sandbox structured output"
                             }
                         }
                     },
                     "artifacts": [{
                         "id": "structured-result",
                         "run_id": "lab-run-2",
-                        "kind": "wp_codebox_result",
+                        "kind": "selected_runtime_result",
                         "type": "file",
                         "mime": "application/json",
                         "path": artifact_path.display().to_string()
@@ -727,7 +727,7 @@ mod tests {
         let summary = render_runs_show_summary(&payload).expect("summary");
 
         assert!(summary.contains(
-            "  wrapper/parser: Could not parse WP Codebox structured output (metadata)\n"
+            "  wrapper/parser: Could not parse Managed Sandbox structured output (metadata)\n"
         ));
         assert!(summary.contains("  wrapper/parser: could not parse structured artifact JSON:"));
         assert!(!summary.contains("  recipe:"));

@@ -54,7 +54,7 @@ pub struct AgentTaskControllerDispatchArgs {
     pub dispatch_backend: Option<String>,
 
     /// Extension-provider selector: the Homeboy executor provider id (e.g.
-    /// `wordpress.codebox-agent-task-executor`) that runs controller-spawned
+    /// `wordpress.sandbox-agent-task-executor`) that runs controller-spawned
     /// dispatch actions when the action omits one. This is NOT a model or AI
     /// runtime name (codex, opencode, claude-code) — pass those in
     /// --dispatch-provider-config. Run `homeboy agent-task providers` for valid ids.

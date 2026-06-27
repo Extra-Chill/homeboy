@@ -11,7 +11,7 @@ fn run_failure_summary_normalizes_nested_provider_failure() {
         "action_id": "spawn-impl",
         "failure_summary": {
             "action_id": "spawn-impl",
-            "provider": "wp-codebox",
+            "provider": "sample-runtime",
             "failure_phase": "plugin_activation",
             "run_id": "run-42",
             "diagnostic": "PHP fatal: Uncaught Error: Class 'Foo' not found",
@@ -23,7 +23,7 @@ fn run_failure_summary_normalizes_nested_provider_failure() {
                 { "message": "PHP fatal: Uncaught Error: Class 'Foo' not found" }
             ],
             "artifacts": [
-                { "kind": "log_bundle", "uri": "file:///runs/run-42/codebox.log", "label": "codebox log" }
+                { "kind": "log_bundle", "uri": "file:///runs/run-42/sandbox.log", "label": "sandbox log" }
             ],
         },
     })];
@@ -36,13 +36,13 @@ fn run_failure_summary_normalizes_nested_provider_failure() {
     assert_eq!(summary.schema, CONTROLLER_RUN_FAILURE_SUMMARY_SCHEMA);
     assert_eq!(summary.stopped_reason, "action_failed");
     assert_eq!(summary.phase.as_deref(), Some("implement"));
-    assert_eq!(summary.owner_surface, "wp_codebox");
+    assert_eq!(summary.owner_surface, "selected_runtime");
     assert_eq!(
         summary.root_blocker,
         "PHP fatal: Uncaught Error: Class 'Foo' not found"
     );
     assert_eq!(summary.action_id.as_deref(), Some("spawn-impl"));
-    assert_eq!(summary.provider.as_deref(), Some("wp-codebox"));
+    assert_eq!(summary.provider.as_deref(), Some("sample-runtime"));
     assert_eq!(summary.failure_phase.as_deref(), Some("plugin_activation"));
     assert!(summary.next_command.contains("loop-9"));
     assert_homeboy_command_parses(&summary.next_command);
@@ -64,7 +64,7 @@ fn run_failure_summary_normalizes_nested_provider_failure() {
     assert!(summary
         .evidence_refs
         .iter()
-        .any(|reference| reference.uri == "file:///runs/run-42/codebox.log"));
+        .any(|reference| reference.uri == "file:///runs/run-42/sandbox.log"));
     assert_emitted_homeboy_evidence_commands_parse(&summary);
 }
 

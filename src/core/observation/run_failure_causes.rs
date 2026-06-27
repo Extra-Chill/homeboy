@@ -15,7 +15,7 @@ impl RunFailureCause {
     fn priority(&self) -> u8 {
         match self.surface.as_str() {
             "recipe" | "browser" => 0,
-            "wp_codebox" => 1,
+            "selected_runtime" => 1,
             "wrapper/parser" => 2,
             _ => 9,
         }
@@ -24,7 +24,7 @@ impl RunFailureCause {
 
 /// Promote useful nested failure causes from a serialized run detail.
 ///
-/// Lab/WP Codebox runs can bury the actionable error in structured artifact
+/// Lab/Managed Sandbox runs can bury the actionable error in structured artifact
 /// JSON. This scans failed-run metadata, artifact metadata, and small JSON
 /// artifact files, then returns a bounded, deduped list ordered by usefulness.
 pub fn nested_failure_causes_from_run_detail(run: &Value) -> Vec<RunFailureCause> {
@@ -262,8 +262,8 @@ fn classify_failure_surface(context: &str, message: &str) -> String {
         || haystack.contains("invalid json")
     {
         "wrapper/parser".to_string()
-    } else if haystack.contains("codebox") || haystack.contains("wp_codebox") {
-        "wp_codebox".to_string()
+    } else if haystack.contains("sandbox") || haystack.contains("selected_runtime") {
+        "selected_runtime".to_string()
     } else {
         "nested".to_string()
     }

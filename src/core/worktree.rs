@@ -706,7 +706,7 @@ mod queue_ops {
     pub(super) fn dmc_add_args(options: &WorktreeQueueCreateOptions, branch: &str) -> Vec<String> {
         let mut args = vec![
             "wp".to_string(),
-            "datamachine-code".to_string(),
+            "workspace-registry".to_string(),
             "workspace".to_string(),
             "worktree".to_string(),
             "add".to_string(),
@@ -734,7 +734,7 @@ mod queue_ops {
         let output = Command::new(dmc_bin)
             .args([
                 "wp",
-                "datamachine-code",
+                "workspace-registry",
                 "workspace",
                 "worktree",
                 "locks",
@@ -1055,7 +1055,7 @@ mod tests {
             vec![
                 "studio",
                 "wp",
-                "datamachine-code",
+                "workspace-registry",
                 "workspace",
                 "worktree",
                 "add",
@@ -1138,7 +1138,7 @@ mod tests {
                 "scope": "homeboy",
                 "state": "active",
                 "path": "/tmp/worktree-homeboy.lock",
-                "command": "wp datamachine-code workspace worktree add homeboy cook/one"
+                "command": "wp workspace-registry workspace worktree add homeboy cook/one"
             }]},
             "filesystem": { "locks": [] }
         });
@@ -1150,7 +1150,7 @@ mod tests {
         assert_eq!(holder.path.as_deref(), Some("/tmp/worktree-homeboy.lock"));
         assert_eq!(
             holder.command.as_deref(),
-            Some("wp datamachine-code workspace worktree add homeboy cook/one")
+            Some("wp workspace-registry workspace worktree add homeboy cook/one")
         );
     }
 

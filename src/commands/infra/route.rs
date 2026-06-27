@@ -910,7 +910,7 @@ mod tests {
         let cli = Cli::parse_from([
             "homeboy",
             "--runner-env",
-            "STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH=/tmp/wp-codebox",
+            "STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH=/tmp/sample-runtime",
             "--runner-env",
             "API_TOKEN=secret-token",
             "--lab-env-json",
@@ -924,8 +924,8 @@ mod tests {
         let overrides = lab_job_overrides(&cli).expect("overrides");
 
         assert_eq!(
-            overrides.env["STUDIO_NATIVE_TRACE_WP_CODEBOX_PLUGIN_PATH"],
-            "/tmp/wp-codebox"
+            overrides.env["STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH"],
+            "/tmp/sample-runtime"
         );
         assert_eq!(overrides.env["EXTRA_PATH"], "/tmp/extra");
         assert_eq!(overrides.env["EMPTY"], "");

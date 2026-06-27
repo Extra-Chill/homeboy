@@ -117,10 +117,10 @@ fn generic_loop_contract_fixtures_are_versioned_and_provider_neutral() {
 
     for raw in fixtures {
         assert!(!raw.contains("WordPress"));
-        assert!(!raw.contains("WP Codebox"));
-        assert!(!raw.contains("Data Machine"));
+        assert!(!raw.contains("Managed Sandbox"));
+        assert!(!raw.contains("Workspace Registry"));
         assert!(!raw.contains("WPSG"));
-        assert!(!raw.contains("wp-codebox"));
+        assert!(!raw.contains("sample-runtime"));
         let outcome: AgentTaskOutcome = serde_json::from_str(raw).expect("fixture outcome");
         assert_eq!(outcome.schema, AGENT_TASK_OUTCOME_SCHEMA);
     }

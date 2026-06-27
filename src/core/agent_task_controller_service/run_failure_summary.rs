@@ -2,7 +2,7 @@
 //!
 //! Diagnosing a failed controller run used to require manually traversing huge
 //! nested JSON envelopes (resume results, action reports, provider/runtime
-//! diagnostics, Codebox evidence) to find the actual blocker, the owning
+//! diagnostics, Sandbox evidence) to find the actual blocker, the owning
 //! surface, and the durable artifacts/logs that prove what happened (#6220).
 //!
 //! This module normalizes those nested provider/runtime failures into a small
@@ -25,7 +25,7 @@ enum OwnerSurface {
     Homeboy,
     LabRunner,
     ExtensionProvider,
-    WpCodebox,
+    SelectedRuntime,
     WordPressRuntime,
     ProviderPlugin,
     AgentOutput,
@@ -37,7 +37,7 @@ impl OwnerSurface {
             OwnerSurface::Homeboy => "homeboy",
             OwnerSurface::LabRunner => "lab_runner",
             OwnerSurface::ExtensionProvider => "extension_provider",
-            OwnerSurface::WpCodebox => "wp_codebox",
+            OwnerSurface::SelectedRuntime => "selected_runtime",
             OwnerSurface::WordPressRuntime => "wordpress_runtime",
             OwnerSurface::ProviderPlugin => "provider_plugin",
             OwnerSurface::AgentOutput => "agent_output",
@@ -211,13 +211,13 @@ fn classify_owner_surface(
         return OwnerSurface::ExtensionProvider;
     }
     let provider_hint = provider.unwrap_or("").to_ascii_lowercase();
-    if haystack.contains("codebox")
-        || provider_hint.contains("codebox")
-        || phase.contains("codebox")
+    if haystack.contains("sandbox")
+        || provider_hint.contains("sandbox")
+        || phase.contains("sandbox")
         || phase.contains("plugin_activation")
         || haystack.contains("plugin activation")
     {
-        return OwnerSurface::WpCodebox;
+        return OwnerSurface::SelectedRuntime;
     }
     if haystack.contains("php fatal")
         || haystack.contains("fatal error")
@@ -466,7 +466,7 @@ fn next_command(loop_id: &str, owner: OwnerSurface, action_status: Option<&str>)
                 "homeboy runner status  # then `homeboy agent-task controller status {loop_id}`"
             )
         }
-        OwnerSurface::WpCodebox | OwnerSurface::WordPressRuntime | OwnerSurface::ProviderPlugin => {
+        OwnerSurface::SelectedRuntime | OwnerSurface::WordPressRuntime | OwnerSurface::ProviderPlugin => {
             format!("homeboy agent-task controller status {loop_id}  # inspect provider/runtime evidence refs above")
         }
         _ => format!("homeboy agent-task controller status {loop_id}"),

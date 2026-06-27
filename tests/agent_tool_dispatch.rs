@@ -221,7 +221,7 @@ printf '%s
 
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{}", dir.path().display(), old_path);
-    let body = "`homeboy-lab run`\n/home/chubes/.cache/homeboy/wp-codebox/source\n> quoted";
+    let body = "`homeboy-lab run`\n/home/chubes/.cache/homeboy/sample-runtime/source\n> quoted";
     let output = run_tool_dispatch_with_env(
         json!({
             "schema": "homeboy/agent-tool-policy/v1",

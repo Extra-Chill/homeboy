@@ -465,7 +465,7 @@ pub(crate) const EXECUTABLE_PLAN_FROM_SPEC_SCHEMA: &str = "homeboy/agent-task-pl
 /// Artifact `kind` suffix that marks an artifact as a Homeboy-owned runtime
 /// artifact (e.g. `static_validation_run`). Runtime artifacts are synthesized
 /// by a Homeboy runtime stage rather than authored/emitted by a repo workflow,
-/// so downstream specs can reference them without hard-coding Homeboy/Codebox
+/// so downstream specs can reference them without hard-coding Homeboy/Sandbox
 /// internals.
 pub(crate) const HOMEBOY_RUNTIME_ARTIFACT_KIND_SUFFIX: &str = "_run";
 

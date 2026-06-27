@@ -6,10 +6,10 @@ use types::RunnerDoctorStatus;
 #[test]
 fn managed_runner_source_warns_on_dirty_generated_cache_state() {
     let contract = AgentTaskProviderRunnerSource {
-        id: "wp-codebox".to_string(),
-        label: "WP Codebox".to_string(),
-        path: "/home/chubes/.cache/homeboy/wp-codebox/source".to_string(),
-        remote_url: Some("https://github.com/Automattic/wp-codebox.git".to_string()),
+        id: "sample-runtime".to_string(),
+        label: "Managed Sandbox".to_string(),
+        path: "/home/chubes/.cache/homeboy/sample-runtime/source".to_string(),
+        remote_url: Some("https://github.com/Automattic/sample-runtime.git".to_string()),
         git_ref: Some("main".to_string()),
         remediation: Some("Run runner doctor with --repair".to_string()),
         extra: BTreeMap::new(),
@@ -19,7 +19,7 @@ fn managed_runner_source_warns_on_dirty_generated_cache_state() {
 
     let check = probes::managed_runner_source_state_check(
         &contract,
-        "lab.managed_source.wp-codebox".to_string(),
+        "lab.managed_source.sample-runtime".to_string(),
         Some("main"),
         1,
         details,
@@ -43,10 +43,10 @@ fn managed_runner_source_warns_on_dirty_generated_cache_state() {
 #[test]
 fn managed_runner_source_warns_on_detached_declared_ref() {
     let contract = AgentTaskProviderRunnerSource {
-        id: "wp-codebox".to_string(),
-        label: "WP Codebox".to_string(),
-        path: "/home/chubes/.cache/homeboy/wp-codebox/source".to_string(),
-        remote_url: Some("https://github.com/Automattic/wp-codebox.git".to_string()),
+        id: "sample-runtime".to_string(),
+        label: "Managed Sandbox".to_string(),
+        path: "/home/chubes/.cache/homeboy/sample-runtime/source".to_string(),
+        remote_url: Some("https://github.com/Automattic/sample-runtime.git".to_string()),
         git_ref: Some("main".to_string()),
         remediation: Some("Run runner doctor with --repair".to_string()),
         extra: BTreeMap::new(),
@@ -54,7 +54,7 @@ fn managed_runner_source_warns_on_detached_declared_ref() {
 
     let check = probes::managed_runner_source_state_check(
         &contract,
-        "lab.managed_source.wp-codebox".to_string(),
+        "lab.managed_source.sample-runtime".to_string(),
         None,
         0,
         BTreeMap::new(),

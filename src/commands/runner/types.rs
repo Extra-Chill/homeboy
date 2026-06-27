@@ -65,7 +65,7 @@ pub struct LabSelectedRunnerOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runtime_diagnostics: Vec<RunnerRuntimeDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub wp_codebox_runtime: Option<WpCodeboxRuntimeOutput>,
+    pub selected_runtime: Option<SelectedRuntimeOutput>,
     pub daemon_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<String>,
@@ -165,7 +165,7 @@ pub struct RunnerExecutableRequirementDiagnostics {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct WpCodeboxRuntimeOutput {
+pub struct SelectedRuntimeOutput {
     pub tool: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configured_binary: Option<String>,
@@ -173,13 +173,13 @@ pub struct WpCodeboxRuntimeOutput {
     pub managed_cache_source: String,
     pub managed_cache_binary: String,
     pub effective_binary_rule: String,
-    pub playground_package: WpCodeboxPackageRuntimeOutput,
-    pub core_package: WpCodeboxPackageRuntimeOutput,
-    pub source_git_sha: WpCodeboxProbeValue,
-    pub dist_build_freshness: WpCodeboxProbeValue,
+    pub primary_package: RuntimePackageOutput,
+    pub secondary_package: RuntimePackageOutput,
+    pub source_git_sha: RuntimeProbeValue,
+    pub dist_build_freshness: RuntimeProbeValue,
     pub runtime_probe_command: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<WpCodeboxRuntimeDiagnostic>,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -196,10 +196,10 @@ pub struct RunnerRuntimeDiagnostics {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<RunnerRuntimePackageDiagnostics>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub probes: BTreeMap<String, WpCodeboxProbeValue>,
+    pub probes: BTreeMap<String, RuntimeProbeValue>,
     pub runtime_probe_command: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<WpCodeboxRuntimeDiagnostic>,
+    pub diagnostics: Vec<RuntimeDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -207,24 +207,24 @@ pub struct RunnerRuntimePackageDiagnostics {
     pub field: String,
     pub package: String,
     pub expected_path: String,
-    pub resolution: WpCodeboxProbeValue,
+    pub resolution: RuntimeProbeValue,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct WpCodeboxPackageRuntimeOutput {
+pub struct RuntimePackageOutput {
     pub package: String,
     pub expected_path: String,
-    pub resolution: WpCodeboxProbeValue,
+    pub resolution: RuntimeProbeValue,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct WpCodeboxProbeValue {
+pub struct RuntimeProbeValue {
     pub value: Option<String>,
     pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct WpCodeboxRuntimeDiagnostic {
+pub struct RuntimeDiagnostic {
     pub id: String,
     pub severity: String,
     pub message: String,
@@ -354,5 +354,5 @@ pub struct RunnerEnvDiagnostics {
     pub server_shell_env: String,
     pub runner_job_env: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub wp_codebox: Option<RunnerToolDiagnostics>,
+    pub selected_tool: Option<RunnerToolDiagnostics>,
 }

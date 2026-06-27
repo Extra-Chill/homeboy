@@ -1,7 +1,7 @@
 //! Persisted extension setup runtime env.
 //!
 //! When an extension's `setup` runs on a runner (e.g. a Lab runner), it can
-//! discover runtime-derived values — for example a WP Codebox core module path
+//! discover runtime-derived values — for example a Managed Sandbox core module path
 //! resolved from a freshly built checkout. Those values are produced by the
 //! extension's env provider but, historically, were only materialized live
 //! during the same process that ran setup. A subsequent capability execution
@@ -172,8 +172,8 @@ mod tests {
             "wordpress",
             &[
                 (
-                    "HOMEBOY_WP_CODEBOX_CORE_MODULE".to_string(),
-                    "/runner/wp-codebox/core.mjs".to_string(),
+                    "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
+                    "/runner/sample-runtime/core.mjs".to_string(),
                 ),
                 ("ANOTHER".to_string(), "value".to_string()),
             ],
@@ -186,8 +186,8 @@ mod tests {
             vec![
                 ("ANOTHER".to_string(), "value".to_string()),
                 (
-                    "HOMEBOY_WP_CODEBOX_CORE_MODULE".to_string(),
-                    "/runner/wp-codebox/core.mjs".to_string()
+                    "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
+                    "/runner/sample-runtime/core.mjs".to_string()
                 ),
             ]
         );
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn sanitizes_extension_id_for_filesystem_safety() {
-        assert_eq!(sanitize_extension_id("wp/codebox"), "wp_codebox");
+        assert_eq!(sanitize_extension_id("wp/sandbox"), "selected_runtime");
         assert_eq!(sanitize_extension_id("wordpress"), "wordpress");
     }
 }

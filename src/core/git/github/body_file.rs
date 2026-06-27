@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn body_file_preserves_shell_sensitive_markdown_without_argv_inline_body() {
-        let body = "`homeboy-lab run`\n/home/chubes/.cache/homeboy/wp-codebox/source\n> quoted";
+        let body = "`homeboy-lab run`\n/home/chubes/.cache/homeboy/sample-runtime/source\n> quoted";
         let mut args = vec!["issue".to_string(), "create".to_string()];
         let mut files = Vec::new();
 

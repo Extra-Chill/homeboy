@@ -104,14 +104,14 @@ exist, and must stay inside the package source repository root.
 ```jsonc
 {
   "id": "static-site-importer-fixture-matrix",
-  "package_dependencies": ["../../shared/wp-codebox"]
+  "package_dependencies": ["../../shared/sample-runtime"]
 }
 ```
 
 When this rig is installed from `WordPress/static-site-importer`, Homeboy records
 the repository root as the source root and keeps the package path at
 `WordPress/static-site-importer`, so imports such as
-`../../../shared/wp-codebox/recipe.mjs` keep resolving on Lab.
+`../../../shared/sample-runtime/recipe.mjs` keep resolving on Lab.
 
 ## `ComponentSpec`
 
