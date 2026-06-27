@@ -5,7 +5,7 @@ mod export_import;
 use super::handlers::{artifact_get, artifacts, env, show_run};
 use super::{
     bench_compare, dead_owned_run, findings, latest, list_runs, runs_dossier, RunsArtifactGetArgs,
-    RunsListArgs, RunsOutput, WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER,
+    RunsListArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER,
 };
 
 use homeboy::core::observation::runs_service;
@@ -911,7 +911,7 @@ fn artifacts_command_derives_viewer_links_from_public_artifact_url_metadata() {
                         "algorithm": "sha256",
                         "value": "abc123"
                     },
-                    "viewer": WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(Some(serde_json::json!({
+                    "viewer": HOSTED_BLUEPRINT_VIEWER.to_metadata(Some(serde_json::json!({
                             "status": "partial",
                             "limitations": ["fixture limitation"]
                     })))
@@ -943,10 +943,7 @@ fn artifacts_command_derives_viewer_links_from_public_artifact_url_metadata() {
         assert!(!artifact_url.ends_with("/content"));
         assert_eq!(replay.mime.as_deref(), Some("application/json"));
         assert_eq!(replay.sha256.as_deref(), Some("abc123"));
-        assert_eq!(
-            replay.viewer_links[0].kind,
-            "wordpress-playground-blueprint"
-        );
+        assert_eq!(replay.viewer_links[0].kind, "hosted-blueprint");
         assert_eq!(
             replay.viewer_url.as_deref(),
             Some(replay.viewer_links[0].url.as_str())
@@ -997,7 +994,7 @@ fn artifacts_command_suppresses_viewer_links_when_public_url_is_unreachable() {
                 "bench_artifact",
                 &artifact_path,
                 serde_json::json!({
-                    "viewer": WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None)
+                    "viewer": HOSTED_BLUEPRINT_VIEWER.to_metadata(None)
                 }),
             )
             .expect("record artifact");

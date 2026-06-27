@@ -515,6 +515,169 @@ fn runner_exec_promotes_artifact_dir_children_to_run_store() {
 }
 
 #[test]
+fn runner_exec_promotes_fuzz_envelope_observations_and_hotspots_as_typed_artifacts() {
+    homeboy::test_support::with_isolated_home(|home| {
+        let artifact_root = home.path().join("artifacts");
+        homeboy::core::set_artifact_root_override(Some(artifact_root));
+        let workspace = tempfile::tempdir().expect("workspace");
+        let envelope_path = workspace.path().join("fuzz-result-envelope.json");
+        std::fs::write(
+            &envelope_path,
+            r#"{
+                "schema": "homeboy/fuzz-result-envelope/v1",
+                "observation_set": {
+                    "schema": "homeboy/fuzz-observation-set/v1",
+                    "version": 1,
+                    "id": "observations-1",
+                    "observations": [
+                        {
+                            "id": "obs-1",
+                            "family": "timing",
+                            "subject": "search route",
+                            "metric": "duration",
+                            "value": 120.0,
+                            "unit": "ms",
+                            "fingerprint": "route:search",
+                            "sample_count": 3
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("write fuzz envelope");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec lab-local".to_string())
+                    .cwd_path(workspace.path())
+                    .metadata(serde_json::json!({}))
+                    .build(),
+            )
+            .expect("run");
+        let output = runner_exec_output(
+            "lab-local",
+            RunnerExecMode::Local,
+            &workspace.path().display().to_string(),
+        );
+
+        let promoted = promote_runner_exec_artifacts(
+            &run.id,
+            &output,
+            &["fuzz-result-envelope.json".to_string()],
+        )
+        .expect("promote fuzz envelope");
+
+        assert_eq!(promoted.len(), 3);
+        let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+        let kinds = artifacts
+            .iter()
+            .map(|artifact| artifact.kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                "fuzz_result_envelope",
+                "fuzz_observation_set",
+                "fuzz_hotspot_set"
+            ]
+        );
+        assert_eq!(
+            artifacts[0].metadata_json["schema"],
+            "homeboy/fuzz-result-envelope/v1"
+        );
+        assert_eq!(
+            artifacts[1].metadata_json["derived_from_artifact_id"],
+            artifacts[0].id
+        );
+        assert_eq!(
+            artifacts[2].metadata_json["derived_from_observation_set_id"],
+            "observations-1"
+        );
+        let hotspot_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&artifacts[2].path).expect("read hotspot artifact"),
+        )
+        .expect("parse hotspot artifact");
+        assert_eq!(hotspot_json["schema"], "homeboy/fuzz-hotspot-set/v1");
+        assert_eq!(hotspot_json["items"][0]["id"], "route:search");
+    });
+}
+
+#[test]
+fn runner_exec_promotes_artifact_dir_typed_fuzz_children() {
+    homeboy::test_support::with_isolated_home(|home| {
+        let artifact_root = home.path().join("artifacts");
+        homeboy::core::set_artifact_root_override(Some(artifact_root));
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outputs = workspace.path().join("outputs");
+        std::fs::create_dir_all(&outputs).expect("create outputs");
+        std::fs::write(
+            outputs.join("fuzz-observations.json"),
+            r#"{
+                "schema": "homeboy/fuzz-observation-set/v1",
+                "version": 1,
+                "id": "observations-1",
+                "observations": [
+                    {
+                        "id": "obs-1",
+                        "family": "timing",
+                        "subject": "route-a",
+                        "metric": "duration",
+                        "value": 40.0,
+                        "unit": "ms"
+                    }
+                ]
+            }"#,
+        )
+        .expect("write observations");
+        std::fs::write(
+            outputs.join("runner-specific-report.json"),
+            r#"{"schema":"runner/mutation-isolation/v1","passed":true}"#,
+        )
+        .expect("write runner report");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec lab-local".to_string())
+                    .cwd_path(workspace.path())
+                    .metadata(serde_json::json!({}))
+                    .build(),
+            )
+            .expect("run");
+        let output = runner_exec_output(
+            "lab-local",
+            RunnerExecMode::Local,
+            &workspace.path().display().to_string(),
+        );
+
+        let promoted =
+            promote_runner_exec_artifact_dirs(&run.id, &output, &["outputs".to_string()])
+                .expect("promote artifact dir children");
+
+        assert_eq!(promoted.len(), 2);
+        let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].kind, "fuzz_observation_set");
+        assert_eq!(
+            artifacts[0].metadata_json["schema"],
+            "homeboy/fuzz-observation-set/v1"
+        );
+        assert_eq!(artifacts[0].metadata_json["artifact_dir"], "outputs");
+        assert_eq!(
+            artifacts[0].metadata_json["promoted_kind"],
+            "fuzz-observations_json"
+        );
+        assert_eq!(artifacts[1].kind, "runner-specific-report_json");
+        assert_eq!(artifacts[1].metadata_json["artifact_dir"], "outputs");
+        assert!(artifacts[1]
+            .metadata_json
+            .get("typed_artifact_kind")
+            .is_none());
+    });
+}
+
+#[test]
 fn runner_exec_rejects_artifacts_without_run_id() {
     let err = exec(
         "lab-local",

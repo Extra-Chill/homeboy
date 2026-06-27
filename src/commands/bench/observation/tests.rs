@@ -82,7 +82,7 @@ fn recorded_bench_artifact_reports_unreachable_public_viewer_url() {
         size_bytes: None,
         mime: Some("application/json".to_string()),
         metadata_json: serde_json::json!({
-            "viewer": crate::commands::runs::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None),
+            "viewer": crate::commands::runs::HOSTED_BLUEPRINT_VIEWER.to_metadata(None),
             "public_url_validation": {
                 "url": "https://artifacts.example.test/homeboy/runs/run-1/artifacts/artifact-1",
                 "reachable": false,
@@ -192,9 +192,7 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
                 kind: Some("json".to_string()),
                 label: Some("Transcript".to_string()),
                 observation_artifact_id: None,
-                viewer: Some(
-                    crate::commands::runs::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None),
-                ),
+                viewer: Some(crate::commands::runs::HOSTED_BLUEPRINT_VIEWER.to_metadata(None)),
                 ..BenchArtifact::default()
             },
         );
@@ -355,7 +353,7 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
             .starts_with("https://playground.wordpress.net/?blueprint-url="));
         assert_eq!(
             transcript_artifact.viewer_refs.viewer_links[0].kind,
-            "wordpress-playground-blueprint"
+            "hosted-blueprint"
         );
         assert!(
             workflow.results.as_ref().unwrap().scenarios[0].artifacts["admin"]
