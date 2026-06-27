@@ -13,8 +13,8 @@ fn provider_capability_contract_exports_core_owned_schema_ids() {
         contract.provider_schema,
         AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
     );
-    assert_eq!(contract.request_schema, AGENT_TASK_REQUEST_SCHEMA);
-    assert_eq!(contract.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
+    assert_eq!(contract.schemas.request_schema, AGENT_TASK_REQUEST_SCHEMA);
+    assert_eq!(contract.schemas.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
     assert_eq!(contract.tool_request_schema, AGENT_TOOL_REQUEST_SCHEMA);
     assert_eq!(contract.tool_result_schema, AGENT_TOOL_RESULT_SCHEMA);
     assert_eq!(contract.tool_policy_schema, AGENT_TOOL_POLICY_SCHEMA);
