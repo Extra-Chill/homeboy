@@ -192,6 +192,8 @@ pub(super) fn exec_via_reverse_broker(
         exit_code,
         Some(job.id.to_string()),
         mirror_run_id.clone(),
+        Some(&source_snapshot),
+        &require_paths,
         &artifacts,
         Some(&runner_result),
     );

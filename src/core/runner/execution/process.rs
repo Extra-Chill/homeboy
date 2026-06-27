@@ -361,6 +361,8 @@ pub(super) fn exec_output(
         exit_code,
         None,
         None,
+        source_snapshot.as_ref(),
+        &require_paths,
         &[],
         Some(&runner_result),
     );

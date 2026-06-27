@@ -15,7 +15,8 @@ use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, Result};
 use crate::core::runner_execution_envelope::{
-    RunnerExecutionArtifactRef, RunnerExecutionNextAction, RunnerExecutionRecord,
+    PathMaterializationEntry, PathMaterializationPlan, RunnerExecutionArtifactRef,
+    RunnerExecutionNextAction, RunnerExecutionRecord,
 };
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -164,6 +165,8 @@ fn runner_execution_record_for_output(
     exit_code: i32,
     job_id: Option<String>,
     mirror_run_id: Option<String>,
+    source_snapshot: Option<&SourceSnapshot>,
+    require_paths: &[String],
     artifacts: &[JobArtifactMetadata],
     runner_result: Option<&RunnerResult>,
 ) -> RunnerExecutionRecord {
@@ -192,6 +195,7 @@ fn runner_execution_record_for_output(
         exit_code,
     )
     .with_mirror_run_id(mirror_run_id)
+    .with_path_materialization_plan(path_materialization_plan(source_snapshot, require_paths))
     .with_artifact_refs(artifact_refs);
     if let Some(job_id) = job_id {
         record = record
@@ -199,6 +203,54 @@ fn runner_execution_record_for_output(
             .with_next_actions(runner_execution_next_actions(&runner.id, &job_id));
     }
     record
+}
+
+fn path_materialization_plan(
+    source_snapshot: Option<&SourceSnapshot>,
+    require_paths: &[String],
+) -> Option<PathMaterializationPlan> {
+    let mut entries = Vec::new();
+    if let Some(snapshot) = source_snapshot.and_then(path_materialization_entry_from_snapshot) {
+        entries.push(snapshot);
+    }
+    entries.extend(require_paths.iter().filter_map(|path| {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(PathMaterializationEntry {
+            role: "required_path".to_string(),
+            owner: "runner_exec.require_paths".to_string(),
+            local_path: None,
+            remote_path: trimmed.to_string(),
+            materialization_mode: "existing_remote".to_string(),
+            validation_status: "validated".to_string(),
+        })
+    }));
+    if entries.is_empty() {
+        return None;
+    }
+    Some(PathMaterializationPlan {
+        schema: "homeboy/path-materialization-plan/v1".to_string(),
+        entries,
+    })
+}
+
+fn path_materialization_entry_from_snapshot(
+    snapshot: &SourceSnapshot,
+) -> Option<PathMaterializationEntry> {
+    let remote_path = snapshot.remote_path.as_deref()?.trim();
+    if remote_path.is_empty() {
+        return None;
+    }
+    Some(PathMaterializationEntry {
+        role: "primary_workspace".to_string(),
+        owner: "runner_exec.source_snapshot".to_string(),
+        local_path: snapshot.local_path.clone(),
+        remote_path: remote_path.to_string(),
+        materialization_mode: snapshot.sync_mode.clone(),
+        validation_status: "materialized".to_string(),
+    })
 }
 
 fn job_artifact_refs(artifacts: &[JobArtifactMetadata]) -> Vec<RunnerExecutionArtifactRef> {
