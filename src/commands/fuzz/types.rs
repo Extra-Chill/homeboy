@@ -279,6 +279,10 @@ pub(crate) struct FuzzValidateArgs {
     #[arg(value_name = "RESULTS_FILE")]
     pub(crate) results_file: PathBuf,
 
+    /// Gate profile to evaluate while validating the campaign.
+    #[arg(long = "gate-profile", value_enum, default_value_t = FuzzGateProfileArg::Measurement)]
+    pub(crate) gate_profile: FuzzGateProfileArg,
+
     /// Canonical fuzz case log JSONL/JSON artifact to validate.
     #[arg(long = "case-log", value_name = "PATH")]
     pub(crate) case_logs: Vec<PathBuf>,
