@@ -239,6 +239,7 @@ impl Commands {
             | Commands::Release(_)
             | Commands::Report(_)
             | Commands::Runner(_)
+            | Commands::Lab(_)
             | Commands::Runtime(_)
             | Commands::Worktree(_)
             | Commands::Tunnel(_)

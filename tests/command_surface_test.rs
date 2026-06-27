@@ -440,6 +440,27 @@ fn runner_exec_artifact_parses_before_trailing_command() {
 }
 
 #[test]
+fn runner_exec_artifact_dir_parses_before_trailing_command() {
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "exec",
+        "homeboy-lab",
+        "--run-id",
+        "runner-exec-artifact-dir-fixture",
+        "--artifact-dir",
+        "output",
+        "--cwd",
+        "/home/user/Developer",
+        "homeboy",
+        "trace",
+        "matrix",
+        "summary",
+    ])
+    .expect("runner exec --artifact-dir should parse before the trailing remote command");
+}
+
+#[test]
 fn runner_env_rejects_legacy_show_values_flag() {
     assert!(
         Cli::try_parse_from(["homeboy", "runner", "env", "homeboy-lab", "--show-values"]).is_err(),

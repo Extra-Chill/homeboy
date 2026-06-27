@@ -76,7 +76,11 @@ pub struct LabRunnerHomeboyOutput {
     pub controller_version: String,
     pub controller_build_identity: String,
     pub configured_executable: String,
+    pub controller_cli: RunnerHomeboyBinaryRole,
+    pub active_daemon: RunnerHomeboyBinaryRole,
+    pub configured_job_binary: RunnerHomeboyBinaryRole,
     pub binary_roles: Vec<RunnerHomeboyBinaryRole>,
+    pub workflow_binary_guidance: RunnerWorkflowBinaryGuidance,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_daemon_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,7 +94,7 @@ pub struct LabRunnerHomeboyOutput {
     pub upgrade_command: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RunnerHomeboyBinaryRole {
     pub role: &'static str,
     pub owner: &'static str,
@@ -101,6 +105,13 @@ pub struct RunnerHomeboyBinaryRole {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_identity: Option<String>,
     pub purpose: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerWorkflowBinaryGuidance {
+    pub recent_workflows: &'static str,
+    pub explicit_workflows: &'static str,
+    pub capability_checks: &'static str,
 }
 
 #[derive(Debug, Serialize)]

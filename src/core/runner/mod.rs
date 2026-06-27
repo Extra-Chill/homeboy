@@ -128,10 +128,11 @@ pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
 pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::{
-    list_workspaces, prune_workspaces, sync_workspace, workspace_snapshots, ByteFileCounts,
-    RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
-    RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
-    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSnapshotAppliedFilters,
+    list_workspaces, plan_workspace_pull, prune_workspaces, pull_workspace, sync_workspace,
+    workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
+    RunnerWorkspaceListOutput, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions,
+    RunnerWorkspacePullOutput, RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters,
     RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };

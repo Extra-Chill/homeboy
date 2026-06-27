@@ -287,6 +287,11 @@ pub(super) enum RunnerCommand {
         #[arg(long = "artifact", value_name = "PATH")]
         artifact_outputs: Vec<String>,
 
+        /// Directory whose immediate produced files/directories should each be persisted as run artifacts.
+        /// Relative paths are resolved from the runner exec cwd. Repeat for multiple directories.
+        #[arg(long = "artifact-dir", value_name = "PATH")]
+        artifact_dir_outputs: Vec<String>,
+
         /// Summary file or directory produced by the runner command to persist as typed run evidence.
         /// Relative paths are resolved from the runner exec cwd. Repeat for multiple summaries.
         #[arg(long = "summary", value_name = "PATH")]

@@ -94,6 +94,39 @@ pub struct RunnerWorkspaceSyncOutput {
     pub validation_dependencies: Vec<RunnerValidationDependencySyncOutput>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RunnerWorkspacePullOptions {
+    pub remote_path: String,
+    pub includes: Vec<String>,
+    pub to: String,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspacePullPlan {
+    pub runner_id: String,
+    pub remote_path: String,
+    pub includes: Vec<String>,
+    pub local_destination: String,
+    pub remote_sources: Vec<String>,
+    pub allowed_roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspacePullOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    pub runner_id: String,
+    pub remote_path: String,
+    pub includes: Vec<String>,
+    pub local_destination: String,
+    pub remote_sources: Vec<String>,
+    pub allowed_roots: Vec<String>,
+    pub dry_run: bool,
+    pub files: usize,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerWorkspaceListOutput {
     pub variant: &'static str,
