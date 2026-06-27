@@ -189,12 +189,10 @@ function validateReviewerFacingUrls(options) {
   if (!reviewerFacing || options.policy.allow_local_reviewer_evidence === true) {
     return;
   }
-  const url = refUrl(options.ref);
-  if (!url) {
-    return;
-  }
-  if (localOnlyUrl(url)) {
-    options.failures.push(failure(options.failureClass, `Reviewer-facing evidence must use a durable non-local URL: ${options.label}`, { url }));
+  for (const ref of reviewerFacingRefs(options.ref)) {
+    if (localOnlyReviewerFacingRef(ref.value)) {
+      options.failures.push(failure(options.failureClass, `Reviewer-facing evidence must use a durable non-local ref: ${options.label}`, { field: ref.field, ref: ref.value }));
+    }
   }
 }
 
@@ -331,20 +329,47 @@ function refUrl(ref) {
   return ref.url || ref.uri || ref.href || ref.public_url || ref.publicUrl || ref.artifact_url || ref.artifactUrl || ref.path || '';
 }
 
-function durableUrl(url) {
-  return typeof url === 'string' && /^https?:\/\//i.test(url) && !localOnlyUrl(url);
+function reviewerFacingRefs(ref) {
+  if (!isObject(ref)) {
+    return [];
+  }
+  const publicFields = [
+    'url',
+    'uri',
+    'href',
+    'public_url',
+    'publicUrl',
+    'artifact_url',
+    'artifactUrl',
+    'ref',
+    'reference',
+  ]
+    .filter((field) => typeof ref[field] === 'string' && ref[field].trim() !== '')
+    .map((field) => ({ field, value: ref[field].trim() }));
+  if (publicFields.length > 0) {
+    return publicFields;
+  }
+  return typeof ref.path === 'string' && ref.path.trim() !== ''
+    ? [{ field: 'path', value: ref.path.trim() }]
+    : [];
 }
 
-function localOnlyUrl(url) {
-  if (typeof url !== 'string' || url.trim() === '') {
+function durableUrl(url) {
+  return typeof url === 'string' && /^https?:\/\//i.test(url) && !localOnlyReviewerFacingRef(url);
+}
+
+function localOnlyReviewerFacingRef(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
     return false;
   }
-  return /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::|\/|$)/i.test(url)
-    || /^file:\/\//i.test(url)
-    || /^\/Users\//.test(url)
-    || /^\/private\//.test(url)
-    || /^\/tmp\//.test(url)
-    || /^\.\.?\//.test(url);
+  const ref = value.trim();
+  return /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::|\/|$)/i.test(ref)
+    || /^file:\/\//i.test(ref)
+    || /^\/Users\//.test(ref)
+    || /^\/private\//.test(ref)
+    || /^\/tmp(?:\/|$)/.test(ref)
+    || /^\.\.?(?:\/|$)/.test(ref)
+    || /^[^:/?#]+(?:\/|$)/.test(ref);
 }
 
 function failure(className, message, data) {
@@ -370,5 +395,6 @@ function isObject(value) {
 
 module.exports = {
   assertControllerLoopProof,
+  localOnlyReviewerFacingRef,
   validateControllerLoopProof,
 };

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { runDeterministicLoop } = require('./deterministic-loop-runner');
-const { validateControllerLoopProof } = require('./controller-loop-proof-validator');
+const { localOnlyReviewerFacingRef, validateControllerLoopProof } = require('./controller-loop-proof-validator');
 const {
   CONTINUE,
   evaluateLoopPolicy,
@@ -723,6 +723,11 @@ function validateGenericAgentLoopOutcomeContract(options = {}) {
     const ref = findEvidenceRef(evidenceRefs, requirement);
     if (!ref) {
       errors.push(`missing required evidence ref ${requirement.name || requirement.kind || requirement.url || requirement.uri || '(unnamed)'}`);
+      continue;
+    }
+    const refValue = evidenceRefUrl(ref);
+    if (localOnlyReviewerFacingRef(refValue)) {
+      errors.push(`required evidence ref ${requirement.name || requirement.kind || requirement.url || requirement.uri || '(unnamed)'} uses local-only evidence: ${refValue}`);
     }
   }
 

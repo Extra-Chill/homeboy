@@ -12,6 +12,7 @@ const validator = require(path.join(repoRoot, 'runtime-agent-ci/lib/controller-l
 assert.equal(typeof runtimeAgentCi.validateControllerLoopProof, 'function');
 assert.equal(runtimeAgentCi.validateControllerLoopProof, validator.validateControllerLoopProof);
 assert.equal(typeof runtimeAgentCi.assertControllerLoopProof, 'function');
+assert.equal(typeof runtimeAgentCi.localOnlyReviewerFacingRef, 'function');
 
 const baseSpec = {
   schema: 'example/controller-loop-spec/v1',
@@ -57,6 +58,36 @@ assert.equal(hasFailure(report, 'artifact.required_missing'), true);
 report = validator.validateControllerLoopProof({
   spec: baseSpec,
   proof: { ...baseProof, artifacts: [{ id: 'run-log', url: 'http://localhost:8888/run-log' }] },
+});
+assert.equal(report.valid, false);
+assert.equal(hasFailure(report, 'artifact.local_reviewer_evidence'), true);
+
+for (const localRef of [
+  'http://127.0.0.1:8888/run-log',
+  'file:///tmp/run-log',
+  '/tmp/run-log',
+  '/Users/chris/run-log',
+  './run-log',
+  '../run-log',
+  'run-log.json',
+]) {
+  report = validator.validateControllerLoopProof({
+    spec: baseSpec,
+    proof: { ...baseProof, artifacts: [{ id: 'run-log', path: localRef }] },
+  });
+  assert.equal(report.valid, false, `${localRef} should be rejected`);
+  assert.equal(hasFailure(report, 'artifact.local_reviewer_evidence'), true, `${localRef} should report local reviewer evidence`);
+}
+
+report = validator.validateControllerLoopProof({
+  spec: baseSpec,
+  proof: { ...baseProof, artifacts: [{ id: 'run-log', public_url: 'https://example.test/artifacts/run-log', path: '/tmp/private-run-log' }] },
+});
+assert.equal(report.valid, true);
+
+report = validator.validateControllerLoopProof({
+  spec: baseSpec,
+  proof: { ...baseProof, artifacts: [{ id: 'run-log', url: 'file:///tmp/private-run-log', public_url: 'https://example.test/artifacts/run-log' }] },
 });
 assert.equal(report.valid, false);
 assert.equal(hasFailure(report, 'artifact.local_reviewer_evidence'), true);
