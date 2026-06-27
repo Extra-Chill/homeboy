@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.28] - 2026-06-27
+
+### Changed
+- drop dead per-language runtime helper shims
+
 ## [3.19.27] - 2026-06-27
 
 ### Fixed
