@@ -1012,9 +1012,9 @@ mod tests {
                     "action_id": "action-1",
                     "child_run_id": "agent-task-child-1",
                     "child_run_status": "failed",
-                    "top_diagnostic": "child run failed",
-                    "hydrated_root_cause": "runtime_task_ability_unavailable: required ability is not registered",
-                    "owner_surface": "wp_codebox",
+                    "top_diagnostic": "Agent runtime did not produce required typed artifacts: concept_packet, design_packet.",
+                    "hydrated_root_cause": "Provider runtime import failed: module not found",
+                    "owner_surface": "agent_runtime",
                     "next_command": "homeboy agent-task status agent-task-child-1 --full"
                 }]
             }
@@ -1024,7 +1024,7 @@ mod tests {
             render_agent_task_summary(AgentTaskSummaryKind::Controller, &payload).unwrap();
 
         assert!(summary.contains(
-            "Last failure: action-1 (agent-task-child-1): runtime_task_ability_unavailable: required ability is not registered\n"
+            "Last failure: action-1 (agent-task-child-1): Provider runtime import failed: module not found\n"
         ));
         assert!(summary.contains("Next: homeboy agent-task status agent-task-child-1 --full\n"));
     }

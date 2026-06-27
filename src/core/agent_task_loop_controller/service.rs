@@ -160,7 +160,10 @@ fn failed_child_action_diagnostic(
         .as_ref()
         .and_then(root_cause_from_run_evidence)
         .or_else(|| aggregate.as_ref().and_then(root_cause_from_aggregate))
-        .filter(|message| message != &top_diagnostic);
+        .filter(|message| message != &top_diagnostic)
+        .filter(|message| {
+            diagnostic_priority("", message) <= diagnostic_priority("", &top_diagnostic)
+        });
     let evidence_refs = child_run
         .as_ref()
         .map(evidence_refs_from_run)
@@ -228,12 +231,25 @@ fn evidence_refs_from_run(
 
 fn root_cause_from_run_evidence(run: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<String> {
     let executor = run.latest_executor_evidence.as_ref()?;
-    executor.refs().iter().find_map(|evidence| {
-        let path = evidence.uri.strip_prefix("file://")?;
-        let raw = fs::read_to_string(path).ok()?;
-        let value: Value = serde_json::from_str(&raw).ok()?;
-        root_cause_from_aggregate(&value)
-    })
+    let mut candidates = Vec::new();
+    for evidence in executor.refs() {
+        let Some(path) = evidence.uri.strip_prefix("file://") else {
+            continue;
+        };
+        let Ok(raw) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        candidates.extend(collect_diagnostics(&value));
+    }
+    candidates
+        .sort_by_key(|diagnostic| diagnostic_priority(&diagnostic.class, &diagnostic.message));
+    candidates
+        .into_iter()
+        .find(|diagnostic| is_root_cause_message(&diagnostic.message))
+        .map(|diagnostic| diagnostic.message)
 }
 
 fn push_failed_child_evidence_ref(
@@ -252,50 +268,104 @@ fn push_failed_child_evidence_ref(
 }
 
 fn first_diagnostic_message(value: &Value) -> Option<String> {
-    collect_diagnostic_messages(value).into_iter().next()
+    collect_diagnostics(value)
+        .into_iter()
+        .next()
+        .map(|diagnostic| diagnostic.message)
 }
 
 fn root_cause_from_aggregate(value: &Value) -> Option<String> {
-    let diagnostics = collect_diagnostic_messages(value);
+    collect_diagnostics(value)
+        .into_iter()
+        .find(|diagnostic| is_root_cause_message(&diagnostic.message))
+        .map(|diagnostic| diagnostic.message)
+}
+
+#[derive(Clone)]
+struct CollectedDiagnostic {
+    class: String,
+    message: String,
+}
+
+fn collect_diagnostics(value: &Value) -> Vec<CollectedDiagnostic> {
+    let mut diagnostics = Vec::new();
+    collect_diagnostics_into(value, &mut diagnostics);
+    let mut seen = std::collections::HashSet::new();
+    diagnostics.retain(|diagnostic| {
+        seen.insert((
+            diagnostic.class.to_ascii_lowercase(),
+            diagnostic.message.clone(),
+        ))
+    });
     diagnostics
-        .iter()
-        .find(|message| is_root_cause_message(message))
-        .cloned()
-        .or_else(|| diagnostics.into_iter().next())
+        .sort_by_key(|diagnostic| diagnostic_priority(&diagnostic.class, &diagnostic.message));
+    diagnostics
 }
 
-fn collect_diagnostic_messages(value: &Value) -> Vec<String> {
-    let mut messages = Vec::new();
-    collect_diagnostic_messages_into(value, &mut messages);
-    messages.dedup();
-    messages
-}
-
-fn collect_diagnostic_messages_into(value: &Value, messages: &mut Vec<String>) {
+fn collect_diagnostics_into(value: &Value, diagnostics: &mut Vec<CollectedDiagnostic>) {
     match value {
         Value::Object(map) => {
-            if let Some(Value::Array(diagnostics)) = map.get("diagnostics") {
-                for diagnostic in diagnostics {
+            if let Some(Value::Array(items)) = map.get("diagnostics") {
+                for diagnostic in items {
                     if let Some(message) = diagnostic
                         .get("message")
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|message| !message.is_empty())
                     {
-                        messages.push(message.to_string());
+                        let class = diagnostic
+                            .get("class")
+                            .or_else(|| diagnostic.get("kind"))
+                            .or_else(|| diagnostic.get("level"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("nested")
+                            .to_string();
+                        diagnostics.push(CollectedDiagnostic {
+                            class,
+                            message: message.to_string(),
+                        });
                     }
                 }
             }
             for nested in map.values() {
-                collect_diagnostic_messages_into(nested, messages);
+                collect_diagnostics_into(nested, diagnostics);
             }
         }
         Value::Array(items) => {
             for nested in items {
-                collect_diagnostic_messages_into(nested, messages);
+                collect_diagnostics_into(nested, diagnostics);
             }
         }
         _ => {}
+    }
+}
+
+fn diagnostic_priority(class: &str, message: &str) -> u8 {
+    let text = format!("{} {}", class, message).to_ascii_lowercase();
+    if text.contains("typed_artifacts_missing")
+        || text.contains("required_typed_artifacts_missing")
+        || text.contains("required typed artifacts")
+        || text.contains("declared artifact result envelope")
+    {
+        8
+    } else if text.contains("valid") || text.contains("recipe") || text.contains("schema") {
+        0
+    } else if text.contains("fatal") || text.contains("error") || text.contains("exception") {
+        1
+    } else if text.contains("registr")
+        || text.contains("provider")
+        || text.contains("discovery")
+        || text.contains("capability")
+    {
+        2
+    } else if text.contains("missing")
+        || text.contains("not_found")
+        || text.contains("path")
+        || text.contains("io")
+    {
+        3
+    } else {
+        9
     }
 }
 
@@ -303,6 +373,8 @@ fn is_root_cause_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("runtime_task_ability_unavailable")
         || lower.contains("root cause")
+        || lower.contains("recipe")
+        || lower.contains("validation")
         || lower.contains("php fatal")
         || lower.contains("fatal error")
         || lower.contains("missing required")
@@ -317,7 +389,7 @@ fn classify_failed_child_owner(
 ) -> String {
     let lower = diagnostic.to_ascii_lowercase();
     if lower.contains("runtime_task_ability_unavailable") || lower.contains("ability unavailable") {
-        "wp_codebox".to_string()
+        "agent_runtime".to_string()
     } else if lower.contains("credential") || lower.contains("secret") || lower.contains("token") {
         "provider_credentials".to_string()
     } else if lower.contains("repo spec")
@@ -327,12 +399,14 @@ fn classify_failed_child_owner(
         "repo_spec".to_string()
     } else if lower.contains("artifact") {
         "workload_artifacts".to_string()
-    } else if lower.contains("codebox")
+    } else if lower.contains("agent runtime")
+        || lower.contains("agent_runtime")
+        || lower.contains("runtime")
         || evidence_refs
             .iter()
-            .any(|reference| reference.uri.to_ascii_lowercase().contains("codebox"))
+            .any(|reference| reference.uri.to_ascii_lowercase().contains("runtime"))
     {
-        "wp_codebox".to_string()
+        "agent_runtime".to_string()
     } else if lower.contains("provider") {
         "provider".to_string()
     } else {
