@@ -3,36 +3,45 @@
 //!
 //! Mechanically split out of `mod.rs`; behavior and the surrounding public API
 //! are preserved by the re-exports in the module root.
+//!
+//! Detector dispatch is table-driven: the descriptor table in `execution_plan`
+//! declares every detector and `descriptor_runtime::run_descriptor_detectors`
+//! executes it. Only three families are still sequenced by hand below because
+//! they have a non-uniform shape — the convention pipeline, the multi-pass
+//! `duplication` family (five timing spans plus the `duplicate_groups` side
+//! output), and `artifact_portability` (logs scan statistics even when empty).
 
 use std::collections::HashSet;
 use std::path::Path;
 
 use super::descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
-use super::detectors::layer_ownership::run as run_layer_ownership;
-use super::detectors::{
-    artifact_portability, command_status_contracts, config_key_usage, dead_guard, deprecation_age,
-    enum_dispatch_contracts, field_patterns, global_env_guard, mutating_resource_access,
-    parallel_runner_setup, public_registry_exposure, redirect_validation,
-    remote_execution_preflight, requested_detectors, source_policy, test_coverage,
-    thin_command_adapter, unbounded_output_capture, wrapper_inference,
-};
-use super::doc_drift::detect_doc_drift;
+use super::detectors::{artifact_portability, field_patterns};
 use super::entry::audit_config_for;
 use super::execution_plan::AuditExecutionPlan;
 use super::findings;
-use super::reference::{
-    build_convention_method_set, fingerprint_component_reference_files, fingerprint_reference_paths,
-};
+use super::reference::build_convention_method_set;
 use super::types::{
     time_audit_detector, AuditAnalysisContext, AuditSummary, AuditTiming, AuditWithAnalysis,
     CodeAuditResult, ConventionReport, ScopedAuditExecution,
 };
-use super::{
-    checks, comment_hygiene, compiler_warnings, conventions, dead_code, discovery, duplication,
-    fingerprint, impact, structural, walker,
-};
-use crate::core::component::{self, AuditConfig};
+use super::{checks, conventions, discovery, duplication, fingerprint, impact, structural, walker};
+use crate::core::component::AuditConfig;
 use crate::core::Result;
+
+/// Detectors run on the root-only fast path (no discovery/fingerprinting). The
+/// full path drives every data-driven detector via `ids = None`; this subset
+/// keeps the fast path's timing spans and findings identical to before.
+const ROOT_ONLY_DETECTOR_IDS: &[&str] = &[
+    "structural",
+    "layer_ownership",
+    "test_topology",
+    "test_wiring",
+    "docs",
+    "compiler_warnings",
+    "field_patterns",
+    "command_status_contracts",
+    "thin_command_adapter",
+];
 
 /// Internal audit implementation supporting optional file scoping and impact tracing.
 ///
@@ -180,23 +189,6 @@ pub(super) fn audit_internal(
     let mut all_findings = findings::build_findings(&check_results);
     let detectors_started = std::time::Instant::now();
 
-    // Phase 4b: Structural complexity analysis (god files, high item counts)
-    let structural_findings = time_audit_detector(
-        &mut timing,
-        "detector.structural",
-        plan.run_structural(),
-        || structural::analyze_snapshot(root, &source_snapshot),
-        Vec::new,
-    );
-    if !structural_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Structural: {} finding(s) (god files, high item counts)",
-            structural_findings.len()
-        );
-        all_findings.extend(structural_findings);
-    }
-
     // Phase 4c: Duplication detection (identical function bodies across files)
     let all_fingerprints: Vec<&fingerprint::FileFingerprint> = discovery
         .groups
@@ -281,21 +273,27 @@ pub(super) fn audit_internal(
 
     let detector_context = DetectorRunContext {
         root,
+        component_id,
         audit_config: &audit_config,
         all_fingerprints: &all_fingerprints,
+        per_file_fingerprints,
+        source_snapshot: Some(&source_snapshot),
+        reference_paths,
     };
 
+    // The duplication family stays hand-sequenced: it runs five timing spans and
+    // also produces `duplicate_groups`, a side output threaded into the report.
     let duplication_findings = time_audit_detector(
         &mut timing,
         "detector.duplication.exact",
-        plan.run_duplication(),
+        plan.detector_enabled("duplication"),
         || duplication::detect_duplicates(&all_fingerprints, &convention_methods),
         Vec::new,
     );
     let duplicate_groups = time_audit_detector(
         &mut timing,
         "detector.duplication.groups",
-        plan.run_duplication(),
+        plan.detector_enabled("duplication"),
         || duplication::detect_duplicate_groups(&all_fingerprints),
         Vec::new,
     );
@@ -313,7 +311,7 @@ pub(super) fn audit_internal(
     let intra_dup_findings = time_audit_detector(
         &mut timing,
         "detector.duplication.intra_method",
-        plan.run_duplication(),
+        plan.detector_enabled("duplication"),
         || duplication::detect_intra_method_duplicates(&all_fingerprints),
         Vec::new,
     );
@@ -330,7 +328,7 @@ pub(super) fn audit_internal(
     let near_dup_findings = time_audit_detector(
         &mut timing,
         "detector.duplication.near_duplicate",
-        plan.run_duplication(),
+        plan.detector_enabled("duplication"),
         || duplication::detect_near_duplicates(&all_fingerprints),
         Vec::new,
     );
@@ -347,7 +345,7 @@ pub(super) fn audit_internal(
     let parallel_findings = time_audit_detector(
         &mut timing,
         "detector.duplication.parallel_implementation",
-        plan.run_duplication(),
+        plan.detector_enabled("duplication"),
         || {
             duplication::detect_parallel_implementations(
                 &all_fingerprints,
@@ -366,478 +364,18 @@ pub(super) fn audit_internal(
         all_findings.extend(parallel_findings);
     }
 
-    // Phase 4e: Dead code detection (unused params, unreferenced exports, orphaned internals)
-    //
-    // Reference dependencies (e.g. WordPress core, plugin dependencies) are fingerprinted
-    // and included in the cross-reference set so that functions called via framework hooks,
-    // callbacks, or inherited methods are recognized as referenced.
-    let ref_fingerprints = if plan.run_dead_code() {
-        fingerprint_reference_paths(reference_paths)
-    } else {
-        Vec::new()
-    };
-    let component_ref_fingerprints = if plan.run_dead_code() {
-        fingerprint_component_reference_files(root)
-    } else {
-        Vec::new()
-    };
-    let ref_fp_refs: Vec<&fingerprint::FileFingerprint> = ref_fingerprints
-        .iter()
-        .chain(component_ref_fingerprints.iter())
-        .collect();
-    let dead_code_findings = time_audit_detector(
-        &mut timing,
-        "detector.dead_code",
-        plan.run_dead_code(),
-        || dead_code::analyze_dead_code_with_config(&all_fingerprints, &ref_fp_refs, &audit_config),
-        Vec::new,
-    );
-    if !dead_code_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Dead code: {} finding(s) (unused params, unreferenced exports, orphaned internals)",
-            dead_code_findings.len()
-        );
-        all_findings.extend(dead_code_findings);
-    }
+    // Every other detector — structural, dead code, comment hygiene, the policy
+    // packs, the fingerprint/root families, etc. — is dispatched by the
+    // descriptor table in one pass. Adding a detector is a descriptor row plus a
+    // `run_generic_descriptor` arm, never a new block here.
+    run_descriptor_detectors(plan, &mut timing, &mut all_findings, &detector_context, None);
 
-    // Phase 4f: Comment hygiene detection (TODO/FIXME/HACK + stale phrasing)
-    let comment_findings = time_audit_detector(
-        &mut timing,
-        "detector.comment_hygiene",
-        plan.run_comment_hygiene(),
-        || comment_hygiene::run(per_file_fingerprints, &audit_config.detector_profile),
-        Vec::new,
-    );
-    if !comment_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Comment hygiene: {} finding(s) (TODO/FIXME/HACK markers, stale phrasing)",
-            comment_findings.len()
-        );
-        all_findings.extend(comment_findings);
-    }
-
-    // Phase 4g: Structural test coverage gap detection
-    // Look up the extension's test mapping config for the component.
-    if plan.run_test_coverage() {
-        let detector_started = std::time::Instant::now();
-        if let Ok(comp) = component::load(component_id) {
-            if let Some(extensions) = &comp.extensions {
-                for ext_id in extensions.keys() {
-                    if let Ok(ext_manifest) = crate::core::extension::load_extension(ext_id) {
-                        if let Some(test_mapping) = ext_manifest.test_mapping() {
-                            let coverage_findings =
-                                test_coverage::run(root, &all_fingerprints, test_mapping);
-                            if !coverage_findings.is_empty() {
-                                log_status!(
-                                    "audit",
-                                    "Test coverage: {} finding(s) (missing test files, uncovered methods, orphaned tests)",
-                                    coverage_findings.len()
-                                );
-                                all_findings.extend(coverage_findings);
-                            }
-                            break; // Only use the first extension that has test_mapping
-                        }
-                    }
-                }
-            }
-        }
-        timing.push_ok("detector.test_coverage", detector_started.elapsed());
-    } else {
-        timing.push_skipped("detector.test_coverage");
-    }
-
-    // Phase 4h: Architecture/layer ownership rule checks (optional config)
-    let layer_findings = time_audit_detector(
-        &mut timing,
-        "detector.layer_ownership",
-        plan.run_layer_ownership(),
-        || run_layer_ownership(root),
-        Vec::new,
-    );
-    if !layer_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Layer ownership: {} finding(s) (architecture ownership violations)",
-            layer_findings.len()
-        );
-        all_findings.extend(layer_findings);
-    }
-
-    run_descriptor_detectors(
-        plan,
-        &mut timing,
-        &mut all_findings,
-        &detector_context,
-        &["test_topology", "test_wiring"],
-    );
-
-    // Phase 4j: Documentation drift detection (broken/stale references in markdown)
-    let doc_findings = time_audit_detector(
-        &mut timing,
-        "detector.docs",
-        plan.run_docs(),
-        || detect_doc_drift(root, component_id),
-        Vec::new,
-    );
-    if !doc_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Docs: {} finding(s) (broken references, stale paths)",
-            doc_findings.len()
-        );
-        all_findings.extend(doc_findings);
-    }
-
-    // Phase 4l: Compiler warnings (dead code, unused imports, unused variables)
-    // Runs extension-owned warning scripts and maps their output to findings.
-    let compiler_findings = time_audit_detector(
-        &mut timing,
-        "detector.compiler_warnings",
-        plan.run_compiler_warnings(),
-        || compiler_warnings::run(root),
-        Vec::new,
-    );
-    if !compiler_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Compiler warnings: {} finding(s) (dead code, unused imports, unused variables)",
-            compiler_findings.len()
-        );
-        all_findings.extend(compiler_findings);
-    }
-
-    // Phase 4m: Wrapper-to-implementation inference
-    // Detects wrapper files missing explicit declarations of what they wrap.
-    // Uses configurable call pattern tracing to infer the implementation target.
-    let wrapper_findings = time_audit_detector(
-        &mut timing,
-        "detector.wrapper_inference",
-        plan.run_wrapper_inference(),
-        || wrapper_inference::run(&all_fingerprints, root),
-        Vec::new,
-    );
-    if !wrapper_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Wrapper inference: {} finding(s) (missing wrapper declarations)",
-            wrapper_findings.len()
-        );
-        all_findings.extend(wrapper_findings);
-    }
-
-    run_descriptor_detectors(
-        plan,
-        &mut timing,
-        &mut all_findings,
-        &detector_context,
-        &["shadow_modules"],
-    );
-
-    // Phase 4o: Repeated struct field pattern detection.
-    let field_pattern_findings = time_audit_detector(
-        &mut timing,
-        "detector.field_patterns",
-        plan.run_field_patterns(),
-        || field_patterns::run(&source_snapshot, &audit_config.detector_profile),
-        Vec::new,
-    );
-    if !field_pattern_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Field patterns: {} finding(s) (repeated struct fields)",
-            field_pattern_findings.len()
-        );
-        all_findings.extend(field_pattern_findings);
-    }
-
-    run_descriptor_detectors(
-        plan,
-        &mut timing,
-        &mut all_findings,
-        &detector_context,
-        &["facade_passthrough", "literal_shapes"],
-    );
-
-    // Phase 4r: Deprecation age detection
-    let deprecation_findings = time_audit_detector(
-        &mut timing,
-        "detector.deprecation_age",
-        plan.run_deprecation_age(),
-        || deprecation_age::run(&all_fingerprints, root, &audit_config.detector_profile),
-        Vec::new,
-    );
-    if !deprecation_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Deprecation age: {} finding(s) (stale @deprecated tags)",
-            deprecation_findings.len()
-        );
-        all_findings.extend(deprecation_findings);
-    }
-
-    // Phase 4q: Dead guard detection — flag function_exists/class_exists/defined
-    // guards on symbols guaranteed to exist given plugin requirements, composer
-    // dependencies, and bootstrap requires.
-    let dead_guard_findings = time_audit_detector(
-        &mut timing,
-        "detector.dead_guard",
-        plan.run_dead_guard(),
-        || dead_guard::run(per_file_fingerprints, root, &audit_config),
-        Vec::new,
-    );
-    if !dead_guard_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Dead guards: {} finding(s) (guards on guaranteed-available symbols)",
-            dead_guard_findings.len()
-        );
-        all_findings.extend(dead_guard_findings);
-    }
-
-    // Phase 4t: Extension-owned requested detector rule packs.
-    let requested_findings = time_audit_detector(
-        &mut timing,
-        "detector.requested_detectors",
-        plan.run_requested_detectors(),
-        || requested_detectors::run(&all_fingerprints, &audit_config),
-        Vec::new,
-    );
-    if !requested_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Requested detectors: {} finding(s) (extension rule packs)",
-            requested_findings.len()
-        );
-        all_findings.extend(requested_findings);
-    }
-
-    // Phase 4t1: Component-owned config-key write/accessor/read correlation.
-    let config_key_findings = time_audit_detector(
-        &mut timing,
-        "detector.config_key_usage",
-        plan.run_config_key_usage(),
-        || config_key_usage::run(&all_fingerprints, &audit_config.config_key_usage.rules),
-        Vec::new,
-    );
-    if !config_key_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Config key usage: {} finding(s) (write/accessor evidence without production reads)",
-            config_key_findings.len()
-        );
-        all_findings.extend(config_key_findings);
-    }
-
-    // Phase 4t1b: Generic command-output capture hygiene.
-    let output_capture_findings = time_audit_detector(
-        &mut timing,
-        "detector.output_capture",
-        plan.run_output_capture(),
-        || unbounded_output_capture::run(per_file_fingerprints),
-        Vec::new,
-    );
-    if !output_capture_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Output capture: {} finding(s) (unbounded stdout/stderr capture)",
-            output_capture_findings.len()
-        );
-        all_findings.extend(output_capture_findings);
-    }
-
-    // Phase 4t2: Configured core-boundary ecosystem leak detection.
-    let core_boundary_findings = time_audit_detector(
-        &mut timing,
-        "detector.core_boundary_leaks",
-        plan.run_core_boundary_leaks(),
-        || {
-            source_policy::run(
-                per_file_fingerprints,
-                &audit_config.core_boundary_leaks.to_source_policy_rules(),
-            )
-        },
-        Vec::new,
-    );
-    if !core_boundary_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Core boundary leaks: {} finding(s) (configured ecosystem terms in core source)",
-            core_boundary_findings.len()
-        );
-        all_findings.extend(core_boundary_findings);
-    }
-
-    // Phase 4t2b: Generic component-owned source policy checks.
-    let source_policy_findings = time_audit_detector(
-        &mut timing,
-        "detector.source_policy",
-        plan.run_source_policy(),
-        || source_policy::run(per_file_fingerprints, &audit_config.source_policies),
-        Vec::new,
-    );
-    if !source_policy_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Source policy: {} finding(s) (configured source boundary rules)",
-            source_policy_findings.len()
-        );
-        all_findings.extend(source_policy_findings);
-    }
-
-    // Phase 4t3: Configured mutating handler/resource access detection.
-    let mutating_access_findings = time_audit_detector(
-        &mut timing,
-        "detector.mutating_resource_access",
-        plan.run_mutating_resource_access(),
-        || {
-            mutating_resource_access::run(
-                per_file_fingerprints,
-                &audit_config.mutating_resource_access,
-            )
-        },
-        Vec::new,
-    );
-    if !mutating_access_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Mutating resource access: {} finding(s) (resource mutations without configured access checks)",
-            mutating_access_findings.len()
-        );
-        all_findings.extend(mutating_access_findings);
-    }
-
-    // Phase 4t4: Configured redirect-destination dominance checks.
-    let redirect_validation_findings = time_audit_detector(
-        &mut timing,
-        "detector.redirect_validation",
-        plan.run_redirect_validation(),
-        || redirect_validation::run(per_file_fingerprints, &audit_config.redirect_validation),
-        Vec::new,
-    );
-    if !redirect_validation_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Redirect validation: {} finding(s) (request-derived redirects without dominating validation)",
-            redirect_validation_findings.len()
-        );
-        all_findings.extend(redirect_validation_findings);
-    }
-
-    // Phase 4v: Process-global environment mutation guard consistency in tests.
-    let env_guard_findings = time_audit_detector(
-        &mut timing,
-        "detector.global_env_guard",
-        plan.run_global_env_guard(),
-        || global_env_guard::run(&all_fingerprints),
-        Vec::new,
-    );
-    if !env_guard_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Global env guards: {} finding(s) (test env mutation without shared guard)",
-            env_guard_findings.len()
-        );
-        all_findings.extend(env_guard_findings);
-    }
-
-    run_descriptor_detectors(
-        plan,
-        &mut timing,
-        &mut all_findings,
-        &detector_context,
-        &["shared_scaffolding"],
-    );
-
-    // Phase 4w: Parallel runner setup detection — command-family files that
-    // assemble the same generic execution contract independently.
-    let parallel_runner_findings = time_audit_detector(
-        &mut timing,
-        "detector.parallel_runner_setup",
-        plan.run_parallel_runner_setup(),
-        || parallel_runner_setup::run(&all_fingerprints),
-        Vec::new,
-    );
-    if !parallel_runner_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Parallel runner setup: {} finding(s) (duplicated execution contract setup)",
-            parallel_runner_findings.len()
-        );
-        all_findings.extend(parallel_runner_findings);
-    }
-
-    // Phase 4w1: Remote execution preflight detection — remote dispatch sites
-    // that do not prove path/artifact parity before remote execution.
-    let remote_execution_findings = time_audit_detector(
-        &mut timing,
-        "detector.remote_execution_preflight",
-        plan.run_remote_execution_preflight(),
-        || {
-            remote_execution_preflight::run(
-                &all_fingerprints,
-                &audit_config.remote_execution_safety,
-            )
-        },
-        Vec::new,
-    );
-    if !remote_execution_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Remote execution preflight: {} finding(s) (remote path/artifact parity gaps)",
-            remote_execution_findings.len()
-        );
-        all_findings.extend(remote_execution_findings);
-    }
-
-    // Phase 4w: Repeated enum-dispatch contract detection.
-    let enum_dispatch_findings = time_audit_detector(
-        &mut timing,
-        "detector.enum_dispatch_contracts",
-        plan.run_enum_dispatch_contracts(),
-        || enum_dispatch_contracts::run(&source_snapshot),
-        Vec::new,
-    );
-    if !enum_dispatch_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Enum dispatch contracts: {} finding(s) (repeated exhaustive enum matches)",
-            enum_dispatch_findings.len()
-        );
-        all_findings.extend(enum_dispatch_findings);
-    }
-
-    run_descriptor_detectors(
-        plan,
-        &mut timing,
-        &mut all_findings,
-        &detector_context,
-        &["aggregate_construction"],
-    );
-
-    // Phase 4y: Public metadata routes returning raw registry/config getters
-    // while a permission-aware resolver/helper exists in the same area.
-    let public_registry_findings = time_audit_detector(
-        &mut timing,
-        "detector.public_registry_exposure",
-        plan.run_public_registry_exposure(),
-        || public_registry_exposure::run(&all_fingerprints, &audit_config.public_registry_exposure),
-        Vec::new,
-    );
-    if !public_registry_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Public registry exposure: {} finding(s) (public metadata routes bypassing resolvers)",
-            public_registry_findings.len()
-        );
-        all_findings.extend(public_registry_findings);
-    }
-
+    // `artifact_portability` stays hand-sequenced: it logs scan statistics (runs,
+    // artifacts, metadata fields) even when it produces no findings.
     let artifact_portability_report = time_audit_detector(
         &mut timing,
         "detector.artifact_portability",
-        plan.run_artifact_portability(),
+        plan.detector_enabled("artifact_portability"),
         || {
             if audit_config.artifact_portability.is_empty() {
                 artifact_portability::run_report(component_id)
@@ -850,7 +388,7 @@ pub(super) fn audit_internal(
         },
         Default::default,
     );
-    if plan.run_artifact_portability() {
+    if plan.detector_enabled("artifact_portability") {
         log_status!(
             "audit",
             "Artifact portability: scanned {} recent run(s), {} artifact row(s), {} metadata string field(s) (window: {})",
@@ -868,42 +406,6 @@ pub(super) fn audit_internal(
             artifact_portability_findings.len()
         );
         all_findings.extend(artifact_portability_findings);
-    }
-
-    // Phase 4z: Declared command status scenario fixtures.
-    let command_status_findings = time_audit_detector(
-        &mut timing,
-        "detector.command_status_contracts",
-        plan.run_command_status_contracts(),
-        || command_status_contracts::run(root, &audit_config.command_status_contracts),
-        Vec::new,
-    );
-    if !command_status_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Command status contracts: {} finding(s) (inconsistent no-op/dry-run status fields)",
-            command_status_findings.len()
-        );
-        all_findings.extend(command_status_findings);
-    }
-
-    // Phase 4za: Thin-command-adapter boundary checks. Flags command-layer
-    // modules that accumulate orchestration/business logic instead of staying
-    // thin adapters over core services.
-    let thin_command_adapter_findings = time_audit_detector(
-        &mut timing,
-        "detector.thin_command_adapter",
-        plan.run_thin_command_adapter(),
-        || thin_command_adapter::run(root, &audit_config.thin_command_adapter),
-        Vec::new,
-    );
-    if !thin_command_adapter_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Thin command adapters: {} finding(s) (command modules accumulating orchestration logic)",
-            thin_command_adapter_findings.len()
-        );
-        all_findings.extend(thin_command_adapter_findings);
     }
     timing.push_ok("detectors", detectors_started.elapsed());
 
@@ -1082,17 +584,14 @@ fn audit_root_only(
 ) -> CodeAuditResult {
     let audit_config = audit_config_for(component_id, root, extension_overrides);
     let mut findings = Vec::new();
-    let detector_context = DetectorRunContext {
-        root,
-        audit_config: &audit_config,
-        all_fingerprints: &[],
-    };
 
     // Build the shared source snapshot once for the root-only path so the
     // whole-tree detectors below (structural, field patterns) consume a single
     // walk/read instead of each re-walking and re-reading the tree. Built only
     // when at least one snapshot-backed detector is enabled.
-    let source_snapshot = if plan.run_structural() || plan.run_field_patterns() {
+    let source_snapshot = if plan.detector_enabled("structural")
+        || plan.detector_enabled("field_patterns")
+    {
         let snapshot_started = std::time::Instant::now();
         let snapshot = build_shared_source_snapshot(root, &audit_config);
         timing.push_ok("source_snapshot", snapshot_started.elapsed());
@@ -1101,104 +600,30 @@ fn audit_root_only(
         None
     };
 
-    let structural_findings = time_audit_detector(
-        timing,
-        "detector.structural",
-        plan.run_structural(),
-        || match source_snapshot.as_ref() {
-            Some(snapshot) => structural::analyze_snapshot(root, snapshot),
-            None => structural::analyze_structure(root),
-        },
-        Vec::new,
-    );
-    if !structural_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Structural: {} finding(s) (god files, high item counts)",
-            structural_findings.len()
-        );
-        findings.extend(structural_findings);
-    }
-
-    let layer_findings = time_audit_detector(
-        timing,
-        "detector.layer_ownership",
-        plan.run_layer_ownership(),
-        || run_layer_ownership(root),
-        Vec::new,
-    );
-    if !layer_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Layer ownership: {} finding(s) (architecture ownership violations)",
-            layer_findings.len()
-        );
-        findings.extend(layer_findings);
-    }
+    let detector_context = DetectorRunContext {
+        root,
+        component_id,
+        audit_config: &audit_config,
+        all_fingerprints: &[],
+        per_file_fingerprints: &[],
+        source_snapshot: source_snapshot.as_ref(),
+        reference_paths: &[],
+    };
 
     run_descriptor_detectors(
         plan,
         timing,
         &mut findings,
         &detector_context,
-        &["test_topology", "test_wiring"],
+        Some(ROOT_ONLY_DETECTOR_IDS),
     );
 
-    let doc_findings = time_audit_detector(
-        timing,
-        "detector.docs",
-        plan.run_docs(),
-        || detect_doc_drift(root, component_id),
-        Vec::new,
-    );
-    if !doc_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Docs: {} finding(s) (broken references, stale paths)",
-            doc_findings.len()
-        );
-        findings.extend(doc_findings);
-    }
-
-    let compiler_findings = time_audit_detector(
-        timing,
-        "detector.compiler_warnings",
-        plan.run_compiler_warnings(),
-        || compiler_warnings::run(root),
-        Vec::new,
-    );
-    if !compiler_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Compiler warnings: {} finding(s) (dead code, unused imports, unused variables)",
-            compiler_findings.len()
-        );
-        findings.extend(compiler_findings);
-    }
-
-    let field_pattern_findings = time_audit_detector(
-        timing,
-        "detector.field_patterns",
-        plan.run_field_patterns(),
-        || match source_snapshot.as_ref() {
-            Some(snapshot) => field_patterns::run(snapshot, &audit_config.detector_profile),
-            None => Vec::new(),
-        },
-        Vec::new,
-    );
-    if !field_pattern_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Field patterns: {} finding(s) (repeated struct fields)",
-            field_pattern_findings.len()
-        );
-        findings.extend(field_pattern_findings);
-    }
-
+    // `artifact_portability` stays hand-sequenced (logs scan statistics even
+    // when empty), mirroring the full path.
     let artifact_portability_report = time_audit_detector(
         timing,
         "detector.artifact_portability",
-        plan.run_artifact_portability(),
+        plan.detector_enabled("artifact_portability"),
         || {
             if audit_config.artifact_portability.is_empty() {
                 artifact_portability::run_report(component_id)
@@ -1211,7 +636,7 @@ fn audit_root_only(
         },
         Default::default,
     );
-    if plan.run_artifact_portability() {
+    if plan.detector_enabled("artifact_portability") {
         log_status!(
             "audit",
             "Artifact portability: scanned {} recent run(s), {} artifact row(s), {} metadata string field(s) (window: {})",
@@ -1229,38 +654,6 @@ fn audit_root_only(
             artifact_portability_findings.len()
         );
         findings.extend(artifact_portability_findings);
-    }
-
-    let command_status_findings = time_audit_detector(
-        timing,
-        "detector.command_status_contracts",
-        plan.run_command_status_contracts(),
-        || command_status_contracts::run(root, &audit_config.command_status_contracts),
-        Vec::new,
-    );
-    if !command_status_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Command status contracts: {} finding(s) (inconsistent no-op/dry-run status fields)",
-            command_status_findings.len()
-        );
-        findings.extend(command_status_findings);
-    }
-
-    let thin_command_adapter_findings = time_audit_detector(
-        timing,
-        "detector.thin_command_adapter",
-        plan.run_thin_command_adapter(),
-        || thin_command_adapter::run(root, &audit_config.thin_command_adapter),
-        Vec::new,
-    );
-    if !thin_command_adapter_findings.is_empty() {
-        log_status!(
-            "audit",
-            "Thin command adapters: {} finding(s) (command modules accumulating orchestration logic)",
-            thin_command_adapter_findings.len()
-        );
-        findings.extend(thin_command_adapter_findings);
     }
 
     if let Some(filter) = file_filter {
