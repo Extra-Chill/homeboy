@@ -19,13 +19,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:?HOMEBOY_RUNTIME_COMMAND_CAPTURE is required}"
 RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
-SETTINGS_HELPER="${SCRIPT_DIR}/lib/settings.sh"
+SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../../scripts/lib/settings.sh}"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --steps --failure-trap --sidecar-writer
 # shellcheck source=./lib/command-capture.sh
 source "${COMMAND_CAPTURE_HELPER}"
-# shellcheck source=./lib/settings.sh
+# shellcheck source=../../scripts/lib/settings.sh
 source "${SETTINGS_HELPER}"
 
 rust_test_runner() {

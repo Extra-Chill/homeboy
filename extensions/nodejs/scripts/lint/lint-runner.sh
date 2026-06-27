@@ -23,11 +23,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
-FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../lib/fix-results.sh}"
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../../../scripts/lib/fix-results.sh}"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --bash 4 --sidecar-writer --failure-trap
-# shellcheck source=../lib/fix-results.sh
+# shellcheck source=../../../scripts/lib/fix-results.sh
 source "$FIX_RESULTS_HELPER"
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"

@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
-FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${ROOT_DIR}/wordpress/scripts/lib/fix-results.sh}"
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${ROOT_DIR}/scripts/lib/fix-results.sh}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 

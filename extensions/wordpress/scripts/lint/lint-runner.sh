@@ -16,8 +16,8 @@ RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH
 
-FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../lib/fix-results.sh}"
-# shellcheck source=../lib/fix-results.sh
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../../../scripts/lib/fix-results.sh}"
+# shellcheck source=../../../scripts/lib/fix-results.sh
 source "$FIX_RESULTS_HELPER"
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
