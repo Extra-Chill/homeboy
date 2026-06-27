@@ -911,7 +911,7 @@ function uniqueRuntimeRequirementObjects(entries) {
 }
 
 function providerPluginPathsFromRuntimeProfile(runtimeRequirements = {}, runtimeProfile = {}, options = {}) {
-  return uniquePaths([
+  return normalizeProviderPluginPaths([
     ...normalizeArray(options.providerPluginPaths),
     ...normalizeArray(options.provider_plugin_paths),
     ...providerPluginPathEntries(runtimeRequirements.provider_plugins),
@@ -920,7 +920,7 @@ function providerPluginPathsFromRuntimeProfile(runtimeRequirements = {}, runtime
 }
 
 function explicitProviderPluginPathsFromConfig(config = {}, options = {}) {
-  return uniquePaths(firstNonEmptyArray(
+  return normalizeProviderPluginPaths(firstNonEmptyArray(
     providerPluginPathsFromEnv(),
     options.providerPluginPaths,
     options.provider_plugin_paths,
@@ -964,6 +964,18 @@ function providerPluginPathEntries(value) {
     }
     return [entry.path, entry.source].filter(Boolean);
   });
+}
+
+function normalizeProviderPluginPaths(paths) {
+  return uniquePaths(normalizeArray(paths).map((entry) => {
+    if (typeof entry === 'string') {
+      return entry;
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return '';
+    }
+    return firstValue(entry.path, entry.source, entry.target, '');
+  }));
 }
 
 function abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) {
@@ -1028,7 +1040,8 @@ function runtimePackageTaskInputForCodebox(input, options = {}) {
     }
   }
   const packageDescriptor = normalized.runtime_package === undefined ? normalized.package : normalized.runtime_package;
-  const runtimePackage = runtimePackageImportPath(packageDescriptor, options);
+  const normalizedPackage = normalizeRuntimePackageTaskPackage(packageDescriptor, options);
+  const runtimePackage = normalizedPackage.runtime_package;
   const runtimePackageAgent = runtimePackageIdentifier(packageDescriptor);
   if (runtimePackage) {
     normalized.runtime_package = runtimePackage;
@@ -1039,11 +1052,35 @@ function runtimePackageTaskInputForCodebox(input, options = {}) {
   if (packageDescriptor && typeof packageDescriptor === 'object' && !Array.isArray(packageDescriptor)) {
     normalized.metadata = {
       ...(normalized.metadata && typeof normalized.metadata === 'object' && !Array.isArray(normalized.metadata) ? normalized.metadata : {}),
-      runtime_package_descriptor: runtimePackageDescriptorForCodebox(packageDescriptor, options),
+      runtime_package_descriptor: normalizedPackage.descriptor,
     };
   }
   delete normalized.package;
   return normalized;
+}
+
+function normalizeRuntimePackageTaskPackage(packageDescriptor, options = {}) {
+  if (!packageDescriptor || typeof packageDescriptor !== 'object' || Array.isArray(packageDescriptor)) {
+    return { runtime_package: runtimePackageImportPath(packageDescriptor, options), descriptor: packageDescriptor };
+  }
+
+  const descriptor = runtimePackageDescriptorForCodebox(packageDescriptor, options);
+  const sourceKeys = ['source', 'path', 'bundle_path', 'bundlePath'];
+  const declaredSources = sourceKeys
+    .map((key) => descriptor[key])
+    .filter((value) => typeof value === 'string' && value !== '');
+  const uniqueSources = Array.from(new Set(declaredSources));
+  if (uniqueSources.length > 1) {
+    throw new Error(`WP Codebox runtime_package descriptor source fields cannot diverge: ${uniqueSources.join(', ')}`);
+  }
+
+  const runtimePackage = uniqueSources[0] || firstValue(descriptor.slug, descriptor.id, descriptor.name, '');
+  for (const key of sourceKeys) {
+    if (descriptor[key]) {
+      descriptor[key] = runtimePackage;
+    }
+  }
+  return { runtime_package: runtimePackage, descriptor };
 }
 
 function runtimePackageIdentifier(value) {
@@ -1115,18 +1152,43 @@ function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, 
   const engineDataOutputs = {
     ...(input.engine_data_outputs && typeof input.engine_data_outputs === 'object' && !Array.isArray(input.engine_data_outputs) ? input.engine_data_outputs : {}),
   };
+  const artifacts = normalizeRuntimePackageTaskArtifacts(input.artifacts);
   for (const declaration of declarations) {
     const name = typedArtifactNameFromDeclaration(declaration);
     if (name && !engineDataOutputs[name]) {
-      engineDataOutputs[name] = `outputs.typed_artifacts.${name}.payload`;
+      engineDataOutputs[name] = runtimePackageOutputProjectionPath(name);
+    }
+    if (name && !artifacts.some((artifact) => artifact.name === name)) {
+      artifacts.push(runtimePackageArtifactFromDeclaration(declaration));
     }
   }
 
   return {
     ...input,
+    artifacts,
     required_artifacts: requiredArtifacts,
     engine_data_outputs: engineDataOutputs,
   };
+}
+
+function normalizeRuntimePackageTaskArtifacts(artifacts) {
+  return normalizeArray(artifacts)
+    .filter((artifact) => artifact && typeof artifact === 'object' && !Array.isArray(artifact))
+    .map((artifact) => ({ ...artifact }));
+}
+
+function runtimePackageArtifactFromDeclaration(declaration) {
+  const name = typedArtifactNameFromDeclaration(declaration);
+  return withoutUndefinedValues({
+    name,
+    required: declaration.required === true,
+    schema: declaration.artifact_schema || declaration.artifactSchema,
+    output: runtimePackageOutputProjectionPath(name),
+  });
+}
+
+function runtimePackageOutputProjectionPath(name) {
+  return `outputs.typed_artifacts.${name}.payload`;
 }
 
 function runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared = {}) {
@@ -1617,7 +1679,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
 }
 
 function defaultProviderPluginPaths(provider, config, options, settings, providerConfig, fallbackProviderPluginPath) {
-  return uniquePaths(firstProviderPathArray(
+  return normalizeProviderPluginPaths(firstProviderPathArray(
     providerPluginPathsFromEnv(),
     options.providerPluginPaths,
     options.provider_plugin_paths,
@@ -3554,6 +3616,9 @@ module.exports = {
   wpCodeboxAgentFanoutAdapterContract,
   codeboxTaskRequestFromAgentTaskRequest,
   codeboxFanoutRequestFromAgentTaskRequest,
+  normalizeProviderPluginPaths,
+  normalizeRuntimePackageTaskPackage,
+  runtimePackageTaskInputForCodebox,
   reconcileRunSummaryWithPublicEnvelope,
   normalizeCodeboxAgentTaskEvents,
   agentTaskOutcomeFromCodeboxResult,
