@@ -149,6 +149,7 @@ pub(super) fn truncated_runner_exec_output() -> RunnerExecOutput {
                 truncated: false,
             },
         }),
+        execution_record: None,
         runner_result: None,
         handoff: None,
         diagnostics: None,

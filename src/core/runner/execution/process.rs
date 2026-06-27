@@ -355,6 +355,15 @@ pub(super) fn exec_output(
     };
     let runner_result = runner_result(None, exit_code, &stdout, &stderr, None, None);
     let handoff = runner_handoff(runner, transport, None, Some(runner_result.clone()));
+    let execution_record = runner_execution_record_for_output(
+        runner,
+        transport,
+        exit_code,
+        None,
+        None,
+        &[],
+        Some(&runner_result),
+    );
     (
         RunnerExecOutput {
             variant: "exec",
@@ -380,6 +389,7 @@ pub(super) fn exec_output(
             structured_summaries: Vec::new(),
             metrics: output.metrics,
             capture: output.capture,
+            execution_record: Some(execution_record),
             runner_result: Some(runner_result),
             handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, source_snapshot.as_ref(), &require_paths),

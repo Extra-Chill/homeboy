@@ -186,6 +186,15 @@ pub(super) fn exec_via_reverse_broker(
         Some(runner_job.clone()),
         Some(runner_result.clone()),
     );
+    let execution_record = runner_execution_record_for_output(
+        runner,
+        "reverse_broker",
+        exit_code,
+        Some(job.id.to_string()),
+        mirror_run_id.clone(),
+        &artifacts,
+        Some(&runner_result),
+    );
 
     Ok((
         RunnerExecOutput {
@@ -212,6 +221,7 @@ pub(super) fn exec_via_reverse_broker(
             structured_summaries: Vec::new(),
             metrics,
             capture,
+            execution_record: Some(execution_record),
             runner_result: Some(runner_result),
             handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),

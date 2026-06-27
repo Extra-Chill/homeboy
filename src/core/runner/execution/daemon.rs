@@ -191,6 +191,15 @@ pub(super) fn exec_via_daemon(
         Some(runner_job.clone()),
         Some(runner_result.clone()),
     );
+    let execution_record = runner_execution_record_for_output(
+        runner,
+        "daemon",
+        exit_code,
+        Some(job.id.to_string()),
+        mirror_run_id.clone(),
+        &artifacts,
+        Some(&runner_result),
+    );
 
     Ok((
         RunnerExecOutput {
@@ -209,7 +218,7 @@ pub(super) fn exec_via_daemon(
             job: Some(job),
             runner_job: Some(runner_job),
             job_events: Some(events),
-            mirror_run_id,
+            mirror_run_id: mirror_run_id.clone(),
             patch,
             mutation_artifacts,
             artifacts,
@@ -217,6 +226,7 @@ pub(super) fn exec_via_daemon(
             structured_summaries: Vec::new(),
             metrics,
             capture,
+            execution_record: Some(execution_record),
             runner_result: Some(runner_result),
             handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
@@ -401,7 +411,7 @@ pub(super) fn detached_handoff_output(
             runner_job: Some(runner_job),
             job_id: Some(job.id.to_string()),
             job_events: None,
-            mirror_run_id,
+            mirror_run_id: mirror_run_id.clone(),
             patch: None,
             mutation_artifacts: None,
             artifacts: Vec::new(),
@@ -409,6 +419,15 @@ pub(super) fn detached_handoff_output(
             structured_summaries: Vec::new(),
             metrics: None,
             capture: None,
+            execution_record: Some(runner_execution_record_for_output(
+                runner,
+                transport,
+                0,
+                Some(job.id.to_string()),
+                mirror_run_id.clone(),
+                &[],
+                Some(&runner_result),
+            )),
             runner_result: Some(runner_result),
             handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),

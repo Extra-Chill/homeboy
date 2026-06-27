@@ -14,6 +14,9 @@ use crate::command_contract::RunnerWorkload;
 use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, Result};
+use crate::core::runner_execution_envelope::{
+    RunnerExecutionArtifactRef, RunnerExecutionNextAction, RunnerExecutionRecord,
+};
 use crate::core::source_snapshot::SourceSnapshot;
 
 use super::resource_metrics::RunnerResourceMetrics;
@@ -146,11 +149,96 @@ pub struct RunnerExecOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture: Option<CommandCaptureMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_record: Option<RunnerExecutionRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_result: Option<RunnerResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<RunnerHandoff>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerExecDiagnostics>,
+}
+
+fn runner_execution_record_for_output(
+    runner: &Runner,
+    transport: &str,
+    exit_code: i32,
+    job_id: Option<String>,
+    mirror_run_id: Option<String>,
+    artifacts: &[JobArtifactMetadata],
+    runner_result: Option<&RunnerResult>,
+) -> RunnerExecutionRecord {
+    let execution_id = job_id
+        .clone()
+        .or_else(|| mirror_run_id.clone())
+        .unwrap_or_else(|| format!("runner-exec:{}:{}", runner.id, transport));
+    let mut artifact_refs = job_artifact_refs(artifacts);
+    if let Some(result) = runner_result {
+        artifact_refs.extend(result.artifact_refs.iter().map(|artifact| {
+            RunnerExecutionArtifactRef {
+                id: artifact.artifact_id.clone(),
+                name: artifact.name.clone(),
+                path: artifact.path.clone(),
+                url: artifact.url.clone(),
+            }
+        }));
+    }
+    artifact_refs.sort_by(|left, right| left.id.cmp(&right.id));
+    artifact_refs.dedup_by(|left, right| left.id == right.id);
+
+    let mut record = RunnerExecutionRecord::terminal(
+        execution_id,
+        runner.id.clone(),
+        transport.to_string(),
+        exit_code,
+    )
+    .with_mirror_run_id(mirror_run_id)
+    .with_artifact_refs(artifact_refs);
+    if let Some(job_id) = job_id {
+        record = record
+            .with_job_id(job_id.clone())
+            .with_next_actions(runner_execution_next_actions(&runner.id, &job_id));
+    }
+    record
+}
+
+fn job_artifact_refs(artifacts: &[JobArtifactMetadata]) -> Vec<RunnerExecutionArtifactRef> {
+    artifacts
+        .iter()
+        .map(|artifact| RunnerExecutionArtifactRef {
+            id: artifact.id.clone(),
+            name: artifact.name.clone(),
+            path: artifact.path.clone(),
+            url: artifact.url.clone(),
+        })
+        .collect()
+}
+
+fn runner_execution_next_actions(runner_id: &str, job_id: &str) -> Vec<RunnerExecutionNextAction> {
+    vec![
+        RunnerExecutionNextAction {
+            label: "runner_job_logs".to_string(),
+            command: vec![
+                "homeboy".to_string(),
+                "runner".to_string(),
+                "job".to_string(),
+                "logs".to_string(),
+                runner_id.to_string(),
+                job_id.to_string(),
+            ],
+        },
+        RunnerExecutionNextAction {
+            label: "runner_job_follow".to_string(),
+            command: vec![
+                "homeboy".to_string(),
+                "runner".to_string(),
+                "job".to_string(),
+                "logs".to_string(),
+                runner_id.to_string(),
+                job_id.to_string(),
+                "--follow".to_string(),
+            ],
+        },
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
