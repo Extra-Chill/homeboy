@@ -12,14 +12,6 @@ pub(crate) fn action_dedupe_key(action: &AgentTaskLoopPolicyAction) -> Option<St
         | AgentTaskLoopPolicyAction::SpawnController { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::SpawnSubloop { dedupe_key, .. }
         | AgentTaskLoopPolicyAction::RouteFinding { dedupe_key, .. } => Some(dedupe_key.clone()),
-        AgentTaskLoopPolicyAction::ValidateCandidatePatch {
-            candidate,
-            validation,
-            ..
-        } => Some(format!(
-            "candidate-validation:{}:{}",
-            candidate.candidate_id, validation.validation_id
-        )),
         AgentTaskLoopPolicyAction::WaitForEvent(wait) => Some(format!("wait:{}", wait.wait_key)),
         AgentTaskLoopPolicyAction::WaitForController {
             loop_id, wait_key, ..
@@ -84,7 +76,6 @@ pub(crate) fn action_name(action: &AgentTaskLoopPolicyAction) -> &'static str {
         AgentTaskLoopPolicyAction::SpawnController { .. } => "spawn_controller",
         AgentTaskLoopPolicyAction::SpawnSubloop { .. } => "spawn_subloop",
         AgentTaskLoopPolicyAction::RouteFinding { .. } => "route_finding",
-        AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. } => "validate_candidate_patch",
         AgentTaskLoopPolicyAction::Join { .. } => "join",
         AgentTaskLoopPolicyAction::Retry { .. } => "retry",
         AgentTaskLoopPolicyAction::RequestChanges { .. } => "request_changes",

@@ -371,6 +371,53 @@ fn status_diagnostics_surface_missing_and_failed_acceptance_gates() {
 }
 
 #[test]
+fn status_diagnostics_surface_pending_acceptance_gate() {
+    let mut record = AgentTaskLoopControllerRecord::new("loop", "verify", "v1");
+    record.gate_bundles.push(AgentTaskGateBundle {
+        bundle_id: "manual-only".to_string(),
+        description: "manual acceptance signal".to_string(),
+        checks: Vec::new(),
+    });
+    record.record_action(
+        AgentTaskLoopPolicyAction::RunGates {
+            bundle_id: "manual-only".to_string(),
+            entity_id: Some("artifact:summary".to_string()),
+        },
+        "run manual gate",
+    );
+    record.gate_results.push(AgentTaskGateBundleResult {
+        result_id: "gate-result-1".to_string(),
+        bundle_id: "manual-only".to_string(),
+        entity_id: Some("artifact:summary".to_string()),
+        run_id: None,
+        status: AgentTaskGateBundleStatus::Pending,
+        checks: Vec::new(),
+        recorded_at: "2026-06-11T00:00:00Z".to_string(),
+    });
+
+    let diagnostics = controller_status_diagnostics_with(
+        &record,
+        DateTime::parse_from_rfc3339("2026-06-11T00:05:00Z")
+            .expect("now")
+            .with_timezone(&Utc),
+        |_| Ok(true),
+    )
+    .expect("diagnostics");
+
+    // A pending (manual) gate is blocking, not a false-green warning.
+    assert_eq!(diagnostics.summary.pending_acceptance_gate_count, 1);
+    assert_eq!(diagnostics.summary.failed_acceptance_gate_count, 0);
+    assert_eq!(diagnostics.summary.missing_acceptance_gate_count, 0);
+    assert!(diagnostics.acceptance_gates.iter().any(|gate| {
+        gate.bundle_id == "manual-only"
+            && gate.status == AgentTaskLoopAcceptanceGateStatus::Pending
+            && gate
+                .problems
+                .contains(&"acceptance gate is pending an external/manual result".to_string())
+    }));
+}
+
+#[test]
 fn subcontroller_spawn_records_parent_visible_child_once() {
     let mut record = AgentTaskLoopControllerRecord::new("parent", "plan", "v1");
     let first = record.record_action(
@@ -931,77 +978,6 @@ fn finding_packets_route_once_with_lineage() {
 }
 
 #[test]
-fn candidate_patch_validation_promotes_passes_to_human_ready() {
-    let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
-    let action = record.record_candidate_patch_validation(
-        candidate_patch(1),
-        AgentTaskLoopCandidateValidation {
-            validation_id: "validation-1".to_string(),
-            status: AgentTaskLoopCandidateValidationStatus::Passed,
-            evidence: vec![artifact_ref("artifact://validation/report")],
-            details: json!({ "passed": true }),
-        },
-        AgentTaskLoopCandidateLoopLimits { max_attempts: 2 },
-    );
-
-    assert_eq!(action.status, AgentTaskLoopActionStatus::Pending);
-    assert_eq!(record.state, AgentTaskLoopControllerState::HumanReady);
-    let entity = record
-        .entities
-        .get("candidate_patch:candidate-1")
-        .expect("candidate entity");
-    assert_eq!(entity.state.as_deref(), Some("validated"));
-    assert!(entity.human_ready);
-    assert_eq!(entity.artifact_refs.len(), 3);
-}
-
-#[test]
-fn candidate_patch_validation_marks_retry_limit_stop_condition() {
-    let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
-    record.record_candidate_patch_validation(
-        candidate_patch(2),
-        AgentTaskLoopCandidateValidation {
-            validation_id: "validation-2".to_string(),
-            status: AgentTaskLoopCandidateValidationStatus::Failed,
-            evidence: vec![artifact_ref("artifact://validation/failure")],
-            details: json!({ "passed": false }),
-        },
-        AgentTaskLoopCandidateLoopLimits { max_attempts: 2 },
-    );
-
-    assert_eq!(record.state, AgentTaskLoopControllerState::HumanReady);
-    let entity = record
-        .entities
-        .get("candidate_patch:candidate-1")
-        .expect("candidate entity");
-    assert_eq!(entity.state.as_deref(), Some("retry_limit_reached"));
-    assert!(entity.human_ready);
-}
-
-#[test]
-fn candidate_patch_validation_keeps_failed_candidate_retryable() {
-    let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
-    record.record_candidate_patch_validation(
-        candidate_patch(1),
-        AgentTaskLoopCandidateValidation {
-            validation_id: "validation-1".to_string(),
-            status: AgentTaskLoopCandidateValidationStatus::Failed,
-            evidence: vec![artifact_ref("artifact://validation/failure")],
-            details: json!({ "passed": false }),
-        },
-        AgentTaskLoopCandidateLoopLimits { max_attempts: 2 },
-    );
-
-    assert_eq!(record.state, AgentTaskLoopControllerState::Running);
-    let entity = record
-        .entities
-        .get("candidate_patch:candidate-1")
-        .expect("candidate entity");
-    assert_eq!(entity.state.as_deref(), Some("needs_retry"));
-    assert!(!entity.human_ready);
-}
-
-#[test]
 fn verify_commands_are_reusable_gate_bundle_checks() {
     let bundle = AgentTaskGateBundle::from_verify_commands(
         "candidate-gates",
@@ -1014,23 +990,3 @@ fn verify_commands_are_reusable_gate_bundle_checks() {
     assert!(bundle.checks[0].retryable);
 }
 
-fn candidate_patch(attempt: u32) -> AgentTaskLoopCandidatePatch {
-    AgentTaskLoopCandidatePatch {
-        candidate_id: "candidate-1".to_string(),
-        patch: artifact_ref("artifact://patch/fix.diff"),
-        finding_id: Some("finding-1".to_string()),
-        worktree: Some("/tmp/homeboy-candidate".to_string()),
-        attempt,
-        lineage: vec![artifact_ref("artifact://finding/finding-1")],
-    }
-}
-
-fn artifact_ref(uri: &str) -> AgentTaskLoopArtifactRef {
-    AgentTaskLoopArtifactRef {
-        uri: uri.to_string(),
-        kind: Some("artifact".to_string()),
-        role: None,
-        label: None,
-        semantic_key: None,
-    }
-}

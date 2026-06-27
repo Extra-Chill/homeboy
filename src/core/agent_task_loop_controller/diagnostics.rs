@@ -54,6 +54,8 @@ pub struct AgentTaskLoopControllerDiagnosticSummary {
     pub acceptance_gate_count: usize,
     pub missing_acceptance_gate_count: usize,
     pub failed_acceptance_gate_count: usize,
+    #[serde(default)]
+    pub pending_acceptance_gate_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,6 +91,10 @@ pub enum AgentTaskLoopAcceptanceGateStatus {
     Missing,
     Failed,
     Warning,
+    /// The gate recorded a result that is still awaiting an external/manual
+    /// signal. Treated as blocking (not acceptable) so a manual-only bundle
+    /// never resolves to a false-green acceptance gate.
+    Pending,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

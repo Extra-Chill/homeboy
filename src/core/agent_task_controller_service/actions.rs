@@ -43,6 +43,10 @@ where
     D: ControllerDispatchHook,
     F: FnMut(&str) -> AgentTaskLoopRunnerAvailability,
 {
+    if let Some(result) = enforce_controller_action_cap(record)? {
+        return Ok(result);
+    }
+
     let action = claim_controller_action(record, action_id)?;
     controller::write_controller(record)?;
 
@@ -102,6 +106,65 @@ where
             Err(error)
         }
     }
+}
+
+/// Guard against unbounded controller growth. When the controller has
+/// accumulated at least [`MAX_CONTROLLER_LIFETIME_ACTIONS`] actions, escalate to
+/// a terminal state instead of claiming and executing (and thereby recording)
+/// yet more actions. Mirrors the deterministic loop's max-iteration guard, which
+/// transitions to a blocked terminal status once the iteration ceiling is hit.
+fn enforce_controller_action_cap(
+    record: &mut AgentTaskLoopControllerRecord,
+) -> Result<Option<AgentTaskRunResult<ControllerActionReport>>> {
+    let action_count = record.next_actions.len();
+    if action_count < MAX_CONTROLLER_LIFETIME_ACTIONS {
+        return Ok(None);
+    }
+
+    let reason = format!(
+        "controller accumulated {action_count} actions, reaching the lifetime cap of {MAX_CONTROLLER_LIFETIME_ACTIONS}; escalating to prevent unbounded loop growth"
+    );
+
+    // Record the terminal outcome and escalate only once: repeated `run`/
+    // `resume` invocations against an already-capped controller must remain
+    // idempotent and must not keep appending terminal outcomes.
+    if record.state != AgentTaskLoopControllerState::Escalated {
+        record.record_terminal_outcome(
+            AgentTaskLoopTerminalStatus::Failed,
+            reason.clone(),
+            None,
+            None,
+            serde_json::json!({
+                "mode": "controller_action_cap",
+                "action_count": action_count,
+                "max_actions": MAX_CONTROLLER_LIFETIME_ACTIONS,
+            }),
+        );
+        record.state = AgentTaskLoopControllerState::Escalated;
+        controller::write_controller(record)?;
+    }
+
+    let execution = serde_json::json!({
+        "mode": "controller_action_cap",
+        "status": "escalated",
+        "action_count": action_count,
+        "max_actions": MAX_CONTROLLER_LIFETIME_ACTIONS,
+        "reason": reason,
+    });
+    Ok(Some(AgentTaskRunResult {
+        value: ControllerActionReport {
+            schema: ACTION_RESULT_SCHEMA,
+            loop_id: record.loop_id.clone(),
+            claimed: false,
+            action_id: None,
+            status: Some("escalated".to_string()),
+            failure_summary: None,
+            runtime_evidence: controller_action_runtime_evidence(&execution),
+            execution: Some(execution),
+            controller: record.clone(),
+        },
+        exit_code: 1,
+    }))
 }
 
 fn enforce_claimed_action_runner_policy<F>(
@@ -534,17 +597,6 @@ where
             target_run_id,
             feedback_id,
         } => execute_request_changes_action(record, action, target_run_id, feedback_id.as_deref()),
-        AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. } => {
-            Err(Error::validation_invalid_argument(
-                "action_id",
-                format!(
-                    "controller action '{}' is not executable by the generic controller runner yet",
-                    action.action_id
-                ),
-                Some(action.action_id.clone()),
-                None,
-            ))
-        }
     }
 }
 
@@ -1437,6 +1489,16 @@ pub(super) fn execute_wait_for_controller_action(
     ))
 }
 
+/// A gate bundle blocks the loop (non-zero exit) when it failed outright or is
+/// still pending an external/manual result. Passed and non-blocking Warn
+/// bundles allow the loop to advance.
+fn gate_bundle_exit_code(status: AgentTaskGateBundleStatus) -> i32 {
+    match status {
+        AgentTaskGateBundleStatus::Failed | AgentTaskGateBundleStatus::Pending => 1,
+        AgentTaskGateBundleStatus::Passed | AgentTaskGateBundleStatus::Warn => 0,
+    }
+}
+
 pub(super) fn execute_run_gates_action(
     record: &mut AgentTaskLoopControllerRecord,
     bundle_id: &str,
@@ -1449,11 +1511,7 @@ pub(super) fn execute_run_gates_action(
         .find(|result| result.bundle_id == bundle_id && result.entity_id.as_deref() == entity_id)
         .cloned()
     {
-        let exit_code = if existing.status == AgentTaskGateBundleStatus::Failed {
-            1
-        } else {
-            0
-        };
+        let exit_code = gate_bundle_exit_code(existing.status);
         return Ok((
             serde_json::json!({ "mode": "run_gates", "bundle_id": bundle_id, "entity_id": entity_id, "result": existing }),
             exit_code,
@@ -1480,7 +1538,11 @@ pub(super) fn execute_run_gates_action(
             AgentTaskGateBundleCheckKind::Command => run_command_gate_check(check)?,
             AgentTaskGateBundleCheckKind::Manual => AgentTaskGateCheckResult {
                 check_id: check.check_id.clone(),
-                status: AgentTaskGateBundleStatus::Warn,
+                // A manual check requires an external result that has not
+                // arrived. Treat it as Pending (blocking) rather than a
+                // non-blocking Warn so a manual-only bundle never resolves to a
+                // false-green acceptance gate.
+                status: AgentTaskGateBundleStatus::Pending,
                 retryable: check.retryable,
                 classification: Some("manual_gate_requires_external_result".to_string()),
                 evidence: Vec::new(),
@@ -1507,6 +1569,11 @@ pub(super) fn execute_run_gates_action(
         AgentTaskGateBundleStatus::Failed
     } else if checks
         .iter()
+        .any(|check| check.status == AgentTaskGateBundleStatus::Pending)
+    {
+        AgentTaskGateBundleStatus::Pending
+    } else if checks
+        .iter()
         .any(|check| check.status == AgentTaskGateBundleStatus::Warn)
     {
         AgentTaskGateBundleStatus::Warn
@@ -1523,11 +1590,7 @@ pub(super) fn execute_run_gates_action(
         recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
     record.gate_results.push(result.clone());
-    let exit_code = if status == AgentTaskGateBundleStatus::Failed {
-        1
-    } else {
-        0
-    };
+    let exit_code = gate_bundle_exit_code(status);
     Ok((
         serde_json::json!({ "mode": "run_gates", "bundle_id": bundle_id, "entity_id": entity_id, "result": result }),
         exit_code,

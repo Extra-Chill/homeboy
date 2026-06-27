@@ -80,6 +80,71 @@ fn run_gates_records_generic_terminal_outcomes() {
 }
 
 #[test]
+fn run_gates_blocks_on_pending_manual_check() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-gate-manual".to_string(),
+            phase: "verify".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        record.gate_bundles.push(AgentTaskGateBundle {
+            bundle_id: "manual-only".to_string(),
+            description: "manual acceptance signal".to_string(),
+            checks: vec![AgentTaskGateBundleCheck {
+                check_id: "external-signal".to_string(),
+                kind: AgentTaskGateBundleCheckKind::Manual,
+                input: json!({ "metric": "coverage" }),
+                retryable: false,
+            }],
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::RunGates {
+                bundle_id: "manual-only".to_string(),
+                entity_id: None,
+            },
+            "run manual gate",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        // A manual-only bundle must NOT auto-pass as an acceptable warning.
+        let result = run_next(
+            "loop-service-gate-manual",
+            CapturingExecutor::default(),
+            &NoopDispatchHook,
+        )
+        .expect("gate action executed");
+        assert_eq!(result.exit_code, 1);
+
+        let loaded =
+            controller::load_controller("loop-service-gate-manual").expect("controller loaded");
+        assert_eq!(loaded.gate_results.len(), 1);
+        assert_eq!(
+            loaded.gate_results[0].status,
+            AgentTaskGateBundleStatus::Pending
+        );
+        assert_eq!(
+            loaded.terminal_outcomes[0].status,
+            AgentTaskLoopTerminalStatus::BlockedByGate
+        );
+
+        // The acceptance gate diagnostic reports the gate as Pending (blocking)
+        // with a problem, instead of a false-green warning.
+        let diagnostics =
+            controller::controller_status_diagnostics(&loaded).expect("controller diagnostics");
+        assert_eq!(diagnostics.summary.pending_acceptance_gate_count, 1);
+        assert_eq!(diagnostics.summary.failed_acceptance_gate_count, 0);
+        assert!(diagnostics.acceptance_gates.iter().any(|gate| {
+            gate.bundle_id == "manual-only"
+                && gate.status == controller::AgentTaskLoopAcceptanceGateStatus::Pending
+                && gate
+                    .problems
+                    .contains(&"acceptance gate is pending an external/manual result".to_string())
+        }));
+    });
+}
+
+#[test]
 fn run_gates_executes_command_bundle_and_records_result() {
     with_isolated_home(|_| {
         let mut record = init(ControllerInitRequest {

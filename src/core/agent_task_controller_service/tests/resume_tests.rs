@@ -590,7 +590,7 @@ fn wait_for_controller_resumes_after_child_terminal_state() {
 }
 
 #[test]
-fn from_spec_resume_drives_generic_workflow_gates_completion_and_lineage() {
+fn from_spec_resume_drives_workflow_lineage_then_blocks_on_pending_manual_gate() {
     with_isolated_home(|_| {
         let spec = AgentTaskRepoLoopSpec {
             schema: Some("example/repo-loop/v1".to_string()),
@@ -728,23 +728,48 @@ fn from_spec_resume_drives_generic_workflow_gates_completion_and_lineage() {
         )
         .expect("controller resumed");
 
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(result.value.results.len(), 3);
+        // The fan-out workflow dispatches both findings, then the manual-only
+        // acceptance gate blocks the loop: a manual check is Pending (awaiting an
+        // external result), so the gate fails closed instead of auto-passing as a
+        // non-blocking warning. The terminal Complete action is never reached.
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.results.len(), 2);
+        assert_eq!(result.value.stopped_reason, "action_failed");
         assert_eq!(
             result.value.controller.state,
-            AgentTaskLoopControllerState::Completed
+            AgentTaskLoopControllerState::Running
         );
+        assert_eq!(result.value.controller.gate_results.len(), 1);
+        assert_eq!(
+            result.value.controller.gate_results[0].status,
+            AgentTaskGateBundleStatus::Pending
+        );
+        let gate_action = result
+            .value
+            .controller
+            .next_actions
+            .iter()
+            .find(|action| {
+                matches!(
+                    action.action,
+                    AgentTaskLoopPolicyAction::RunGates { .. }
+                )
+            })
+            .expect("run-gates action present");
+        assert_eq!(gate_action.status, AgentTaskLoopActionStatus::Failed);
         assert!(result
             .value
             .controller
             .next_actions
             .iter()
-            .all(|action| action.status == AgentTaskLoopActionStatus::Completed));
-        assert_eq!(result.value.controller.gate_results.len(), 1);
-        assert_eq!(
-            result.value.controller.gate_results[0].status,
-            AgentTaskGateBundleStatus::Warn
-        );
+            .any(|action| matches!(action.action, AgentTaskLoopPolicyAction::Complete { .. })
+                && action.status == AgentTaskLoopActionStatus::Pending));
+        assert!(result
+            .value
+            .controller
+            .terminal_outcomes
+            .iter()
+            .any(|outcome| outcome.status == AgentTaskLoopTerminalStatus::BlockedByGate));
         assert_eq!(result.value.controller.task_lineage.len(), 2);
         assert!(result.value.controller.task_lineage.iter().any(|lineage| {
             lineage.run_id == "generic-run-finding_alpha"

@@ -74,6 +74,11 @@ pub enum AgentTaskGateBundleStatus {
     Passed,
     Failed,
     Warn,
+    /// The gate has a recorded result but cannot be considered acceptable yet:
+    /// it requires an external result that has not arrived (for example a
+    /// manual check awaiting a human/external signal). Pending gates block the
+    /// loop rather than auto-passing as a non-blocking warning.
+    Pending,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -47,6 +47,10 @@ where
         .iter()
         .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Failed)
         .count();
+    let pending_acceptance_gate_count = acceptance_gates
+        .iter()
+        .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Pending)
+        .count();
 
     for action in record
         .next_actions
@@ -112,6 +116,7 @@ where
             acceptance_gate_count: acceptance_gates.len(),
             missing_acceptance_gate_count,
             failed_acceptance_gate_count,
+            pending_acceptance_gate_count,
         },
         failed_child_actions,
         pending_actions,
@@ -455,6 +460,9 @@ fn acceptance_gate_diagnostics(
                     AgentTaskLoopAcceptanceGateStatus::Failed
                 }
                 Some(AgentTaskGateBundleStatus::Warn) => AgentTaskLoopAcceptanceGateStatus::Warning,
+                Some(AgentTaskGateBundleStatus::Pending) => {
+                    AgentTaskLoopAcceptanceGateStatus::Pending
+                }
                 None => AgentTaskLoopAcceptanceGateStatus::Missing,
             };
             let problems = match status {
@@ -463,6 +471,9 @@ fn acceptance_gate_diagnostics(
                 }
                 AgentTaskLoopAcceptanceGateStatus::Failed => {
                     vec!["acceptance gate recorded a failed result".to_string()]
+                }
+                AgentTaskLoopAcceptanceGateStatus::Pending => {
+                    vec!["acceptance gate is pending an external/manual result".to_string()]
                 }
                 AgentTaskLoopAcceptanceGateStatus::Satisfied
                 | AgentTaskLoopAcceptanceGateStatus::Warning => Vec::new(),

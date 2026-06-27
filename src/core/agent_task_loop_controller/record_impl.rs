@@ -449,40 +449,6 @@ impl AgentTaskLoopControllerRecord {
         )
     }
 
-    // Part of the loop-controller API exercised only by tests; production wiring is pending.
-    #[cfg(test)]
-    pub(crate) fn record_candidate_patch_validation(
-        &mut self,
-        candidate: AgentTaskLoopCandidatePatch,
-        validation: AgentTaskLoopCandidateValidation,
-        limits: AgentTaskLoopCandidateLoopLimits,
-    ) -> AgentTaskLoopPolicyActionRecord {
-        let entity_id = self.upsert_entity(
-            "candidate_patch",
-            &candidate.candidate_id,
-            candidate.finding_id.clone().into_iter().collect(),
-            json!({
-                "worktree": candidate.worktree.clone(),
-                "attempt": candidate.attempt,
-                "finding_id": candidate.finding_id.clone(),
-            }),
-        );
-        if let Some(entity) = self.entities.get_mut(&entity_id) {
-            entity.artifact_refs.push(candidate.patch.clone());
-            entity.artifact_refs.extend(candidate.lineage.clone());
-            entity.artifact_refs.extend(validation.evidence.clone());
-        }
-
-        self.record_action(
-            AgentTaskLoopPolicyAction::ValidateCandidatePatch {
-                candidate,
-                validation,
-                limits,
-            },
-            "candidate patch validation recorded",
-        )
-    }
-
     pub fn record_pr_ownership_status(
         &mut self,
         request: &AgentTaskPrOwnershipRequest,
@@ -602,35 +568,6 @@ impl AgentTaskLoopControllerRecord {
             AgentTaskLoopPolicyAction::RouteFinding {
                 entity_id: None, ..
             } => {}
-            AgentTaskLoopPolicyAction::ValidateCandidatePatch {
-                candidate,
-                validation,
-                limits,
-            } => {
-                let entity_id = format!(
-                    "candidate_patch:{}",
-                    sanitize_loop_id(&candidate.candidate_id)
-                );
-                if let Some(entity) = self.entities.get_mut(&entity_id) {
-                    match validation.status {
-                        AgentTaskLoopCandidateValidationStatus::Passed => {
-                            entity.state = Some("validated".to_string());
-                            entity.human_ready = true;
-                            self.state = AgentTaskLoopControllerState::HumanReady;
-                        }
-                        AgentTaskLoopCandidateValidationStatus::Failed
-                            if candidate.attempt >= limits.max_attempts =>
-                        {
-                            entity.state = Some("retry_limit_reached".to_string());
-                            entity.human_ready = true;
-                            self.state = AgentTaskLoopControllerState::HumanReady;
-                        }
-                        AgentTaskLoopCandidateValidationStatus::Failed => {
-                            entity.state = Some("needs_retry".to_string());
-                        }
-                    }
-                }
-            }
             AgentTaskLoopPolicyAction::OwnPrUntilGreen {
                 ownership,
                 entity_id,
