@@ -33,6 +33,46 @@ fn single_rig_run_records_installed_rig_package_evidence_in_metadata() {
 }
 
 #[test]
+fn local_git_rig_package_evidence_records_source_identity() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        let (_package_root, revision) =
+            install_git_rig_package(home, "studio-bfb", "studio", component_dir.path());
+
+        let (output, exit_code) = run(
+            run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
+            &GlobalArgs {},
+        )
+        .expect("rig bench should run");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::Single(result) => {
+                let metadata = result
+                    .results
+                    .expect("bench results")
+                    .run_metadata
+                    .expect("run metadata");
+                let evidence = metadata.rig_package.expect("rig package evidence");
+                assert_eq!(
+                    evidence.installed_source_revision.as_deref(),
+                    Some(revision.as_str())
+                );
+                assert_eq!(
+                    evidence.current_source_revision.as_deref(),
+                    Some(revision.as_str())
+                );
+                assert_eq!(evidence.source_ref.as_deref(), Some("main"));
+                assert!(evidence.source_dirty);
+                assert!(evidence.freshness_verified);
+            }
+            _ => panic!("expected single output"),
+        }
+    });
+}
+
+#[test]
 fn run_selects_single_scenario() {
     with_isolated_home(|home| {
         write_bench_extension(home);
