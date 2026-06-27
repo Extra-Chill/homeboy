@@ -312,6 +312,8 @@ fn write_rig_source_metadata(rig_id: &str) {
             linked: false,
             materialized: false,
             source_revision: Some("abc123".to_string()),
+            source_ref: Some("main".to_string()),
+            source_dirty: false,
         })
         .expect("serialize source metadata"),
     )

@@ -120,13 +120,11 @@ Metric lookup supports top-level run metadata such as `results.total_elapsed_ms`
 ## Related Readers
 
 ```bash
-homeboy bench history <component> [--scenario <id>] [--rig <id>] [--limit 20]
-homeboy bench distribution <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
-homeboy bench compare --from-run <run-id> --to-run <run-id>
+homeboy runs list --kind bench --component <component> [--scenario <id>] [--rig <id>] [--limit 20]
+homeboy runs distribution --kind bench --component <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
+homeboy runs bench-compare --from-run <run-id> --to-run <run-id>
 homeboy rig runs <id> [--limit 20]
 ```
-
-These commands are thin read-only compatibility wrappers over the same observation-store records. Prefer `runs` readers for new automation: `bench history` returns the `runs.list` payload, `bench distribution` returns `runs.distribution`, and `bench compare` returns `runs.bench-compare`.
 
 ## Portable Bundles
 

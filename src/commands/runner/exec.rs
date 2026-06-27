@@ -5,7 +5,10 @@ use std::path::{Component, Path, PathBuf};
 
 use homeboy::core::engine::shell;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
-use homeboy::core::runners::{self as runner, RunnerExecOutput, RunnerKind};
+use homeboy::core::runners::{
+    self as runner, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
+    RunnerKind,
+};
 use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::{server, Error};
 
@@ -59,7 +62,7 @@ pub(super) fn exec(
 
     let validated_run_id = validate_runner_exec_run_id(run_id)?;
 
-    let (output, exit_code) = runner::exec(
+    let (mut output, exit_code) = runner::exec(
         runner_id,
         runner::RunnerExecOptions {
             cwd,
@@ -88,8 +91,23 @@ pub(super) fn exec(
         },
     )?;
     if let Some(run_id) = validated_run_id.as_deref() {
-        promote_runner_exec_artifacts(run_id, &output, &artifact_outputs)?;
-        promote_runner_exec_summaries(run_id, &output, &summary_outputs)?;
+        let artifacts = promote_runner_exec_artifacts(run_id, &output, &artifact_outputs)?;
+        let promoted_artifacts = artifacts
+            .iter()
+            .filter_map(|record| promoted_output(&output, record))
+            .collect::<Vec<_>>();
+        let summaries = promote_runner_exec_summaries(run_id, &output, &summary_outputs)?;
+        let structured_summaries = summaries
+            .iter()
+            .filter_map(|summary| runner_exec_structured_summary(&output, summary))
+            .collect::<Vec<_>>();
+        let promoted_summaries = summaries
+            .iter()
+            .filter_map(|record| promoted_output(&output, record))
+            .collect::<Vec<_>>();
+        output.promoted_outputs.extend(promoted_artifacts);
+        output.structured_summaries.extend(structured_summaries);
+        output.promoted_outputs.extend(promoted_summaries);
     }
     Ok((output, exit_code))
 }
@@ -315,6 +333,7 @@ fn promote_runner_exec_outputs(
                 "declared_path": declared,
                 "evidence_role": role.as_str(),
                 "promoted_by": "runner.exec",
+                "runner_path": runner_path.display().to_string(),
             });
             let record_path = if let Some(runner) = runner.as_ref() {
                 metadata["source"] = serde_json::json!("runner_path_attach");
@@ -324,13 +343,73 @@ fn promote_runner_exec_outputs(
             } else {
                 runner_path.clone()
             };
-            if record_path.is_dir() {
-                store.record_directory_artifact_with_metadata(run_id, &kind, &record_path, metadata)
+            let record = if record_path.is_dir() {
+                store.record_directory_artifact_with_metadata(
+                    run_id,
+                    &kind,
+                    &record_path,
+                    metadata,
+                )?
             } else {
-                store.record_artifact_with_metadata(run_id, &kind, &record_path, metadata)
-            }
+                store.record_artifact_with_metadata(run_id, &kind, &record_path, metadata)?
+            };
+            Ok(record)
         })
         .collect()
+}
+
+fn promoted_output(
+    output: &RunnerExecOutput,
+    record: &ArtifactRecord,
+) -> Option<RunnerExecPromotedOutput> {
+    let role = record
+        .metadata_json
+        .get("evidence_role")?
+        .as_str()?
+        .to_string();
+    let declared_path = record
+        .metadata_json
+        .get("declared_path")?
+        .as_str()?
+        .to_string();
+    let runner_path = record
+        .metadata_json
+        .get("runner_path")?
+        .as_str()?
+        .to_string();
+    Some(RunnerExecPromotedOutput {
+        role,
+        run_id: record.run_id.clone(),
+        runner_id: output.runner_id.clone(),
+        command: output.argv.clone(),
+        declared_path,
+        runner_path,
+        artifact_id: record.id.clone(),
+        artifact_kind: record.kind.clone(),
+        artifact_path: record.path.clone(),
+    })
+}
+
+fn runner_exec_structured_summary(
+    output: &RunnerExecOutput,
+    record: &ArtifactRecord,
+) -> Option<RunnerExecStructuredSummary> {
+    if record.artifact_type != "file" || record.mime.as_deref() != Some("application/json") {
+        return None;
+    }
+    let summary = fs::read_to_string(&record.path)
+        .ok()
+        .and_then(|body| serde_json::from_str(&body).ok())?;
+    let promoted = promoted_output(output, record)?;
+    Some(RunnerExecStructuredSummary {
+        run_id: promoted.run_id,
+        runner_id: promoted.runner_id,
+        command: promoted.command,
+        declared_path: promoted.declared_path,
+        artifact_id: promoted.artifact_id,
+        artifact_path: promoted.artifact_path,
+        summary,
+    })
 }
 
 fn copy_runner_exec_artifact_source(
@@ -632,6 +711,8 @@ fn runner_exec_dry_run(
             patch: None,
             mutation_artifacts: None,
             artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
             metrics: None,
             capture: None,
             runner_result: None,
@@ -640,6 +721,7 @@ fn runner_exec_dry_run(
                 runner_workspace_root: runner.workspace_root,
                 source_snapshot_remote_path: None,
                 required_paths: require_paths,
+                homeboy_binaries: None,
                 hints: vec!["dry run only; no runner command was executed".to_string()],
             }),
         },

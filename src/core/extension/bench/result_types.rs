@@ -121,6 +121,10 @@ pub struct RigPackageEvidence {
     pub installed_source_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_dirty: bool,
     pub linked: bool,
     pub materialized: bool,
     pub freshness: RigPackageFreshness,

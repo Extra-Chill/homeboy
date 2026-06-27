@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 use serde_json::json;
 
-use crate::core::api_jobs::RemoteRunnerJobResult;
+use crate::core::api_jobs::{RemoteRunnerJobRequest, RemoteRunnerJobResult};
 use crate::core::error::{Error, Result};
 
 use super::super::execution::{exec_worker_local_until_cancelled, RunnerExecOptions};
@@ -277,6 +277,7 @@ fn run_once_output(
     };
     let mut cancel_seen = false;
     let mut last_cancel_poll = Instant::now();
+    let claimed_run_id = claimed_job_run_id(&claim.request);
     let exec_result = exec_worker_local_until_cancelled(
         &options.runner_id,
         RunnerExecOptions {
@@ -293,7 +294,7 @@ fn run_once_output(
             required_extensions: claim.request.required_extensions(),
             require_paths: claim.request.require_paths.clone(),
             runner_workload: claim.request.runner_workload.clone(),
-            run_id: None,
+            run_id: claimed_run_id,
             detach_after_handoff: false,
         },
         || {
@@ -378,4 +379,25 @@ fn run_once_output(
         ),
         exit_code,
     ))
+}
+
+fn claimed_job_run_id(request: &RemoteRunnerJobRequest) -> Option<String> {
+    request
+        .lifecycle
+        .as_ref()
+        .and_then(|lifecycle| non_empty_run_id(lifecycle.durable_run_id.as_deref()))
+        .or_else(|| {
+            request
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("run_id"))
+                .and_then(|run_id| non_empty_run_id(run_id.as_str()))
+        })
+}
+
+fn non_empty_run_id(run_id: Option<&str>) -> Option<String> {
+    run_id
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+        .map(ToString::to_string)
 }

@@ -132,6 +132,8 @@ pub(super) fn truncated_runner_exec_output() -> RunnerExecOutput {
         patch: None,
         mutation_artifacts: None,
         artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
         metrics: None,
         capture: Some(crate::core::engine::command::CommandCaptureMetadata {
             stdout: crate::core::engine::command::CaptureMetadata {

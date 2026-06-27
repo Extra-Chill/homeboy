@@ -58,15 +58,15 @@ pub struct RunsArgs {
 
 #[derive(Subcommand, Clone)]
 pub(super) enum RunsCommand {
-    /// List persisted observation runs; canonical replacement for `bench history` and `rig runs`
+    /// List persisted observation runs
     List(RunsListArgs),
-    /// Aggregate persisted run metadata; canonical replacement for `bench distribution`
+    /// Aggregate persisted run metadata
     Distribution(RunsDistributionArgs),
     /// Show the latest persisted observation run matching filters
     LatestRun(RunsLatestRunArgs),
     /// Compare selected metrics across persisted run history
     Compare(RunsCompareArgs),
-    /// Compare two persisted benchmark runs by exact run id; canonical replacement for `bench compare`
+    /// Compare two persisted benchmark runs by exact run id
     BenchCompare(RunsBenchCompareArgs),
     /// Compare two persisted fuzz runs by exact run id
     FuzzCompare(RunsFuzzCompareArgs),

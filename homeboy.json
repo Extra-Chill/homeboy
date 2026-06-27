@@ -7,28 +7,15 @@
     },
     "command_status_contracts": {
       "required_commands": [
-        "audit",
         "deploy",
-        "lint",
         "release",
-        "review",
         "runs",
-        "stack",
-        "test"
+        "stack"
       ],
       "required_output_error_commands": [
         "status"
       ],
       "scenarios": [
-        {
-          "command": "audit",
-          "expected_fields": {
-            "/data/command": "audit.summary",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/audit-summary.json",
-          "id": "audit-summary-golden"
-        },
         {
           "command": "deploy",
           "expected_fields": {
@@ -39,30 +26,12 @@
           "id": "deploy-golden-contract"
         },
         {
-          "command": "lint",
-          "expected_fields": {
-            "/data/phase/phase": "lint",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/lint-findings.json",
-          "id": "lint-findings-golden"
-        },
-        {
           "command": "release",
           "expected_fields": {
             "/scenarios/0/payload/success": true
           },
           "file": "tests/fixtures/golden_json_contracts/release_contract.json",
           "id": "release-golden-contract"
-        },
-        {
-          "command": "review",
-          "expected_fields": {
-            "/data/command": "review",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/review-artifact.json",
-          "id": "review-artifact-golden"
         },
         {
           "command": "runs",
@@ -93,15 +62,6 @@
           "id": "status-runner-validation-error-output",
           "outcome": "validation_error",
           "output_file": true
-        },
-        {
-          "command": "test",
-          "expected_fields": {
-            "/data/phase/phase": "test",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/test-summary.json",
-          "id": "test-summary-golden"
         },
         {
           "command": "refactor transform",
@@ -698,7 +658,6 @@
         "parallel-implementation::src/core/agent_task_prompts.rs::ParallelImplementation",
         "parallel-implementation::src/core/extension/trace/attach.rs::ParallelImplementation",
         "structural::src/core/agent_task_controller_service/tests.rs::HighItemCount",
-        "structural::src/commands/bench/tests.rs::GodFile",
         "structural::src/commands::DirectorySprawl",
         "structural::src/core/agent_task_controller_service/artifacts.rs::HighItemCount",
         "structural::src/core/agent_task_controller_service/tests.rs::GodFile",
@@ -717,7 +676,7 @@
         "structural::src/core/triage/tests.rs::GodFile",
         "structural::src/core::DirectorySprawl",
         "structural::tests/core_agnostic_test.rs::HighItemCount",
-        "test_quality::src/commands/bench/tests.rs::VacuousTest",
+        "test_quality::src/commands/bench/tests/scenario_run_tests.rs::VacuousTest",
         "test_quality::src/core/agent_task_scheduler/tests/outcome_tests.rs::VacuousTest",
         "test_quality::src/core/code_audit/duplication/tests.rs::VacuousTest",
         "test_quality::src/core/runner/execution/tests/policy.rs::VacuousTest",

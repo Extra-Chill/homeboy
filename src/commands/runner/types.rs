@@ -76,6 +76,7 @@ pub struct LabRunnerHomeboyOutput {
     pub controller_version: String,
     pub controller_build_identity: String,
     pub configured_executable: String,
+    pub binary_roles: Vec<RunnerHomeboyBinaryRole>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_daemon_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +88,19 @@ pub struct LabRunnerHomeboyOutput {
     pub artifact_features: RunnerArtifactFeatureDiagnostics,
     pub refresh_commands: Vec<String>,
     pub upgrade_command: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerHomeboyBinaryRole {
+    pub role: &'static str,
+    pub owner: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<String>,
+    pub purpose: &'static str,
 }
 
 #[derive(Debug, Serialize)]

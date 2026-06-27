@@ -916,6 +916,7 @@ pub(super) fn compile_loop_spec_workflow(
     workflow: &AgentTaskRepoLoopSpecWorkflow,
 ) -> Result<AgentTaskLoopPolicyAction> {
     let dedupe_key = format!("workflow:{}", workflow.workflow_id);
+    validate_workflow_runtime_execution(workflow)?;
     if workflow
         .runtime_execution
         .get("kind")
@@ -951,6 +952,26 @@ pub(super) fn compile_loop_spec_workflow(
             request_template: request,
         })
     }
+}
+
+fn validate_workflow_runtime_execution(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Result<()> {
+    let Some(execution) = workflow.runtime_execution.as_object() else {
+        return Ok(());
+    };
+    if execution
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|command| !command.trim().is_empty())
+        && execution.get("kind").and_then(Value::as_str) != Some("command")
+    {
+        return Err(Error::validation_invalid_argument(
+            "workflows[].runtime_execution.kind",
+            "workflow runtime_execution declares a command but is missing `kind: command`; deterministic command workflows must opt into command execution instead of falling through to agent dispatch",
+            Some(workflow.workflow_id.clone()),
+            Some(vec!["command".to_string()]),
+        ));
+    }
+    Ok(())
 }
 
 fn workflow_command_request(

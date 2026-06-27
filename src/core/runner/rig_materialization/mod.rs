@@ -58,6 +58,10 @@ pub(super) struct LabOffloadRigPackageSource {
     pub source_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_dirty: bool,
     pub freshness_verified: bool,
     pub freshness_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -117,6 +121,8 @@ pub(super) fn sync_lab_offload_rigs(
                         discovery_path: None,
                         source_revision: primary.source_snapshot.git_sha.clone(),
                         current_source_revision: primary.source_snapshot.git_sha.clone(),
+                        source_ref: primary.source_snapshot.git_branch.clone(),
+                        source_dirty: primary.source_snapshot.dirty,
                         freshness_verified: primary.source_snapshot.git_sha.is_some(),
                         freshness_status: if primary.source_snapshot.git_sha.is_some() {
                             "verified".to_string()
@@ -186,8 +192,20 @@ pub(super) fn sync_lab_offload_rigs(
                     install_source: install_source.clone(),
                     rig_path: Some(metadata.rig_path),
                     discovery_path: metadata.discovery_path,
-                    source_revision: metadata.source_revision,
-                    current_source_revision: source_snapshot.git_sha.clone(),
+                    source_revision: metadata.source_revision.clone(),
+                    current_source_revision: source_snapshot
+                        .git_sha
+                        .clone()
+                        .or_else(|| metadata.source_revision.clone()),
+                    source_ref: source_snapshot
+                        .git_branch
+                        .clone()
+                        .or_else(|| metadata.source_ref.clone()),
+                    source_dirty: source_snapshot
+                        .git_sha
+                        .is_some()
+                        .then_some(source_snapshot.dirty)
+                        .unwrap_or(metadata.source_dirty),
                     linked: metadata.linked,
                     materialized: metadata.materialized,
                     freshness_verified: false,
@@ -295,6 +313,10 @@ fn with_lab_package_freshness(
     rig_id: &str,
     mut package_source: LabOffloadRigPackageSource,
 ) -> LabOffloadRigPackageSource {
+    if package_source.current_source_revision.is_none() {
+        package_source.current_source_revision = package_source.source_revision.clone();
+    }
+
     match (
         package_source.source_revision.as_deref(),
         package_source.current_source_revision.as_deref(),
@@ -1065,6 +1087,8 @@ mod tests {
                         .to_string(),
                     discovery_path: Some(checkout.display().to_string()),
                     source_revision: None,
+                    source_ref: None,
+                    source_dirty: false,
                     linked: true,
                     materialized: false,
                 },
@@ -1114,6 +1138,8 @@ mod tests {
                 discovery_path: Some("/controller/homeboy-rigs".to_string()),
                 source_revision: Some("abc1234".to_string()),
                 current_source_revision: Some("def5678".to_string()),
+                source_ref: Some("main".to_string()),
+                source_dirty: false,
                 freshness_verified: false,
                 freshness_status: String::new(),
                 freshness_message: None,
@@ -1134,6 +1160,38 @@ mod tests {
             package.refresh_command.as_deref(),
             Some("homeboy rig install /runner/_lab_workspaces/homeboy-rigs --id studio-web-product-matrix --reinstall")
         );
+    }
+
+    #[test]
+    fn lab_package_source_freshness_uses_controller_metadata_when_snapshot_has_no_git() {
+        let package = with_lab_package_freshness(
+            "ssi-matrix-run-latest",
+            LabOffloadRigPackageSource {
+                source: "/controller/homeboy-rigs".to_string(),
+                source_root: "/controller/homeboy-rigs".to_string(),
+                package_path: "/controller/homeboy-rigs".to_string(),
+                install_source: "/runner/_lab_workspaces/homeboy-rigs".to_string(),
+                rig_path: Some("/controller/homeboy-rigs/rigs/ssi/rig.json".to_string()),
+                discovery_path: Some("/controller/homeboy-rigs".to_string()),
+                source_revision: Some("abc1234".to_string()),
+                current_source_revision: None,
+                source_ref: Some("main".to_string()),
+                source_dirty: true,
+                freshness_verified: false,
+                freshness_status: String::new(),
+                freshness_message: None,
+                refresh_command: None,
+                linked: true,
+                materialized: false,
+            },
+        );
+
+        assert!(package.freshness_verified);
+        assert_eq!(package.freshness_status, "verified");
+        assert_eq!(package.source_ref.as_deref(), Some("main"));
+        assert!(package.source_dirty);
+        assert!(package.freshness_message.is_none());
+        assert!(package.refresh_command.is_none());
     }
 
     #[test]

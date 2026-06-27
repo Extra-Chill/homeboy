@@ -12,6 +12,41 @@ pub(super) fn spawn_mock_broker(
     spawn_mock_broker_with_paths(store, expected_requests, None)
 }
 
+pub(super) fn spawn_mock_broker_until_finish(
+    store: JobStore,
+    max_requests: usize,
+) -> (String, std::thread::JoinHandle<()>) {
+    spawn_mock_broker_until_finish_with_paths(store, max_requests, None)
+}
+
+pub(super) fn spawn_mock_broker_until_finish_with_paths(
+    store: JobStore,
+    max_requests: usize,
+    seen_paths: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let handle = std::thread::spawn(move || {
+        for _ in 0..max_requests {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let request = read_request(&mut stream);
+            if let Some(seen_paths) = &seen_paths {
+                seen_paths
+                    .lock()
+                    .expect("record request path")
+                    .push(request.path.clone());
+            }
+            let finished = request.path.ends_with("/finish");
+            let response = handle_request(&store, &request);
+            write_response(&mut stream, response);
+            if finished {
+                break;
+            }
+        }
+    });
+    (format!("http://{addr}"), handle)
+}
+
 pub(super) fn spawn_mock_broker_with_paths(
     store: JobStore,
     expected_requests: usize,

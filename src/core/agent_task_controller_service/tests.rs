@@ -390,6 +390,16 @@ mod init_from_spec_resume_tests {
             assert_ne!(report.loop_id, "repo-loop-resume-fork");
             assert!(report.loop_id.starts_with("repo-loop-resume-fork-fork-"));
 
+            let second_report = init_from_spec_for_resume_with_resolution(
+                ControllerFromSpecRequest { spec: changed },
+                ControllerResumeStateResolution::Fork,
+            )
+            .expect("a second fork gets a fresh controller");
+            assert_ne!(second_report.loop_id, report.loop_id);
+            assert!(second_report
+                .loop_id
+                .starts_with("repo-loop-resume-fork-fork-"));
+
             // The original controller still carries the base fingerprint, untouched.
             let original = status("repo-loop-resume-fork").expect("original controller intact");
             assert_eq!(
@@ -2412,6 +2422,67 @@ mod run_command_workflow_tests {
     }
 
     #[test]
+    fn command_shaped_runtime_execution_requires_explicit_command_kind() {
+        with_isolated_home(|_| {
+            let spec = AgentTaskRepoLoopSpec {
+                schema: None,
+                loop_id: "repo-loop-command-missing-kind".to_string(),
+                phase: "init".to_string(),
+                config_version: "v1".to_string(),
+                metadata: Value::Null,
+                entities: Vec::new(),
+                agents: Vec::new(),
+                tools: Vec::new(),
+                abilities: Vec::new(),
+                workflows: vec![AgentTaskRepoLoopSpecWorkflow {
+                    workflow_id: "deterministic-validation".to_string(),
+                    agent_id: None,
+                    prompt: None,
+                    tasks: vec!["Run deterministic validation.".to_string()],
+                    entity_ids: Vec::new(),
+                    fan_out: None,
+                    tools: Vec::new(),
+                    abilities: Vec::new(),
+                    artifacts: vec!["validation_result".to_string()],
+                    consumes: Vec::new(),
+                    emits: Vec::new(),
+                    dependencies: Vec::new(),
+                    gates: Vec::new(),
+                    metrics: Vec::new(),
+                    runtime_execution: json!({
+                        "command": "/bin/sh",
+                        "args": ["-c", "printf ok"]
+                    }),
+                    inputs: Value::Null,
+                }],
+                artifacts: vec![AgentTaskRepoLoopSpecArtifact {
+                    artifact_id: "validation_result".to_string(),
+                    kind: "example/ValidationResult/v1".to_string(),
+                    description: None,
+                    required: true,
+                }],
+                artifact_graph: Vec::new(),
+                dependencies: Vec::new(),
+                gates: Vec::new(),
+                metrics: Vec::new(),
+                gate_bundles: Vec::new(),
+                policy: None,
+                phases: Vec::new(),
+                actions: Vec::new(),
+                initial_event: None,
+            };
+
+            let error = init_from_spec(ControllerFromSpecRequest { spec })
+                .expect_err("missing command kind is rejected before dispatch");
+
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert_eq!(error.details["field"], "workflows[].runtime_execution.kind");
+            assert_eq!(error.details["id"], "deterministic-validation");
+            assert!(error.message.contains("kind: command"), "{error}");
+        });
+    }
+
+    #[test]
     fn run_command_workflow_times_out_instead_of_blocking_controller() {
         with_isolated_home(|_| {
             let spec = AgentTaskRepoLoopSpec {
@@ -3182,6 +3253,63 @@ mod failure_summary_tests {
             .iter()
             .any(|reference| reference.uri == "file:///runs/run-42/codebox.log"));
         assert_emitted_homeboy_evidence_commands_parse(&summary);
+    }
+
+    #[test]
+    fn run_failure_summary_prefers_nested_actionable_diagnostic_over_generic_artifact_blocker() {
+        let results = vec![serde_json::json!({
+            "schema": ACTION_RESULT_SCHEMA,
+            "status": "failed",
+            "action_id": "generate-site",
+            "failure_summary": {
+                "action_id": "generate-site",
+                "provider": "runtime-provider",
+                "failure_phase": "runtime_execution",
+                "run_id": "run-99",
+                "diagnostic": "Missing required typed artifact: static_site_pull_request",
+            },
+            "execution": {
+                "diagnostics": [{
+                    "class": "required_typed_artifacts_missing",
+                    "message": "Missing required typed artifact: static_site_pull_request"
+                }],
+                "provider_result": {
+                    "runtime": {
+                        "diagnostics": [{
+                            "class": "provider_runtime_fatal",
+                            "message": "Fatal error: ProviderMetadata::getDescription() must be compatible with RuntimeMetadata::getDescription()"
+                        }],
+                        "selected_provider_plugin_path": "/workspace/plugins/provider/current",
+                        "prepared_plugin_source": {
+                            "uri": "git+https://example.invalid/provider.git#abc123",
+                            "label": "prepared provider plugin"
+                        },
+                        "runtime_overlay_ref": "git+https://example.invalid/runtime.git#def456"
+                    }
+                }
+            }
+        })];
+        let status = serde_json::json!({ "controller": { "phase": "generate" } });
+
+        let summary = build_run_failure_summary("loop-99", "action_failed", &results, &status);
+
+        assert_eq!(
+            summary.root_blocker,
+            "Fatal error: ProviderMetadata::getDescription() must be compatible with RuntimeMetadata::getDescription()"
+        );
+        assert_eq!(summary.owner_surface, "wordpress_runtime");
+        assert!(summary.evidence_refs.iter().any(|reference| {
+            reference.kind == "provider_source"
+                && reference.uri == "/workspace/plugins/provider/current"
+        }));
+        assert!(summary.evidence_refs.iter().any(|reference| {
+            reference.kind == "prepared_source"
+                && reference.uri == "git+https://example.invalid/provider.git#abc123"
+        }));
+        assert!(summary.evidence_refs.iter().any(|reference| {
+            reference.kind == "runtime_overlay_source"
+                && reference.uri == "git+https://example.invalid/runtime.git#def456"
+        }));
     }
 
     #[test]

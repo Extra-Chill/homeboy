@@ -4,15 +4,17 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use crate::core::api_jobs::{JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest};
+use crate::core::api_jobs::{
+    JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
+};
 use crate::core::server::RunnerPolicy;
 use crate::test_support;
 
 use super::super::run::{run_loop, run_reverse_worker};
 use super::support::{
     spawn_cancelling_after_claim_broker, spawn_cancelling_on_second_snapshot_broker,
-    spawn_failing_broker, spawn_mock_broker, spawn_mock_broker_with_paths,
-    write_reverse_controller_session,
+    spawn_failing_broker, spawn_mock_broker, spawn_mock_broker_until_finish,
+    spawn_mock_broker_until_finish_with_paths, write_reverse_controller_session,
 };
 use super::worker_options;
 
@@ -62,7 +64,7 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
             .expect("submit job");
         let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (broker_url, handle) =
-            spawn_mock_broker_with_paths(store.clone(), 5, Some(seen_paths.clone()));
+            spawn_mock_broker_until_finish_with_paths(store.clone(), 8, Some(seen_paths.clone()));
         write_reverse_controller_session(&broker_url);
 
         let (output, exit_code) =
@@ -107,6 +109,80 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
             );
             assert!(result["metrics"]["sample_count"].as_u64().is_some());
         }
+    });
+}
+
+#[test]
+fn reverse_worker_injects_lifecycle_run_id_into_claimed_job_env() {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let store = JobStore::default();
+        let mut request = run_id_echo_request();
+        request.env.insert(
+            "HOMEBOY_ACTIVE_RUN_ID".to_string(),
+            "conflicting-active".to_string(),
+        );
+        request.env.insert(
+            "HOMEBOY_RUN_ID".to_string(),
+            "conflicting-homeboy".to_string(),
+        );
+        request.env.insert(
+            "HOMEBOY_BENCH_RUN_ID".to_string(),
+            "conflicting-bench".to_string(),
+        );
+        request.env.insert(
+            "WORKFLOW_BENCH_RUN_ID".to_string(),
+            "conflicting-workflow".to_string(),
+        );
+        request.lifecycle = Some(RunnerJobLifecycleMetadata {
+            source: None,
+            kind: None,
+            durable_run_id: Some("durable-run-123".to_string()),
+            active_child_count: None,
+            active_cell_count: None,
+        });
+        store.submit_remote_runner_job(request).expect("submit job");
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+
+        let (output, exit_code) =
+            run_reverse_worker(worker_options(broker_url)).expect("run worker");
+
+        assert_eq!(exit_code, 0);
+        let job = output.job.expect("job");
+        assert_eq!(job.status, JobStatus::Succeeded);
+        handle.join().expect("mock broker joins");
+        let result = result_event_data(&store, job.id);
+        assert_eq!(
+            result["stdout"],
+            serde_json::json!("durable-run-123|durable-run-123|durable-run-123|unset")
+        );
+    });
+}
+
+#[test]
+fn reverse_worker_uses_metadata_run_id_for_claimed_job_env() {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let store = JobStore::default();
+        let mut request = run_id_echo_request();
+        request.metadata = Some(serde_json::json!({
+            "run_id": "metadata-run-456",
+        }));
+        store.submit_remote_runner_job(request).expect("submit job");
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+
+        let (output, exit_code) =
+            run_reverse_worker(worker_options(broker_url)).expect("run worker");
+
+        assert_eq!(exit_code, 0);
+        let job = output.job.expect("job");
+        assert_eq!(job.status, JobStatus::Succeeded);
+        handle.join().expect("mock broker joins");
+        let result = result_event_data(&store, job.id);
+        assert_eq!(
+            result["stdout"],
+            serde_json::json!("metadata-run-456|metadata-run-456|metadata-run-456|unset")
+        );
     });
 }
 
@@ -436,6 +512,60 @@ fn reverse_worker_interrupts_running_job_when_broker_cancel_is_observed() {
             .iter()
             .any(|event| event.kind == JobEventKind::Result));
     });
+}
+
+fn create_shell_runner() {
+    crate::core::runner::create(
+        r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+        false,
+    )
+    .expect("create runner");
+    crate::core::runner::merge(
+        Some("lab"),
+        &serde_json::json!({
+            "policy": RunnerPolicy {
+                allow_raw_exec: Some(true),
+                workspace_roots: vec!["/tmp".to_string()],
+                allowed_commands: vec!["sh".to_string()],
+                ..Default::default()
+            }
+        })
+        .to_string(),
+        &[],
+    )
+    .expect("set policy");
+}
+
+fn run_id_echo_request() -> RemoteRunnerJobRequest {
+    RemoteRunnerJobRequest {
+        runner_id: "lab".to_string(),
+        project_id: None,
+        operation: "runner.exec".to_string(),
+        command: vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '%s|%s|%s|%s' \"$HOMEBOY_ACTIVE_RUN_ID\" \"$HOMEBOY_RUN_ID\" \"$HOMEBOY_BENCH_RUN_ID\" \"${WORKFLOW_BENCH_RUN_ID-unset}\"".to_string(),
+        ],
+        cwd: Some("/tmp".to_string()),
+        env: Default::default(),
+        secret_env_names: Vec::new(),
+        capture_patch: false,
+        source_snapshot: None,
+        require_paths: Vec::new(),
+        runner_workload: None,
+        lifecycle: None,
+        metadata: None,
+    }
+}
+
+fn result_event_data(store: &JobStore, job_id: uuid::Uuid) -> serde_json::Value {
+    store
+        .events(job_id)
+        .expect("events")
+        .into_iter()
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data)
+        .expect("result event data")
 }
 
 #[test]
