@@ -207,6 +207,10 @@ fn fuzz_run_parses_generic_contract_flags() {
         "parser",
         "--run-id",
         "proof-1",
+        "--tracker-ref",
+        "github_issue:Extra-Chill/homeboy#123",
+        "--tracker-ref",
+        "linear:HB-42",
         "--seed",
         "1234",
         "--inventory",
@@ -229,6 +233,11 @@ fn fuzz_run_parses_generic_contract_flags() {
             assert_eq!(run.rig.as_deref(), Some("package-fuzz"));
             assert_eq!(run.workload_id.as_deref(), Some("parser"));
             assert_eq!(run.run_id.as_deref(), Some("proof-1"));
+            assert_eq!(run.tracker_refs.len(), 2);
+            assert_eq!(run.tracker_refs[0].kind, "github_issue");
+            assert_eq!(run.tracker_refs[0].id, "Extra-Chill/homeboy#123");
+            assert_eq!(run.tracker_refs[1].kind, "linear");
+            assert_eq!(run.tracker_refs[1].id, "HB-42");
             assert_eq!(run.seed.as_deref(), Some("1234"));
             assert_eq!(
                 run.inventory.as_deref(),

@@ -16,6 +16,13 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             },
             workload_id: Some("parser".to_string()),
             run_id: Some("proof-1".to_string()),
+            tracker_refs: vec![homeboy::core::evidence_manifest::TrackerRef {
+                kind: "github_issue".to_string(),
+                id: "Extra-Chill/homeboy#123".to_string(),
+                url: None,
+                title: None,
+                state: None,
+            }],
             seed: Some("1234".to_string()),
             inventory: None,
             require_case_log: false,
@@ -63,11 +70,16 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
         assert_eq!(run.rig_id.as_deref(), Some("package-fuzz"));
         assert_eq!(run.metadata_json["workload_id"], "parser");
         assert_eq!(run.metadata_json["seed"], "1234");
+        assert_eq!(run.metadata_json["tracker_refs"][0]["kind"], "github_issue");
+        assert_eq!(
+            run.metadata_json["tracker_refs"][0]["id"],
+            "Extra-Chill/homeboy#123"
+        );
         assert!(run
             .command
             .as_deref()
             .unwrap_or_default()
-            .contains("homeboy fuzz run component-a"));
+            .contains("--tracker-ref github_issue:Extra-Chill/homeboy#123"));
         let artifacts = store.list_artifacts("proof-1").expect("artifacts");
         assert_eq!(artifacts.len(), 2);
         let results_artifact = artifacts
@@ -406,6 +418,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             },
             workload_id: Some("parser".to_string()),
             run_id: Some("proof-bad-results".to_string()),
+            tracker_refs: vec![],
             seed: None,
             inventory: None,
             require_case_log: false,
