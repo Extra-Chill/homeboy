@@ -66,5 +66,14 @@
     "tracker_reference_regexes": [
       "core\\.trac\\.wordpress\\.org/ticket/\\d+"
     ]
+  },
+  "fuzz": {
+    "case_evidence_kinds": [
+      "fuzz_report",
+      "fuzz_case",
+      "case_artifact",
+      "failing_case",
+      "repro_case"
+    ]
   }
 }

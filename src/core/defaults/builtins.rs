@@ -20,6 +20,25 @@ struct ExtensionProvidedDefaults {
     /// profile defaults, keeping core source framework-agnostic (#2240).
     #[serde(default)]
     detector_profile: DetectorProfileDefaults,
+    /// Ecosystem-specific fuzz defaults (extra artifact-kind spellings that the
+    /// generic gate evaluator should treat as case-level proof). Core ships no
+    /// domain artifact vocabulary as Rust literals; the framework set lives here
+    /// in the extension-provided defaults asset so the gate evaluator stays
+    /// product-neutral (#6766).
+    #[serde(default)]
+    fuzz: FuzzDefaults,
+}
+
+/// Extension-provided fuzz defaults. Empty by default so a truly generic core
+/// (or an external defaults file that omits the section) carries no
+/// ecosystem-specific artifact-kind vocabulary.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct FuzzDefaults {
+    /// Extra artifact-kind spellings that count as case-level proof for the
+    /// `has-case-evidence` gate, beyond the canonical `case_log` kind that core
+    /// always recognizes.
+    #[serde(default)]
+    pub case_evidence_kinds: Vec<String>,
 }
 
 /// Extension-provided code-audit detector defaults. Empty by default so a
@@ -99,6 +118,10 @@ pub(crate) fn extension_provided_direct_test_file_suffixes() -> Vec<String> {
 
 pub(crate) fn extension_provided_detector_profile() -> DetectorProfileDefaults {
     extension_provided_defaults().detector_profile.clone()
+}
+
+pub(crate) fn extension_provided_fuzz_case_evidence_kinds() -> Vec<String> {
+    extension_provided_defaults().fuzz.case_evidence_kinds.clone()
 }
 
 pub(super) fn default_deploy() -> DeployConfig {
@@ -216,6 +239,21 @@ mod tests {
             .tracker_reference_regexes
             .iter()
             .any(|r| r.contains("wordpress")));
+    }
+
+    #[test]
+    fn fuzz_case_evidence_defaults_live_in_extension_asset() {
+        // The ecosystem-specific case-evidence artifact spellings live in the
+        // extension-provided asset, not core Rust literals, so the generic gate
+        // evaluator stays product-neutral (#6766). Behavior is still wired
+        // one-repo so the previously hardcoded set is preserved.
+        let kinds = extension_provided_fuzz_case_evidence_kinds();
+
+        assert!(kinds.iter().any(|kind| kind == "fuzz_report"));
+        assert!(kinds.iter().any(|kind| kind == "repro_case"));
+        // The canonical `case_log` kind is owned by core and is not duplicated
+        // into the extension-supplied alias list.
+        assert!(!kinds.iter().any(|kind| kind == "case_log"));
     }
 
     #[test]

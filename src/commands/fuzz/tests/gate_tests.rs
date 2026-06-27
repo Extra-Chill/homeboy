@@ -1,5 +1,47 @@
 use super::*;
 
+/// The generic gate evaluator must not carry ecosystem-specific artifact-kind
+/// vocabulary as Rust literals. The canonical `case_log` kind stays in core; the
+/// extended alias spellings live in the extension-provided defaults asset (#6766).
+#[test]
+fn gate_evaluator_source_carries_no_domain_artifact_vocabulary() {
+    let source = include_str!("../report.rs");
+    for domain_kind in ["fuzz_report", "fuzz_case", "case_artifact", "failing_case", "repro_case"] {
+        let literal = format!("\"{domain_kind}\"");
+        assert!(
+            !source.contains(&literal),
+            "gate evaluator source must not hardcode domain artifact kind literal {literal}; \
+             it belongs in the extension-provided defaults asset",
+        );
+    }
+}
+
+/// Externalizing the case-evidence vocabulary to the asset must preserve the
+/// exact set the evaluator previously recognized: canonical `case_log` plus the
+/// ecosystem aliases now sourced from the extension-provided defaults.
+#[test]
+fn case_evidence_kinds_preserve_prior_recognized_set() {
+    let kinds = homeboy::core::fuzz::fuzz_case_evidence_artifact_kinds();
+    for expected in [
+        "case_log",
+        "fuzz_report",
+        "fuzz_case",
+        "case_artifact",
+        "failing_case",
+        "repro_case",
+    ] {
+        assert!(
+            kinds.iter().any(|kind| kind == expected),
+            "case-evidence kinds should include {expected}",
+        );
+    }
+    assert_eq!(
+        kinds.first().map(String::as_str),
+        Some("case_log"),
+        "canonical case_log kind must lead the recognized set",
+    );
+}
+
 #[test]
 fn fuzz_gate_evaluation_requires_case_log_evidence() {
     let campaign = FuzzCampaign {

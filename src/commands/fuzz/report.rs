@@ -3,10 +3,12 @@ use std::path::Path;
 
 use homeboy::core::artifact_ref::EvidenceRef;
 use homeboy::core::fuzz::{
-    fuzz_gate_profile_contract, parse_fuzz_case_log_file, parse_fuzz_observation_set_value,
-    parse_fuzz_results_file, parse_fuzz_target_inventory_file, rank_fuzz_observation_set_hotspots,
-    FuzzCampaign, FuzzExecutionRequest, FuzzGateProfile, FuzzHotspotSet, FuzzProvenance,
-    FuzzResultEnvelope, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    fuzz_case_evidence_artifact_kinds, fuzz_gate_profile_contract, parse_fuzz_case_log_file,
+    parse_fuzz_observation_set_value, parse_fuzz_results_file, parse_fuzz_target_inventory_file,
+    rank_fuzz_observation_set_hotspots, FuzzCampaign, FuzzExecutionRequest, FuzzGateProfile,
+    FuzzHotspotSet, FuzzProvenance, FuzzResultEnvelope, FUZZ_ARTIFACT_KIND_CASE_LOG,
+    FUZZ_ARTIFACT_KIND_COVERAGE_SUMMARY, FUZZ_ARTIFACT_KIND_REPLAY_DATA,
+    FUZZ_ARTIFACT_KIND_RESULT_ENVELOPE, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
@@ -496,15 +498,15 @@ fn observed_gate_metric(metrics: &FuzzGateMetrics, metric: &str) -> f64 {
 
 pub(super) fn required_artifact_count(envelope: &FuzzResultEnvelope, kind: &str) -> usize {
     match kind {
-        "result_envelope" => 1,
-        "case_log" => envelope
+        FUZZ_ARTIFACT_KIND_RESULT_ENVELOPE => 1,
+        FUZZ_ARTIFACT_KIND_CASE_LOG => envelope
             .campaign
             .as_ref()
             .map(|campaign| {
                 case_evidence_artifact_count(campaign, &FuzzGateEvaluationProfile::default())
             })
             .unwrap_or(0),
-        "coverage_summary" => {
+        FUZZ_ARTIFACT_KIND_COVERAGE_SUMMARY => {
             usize::from(
                 envelope
                     .campaign
@@ -513,7 +515,9 @@ pub(super) fn required_artifact_count(envelope: &FuzzResultEnvelope, kind: &str)
                     .is_some(),
             ) + artifact_ref_count(envelope, kind)
         }
-        "replay_data" => replay_data_count(envelope) + artifact_ref_count(envelope, kind),
+        FUZZ_ARTIFACT_KIND_REPLAY_DATA => {
+            replay_data_count(envelope) + artifact_ref_count(envelope, kind)
+        }
         _ => artifact_ref_count(envelope, kind),
     }
 }
@@ -585,21 +589,18 @@ fn metadata_artifact_has_kind(artifact: &serde_json::Value, kind: &str) -> bool 
 }
 
 struct FuzzGateEvaluationProfile {
-    case_evidence_kinds: &'static [&'static str],
+    /// Artifact kinds that count as case-level proof for the `has-case-evidence`
+    /// gate. Resolved from the core contract: the canonical `case_log` kind plus
+    /// any ecosystem-specific spellings supplied through the extension-provided
+    /// defaults asset. Core source carries no domain artifact vocabulary (#6766).
+    case_evidence_kinds: Vec<String>,
     metadata_artifact_ref_keys: &'static [&'static str],
 }
 
 impl Default for FuzzGateEvaluationProfile {
     fn default() -> Self {
         Self {
-            case_evidence_kinds: &[
-                "case_log",
-                "fuzz_report",
-                "fuzz_case",
-                "case_artifact",
-                "failing_case",
-                "repro_case",
-            ],
+            case_evidence_kinds: fuzz_case_evidence_artifact_kinds(),
             metadata_artifact_ref_keys: &["artifact_refs", "artifactRefs"],
         }
     }
@@ -657,7 +658,8 @@ fn case_evidence_artifact_count(
         .filter(|artifact| {
             profile
                 .case_evidence_kinds
-                .contains(&artifact.kind.as_str())
+                .iter()
+                .any(|kind| kind == &artifact.kind)
         })
         .count();
     campaign_artifacts + metadata_case_evidence_artifact_count(&campaign.metadata, profile)
@@ -698,7 +700,10 @@ fn metadata_artifact_has_case_evidence_kind(
         .or_else(|| artifact.get("role"))
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    profile.case_evidence_kinds.contains(&kind)
+    profile
+        .case_evidence_kinds
+        .iter()
+        .any(|evidence_kind| evidence_kind == kind)
 }
 
 pub(super) fn fuzz_coverage_completeness(

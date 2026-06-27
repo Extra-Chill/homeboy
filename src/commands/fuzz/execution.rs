@@ -10,7 +10,9 @@ use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use homeboy::core::fuzz::{
-    parse_fuzz_results_file, FuzzArtifact, FuzzCampaign, FuzzFindingStatus, FuzzGateProfile,
+    fuzz_artifact_kind_matches, parse_fuzz_results_file, FuzzArtifact, FuzzCampaign,
+    FuzzFindingStatus, FuzzGateProfile, FUZZ_ARTIFACT_KIND_CASE_LOG,
+    FUZZ_ARTIFACT_KIND_COVERAGE_SUMMARY, FUZZ_ARTIFACT_KIND_RESULT_ENVELOPE,
 };
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
@@ -224,25 +226,17 @@ pub(super) fn fuzz_run_artifact_validation_error(
     };
 
     let mut missing = Vec::new();
-    if args.require_case_log && !campaign_has_artifact(campaign, &["case-log", "case_log"]) {
+    if args.require_case_log && !campaign_has_artifact(campaign, FUZZ_ARTIFACT_KIND_CASE_LOG) {
         missing.push("case log (--require-case-log)");
     }
     if args.require_coverage_summary
         && campaign.coverage_summary.is_none()
-        && !campaign_has_artifact(campaign, &["coverage-summary", "coverage_summary"])
+        && !campaign_has_artifact(campaign, FUZZ_ARTIFACT_KIND_COVERAGE_SUMMARY)
     {
         missing.push("coverage summary (--require-coverage-summary)");
     }
     if args.require_result_envelope
-        && !campaign_has_artifact(
-            campaign,
-            &[
-                "result-envelope",
-                "result_envelope",
-                "fuzz-result-envelope",
-                "fuzz_result_envelope",
-            ],
-        )
+        && !campaign_has_artifact(campaign, FUZZ_ARTIFACT_KIND_RESULT_ENVELOPE)
     {
         missing.push("result envelope (--require-result-envelope)");
     }
@@ -293,17 +287,16 @@ fn fuzz_requested_settings(args: &FuzzRunArgs) -> serde_json::Value {
     })
 }
 
-fn campaign_has_artifact(campaign: &FuzzCampaign, aliases: &[&str]) -> bool {
+fn campaign_has_artifact(campaign: &FuzzCampaign, canonical_kind: &str) -> bool {
     campaign
         .artifacts
         .iter()
-        .any(|artifact| fuzz_artifact_matches(artifact, aliases))
+        .any(|artifact| fuzz_artifact_matches(artifact, canonical_kind))
 }
 
-fn fuzz_artifact_matches(artifact: &FuzzArtifact, aliases: &[&str]) -> bool {
-    aliases
-        .iter()
-        .any(|alias| artifact.id == *alias || artifact.kind == *alias)
+fn fuzz_artifact_matches(artifact: &FuzzArtifact, canonical_kind: &str) -> bool {
+    fuzz_artifact_kind_matches(&artifact.id, canonical_kind)
+        || fuzz_artifact_kind_matches(&artifact.kind, canonical_kind)
 }
 
 fn fuzz_prepare_settings(args: &FuzzRunArgs) -> Vec<(String, String)> {

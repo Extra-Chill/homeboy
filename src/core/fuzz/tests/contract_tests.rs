@@ -63,6 +63,79 @@ fn core_contract_lists_product_neutral_schema_ids() {
 }
 
 #[test]
+fn core_contract_publishes_canonical_artifact_kinds() {
+    let contract = fuzz_core_contract();
+
+    assert_eq!(contract.artifact_kinds, canonical_fuzz_artifact_kinds());
+    for kind in [
+        FUZZ_ARTIFACT_KIND_RESULT_ENVELOPE,
+        FUZZ_ARTIFACT_KIND_CASE_LOG,
+        FUZZ_ARTIFACT_KIND_COVERAGE_SUMMARY,
+        FUZZ_ARTIFACT_KIND_REPLAY_DATA,
+    ] {
+        assert!(
+            contract.artifact_kinds.iter().any(|k| k == kind),
+            "published contract should list canonical artifact kind {kind}",
+        );
+    }
+}
+
+#[test]
+fn published_result_envelope_schema_matches_struct_serialization() {
+    let contract = fuzz_core_contract();
+
+    // The schema id and version the extension would consume from the published
+    // contract must equal what `FuzzResultEnvelope` actually serializes with, so
+    // the extension can validate against the contract instead of re-declaring
+    // `homeboy/fuzz-result-envelope/v1` and the version by hand (#6766).
+    let envelope: FuzzResultEnvelope = serde_json::from_value(json!({
+        "id": "envelope-1",
+        "status": "passed",
+        "request": {"id": "request-1", "component": "component-a"}
+    }))
+    .expect("minimal result envelope payload backfills schema + version");
+
+    assert_eq!(envelope.schema, contract.schemas.result_envelope);
+    assert_eq!(envelope.schema, FUZZ_RESULT_ENVELOPE_SCHEMA);
+    assert_eq!(envelope.version, contract.version);
+    assert_eq!(envelope.version, FUZZ_CONTRACT_VERSION);
+}
+
+#[test]
+fn core_contract_backfills_artifact_kinds_for_legacy_payloads() {
+    let contract: FuzzCoreContract = serde_json::from_value(json!({
+        "schema": FUZZ_CORE_CONTRACT_SCHEMA,
+        "version": FUZZ_CONTRACT_VERSION,
+        "schemas": {
+            "surface": FUZZ_SURFACE_SCHEMA,
+            "target": FUZZ_TARGET_SCHEMA,
+            "workload": FUZZ_WORKLOAD_SCHEMA,
+            "campaign": FUZZ_CAMPAIGN_SCHEMA,
+            "case": FUZZ_CASE_SCHEMA,
+            "case_log": FUZZ_CASE_LOG_SCHEMA,
+            "seed": FUZZ_SEED_SCHEMA,
+            "coverage": FUZZ_COVERAGE_SCHEMA,
+            "finding": FUZZ_FINDING_SCHEMA,
+            "artifact": FUZZ_ARTIFACT_SCHEMA,
+            "threshold": FUZZ_THRESHOLD_SCHEMA,
+            "provenance": FUZZ_PROVENANCE_SCHEMA,
+            "replay": FUZZ_REPLAY_SCHEMA,
+            "coverage_summary": FUZZ_COVERAGE_SUMMARY_SCHEMA,
+            "target_inventory": FUZZ_TARGET_INVENTORY_SCHEMA,
+            "execution_request": FUZZ_EXECUTION_REQUEST_SCHEMA,
+            "result_envelope": FUZZ_RESULT_ENVELOPE_SCHEMA,
+            "required_artifact": FUZZ_REQUIRED_ARTIFACT_SCHEMA,
+            "gate": FUZZ_GATE_SCHEMA
+        },
+        "safety_classes": ["read_only"],
+        "finding_statuses": ["open"]
+    }))
+    .expect("legacy contract payload without artifact_kinds");
+
+    assert_eq!(contract.artifact_kinds, canonical_fuzz_artifact_kinds());
+}
+
+#[test]
 fn fuzz_gate_profiles_are_measurement_first_and_named() {
     let (measurement_artifacts, measurement_gates) =
         fuzz_gate_profile_contract(FuzzGateProfile::Measurement);

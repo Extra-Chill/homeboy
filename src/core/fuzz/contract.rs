@@ -3,6 +3,7 @@
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
+use super::artifact_kinds::canonical_fuzz_artifact_kinds;
 use super::schema_defaults::{
     fuzz_contract_version, fuzz_core_contract_schema, lifecycle_contract_schema,
     lifecycle_result_schema, lifecycle_snapshot_ref_schema,
@@ -25,6 +26,11 @@ pub struct FuzzCoreContract {
     #[serde(default = "fuzz_contract_version")]
     pub version: u32,
     pub schemas: FuzzContractSchemas,
+    /// Canonical contract artifact-kind identifiers. Published so consumers can
+    /// fold their own artifact-role spellings onto core's identifiers instead of
+    /// re-declaring alias arrays by hand (#6766).
+    #[serde(default = "canonical_fuzz_artifact_kinds")]
+    pub artifact_kinds: Vec<String>,
     pub safety_classes: Vec<FuzzSafetyClass>,
     #[serde(default = "default_fuzz_operation_families")]
     pub operation_families: Vec<FuzzOperationFamily>,
@@ -208,6 +214,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             lifecycle_snapshot_ref: crate::core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA
                 .to_string(),
         },
+        artifact_kinds: canonical_fuzz_artifact_kinds(),
         safety_classes: vec![
             FuzzSafetyClass::ReadOnly,
             FuzzSafetyClass::Idempotent,

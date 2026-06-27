@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::core::observation::ArtifactRecord;
 
+use super::artifact_kinds::{canonical_fuzz_artifact_kind, FUZZ_ARTIFACT_KIND_RESULT_ENVELOPE};
 use super::envelope::FuzzResultEnvelope;
 use super::schemas::FUZZ_RESULT_ENVELOPE_SCHEMA;
 
@@ -90,7 +91,7 @@ pub fn inspect_fuzz_result_envelope_artifact(
 
 fn recognition_reasons(artifact: &ArtifactRecord) -> Vec<String> {
     let mut reasons = Vec::new();
-    if artifact.kind == "fuzz_result_envelope" {
+    if canonical_fuzz_artifact_kind(&artifact.kind) == Some(FUZZ_ARTIFACT_KIND_RESULT_ENVELOPE) {
         reasons.push("artifact.kind".to_string());
     }
     if artifact
