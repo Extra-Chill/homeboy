@@ -349,7 +349,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
   const runtimeTask = runtimeTaskWithExecutionDefaults(
     inputs.runtime_task || inputs.runtimeTask || clientInputs.runtime_task || clientInputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
-    { provider, model, agentBundles, runtimePackage: runtimePackageDefaultFromProfile(config, runtimeOptions) }
+    { provider, model, agentBundles, runtimePackage: runtimePackageDefaultFromProfile(config, runtimeOptions), workspaceTarget: defaults.workspaceRoot ? defaultWorkspaceTarget(defaults.workspaceRoot) : '', request, config, inputs }
   );
   let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
   let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
@@ -628,8 +628,11 @@ function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
       ...normalizeArray(runtimeProfile.ability_requirements),
       ...normalizeArray(runtimeProfile.abilityRequirements),
     ]),
-    providerPluginPaths: providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, mergedOptions),
-    runtimeOverlays: firstDefined(runtimeRequirements.runtime_overlays, runtimeProfile.runtime_overlays, mergedOptions.runtimeOverlays),
+    providerPluginPaths: firstNonEmptyArray(
+      explicitProviderPluginPathsFromConfig(config, mergedOptions),
+      providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, mergedOptions)
+    ),
+    runtimeOverlays: firstNonEmptyArray(runtimeRequirements.runtime_overlays, runtimeProfile.runtime_overlays, mergedOptions.runtimeOverlays),
     runtimeEnv: firstNonEmptyObject(runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, mergedOptions.runtimeEnv, mergedOptions.runtime_env),
     runtimeEnvAliases: firstObject(runtimeRequirements.runtime_env_aliases, runtimeRequirements.runtimeEnvAliases, runtimeProfile.runtime_env_aliases, runtimeProfile.runtimeEnvAliases, mergedOptions.runtimeEnvAliases, mergedOptions.runtime_env_aliases),
     runtimeStateMounts: firstDefined(runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, mergedOptions.runtimeStateMounts, mergedOptions.runtime_state_mounts),
@@ -784,7 +787,7 @@ class RuntimeOverlayConfigError extends Error {
 }
 
 function runtimeOverlaysFromConfig(config, options = {}, defaults = {}) {
-  return validateRuntimeOverlays(firstDefined(
+  return validateRuntimeOverlays(firstNonEmptyArray(
     config.runtime_overlays,
     config.runtime_requirements?.runtime_overlays,
     options.runtimeProfile?.runtime_overlays,
@@ -844,16 +847,23 @@ function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, de
   const runtimeProfile = firstObject(options.runtimeProfile) || {};
   const runtimeRequirements = mergeRuntimeRequirements(defaults.runtimeRequirements, firstObject(config.runtime_requirements, config.runtimeRequirements) || {});
   const runtimeEnv = firstNonEmptyObject(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, options.runtimeEnv, defaults.runtimeEnv) || {};
+  const explicitProviderPluginPaths = explicitProviderPluginPathsFromConfig(config, options);
   const providerPluginPaths = firstNonEmptyArray(
+    explicitProviderPluginPaths,
     providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, options),
-    config.provider_plugin_paths,
     defaults.providerPluginPaths,
     []
   );
+  const runtimeProfilePayloadSource = explicitProviderPluginPaths.length > 0
+    ? {
+        runtimeRequirements: withoutProviderPlugins(runtimeRequirements),
+        runtimeProfile: withoutProviderPlugins(runtimeProfile),
+      }
+    : { runtimeRequirements, runtimeProfile };
   return codeboxRuntimeProfilePayload({
     id: config.runtime_profile || config.runtimeProfile,
-    profile: runtimeProfile,
-    runtimeRequirements,
+    profile: runtimeProfilePayloadSource.runtimeProfile,
+    runtimeRequirements: runtimeProfilePayloadSource.runtimeRequirements,
     componentContracts,
     runtimeOverlays,
     runtimeEnv,
@@ -907,6 +917,41 @@ function providerPluginPathsFromRuntimeProfile(runtimeRequirements = {}, runtime
     ...providerPluginPathEntries(runtimeRequirements.provider_plugins),
     ...providerPluginPathEntries(runtimeProfile.provider_plugins),
   ]);
+}
+
+function explicitProviderPluginPathsFromConfig(config = {}, options = {}) {
+  return uniquePaths(firstNonEmptyArray(
+    providerPluginPathsFromEnv(),
+    options.providerPluginPaths,
+    options.provider_plugin_paths,
+    config.runtime_options?.providerPluginPaths,
+    config.runtime_options?.provider_plugin_paths,
+    config.runtimeOptions?.providerPluginPaths,
+    config.runtimeOptions?.provider_plugin_paths,
+    config.provider_plugin_paths,
+    config.providerPluginPaths,
+    []
+  ));
+}
+
+function providerPluginPathsFromEnv(env = process.env) {
+  return firstNonEmptyArray(
+    envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATHS),
+    envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATH),
+    envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
+    envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
+    envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH),
+    envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATH),
+  );
+}
+
+function withoutProviderPlugins(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.prototype.hasOwnProperty.call(value, 'provider_plugins')) {
+    return value;
+  }
+  const rest = { ...value };
+  delete rest.provider_plugins;
+  return rest;
 }
 
 function providerPluginPathEntries(value) {
@@ -971,29 +1016,30 @@ function normalizeRuntimeTaskAbilityForCodebox(ability) {
   return RUNTIME_PACKAGE_ABILITY_ALIASES.has(ability) ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : ability;
 }
 
-function runtimePackageTaskInputForCodebox(input) {
+function runtimePackageTaskInputForCodebox(input, options = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return input;
   }
   const normalized = { ...input };
-  const options = normalized.options && typeof normalized.options === 'object' && !Array.isArray(normalized.options) ? normalized.options : {};
+  const runtimeOptions = normalized.options && typeof normalized.options === 'object' && !Array.isArray(normalized.options) ? normalized.options : {};
   for (const key of ['provider', 'model']) {
-    if (!firstValue(normalized[key]) && firstValue(options[key])) {
-      normalized[key] = options[key];
+    if (!firstValue(normalized[key]) && firstValue(runtimeOptions[key])) {
+      normalized[key] = runtimeOptions[key];
     }
   }
   const packageDescriptor = normalized.runtime_package === undefined ? normalized.package : normalized.runtime_package;
-  const runtimePackage = runtimePackageIdentifier(packageDescriptor);
+  const runtimePackage = runtimePackageImportPath(packageDescriptor, options);
+  const runtimePackageAgent = runtimePackageIdentifier(packageDescriptor);
   if (runtimePackage) {
     normalized.runtime_package = runtimePackage;
     if (!firstValue(normalized.agent, normalized.agent_slug)) {
-      normalized.agent = runtimePackage;
+      normalized.agent = runtimePackageAgent || runtimePackage;
     }
   }
   if (packageDescriptor && typeof packageDescriptor === 'object' && !Array.isArray(packageDescriptor)) {
     normalized.metadata = {
       ...(normalized.metadata && typeof normalized.metadata === 'object' && !Array.isArray(normalized.metadata) ? normalized.metadata : {}),
-      runtime_package_descriptor: packageDescriptor,
+      runtime_package_descriptor: runtimePackageDescriptorForCodebox(packageDescriptor, options),
     };
   }
   delete normalized.package;
@@ -1008,6 +1054,51 @@ function runtimePackageIdentifier(value) {
     return '';
   }
   return firstValue(value.slug, value.id, value.name, value.source, '');
+}
+
+function runtimePackageImportPath(value, options = {}) {
+  if (typeof value === 'string') {
+    return runtimePackagePathForSandbox(value, options);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return '';
+  }
+  const importPath = firstValue(value.source, value.path, value.bundle_path, value.bundlePath, '');
+  if (importPath) {
+    return runtimePackagePathForSandbox(importPath, options);
+  }
+  return firstValue(value.slug, value.id, value.name, '');
+}
+
+function runtimePackageDescriptorForCodebox(descriptor, options = {}) {
+  if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
+    return descriptor;
+  }
+  const normalized = { ...descriptor };
+  for (const key of ['source', 'path', 'bundle_path', 'bundlePath']) {
+    if (typeof normalized[key] === 'string' && normalized[key]) {
+      normalized[key] = runtimePackagePathForSandbox(normalized[key], options);
+    }
+  }
+  return normalized;
+}
+
+function runtimePackagePathForSandbox(value, options = {}) {
+  const raw = String(value || '');
+  if (!raw || !relativeRuntimePackagePath(raw)) {
+    return raw;
+  }
+  const workspaceTarget = String(options.workspaceTarget || '').replace(/\/+$/, '');
+  return workspaceTarget ? `${workspaceTarget}/${raw.replace(/^\.\//, '')}` : raw;
+}
+
+function relativeRuntimePackagePath(value) {
+  const raw = String(value || '');
+  return raw.includes('/')
+    && !raw.startsWith('/')
+    && !raw.startsWith('~/')
+    && !/^[A-Za-z]:[\\/]/.test(raw)
+    && !/^[a-z][a-z0-9+.-]*:/i.test(raw);
 }
 
 function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs) {
@@ -1315,7 +1406,7 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
     normalizedRuntimeTask.ability_normalization = abilityNormalization;
   }
   if (normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
-    normalizedRuntimeTask.input = runtimePackageTaskInputForCodebox(normalizedRuntimeTask.input);
+    normalizedRuntimeTask.input = runtimePackageTaskInputForCodebox(runtimeTaskInputWithArtifactOutputs(normalizedRuntimeTask.input, defaults), defaults);
   }
   const applyExecutionDefaults = normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY || (Array.isArray(defaults.agentBundles) && defaults.agentBundles.length > 0);
   if (!applyExecutionDefaults) {
@@ -1337,14 +1428,21 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
 
   return {
     ...normalizedRuntimeTask,
-    input: normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY ? runtimePackageTaskInputForCodebox({
+    input: normalizedRuntimeTask.ability === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY ? runtimePackageTaskInputForCodebox(runtimeTaskInputWithArtifactOutputs({
       ...defaultInput,
       ...input,
-    }) : {
+    }, defaults), defaults) : {
       ...defaultInput,
       ...input,
     },
   };
+}
+
+function runtimeTaskInputWithArtifactOutputs(input, defaults = {}) {
+  if (!defaults.request) {
+    return input;
+  }
+  return agentBundleRuntimeTaskInputWithArtifactOutputs(input, defaults.request, defaults.config || {}, defaults.inputs || {});
 }
 
 function runtimeTaskAbilityNormalization({ requestedAbility, normalizedAbility }) {
@@ -1520,8 +1618,11 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
 
 function defaultProviderPluginPaths(provider, config, options, settings, providerConfig, fallbackProviderPluginPath) {
   return uniquePaths(firstProviderPathArray(
+    providerPluginPathsFromEnv(),
     options.providerPluginPaths,
+    options.provider_plugin_paths,
     config.provider_plugin_paths,
+    config.providerPluginPaths,
     providerPathsFor(settings.wp_codebox_provider_plugin_paths, provider),
     providerPathsFor(settings.provider_plugin_paths, provider),
     providerConfig.provider_plugin_paths,
@@ -2785,7 +2886,17 @@ function normalizeOutputs(result, request = null, options = {}) {
     : outputs;
 
   const bundle = result.task_input?.agent_bundle || {};
-  const configuredOutputs = firstPlainObject(bundle.runtime_output_projections, bundle.runtimeOutputProjections, bundle.engine_data_outputs, bundle.engineDataOutputs) || {};
+  const runtimeTaskInput = result.task_input?.runtime_task?.input || result.taskInput?.runtimeTask?.input || {};
+  const configuredOutputs = firstPlainObject(
+    runtimeTaskInput.runtime_output_projections,
+    runtimeTaskInput.runtimeOutputProjections,
+    runtimeTaskInput.engine_data_outputs,
+    runtimeTaskInput.engineDataOutputs,
+    bundle.runtime_output_projections,
+    bundle.runtimeOutputProjections,
+    bundle.engine_data_outputs,
+    bundle.engineDataOutputs
+  ) || {};
   if (Object.keys(configuredOutputs).length === 0) {
     return sanitizePublicMetadata(appendTypedArtifacts(publicOutputs));
   }

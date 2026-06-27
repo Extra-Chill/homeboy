@@ -577,6 +577,31 @@
           "artifact_result_envelope": "wp-codebox/artifact-result-envelope/v1"
         }
       },
+      "agent_fanout_adapter": {
+        "schema": "homeboy-extensions/wp-codebox-agent-fanout-adapter/v1",
+        "canonical_path": "homeboy-durable-scheduler-to-homeboy-extensions-codebox-executor-to-wp-codebox-sandbox-fanout",
+        "ownership": {
+          "substrate": "agents-api",
+          "durable_scheduler": "homeboy",
+          "executor_adapter": "homeboy-extensions",
+          "sandbox_worker_runtime": "wp-codebox"
+        },
+        "accepted_request_schema": "wp-codebox/agent-fanout-request/v1",
+        "maps": [
+          "task_id",
+          "parent_plan_id",
+          "group_key",
+          "metadata",
+          "workspace",
+          "artifact_declarations",
+          "expected_artifacts",
+          "secret_env_names",
+          "provider",
+          "model",
+          "progress_callbacks",
+          "evidence_refs"
+        ]
+      },
       "role_aliases": {
         "artifact_roles": {
           "artifact_bundle": ["codebox-artifact-bundle", "artifact-bundle", "codebox-artifact-directory", "codebox-session-artifacts"],
@@ -606,17 +631,14 @@
           "provider_run_result": ["codebox_run_result"]
         }
       },
-      "result_contract": {
-        "typed_artifact_envelope": {
-          "schema": "wp-codebox/artifact-result-envelope/v1",
-          "output": "provider_run_result",
-          "provider_label": "WP Codebox",
-          "diagnostic_class_prefix": "codebox",
-          "private_shape_markers": ["agent_result", "metadata.agent_runtime"],
-          "require_typed_artifacts": true
-        }
-      },
       "upstream_primitive_requirements": [
+        {
+          "id": "agent-fanout-request",
+          "schema": "wp-codebox/agent-fanout-request/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "project_homeboy_agent_task_metadata_without_product_assumptions",
+          "requirement": "Accept lower-level sandbox-native fanout requests with typed worker, artifact, event, and aggregation contracts. Homeboy owns durable fanout plan/run state; Homeboy Extensions only adapts generic task metadata, workspace, provider/model, secret-env names, progress/evidence callbacks, and artifact declarations into this request shape."
+        },
         {
           "id": "run-agent-task",
           "schema": "wp-codebox/run-agent-task/v1",

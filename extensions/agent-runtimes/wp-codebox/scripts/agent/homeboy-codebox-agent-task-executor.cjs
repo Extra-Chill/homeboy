@@ -433,7 +433,7 @@ function providerPluginInspection(providerPath, validation) {
     return { status: 'invalid', reason: 'opencode_provider_plugin' };
   }
   if (!fs.existsSync(providerPath)) {
-    return { status: 'unknown', reason: 'path_not_available_on_parent' };
+    return { status: 'invalid', reason: 'path_not_available_on_parent' };
   }
   for (const filePath of collectProviderProbeFiles(providerPath)) {
     let contents = '';

@@ -18,6 +18,7 @@ const {
   providerPreflightManifest,
   providerRequiredSecretEnv,
   providerSecretEnv,
+  runtimeOverlayReadinessDiagnostics,
 } = require('../../agent-runtimes/wp-codebox');
 const {
   AGENT_TASK_FAILURE_CLASSIFICATIONS,
@@ -259,6 +260,19 @@ function writeBundleFixture(root) {
   fs.mkdirSync(bundle, { recursive: true });
   fs.writeFileSync(path.join(bundle, 'manifest.json'), '{}\n');
   return bundle;
+}
+
+function writePhpAiClientOverlay(root, options = {}) {
+  const overlay = path.join(root, options.name || 'php-ai-client-overlay');
+  const dtoDir = path.join(overlay, 'src', 'Providers', 'DTO');
+  fs.mkdirSync(path.join(overlay, 'vendor'), { recursive: true });
+  fs.mkdirSync(dtoDir, { recursive: true });
+  fs.writeFileSync(path.join(overlay, 'composer.json'), '{}\n');
+  fs.writeFileSync(path.join(overlay, 'vendor', 'autoload.php'), '<?php\n');
+  fs.writeFileSync(path.join(dtoDir, 'ProviderMetadata.php'), options.withoutDescription
+    ? '<?php\nclass ProviderMetadata {}\n'
+    : '<?php\nclass ProviderMetadata { public function getDescription(): ?string { return null; } }\n');
+  return overlay;
 }
 
 const request = {
@@ -975,6 +989,10 @@ assert.deepEqual(capabilityMatrixRecipeRequest.recipe.inputs.userSessions, [{
   metadata: { role: 'shop_manager', capabilities: ['manage_woocommerce', 'view_woocommerce_reports'] },
 }]);
 
+const codexProviderFixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-codex-provider-'));
+process.on('exit', () => fs.rmSync(codexProviderFixtureRoot, { recursive: true, force: true }));
+fs.writeFileSync(path.join(codexProviderFixtureRoot, 'plugin.php'), '<?php\n/* Plugin Name: Fixture Codex Provider */\n// Registers the codex provider for preflight fixture inspection.\n');
+
 const codexAgentRequest = {
   ...request,
   task_id: 'codex-task-123',
@@ -983,7 +1001,7 @@ const codexAgentRequest = {
     model: 'gpt-5.5',
     config: exampleAgentCiCodeboxExecutorConfig({
       provider: 'codex',
-      provider_plugin_paths: ['/components/ai-provider-for-openai'],
+      provider_plugin_paths: [codexProviderFixtureRoot],
       secret_env: [
         'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
         'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -997,7 +1015,7 @@ const codexAgentRequest = {
       },
       homeboy: '/components/homeboy',
       homeboy_extensions: '/components/homeboy-extensions',
-      wp_codebox_bin: '/bin/wp-codebox',
+      runtime_bin: '/bin/wp-codebox',
       max_turns: 8,
     }),
   },
@@ -1007,7 +1025,7 @@ assert.equal(Object.hasOwn(codexRequest, 'agent'), false);
 assert.equal(codexRequest.mode, 'sandbox');
 assert.equal(codexRequest.provider, 'codex');
 assert.equal(codexRequest.model, 'gpt-5.5');
-assert.deepEqual(codexRequest.provider_plugin_paths, ['/components/ai-provider-for-openai']);
+assert.deepEqual(codexRequest.provider_plugin_paths, [codexProviderFixtureRoot]);
 assert.equal(codexRequest.runtime_component_paths.agent_runtime, '/components/example-runtime');
 assert.equal(codexRequest.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
 assert.equal(Object.hasOwn(codexRequest.runtime_component_paths, 'agents_api'), false);
@@ -1348,7 +1366,7 @@ try {
   });
   assert.deepEqual(explicitProviderRequest.provider_plugin_paths, [explicitProviderPath]);
 
-  const configuredLibraryPath = path.join(defaultsRoot, 'configured-library');
+  const configuredLibraryPath = writePhpAiClientOverlay(defaultsRoot, { name: 'configured-library' });
   const configuredRuntimeOverlays = [{
     kind: 'bundled-library',
     library: 'php-ai-client',
@@ -1378,8 +1396,31 @@ try {
   assert.deepEqual(configuredGenericStackRequest.runtime_overlays, configuredRuntimeOverlays);
   assert.deepEqual(configuredGenericStackRequest.secret_env, ['CONFIGURED_SECRET']);
 
-  const explicitPhpAiClientPath = path.join(defaultsRoot, 'explicit-php-ai-client');
-  fs.mkdirSync(explicitPhpAiClientPath, { recursive: true });
+  const configuredOverlayWithEmptyProfileRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'configured-overlay-empty-profile-task-123',
+    executor: {
+      backend: 'codebox',
+      config: {
+        provider: 'codex',
+        runtime_requirements: { runtime_overlays: [] },
+        runtime_profiles: {
+          empty: { runtime_overlays: [] },
+        },
+        runtime_profile: 'empty',
+      },
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: {
+      wp_codebox_runtime_overlays: configuredRuntimeOverlays,
+    },
+  });
+  assert.deepEqual(configuredOverlayWithEmptyProfileRequest.runtime_overlays, configuredRuntimeOverlays);
+
+  const explicitPhpAiClientPath = writePhpAiClientOverlay(defaultsRoot, { name: 'explicit-php-ai-client' });
   const explicitPhpAiClientRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
     task_id: 'explicit-php-ai-client-runtime-stack-task-123',
@@ -1395,6 +1436,14 @@ try {
   });
   assert.equal(fs.realpathSync(explicitPhpAiClientRequest.runtime_overlays[0].source), fs.realpathSync(explicitPhpAiClientPath));
   assert.equal(explicitPhpAiClientRequest.runtime_overlays[0].strategy, 'wordpress-scoped-bundle');
+  assert.deepEqual(runtimeOverlayReadinessDiagnostics(explicitPhpAiClientRequest), []);
+
+  const stalePhpAiClientPath = writePhpAiClientOverlay(defaultsRoot, { name: 'stale-php-ai-client', withoutDescription: true });
+  const stalePhpAiClientDiagnostics = runtimeOverlayReadinessDiagnostics({
+    runtime_overlays: [{ kind: 'bundled-library', library: 'php-ai-client', source: stalePhpAiClientPath }],
+  });
+  assert.equal(stalePhpAiClientDiagnostics[0].class, 'codebox.preflight.runtime_overlay_dependency_unprepared');
+  assert.match(stalePhpAiClientDiagnostics[0].message, /ProviderMetadata::getDescription/);
 
   const originalCwd = process.cwd();
   const labOffloadCwd = path.join(defaultsRoot, '_lab_workspaces', 'example-repo-pilot-homeboy-agent-loop');
@@ -2654,6 +2703,9 @@ try {
   providerPluginValidation() { return null; },
   providerSecretEnv() { return []; },
 };\n`);
+  fs.writeFileSync(path.join(installedRuntime, 'lib', 'wp-codebox-runtime-readiness.js'), `module.exports = {
+  wpCodeboxRuntimeReadinessDiagnostics() { return []; },
+};\n`);
   fs.writeFileSync(path.join(installedLayoutRoot, 'extensions', 'wordpress', 'lib', 'wp-codebox-core-loader.js'), `module.exports = { async loadWpCodeboxCore() { return {}; } };\n`);
   const installedLayoutResult = spawnSync(process.execPath, [path.join(installedRuntime, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs')], {
     encoding: 'utf8',
@@ -2837,7 +2889,7 @@ try {
   const capturedCodex = JSON.parse(fs.readFileSync(capture, 'utf8'));
   assert.equal(capturedCodex.request.provider, 'codex');
   assert.equal(capturedCodex.request.model, 'gpt-5.5');
-  assert.deepEqual(capturedCodex.request.provider_plugin_paths, ['/components/ai-provider-for-openai']);
+  assert.deepEqual(capturedCodex.request.provider_plugin_paths, [codexProviderFixtureRoot]);
   assert.equal(Object.hasOwn(capturedCodex.request.runtime_component_paths, 'agents_api'), false);
   assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime, '/components/example-runtime');
   assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
@@ -3025,7 +3077,7 @@ try {
       model: 'gpt-5.5',
       config: {
         provider: 'openai',
-        provider_plugin_paths: ['/components/ai-provider-for-openai'],
+        provider_plugin_paths: [codexProviderFixtureRoot],
         runtime_component_paths: {
           agents_api: '/components/agents-api',
           agent_runtime: '/components/example-runtime',
@@ -3036,7 +3088,7 @@ try {
         runtime_state_mounts: fullRunnerRuntimeStateMounts,
         runtime_config_mounts: fullRunnerRuntimeConfigMounts,
         homeboy_extensions: path.join(__dirname, '..'),
-        wp_codebox_bin: fakeWpCodebox,
+        runtime_bin: fakeWpCodebox,
         bundle_path: bundle,
         agent_slug: 'example-agent',
         pipeline_slug: 'example-pipeline',
@@ -3091,7 +3143,7 @@ try {
       executor: {
         backend: 'codebox',
         config: {
-          wp_codebox_bin: recipeFakeWpCodebox,
+          runtime_bin: recipeFakeWpCodebox,
           recipe_pack: 'example-codebox-recipes',
           recipe_ref: 'release/v1',
           recipe: 'minimal-runtime',
@@ -3122,7 +3174,7 @@ try {
       executor: {
         backend: 'codebox',
         config: {
-          wp_codebox_bin: failedFakeWpCodebox,
+          runtime_bin: failedFakeWpCodebox,
           homeboy_extensions: path.join(__dirname, '..'),
         },
       },
@@ -3198,7 +3250,7 @@ try {
       executor: {
         backend: 'codebox',
         config: {
-          wp_codebox_bin: writeEmptyJsonTaskRunner(root),
+          runtime_bin: writeEmptyJsonTaskRunner(root),
           homeboy_extensions: path.join(__dirname, '..'),
         },
       },
@@ -3222,7 +3274,7 @@ try {
       executor: {
         backend: 'codebox',
         config: {
-          wp_codebox_bin: writeEmptyStdoutTaskRunner(root),
+          runtime_bin: writeEmptyStdoutTaskRunner(root),
           homeboy_extensions: path.join(__dirname, '..'),
         },
       },
