@@ -117,6 +117,7 @@ try {
 		runtimeRequirements: {
 			runtime_overlays: [{ kind: 'plugin', slug: 'agents-api', source: '/runtime/agents-api' }],
 			env: { REQUIREMENT_ENV: '1', SHARED_ENV: 'requirement' },
+			provider_plugins: [{ path: '/runtime/provider-from-requirement' }],
 		},
 		runtimeOverlays: [{ kind: 'mu-plugin', slug: 'runtime-tools', source: '/runtime/runtime-tools' }],
 		runtimeEnv: { REQUEST_ENV: '1', SHARED_ENV: 'request' },
@@ -135,6 +136,7 @@ try {
 	});
 	assert.deepEqual(mergedProfile.provider_plugins, [
 		{ path: '/runtime/provider-from-profile' },
+		{ path: '/runtime/provider-from-requirement' },
 		{ path: '/runtime/provider-from-request' },
 	]);
 
