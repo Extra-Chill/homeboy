@@ -33,11 +33,17 @@ pub struct TriageWatchOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TriageWatchTargetOutput {
-    pub reference: String,
+pub struct TriageWatchItemRef {
     pub repo: String,
     pub number: u64,
     pub item_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TriageWatchTargetOutput {
+    pub reference: String,
+    #[serde(flatten)]
+    pub item_ref: TriageWatchItemRef,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_state: Option<TriageWatchItemState>,
 }
@@ -45,9 +51,8 @@ pub struct TriageWatchTargetOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct TriageWatchEvent {
     pub event: String,
-    pub repo: String,
-    pub number: u64,
-    pub item_type: String,
+    #[serde(flatten)]
+    pub item_ref: TriageWatchItemRef,
     pub ts: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<TriageWatchItemState>,
@@ -104,9 +109,11 @@ pub fn run(options: TriageWatchOptions) -> Result<TriageWatchOutput> {
         .iter()
         .map(|reference| TriageWatchTargetOutput {
             reference: reference.raw.clone(),
-            repo: reference.repo_slug(),
-            number: reference.number,
-            item_type: "unknown".to_string(),
+            item_ref: TriageWatchItemRef {
+                repo: reference.repo_slug(),
+                number: reference.number,
+                item_type: "unknown".to_string(),
+            },
             final_state: None,
         })
         .collect::<Vec<_>>();
@@ -118,7 +125,7 @@ pub fn run(options: TriageWatchOptions) -> Result<TriageWatchOutput> {
         let mut all_reached = true;
         for (index, reference) in refs.iter().enumerate() {
             let item = fetch_watch_item(reference).map_err(Error::internal_unexpected)?;
-            targets[index].item_type = item.item_type.clone();
+            targets[index].item_ref.item_type = item.item_type.clone();
             targets[index].final_state = Some(item.state.clone());
             let key = reference.key();
             if let Some(previous) = states.get(&key) {
@@ -169,15 +176,17 @@ pub fn run(options: TriageWatchOptions) -> Result<TriageWatchOutput> {
 
     events.push(TriageWatchEvent {
         event: "watch.exit".to_string(),
-        repo: refs
-            .first()
-            .map(TriageWatchRef::repo_slug)
-            .unwrap_or_default(),
-        number: refs
-            .first()
-            .map(|reference| reference.number)
-            .unwrap_or_default(),
-        item_type: "watch".to_string(),
+        item_ref: TriageWatchItemRef {
+            repo: refs
+                .first()
+                .map(TriageWatchRef::repo_slug)
+                .unwrap_or_default(),
+            number: refs
+                .first()
+                .map(|reference| reference.number)
+                .unwrap_or_default(),
+            item_type: "watch".to_string(),
+        },
         ts: Utc::now().to_rfc3339(),
         state: None,
         from: None,
@@ -403,9 +412,11 @@ fn watch_event(
 ) -> TriageWatchEvent {
     TriageWatchEvent {
         event: event.to_string(),
-        repo: reference.repo_slug(),
-        number: reference.number,
-        item_type: item.item_type.clone(),
+        item_ref: TriageWatchItemRef {
+            repo: reference.repo_slug(),
+            number: reference.number,
+            item_type: item.item_type.clone(),
+        },
         ts: Utc::now().to_rfc3339(),
         state: Some(item.state.clone()),
         from,
