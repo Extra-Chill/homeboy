@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.8] - 2026-06-27
+
+### Changed
+- Add rollback-safe REST fuzz contract
+
 ## [3.19.7] - 2026-06-27
 
 ### Changed
