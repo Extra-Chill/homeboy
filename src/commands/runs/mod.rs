@@ -19,6 +19,7 @@ mod corpus_tests;
 mod disk;
 mod dispatch;
 mod distribution;
+mod dossier;
 mod drift;
 mod evidence;
 mod findings;
@@ -63,6 +64,7 @@ pub(crate) use types::{RunsListArgs, RunsListOutput};
 pub use bench::{bench_compare, BenchCompareOutput, RunsBenchCompareArgs};
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
+pub use dossier::{runs_dossier, RunsDossierOutput};
 
 // Test-only helpers consumed by sibling test modules via `super::runs::*` / `super::*`.
 #[cfg(test)]
