@@ -20,8 +20,10 @@ use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
     RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceMetadata,
     RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
-    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSnapshotAppliedFilters,
+    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    DEFAULT_EXCLUDES,
 };
 use super::util::{
     deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
@@ -96,6 +98,7 @@ pub fn sync_workspace(
                     &remote_path,
                     options.mode,
                     &snapshot,
+                    options.run_isolation_token.as_deref(),
                 ),
             )?;
             let validation_dependencies = sync_validation_dependency_workspaces(
@@ -190,6 +193,7 @@ pub fn sync_workspace(
                     &remote_path,
                     RunnerWorkspaceSyncMode::Git,
                     &git.head,
+                    options.run_isolation_token.as_deref(),
                 ),
             )?;
             let validation_dependencies = sync_validation_dependency_workspaces(
@@ -337,6 +341,56 @@ pub fn list_workspaces(runner_id: &str, limit: usize) -> Result<(RunnerWorkspace
     ))
 }
 
+pub fn workspace_snapshots(
+    runner_id: &str,
+    filters: RunnerWorkspaceSnapshotFilters,
+) -> Result<(RunnerWorkspaceSnapshotsOutput, i32)> {
+    let runner = load(runner_id)?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner workspace snapshots requires workspace_root",
+            Some(runner.id.clone()),
+            Some(vec![
+                "Set runner.workspace_root to the remote workspace directory.".to_string(),
+            ]),
+        )
+    })?;
+    validate_absolute_path("workspace_root", workspace_root)?;
+    let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    let limit = filters.limit.max(1);
+    let mut snapshots = match runner.kind {
+        RunnerKind::Local => workspace_snapshots_local(Path::new(&lab_workspaces_root))?,
+        RunnerKind::Ssh => workspace_snapshots_ssh(&runner, &lab_workspaces_root)?,
+    };
+    snapshots.retain(|snapshot| workspace_snapshot_matches(snapshot, &filters));
+    snapshots.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.remote_path.cmp(&b.remote_path))
+    });
+    snapshots.truncate(limit);
+
+    Ok((
+        RunnerWorkspaceSnapshotsOutput {
+            variant: "workspace_snapshots",
+            command: "runner.workspace.snapshots",
+            runner_id: runner.id,
+            workspace_root: workspace_root.to_string(),
+            lab_workspaces_root,
+            filters: RunnerWorkspaceSnapshotAppliedFilters {
+                repo: filters.repo,
+                source_ref: filters.source_ref,
+                source_commit: filters.source_commit,
+                run_id: filters.run_id,
+                limit,
+            },
+            snapshots,
+        },
+        0,
+    ))
+}
+
 fn list_local_lab_workspaces(root: &Path, limit: usize) -> Result<Vec<String>> {
     if !root.is_dir() {
         return Ok(Vec::new());
@@ -403,24 +457,170 @@ fn list_ssh_lab_workspaces(
     Ok(paths.into_iter().take(limit).collect())
 }
 
+fn workspace_snapshots_local(root: &Path) -> Result<Vec<RunnerWorkspaceSnapshotEntry>> {
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut snapshots = Vec::new();
+    for entry in fs::read_dir(root).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("read runner workspace root".to_string()),
+        )
+    })? {
+        let entry = entry.map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read runner workspace entry".to_string()),
+            )
+        })?;
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let metadata_path = entry.path().join(WORKSPACE_METADATA_FILE);
+        let Ok(content) = fs::read_to_string(&metadata_path) else {
+            continue;
+        };
+        let metadata: RunnerWorkspaceMetadata = serde_json::from_str(&content).map_err(|err| {
+            Error::internal_json(err.to_string(), Some(metadata_path.display().to_string()))
+        })?;
+        if let Some(snapshot) = workspace_snapshot_entry(metadata) {
+            snapshots.push(snapshot);
+        }
+    }
+    Ok(snapshots)
+}
+
+fn workspace_snapshots_ssh(
+    runner: &super::super::Runner,
+    root: &str,
+) -> Result<Vec<RunnerWorkspaceSnapshotEntry>> {
+    let (_server, mut client) = ssh_client_for_runner(runner)?;
+    client.env.extend(runner.env.clone());
+    let command = format!(
+        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'meta_rel=$1; shift; for dir do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; printf \"%s\\t\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done' sh {meta_arg} {{}} +; fi",
+        root = shell::quote_arg(root),
+        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        meta_arg = shell::quote_arg(WORKSPACE_METADATA_FILE),
+    );
+    let output = client.execute(&command);
+    if !output.success {
+        return Err(Error::internal_unexpected(format!(
+            "runner workspace snapshot scan failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    let mut snapshots = Vec::new();
+    for line in output.stdout.lines() {
+        let parts = line.splitn(2, '\t').collect::<Vec<_>>();
+        if parts.len() != 2 {
+            continue;
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(parts[1])
+            .map_err(|err| Error::internal_json(err.to_string(), None))?;
+        let metadata: RunnerWorkspaceMetadata = serde_json::from_slice(&decoded)
+            .map_err(|err| Error::internal_json(err.to_string(), Some(parts[0].to_string())))?;
+        if let Some(snapshot) = workspace_snapshot_entry(metadata) {
+            snapshots.push(snapshot);
+        }
+    }
+    Ok(snapshots)
+}
+
+fn workspace_snapshot_entry(
+    metadata: RunnerWorkspaceMetadata,
+) -> Option<RunnerWorkspaceSnapshotEntry> {
+    if metadata.schema != "homeboy/runner-workspace/v1" {
+        return None;
+    }
+    let repo = metadata
+        .repo
+        .clone()
+        .unwrap_or_else(|| workspace_repo_from_path(&metadata.local_path));
+    Some(RunnerWorkspaceSnapshotEntry {
+        exec_command: format!(
+            "homeboy runner exec {} --cwd {} -- <command>",
+            shell_arg(&metadata.runner_id),
+            shell_arg(&metadata.remote_path)
+        ),
+        runner_id: metadata.runner_id,
+        repo,
+        local_path: metadata.local_path,
+        remote_path: metadata.remote_path,
+        sync_mode: metadata.sync_mode,
+        snapshot_identity: metadata.snapshot_identity,
+        created_at: metadata.synced_at,
+        source_ref: metadata.source_ref,
+        source_commit: metadata.source_commit,
+        source_dirty: metadata.source_dirty,
+        run_id: metadata.run_id,
+        job_id: metadata.job_id,
+    })
+}
+
+fn workspace_snapshot_matches(
+    snapshot: &RunnerWorkspaceSnapshotEntry,
+    filters: &RunnerWorkspaceSnapshotFilters,
+) -> bool {
+    if let Some(repo) = filters.repo.as_deref() {
+        if snapshot.repo != repo {
+            return false;
+        }
+    }
+    if let Some(source_ref) = filters.source_ref.as_deref() {
+        if snapshot.source_ref.as_deref() != Some(source_ref) {
+            return false;
+        }
+    }
+    if let Some(source_commit) = filters.source_commit.as_deref() {
+        if snapshot.source_commit.as_deref() != Some(source_commit) {
+            return false;
+        }
+    }
+    if let Some(run_id) = filters.run_id.as_deref() {
+        if snapshot.run_id.as_deref() != Some(run_id) {
+            return false;
+        }
+    }
+    true
+}
+
 fn workspace_metadata(
     runner_id: &str,
     local_path: &Path,
     remote_path: &str,
     sync_mode: RunnerWorkspaceSyncMode,
     snapshot_identity: &str,
+    run_id: Option<&str>,
 ) -> RunnerWorkspaceMetadata {
+    let git_state = local_git_state(local_path);
     RunnerWorkspaceMetadata {
-        schema: "homeboy/runner-workspace/v1",
+        schema: "homeboy/runner-workspace/v1".to_string(),
         runner_id: runner_id.to_string(),
+        repo: Some(workspace_repo_from_path(&local_path.display().to_string())),
         local_path: local_path.display().to_string(),
         remote_path: remote_path.to_string(),
         sync_mode: sync_mode.label().to_string(),
         snapshot_identity: snapshot_identity.to_string(),
         synced_at: chrono::Utc::now().to_rfc3339(),
-        run_id: None,
+        source_ref: git_state.ref_name,
+        source_commit: git_state.commit,
+        source_dirty: git_state.dirty,
+        run_id: run_id.map(str::to_string),
         job_id: None,
     }
+}
+
+fn workspace_repo_from_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+        .split('@')
+        .next()
+        .unwrap_or(path)
+        .to_string()
 }
 
 fn write_workspace_metadata(

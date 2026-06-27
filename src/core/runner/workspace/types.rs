@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::super::validation_dependencies::RunnerValidationDependencySyncOutput;
 use super::super::RunnerWorkspaceLease;
@@ -156,18 +156,83 @@ pub struct RunnerWorkspacePruneSkippedEntry {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct RunnerWorkspaceMetadata {
-    pub schema: &'static str,
+#[derive(Debug, Clone, Default)]
+pub struct RunnerWorkspaceSnapshotFilters {
+    pub repo: Option<String>,
+    pub source_ref: Option<String>,
+    pub source_commit: Option<String>,
+    pub run_id: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceSnapshotsOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
     pub runner_id: String,
+    pub workspace_root: String,
+    pub lab_workspaces_root: String,
+    pub filters: RunnerWorkspaceSnapshotAppliedFilters,
+    pub snapshots: Vec<RunnerWorkspaceSnapshotEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceSnapshotAppliedFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceSnapshotEntry {
+    pub runner_id: String,
+    pub repo: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub sync_mode: String,
+    pub snapshot_identity: String,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_dirty: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    pub exec_command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct RunnerWorkspaceMetadata {
+    pub schema: String,
+    pub runner_id: String,
+    #[serde(default)]
+    pub repo: Option<String>,
     pub local_path: String,
     pub remote_path: String,
     pub sync_mode: String,
     pub snapshot_identity: String,
     pub synced_at: String,
+    #[serde(default)]
+    pub source_ref: Option<String>,
+    #[serde(default)]
+    pub source_commit: Option<String>,
+    #[serde(default)]
+    pub source_dirty: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub job_id: Option<String>,
 }
 

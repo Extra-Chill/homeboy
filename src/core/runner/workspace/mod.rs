@@ -13,11 +13,13 @@ mod types;
 mod util;
 
 pub use sync::sync_workspace;
-pub use sync::{list_workspaces, prune_workspaces};
+pub use sync::{list_workspaces, prune_workspaces, workspace_snapshots};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
-    RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSyncMode,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
+    RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
