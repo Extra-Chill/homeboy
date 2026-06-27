@@ -58,6 +58,7 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
             extension_script_required: true,
             env: vec!["HOMEBOY_FUZZ_RESULTS_FILE"],
         },
+        evidence_refs: Vec::new(),
         evidence_followups: Vec::new(),
     }))
     .unwrap();

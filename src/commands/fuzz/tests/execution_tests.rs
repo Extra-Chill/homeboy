@@ -57,6 +57,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             postprocess: &[],
         })
         .expect("persist fuzz run")
+        .run
         .expect("run record");
 
         assert_eq!(persisted.id, "proof-1");
@@ -130,6 +131,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             postprocess: &[],
         })
         .expect("persist fuzz run")
+        .run
         .expect("run record");
 
         assert!(persisted.id.starts_with("fuzz-"));
@@ -159,7 +161,7 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
         .expect("results file");
         std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
 
-        persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+        let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
             run_id: args.run_id.as_deref(),
             component_id: "component-a",
             rig_id: args.rig.as_deref(),
@@ -179,6 +181,17 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
         })
         .expect("persist fuzz run");
 
+        assert_eq!(persisted.evidence_refs.len(), 1);
+        assert_eq!(
+            persisted.evidence_refs[0].canonical_uri(),
+            persisted.evidence_refs[0]
+                .artifact
+                .as_ref()
+                .expect("artifact ref")
+                .canonical_uri()
+        );
+        assert_eq!(persisted.evidence_refs[0].role.as_deref(), Some("result"));
+
         let store = ObservationStore::open_initialized().expect("store");
         let artifacts = store.list_artifacts("proof-envelope").expect("artifacts");
         let envelope_artifact = artifacts
@@ -193,6 +206,10 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
         assert_eq!(
             envelope_artifact.metadata_json["source"],
             "homeboy fuzz run"
+        );
+        assert_eq!(
+            envelope_artifact.metadata_json["evidence"]["semantic_key"],
+            "fuzz.result_envelope"
         );
 
         let envelope: serde_json::Value = serde_json::from_str(
@@ -522,6 +539,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             postprocess: &[],
         })
         .expect("persist fuzz run")
+        .run
         .expect("run record");
 
         assert_eq!(persisted.id, "proof-bad-results");

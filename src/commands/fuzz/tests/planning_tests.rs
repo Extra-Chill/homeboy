@@ -414,6 +414,7 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
             extension_script_required: true,
             env: Vec::new(),
         },
+        evidence_refs: Vec::new(),
         evidence_followups: Vec::new(),
     }))
     .unwrap();
