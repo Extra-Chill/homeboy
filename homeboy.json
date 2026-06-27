@@ -672,7 +672,6 @@
         "test_quality::src/core/runner/execution/tests/redaction.rs::VacuousTest",
         "test_quality::src/core/runner/execution/tests/secret_source.rs::VacuousTest",
         "test_quality::tests/command_surface_test.rs::VacuousTest",
-        "thin_command_adapter::src/commands/agent_task/tool.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/bench/settings_matrix.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/observe.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/review/mod.rs::ThinCommandAdapterViolation",
