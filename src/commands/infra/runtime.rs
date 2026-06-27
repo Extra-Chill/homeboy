@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::CmdResult;
+use crate::commands::CmdResult;
 
 #[derive(Args)]
 pub struct RuntimeArgs {

@@ -4,7 +4,7 @@ use serde::Serialize;
 use crate::cli_runtime::current_augmented_command_safety_manifest;
 use crate::cli_surface::CommandSafetyManifest;
 
-use super::{CmdResult, GlobalArgs};
+use crate::commands::{CmdResult, GlobalArgs};
 
 #[derive(Args, Debug, Clone)]
 pub struct ManifestArgs {}

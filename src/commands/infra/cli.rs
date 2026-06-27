@@ -1,7 +1,7 @@
 use homeboy::core::engine::cli_tool::{self, CliToolResult};
 use serde::Serialize;
 
-use super::CmdResult;
+use crate::commands::CmdResult;
 
 pub struct CliArgs {
     pub tool: String,
@@ -16,7 +16,7 @@ pub struct CliOutput {
     pub result: CliToolResult,
 }
 
-pub fn run(args: CliArgs, _global: &super::GlobalArgs) -> CmdResult<CliOutput> {
+pub fn run(args: CliArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<CliOutput> {
     let result = cli_tool::run(&args.tool, &args.identifier, &args.args)?;
     let exit_code = result.exit_code;
 

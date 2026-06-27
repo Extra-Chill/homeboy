@@ -4,8 +4,6 @@ use serde_json::{Map, Value};
 
 pub type CmdResult<T> = homeboy::core::Result<(T, i32)>;
 
-mod key_artifacts;
-
 pub(crate) use crate::core::markdown::escape_markdown_table_cell;
 
 /// Parse a `KEY=value` string into a (key, value) tuple.
@@ -183,7 +181,6 @@ pub fn finalize_set_spec(
     Ok((json_string, replace_fields))
 }
 
-pub(crate) mod adapter;
 pub mod agent_task;
 pub(crate) mod agent_task_dispatch;
 pub(crate) mod agent_task_summary;
@@ -198,7 +195,6 @@ pub mod changelog;
 pub mod changes;
 pub mod ci;
 pub mod cleanup;
-pub mod cli;
 pub mod component;
 pub mod config;
 pub mod daemon;
@@ -218,31 +214,23 @@ pub mod json_output;
 pub mod lab;
 pub mod lint;
 pub mod logs;
-pub mod manifest;
 pub mod observe;
-pub mod output_runtime;
 pub mod project;
 pub mod raw_output;
 pub mod refactor;
 pub mod refs;
 pub mod release;
 pub mod report;
-pub mod response;
 pub mod review;
 pub mod rig;
-pub mod route;
 pub mod runner;
 pub mod runs;
-pub(crate) mod runs_dossier_summary;
 pub(crate) mod runs_summary;
-pub mod runtime;
 pub mod self_cmd;
 pub mod server;
-pub mod source_command;
 pub mod ssh;
 pub mod stack;
 pub mod status;
-pub(crate) mod summary_json;
 pub mod test;
 pub mod trace;
 pub mod triage;
@@ -252,6 +240,24 @@ pub mod upgrade;
 pub mod utils;
 pub mod version;
 pub mod worktree;
+
+// CLI-infrastructure / plumbing modules live in the `infra` submodule to keep
+// this directory under the structural file-count threshold. They are re-exported
+// below at their original `crate::commands::*` paths (matching original
+// visibility) so this relocation is a pure move with zero API change.
+mod infra;
+
+pub(crate) use infra::adapter;
+pub use infra::cli;
+pub(crate) use infra::key_artifacts;
+pub use infra::manifest;
+pub use infra::output_runtime;
+pub use infra::response;
+pub use infra::route;
+pub(crate) use infra::runs_dossier_summary;
+pub use infra::runtime;
+pub use infra::source_command;
+pub(crate) use infra::summary_json;
 
 #[cfg(test)]
 mod tests {
