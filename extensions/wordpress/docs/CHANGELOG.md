@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.11] - 2026-06-27
+
+### Changed
+- Add Codebox runtime package task schema
+
 ## [3.19.10] - 2026-06-27
 
 ### Changed
