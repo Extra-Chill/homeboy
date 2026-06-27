@@ -100,6 +100,7 @@
     "test:full-surface-coverage": "node tests/full-surface-coverage-smoke.js",
     "test:wordpress-fuzz-coverage-aggregate": "node tests/wordpress-fuzz-coverage-aggregate-smoke.js",
     "test:external-http-guardrail": "node tests/external-http-guardrail-smoke.js",
+    "test:env-provider": "node tests/env-provider-smoke.js",
     "test:wordpress-helper-consumer": "node tests/wordpress-helper-consumer-smoke.mjs",
     "test:materialized-site-quality": "node tests/materialized-site-quality-smoke.js",
     "test:timing-correlator": "node tests/timing-correlator-smoke.js",
