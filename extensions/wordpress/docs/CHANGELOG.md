@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.27] - 2026-06-27
+
+### Fixed
+- fix(wp-codebox): forward full secret-env-plan aggregation into sandbox
+
 ## [3.19.26] - 2026-06-27
 
 ### Changed
