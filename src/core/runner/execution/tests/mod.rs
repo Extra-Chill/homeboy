@@ -75,6 +75,7 @@ pub(super) fn failed_runner_exec_output(stdout: &str, stderr: &str) -> RunnerExe
         structured_summaries: Vec::new(),
         metrics: None,
         capture: None,
+        execution_record: None,
         runner_result: None,
         handoff: None,
         diagnostics: None,

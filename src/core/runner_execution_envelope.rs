@@ -6,6 +6,7 @@ use crate::core::agent_task::{AgentTaskArtifactDeclaration, AgentTaskRequest};
 use crate::core::secret_env_plan::SecretEnvPlan;
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
+pub const RUNNER_EXECUTION_RECORD_SCHEMA: &str = "homeboy/runner-execution-record/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunnerExecutionEnvelope {
@@ -34,6 +35,103 @@ pub struct RunnerExecutionEnvelope {
     pub result_refs: RunnerExecutionResultRefs,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerExecutionRecord {
+    #[serde(default = "runner_execution_record_schema")]
+    pub schema: String,
+    pub execution_id: String,
+    pub runner_id: String,
+    pub transport: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_task_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<RunnerExecutionArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<RunnerExecutionNextAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerExecutionArtifactRef {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerExecutionNextAction {
+    pub label: String,
+    pub command: Vec<String>,
+}
+
+impl RunnerExecutionRecord {
+    pub fn terminal(
+        execution_id: impl Into<String>,
+        runner_id: impl Into<String>,
+        transport: impl Into<String>,
+        exit_code: i32,
+    ) -> Self {
+        Self {
+            schema: RUNNER_EXECUTION_RECORD_SCHEMA.to_string(),
+            execution_id: execution_id.into(),
+            runner_id: runner_id.into(),
+            transport: transport.into(),
+            status: if exit_code == 0 {
+                "succeeded"
+            } else {
+                "failed"
+            }
+            .to_string(),
+            job_id: None,
+            local_run_id: None,
+            remote_run_id: None,
+            agent_task_run_id: None,
+            mirror_run_id: None,
+            artifact_refs: Vec::new(),
+            next_actions: Vec::new(),
+        }
+    }
+
+    pub fn with_job_id(mut self, job_id: impl Into<String>) -> Self {
+        self.job_id = Some(job_id.into());
+        self
+    }
+
+    pub fn with_mirror_run_id(mut self, mirror_run_id: Option<String>) -> Self {
+        self.mirror_run_id = mirror_run_id.clone();
+        self.remote_run_id = mirror_run_id;
+        self
+    }
+
+    pub fn with_artifact_refs(
+        mut self,
+        artifact_refs: impl IntoIterator<Item = RunnerExecutionArtifactRef>,
+    ) -> Self {
+        self.artifact_refs = artifact_refs.into_iter().collect();
+        self
+    }
+
+    pub fn with_next_actions(
+        mut self,
+        next_actions: impl IntoIterator<Item = RunnerExecutionNextAction>,
+    ) -> Self {
+        self.next_actions = next_actions.into_iter().collect();
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -268,6 +366,10 @@ fn runner_execution_envelope_schema() -> String {
     RUNNER_EXECUTION_ENVELOPE_SCHEMA.to_string()
 }
 
+fn runner_execution_record_schema() -> String {
+    RUNNER_EXECUTION_RECORD_SCHEMA.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -344,6 +446,41 @@ mod tests {
         assert_eq!(decoded.result_refs.plan_id.as_deref(), Some("plan-1"));
         assert_eq!(decoded.result_refs.job_id.as_deref(), Some("job-1"));
         assert_eq!(decoded.result_refs.artifacts.len(), 1);
+    }
+
+    #[test]
+    fn runner_execution_record_captures_durable_identity_and_actions() {
+        let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
+            .with_job_id("job-1")
+            .with_mirror_run_id(Some("run-1".to_string()))
+            .with_artifact_refs(vec![RunnerExecutionArtifactRef {
+                id: "artifact-1".to_string(),
+                name: Some("report".to_string()),
+                path: Some("artifacts/report.json".to_string()),
+                url: None,
+            }])
+            .with_next_actions(vec![RunnerExecutionNextAction {
+                label: "runner_job_logs".to_string(),
+                command: vec![
+                    "homeboy".to_string(),
+                    "runner".to_string(),
+                    "job".to_string(),
+                    "logs".to_string(),
+                    "lab-a".to_string(),
+                    "job-1".to_string(),
+                ],
+            }]);
+
+        let value = serde_json::to_value(&record).expect("serialize record");
+        assert_eq!(value["schema"], RUNNER_EXECUTION_RECORD_SCHEMA);
+        assert_eq!(value["execution_id"], "job-1");
+        assert_eq!(value["runner_id"], "lab-a");
+        assert_eq!(value["transport"], "daemon");
+        assert_eq!(value["status"], "succeeded");
+        assert_eq!(value["job_id"], "job-1");
+        assert_eq!(value["remote_run_id"], "run-1");
+        assert_eq!(value["artifact_refs"][0]["id"], "artifact-1");
+        assert_eq!(value["next_actions"][0]["label"], "runner_job_logs");
     }
 
     #[test]

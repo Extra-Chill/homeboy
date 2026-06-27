@@ -1550,6 +1550,7 @@ fn exec_output(
         structured_summaries: Vec::new(),
         metrics: None,
         capture: None,
+        execution_record: None,
         runner_result: None,
         handoff: None,
         diagnostics: None,
