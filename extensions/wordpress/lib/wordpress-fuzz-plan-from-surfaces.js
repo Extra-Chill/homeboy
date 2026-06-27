@@ -240,10 +240,12 @@ function adminPageTargetFromSurface(surface, options = {}) {
 
 function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReasons, surfaceDestructiveReasons, options = {}) {
 	const safeMethod = SAFE_REST_METHODS.has(method);
+	const restMutationOptIn = safeMethod ? undefined : restMutationOptInForSurfaceAction(surface, method, options);
 	const fixtureBinding = fixtureBindingForSurfaceAction(surface, method.toLowerCase(), options);
 	const operation = bindRestOperationFixtures({ ...operationForSurface(surface), method }, fixtureBinding);
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
-	const skipReasons = safeMethod || mutationMode === 'isolated' ? surfaceSkipReasons : reasonList([...surfaceSkipReasons, 'mutating_rest_method_requires_explicit_opt_in']);
+	const hasMutationOptIn = objectHasValues(restMutationOptIn);
+	const skipReasons = safeMethod || mutationMode === 'isolated' || hasMutationOptIn ? surfaceSkipReasons : reasonList([...surfaceSkipReasons, 'mutating_rest_method_requires_explicit_opt_in']);
 	const destructiveReasons = safeMethod ? surfaceDestructiveReasons : reasonList([...surfaceDestructiveReasons, 'rest_method_mutates_state']);
 	const fixtureMetadata = fixtureBindingMetadata(fixtureBinding);
 	const testCase = annotateWordPressFuzzCaseExecutionTier({
@@ -258,6 +260,7 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 			surface,
 			rest_method: method,
 			fixture_binding: fixtureMetadata,
+			rest_mutation_opt_in: restMutationOptIn,
 			auth: surface.auth || surface.authentication || surface.authorization || null,
 			safety: safeMethod ? { level: 'safe', mutates: false } : { level: 'mutating', mutates: true, requires_explicit_opt_in: true, rollback_required: true },
 			mutation_lifecycle: safeMethod ? undefined : mutationLifecycleContract({ kind: 'rest', surface, method }),
@@ -274,6 +277,52 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 		required_any_capabilities: REST_ROLLBACK_ANY_CAPABILITIES,
 		mutation_mode: mutationMode,
 		mutates: true,
+	});
+}
+
+function restMutationOptInForSurfaceAction(surface, method, options = {}) {
+	const manifest = normalizeRestMutationOptInManifest(options.rest_mutation_opt_ins || options.restMutationOptIns || options.rest_mutation_opt_in || options.restMutationOptIn);
+	const surfaceOptIn = normalizeRestMutationOptInEntry(surface.rest_mutation_opt_in || surface.restMutationOptIn || surface.mutation_opt_in || surface.mutationOptIn, { surface, method });
+	if (surfaceOptIn) {
+		return surfaceOptIn;
+	}
+	const normalizedMethod = String(method || '').toUpperCase();
+	for (const entry of manifest.entries) {
+		if (entry.allowed === false) {
+			continue;
+		}
+		if (entry.method && entry.method !== normalizedMethod) {
+			continue;
+		}
+		if ([entry.surface_id, entry.route, entry.path].filter(Boolean).some((value) => [surface.id, surface.route, surface.path, surface.name].includes(value))) {
+			return stripUndefined({ ...entry, manifest_id: manifest.id });
+		}
+	}
+	return undefined;
+}
+
+function normalizeRestMutationOptInManifest(value) {
+	const source = Array.isArray(value) ? value : (isObject(value) ? value : {});
+	const entries = (Array.isArray(source) ? source : source.entries || source.opt_ins || source.optIns || source.routes || [])
+		.map((entry) => normalizeRestMutationOptInEntry(entry))
+		.filter(Boolean);
+	return { id: source.id || source.manifest_id || source.manifestId, entries };
+}
+
+function normalizeRestMutationOptInEntry(value, fallback = {}) {
+	if (!isObject(value)) {
+		return undefined;
+	}
+	const method = String(value.method || fallback.method || '').toUpperCase();
+	return stripUndefined({
+		id: value.id || value.opt_in_id || value.optInId,
+		surface_id: value.surface_id || value.surfaceId || fallback.surface?.id,
+		route: value.route || value.path || fallback.surface?.route || fallback.surface?.path,
+		method: method || undefined,
+		allowed: value.allowed !== false,
+		fixture_ref: value.fixture_ref || value.fixtureRef,
+		contract_ref: value.contract_ref || value.contractRef,
+		metadata: isObject(value.metadata) ? value.metadata : undefined,
 	});
 }
 
@@ -626,6 +675,10 @@ function normalizeFixtureValue(entry) {
 
 function bindingHasValues(binding) {
 	return Boolean(binding && (binding.fixture_id || binding.artifact_ref || binding.request_body || Object.keys(binding.route_params || {}).length > 0));
+}
+
+function objectHasValues(value) {
+	return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0);
 }
 
 function bindCrudOperationFixtures(operation, binding) {

@@ -209,6 +209,8 @@ function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDurat
 		coverage: workload.coverage || { wordpress_fuzz_coverage: true },
 		runtimeProfile: workload.runtime_profile || workload.runtimeProfile,
 		artifacts: workload.artifacts,
+		fixture_plan: workload.fixture_plan || workload.fixturePlan || workload.metadata?.fixture_plan || workload.metadata?.fixturePlan,
+		rest_mutation_opt_ins: workload.rest_mutation_opt_ins || workload.restMutationOptIns || workload.rest_mutation_opt_in || workload.restMutationOptIn || workload.metadata?.rest_mutation_opt_ins || workload.metadata?.restMutationOptIns,
 		metadata: stripUndefined({ ...(workload.metadata || {}), runner: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA, runtime_capabilities: runtimeCapabilities, workload: stripUndefined({ id: workloadId }) }),
 	});
 }

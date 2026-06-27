@@ -22,6 +22,7 @@ const workloadPath = path.join(tempDir, 'workload.json');
 const resultsPath = path.join(tempDir, 'campaign.json');
 const observedRequestPath = path.join(tempDir, 'observed-fuzz-suite-request.json');
 const emptyCodeboxInstallRoot = path.join(tempDir, 'empty-wp-codebox-install');
+const fakeCodeboxCoreModule = path.join(tempDir, 'wp-codebox-core-contracts.cjs');
 const fakeCodeboxBin = path.join(tempDir, 'wp-codebox');
 const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
 
@@ -50,6 +51,12 @@ const workload = {
 
 fs.writeFileSync(workloadPath, `${JSON.stringify(workload, null, 2)}\n`);
 fs.mkdirSync(emptyCodeboxInstallRoot, { recursive: true });
+fs.writeFileSync(fakeCodeboxCoreModule, `module.exports.runtimeContractManifest = () => ({
+  schema: 'wp-codebox/runtime-contract-manifest/v1',
+  version: 1,
+  abilities: { wordpressRuntime: { runFuzzSuite: 'wp-codebox/run-fuzz-suite', runWorkload: 'wp-codebox/run-wordpress-workload' } },
+  schemas: { wordpressRuntime: { fuzzSuite: 'wp-codebox/fuzz-suite/v1', fuzzSuiteResult: 'wp-codebox/fuzz-suite-result/v1', workloadRun: 'wp-codebox/wordpress-workload-run/v1' } }
+});\n`);
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 
@@ -119,6 +126,7 @@ const cli = spawnSync(runnerPath, [], {
 		...process.env,
 		HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH: 'legacy-codebox-bin',
 		HOMEBOY_WP_CODEBOX_BIN: fakeCodeboxBin,
+		HOMEBOY_WP_CODEBOX_CORE_MODULE: fakeCodeboxCoreModule,
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
 		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
 		HOMEBOY_FUZZ_WORKLOAD_ID: 'contract-workload',

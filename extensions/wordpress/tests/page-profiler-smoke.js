@@ -182,7 +182,7 @@ assert.equal(classifyResourceUrl('https://example.test/wp-content/themes/theme/s
 assert.equal(resourceFamily('https://example.test/wp-includes/js/dist/block-editor.min.js?ver=1'), '/wp-includes/js/dist/block-editor.js');
 assert.equal(resourceFamily('https://example.test/wp-content/plugins/example-plugin/assets/admin.js?ver=1'), '/wp-content/plugins/example-plugin');
 assert.equal(DEFAULT_THIRD_PARTY_WATERFALL_GROUPS.some((group) => group.id === 'woocommerce-store-api'), false);
-assert.equal(WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS.woocommerce.firstPartyWaterfallGroupIds[0], 'woocommerce-store-api');
+assert.deepEqual(WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS, {});
 
 const manifest = normalizePageManifest({
 	pages: [
@@ -703,7 +703,10 @@ process.stdout.write(JSON.stringify(output) + '\\n');
 		assert.equal(standaloneAttribution.groups.find((group) => group.id === 'woocommerce-store-api'), undefined);
 		const woocommerceAttribution = summarizeThirdPartyWaterfall(browserNetworkRows, {
 			baseUrl: 'https://example.test',
-			productAdapters: ['woocommerce'],
+			productAdapters: [{
+				waterfallGroups: [{ id: 'woocommerce-store-api', label: 'WooCommerce Store API', urlIncludes: ['/wp-json/wc/store/', 'rest_route=/wc/store/'] }],
+				firstPartyWaterfallGroupIds: ['woocommerce-store-api'],
+			}],
 		});
 		assert.equal(woocommerceAttribution.groups.find((group) => group.id === 'woocommerce-store-api').responseCount, 1);
 		assert.equal(woocommerceAttribution.thirdPartyGroupCount, 3);

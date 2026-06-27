@@ -196,7 +196,7 @@ function requiresCodeboxTaskAdapter(request) {
 }
 
 function wpCodeboxCommandFromPublicAbility(ability, options = {}) {
-	const contracts = wpCodeboxRuntimeContractManifest(options).abilities?.wordpressRuntime || {};
+	const contracts = wpCodeboxRuntimeContractManifest(options)?.abilities?.wordpressRuntime || {};
 	const publicAbilities = new Set([
 		contracts.runWorkload,
 		contracts.runFuzzSuite,

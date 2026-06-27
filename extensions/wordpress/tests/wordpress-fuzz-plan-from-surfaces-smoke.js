@@ -356,7 +356,9 @@ assert.equal(capableRestMutation.execution_tier, 'plan_only');
 const capableAdminMutation = capableCases.find((entry) => entry.intent === 'plan-admin-page-mutation');
 assert.equal(capableAdminMutation.executable, false);
 assert.equal(capableAdminMutation.metadata.runtime_capability_gated, false);
-assert.deepEqual(capableAdminMutation.skip_reasons, ['requires-isolated-mutation-runtime', 'requires_explicit_mutation_opt_in']);
+assert.deepEqual(capableAdminMutation.skip_reasons, ['invalid-runtime-workload-operation', 'requires-isolated-mutation-runtime', 'requires_explicit_mutation_opt_in']);
+assert.equal(capableAdminMutation.runtime_operation.status, 'blocked');
+assert.equal(capableAdminMutation.runtime_operation.blockers[0].code, 'missing-runtime-workload-operation-field');
 assert.equal(capableAdminMutation.execution_tier, 'plan_only');
 
 const isolatedMutationPlan = buildWordPressFuzzPlanFromSurfaces({
@@ -371,18 +373,67 @@ const isolatedMutationPlan = buildWordPressFuzzPlanFromSurfaces({
 });
 assert.equal(isolatedMutationPlan.metadata.mutation_mode, 'isolated');
 const isolatedCases = isolatedMutationPlan.targets.flatMap((target) => target.cases);
-for (const intent of ['create-post', 'request-rest-route', 'plan-admin-page-mutation']) {
+for (const intent of ['create-post', 'request-rest-route']) {
 	const testCase = isolatedCases.find((entry) => entry.intent === intent);
 	assert.equal(testCase.executable, true, `${intent} should execute in isolated mode with runtime capabilities`);
 	assert.deepEqual(testCase.skip_reasons, []);
 	assert.equal(testCase.execution_tier, 'isolated_mutating_executable');
 	assert.equal(testCase.metadata.runtime_capability_gated, false);
 }
+const isolatedAdminMutation = isolatedCases.find((entry) => entry.intent === 'plan-admin-page-mutation');
+assert.equal(isolatedAdminMutation.executable, false);
+assert.deepEqual(isolatedAdminMutation.skip_reasons, ['invalid-runtime-workload-operation']);
+assert.equal(isolatedAdminMutation.runtime_operation.status, 'blocked');
+assert.equal(isolatedAdminMutation.execution_tier, 'plan_only');
 const isolatedRestMutation = isolatedCases.find((entry) => entry.intent === 'request-rest-route');
 const isolatedCrudDelete = isolatedCases.find((entry) => entry.intent === 'delete-post');
 assert.equal(isolatedRestMutation.metadata.rollback_contract.schema, 'homeboy/wordpress-rest-mutation-rollback-contract/v1');
 assert.deepEqual(isolatedRestMutation.metadata.required_any_capabilities, [['reset', 'restore']]);
 assert(isolatedCrudDelete.metadata.mutation_lifecycle.required_evidence.some((entry) => entry.kind === 'delete-boundary'));
+
+const optInRestMutationPlan = buildWordPressFuzzPlanFromSurfaces({
+	rest: [{ id: 'rest:generic-items', route: '/example/v1/items/(?P<id>[\\d]+)', methods: ['POST', 'PATCH', 'DELETE'] }],
+}, {
+	mutation_mode: 'isolated',
+	runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback', 'restore'] },
+	runtimeReadiness: {
+		schema: 'wp-codebox/fuzz-runner-readiness/v1',
+		status: 'ready',
+		operationKinds: ['mutation'],
+		mutationIsolation: true,
+		deleteBoundary: true,
+	},
+	rest_mutation_opt_ins: {
+		id: 'generic-rest-mutation-opt-ins',
+		entries: [
+			{ id: 'create-item-opt-in', route: '/example/v1/items/(?P<id>[\\d]+)', method: 'POST', fixture_ref: 'fixture:items' },
+			{ id: 'patch-item-opt-in', route: '/example/v1/items/(?P<id>[\\d]+)', method: 'PATCH', contract_ref: 'contract:patch' },
+			{ id: 'delete-item-opt-in', route: '/example/v1/items/(?P<id>[\\d]+)', method: 'DELETE', contract_ref: 'contract:delete' },
+		],
+	},
+	fixture_bindings: {
+		'rest:generic-items': {
+			route_params: { id: 42 },
+			request_bodies: {
+				post: { title: 'Created fixture item' },
+				patch: { title: 'Patched fixture item' },
+				delete: { force: true },
+			},
+		},
+	},
+});
+const optInRestCases = optInRestMutationPlan.targets[0].cases;
+assert.deepEqual(optInRestCases.map((testCase) => testCase.operation.method), ['DELETE', 'PATCH', 'POST']);
+for (const method of ['POST', 'PATCH', 'DELETE']) {
+	const testCase = optInRestCases.find((entry) => entry.operation.method === method);
+	assert.equal(testCase.executable, true, `${method} should execute with isolated readiness and opt-in`);
+	assert.equal(testCase.runtime_operation.status, 'ready');
+	assert.equal(testCase.operation.route, '/example/v1/items/42');
+	assert.equal(testCase.metadata.rest_mutation_opt_in.method, method);
+	assert.equal(testCase.metadata.fixture_binding.route_params.id.value, 42);
+}
+assert.deepEqual(optInRestCases.find((entry) => entry.operation.method === 'PATCH').operation.request_body, { title: 'Patched fixture item' });
+assert.deepEqual(optInRestCases.find((entry) => entry.operation.method === 'DELETE').operation.request_body, { force: true });
 
 const readOnlyMutationPlan = buildWordPressFuzzPlanFromSurfaces({
 	post_types: [{ id: 'post:read-only', post_type: 'post', allowCrudMutations: true }],

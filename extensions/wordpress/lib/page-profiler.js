@@ -46,18 +46,7 @@ const DEFAULT_THIRD_PARTY_WATERFALL_GROUPS = [
 		domains: ['gstatic.com', 'googleapis.com', 'google.com'],
 	},
 ];
-const WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS = Object.freeze({
-	woocommerce: Object.freeze({
-		waterfallGroups: Object.freeze([
-			Object.freeze({
-				id: 'woocommerce-store-api',
-				label: 'WooCommerce Store API',
-				urlIncludes: Object.freeze(['/wp-json/wc/store/', 'rest_route=/wc/store/']),
-			}),
-		]),
-		firstPartyWaterfallGroupIds: Object.freeze(['woocommerce-store-api']),
-	}),
-});
+const WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS = Object.freeze({});
 const DEFAULT_GATE_THRESHOLDS = {
 	readyMsRegression: 250,
 	networkIdleMsRegression: 500,
@@ -304,9 +293,6 @@ function normalizeThirdPartyWaterfallGroups(groups) {
 function normalizeWaterfallProductAdapters(adapters) {
 	return (Array.isArray(adapters) ? adapters : [])
 		.map((adapter) => {
-			if (typeof adapter === 'string') {
-				return WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS[adapter] || null;
-			}
 			return isPlainObject(adapter) ? adapter : null;
 		})
 		.filter(Boolean);
