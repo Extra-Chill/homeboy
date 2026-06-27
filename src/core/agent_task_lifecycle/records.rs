@@ -155,6 +155,24 @@ pub enum AgentTaskRunState {
     Cancelled,
 }
 
+/// Canonical projection of a run's aggregate state onto the generic
+/// `RunExecutionState` carried by `RunLifecycleRecord`. The two enums share
+/// every agent-task variant 1:1 (`RunExecutionState` additionally models the
+/// generic `Unknown` default), so this single `From` keeps `record.state` and
+/// `record.lifecycle.execution.state` in lockstep instead of a hand-synced map.
+impl From<AgentTaskRunState> for RunExecutionState {
+    fn from(state: AgentTaskRunState) -> Self {
+        match state {
+            AgentTaskRunState::Queued => RunExecutionState::Queued,
+            AgentTaskRunState::Running => RunExecutionState::Running,
+            AgentTaskRunState::Succeeded => RunExecutionState::Succeeded,
+            AgentTaskRunState::PartialFailure => RunExecutionState::PartialFailure,
+            AgentTaskRunState::Failed => RunExecutionState::Failed,
+            AgentTaskRunState::Cancelled => RunExecutionState::Cancelled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskRunTask {
     pub task_id: String,

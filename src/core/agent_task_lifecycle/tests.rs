@@ -715,6 +715,45 @@ fn submitted_run_can_be_loaded_marked_running_and_completed() {
 }
 
 #[test]
+fn run_state_bridges_one_to_one_onto_execution_state() {
+    let cases = [
+        (AgentTaskRunState::Queued, RunExecutionState::Queued),
+        (AgentTaskRunState::Running, RunExecutionState::Running),
+        (AgentTaskRunState::Succeeded, RunExecutionState::Succeeded),
+        (
+            AgentTaskRunState::PartialFailure,
+            RunExecutionState::PartialFailure,
+        ),
+        (AgentTaskRunState::Failed, RunExecutionState::Failed),
+        (AgentTaskRunState::Cancelled, RunExecutionState::Cancelled),
+    ];
+    for (run_state, expected) in cases {
+        assert_eq!(RunExecutionState::from(run_state), expected);
+    }
+}
+
+#[test]
+fn cancel_keeps_run_state_and_execution_state_paired() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("run-cancel-pairing")).expect("submitted");
+        mark_running("run-cancel-pairing").expect("marked running");
+
+        let cancelled = cancel("run-cancel-pairing").expect("cancelled");
+
+        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            cancelled.lifecycle.execution.state,
+            RunExecutionState::from(cancelled.state),
+        );
+        assert_eq!(
+            cancelled.lifecycle.execution.state,
+            RunExecutionState::Cancelled,
+        );
+    });
+}
+
+#[test]
 fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
     with_isolated_home(|_| {
         let mut plan = test_plan();

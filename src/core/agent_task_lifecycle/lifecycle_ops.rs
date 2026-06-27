@@ -90,9 +90,8 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     }
 
     let reclaimed_stale = record.state == AgentTaskRunState::Running;
-    record.state = AgentTaskRunState::Running;
     record.updated_at = Some(now_timestamp());
-    update_lifecycle_execution(&mut record, AgentTaskRunState::Running);
+    set_run_state(&mut record, AgentTaskRunState::Running);
     update_lifecycle_heartbeat(&mut record);
     for task in &mut record.tasks {
         if task.state == AgentTaskState::Queued {
