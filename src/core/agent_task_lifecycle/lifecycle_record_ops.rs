@@ -14,12 +14,15 @@ pub(crate) fn lifecycle_for_submitted_plan(plan: &AgentTaskPlan) -> RunLifecycle
     lifecycle
 }
 
-pub(crate) fn update_lifecycle_execution(
-    record: &mut AgentTaskRunRecord,
-    state: AgentTaskRunState,
-) {
+/// Single authoritative setter for a run's state. It writes both the
+/// top-level `record.state` and the derived `lifecycle.execution.state`
+/// projection together, so the two cannot silently diverge: every state
+/// transition routes through here instead of assigning `record.state`
+/// separately from refreshing the lifecycle projection.
+pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRunState) {
+    record.state = state;
     let timestamp = record.updated_at.clone().unwrap_or_else(now_timestamp);
-    record.lifecycle.execution.state = execution_state_for_run_state(state);
+    record.lifecycle.execution.state = RunExecutionState::from(state);
     record.lifecycle.execution.updated_at = Some(timestamp.clone());
     if state == AgentTaskRunState::Running && record.lifecycle.execution.started_at.is_none() {
         record.lifecycle.execution.started_at = Some(timestamp.clone());
@@ -46,7 +49,7 @@ pub(crate) fn update_lifecycle_heartbeat(record: &mut AgentTaskRunRecord) {
 }
 
 pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan: &AgentTaskPlan) {
-    update_lifecycle_execution(record, record.state);
+    set_run_state(record, record.state);
     record.lifecycle.cleanup = cleanup_lifecycle_for_plan(plan, record.updated_at.clone());
     record.lifecycle.provider_runtime = record
         .provider_handles
@@ -108,17 +111,6 @@ pub(crate) fn provider_runtime_for_handle(
             url: handle.stream_uri.clone(),
         }],
         metadata: handle.metadata.clone(),
-    }
-}
-
-pub(crate) fn execution_state_for_run_state(state: AgentTaskRunState) -> RunExecutionState {
-    match state {
-        AgentTaskRunState::Queued => RunExecutionState::Queued,
-        AgentTaskRunState::Running => RunExecutionState::Running,
-        AgentTaskRunState::Succeeded => RunExecutionState::Succeeded,
-        AgentTaskRunState::PartialFailure => RunExecutionState::PartialFailure,
-        AgentTaskRunState::Failed => RunExecutionState::Failed,
-        AgentTaskRunState::Cancelled => RunExecutionState::Cancelled,
     }
 }
 

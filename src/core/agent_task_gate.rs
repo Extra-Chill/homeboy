@@ -91,6 +91,19 @@ pub enum AgentTaskGateStatus {
     Failed,
 }
 
+/// Canonical bridge from the binary agent-task gate status to the shared
+/// `HomeboyGateStatus`. Both the report constructor and the
+/// `HomeboyGateResult` conversion route through this single mapping so the
+/// pass/fail projection cannot drift between call sites.
+impl From<AgentTaskGateStatus> for HomeboyGateStatus {
+    fn from(status: AgentTaskGateStatus) -> Self {
+        match status {
+            AgentTaskGateStatus::Succeeded => HomeboyGateStatus::Passed,
+            AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateFailureEvidence {
     pub summary: String,
@@ -125,10 +138,7 @@ impl AgentTaskGateReport {
             id.clone(),
             id.clone(),
             HomeboyGateKind::Command,
-            match status {
-                AgentTaskGateStatus::Succeeded => HomeboyGateStatus::Passed,
-                AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
-            },
+            HomeboyGateStatus::from(status),
         )
         .visibility(visibility)
         .reveal_policy(reveal_policy)
@@ -278,10 +288,7 @@ pub(crate) fn text_tail(text: &str, max_lines: usize) -> String {
 
 impl From<AgentTaskGateReport> for HomeboyGateResult {
     fn from(report: AgentTaskGateReport) -> Self {
-        let status = match report.status {
-            AgentTaskGateStatus::Succeeded => HomeboyGateStatus::Passed,
-            AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
-        };
+        let status = HomeboyGateStatus::from(report.status);
         let command = report.command.join(" ");
         let summary = gate_result_summary(&report, &command);
         let agent_feedback = gate_result_agent_feedback(&report);
@@ -401,6 +408,18 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn agent_task_gate_status_bridges_to_homeboy_gate_status() {
+        assert_eq!(
+            HomeboyGateStatus::from(AgentTaskGateStatus::Succeeded),
+            HomeboyGateStatus::Passed
+        );
+        assert_eq!(
+            HomeboyGateStatus::from(AgentTaskGateStatus::Failed),
+            HomeboyGateStatus::Failed
+        );
+    }
 
     #[test]
     fn gate_command_reports_success_without_failure_evidence() {

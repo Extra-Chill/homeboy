@@ -35,9 +35,8 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
 
     let cancelled_at = now_timestamp();
     let was_stale_running = record.state == AgentTaskRunState::Running;
-    record.state = AgentTaskRunState::Cancelled;
     record.updated_at = Some(cancelled_at.clone());
-    update_lifecycle_execution(&mut record, AgentTaskRunState::Cancelled);
+    set_run_state(&mut record, AgentTaskRunState::Cancelled);
     for task in &mut record.tasks {
         if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
             task.state = AgentTaskState::Cancelled;
@@ -200,9 +199,8 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
         ));
     }
 
-    record.state = AgentTaskRunState::Cancelled;
     record.updated_at = Some(now_timestamp());
-    update_lifecycle_execution(&mut record, AgentTaskRunState::Cancelled);
+    set_run_state(&mut record, AgentTaskRunState::Cancelled);
     for task in &mut record.tasks {
         if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
             task.state = AgentTaskState::Cancelled;

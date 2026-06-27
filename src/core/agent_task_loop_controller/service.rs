@@ -452,19 +452,8 @@ fn acceptance_gate_diagnostics(
                 .iter()
                 .rev()
                 .find(|result| result.bundle_id == bundle_id && result.entity_id == entity_id);
-            let status = match result.map(|result| result.status) {
-                Some(AgentTaskGateBundleStatus::Passed) => {
-                    AgentTaskLoopAcceptanceGateStatus::Satisfied
-                }
-                Some(AgentTaskGateBundleStatus::Failed) => {
-                    AgentTaskLoopAcceptanceGateStatus::Failed
-                }
-                Some(AgentTaskGateBundleStatus::Warn) => AgentTaskLoopAcceptanceGateStatus::Warning,
-                Some(AgentTaskGateBundleStatus::Pending) => {
-                    AgentTaskLoopAcceptanceGateStatus::Pending
-                }
-                None => AgentTaskLoopAcceptanceGateStatus::Missing,
-            };
+            let status =
+                AgentTaskLoopAcceptanceGateStatus::from(result.map(|result| result.status));
             let problems = match status {
                 AgentTaskLoopAcceptanceGateStatus::Missing => {
                     vec!["acceptance gate has no recorded result".to_string()]

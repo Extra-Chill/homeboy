@@ -535,8 +535,8 @@ pub(crate) fn apply_aggregate_to_record(
     aggregate: &AgentTaskAggregate,
     aggregate_path: String,
 ) {
-    record.state = run_state_for_aggregate(aggregate);
     record.updated_at = Some(now_timestamp());
+    set_run_state(record, run_state_for_aggregate(aggregate));
     record.aggregate_path = Some(aggregate_path);
     record.totals = Some(aggregate.totals.clone());
     record.tasks = tasks_for_aggregate(plan, aggregate);
