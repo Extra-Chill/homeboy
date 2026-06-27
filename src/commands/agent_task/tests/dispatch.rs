@@ -352,8 +352,11 @@ fn controller_dispatch_provider_id_alias_maps_to_dispatch_selector() {
         panic!("expected controller from-spec command");
     };
 
-    assert_eq!(args.dispatch_selector.as_deref(), Some("sample-provider"));
-    assert_eq!(args.dispatch_model, None);
+    assert_eq!(
+        args.dispatch.dispatch_selector.as_deref(),
+        Some("sample-provider")
+    );
+    assert_eq!(args.dispatch.dispatch_model, None);
 }
 
 #[test]

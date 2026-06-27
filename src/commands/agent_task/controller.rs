@@ -28,9 +28,9 @@ use homeboy::core::agent_tasks::loop_controller::AgentTaskLoopPolicyAction;
 use super::super::CmdResult;
 use super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
-    AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
-    AgentTaskControllerPlanArgs, AgentTaskControllerProofArgs, AgentTaskControllerRunArgs,
-    AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
+    AgentTaskControllerDispatchArgs, AgentTaskControllerFromSpecArgs,
+    AgentTaskControllerMaterializeArgs, AgentTaskControllerPlanArgs, AgentTaskControllerProofArgs,
+    AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
     AgentTaskControllerValidateProofArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs,
 };
@@ -366,10 +366,12 @@ where
         replace: false,
         fork: false,
         resume_existing: false,
-        dispatch_backend: preparation.profile.dispatch_backend.clone(),
-        dispatch_selector: preparation.profile.dispatch_selector.clone(),
-        dispatch_model: None,
-        dispatch_provider_config: preparation.profile.dispatch_provider_config.clone(),
+        dispatch: AgentTaskControllerDispatchArgs {
+            dispatch_backend: preparation.profile.dispatch_backend.clone(),
+            dispatch_selector: preparation.profile.dispatch_selector.clone(),
+            dispatch_model: None,
+            dispatch_provider_config: preparation.profile.dispatch_provider_config.clone(),
+        },
     };
 
     let (run_value, exit_code) = controller_run_from_spec_with_executor(run_args, executor)?;
@@ -959,37 +961,37 @@ struct ControllerDispatchDefaults {
 impl ControllerDispatchDefaults {
     fn from_from_spec_args(args: &AgentTaskControllerFromSpecArgs) -> Self {
         Self {
-            backend: args.dispatch_backend.clone(),
-            selector: args.dispatch_selector.clone(),
-            model: args.dispatch_model.clone(),
-            provider_config: args.dispatch_provider_config.clone(),
+            backend: args.dispatch.dispatch_backend.clone(),
+            selector: args.dispatch.dispatch_selector.clone(),
+            model: args.dispatch.dispatch_model.clone(),
+            provider_config: args.dispatch.dispatch_provider_config.clone(),
         }
     }
 
     fn from_run_from_spec_args(args: &AgentTaskControllerRunFromSpecArgs) -> Self {
         Self {
-            backend: args.dispatch_backend.clone(),
-            selector: args.dispatch_selector.clone(),
-            model: args.dispatch_model.clone(),
-            provider_config: args.dispatch_provider_config.clone(),
+            backend: args.dispatch.dispatch_backend.clone(),
+            selector: args.dispatch.dispatch_selector.clone(),
+            model: args.dispatch.dispatch_model.clone(),
+            provider_config: args.dispatch.dispatch_provider_config.clone(),
         }
     }
 
     fn from_run_next_args(args: &AgentTaskControllerRunNextArgs) -> Self {
         Self {
-            backend: args.dispatch_backend.clone(),
-            selector: args.dispatch_selector.clone(),
-            model: args.dispatch_model.clone(),
-            provider_config: args.dispatch_provider_config.clone(),
+            backend: args.dispatch.dispatch_backend.clone(),
+            selector: args.dispatch.dispatch_selector.clone(),
+            model: args.dispatch.dispatch_model.clone(),
+            provider_config: args.dispatch.dispatch_provider_config.clone(),
         }
     }
 
     fn from_run_args(args: &AgentTaskControllerRunArgs) -> Self {
         Self {
-            backend: args.dispatch_backend.clone(),
-            selector: args.dispatch_selector.clone(),
-            model: args.dispatch_model.clone(),
-            provider_config: args.dispatch_provider_config.clone(),
+            backend: args.dispatch.dispatch_backend.clone(),
+            selector: args.dispatch.dispatch_selector.clone(),
+            model: args.dispatch.dispatch_model.clone(),
+            provider_config: args.dispatch.dispatch_provider_config.clone(),
         }
     }
 

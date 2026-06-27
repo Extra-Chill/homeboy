@@ -345,7 +345,7 @@ mod tests {
     use crate::command_contract::CommandDispatchFamily;
     use crate::commands::agent_task::{
         AgentTaskArgs, AgentTaskCommand, AgentTaskControllerArgs, AgentTaskControllerCommand,
-        AgentTaskControllerRunFromSpecArgs, StatusArgs,
+        AgentTaskControllerDispatchArgs, AgentTaskControllerRunFromSpecArgs, StatusArgs,
     };
 
     #[test]
@@ -467,10 +467,12 @@ mod tests {
                         replace: false,
                         fork: false,
                         resume_existing: false,
-                        dispatch_backend: None,
-                        dispatch_selector: None,
-                        dispatch_model: None,
-                        dispatch_provider_config: None,
+                        dispatch: AgentTaskControllerDispatchArgs {
+                            dispatch_backend: None,
+                            dispatch_selector: None,
+                            dispatch_model: None,
+                            dispatch_provider_config: None,
+                        },
                     },
                 ),
             }),

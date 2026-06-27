@@ -9,9 +9,9 @@ pub(in crate::commands::agent_task) use super::super::super::agent_task_dispatch
     DispatchArgs, DispatchCoreArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskControllerApplyEventArgs, AgentTaskControllerFromSpecArgs,
-    AgentTaskControllerMaterializeArgs, AgentTaskControllerProofArgs,
-    AgentTaskControllerRunFromSpecArgs,
+    AgentTaskControllerApplyEventArgs, AgentTaskControllerDispatchArgs,
+    AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
+    AgentTaskControllerProofArgs, AgentTaskControllerRunFromSpecArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, ReviewArgs, StatusArgs,
