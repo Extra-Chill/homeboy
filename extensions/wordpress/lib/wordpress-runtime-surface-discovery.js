@@ -171,7 +171,8 @@ function appendFuzzSurfaceArtifact(surfaces, artifact) {
 function appendArraySurfaces(surfaces, value, defaultType, source) {
 	if (Array.isArray(value)) {
 		for (const item of value) {
-			surfaces.push(isPlainObject(item) ? { ...item, type: item.type || item.kind || defaultType, source: item.source || source } : { label: item, value: item, type: defaultType, source });
+			const type = source === 'settings' && defaultType === 'setting' ? defaultType : undefined;
+			surfaces.push(isPlainObject(item) ? { ...item, type: type || item.type || item.kind || defaultType, source: item.source || source } : { label: item, value: item, type: defaultType, source });
 		}
 		return;
 	}

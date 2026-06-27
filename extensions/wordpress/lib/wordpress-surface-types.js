@@ -58,6 +58,7 @@ const WORDPRESS_SURFACE_TYPE_ALIASES = new Map([
 	['rest', 'rest-route'],
 	['rest_route', 'rest-route'],
 	['roles', 'role'],
+	['setting', 'setting'],
 	['settings', 'setting'],
 	['taxonomy-term', 'taxonomy'],
 	['taxonomy_term', 'taxonomy'],

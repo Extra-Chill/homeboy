@@ -22,6 +22,17 @@ const WORDPRESS_LIVE_SURFACE_TYPES = Object.freeze({
 	db_table: 'Database tables',
 	frontend_url: 'Frontend URLs',
 	block: 'Blocks',
+	ajax_action: 'AJAX actions',
+	capability: 'Capabilities',
+	cron_event: 'Cron events',
+	media: 'Media',
+	option: 'Options',
+	post_type: 'Post types',
+	role: 'Roles',
+	setting: 'Settings',
+	taxonomy: 'Taxonomies',
+	user: 'Users',
+	wp_cli_command: 'WP-CLI commands',
 });
 
 function buildWordPressLiveSurfaceDiscoveryArtifact(input = {}, options = {}) {
@@ -32,6 +43,17 @@ function buildWordPressLiveSurfaceDiscoveryArtifact(input = {}, options = {}) {
 		{ tables: payload.databaseTables },
 		{ frontendUrls: payload.frontendUrls },
 		{ blocks: payload.blocks },
+		{ ajaxActions: payload.ajaxActions },
+		{ cronEvents: payload.cronEvents },
+		{ options: payload.options },
+		{ settings: payload.settings },
+		{ roles: payload.roles },
+		{ capabilities: payload.capabilities },
+		{ users: payload.users },
+		{ media: payload.media },
+		{ postTypes: payload.postTypes },
+		{ taxonomies: payload.taxonomies },
+		{ wpCliCommands: payload.wpCliCommands },
 	];
 	const unsupported = normalizeUnsupportedSurfaces(payload.unsupported, payload.supportedTypes);
 
@@ -101,6 +123,17 @@ function normalizeLiveSurfacePayload(input = {}) {
 		databaseTables: firstArray(payload.databaseTables, payload.database_tables, payload.database, payload.db, payload.tables),
 		frontendUrls: firstArray(payload.frontendUrls, payload.frontend_urls, payload.frontend, payload.urls),
 		blocks: firstArray(payload.blocks, payload.blockTypes, payload.block_types),
+		ajaxActions: firstArray(payload.ajaxActions, payload.ajax_actions, payload.ajax, payload.actions),
+		cronEvents: concatArrays(payload.cronEvents, payload.cron_events, payload.cron, payload.cronSchedules, payload.cron_schedules),
+		options: firstArray(payload.options),
+		settings: firstArray(payload.settings),
+		roles: firstArray(payload.roles),
+		capabilities: firstArray(payload.capabilities, payload.caps),
+		users: firstArray(payload.users),
+		media: firstArray(payload.media, payload.attachments),
+		postTypes: firstArray(payload.postTypes, payload.post_types),
+		taxonomies: firstArray(payload.taxonomies),
+		wpCliCommands: firstArray(payload.wpCliCommands, payload.wp_cli_commands, payload.wpCli, payload.wp_cli, payload.commands),
 		unsupported: firstArray(payload.unsupported, payload.unsupportedSurfaces, payload.unsupported_surfaces),
 		supportedTypes: firstArray(payload.supportedTypes, payload.supported_types),
 	};
@@ -108,6 +141,10 @@ function normalizeLiveSurfacePayload(input = {}) {
 
 function firstArray(...values) {
 	return values.find(Array.isArray) || [];
+}
+
+function concatArrays(...values) {
+	return values.filter(Array.isArray).flat();
 }
 
 function normalizeUnsupportedSurfaces(rows, supportedTypes = []) {
