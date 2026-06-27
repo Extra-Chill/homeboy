@@ -15,7 +15,7 @@ const {
 } = require('../lib/wordpress-generic-fuzz-primitives');
 const {
 	genericAgentTaskRequest,
-} = require('../../runtime-agent-ci/lib/generic-agent-task-plan');
+} = require('../../agent-task-contracts/generic-agent-task-plan');
 
 const contract = JSON.parse(fs.readFileSync(path.join(
 	__dirname,

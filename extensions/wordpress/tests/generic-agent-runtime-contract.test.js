@@ -13,7 +13,7 @@ const {
 } = require('../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const {
 	agentTaskRunnerSpec,
-} = require('../../runtime-agent-ci/lib/agent-task-runner-contract');
+} = require('../../agent-task-contracts/agent-task-runner-contract');
 const {
 	runtimeAgentCiRunnerSpec,
 } = require('../../runtime-agent-ci');
