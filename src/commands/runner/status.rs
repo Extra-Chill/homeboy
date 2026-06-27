@@ -14,7 +14,8 @@ use super::super::CmdResult;
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
     RunnerConnectionOutput, RunnerExtra, RunnerHomeboyBinaryRole, RunnerOperatorCommand,
-    RunnerOutput, RunnerToolDiagnostics, WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue,
+    RunnerOutput, RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics, RunnerToolDiagnostics,
+    RunnerWorkflowBinaryGuidance, WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue,
     WpCodeboxRuntimeDiagnostic, WpCodeboxRuntimeOutput,
 };
 
@@ -93,16 +94,18 @@ fn selected_lab_runner_status(
     let effective_env = runner::effective_env(runner_id)?
         .into_iter()
         .collect::<BTreeMap<_, _>>();
+    let runtime_diagnostics =
+        declared_runtime_diagnostics_collection(Some(runner_id), &effective_env);
     Ok(Some(LabSelectedRunnerOutput {
         runner_id: runner_id.to_string(),
         kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
         configured_executable: configured_executable.clone(),
         runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
-        wp_codebox_runtime: declared_runtime_diagnostics_for_legacy(
-            "wp_codebox_runtime",
-            Some(runner_id),
-            &effective_env,
-        ),
+        wp_codebox_runtime: runtime_diagnostics
+            .iter()
+            .find(|diagnostics| diagnostics.legacy_output.as_deref() == Some("wp_codebox_runtime"))
+            .map(wp_codebox_runtime_output_from_generic),
+        runtime_diagnostics,
         daemon_enabled: runner_config.settings.daemon,
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
@@ -133,15 +136,23 @@ pub(super) fn lab_runner_homeboy_output(
     let version_drift = active_daemon_version
         .as_ref()
         .is_some_and(|version| version != &controller_version);
+    let binary_roles = runner_homeboy_binary_roles(
+        configured_executable,
+        &status.session,
+        &active_daemon_version,
+    );
+    let controller_cli = binary_roles[0].clone();
+    let active_daemon = binary_roles[1].clone();
+    let configured_job_binary = binary_roles[2].clone();
     LabRunnerHomeboyOutput {
         controller_version,
         controller_build_identity,
         configured_executable: configured_executable.to_string(),
-        binary_roles: runner_homeboy_binary_roles(
-            configured_executable,
-            &status.session,
-            &active_daemon_version,
-        ),
+        controller_cli,
+        active_daemon,
+        configured_job_binary,
+        binary_roles,
+        workflow_binary_guidance: runner_workflow_binary_guidance(),
         active_daemon_version,
         active_daemon_build_identity: status
             .session
@@ -189,6 +200,7 @@ pub(crate) fn declared_runtime_diagnostics_for_legacy(
         .flat_map(|contract| contract.runtimes.iter())
         .find(|declaration| declaration.legacy_output.as_deref() == Some(legacy_output))
         .map(|declaration| declared_runtime_diagnostics(declaration, runner_id, env))
+        .map(|diagnostics| wp_codebox_runtime_output_from_generic(&diagnostics))
 }
 
 pub(crate) fn declared_tool_diagnostics(
@@ -225,7 +237,7 @@ pub(crate) fn declared_runtime_diagnostics(
     declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
     runner_id: Option<&str>,
     env: &BTreeMap<String, String>,
-) -> WpCodeboxRuntimeOutput {
+) -> RunnerRuntimeDiagnostics {
     let (configured, configured_binary_source) =
         configured_value(env, &declaration.configured_binary_env);
     let install_dir = install_dir(
@@ -249,19 +261,78 @@ pub(crate) fn declared_runtime_diagnostics(
         &managed_cache_source,
     );
 
-    WpCodeboxRuntimeOutput {
-        tool: declaration.tool.clone(),
+    RunnerRuntimeDiagnostics {
+        runtime: declaration.tool.clone(),
+        legacy_output: declaration.legacy_output.clone(),
         configured_binary: configured,
         configured_binary_source,
         managed_cache_source: managed_cache_source.clone(),
         managed_cache_binary,
         effective_binary_rule: declaration.effective_binary_rule.clone(),
-        playground_package: packages.first().cloned().unwrap_or_else(empty_package),
-        core_package: packages.get(1).cloned().unwrap_or_else(empty_package),
-        source_git_sha: declared_probe_value(declaration, "source_git_sha"),
-        dist_build_freshness: declared_probe_value(declaration, "dist_build_freshness"),
+        packages,
+        probes: declared_probe_values(declaration),
         runtime_probe_command: diagnostic_command(runner_id, &declaration.runtime_probe_script),
         diagnostics,
+    }
+}
+
+pub(crate) fn declared_runtime_diagnostics_collection(
+    runner_id: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Vec<RunnerRuntimeDiagnostics> {
+    declared_diagnostics_contracts()
+        .iter()
+        .flat_map(|contract| contract.runtimes.iter())
+        .map(|declaration| declared_runtime_diagnostics(declaration, runner_id, env))
+        .collect()
+}
+
+fn wp_codebox_runtime_output_from_generic(
+    diagnostics: &RunnerRuntimeDiagnostics,
+) -> WpCodeboxRuntimeOutput {
+    WpCodeboxRuntimeOutput {
+        tool: diagnostics.runtime.clone(),
+        configured_binary: diagnostics.configured_binary.clone(),
+        configured_binary_source: diagnostics.configured_binary_source.clone(),
+        managed_cache_source: diagnostics.managed_cache_source.clone(),
+        managed_cache_binary: diagnostics.managed_cache_binary.clone(),
+        effective_binary_rule: diagnostics.effective_binary_rule.clone(),
+        playground_package: diagnostics
+            .packages
+            .iter()
+            .find(|package| package.field == "playground_package")
+            .or_else(|| diagnostics.packages.first())
+            .map(wp_codebox_package_output_from_generic)
+            .unwrap_or_else(empty_package),
+        core_package: diagnostics
+            .packages
+            .iter()
+            .find(|package| package.field == "core_package")
+            .or_else(|| diagnostics.packages.get(1))
+            .map(wp_codebox_package_output_from_generic)
+            .unwrap_or_else(empty_package),
+        source_git_sha: diagnostics
+            .probes
+            .get("source_git_sha")
+            .cloned()
+            .unwrap_or_else(default_runtime_probe_value),
+        dist_build_freshness: diagnostics
+            .probes
+            .get("dist_build_freshness")
+            .cloned()
+            .unwrap_or_else(default_runtime_probe_value),
+        runtime_probe_command: diagnostics.runtime_probe_command.clone(),
+        diagnostics: diagnostics.diagnostics.clone(),
+    }
+}
+
+fn wp_codebox_package_output_from_generic(
+    package: &RunnerRuntimePackageDiagnostics,
+) -> WpCodeboxPackageRuntimeOutput {
+    WpCodeboxPackageRuntimeOutput {
+        package: package.package.clone(),
+        expected_path: package.expected_path.clone(),
+        resolution: package.resolution.clone(),
     }
 }
 
@@ -344,11 +415,12 @@ fn declared_runtime_packages(
     env: &BTreeMap<String, String>,
     install_dir: &str,
     managed_cache_source: &str,
-) -> Vec<WpCodeboxPackageRuntimeOutput> {
+) -> Vec<RunnerRuntimePackageDiagnostics> {
     declaration
         .packages
         .iter()
-        .map(|package| WpCodeboxPackageRuntimeOutput {
+        .map(|package| RunnerRuntimePackageDiagnostics {
+            field: package.field.clone(),
             package: package.package.clone(),
             expected_path: package
                 .env_override
@@ -380,19 +452,28 @@ fn empty_package() -> WpCodeboxPackageRuntimeOutput {
     }
 }
 
-fn declared_probe_value(
+fn declared_probe_values(
     declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-    field: &str,
-) -> WpCodeboxProbeValue {
-    let source = declaration
+) -> BTreeMap<String, WpCodeboxProbeValue> {
+    declaration
         .probes
         .iter()
-        .find(|probe| probe.field == field)
-        .map(|probe| probe.source.clone())
-        .unwrap_or_else(|| "runtime_probe_command".to_string());
+        .map(|probe| {
+            (
+                probe.field.clone(),
+                WpCodeboxProbeValue {
+                    value: None,
+                    source: probe.source.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn default_runtime_probe_value() -> WpCodeboxProbeValue {
     WpCodeboxProbeValue {
         value: None,
-        source,
+        source: "runtime_probe_command".to_string(),
     }
 }
 
@@ -450,7 +531,7 @@ fn runner_homeboy_binary_roles(
             purpose: "Accepts connected daemon jobs until the runner is disconnected/reconnected; it can lag behind the configured job binary after refresh-homeboy.",
         },
         RunnerHomeboyBinaryRole {
-            role: "job_command_binary",
+            role: "configured_job_binary",
             owner: "runner_config.settings.homeboy_path",
             path: Some(configured_executable.to_string()),
             version: None,
@@ -458,6 +539,14 @@ fn runner_homeboy_binary_roles(
             purpose: "Binary path selected for runner-side Homeboy subcommands and capability checks; use command_availability_checks to verify required subcommands on the runner.",
         },
     ]
+}
+
+fn runner_workflow_binary_guidance() -> RunnerWorkflowBinaryGuidance {
+    RunnerWorkflowBinaryGuidance {
+        recent_workflows: "Recent or already-queued runner workflows may still be owned by the active_daemon session shown here until the runner reconnects.",
+        explicit_workflows: "Explicit runner workflow commands and capability checks use configured_job_binary unless the workflow overrides the command binary itself.",
+        capability_checks: "Use command_availability_checks or artifact_features.runner_command_checks to verify the configured_job_binary on the runner before assuming controller_cli features are available remotely.",
+    }
 }
 
 pub(super) fn runner_artifact_feature_diagnostics(

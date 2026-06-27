@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
     component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, fuzz, git, http,
-    issues, lint, logs, manifest, observe, project, refactor, refs, release, report, review, rig,
-    runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
-    upgrade, version, worktree,
+    issues, lab, lint, logs, manifest, observe, project, refactor, refs, release, report, review,
+    rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel,
+    undo, upgrade, version, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -165,6 +165,8 @@ pub enum Commands {
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
     Runner(runner::RunnerArgs),
+    /// Discover Lab routing and runner refresh planning commands
+    Lab(lab::LabArgs),
     /// Inspect core-owned runtime helper assets
     Runtime(runtime::RuntimeArgs),
     /// Manage component-backed task worktrees
@@ -430,6 +432,7 @@ mod entry_command_impls {
                 Commands::Refs(_) => "refs",
                 Commands::Rig(_) => "rig",
                 Commands::Runner(_) => "runner",
+                Commands::Lab(_) => "lab",
                 Commands::Runtime(_) => "runtime",
                 Commands::Worktree(_) => "worktree",
                 Commands::Tunnel(_) => "tunnel",
@@ -920,6 +923,21 @@ mod tests {
             ["homeboy", "runner", "connect", "homeboy-lab"].as_slice(),
             ["homeboy", "runner", "status", "homeboy-lab"].as_slice(),
             ["homeboy", "runner", "disconnect", "homeboy-lab"].as_slice(),
+            [
+                "homeboy",
+                "runner",
+                "workspace",
+                "pull",
+                "homeboy-lab",
+                "--remote-path",
+                "/srv/homeboy/workspace",
+                "--include",
+                "fixtures/*.fig",
+                "--to",
+                "fixtures",
+                "--dry-run",
+            ]
+            .as_slice(),
             [
                 "homeboy",
                 "db",

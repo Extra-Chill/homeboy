@@ -37,13 +37,13 @@ pub use super::runner::{
     is_retrievable_runner_artifact, lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, list_workspaces, mirror_connected_runner_run,
     mirrored_runner_job_identity, plan_homeboy_binary_refresh, plan_managed_runner_source_sync,
-    plan_managed_runner_source_syncs, preflight_lab_offload_changed_since,
+    plan_managed_runner_source_syncs, plan_workspace_pull, preflight_lab_offload_changed_since,
     preflight_remote_argv_path_translation, prepare_git_lab_offload_changed_since,
-    prepare_lab_runner_capability, prune_workspaces, refresh_homeboy_binary,
+    prepare_lab_runner_capability, prune_workspaces, pull_workspace, refresh_homeboy_binary,
     refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
     resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token,
     runner_exec_failure_error, runner_job_cancel, runner_job_log_snapshot, status, statuses,
-    sync_workspace, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
+    sync_workspace, workspace_snapshots, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
     HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, LabJobOverrides, LabLocalExecutionPolicy,
     LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode,
     LabOffloadWorkspaceModePolicy, LabRunnerCapabilityContract, LabRunnerGateDecision,
@@ -61,8 +61,10 @@ pub use super::runner::{
     RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus, RunnerWorkspaceLease,
     RunnerWorkspaceLeaseSet, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
     RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
-    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions, RunnerWorkspacePullOutput,
+    RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
@@ -113,12 +115,16 @@ pub mod execution {
 pub mod workspace {
     pub use super::super::runner::{
         apply_change_artifact, apply_workspace_patch, list_workspaces,
-        plan_managed_runner_source_sync, plan_managed_runner_source_syncs, prune_workspaces,
-        sync_workspace, ManagedRunnerSourceSyncPlan, RunnerWorkspaceApplyOptions,
-        RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus, RunnerWorkspaceListEntry,
-        RunnerWorkspaceListOutput, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
-        RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSyncMode,
-        RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+        plan_managed_runner_source_sync, plan_managed_runner_source_syncs, plan_workspace_pull,
+        prune_workspaces, pull_workspace, sync_workspace, workspace_snapshots,
+        ManagedRunnerSourceSyncPlan, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
+        RunnerWorkspaceApplyStatus, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
+        RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+        RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions, RunnerWorkspacePullOutput,
+        RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters,
+        RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters,
+        RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+        RunnerWorkspaceSyncOutput,
     };
 }
 

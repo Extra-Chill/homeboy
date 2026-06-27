@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::core::fuzz::{
     parse_fuzz_hotspot_set_value, parse_fuzz_observation_set_value,
-    parse_fuzz_result_envelope_file, FuzzHotspot, FuzzObservationFamily, FuzzResultEnvelope,
+    parse_fuzz_result_envelope_file, rank_fuzz_observation_set_hotspots, FuzzHotspot,
+    FuzzResultEnvelope,
 };
 
 use super::report::{
@@ -312,42 +313,8 @@ fn collect_hotspots_from_value(
         return;
     }
     if let Some(set) = parse_fuzz_observation_set_value(value) {
-        hotspots.extend(set.observations.into_iter().map(|observation| {
-            let dimension = match observation.family {
-                FuzzObservationFamily::Action => "action",
-                FuzzObservationFamily::Query => "query",
-                FuzzObservationFamily::Resource => "resource",
-                FuzzObservationFamily::Timing => "timing",
-                FuzzObservationFamily::Counter => "counter",
-            }
-            .to_string();
-            let id = observation.fingerprint.clone().unwrap_or_else(|| {
-                [
-                    Some(dimension.as_str()),
-                    Some(observation.subject.as_str()),
-                    Some(observation.metric.as_str()),
-                    observation.operation_id.as_deref(),
-                    observation.case_id.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(":")
-            });
-            FuzzCompareHotspotSnapshot {
-                id,
-                dimension,
-                kind: Some("observation".to_string()),
-                metric: observation.metric,
-                value: observation.value,
-                unit: observation.unit,
-                basis: Some("fuzz_observation_set".to_string()),
-                sample_count: observation.sample_count,
-                rank: None,
-                relative_score: Some(observation.value.abs()),
-                label: Some(observation.subject),
-            }
-        }));
+        let ranked = rank_fuzz_observation_set_hotspots(&set);
+        hotspots.extend(ranked.items.into_iter().map(hotspot_snapshot));
         return;
     }
 
@@ -872,7 +839,8 @@ mod tests {
         assert_eq!(snapshot.hotspots[0].id, "page-load:duration");
         assert_eq!(snapshot.hotspots[0].dimension, "timing");
         assert_eq!(snapshot.hotspots[0].kind.as_deref(), Some("observation"));
-        assert_eq!(snapshot.hotspots[0].relative_score, Some(123.0));
+        assert_eq!(snapshot.hotspots[0].rank, Some(1));
+        assert_eq!(snapshot.hotspots[0].relative_score, Some(1.0));
     }
 
     #[test]

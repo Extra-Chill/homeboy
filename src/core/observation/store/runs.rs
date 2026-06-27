@@ -1,7 +1,6 @@
 use std::fs;
 
-use rusqlite::params;
-use rusqlite::OptionalExtension;
+use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
 use super::*;

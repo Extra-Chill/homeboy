@@ -4,8 +4,8 @@ mod export_import;
 
 use super::handlers::{artifact_get, artifacts, env, show_run};
 use super::{
-    bench_compare, dead_owned_run, findings, latest, list_runs, RunsArtifactGetArgs, RunsListArgs,
-    RunsOutput, WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER,
+    bench_compare, dead_owned_run, findings, latest, list_runs, runs_dossier, RunsArtifactGetArgs,
+    RunsListArgs, RunsOutput, WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER,
 };
 
 use homeboy::core::observation::runs_service;
@@ -184,6 +184,96 @@ fn run_show_includes_metadata_and_artifacts() {
         );
         assert_eq!(output.run.artifacts.len(), 1);
         assert_eq!(output.run.artifacts[0].kind, "bench_results");
+    });
+}
+
+#[test]
+fn runs_dossier_aggregates_failure_env_refs_artifacts_and_commands() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "bench",
+                "homeboy",
+                "studio",
+                serde_json::json!({
+                    "exit_code": 1,
+                    "error": "budget exceeded",
+                    "gate_failures": ["p95_ms exceeded"],
+                    "runner_job_id": "job-123",
+                    "handoff": { "ref": "handoff-123" },
+                    "result": { "ref": "result-123" },
+                    "env_resolution": {
+                        "schema": "homeboy/env-resolution/v1",
+                        "values_redacted": true,
+                        "keys": [
+                            {
+                                "key": "TOKEN",
+                                "classification": "secret",
+                                "shadowed_source_layers": ["env"]
+                            },
+                            {
+                                "key": "HOMEBOY_RUNTIME_DIR",
+                                "classification": "public",
+                                "shadowed_source_layers": []
+                            }
+                        ]
+                    }
+                }),
+            ))
+            .expect("run");
+        store
+            .finish_run(&run.id, RunStatus::Fail, None)
+            .expect("finish run");
+        let artifact_path = home.path().join("report.json");
+        std::fs::write(&artifact_path, b"{}").expect("artifact");
+        store
+            .record_artifact(&run.id, "report", &artifact_path)
+            .expect("record artifact");
+        store
+            .record_url_artifact(&run.id, "review", "https://example.test/evidence")
+            .expect("record url");
+
+        let (output, _) = runs_dossier(&run.id).expect("dossier");
+        let RunsOutput::Dossier(output) = output else {
+            panic!("expected dossier output");
+        };
+
+        assert_eq!(output.command, "runs.dossier");
+        assert_eq!(output.run_id, run.id);
+        assert_eq!(output.run_ref, format!("homeboy://run/{}", run.id));
+        assert_eq!(output.status.status, "fail");
+        assert_eq!(output.status.category.as_deref(), Some("gate_failure"));
+        assert_eq!(output.failure.error.as_deref(), Some("budget exceeded"));
+        assert_eq!(output.failure.gate_failures, vec!["p95_ms exceeded"]);
+        assert_eq!(output.refs.job_ref.as_deref(), Some("job-123"));
+        assert_eq!(output.refs.handoff_ref.as_deref(), Some("handoff-123"));
+        assert_eq!(output.refs.result_ref.as_deref(), Some("result-123"));
+        assert_eq!(
+            output.env.schema.as_deref(),
+            Some("homeboy/env-resolution/v1")
+        );
+        assert!(output.env.values_redacted);
+        assert_eq!(output.env.key_count, 2);
+        assert_eq!(output.env.secret_key_count, 1);
+        assert_eq!(output.env.public_key_count, 1);
+        assert_eq!(output.env.shadowed_key_count, 1);
+        assert_eq!(output.artifacts.count, 2);
+        assert_eq!(output.artifacts.reviewer_visible_count, 1);
+        assert_eq!(output.artifacts.fetchable_count, 1);
+        assert!(output
+            .artifacts
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.visibility_hint
+                == "operator-local; fetch before sharing with reviewers"));
+        assert!(output
+            .inspection_commands
+            .iter()
+            .any(|command| command.command == format!("homeboy runs evidence {}", run.id)));
+        assert!(output.next_commands.iter().any(|command| command.command
+            == format!("homeboy runs export --run {} --output <dir>", run.id)));
     });
 }
 
