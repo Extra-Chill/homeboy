@@ -1,8 +1,10 @@
 use std::path::Path;
 
+use homeboy::core::artifact_ref::{artifact_uri, EvidenceRef};
 use homeboy::core::fuzz::inspect_fuzz_result_envelope_artifact;
 use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
 
+use super::report::fuzz_result_envelope_evidence_ref;
 use super::types::{FuzzInspectArgs, FuzzInspectCandidate, FuzzInspectOutput};
 
 /// Artifact kinds that hold the raw fuzz runner input/result pair, ordered by
@@ -49,6 +51,7 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
             kind: artifact.kind.clone(),
             artifact_type: artifact.artifact_type.clone(),
             path: artifact.path.clone(),
+            canonical_ref: artifact_uri(&artifact.run_id, &artifact.id),
             exists: Path::new(&artifact.path).is_file(),
         })
         .collect::<Vec<_>>();
@@ -67,6 +70,8 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
             artifact_id: String::new(),
             artifact_kind: String::new(),
             artifact_path: String::new(),
+            canonical_ref: None,
+            evidence_ref: None,
             fetch_command: None,
             result: None,
             raw: None,
@@ -88,6 +93,8 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
         "homeboy runs artifact get {} {} -o <path>",
         selected.run_id, selected.id
     ));
+    let canonical_ref = Some(artifact_uri(&selected.run_id, &selected.id));
+    let evidence_ref = fuzz_inspect_evidence_ref(selected);
 
     let path = Path::new(&selected.path);
     if !path.is_file() {
@@ -99,6 +106,8 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
             artifact_id: selected.id.clone(),
             artifact_kind: selected.kind.clone(),
             artifact_path: selected.path.clone(),
+            canonical_ref,
+            evidence_ref,
             fetch_command: fetch_command.clone(),
             result: None,
             raw: None,
@@ -143,6 +152,8 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
         artifact_id: selected.id.clone(),
         artifact_kind: selected.kind.clone(),
         artifact_path: selected.path.clone(),
+        canonical_ref,
+        evidence_ref,
         fetch_command,
         result,
         raw,
@@ -159,6 +170,12 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
             ),
         ],
     })
+}
+
+fn fuzz_inspect_evidence_ref(artifact: &ArtifactRecord) -> Option<EvidenceRef> {
+    inspect_fuzz_result_envelope_artifact(artifact)
+        .is_some()
+        .then(|| fuzz_result_envelope_evidence_ref(artifact))
 }
 
 #[cfg(test)]
@@ -351,6 +368,15 @@ mod tests {
 
             assert_eq!(output.status, "ok");
             assert_eq!(output.artifact_kind, "runner-output");
+            assert!(output
+                .canonical_ref
+                .as_deref()
+                .expect("canonical ref")
+                .starts_with("homeboy://run/"));
+            let evidence_ref = output.evidence_ref.as_ref().expect("evidence ref");
+            assert_eq!(evidence_ref.role.as_deref(), Some("result"));
+            assert_eq!(evidence_ref.semantic_key.as_deref(), Some("fuzz.result_envelope"));
+            assert_eq!(Some(evidence_ref.canonical_uri()), output.canonical_ref.as_deref());
             assert_eq!(
                 output
                     .result
