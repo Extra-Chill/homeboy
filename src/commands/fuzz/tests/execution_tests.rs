@@ -54,6 +54,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             expected_metric_gates: &[],
             results_error: None,
             missing_artifact_refs: &[],
+            postprocess: &[],
         })
         .expect("persist fuzz run")
         .expect("run record");
@@ -126,6 +127,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             expected_metric_gates: &[],
             results_error: None,
             missing_artifact_refs: &[],
+            postprocess: &[],
         })
         .expect("persist fuzz run")
         .expect("run record");
@@ -173,6 +175,7 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
             expected_metric_gates: &[],
             results_error: None,
             missing_artifact_refs: &[],
+            postprocess: &[],
         })
         .expect("persist fuzz run");
 
@@ -516,6 +519,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
                 "fuzz results schema must be homeboy/fuzz-campaign/v1, got unsupported/fuzz-result/v1",
             ),
             missing_artifact_refs: &[],
+            postprocess: &[],
         })
         .expect("persist fuzz run")
         .expect("run record");

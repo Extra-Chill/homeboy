@@ -178,6 +178,8 @@ pub struct FuzzArtifactPostprocessOutput {
     pub stdout: String,
     pub stderr: String,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<homeboy::core::artifacts::ArtifactPostprocessProducedArtifact>,
 }
 
 #[derive(Serialize)]
