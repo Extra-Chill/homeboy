@@ -803,6 +803,7 @@ pub(super) fn persist_fuzz_run_evidence(
         "seed": input.args.seed.clone(),
         "max_duration": input.args.max_duration.clone(),
         "passthrough_args": input.args.args.clone(),
+        "tracker_refs": input.args.tracker_refs,
         "exit_code": input.exit_code,
         "success": input.success,
         "status": input.status,
@@ -1005,6 +1006,12 @@ fn fuzz_run_command(
     }
     if let Some(run_id) = args.run_id.as_ref() {
         parts.extend(["--run-id".to_string(), run_id.clone()]);
+    }
+    for tracker_ref in &args.tracker_refs {
+        parts.extend([
+            "--tracker-ref".to_string(),
+            format!("{}:{}", tracker_ref.kind, tracker_ref.id),
+        ]);
     }
     if let Some(seed) = args.seed.as_ref() {
         parts.extend(["--seed".to_string(), seed.clone()]);
