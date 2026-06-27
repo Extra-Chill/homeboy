@@ -37,9 +37,14 @@ assert.equal(campaign.workload.schema, 'homeboy/fuzz-workload/v1');
 assert.equal(campaign.wp_codebox.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(campaign.wp_codebox.input.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.schema, 'wp-codebox/fuzz-suite/v1');
-assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.cases[0].target.entrypoint, 'wordpress.run-fuzz-case');
-assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.cases[0].phases.action[0].command, 'wordpress.run-fuzz-case');
+assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.cases[0].target.entrypoint, 'wordpress.load-admin-page');
+assert.equal(campaign.wp_codebox.task_request.executor.config.runtime_task.input.cases[0].phases.action[0].command, 'wordpress.load-admin-page');
 assert(campaign.wp_codebox.input.metadata.coverage_manifest.surfaces.length > 0);
+assert.equal(campaign.workload.metadata.runtime_operations.schema, 'homeboy/wordpress-fuzz-runtime-workload-operation-summary/v1');
+assert.equal(campaign.workload.metadata.runtime_operations.by_family.rest, 1);
+assert.equal(campaign.workload.metadata.runtime_operations.by_family.admin_page, 1);
+assert.equal(campaign.workload.metadata.runtime_operations.by_status.ready, 2);
+assert.equal(campaign.wp_codebox.input.metadata.runtime_operations.total, 2);
 assert.deepEqual(Object.keys(campaign.aggregation_hooks).sort(), ['coverage', 'gaps', 'performance']);
 assert.equal(campaign.metadata.surface_count, 2);
 assert.equal(campaign.metadata.target_count, 2);
@@ -92,6 +97,32 @@ const readOnlyCampaign = compileWordPressFuzzCampaign({
 	plan: { runtimeCapabilities: { capabilities: ['crud', 'snapshot', 'restore', 'reset'] } },
 });
 assert.equal(readOnlyCampaign.plan.metadata.mutation_mode, 'read_only');
+
+const optInCampaign = compileWordPressFuzzCampaign({
+	id: 'opt-in-campaign',
+	mutation_mode: 'isolated',
+	surfaces: [
+		{ id: 'rest:opt-in-items', type: 'rest_route', route: '/example/v1/items/(?P<id>[\\d]+)', method: 'DELETE' },
+	],
+	fixture_plan: { id: 'campaign-fixtures', refs: [{ id: 'items', path: 'fixtures/items.json' }] },
+	rest_mutation_opt_ins: {
+		id: 'campaign-rest-opt-ins',
+		entries: [
+			{ id: 'post-item', route: '/example/v1/items/(?P<id>[\\d]+)', method: 'POST' },
+			{ id: 'patch-item', route: '/example/v1/items/(?P<id>[\\d]+)', method: 'PATCH' },
+			{ id: 'delete-item', route: '/example/v1/items/(?P<id>[\\d]+)', method: 'DELETE' },
+		],
+	},
+}, {
+	plan: {
+		runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback', 'restore'] },
+		runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], mutationIsolation: true, deleteBoundary: true },
+		fixture_bindings: { 'rest:opt-in-items': { route_params: { id: 42 } } },
+	},
+});
+assert.equal(optInCampaign.wp_codebox.input.metadata.fixture_plan.id, 'campaign-fixtures');
+assert.equal(optInCampaign.wp_codebox.input.metadata.rest_mutation_opt_ins.id, 'campaign-rest-opt-ins');
+assert.equal(optInCampaign.wp_codebox.task_request.executor.config.runtime_task.input.metadata.rest_mutation_opt_ins.entries.length, 3);
 
 const productionCampaign = compileWordPressFuzzCampaign({
 	id: 'production-campaign',

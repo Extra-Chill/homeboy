@@ -19,6 +19,7 @@ const {
 	WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+	REQUIRED_WP_CODEBOX_FUZZ_CONTRACT_PATHS,
 	buildWordPressFuzzCommandManifest,
 	wpCodeboxFuzzSuiteAbility,
 	wpCodeboxFuzzSuiteSchema,
@@ -35,6 +36,7 @@ const {
 	wpCodeboxFuzzExecutionRequest,
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
+	wpCodeboxRuntimeContractManifest,
 } = require('../lib/wp-codebox-fuzz-run');
 
 const input = wpCodeboxFuzzSuiteInput({
@@ -53,6 +55,37 @@ assert.equal(input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.equal(input.target.slug, 'sample-plugin');
 assert.deepEqual(input.metadata.limits, { max_cases: 1 });
 assert.equal(wpCodeboxFuzzSuiteInput({ id: 'suite-alias' }).schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+
+const fixtureAndOptInInput = wpCodeboxFuzzSuiteInput({
+	id: 'fixture-opt-in-suite',
+	fixture_plan: {
+		id: 'generic-fixtures',
+		refs: [{ id: 'items', path: 'fixtures/items.json' }],
+		data: { items: [{ id: 42 }] },
+	},
+	rest_mutation_opt_ins: {
+		id: 'generic-rest-mutators',
+		refs: ['artifact://rest-mutator-opt-ins'],
+		entries: [
+			{ id: 'create-item', route: '/example/v1/items', method: 'POST', fixture_ref: 'items' },
+			{ id: 'patch-item', route: '/example/v1/items/42', method: 'PATCH', contract_ref: 'contract://patch-item' },
+			{ id: 'delete-item', route: '/example/v1/items/42', method: 'DELETE', contract_ref: 'contract://delete-item' },
+		],
+	},
+	cases: [{
+		id: 'delete-item-case',
+		input: {
+			operation: { method: 'DELETE', route: '/example/v1/items/42' },
+			rest_mutation_opt_in: { id: 'delete-item', route: '/example/v1/items/42', method: 'DELETE' },
+		},
+	}],
+});
+assert.equal(fixtureAndOptInInput.metadata.fixture_plan.schema, 'homeboy/wordpress-fuzz-fixture-plan/v1');
+assert.equal(fixtureAndOptInInput.metadata.fixture_plan.refs[0].path, 'fixtures/items.json');
+assert.equal(fixtureAndOptInInput.metadata.rest_mutation_opt_ins.schema, 'homeboy/wordpress-rest-mutation-opt-ins/v1');
+assert.deepEqual(fixtureAndOptInInput.metadata.rest_mutation_opt_ins.entries.map((entry) => entry.method), ['POST', 'PATCH', 'DELETE']);
+assert.equal(fixtureAndOptInInput.cases[0].input.rest_mutation_opt_in.method, 'DELETE');
+assert(!JSON.stringify(fixtureAndOptInInput).includes('woocommerce'));
 
 const manifest = {
 	schema: 'wp-codebox/runtime-contract-manifest/v1',
@@ -76,6 +109,14 @@ assert.equal(wpCodeboxFuzzSuiteAbility({ runtimeContractManifest: manifest }), D
 assert.equal(wpCodeboxFuzzSuiteSchema({ runtimeContractManifest: manifest }), WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.equal(wpCodeboxWordPressWorkloadRunAbility({ runtimeContractManifest: manifest }), DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY);
 assert.equal(wpCodeboxWordPressWorkloadRunSchema({ runtimeContractManifest: manifest }), DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA);
+assert.deepEqual(REQUIRED_WP_CODEBOX_FUZZ_CONTRACT_PATHS, [
+	'abilities.wordpressRuntime.runFuzzSuite',
+	'abilities.wordpressRuntime.runWorkload',
+	'schemas.wordpressRuntime.fuzzSuite',
+	'schemas.wordpressRuntime.fuzzSuiteResult',
+	'schemas.wordpressRuntime.workloadRun',
+]);
+assert.equal(wpCodeboxRuntimeContractManifest({ loadRuntimeContractSource: () => ({ manifest }) }), manifest);
 assert.deepEqual(wpCodeboxWordPressWorkloadRunInput({
 	id: 'workload-run',
 	steps: [{ command: 'wordpress.run-declarative-fuzz' }],
@@ -195,6 +236,16 @@ const preflightMissingAbility = preflightWpCodeboxFuzzCapabilityContract({
 });
 assert.equal(preflightMissingAbility.ok, false);
 assert.equal(preflightMissingAbility.missing_contracts.some((contract) => contract.ability === DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY), true);
+assert.equal(preflightMissingAbility.missing_contracts.some((contract) => contract.type === 'runtime_contract_manifest' && contract.missing_paths.includes('schemas.wordpressRuntime.workloadRun')), true);
+
+const preflightMissingCanonicalContract = preflightWpCodeboxFuzzCapabilityContract({
+	request: taskRequest,
+	loadRuntimeContractSource: () => null,
+	publicCliCapabilities: { commands: { 'run-fuzz-suite': true, 'run-wordpress-workload': true } },
+});
+assert.equal(preflightMissingCanonicalContract.ok, false);
+assert.equal(preflightMissingCanonicalContract.missing_contracts.some((contract) => contract.type === 'runtime_contract_manifest'), true);
+assert.equal(preflightMissingCanonicalContract.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_runtime_contract_manifest'), true);
 
 const preflightPassed = preflightWpCodeboxFuzzCapabilityContract({
 	request: taskRequest,
@@ -202,6 +253,67 @@ const preflightPassed = preflightWpCodeboxFuzzCapabilityContract({
 	publicCliCapabilities: { commands: { 'run-fuzz-suite': true, 'run-wordpress-workload': true } },
 });
 assert.equal(preflightPassed.ok, true);
+
+const readinessContract = {
+	schema: 'wp-codebox/fuzz-runner-readiness/v1',
+	status: 'ready',
+	mode: 'runtime-backed',
+	entrypoint: 'run-fuzz-suite --runner-mode=runtime-backed',
+	operationKinds: ['read', 'crud', 'mutation'],
+	capabilities: {
+		schema: 'wp-codebox/fuzz-runner-capabilities/v1',
+		mode: 'runtime-backed',
+		capabilities: ['target:runtime', 'runtime'],
+		targetKinds: ['runtime'],
+		operationKinds: ['read', 'crud', 'mutation'],
+		runtimeActionTypes: ['crud_operation', 'rest_request', 'db_operation'],
+		commands: ['wordpress.crud-operation', 'wordpress.rest-request', 'wordpress.db-operation', 'wordpress.run-workload'],
+		unsupportedRequiredCapabilities: [],
+	},
+	unsupportedRequiredCapabilities: [],
+};
+const readinessCapabilities = detectWpCodeboxPublicFuzzCapabilities({
+	runPublicCli: ({ args }) => args.join(' ') === 'fuzz readiness --format=json'
+		? { status: 0, stdout: JSON.stringify(readinessContract) }
+		: { status: 1, stderr: 'unexpected command' },
+});
+assert.equal(readinessCapabilities.readiness.schema, 'wp-codebox/fuzz-runner-readiness/v1');
+assert.equal(readinessCapabilities.commands['run-fuzz-suite'], true);
+assert.equal(readinessCapabilities.commands['run-wordpress-workload'], true);
+assert.deepEqual(readinessCapabilities.capabilities, ['crud', 'database', 'query-observation', 'rest']);
+const preflightReadinessPassed = preflightWpCodeboxFuzzCapabilityContract({
+	request: taskRequest,
+	runtimeContractManifest: manifest,
+	runPublicCli: ({ args }) => args.join(' ') === 'fuzz readiness --format=json'
+		? { status: 0, stdout: JSON.stringify(readinessContract) }
+		: { status: 1, stderr: 'unexpected command' },
+});
+assert.equal(preflightReadinessPassed.ok, true);
+
+const unsupportedReadiness = {
+	...readinessContract,
+	status: 'unsupported',
+	unsupportedRequiredCapabilities: ['runtime-action:editor_insert_save'],
+};
+const preflightUnsupportedReadiness = preflightWpCodeboxFuzzCapabilityContract({
+	request: taskRequest,
+	runtimeContractManifest: manifest,
+	publicCliReadiness: unsupportedReadiness,
+});
+assert.equal(preflightUnsupportedReadiness.ok, false);
+assert.equal(preflightUnsupportedReadiness.missing_contracts.some((contract) => contract.type === 'public_cli_readiness'), true);
+assert.equal(preflightUnsupportedReadiness.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_public_cli_readiness'), true);
+
+const preflightMissingReadinessCommand = preflightWpCodeboxFuzzCapabilityContract({
+	request: taskRequest,
+	runtimeContractManifest: manifest,
+	runPublicCli: ({ args }) => args.join(' ') === 'fuzz readiness --format=json'
+		? { status: 1, stderr: 'unknown command: fuzz readiness' }
+		: { status: 0, stdout: 'legacy help' },
+});
+assert.equal(preflightMissingReadinessCommand.ok, false);
+assert.equal(preflightMissingReadinessCommand.missing_contracts.some((contract) => contract.type === 'public_cli_readiness_command'), true);
+assert.equal(preflightMissingReadinessCommand.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_public_cli_readiness_command'), true);
 
 const rollbackRestPlanRequest = wpCodeboxFuzzSuiteTaskRequest({
 	taskId: 'rollback-rest-plan-task',
@@ -1019,6 +1131,7 @@ runWpCodeboxFuzzSuite({
 	return runWpCodeboxFuzzSuite({
 		taskId: 'public-cli-suite-run',
 		input,
+		runtimeContractManifest: manifest,
 		wpCodeboxBin: '/custom/direct-wp-codebox',
 		runtimeRequirements: {
 			extra_plugins: [{ slug: 'sample-plugin', source: '/runner/components/sample-plugin', loadAs: 'plugin' }],
@@ -1026,6 +1139,9 @@ runWpCodeboxFuzzSuite({
 		},
 		runPublicCli: ({ command, args, stdin }) => {
 			assert.equal(command, '/custom/direct-wp-codebox');
+			if (args.join(' ') === 'fuzz readiness --format=json') {
+				return { status: 0, stdout: JSON.stringify(readinessContract) };
+			}
 			if (args.join(' ') === 'run-fuzz-suite --help') {
 				return { status: 0, stdout: 'usage' };
 			}
@@ -1089,10 +1205,12 @@ runWpCodeboxFuzzSuite({
 	return runWpCodeboxFuzzSuite({
 		taskId: 'public-cli-staged-helper-run',
 		input: stagedHelperInput,
+		runtimeContractManifest: manifest,
 		wpCodeboxBin: '/custom/direct-wp-codebox',
 		runtimeRequirements: { extra_plugins: [{ slug: 'sample-plugin', source: stagedHelperDir, loadAs: 'plugin' }] },
 		env: { resultsFile: path.join(stagedArtifactRoot, 'fuzz-results.json') },
 		runPublicCli: ({ args }) => {
+			if (args.join(' ') === 'fuzz readiness --format=json') return { status: 0, stdout: JSON.stringify(readinessContract) };
 			if (args.includes('--help')) return { status: 0, stdout: 'usage' };
 			assert.deepEqual([args[0], args[1], args[2], args[4]], ['run-fuzz-suite', '--runner-mode=runtime-backed', '--input-file', '--json']);
 			const publicCliInput = JSON.parse(fs.readFileSync(args[3], 'utf8'));
@@ -1111,6 +1229,10 @@ runWpCodeboxFuzzSuite({
 	const largeCli = path.join(largeCliDir, 'wp-codebox-large-output.cjs');
 	fs.writeFileSync(largeCli, `
 const args = process.argv.slice(2);
+if (args.join(' ') === 'fuzz readiness --format=json') {
+  process.stdout.write(${JSON.stringify(JSON.stringify(readinessContract))});
+  process.exit(0);
+}
 if (args.includes('--help')) {
   process.stdout.write('usage');
   process.exit(0);
@@ -1126,6 +1248,7 @@ process.stdout.write(JSON.stringify({
 	return runWpCodeboxFuzzSuite({
 		taskId: 'public-cli-large-output-run',
 		input,
+		runtimeContractManifest: manifest,
 		wpCodeboxBin: largeCli,
 	}).finally(() => fs.rmSync(largeCliDir, { recursive: true, force: true }));
 }).then((summary) => {
@@ -1138,11 +1261,12 @@ process.stdout.write(JSON.stringify({
 	return runWpCodeboxFuzzSuite({
 		taskId: 'public-cli-unsupported-run',
 		input,
+		runtimeContractManifest: manifest,
 		runPublicCli: () => ({ status: 1, stderr: 'unknown command' }),
 	});
 }).then((summary) => {
 	assert.equal(summary.succeeded, false);
-	assert.equal(summary.failures[0].code, 'wp_codebox_fuzz_missing_public_cli_command');
+	assert.equal(summary.failures[0].code, 'wp_codebox_fuzz_missing_public_cli_readiness_command');
 	assert.equal(summary.failures.some((failure) => failure.code === 'wp_codebox_fuzz_required_artifacts_missing'), false);
 
 	console.log('wp-codebox fuzz-run smoke passed');

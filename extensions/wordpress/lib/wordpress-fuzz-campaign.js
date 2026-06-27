@@ -25,6 +25,9 @@ const {
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
 } = require('./wp-codebox-fuzz-run');
+const {
+	summarizeWordPressFuzzRuntimeWorkloadOperations,
+} = require('./wordpress-fuzz-runtime-workload-operations');
 
 const WORDPRESS_FUZZ_CAMPAIGN_SCHEMA = 'homeboy/wordpress-fuzz-campaign/v1';
 const HOMEBOY_FUZZ_WORKLOAD_SCHEMA = 'homeboy/fuzz-workload/v1';
@@ -47,7 +50,13 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 	if (input.mutation_mode || input.mutationMode || options.mutation_mode || options.mutationMode) {
 		planOptions.mutation_mode = input.mutation_mode || input.mutationMode || options.mutation_mode || options.mutationMode;
 	}
+	const fixturePlan = input.fixture_plan || input.fixturePlan || options.fixture_plan || options.fixturePlan;
+	const restMutationOptIns = input.rest_mutation_opt_ins || input.restMutationOptIns || input.rest_mutation_opt_in || input.restMutationOptIn || options.rest_mutation_opt_ins || options.restMutationOptIns || options.rest_mutation_opt_in || options.restMutationOptIn;
+	if (restMutationOptIns) {
+		planOptions.rest_mutation_opt_ins = restMutationOptIns;
+	}
 	const plan = buildWordPressFuzzPlanFromSurfaces(discovery, planOptions);
+	const runtimeOperationSummary = summarizeWordPressFuzzRuntimeWorkloadOperations(plan);
 	const coverageManifest = buildWordPressRuntimeSurfaceCoverageManifest(discovery);
 	const workload = buildWordPressFuzzCampaignWorkload({
 		id: input.workload_id || input.workloadId || `${plan.id}-workload`,
@@ -59,6 +68,7 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 			...(objectOrUndefined(input.metadata) || {}),
 			...(objectOrUndefined(options.metadata) || {}),
 			campaign_schema: WORDPRESS_FUZZ_CAMPAIGN_SCHEMA,
+			runtime_operations: runtimeOperationSummary,
 			production_campaign: production || undefined,
 		},
 		artifacts: input.artifacts || options.artifacts,
@@ -72,10 +82,15 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 		target: input.target || options.target,
 		coverage: campaignCoverageRequest(coverageManifest),
 		homeboyFuzzWorkload: workload,
+		fixture_plan: fixturePlan,
+		rest_mutation_opt_ins: restMutationOptIns,
 		metadata: {
 			...(objectOrUndefined(options.suiteInput?.metadata) || objectOrUndefined(options.suite_input?.metadata) || {}),
 			...(objectOrUndefined(input.suite_input?.metadata) || objectOrUndefined(input.suiteInput?.metadata) || {}),
 			coverage_manifest: coverageManifest,
+			fixture_plan: fixturePlan,
+			rest_mutation_opt_ins: restMutationOptIns,
+			runtime_operations: runtimeOperationSummary,
 			aggregation_hooks: campaignAggregationHooks(),
 			production_campaign: production || undefined,
 			output_requirements: production ? productionOutputRequirements() : undefined,
@@ -116,6 +131,7 @@ function compileWordPressFuzzCampaign(input = {}, options = {}) {
 
 function buildWordPressFuzzCampaignWorkload(input = {}) {
 	const plan = input.plan || {};
+	const runtimeOperationSummary = summarizeWordPressFuzzRuntimeWorkloadOperations(plan);
 	return {
 		schema: HOMEBOY_FUZZ_WORKLOAD_SCHEMA,
 		id: input.id || `${plan.id || 'wordpress-fuzz-plan'}-workload`,
@@ -133,6 +149,7 @@ function buildWordPressFuzzCampaignWorkload(input = {}) {
 		metadata: {
 			...(objectOrUndefined(input.metadata) || {}),
 			coverage_manifest: input.coverageManifest || input.coverage_manifest,
+			runtime_operations: runtimeOperationSummary,
 			aggregation_hooks: campaignAggregationHooks(),
 			postprocess_binding: objectOrUndefined(input.postprocess_binding || input.postprocessBinding),
 		},
