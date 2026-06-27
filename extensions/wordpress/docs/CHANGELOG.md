@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.10] - 2026-06-27
+
+### Changed
+- Tighten extension contract boundaries
+
 ## [3.19.9] - 2026-06-27
 
 ### Fixed
