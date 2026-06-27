@@ -1,5 +1,5 @@
 use crate::core::engine::shell;
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::extension;
 use crate::core::server::{self, SshClient};
 
@@ -223,25 +223,49 @@ fn local_source_runner_sync_error(
     local_revision: &str,
     parity_error: Error,
 ) -> Error {
-    Error::validation_invalid_argument(
-        "runner_extension",
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
         format!(
-            "Runner '{runner_id}' cannot auto-sync stale extension parity for '{extension_id}' from a controller-local source before command execution"
+            "Invalid argument 'runner_extension': Runner '{runner_id}' cannot auto-sync stale extension parity for '{extension_id}' from a controller-local source before command execution"
         ),
-        Some(extension_id.to_string()),
-        Some(vec![
-            format!("Local extension source_revision: {local_revision}"),
-            format!("Local extension source: {source_url}"),
-            format!(
-                "Resolved controller-local source path: {}",
-                local_source_path.display()
-            ),
-            "Controller-local extension sources are not runner-resolvable by source URL/ref during automatic parity sync.".to_string(),
-            format!(
-                "Install, relink, or explicitly sync the extension from a runner-resolvable source before dispatch: {homeboy_path} extension refresh <source> --id {extension_id} --ref {local_revision}"
-            ),
-            format!("Original parity error: {}", parity_error.message),
-        ]),
+        serde_json::json!({
+            "field": "runner_extension",
+            "problem": "controller_local_source_unresolvable",
+            "id": extension_id,
+            "diagnostic": {
+                "code": "runner_extension.controller_local_source_unresolvable",
+                "runner_id": runner_id,
+                "extension_id": extension_id,
+                "homeboy_path": homeboy_path,
+                "source_url": source_url,
+                "controller_local_source_path": local_source_path.display().to_string(),
+                "local_source_revision": local_revision,
+                "original_error": parity_error.message,
+                "next_commands": [
+                    format!("{homeboy_path} extension diff-installed {extension_id}"),
+                    format!("{homeboy_path} extension refresh <runner-resolvable-source> --id {extension_id} --ref {local_revision}")
+                ],
+                "issue_acceptance_criteria": [
+                    "Declare a runner-resolvable extension source or materialization plan for controller-local sources.",
+                    "Runner parity preflight can sync the extension without reading controller-local paths directly.",
+                    "The runner reports the same extension source_revision as the controller before command execution."
+                ]
+            },
+            "tried": [
+                format!("Local extension source_revision: {local_revision}"),
+                format!("Local extension source: {source_url}"),
+                format!(
+                    "Resolved controller-local source path: {}",
+                    local_source_path.display()
+                ),
+                "Controller-local extension sources are not runner-resolvable by source URL/ref during automatic parity sync.",
+                format!(
+                    "Install, relink, or explicitly sync the extension from a runner-resolvable source before dispatch: {homeboy_path} extension refresh <runner-resolvable-source> --id {extension_id} --ref {local_revision}"
+                ),
+                format!("Inspect local installed-extension freshness: {homeboy_path} extension diff-installed {extension_id}"),
+                format!("Original parity error: {}", parity_error.message),
+            ]
+        }),
     )
 }
 
@@ -593,7 +617,17 @@ mod tests {
         assert!(tried.contains(tempdir.path().to_str().unwrap()));
         assert!(tried.contains("not runner-resolvable"));
         assert!(tried.contains("abc1234"));
-        assert!(tried.contains("extension refresh <source> --id rust --ref abc1234"));
+        assert!(
+            tried.contains("extension refresh <runner-resolvable-source> --id rust --ref abc1234")
+        );
+        assert_eq!(
+            err.details["diagnostic"]["code"].as_str(),
+            Some("runner_extension.controller_local_source_unresolvable")
+        );
+        assert!(err.details["diagnostic"]["next_commands"]
+            .to_string()
+            .contains("extension diff-installed rust"));
+        assert!(err.details["diagnostic"]["issue_acceptance_criteria"].is_array());
     }
 
     #[test]
