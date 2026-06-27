@@ -252,6 +252,52 @@ pub(crate) fn files_match(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Classify a serde error from rig-spec deserialization into an actionable
+/// error.
+///
+/// A `Category::Data` error means the JSON parsed fine but its shape doesn't
+/// match this binary's `RigSpec` schema — almost always a binary/spec version
+/// mismatch (e.g. a current rig declaring the `component_id`/`path_setting`
+/// component schema against an older homeboy that only understood top-level
+/// `path`). Those surface as `rig.schema_unsupported` with an upgrade hint
+/// instead of mislabeling a valid rig file as malformed JSON. Syntax/EOF
+/// errors stay `validation.invalid_json` because the file really is malformed.
+fn rig_spec_parse_error(
+    err: serde_json::Error,
+    path: &Path,
+    value: Option<&serde_json::Value>,
+    received: Option<String>,
+) -> Error {
+    let context = format!("parse rig spec {}", path.display());
+    if matches!(err.classify(), serde_json::error::Category::Data) {
+        let component = value.and_then(component_with_unrecognized_schema);
+        return Error::rig_schema_unsupported(err.to_string(), context, component);
+    }
+    Error::validation_invalid_json(err, Some(context), received)
+}
+
+/// Find the first component whose declaration matches neither the portable
+/// `path` schema nor the registry `component_id` schema — the shape an older
+/// binary rejects with `missing field `path``.
+fn component_with_unrecognized_schema(value: &serde_json::Value) -> Option<String> {
+    let components = value.get("components")?.as_object()?;
+    components
+        .iter()
+        .find(|(_, spec)| {
+            let Some(spec) = spec.as_object() else {
+                return false;
+            };
+            let has_path = spec
+                .get("path")
+                .and_then(|p| p.as_str())
+                .map(|p| !p.is_empty())
+                .unwrap_or(false);
+            let has_component_id = spec.contains_key("component_id");
+            !has_path && !has_component_id
+        })
+        .map(|(name, _)| name.clone())
+}
+
 fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
     let path = paths::rig_config(id)?;
     if !path.exists() {
@@ -265,9 +311,11 @@ fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
         Error::internal_unexpected(format!("Failed to read rig {}: {}", path.display(), e))
     })?;
     let mut spec: RigSpec = serde_json::from_str(&content).map_err(|e| {
-        Error::validation_invalid_json(
+        let value = serde_json::from_str::<serde_json::Value>(&content).ok();
+        rig_spec_parse_error(
             e,
-            Some(format!("parse rig spec {}", path.display())),
+            &path,
+            value.as_ref(),
             Some(content.chars().take(200).collect()),
         )
     })?;
@@ -297,9 +345,8 @@ fn read_spec_from_path(path: &Path, id_hint: Option<&str>, package_root: &Path) 
             })?
         }
     };
-    let mut spec: RigSpec = serde_json::from_value(value).map_err(|e| {
-        Error::validation_invalid_json(e, Some(format!("parse rig spec {}", path.display())), None)
-    })?;
+    let mut spec: RigSpec = serde_json::from_value(value.clone())
+        .map_err(|e| rig_spec_parse_error(e, path, Some(&value), None))?;
     if spec.id.is_empty() {
         spec.id = id_hint.unwrap_or_default().to_string();
     }
@@ -575,4 +622,87 @@ pub fn list_ids() -> Result<Vec<String>> {
             .map(|entry| entry.id)
             .collect()
     })
+}
+
+#[cfg(test)]
+mod schema_error_tests {
+    use super::*;
+    use crate::core::error::ErrorCode;
+
+    /// A rig declaring the `component_id` component schema, with one component
+    /// that uses neither `path` nor `component_id` — the shape an older binary
+    /// rejects with `missing field `path``.
+    fn rig_value_with_unrecognized_component() -> serde_json::Value {
+        serde_json::from_str(
+            r#"{
+                "id": "static-site-importer-fixture-matrix",
+                "components": {
+                    "importer": { "component_id": "static-site-importer", "branch": "trunk" },
+                    "legacy": { "branch": "trunk" }
+                }
+            }"#,
+        )
+        .expect("fixture value")
+    }
+
+    #[test]
+    fn data_shape_error_surfaces_schema_unsupported_with_component() {
+        // A serde `Category::Data` error: valid JSON, wrong shape — exactly
+        // what an older binary's stricter parser produces (`missing field path`).
+        let err = serde_json::from_str::<WorkloadSpec>("{}").unwrap_err();
+        assert!(matches!(err.classify(), serde_json::error::Category::Data));
+
+        let value = rig_value_with_unrecognized_component();
+        let path = Path::new("/tmp/static-site-importer-fixture-matrix/rig.json");
+        let error = rig_spec_parse_error(err, path, Some(&value), None);
+
+        assert_eq!(error.code, ErrorCode::RigSchemaUnsupported);
+        assert!(
+            error.message.contains("legacy"),
+            "message should name the offending component: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains(env!("CARGO_PKG_VERSION")),
+            "message should report the active version: {}",
+            error.message
+        );
+        assert!(
+            error.hints.iter().any(|h| h.message.contains("homeboy upgrade")),
+            "should hint to upgrade"
+        );
+    }
+
+    #[test]
+    fn syntax_error_stays_invalid_json() {
+        let err = serde_json::from_str::<serde_json::Value>("{ not json").unwrap_err();
+        assert!(matches!(err.classify(), serde_json::error::Category::Syntax));
+
+        let path = Path::new("/tmp/broken/rig.json");
+        let error = rig_spec_parse_error(err, path, None, Some("{ not json".to_string()));
+        assert_eq!(error.code, ErrorCode::ValidationInvalidJson);
+    }
+
+    #[test]
+    fn component_detection_skips_recognized_schemas() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "components": {
+                    "with_path": { "path": "~/dev/foo" },
+                    "with_id": { "component_id": "foo" }
+                }
+            }"#,
+        )
+        .expect("value");
+        assert_eq!(component_with_unrecognized_schema(&value), None);
+    }
+
+    #[test]
+    fn component_detection_finds_unrecognized_schema() {
+        let value = rig_value_with_unrecognized_component();
+        assert_eq!(
+            component_with_unrecognized_schema(&value),
+            Some("legacy".to_string())
+        );
+    }
 }
