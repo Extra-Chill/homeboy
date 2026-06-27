@@ -14,8 +14,9 @@ use super::super::CmdResult;
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
     RunnerConnectionOutput, RunnerExtra, RunnerHomeboyBinaryRole, RunnerOperatorCommand,
-    RunnerOutput, RunnerToolDiagnostics, WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue,
-    WpCodeboxRuntimeDiagnostic, WpCodeboxRuntimeOutput,
+    RunnerOutput, RunnerToolDiagnostics, RunnerWorkflowBinaryGuidance,
+    WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue, WpCodeboxRuntimeDiagnostic,
+    WpCodeboxRuntimeOutput,
 };
 
 pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
@@ -133,15 +134,23 @@ pub(super) fn lab_runner_homeboy_output(
     let version_drift = active_daemon_version
         .as_ref()
         .is_some_and(|version| version != &controller_version);
+    let binary_roles = runner_homeboy_binary_roles(
+        configured_executable,
+        &status.session,
+        &active_daemon_version,
+    );
+    let controller_cli = binary_roles[0].clone();
+    let active_daemon = binary_roles[1].clone();
+    let configured_job_binary = binary_roles[2].clone();
     LabRunnerHomeboyOutput {
         controller_version,
         controller_build_identity,
         configured_executable: configured_executable.to_string(),
-        binary_roles: runner_homeboy_binary_roles(
-            configured_executable,
-            &status.session,
-            &active_daemon_version,
-        ),
+        controller_cli,
+        active_daemon,
+        configured_job_binary,
+        binary_roles,
+        workflow_binary_guidance: runner_workflow_binary_guidance(),
         active_daemon_version,
         active_daemon_build_identity: status
             .session
@@ -450,7 +459,7 @@ fn runner_homeboy_binary_roles(
             purpose: "Accepts connected daemon jobs until the runner is disconnected/reconnected; it can lag behind the configured job binary after refresh-homeboy.",
         },
         RunnerHomeboyBinaryRole {
-            role: "job_command_binary",
+            role: "configured_job_binary",
             owner: "runner_config.settings.homeboy_path",
             path: Some(configured_executable.to_string()),
             version: None,
@@ -458,6 +467,14 @@ fn runner_homeboy_binary_roles(
             purpose: "Binary path selected for runner-side Homeboy subcommands and capability checks; use command_availability_checks to verify required subcommands on the runner.",
         },
     ]
+}
+
+fn runner_workflow_binary_guidance() -> RunnerWorkflowBinaryGuidance {
+    RunnerWorkflowBinaryGuidance {
+        recent_workflows: "Recent or already-queued runner workflows may still be owned by the active_daemon session shown here until the runner reconnects.",
+        explicit_workflows: "Explicit runner workflow commands and capability checks use configured_job_binary unless the workflow overrides the command binary itself.",
+        capability_checks: "Use command_availability_checks or artifact_features.runner_command_checks to verify the configured_job_binary on the runner before assuming controller_cli features are available remotely.",
+    }
 }
 
 pub(super) fn runner_artifact_feature_diagnostics(
