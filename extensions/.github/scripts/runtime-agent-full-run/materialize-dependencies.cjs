@@ -9,17 +9,18 @@ const { resolveRuntimeProvider, runtimeIdFromOptions } = require('../../../runti
 function main() {
   const printPlan = process.argv.includes('--print-plan');
   const entries = dependencyEntries(process.env);
-  const plan = resolvePlan(entries, printPlan);
+  const plan = resolvePlan(entries, printPlan, { workspace: process.env.GITHUB_WORKSPACE || process.cwd() });
   if (printPlan) {
     process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
     return;
   }
   for (const item of plan) {
-    fs.rmSync(item.target, { recursive: true, force: true });
+    assertSafeDependencyTargetPath(item.targetPath, process.env.GITHUB_WORKSPACE || process.cwd());
+    fs.rmSync(item.targetPath, { recursive: true, force: true });
     process.stdout.write(`Checking out validation dependency ${item.repo}@${item.ref} into ${item.target}\n`);
-    run('gh', ['repo', 'clone', item.repo, item.target, '--', '--depth=1']);
-    run('git', ['-C', item.target, 'fetch', '--depth=1', 'origin', item.ref]);
-    run('git', ['-C', item.target, 'checkout', '--quiet', 'FETCH_HEAD']);
+    run('gh', ['repo', 'clone', item.repo, item.targetPath, '--', '--depth=1']);
+    run('git', ['-C', item.targetPath, 'fetch', '--depth=1', 'origin', item.ref]);
+    run('git', ['-C', item.targetPath, 'checkout', '--quiet', 'FETCH_HEAD']);
   }
 }
 
@@ -49,7 +50,8 @@ function runtimeDependencyEntries(value) {
   return splitCsv(value);
 }
 
-function resolvePlan(entries, offline) {
+function resolvePlan(entries, offline, options = {}) {
+  const workspace = options.workspace || process.env.GITHUB_WORKSPACE || process.cwd();
   const seen = new Set();
   const plan = [];
   for (const rawEntry of entries) {
@@ -75,9 +77,58 @@ function resolvePlan(entries, offline) {
       continue;
     }
     seen.add(key);
-    plan.push({ repo, ref, target: target || path.join('.ci', repo.split('/')[1]) });
+    const safeTarget = resolveDependencyTarget(target || path.join('.ci', repo.split('/')[1]), workspace);
+    plan.push({ repo, ref, target: safeTarget.target, targetPath: safeTarget.targetPath });
   }
   return plan;
+}
+
+function resolveDependencyTarget(rawTarget, workspace) {
+  const target = String(rawTarget || '').trim();
+  if (!target || target === '.' || target === '..' || path.isAbsolute(target) || path.win32.isAbsolute(target)) {
+    throw new Error(`Dependency target must be a relative path under .ci/: ${target || '(empty)'}`);
+  }
+
+  const segments = target.split(/[\\/]+/);
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    throw new Error(`Dependency target must not contain empty, current-directory, or parent-directory segments: ${target}`);
+  }
+
+  const normalized = path.normalize(target);
+  const safeRoot = path.resolve(workspace, '.ci');
+  const targetPath = path.resolve(workspace, normalized);
+  const relativeToSafeRoot = path.relative(safeRoot, targetPath);
+  // Dependency materialization deletes the target before cloning; keep that write bounded to .ci/*.
+  if (relativeToSafeRoot === '' || relativeToSafeRoot.startsWith('..') || path.isAbsolute(relativeToSafeRoot)) {
+    throw new Error(`Dependency target must resolve under .ci/: ${target}`);
+  }
+
+  return { target: normalized, targetPath };
+}
+
+function assertSafeDependencyTargetPath(targetPath, workspace) {
+  const safeRoot = path.resolve(workspace, '.ci');
+  fs.mkdirSync(safeRoot, { recursive: true });
+  const workspaceRealPath = fs.realpathSync(path.resolve(workspace));
+  const safeRootRealPath = fs.realpathSync(safeRoot);
+  if (safeRootRealPath !== path.join(workspaceRealPath, '.ci')) {
+    throw new Error(`Dependency safe root must be a workspace-owned directory: ${safeRoot}`);
+  }
+
+  let existingParent = targetPath;
+  while (!fs.existsSync(existingParent)) {
+    const parent = path.dirname(existingParent);
+    if (parent === existingParent) {
+      break;
+    }
+    existingParent = parent;
+  }
+
+  const parentRealPath = fs.realpathSync(existingParent);
+  const relativeToSafeRoot = path.relative(safeRootRealPath, parentRealPath);
+  if (relativeToSafeRoot.startsWith('..') || path.isAbsolute(relativeToSafeRoot)) {
+    throw new Error(`Dependency target parent must resolve under .ci/: ${targetPath}`);
+  }
 }
 
 function normalizeDependencyEntry(rawEntry) {
@@ -110,4 +161,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { dependencyEntries, resolvePlan };
+module.exports = { assertSafeDependencyTargetPath, dependencyEntries, resolveDependencyTarget, resolvePlan };

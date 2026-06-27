@@ -33,17 +33,35 @@ const explicitProviderPlugin = {
     connectors_ai_openai_api_key: 'PROVIDER_SECRET_1',
   },
 };
-assert.deepEqual(resolvePlan(dependencyEntries({
+const providerPluginPlan = resolvePlan(dependencyEntries({
   ...baseEnv,
   PROVIDER_PLUGIN: JSON.stringify(explicitProviderPlugin),
-}), true), [{
+}), true, { workspace: repoRoot });
+assert.deepEqual(providerPluginPlan, [{
   repo: 'WordPress/ai-provider-for-openai',
   ref: 'trunk',
   target: '.ci/ai-provider-for-openai',
+  targetPath: path.join(repoRoot, '.ci', 'ai-provider-for-openai'),
 }]);
 assert.deepEqual(normalizeProviderPlugin(JSON.stringify(explicitProviderPlugin), 'openai', true).provider_secret_env, {
   connectors_ai_openai_api_key: 'PROVIDER_SECRET_1',
 });
+
+for (const unsafeTarget of ['.', '/tmp/foo', '../repo']) {
+  assert.throws(
+    () => resolvePlan([{ repo: 'Extra-Chill/example', ref: 'main', target: unsafeTarget }], true, { workspace: repoRoot }),
+    /Dependency target must/,
+    `rejects unsafe dependency target ${unsafeTarget}`,
+  );
+}
+assert.deepEqual(resolvePlan([
+  { repo: 'Extra-Chill/example-dependency', ref: 'main', target: '.ci/dependencies/example-dependency' },
+], true, { workspace: repoRoot }), [{
+  repo: 'Extra-Chill/example-dependency',
+  ref: 'main',
+  target: '.ci/dependencies/example-dependency',
+  targetPath: path.join(repoRoot, '.ci', 'dependencies', 'example-dependency'),
+}]);
 
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-provider-neutral-workspace-'));
 const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-provider-neutral-runner-'));
