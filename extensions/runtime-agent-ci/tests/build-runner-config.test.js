@@ -8,7 +8,10 @@ const path = require('node:path');
 const {
   buildConfig,
   loopPolicyFromEnv,
-} = require('../../.github/scripts/runtime-agent-full-run/build-runner-config.cjs');
+} = require('..');
+const { normalizeProviderPlugin } = require('../lib/full-run-inputs.cjs');
+
+assert.equal(typeof buildConfig, 'function');
 
 assert.deepEqual(loopPolicyFromEnv({}), {});
 assert.deepEqual(loopPolicyFromEnv({
@@ -46,8 +49,16 @@ try {
     duration_ms: 60000,
     deadline_at: '2030-01-01T00:00:00.000Z',
   });
+
+  assert.equal(config.execution_kind, 'runtime_execution');
+  assert.deepEqual(config.secret_env.slice(0, 2), ['GITHUB_TOKEN', 'HOMEBOY_GITHUB_APP_TOKEN']);
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 }
+
+assert.deepEqual(
+  normalizeProviderPlugin('{"providerSecretEnv":{"token":"PROVIDER_TOKEN"}}', 'fixture', true).provider_secret_env,
+  { token: 'PROVIDER_TOKEN' }
+);
 
 process.stdout.write('Runtime agent full-run config loop policy checks passed\n');

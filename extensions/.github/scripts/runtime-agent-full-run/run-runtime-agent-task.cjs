@@ -47,6 +47,7 @@ try {
     repoRoot: REPO_ROOT,
     extensionPath: REPO_ROOT,
     replayBundleDir: process.env.HOMEBOY_RUNTIME_AGENT_REPLAY_BUNDLE_DIR,
+    controllerProof: true,
     validate: true,
     validationPolicy: {
       scenario_id: config.workload_id,

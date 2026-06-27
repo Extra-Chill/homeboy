@@ -202,7 +202,7 @@ assert.throws(() => genericLoopRunner.runGenericAgentLoop({
     { kind: 'preview', url: 'http://localhost:8888/preview' },
     { kind: 'publication', url: 'https://example.test/pull/124' },
   ]),
-}), /Reviewer-facing evidence must use a durable non-local URL: preview/);
+}), /Reviewer-facing evidence must use a durable non-local ref: preview/);
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-generic-agent-loop-'));
 try {

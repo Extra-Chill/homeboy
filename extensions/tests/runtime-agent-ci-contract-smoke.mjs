@@ -80,7 +80,7 @@ const genericConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   runtimeInvocation: { operations: ['workspaceCommand'] },
 });
 
-assert.equal(genericConfig.runtime_provider, 'wp-codebox');
+assert.equal(genericConfig.runtime_id, 'wp-codebox');
 assert.equal(genericConfig.runtime_profile, 'example-agent-ci');
 assert.deepEqual(genericConfig.runtime_component_paths, { agent_runtime: '/workspace/components/example-runtime' });
 assert.deepEqual(genericConfig.ignored_workspace_paths, ['.cache', 'tmp']);
