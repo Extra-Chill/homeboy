@@ -612,6 +612,13 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "executes extension-owned runtime commands with forwarded arguments that may mutate the target system";
             metadata.dangerous_flags = vec!["extension runtime command", "passthrough args"];
         }
+        ["extension", "action"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes =
+                "executes extension-owned actions that may mutate the target system";
+            metadata.dangerous_flags = vec!["extension action"];
+        }
         ["undo", "delete"] => {
             metadata.mutates = true;
             metadata.output_notes = "deletes an undo snapshot without restoring it";
@@ -713,7 +720,8 @@ mod tests {
 
         matches!(
             name,
-            "apply"
+            "action"
+                | "apply"
                 | "cleanup"
                 | "cleanup-downloads"
                 | "cleanup-persisted"
@@ -721,6 +729,7 @@ mod tests {
                 | "create"
                 | "delete"
                 | "disconnect"
+                | "exec"
                 | "generate"
                 | "import"
                 | "init"
@@ -843,6 +852,7 @@ mod tests {
             ["extension", "update"].as_slice(),
             ["extension", "uninstall"].as_slice(),
             ["extension", "run"].as_slice(),
+            ["extension", "action"].as_slice(),
             ["extension", "exec"].as_slice(),
             ["config", "set"].as_slice(),
             ["config", "remove"].as_slice(),
@@ -999,6 +1009,7 @@ mod tests {
             ["runner", "connect"].as_slice(),
             ["runner", "work"].as_slice(),
             ["extension", "run"].as_slice(),
+            ["extension", "action"].as_slice(),
             ["extension", "exec"].as_slice(),
         ] {
             let entry = manifest_path(&manifest, path);
