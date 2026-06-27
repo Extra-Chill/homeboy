@@ -9,9 +9,6 @@ deltas against a stored baseline.
 homeboy bench <component> [options] [-- <runner-args>]
 homeboy bench matrix [<component>] --setting-matrix <key=value[,value...]> [options] [-- <runner-args>]
 homeboy bench list <component> [options] [-- <runner-args>]
-homeboy bench history <component> [--scenario <id>] [--rig <id>] [--limit 20]
-homeboy bench distribution <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
-homeboy bench compare --from-run <run-id> --to-run <run-id> [--metric <name>]
 ```
 
 ## Description

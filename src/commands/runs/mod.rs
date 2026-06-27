@@ -60,7 +60,6 @@ pub(crate) use types::RunsArtifactGetArgs;
 use types::DEFAULT_LIMIT;
 pub(crate) use types::{RunsListArgs, RunsListOutput};
 
-pub(crate) use bench::bench_compare_from_args;
 pub use bench::{bench_compare, BenchCompareOutput, RunsBenchCompareArgs};
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
