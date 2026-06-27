@@ -9,16 +9,11 @@ const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime
 function main() {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const runtime = resolveRuntimeProvider(process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || DEFAULT_RUNTIME_ID, { workspace });
-  if (requiresWordPressDependencies(runtime, process.env)) {
-    run('composer', ['install', '--no-interaction', '--no-progress', '--prefer-dist'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
-    run('npm', ['install'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
-  }
+  runRuntimeSetup(runtime, { phase: 'before_commands', workspace, env: process.env, run });
   for (const command of [...runtime.setupCommands, ...runtime.buildCommands]) {
     run(command.command, command.args, { cwd: path.join(workspace, command.cwd) });
   }
-  if (requiresWordPressDependencies(runtime, process.env)) {
-    installCheckedOutPhpDependencies(workspace);
-  }
+  runRuntimeSetup(runtime, { phase: 'after_commands', workspace, env: process.env, run, installCheckedOutPhpDependencies });
 }
 
 try {
@@ -30,27 +25,27 @@ try {
   process.exit(1);
 }
 
-function requiresWordPressDependencies(runtime, env = process.env) {
-  if (runtime?.manifest?.ci_materialization?.requires_wordpress_dependencies === true) {
-    return true;
+function runRuntimeSetup(runtime, context) {
+  const adapter = runtimeSetupAdapter(runtime);
+  if (!adapter) {
+    return;
   }
-  const runtimeProfileId = env.PROFILE || env.RUNTIME_PROFILE || '';
-  if (!runtimeProfileId) {
-    return false;
+  adapter({ runtime, ...context });
+}
+
+function runtimeSetupAdapter(runtime) {
+  const adapter = runtime?.manifest?.ci_materialization?.setup_adapter;
+  if (!adapter || typeof adapter !== 'object' || Array.isArray(adapter) || !adapter.module) {
+    return null;
   }
-  let profiles;
-  try {
-    profiles = env.RUNTIME_PROFILES ? JSON.parse(env.RUNTIME_PROFILES) : {};
-  } catch {
-    return false;
+  const repoRoot = path.resolve(__dirname, '..', '..', '..');
+  const adapterPath = path.resolve(repoRoot, adapter.module);
+  const loaded = require(adapterPath);
+  const exportName = adapter.export || 'setupRuntime';
+  if (typeof loaded[exportName] !== 'function') {
+    throw new Error(`Runtime ${runtime.id} setup adapter ${adapter.module} does not export ${exportName}`);
   }
-  const profile = profiles && typeof profiles === 'object' && !Array.isArray(profiles) ? profiles[runtimeProfileId] : null;
-  return Boolean(
-    profile &&
-    typeof profile === 'object' &&
-    !Array.isArray(profile) &&
-    (profile.requires_wordpress_dependencies === true || profile.wordpress_dependencies === true)
-  );
+  return loaded[exportName];
 }
 
 function installCheckedOutPhpDependencies(workspace) {
@@ -84,5 +79,6 @@ function installCheckedOutPhpDependencies(workspace) {
 module.exports = {
   installCheckedOutPhpDependencies,
   main,
-  requiresWordPressDependencies,
+  runRuntimeSetup,
+  runtimeSetupAdapter,
 };
