@@ -18,9 +18,9 @@ use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
     RunDetail, RunsArtifactArgs, RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactGetOutput,
-    RunsArtifactPathGuide, RunsArtifactsArgs, RunsArtifactsOutput, RunsEnvKeyOutput, RunsEnvOutput,
-    RunsEnvSourceLayerOutput, RunsEnvSummary, RunsListArgs, RunsListOutput, RunsOutput,
-    RunsResumePlanOutput, RunsShowOutput,
+    RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs,
+    RunsArtifactsOutput, RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
+    RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsShowOutput,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -153,11 +153,23 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     artifacts_from_args(RunsArtifactsArgs {
         run_id: run_id.to_string(),
         runner: None,
+        pull: false,
+        pull_dir: None,
     })
 }
 
 pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
     if let Some(runner_id) = args.runner.as_deref() {
+        if args.pull {
+            return Err(Error::validation_invalid_argument(
+                "pull",
+                "`--pull` operates on the local mirrored observation store; drop `--runner` to retrieve runner artifact bytes to the operator-local artifact root",
+                Some(runner_id.to_string()),
+                Some(vec![
+                    format!("Run `homeboy runs artifacts {} --pull` (without --runner) to pull mirrored runner artifacts locally.", args.run_id),
+                ]),
+            ));
+        }
         return remote::runner_artifacts(runner_id, &args.run_id);
     }
 
@@ -180,6 +192,11 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
         .iter()
         .filter_map(homeboy::core::fuzz::inspect_fuzz_result_envelope_artifact)
         .collect();
+    let pull = if args.pull {
+        Some(pull_artifacts_to_local(&artifacts, args.pull_dir.as_deref())?)
+    } else {
+        None
+    };
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
@@ -190,9 +207,161 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
             preview_entrypoints,
             matrix_summary,
             fuzz_result_envelopes,
+            pull,
         }),
         0,
     ))
+}
+
+/// Best-effort retrieval of each artifact's bytes to the operator-local
+/// artifact root so a completed run is self-contained.
+///
+/// Local-file (and locally-present directory) artifacts are already operator
+/// readable and reported as `already_local`. Remote runner artifacts are
+/// downloaded; metadata-only / url artifacts are skipped with a reason. A
+/// single artifact's failure never aborts the pass — it is recorded so the
+/// operator sees exactly which diagnostics are unreachable and why.
+fn pull_artifacts_to_local(
+    artifacts: &[homeboy::core::observation::ArtifactRecord],
+    pull_dir: Option<&std::path::Path>,
+) -> homeboy::core::Result<RunsArtifactPullSummary> {
+    let pull_root = match pull_dir {
+        Some(dir) => dir.display().to_string(),
+        None => homeboy::core::artifact_root()?.display().to_string(),
+    };
+    let mut entries = Vec::with_capacity(artifacts.len());
+    let (mut pulled_count, mut already_local_count, mut skipped_count, mut failed_count) =
+        (0, 0, 0, 0);
+
+    for artifact in artifacts {
+        let entry = match runs_service::classify_artifact_storage(artifact) {
+            runs_service::ArtifactStorage::LocalFile => {
+                already_local_count += 1;
+                RunsArtifactPullEntry {
+                    artifact_id: artifact.id.clone(),
+                    storage: "local_file",
+                    status: "already_local",
+                    output_path: Some(artifact.path.clone()),
+                    size_bytes: artifact.size_bytes,
+                    content_type: artifact.mime.clone(),
+                    sha256: artifact.sha256.clone(),
+                    error: None,
+                }
+            }
+            runs_service::ArtifactStorage::Remote => {
+                let output = pull_dir.map(|dir| dir.join(sanitize_artifact_filename(&artifact.id)));
+                match runs_service::download_remote_artifact(artifact.clone(), output) {
+                    Ok(outcome) => {
+                        pulled_count += 1;
+                        RunsArtifactPullEntry {
+                            artifact_id: artifact.id.clone(),
+                            storage: "remote",
+                            status: "pulled",
+                            output_path: Some(outcome.output_path.display().to_string()),
+                            size_bytes: outcome.size_bytes,
+                            content_type: outcome.content_type,
+                            sha256: outcome.sha256,
+                            error: None,
+                        }
+                    }
+                    Err(err) => {
+                        failed_count += 1;
+                        RunsArtifactPullEntry {
+                            artifact_id: artifact.id.clone(),
+                            storage: "remote",
+                            status: "failed",
+                            output_path: None,
+                            size_bytes: None,
+                            content_type: None,
+                            sha256: None,
+                            error: Some(err.message),
+                        }
+                    }
+                }
+            }
+            runs_service::ArtifactStorage::MetadataOnly => {
+                skipped_count += 1;
+                RunsArtifactPullEntry {
+                    artifact_id: artifact.id.clone(),
+                    storage: "metadata_only",
+                    status: "skipped",
+                    output_path: None,
+                    size_bytes: None,
+                    content_type: None,
+                    sha256: None,
+                    error: Some(
+                        "artifact was imported as metadata only; bytes are not available"
+                            .to_string(),
+                    ),
+                }
+            }
+            runs_service::ArtifactStorage::Other => {
+                // A locally-present directory artifact is already self-contained.
+                if artifact.artifact_type == "directory"
+                    && std::path::Path::new(&artifact.path).is_dir()
+                {
+                    already_local_count += 1;
+                    RunsArtifactPullEntry {
+                        artifact_id: artifact.id.clone(),
+                        storage: "other",
+                        status: "already_local",
+                        output_path: Some(artifact.path.clone()),
+                        size_bytes: artifact.size_bytes,
+                        content_type: artifact.mime.clone(),
+                        sha256: artifact.sha256.clone(),
+                        error: None,
+                    }
+                } else {
+                    skipped_count += 1;
+                    RunsArtifactPullEntry {
+                        artifact_id: artifact.id.clone(),
+                        storage: "other",
+                        status: "skipped",
+                        output_path: None,
+                        size_bytes: None,
+                        content_type: None,
+                        sha256: None,
+                        error: Some(format!(
+                            "artifact type `{}` is not a pullable file",
+                            artifact.artifact_type
+                        )),
+                    }
+                }
+            }
+        };
+        entries.push(entry);
+    }
+
+    Ok(RunsArtifactPullSummary {
+        pull_root,
+        pulled_count,
+        already_local_count,
+        skipped_count,
+        failed_count,
+        entries,
+    })
+}
+
+/// Derive a filesystem-safe filename from an artifact id for `--pull-dir`
+/// targets. Mirrors the conservative substitution used elsewhere for derived
+/// artifact paths so unusual ids cannot escape the target directory.
+fn sanitize_artifact_filename(artifact_id: &str) -> String {
+    let sanitized = artifact_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let trimmed = sanitized.trim_matches(['.', '_']).to_string();
+    if trimmed.is_empty() {
+        "artifact".to_string()
+    } else {
+        trimmed
+    }
 }
 
 pub fn env(run_id: &str) -> CmdResult<RunsOutput> {
@@ -439,5 +608,164 @@ pub(crate) fn run_summary(run: RunRecord) -> RunSummary {
         cwd: run.cwd,
         status_note,
         artifact_index: None,
+    }
+}
+
+#[cfg(test)]
+mod pull_tests {
+    use std::fs;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use homeboy::core::observation::{ArtifactRecord, NewRunRecord, ObservationStore};
+    use homeboy::test_support::with_isolated_home;
+
+    use super::*;
+
+    fn artifact_root_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn metadata_only_record(run_id: &str, id: &str) -> ArtifactRecord {
+        ArtifactRecord {
+            id: id.to_string(),
+            run_id: run_id.to_string(),
+            kind: "finding-packets".to_string(),
+            artifact_type: "metadata-only".to_string(),
+            path: format!("metadata://{id}"),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: serde_json::json!({}),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn sanitize_artifact_filename_is_path_safe() {
+        assert_eq!(sanitize_artifact_filename("finding-packets.json"), "finding-packets.json");
+        assert_eq!(sanitize_artifact_filename("../../etc/passwd"), "etc_passwd");
+        assert_eq!(sanitize_artifact_filename("a/b\\c"), "a_b_c");
+        assert_eq!(sanitize_artifact_filename("..."), "artifact");
+        assert_eq!(sanitize_artifact_filename(""), "artifact");
+    }
+
+    #[test]
+    fn pull_reports_local_file_as_already_local() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("run");
+            let source = home.path().join("finding-packets.json");
+            fs::write(&source, br#"{"findings":[]}"#).expect("source");
+            let artifact = store
+                .record_artifact(&run.id, "finding-packets", &source)
+                .expect("artifact");
+
+            let summary = pull_artifacts_to_local(&[artifact.clone()], None).expect("pull summary");
+
+            assert_eq!(summary.already_local_count, 1);
+            assert_eq!(summary.pulled_count, 0);
+            assert_eq!(summary.failed_count, 0);
+            assert_eq!(summary.entries.len(), 1);
+            assert_eq!(summary.entries[0].status, "already_local");
+            assert_eq!(summary.entries[0].storage, "local_file");
+            assert_eq!(summary.entries[0].output_path.as_deref(), Some(artifact.path.as_str()));
+        });
+    }
+
+    #[test]
+    fn pull_skips_metadata_only_artifacts_with_reason() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+
+            let record = metadata_only_record("run-1", "finding-packets");
+            let summary = pull_artifacts_to_local(&[record], None).expect("pull summary");
+
+            assert_eq!(summary.skipped_count, 1);
+            assert_eq!(summary.entries[0].status, "skipped");
+            assert_eq!(summary.entries[0].storage, "metadata_only");
+            assert!(summary.entries[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("metadata only"));
+        });
+    }
+
+    #[test]
+    fn pull_records_per_artifact_failure_without_aborting() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+
+            // A remote runner-artifact ref for a runner that does not exist must
+            // be reported as a failed entry, not panic or abort the pass.
+            let remote = ArtifactRecord {
+                id: "matrix-json".to_string(),
+                run_id: "run-1".to_string(),
+                kind: "matrix".to_string(),
+                artifact_type: "remote_file".to_string(),
+                path: "runner-artifact://does-not-exist/run-1/matrix-json".to_string(),
+                url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: None,
+                size_bytes: None,
+                mime: None,
+                metadata_json: serde_json::json!({}),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            let local_source = home.path().join("summary.json");
+            fs::write(&local_source, b"{}").expect("source");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("run");
+            let local = store
+                .record_artifact(&run.id, "summary", &local_source)
+                .expect("artifact");
+
+            let summary =
+                pull_artifacts_to_local(&[remote, local], None).expect("pull summary");
+
+            assert_eq!(summary.entries.len(), 2);
+            assert_eq!(summary.failed_count, 1);
+            assert_eq!(summary.already_local_count, 1);
+            let remote_entry = summary
+                .entries
+                .iter()
+                .find(|entry| entry.artifact_id == "matrix-json")
+                .expect("remote entry");
+            assert_eq!(remote_entry.status, "failed");
+            assert!(remote_entry.error.is_some());
+        });
+    }
+
+    #[test]
+    fn artifacts_from_args_pull_with_runner_is_rejected() {
+        let result = artifacts_from_args(RunsArtifactsArgs {
+            run_id: "run-1".to_string(),
+            runner: Some("lab".to_string()),
+            pull: true,
+            pull_dir: None,
+        });
+        let Err(err) = result else {
+            panic!("--pull with --runner should fail");
+        };
+        assert!(err.to_string().contains("local mirrored observation store"));
     }
 }

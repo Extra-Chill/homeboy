@@ -58,6 +58,7 @@ pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> 
             preview_entrypoints: Vec::new(),
             matrix_summary: None,
             fuzz_result_envelopes: Vec::new(),
+            pull: None,
         }),
         0,
     ))
