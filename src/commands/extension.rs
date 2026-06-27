@@ -11,6 +11,7 @@ use homeboy::core::extension::{
 use homeboy::core::project::{self, Project};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Command;
 
 use crate::commands::runner::{declared_tool_diagnostics, RunnerToolDiagnostics};
 use crate::commands::CmdResult;
@@ -28,6 +29,11 @@ enum ExtensionCommand {
         /// Project ID to filter compatible extensions
         #[arg(short, long)]
         project: Option<String>,
+    },
+    /// Compare installed extension revisions with their current checkout HEADs
+    DiffInstalled {
+        /// Optional extension ID to inspect
+        extension_id: Option<String>,
     },
     /// Show detailed information about a extension
     Show {
@@ -171,6 +177,7 @@ pub fn run(
 ) -> CmdResult<ExtensionOutput> {
     match args.command {
         ExtensionCommand::List { project } => list(project),
+        ExtensionCommand::DiffInstalled { extension_id } => diff_installed(extension_id.as_deref()),
         ExtensionCommand::Show { extension_id } => show_extension(&extension_id),
         ExtensionCommand::Run {
             extension_id,
@@ -255,6 +262,12 @@ pub enum ExtensionOutput {
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
         extensions: Vec<ExtensionSummary>,
+    },
+    #[serde(rename = "extension.diff_installed")]
+    DiffInstalled {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        extension_id: Option<String>,
+        extensions: Vec<InstalledExtensionDiff>,
     },
     #[serde(rename = "extension.show")]
     Show { extension: ExtensionDetail },
@@ -476,6 +489,22 @@ pub struct ExtensionRuntimeDiagnosticCommands {
     pub refresh: String,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct InstalledExtensionDiff {
+    pub extension_id: String,
+    pub path: String,
+    pub linked: bool,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkout_head_revision: Option<String>,
+    pub status: String,
+    pub next_command: String,
+}
+
 fn list(project: Option<String>) -> CmdResult<ExtensionOutput> {
     let project_config: Option<Project> = project.as_ref().and_then(|id| project::load(id).ok());
     let summaries = extension::list_summaries(project_config.as_ref());
@@ -487,6 +516,98 @@ fn list(project: Option<String>) -> CmdResult<ExtensionOutput> {
         },
         0,
     ))
+}
+
+fn diff_installed(extension_id: Option<&str>) -> CmdResult<ExtensionOutput> {
+    let rows = extension::list_summaries(None)
+        .into_iter()
+        .filter(|summary| extension_id.is_none_or(|id| summary.id == id))
+        .map(installed_extension_diff)
+        .collect::<Vec<_>>();
+
+    if rows.is_empty() {
+        if let Some(id) = extension_id {
+            load_extension(id)?;
+        }
+    }
+
+    Ok((
+        ExtensionOutput::DiffInstalled {
+            extension_id: extension_id.map(str::to_string),
+            extensions: rows,
+        },
+        0,
+    ))
+}
+
+fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff {
+    let checkout_head_revision = git_head_revision(Path::new(&summary.path));
+    let status = installed_extension_diff_status(
+        summary.ready,
+        summary.source_revision.as_deref(),
+        checkout_head_revision.as_deref(),
+    );
+    let next_command = installed_extension_diff_next_command(&summary, &status);
+
+    InstalledExtensionDiff {
+        extension_id: summary.id,
+        path: summary.path,
+        linked: summary.linked,
+        ready: summary.ready,
+        ready_reason: summary.ready_reason,
+        installed_source_revision: summary.source_revision,
+        checkout_head_revision,
+        status,
+        next_command,
+    }
+}
+
+fn installed_extension_diff_status(
+    ready: bool,
+    installed_revision: Option<&str>,
+    checkout_revision: Option<&str>,
+) -> String {
+    if !ready {
+        return "unready".to_string();
+    }
+    match (installed_revision, checkout_revision) {
+        (Some(installed), Some(checkout)) if installed == checkout => "current".to_string(),
+        (Some(_), Some(_)) => "stale".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn installed_extension_diff_next_command(summary: &ExtensionSummary, status: &str) -> String {
+    match status {
+        "current" => format!("homeboy extension show {}", shell_arg(&summary.id)),
+        "stale" if summary.linked => format!(
+            "homeboy extension relink {} {}",
+            shell_arg(&summary.id),
+            shell_arg(&summary.path)
+        ),
+        "stale" => format!("homeboy extension update {}", shell_arg(&summary.id)),
+        "unready" => format!("homeboy extension setup {}", shell_arg(&summary.id)),
+        _ => format!("homeboy extension show {}", shell_arg(&summary.id)),
+    }
+}
+
+fn git_head_revision(path: &Path) -> Option<String> {
+    if path.as_os_str().is_empty() || !path.exists() {
+        return None;
+    }
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(path)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
@@ -1052,5 +1173,66 @@ mod tests {
 
             std::env::remove_var("HOMEBOY_GENERIC_TOOL_BIN");
         });
+    }
+
+    #[test]
+    fn installed_extension_diff_status_reports_stale_current_and_unknown() {
+        assert_eq!(
+            installed_extension_diff_status(true, Some("abc1234"), Some("abc1234")),
+            "current"
+        );
+        assert_eq!(
+            installed_extension_diff_status(true, Some("abc1234"), Some("def5678")),
+            "stale"
+        );
+        assert_eq!(
+            installed_extension_diff_status(true, Some("abc1234"), None),
+            "unknown"
+        );
+        assert_eq!(
+            installed_extension_diff_status(false, Some("abc1234"), Some("abc1234")),
+            "unready"
+        );
+    }
+
+    #[test]
+    fn installed_extension_diff_next_command_guides_stale_local_iteration() {
+        let mut summary = ExtensionSummary {
+            id: "rust".to_string(),
+            name: "Rust".to_string(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            runtime: "platform".to_string(),
+            compatible: true,
+            ready: true,
+            ready_reason: None,
+            ready_detail: None,
+            linked: true,
+            path: "/tmp/homeboy-extensions/rust".to_string(),
+            error: None,
+            symlink_target: None,
+            source_revision: Some("abc1234".to_string()),
+            cli_tool: None,
+            cli_display_name: None,
+            actions: Vec::new(),
+            has_setup: None,
+            has_ready_check: None,
+        };
+
+        assert_eq!(
+            installed_extension_diff_next_command(&summary, "stale"),
+            "homeboy extension relink rust /tmp/homeboy-extensions/rust"
+        );
+
+        summary.linked = false;
+        assert_eq!(
+            installed_extension_diff_next_command(&summary, "stale"),
+            "homeboy extension update rust"
+        );
+
+        assert_eq!(
+            installed_extension_diff_next_command(&summary, "unready"),
+            "homeboy extension setup rust"
+        );
     }
 }
