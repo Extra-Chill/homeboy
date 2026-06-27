@@ -20,7 +20,7 @@ set -euo pipefail
 
 homeboy_get_validation_dependencies_raw() {
     if ! type homeboy_setting_json >/dev/null 2>&1; then
-        local settings_helper="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-$(dirname "${BASH_SOURCE[0]}")/settings.sh}"
+        local settings_helper="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib/settings.sh}"
         # shellcheck source=/dev/null
         source "$settings_helper"
     fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_SCRIPTS_HELPER="${HOMEBOY_RUNTIME_PROJECT_SCRIPTS:-${SCRIPT_DIR}/project-scripts.sh}"
+PROJECT_SCRIPTS_HELPER="${HOMEBOY_RUNTIME_PROJECT_SCRIPTS:-${SCRIPT_DIR}/../../../scripts/lib/project-scripts.sh}"
 # shellcheck source=/dev/null
 source "$PROJECT_SCRIPTS_HELPER"
 

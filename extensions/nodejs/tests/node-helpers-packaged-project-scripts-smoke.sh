@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_HELPERS="${ROOT_DIR}/scripts/lib/node-helpers.sh"
-PROJECT_SCRIPTS="${ROOT_DIR}/scripts/lib/project-scripts.sh"
+PROJECT_SCRIPTS="${ROOT_DIR}/../scripts/lib/project-scripts.sh"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 

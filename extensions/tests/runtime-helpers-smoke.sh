@@ -28,18 +28,11 @@ RUNNER_STEPS_HELPERS=(
 SIDECAR_WRITER_HELPERS=(
     "${ROOT_DIR}/wordpress/scripts/lib/sidecar-writer.sh"
 )
-FIX_RESULTS_HELPERS=(
-    "${ROOT_DIR}/nodejs/scripts/lib/fix-results.sh"
-    "${ROOT_DIR}/rust/scripts/lib/fix-results.sh"
-    "${ROOT_DIR}/wordpress/scripts/lib/fix-results.sh"
-)
+# Extension-owned shared libs are single-sourced in the top-level scripts/lib
+# shared asset (materialized as an extensions/scripts/lib sibling at install).
+FIX_RESULTS_HELPER="${ROOT_DIR}/scripts/lib/fix-results.sh"
 BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
-SETTINGS_HELPERS=(
-    "${ROOT_DIR}/scripts/lib/settings.sh"
-    "${ROOT_DIR}/nodejs/scripts/lib/settings.sh"
-    "${ROOT_DIR}/rust/scripts/lib/settings.sh"
-    "${ROOT_DIR}/wordpress/scripts/lib/settings.sh"
-)
+SETTINGS_HELPER="${ROOT_DIR}/scripts/lib/settings.sh"
 COMMAND_CAPTURE_HELPERS=(
     "${ROOT_DIR}/nodejs/scripts/lib/command-capture.sh"
     "${ROOT_DIR}/rust/scripts/lib/command-capture.sh"
@@ -92,25 +85,14 @@ for runner_prelude_helper in "${RUNNER_PRELUDE_HELPERS[@]}"; do
     assert_file "$runner_prelude_helper"
     HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_CORE_HELPER" bash -c 'source "$1"; type homeboy_runner_init >/dev/null; type homeboy_source_runtime_helper >/dev/null; type homeboy_require_bash_version >/dev/null' _ "$runner_prelude_helper"
 done
-for fix_results_helper in "${FIX_RESULTS_HELPERS[@]}"; do
-    assert_file "$fix_results_helper"
-    bash -c 'source "$1"; type homeboy_fix_results_capture >/dev/null; type homeboy_fix_results_append_changed >/dev/null; type homeboy_fix_results_write >/dev/null' _ "$fix_results_helper"
-done
-for settings_helper in "${SETTINGS_HELPERS[@]}"; do
-    assert_file "$settings_helper"
-    bash -c 'source "$1"; type homeboy_setting >/dev/null; type homeboy_setting_bool >/dev/null; type homeboy_setting_array >/dev/null' _ "$settings_helper"
-done
+assert_file "$FIX_RESULTS_HELPER"
+bash -c 'source "$1"; type homeboy_fix_results_capture >/dev/null; type homeboy_fix_results_append_changed >/dev/null; type homeboy_fix_results_write >/dev/null' _ "$FIX_RESULTS_HELPER"
+assert_file "$SETTINGS_HELPER"
+bash -c 'source "$1"; type homeboy_setting >/dev/null; type homeboy_setting_bool >/dev/null; type homeboy_setting_array >/dev/null' _ "$SETTINGS_HELPER"
 for command_capture_helper in "${COMMAND_CAPTURE_HELPERS[@]}"; do
     assert_file "$command_capture_helper"
     HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_CORE_HELPER" bash -c 'source "$1"; type homeboy_run_step >/dev/null; type homeboy_run_step_capture >/dev/null; type homeboy_cleanup_step_capture >/dev/null' _ "$command_capture_helper"
 done
-
-if ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[1]}" \
-    || ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[2]}" \
-    || ! cmp -s "${SETTINGS_HELPERS[0]}" "${SETTINGS_HELPERS[3]}"; then
-    echo "Settings helpers should stay identical across installed extension trees" >&2
-    exit 1
-fi
 
 if ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[1]}" \
     || ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[2]}"; then
@@ -124,11 +106,48 @@ if ! cmp -s "${RUNNER_PRELUDE_HELPERS[0]}" "${RUNNER_PRELUDE_HELPERS[1]}" \
     exit 1
 fi
 
-if ! cmp -s "${FIX_RESULTS_HELPERS[0]}" "${FIX_RESULTS_HELPERS[1]}" \
-    || ! cmp -s "${FIX_RESULTS_HELPERS[0]}" "${FIX_RESULTS_HELPERS[2]}"; then
-    echo "Fix-result helpers should stay identical across installed extension trees" >&2
-    exit 1
-fi
+# Single-source guarantee: extension-owned shared libs (settings, fix-results,
+# project-scripts) live only in the top-level scripts/lib shared asset and are
+# never re-vendored into a per-language lib dir.
+for vendored in \
+    nodejs/scripts/lib/settings.sh \
+    rust/scripts/lib/settings.sh \
+    wordpress/scripts/lib/settings.sh \
+    nodejs/scripts/lib/fix-results.sh \
+    rust/scripts/lib/fix-results.sh \
+    wordpress/scripts/lib/fix-results.sh \
+    nodejs/scripts/lib/project-scripts.sh; do
+    if [ -e "${ROOT_DIR}/${vendored}" ]; then
+        echo "Shared lib must be single-sourced in scripts/lib; found vendored copy: ${vendored}" >&2
+        exit 1
+    fi
+done
+
+# Resolution wiring: each runner's relative fallback path must resolve to the
+# canonical shared lib. The source-repo layout (scripts/lib as a sibling of each
+# language tree) matches the installed layout (extensions/scripts/lib sibling of
+# extensions/<id>), so the same relative depth resolves in both. This catches a
+# wrong ../ depth before it ships.
+assert_resolves() {
+    local from_dir="$1" rel="$2" canonical="$3" resolved
+    if ! resolved="$(cd "${ROOT_DIR}/${from_dir}" && cd "$(dirname "$rel")" 2>/dev/null && pwd)/$(basename "$rel")"; then
+        echo "Could not resolve $rel from $from_dir" >&2
+        exit 1
+    fi
+    if ! cmp -s "$resolved" "$canonical"; then
+        echo "Runner in $from_dir resolves $rel to $resolved, expected canonical $canonical" >&2
+        exit 1
+    fi
+}
+assert_resolves nodejs/scripts/test    ../../../scripts/lib/settings.sh         "$SETTINGS_HELPER"
+assert_resolves rust/scripts           ../../scripts/lib/settings.sh            "$SETTINGS_HELPER"
+assert_resolves rust/scripts/bench     ../../../scripts/lib/settings.sh         "$SETTINGS_HELPER"
+assert_resolves wordpress/scripts/test ../../../scripts/lib/settings.sh         "$SETTINGS_HELPER"
+assert_resolves wordpress/scripts/lib  ../../../scripts/lib/settings.sh         "$SETTINGS_HELPER"
+assert_resolves nodejs/scripts/lint    ../../../scripts/lib/fix-results.sh      "$FIX_RESULTS_HELPER"
+assert_resolves rust/scripts           ../../scripts/lib/fix-results.sh         "$FIX_RESULTS_HELPER"
+assert_resolves wordpress/scripts/lint ../../../scripts/lib/fix-results.sh      "$FIX_RESULTS_HELPER"
+assert_resolves nodejs/scripts/lib     ../../../scripts/lib/project-scripts.sh  "$PROJECT_SCRIPTS_HELPER"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
