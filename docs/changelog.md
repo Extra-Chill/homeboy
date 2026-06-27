@@ -4,6 +4,32 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.264.1] - 2026-06-27
+
+### Changed
+- split observation/store god-file into module dir
+- split component/inventory god-file into module dir
+- split triage tests.rs god-file into tests/ subdir
+- split controller_service tests.rs god-file into tests/ subdir
+- Hydrate runner artifacts from runs commands
+- Improve cleanup artifacts operator summary
+- Report cleanup artifact session totals
+- Improve cleanup artifacts non-git error
+- Clarify runner Homeboy binary roles
+- Preserve rig package source metadata
+- Recover Lab results after stream truncation
+- Surface runner exec structured summaries
+- Fail bench matrix on declared result gates
+- Remove deprecated bench reader aliases
+- Propagate run ids to claimed runner jobs
+- Classify extension action safety
+- Persist bench URL artifacts from run files
+- Fail closed on materialized runtime ref readiness
+
+### Fixed
+- retry transient artifact directory cleanup
+- Fix controller fork run isolation
+
 ## [0.264.0] - 2026-06-27
 
 ### Added
