@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.9] - 2026-06-27
+
+### Fixed
+- Fix Codebox runtime package handoff
+
 ## [3.19.8] - 2026-06-27
 
 ### Changed
