@@ -344,7 +344,15 @@ fn classify_artifact(artifact: &ArtifactRecord) -> ArtifactClass {
         artifact.path.as_str(),
         artifact.id.as_str(),
     ];
-    for key in ["role", "semantic_key", "schema", "kind"] {
+    for key in [
+        "role",
+        "semantic_key",
+        "schema",
+        "kind",
+        "name",
+        "original_path",
+        "url",
+    ] {
         if let Some(value) = artifact.metadata_json.get(key).and_then(Value::as_str) {
             tokens.push(value);
         }

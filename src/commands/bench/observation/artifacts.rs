@@ -126,40 +126,64 @@ fn persist_bench_artifact(
     let kind = artifact.kind.clone().unwrap_or_else(|| name.to_string());
     let metadata = bench_artifact_metadata(scenario_id, run_index, name, artifact);
 
-    if let Some(url) = artifact.url.clone() {
-        return match observation.0.store().record_url_artifact_with_metadata(
-            observation.run_id(),
-            &kind,
-            &url,
-            metadata,
-        ) {
-            Ok(record) => {
-                apply_recorded_bench_artifact_links(scenario_id, run_index, name, artifact, &record)
-            }
-            Err(error) => Some(bench_artifact_diagnostic(
+    let original_path = artifact.path.clone();
+    if let Some(original_path) = original_path.as_deref() {
+        if bench_artifact_path_is_blocked(original_path) {
+            return Some(bench_artifact_diagnostic(
                 scenario_id,
                 run_index,
                 name,
-                "bench_artifact_url_record_failed",
-                format!("failed to record bench URL artifact `{name}`: {error}"),
-                serde_json::json!({ "url": url }),
-            )),
-        };
+                "bench_artifact_path_blocked",
+                format!("blocked bench artifact path `{original_path}` for `{name}`"),
+                serde_json::json!({ "path": original_path }),
+            ));
+        }
     }
 
-    let original_path = artifact.path.clone()?;
-    if bench_artifact_path_is_blocked(&original_path) {
+    let Some(path) = resolve_bench_artifact_file_pointer(
+        original_path.as_deref(),
+        artifact.url.as_deref(),
+        run_dir,
+        shared_state,
+    ) else {
+        if let Some(url) = artifact.url.clone() {
+            return match observation.0.store().record_url_artifact_with_metadata(
+                observation.run_id(),
+                &kind,
+                &url,
+                metadata,
+            ) {
+                Ok(record) => apply_recorded_bench_artifact_links(
+                    scenario_id,
+                    run_index,
+                    name,
+                    artifact,
+                    &record,
+                ),
+                Err(error) => Some(bench_artifact_diagnostic(
+                    scenario_id,
+                    run_index,
+                    name,
+                    "bench_artifact_url_record_failed",
+                    format!("failed to record bench URL artifact `{name}`: {error}"),
+                    serde_json::json!({ "url": url }),
+                )),
+            };
+        }
+
+        let original_path = original_path?;
         return Some(bench_artifact_diagnostic(
             scenario_id,
             run_index,
             name,
-            "bench_artifact_path_blocked",
-            format!("blocked bench artifact path `{original_path}` for `{name}`"),
-            serde_json::json!({ "path": original_path }),
+            "bench_artifact_path_missing",
+            format!("bench artifact path for `{name}` was not found: {original_path}"),
+            serde_json::json!({
+                "path": original_path,
+                "resolved_path": resolve_bench_artifact_path(&original_path, run_dir, shared_state).to_string_lossy().to_string(),
+            }),
         ));
-    }
-
-    let path = resolve_bench_artifact_path(&original_path, run_dir, shared_state);
+    };
     let record = if path.is_file() {
         observation.0.store().record_artifact_with_metadata(
             observation.run_id(),
@@ -178,17 +202,7 @@ fn persist_bench_artifact(
                 metadata,
             )
     } else {
-        return Some(bench_artifact_diagnostic(
-            scenario_id,
-            run_index,
-            name,
-            "bench_artifact_path_missing",
-            format!("bench artifact path for `{name}` was not found: {original_path}"),
-            serde_json::json!({
-                "path": original_path,
-                "resolved_path": path.to_string_lossy().to_string(),
-            }),
-        ));
+        unreachable!("resolved bench artifact file pointers must be files or directories");
     };
 
     match record {
@@ -338,6 +352,40 @@ fn resolve_bench_artifact_path(
         return run_dir_path;
     }
     artifact_path
+}
+
+fn resolve_bench_artifact_file_pointer(
+    path: Option<&str>,
+    url: Option<&str>,
+    run_dir: &RunDir,
+    shared_state: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(path) = path {
+        let resolved = resolve_bench_artifact_path(path, run_dir, shared_state);
+        if resolved.is_file() || resolved.is_dir() {
+            return Some(resolved);
+        }
+    }
+
+    let filename = url.and_then(artifact_filename_from_url)?;
+    for candidate in [
+        run_dir.path().join("artifacts").join(&filename),
+        run_dir.path().join(&filename),
+    ] {
+        if candidate.is_file() || candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn artifact_filename_from_url(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    parsed
+        .path_segments()?
+        .next_back()
+        .filter(|segment| !segment.is_empty() && !bench_artifact_path_is_blocked(segment))
+        .map(str::to_string)
 }
 
 fn resolve_shared_state_artifact(path: &Path, shared_state: Option<&str>) -> Option<PathBuf> {
