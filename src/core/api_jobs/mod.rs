@@ -13,8 +13,8 @@ pub use remote_runner::{
 pub use store::{JobHandle, JobRunner, JobStore};
 pub use summary::active_runner_job_run_summary;
 pub use types::{
-    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, Job, JobEvent, JobEventKind, JobStatus,
-    RunnerJobLifecycleOwner, RunnerJobSource,
+    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, Job, JobClaimMetadata, JobEvent,
+    JobEventKind, JobStatus, RunnerJobLifecycleOwner, RunnerJobSource,
 };
 
 #[cfg(test)]
@@ -832,10 +832,16 @@ mod tests {
             .iter()
             .find(|job| job.job_id == first.id.to_string())
             .expect("claimed job is active");
-        assert_eq!(active.claimed_by_runner_id.as_deref(), Some("homeboy-lab"));
-        assert_eq!(active.claim_id, claim.job.claim_id);
-        assert_eq!(active.claimed_at_ms, claim.job.claimed_at_ms);
-        assert_eq!(active.claim_expires_at_ms, claim.job.claim_expires_at_ms);
+        assert_eq!(
+            active.claim.claimed_by_runner_id.as_deref(),
+            Some("homeboy-lab")
+        );
+        assert_eq!(active.claim.claim_id, claim.job.claim_id);
+        assert_eq!(active.claim.claimed_at_ms, claim.job.claimed_at_ms);
+        assert_eq!(
+            active.claim.claim_expires_at_ms,
+            claim.job.claim_expires_at_ms
+        );
         assert!(active.claim_expires_in_ms.is_some());
         assert!(active.heartbeat_age_ms <= active.elapsed_ms);
     }

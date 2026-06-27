@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::failure_digest::budget_values;
 use crate::commands::escape_markdown_table_cell;
+use homeboy::core::engine::resource::ChildResourcePeakSample;
 use homeboy::core::engine::run_dir::files;
 
 #[derive(Args, Debug, Clone)]
@@ -115,8 +116,8 @@ pub struct ChildResourceDigest {
     pub root_pid: Option<u64>,
     pub command_label: Option<String>,
     pub duration_ms: Option<f64>,
-    pub sampled_peak_rss_bytes: Option<u64>,
-    pub sampled_peak_cpu_percent: Option<f64>,
+    #[serde(flatten)]
+    pub peak: ChildResourcePeakSample,
     pub warnings: Vec<String>,
 }
 
@@ -357,8 +358,10 @@ mod helpers {
             root_pid: u64_value(obj, "root_pid"),
             command_label: string_value(obj, "command_label"),
             duration_ms: number_value(obj, "duration_ms"),
-            sampled_peak_rss_bytes: u64_value(obj, "sampled_peak_rss_bytes"),
-            sampled_peak_cpu_percent: number_value(obj, "sampled_peak_cpu_percent"),
+            peak: ChildResourcePeakSample {
+                sampled_peak_rss_bytes: u64_value(obj, "sampled_peak_rss_bytes"),
+                sampled_peak_cpu_percent: number_value(obj, "sampled_peak_cpu_percent"),
+            },
             warnings: string_array(obj, "warnings"),
         })
     }
@@ -683,6 +686,7 @@ mod helpers {
                     .map(|duration| format!("{} ms", format_number(duration)))
                     .unwrap_or_else(|| "-".to_string());
                 let cpu = child
+                    .peak
                     .sampled_peak_cpu_percent
                     .map(|cpu| format!("{:.1}%", cpu))
                     .unwrap_or_else(|| "-".to_string());
@@ -692,7 +696,7 @@ mod helpers {
                     escape_markdown_table_cell(command),
                     pid,
                     duration,
-                    format_bytes(child.sampled_peak_rss_bytes),
+                    format_bytes(child.peak.sampled_peak_rss_bytes),
                     cpu
                 );
             }

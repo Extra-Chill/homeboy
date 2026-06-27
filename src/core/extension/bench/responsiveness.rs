@@ -138,8 +138,8 @@ pub fn memory_sample(
     child_resource: Option<&ExtensionChildResourceSummary>,
 ) -> Option<BenchFailureMemorySample> {
     child_resource.map(|resource| BenchFailureMemorySample {
-        sampled_peak_rss_bytes: resource.sampled_peak_rss_bytes,
-        sampled_peak_cpu_percent: resource.sampled_peak_cpu_percent,
+        sampled_peak_rss_bytes: resource.peak.sampled_peak_rss_bytes,
+        sampled_peak_cpu_percent: resource.peak.sampled_peak_cpu_percent,
     })
 }
 
