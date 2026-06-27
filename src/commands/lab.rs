@@ -4,6 +4,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy::core::runners;
+use homeboy::core::runners::RunnerWorkspaceSyncMode;
 
 use super::{CmdResult, GlobalArgs};
 
@@ -69,10 +70,92 @@ pub struct LabRefreshPlanOutput {
     pub workspace: String,
     pub runner_cwd: String,
     pub run_id: String,
+    pub handoff: LabRefreshPlanHandoff,
     pub checks: Vec<LabRefreshPlanCheck>,
     pub evidence_paths: Vec<LabRefreshPlanEvidencePath>,
     pub next_commands: Vec<LabRefreshPlanCommand>,
     pub docs: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanHandoff {
+    pub schema: &'static str,
+    pub run_id: String,
+    pub handoff_id: String,
+    pub workload_id: String,
+    pub runner: LabRefreshPlanRunnerHandoff,
+    pub workspace: LabRefreshPlanWorkspaceHandoff,
+    pub env_plan: LabRefreshPlanEnvPlan,
+    pub secret_plan: LabRefreshPlanSecretPlan,
+    pub runtime_refs: LabRefreshPlanRuntimeRefs,
+    pub lifecycle: LabRefreshPlanLifecycle,
+    pub artifact: LabRefreshPlanArtifactPlan,
+    pub evidence: LabRefreshPlanEvidencePlan,
+    pub result: LabRefreshPlanResultPlan,
+    pub inspection: LabRefreshPlanInspectionPlan,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanRunnerHandoff {
+    pub id: String,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanWorkspaceHandoff {
+    pub controller_path: String,
+    pub runner_cwd: String,
+    pub sync_mode: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanEnvPlan {
+    pub vars: Vec<String>,
+    pub unknown: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanSecretPlan {
+    pub refs: Vec<String>,
+    pub unknown: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanRuntimeRefs {
+    pub command: Vec<String>,
+    pub docs: Vec<String>,
+    pub unknown: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanLifecycle {
+    pub status: &'static str,
+    pub next: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanArtifactPlan {
+    pub paths: Vec<String>,
+    pub unknown: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanEvidencePlan {
+    pub paths: Vec<LabRefreshPlanEvidencePath>,
+    pub unknown: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanResultPlan {
+    pub run_id: String,
+    pub status: &'static str,
+    pub refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct LabRefreshPlanInspectionPlan {
+    pub commands: Vec<LabRefreshPlanCommand>,
+    pub unknown: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -82,13 +165,13 @@ pub struct LabRefreshPlanCheck {
     pub detail: String,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LabRefreshPlanEvidencePath {
     pub kind: &'static str,
     pub path: String,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LabRefreshPlanCommand {
     pub label: &'static str,
     pub command: String,
@@ -102,6 +185,8 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabRefreshPlanOutpu
 }
 
 fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOutput> {
+    validate_sync_mode(&args.sync_mode)?;
+
     if args.command.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "command",
@@ -125,6 +210,11 @@ fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOu
 
     let evidence_paths = evidence_paths(&args);
     let next_commands = next_commands(&args, &evidence_paths);
+    let docs = vec![
+        "docs/operators/artifact-loop-runner-matrix.md".to_string(),
+        "docs/commands/lab.md".to_string(),
+    ];
+    let handoff = handoff_plan(&args, &evidence_paths, &next_commands, &docs);
 
     Ok(LabRefreshPlanOutput {
         variant: "refresh_plan",
@@ -132,14 +222,26 @@ fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOu
         workspace: args.workspace,
         runner_cwd: args.runner_cwd,
         run_id: args.run_id,
+        handoff,
         checks,
         evidence_paths,
         next_commands,
-        docs: vec![
-            "docs/operators/artifact-loop-runner-matrix.md".to_string(),
-            "docs/commands/lab.md".to_string(),
-        ],
+        docs,
     })
+}
+
+fn validate_sync_mode(sync_mode: &str) -> homeboy::core::Result<RunnerWorkspaceSyncMode> {
+    match sync_mode {
+        "snapshot" => Ok(RunnerWorkspaceSyncMode::Snapshot),
+        "snapshot-git" => Ok(RunnerWorkspaceSyncMode::SnapshotGit),
+        "git" => Ok(RunnerWorkspaceSyncMode::Git),
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "sync_mode",
+            format!("unsupported sync mode: {sync_mode}"),
+            None,
+            Some(vec!["Use one of: snapshot, snapshot-git, git".to_string()]),
+        )),
+    }
 }
 
 fn add_runner_check(
@@ -217,6 +319,79 @@ fn evidence_paths(args: &RefreshPlanArgs) -> Vec<LabRefreshPlanEvidencePath> {
                 }),
         )
         .collect()
+}
+
+fn handoff_plan(
+    args: &RefreshPlanArgs,
+    evidence_paths: &[LabRefreshPlanEvidencePath],
+    next_commands: &[LabRefreshPlanCommand],
+    docs: &[String],
+) -> LabRefreshPlanHandoff {
+    let artifact_paths = evidence_paths
+        .iter()
+        .filter(|path| path.kind == "artifact")
+        .map(|path| path.path.clone())
+        .collect();
+    let inspection_commands = next_commands
+        .iter()
+        .filter(|command| matches!(command.label, "inspect-artifacts" | "inspect-evidence"))
+        .cloned()
+        .collect();
+
+    LabRefreshPlanHandoff {
+        schema: "homeboy/lab-refresh-handoff/v1",
+        run_id: args.run_id.clone(),
+        handoff_id: format!("lab-refresh:{}:{}", args.runner, args.run_id),
+        workload_id: args.run_id.clone(),
+        runner: LabRefreshPlanRunnerHandoff {
+            id: args.runner.clone(),
+            mode: None,
+        },
+        workspace: LabRefreshPlanWorkspaceHandoff {
+            controller_path: args.workspace.clone(),
+            runner_cwd: args.runner_cwd.clone(),
+            sync_mode: args.sync_mode.clone(),
+        },
+        env_plan: LabRefreshPlanEnvPlan {
+            vars: Vec::new(),
+            unknown: true,
+        },
+        secret_plan: LabRefreshPlanSecretPlan {
+            refs: Vec::new(),
+            unknown: true,
+        },
+        runtime_refs: LabRefreshPlanRuntimeRefs {
+            command: args.command.clone(),
+            docs: docs.to_vec(),
+            unknown: false,
+        },
+        lifecycle: LabRefreshPlanLifecycle {
+            status: "planned",
+            next: vec![
+                "verify_runner",
+                "sync_workspace",
+                "run_refresh",
+                "inspect_evidence",
+            ],
+        },
+        artifact: LabRefreshPlanArtifactPlan {
+            paths: artifact_paths,
+            unknown: false,
+        },
+        evidence: LabRefreshPlanEvidencePlan {
+            paths: evidence_paths.to_vec(),
+            unknown: false,
+        },
+        result: LabRefreshPlanResultPlan {
+            run_id: args.run_id.clone(),
+            status: "planned",
+            refs: Vec::new(),
+        },
+        inspection: LabRefreshPlanInspectionPlan {
+            commands: inspection_commands,
+            unknown: false,
+        },
+    }
 }
 
 fn next_commands(
@@ -358,6 +533,70 @@ mod tests {
             commands[4].command,
             "homeboy runs evidence matrix-refresh-1"
         );
+    }
+
+    #[test]
+    fn handoff_plan_exposes_typed_generic_fields() {
+        let args = RefreshPlanArgs {
+            runner: "lab-runner".to_string(),
+            workspace: "/workspace/source".to_string(),
+            runner_cwd: "/runner/source".to_string(),
+            run_id: "matrix-refresh-1".to_string(),
+            outputs: vec!["artifacts/matrix".to_string()],
+            summaries: vec!["artifacts/matrix/matrix-summary.json".to_string()],
+            sources: Vec::new(),
+            fixtures: Vec::new(),
+            sync_mode: "snapshot-git".to_string(),
+            command: vec!["cargo".to_string(), "test".to_string()],
+        };
+        let evidence = evidence_paths(&args);
+        let commands = next_commands(&args, &evidence);
+        let docs = vec!["docs/commands/lab.md".to_string()];
+
+        let handoff = handoff_plan(&args, &evidence, &commands, &docs);
+
+        assert_eq!(handoff.schema, "homeboy/lab-refresh-handoff/v1");
+        assert_eq!(handoff.run_id, "matrix-refresh-1");
+        assert_eq!(
+            handoff.handoff_id,
+            "lab-refresh:lab-runner:matrix-refresh-1"
+        );
+        assert_eq!(handoff.workload_id, "matrix-refresh-1");
+        assert_eq!(handoff.runner.id, "lab-runner");
+        assert_eq!(handoff.runner.mode, None);
+        assert_eq!(handoff.workspace.controller_path, "/workspace/source");
+        assert_eq!(handoff.workspace.runner_cwd, "/runner/source");
+        assert_eq!(handoff.workspace.sync_mode, "snapshot-git");
+        assert_eq!(handoff.env_plan.vars, Vec::<String>::new());
+        assert!(handoff.env_plan.unknown);
+        assert_eq!(handoff.secret_plan.refs, Vec::<String>::new());
+        assert!(handoff.secret_plan.unknown);
+        assert_eq!(handoff.runtime_refs.command, vec!["cargo", "test"]);
+        assert_eq!(handoff.artifact.paths, vec!["artifacts/matrix"]);
+        assert_eq!(handoff.evidence.paths, evidence);
+        assert_eq!(handoff.result.status, "planned");
+        assert_eq!(handoff.inspection.commands.len(), 2);
+    }
+
+    #[test]
+    fn invalid_sync_mode_is_rejected() {
+        let args = RefreshPlanArgs {
+            runner: "missing-runner".to_string(),
+            workspace: "/missing/workspace".to_string(),
+            runner_cwd: "/runner/source".to_string(),
+            run_id: "matrix-refresh-1".to_string(),
+            outputs: Vec::new(),
+            summaries: Vec::new(),
+            sources: Vec::new(),
+            fixtures: Vec::new(),
+            sync_mode: "rsync".to_string(),
+            command: vec!["cargo".to_string(), "test".to_string()],
+        };
+
+        let err = refresh_plan(args).expect_err("sync mode should be validated");
+
+        let message = err.to_string();
+        assert!(message.contains("unsupported sync mode: rsync"));
     }
 
     #[test]
