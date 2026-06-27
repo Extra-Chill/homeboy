@@ -12,17 +12,21 @@ const WP_CODEBOX_FUZZ_PUBLIC_ABILITIES = Object.freeze({
 	runWorkload: 'wp-codebox/run-wordpress-workload',
 });
 
+const WP_CODEBOX_FUZZ_PUBLIC_RUNNER_MODES = Object.freeze([
+	'runtime-backed',
+]);
+
 const CASE_INTENT_REQUIREMENTS = Object.freeze({
 	default: Object.freeze({ commands: ['run-fuzz-suite'], abilities: ['wp-codebox/run-fuzz-suite'] }),
-	workload: Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'] }),
-	'request-rest-route': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['rest'] }),
-	'request-admin-page': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['admin'] }),
-	'exercise-admin-page-read-only-interaction': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['admin'] }),
-	'plan-admin-page-mutation': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['admin', 'snapshot', 'restore', 'reset'] }),
-	'exercise-ajax-action': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['admin'] }),
-	'render-block': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['browser'] }),
+	workload: Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], runner_modes: ['runtime-backed'] }),
+	'request-rest-route': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['rest'], runner_modes: ['runtime-backed'] }),
+	'request-admin-page': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['admin'], runner_modes: ['runtime-backed'] }),
+	'exercise-admin-page-read-only-interaction': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['admin'], runner_modes: ['runtime-backed'] }),
+	'plan-admin-page-mutation': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['admin', 'snapshot', 'restore', 'reset'], runner_modes: ['runtime-backed'] }),
+	'exercise-ajax-action': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['admin'], runner_modes: ['runtime-backed'] }),
+	'render-block': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['browser'], runner_modes: ['runtime-backed'] }),
 	'serialize-parse-block': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'] }),
-	'insert-block-in-editor': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['browser'] }),
+	'insert-block-in-editor': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['browser'], runner_modes: ['runtime-backed'] }),
 	'inspect-database-table': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['database'] }),
 	'profile-database-query': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['database'] }),
 	'mutate-database-table': Object.freeze({ commands: ['run-wordpress-workload'], abilities: ['wp-codebox/run-wordpress-workload'], capabilities: ['database', 'snapshot', 'transaction', 'reset'] }),
@@ -49,6 +53,7 @@ function buildWordPressFuzzCommandManifest() {
 		wp_codebox: {
 			public_commands: [...WP_CODEBOX_FUZZ_PUBLIC_COMMANDS],
 			abilities: { ...WP_CODEBOX_FUZZ_PUBLIC_ABILITIES },
+			runner_modes: [...WP_CODEBOX_FUZZ_PUBLIC_RUNNER_MODES],
 		},
 		case_intents: Object.fromEntries(Object.entries(CASE_INTENT_REQUIREMENTS).map(([intent, requirements]) => [intent, cloneRequirements(requirements)])),
 	};
@@ -74,6 +79,7 @@ function mergeRequirements(requirements) {
 		commands: unique(requirements.flatMap((requirement) => arrayOf(requirement.commands))),
 		abilities: unique(requirements.flatMap((requirement) => arrayOf(requirement.abilities))),
 		capabilities: unique(requirements.flatMap((requirement) => arrayOf(requirement.capabilities))),
+		runner_modes: unique(requirements.flatMap((requirement) => arrayOf(requirement.runner_modes || requirement.runnerModes))),
 	};
 }
 
@@ -82,6 +88,7 @@ function cloneRequirements(requirements = {}) {
 		commands: arrayOf(requirements.commands),
 		abilities: arrayOf(requirements.abilities),
 		capabilities: arrayOf(requirements.capabilities),
+		runner_modes: arrayOf(requirements.runner_modes || requirements.runnerModes),
 	};
 }
 
@@ -97,6 +104,7 @@ module.exports = {
 	WORDPRESS_FUZZ_COMMAND_MANIFEST_SCHEMA,
 	WP_CODEBOX_FUZZ_PUBLIC_ABILITIES,
 	WP_CODEBOX_FUZZ_PUBLIC_COMMANDS,
+	WP_CODEBOX_FUZZ_PUBLIC_RUNNER_MODES,
 	buildWordPressFuzzCommandManifest,
 	requiredWpCodeboxContractsForFuzzCase,
 	requiredWpCodeboxContractsForFuzzPlan,
