@@ -437,8 +437,8 @@ assert.deepEqual(
   controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.ability_normalization.deprecated_compatibility_alias,
   legacyRuntimePackageAbilityAlias('runtime-package/run')
 );
-assert.equal(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.input.runtime_package, 'bundles/website-idea-agent');
-assert.equal(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.input.agent, 'website-idea-agent');
+assert.equal(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
+assert.deepEqual(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.input.package, { slug: 'website-idea-agent', source: 'bundles/website-idea-agent' });
 assert.deepEqual(controllerRuntimeTaskFanoutRequest.workers[0].ability_requirements, ['wp-codebox/run-runtime-package']);
 
 const controllerAbilityRequestFanoutRequest = codeboxFanoutRequestFromAgentTaskRequest({
@@ -478,7 +478,8 @@ const controllerAbilityRequestFanoutRequest = codeboxFanoutRequestFromAgentTaskR
 assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.ability, 'wp-codebox/run-runtime-package');
 assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.ability_normalization.requested_ability, 'homeboy/run-runtime-package');
 assert.equal(Object.hasOwn(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.ability_normalization, 'deprecated_compatibility_alias'), false);
-assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.input.runtime_package, 'bundles/design-agent');
+assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
+assert.deepEqual(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.input.package, { slug: 'design-agent', source: 'bundles/design-agent' });
 assert.deepEqual(controllerAbilityRequestFanoutRequest.workers[0].ability_requirements, ['wp-codebox/run-runtime-package', 'wordpress/site-health']);
 const stableCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput });
 assert.equal(stableCodeboxInvocation.contract, runtimeContractSchemas().agentTask.runRequest);
@@ -853,14 +854,19 @@ assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.ability_
   deprecated_compatibility_alias: legacyRuntimePackageAbilityAlias('agents/run-runtime-package'),
 });
 assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task_ability_normalization, controllerClientContextArtifactsTaskInput.runtime_task.ability_normalization);
-assert.equal(controllerClientContextArtifactsTaskInput.runtime_task.input.runtime_package, 'bundles/website-idea-agent');
-assert.equal(controllerClientContextArtifactsTaskInput.runtime_task.input.agent, 'website-idea-agent');
-assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.metadata.runtime_package_descriptor, { slug: 'website-idea-agent', source: 'bundles/website-idea-agent' });
-assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'package'), false);
-assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
-assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.engine_data_outputs, {
-  concept_packet: 'outputs.typed_artifacts.concept_packet.payload',
-});
+assert.equal(controllerClientContextArtifactsTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
+assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.package, { slug: 'website-idea-agent', source: 'bundles/website-idea-agent' });
+assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.artifacts, [{
+  name: 'concept_packet',
+  required: true,
+  schema: 'wp-site-generator/ConceptPacket/v1',
+  output: 'outputs.typed_artifacts.concept_packet.payload',
+}]);
+assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'runtime_package'), false);
+assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'agent'), false);
+assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'metadata'), false);
+assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'required_artifacts'), false);
+assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'engine_data_outputs'), false);
 
 const controllerClientContextRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -885,6 +891,7 @@ const controllerClientContextRuntimeTaskInput = codeboxTaskRequestFromAgentTaskR
   },
 });
 assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
 assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.input.input.concept_packet.payload.title, 'Concept');
 assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.input.input.design_packet.payload.design_system, 'Editorial');
 
@@ -905,12 +912,13 @@ assert.deepEqual(
   legacyRuntimePackageTaskInput.runtime_task.ability_normalization.deprecated_compatibility_alias,
   legacyRuntimePackageAbilityAlias('runtime-package/run')
 );
-assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.runtime_package, 'bundles/example-agent');
-assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.agent, 'example-agent');
+assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
+assert.deepEqual(legacyRuntimePackageTaskInput.runtime_task.input.package, { slug: 'example-agent', source: 'bundles/example-agent' });
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.provider, 'codex');
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.model, 'gpt-5.5');
-assert.deepEqual(legacyRuntimePackageTaskInput.runtime_task.input.metadata.runtime_package_descriptor, { slug: 'example-agent', source: 'bundles/example-agent' });
-assert.equal(Object.hasOwn(legacyRuntimePackageTaskInput.runtime_task.input, 'package'), false);
+assert.equal(Object.hasOwn(legacyRuntimePackageTaskInput.runtime_task.input, 'runtime_package'), false);
+assert.equal(Object.hasOwn(legacyRuntimePackageTaskInput.runtime_task.input, 'agent'), false);
+assert.equal(Object.hasOwn(legacyRuntimePackageTaskInput.runtime_task.input, 'metadata'), false);
 
 const neutralRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -928,8 +936,8 @@ assert.equal(neutralRuntimePackageTaskInput.runtime_task.ability, 'wp-codebox/ru
 assert.equal(neutralRuntimePackageTaskInput.runtime_task.ability_normalization.requested_ability, 'homeboy/run-runtime-package');
 assert.equal(neutralRuntimePackageTaskInput.runtime_task.ability_normalization.normalized_codebox_ability, 'wp-codebox/run-runtime-package');
 assert.equal(Object.hasOwn(neutralRuntimePackageTaskInput.runtime_task.ability_normalization, 'deprecated_compatibility_alias'), false);
-assert.equal(neutralRuntimePackageTaskInput.runtime_task.input.runtime_package, 'bundles/example-agent');
-assert.equal(neutralRuntimePackageTaskInput.runtime_task.input.agent, 'example-agent');
+assert.equal(neutralRuntimePackageTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
+assert.deepEqual(neutralRuntimePackageTaskInput.runtime_task.input.package, { slug: 'example-agent', source: 'bundles/example-agent' });
 
 const neutralProfileRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -953,8 +961,8 @@ const neutralProfileRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskReq
   instructions: 'Run a neutral runtime-package task through the selected runtime profile.',
 });
 assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
-assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.input.runtime_package, 'example-agent-profile');
-assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.input.agent, 'example-agent-profile');
+assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
+assert.deepEqual(neutralProfileRuntimePackageTaskInput.runtime_task.input.package, { slug: 'example-agent-profile' });
 assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.input.provider, 'codex');
 assert.equal(neutralProfileRuntimePackageTaskInput.runtime_task.input.model, 'gpt-5.5');
 
@@ -1056,12 +1064,13 @@ assert.deepEqual(
   explicitLegacyRuntimeTaskInput.runtime_task.ability_normalization.deprecated_compatibility_alias,
   legacyRuntimePackageAbilityAlias('runtime-package/run')
 );
-assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.input.runtime_package, 'example-agent');
-assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.input.agent, 'example-agent');
+assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
+assert.deepEqual(explicitLegacyRuntimeTaskInput.runtime_task.input.package, { slug: 'example-agent' });
 assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.input.provider, 'codex');
 assert.equal(explicitLegacyRuntimeTaskInput.runtime_task.input.model, 'gpt-5.5');
-assert.deepEqual(explicitLegacyRuntimeTaskInput.runtime_task.input.metadata.runtime_package_descriptor, { slug: 'example-agent' });
-assert.equal(Object.hasOwn(explicitLegacyRuntimeTaskInput.runtime_task.input, 'package'), false);
+assert.equal(Object.hasOwn(explicitLegacyRuntimeTaskInput.runtime_task.input, 'runtime_package'), false);
+assert.equal(Object.hasOwn(explicitLegacyRuntimeTaskInput.runtime_task.input, 'agent'), false);
+assert.equal(Object.hasOwn(explicitLegacyRuntimeTaskInput.runtime_task.input, 'metadata'), false);
 
 const runtimeConfigOptionsRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -1107,11 +1116,13 @@ const providerAndControllerArtifactsTaskInput = codeboxTaskRequestFromAgentTaskR
   },
 });
 assert.deepEqual(providerAndControllerArtifactsTaskInput.artifact_declarations.map((declaration) => declaration.name), ['concept_packet']);
-assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
-assert.equal(
-  providerAndControllerArtifactsTaskInput.runtime_task.input.engine_data_outputs.concept_packet,
-  'outputs.typed_artifacts.concept_packet.payload'
-);
+assert.equal(providerAndControllerArtifactsTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
+assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.artifacts, [{
+  name: 'concept_packet',
+  required: true,
+  schema: 'wp-site-generator/ConceptPacket/v1',
+  output: 'outputs.typed_artifacts.concept_packet.payload',
+}]);
 
 const placeholderArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   schema: 'homeboy/agent-task-request/v1',
@@ -1642,13 +1653,22 @@ const runtimePackageTypedArtifactRequest = {
 };
 const runtimePackageTypedArtifactTaskInput = codeboxTaskRequestFromAgentTaskRequest(runtimePackageTypedArtifactRequest);
 assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
-assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.runtime_package, '/workspace/example-runtime/bundles/store-idea-agent');
-assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.agent, 'store-idea-agent');
-assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.metadata.runtime_package_descriptor, { slug: 'store-idea-agent', source: '/workspace/example-runtime/bundles/store-idea-agent' });
-assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.metadata.runtime_package_descriptor.source === 'bundles/store-idea-agent', false);
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
+assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.package, { slug: 'store-idea-agent', source: '/workspace/example-runtime/bundles/store-idea-agent' });
+assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.workflow, { id: 'store-idea-artifact-flow' });
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.package.source === 'bundles/store-idea-agent', false);
 assert.equal(JSON.stringify(runtimePackageTypedArtifactTaskInput.runtime_task).includes('"source":"bundles/store-idea-agent"'), false);
-assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
-assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.engine_data_outputs.concept_packet, 'outputs.typed_artifacts.concept_packet.payload');
+assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.artifacts, [{
+  name: 'concept_packet',
+  required: true,
+  schema: 'example/ConceptPacket/v1',
+  output: 'outputs.typed_artifacts.concept_packet.payload',
+}]);
+assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'runtime_package'), false);
+assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'agent'), false);
+assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'metadata'), false);
+assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'required_artifacts'), false);
+assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'engine_data_outputs'), false);
 
 const runtimePackageTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult(runtimePackageTypedArtifactRequest, {
   success: true,
