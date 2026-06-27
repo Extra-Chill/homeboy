@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
-use crate::core::redaction::redact_argv;
+use crate::core::redaction::{redact_argv, RedactionPolicy};
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -38,6 +38,7 @@ pub(super) fn exec_diagnostic_ssh(
     cwd: String,
     command: Vec<String>,
     env: HashMap<String, String>,
+    secret_env_names: &[String],
     require_paths: Vec<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let server_id = runner.server_id.as_deref().ok_or_else(|| {
@@ -49,10 +50,15 @@ pub(super) fn exec_diagnostic_ssh(
         )
     })?;
     let server = server::load(server_id)?;
+    let mut merged_env = runner.env.clone();
+    merged_env.extend(env);
+    // Keep the full merged env for stream redaction, but route secret-bearing
+    // entries over stdin rather than the SSH command argv so tokens never land
+    // in the controller `ps` table or the remote login-shell argv (#6676).
+    let redaction_env = merged_env.clone();
+    let (public_env, secret_env) = partition_runner_secret_env(merged_env, secret_env_names);
     let mut client = SshClient::from_server(&server, server_id)?;
-    client.env.extend(runner.env.clone());
-    client.env.extend(env);
-    let redaction_env = client.env.clone();
+    client.env.extend(public_env);
     validate_remote_required_paths(&mut client, &require_paths)?;
     let command_line = format!(
         "cd {} && {}",
@@ -63,7 +69,7 @@ pub(super) fn exec_diagnostic_ssh(
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let output = client.execute(&command_line);
+    let output = client.execute_with_secret_env(&command_line, &secret_env);
     let source_snapshot =
         SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref());
     Ok(exec_output(
@@ -83,6 +89,34 @@ pub(super) fn exec_diagnostic_ssh(
         &redaction_env,
         &[],
     ))
+}
+
+/// Split a runner's merged environment into the public exports that stay inline
+/// on the SSH command line and the secret values that must be streamed over
+/// stdin instead.
+///
+/// A key is treated as secret when the caller explicitly declared it in
+/// `secret_env_names` or when the shared redaction policy recognizes it as a
+/// sensitive key (token/secret/api_key/...). This is defense in depth: any
+/// credential-shaped value is kept off the argv even if a caller forgets to
+/// declare its name.
+fn partition_runner_secret_env(
+    env: HashMap<String, String>,
+    secret_env_names: &[String],
+) -> (HashMap<String, String>, BTreeMap<String, String>) {
+    let policy = RedactionPolicy::default();
+    let mut public_env = HashMap::new();
+    let mut secret_env = BTreeMap::new();
+    for (key, value) in env {
+        let is_secret =
+            secret_env_names.iter().any(|name| name == &key) || policy.is_sensitive_key(&key);
+        if is_secret {
+            secret_env.insert(key, value);
+        } else {
+            public_env.insert(key, value);
+        }
+    }
+    (public_env, secret_env)
 }
 
 pub(crate) fn prepare_runner_process(

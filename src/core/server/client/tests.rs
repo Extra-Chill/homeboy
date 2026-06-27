@@ -10,7 +10,64 @@ use super::local_exec::{
     execute_local_command_in_dir, execute_local_command_interactive,
     execute_local_command_passthrough, execute_local_command_stderr_passthrough,
 };
+use super::ssh_client::{
+    build_secret_env_stdin_block, wrap_command_with_secret_env_read_loop,
+    SECRET_ENV_STDIN_SENTINEL,
+};
 use super::{CommandOutput, SshClient};
+
+#[test]
+fn secret_env_values_stream_over_stdin_not_command_argv() {
+    // OAuth/API tokens that earlier went inline as `export KEY=value` in the
+    // SSH command argv (visible in the controller `ps` table and the remote
+    // login-shell argv) must now travel over stdin instead.
+    let secret_env = std::collections::BTreeMap::from([
+        (
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "super-secret-access-token".to_string(),
+        ),
+        (
+            "OPENAI_API_KEY".to_string(),
+            "sk-do-not-leak-this".to_string(),
+        ),
+    ]);
+    let command_line = "cd /srv/app && node run-headless-loop.cjs";
+
+    let wrapped = wrap_command_with_secret_env_read_loop(command_line);
+    let block = String::from_utf8(build_secret_env_stdin_block(&secret_env)).expect("utf8 block");
+
+    // The command argv (what lands in `ps`) must carry neither the secret
+    // values nor even the secret env names.
+    assert!(
+        !wrapped.contains("super-secret-access-token"),
+        "argv must not contain the access token: {wrapped}"
+    );
+    assert!(
+        !wrapped.contains("sk-do-not-leak-this"),
+        "argv must not contain the api key: {wrapped}"
+    );
+    assert!(
+        !wrapped.contains("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"),
+        "argv must not contain the secret env name: {wrapped}"
+    );
+    assert!(
+        wrapped.contains(command_line),
+        "argv must still run the original command: {wrapped}"
+    );
+
+    // The stdin block carries the assignments and the terminating sentinel.
+    assert!(block.contains("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN=super-secret-access-token"));
+    assert!(block.contains("OPENAI_API_KEY=sk-do-not-leak-this"));
+    assert!(block.trim_end().ends_with(SECRET_ENV_STDIN_SENTINEL));
+}
+
+#[test]
+fn empty_secret_env_block_carries_only_the_sentinel() {
+    let block =
+        String::from_utf8(build_secret_env_stdin_block(&std::collections::BTreeMap::new()))
+            .expect("utf8 block");
+    assert_eq!(block, format!("{SECRET_ENV_STDIN_SENTINEL}\n"));
+}
 
 #[test]
 fn test_non_local_hosts() {

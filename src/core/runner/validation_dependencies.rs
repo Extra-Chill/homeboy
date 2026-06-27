@@ -845,6 +845,70 @@ mod tests {
     }
 
     #[test]
+    fn sync_workspace_rolls_back_checkout_when_validation_dependency_fails() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace_parent = tempfile::tempdir().expect("workspace parent");
+            let source = workspace_parent.path().join("host-app");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            fs::create_dir_all(&source).expect("source dir");
+            fs::write(
+                source.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "host-app",
+                    "extensions": {
+                        "wordpress": {
+                            "settings": { "validation_dependencies": ["shared-runtime"] }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("source manifest");
+            fs::write(source.join("main.php"), "<?php\n").expect("source file");
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-rollback","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            // The missing `shared-runtime` sibling makes validation-dependency
+            // sync fail *after* the main checkout and its metadata are already
+            // materialized — the exact partial-failure window from #6752.
+            let err = sync_workspace(
+                "lab-local-rollback",
+                RunnerWorkspaceSyncOptions {
+                    path: source.display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
+                    run_isolation_token: None,
+                },
+            )
+            .expect_err("missing validation dependency should fail sync");
+            assert!(err.message.contains("shared-runtime"));
+
+            // The materialized checkout must be rolled back so no orphaned remote
+            // directory survives under _lab_workspaces.
+            let lab_workspaces = runner_root.path().join("_lab_workspaces");
+            let leftovers = fs::read_dir(&lab_workspaces)
+                .map(|entries| entries.filter_map(|entry| entry.ok()).count())
+                .unwrap_or(0);
+            assert_eq!(
+                leftovers, 0,
+                "partial sync must not leave an orphaned remote checkout under {}",
+                lab_workspaces.display()
+            );
+        });
+    }
+
+    #[test]
     fn validation_dependency_workspace_errors_when_sibling_missing() {
         crate::test_support::with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
