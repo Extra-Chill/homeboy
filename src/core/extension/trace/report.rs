@@ -6,8 +6,11 @@ use std::collections::BTreeMap;
 use super::aggregate_report::TraceAggregateSpanSampleOutput;
 use super::baseline::TraceBaselineComparison;
 use super::overlay_lock::TraceOverlayLockRecord;
-use super::parsing::{TraceArtifact, TraceEvidenceMetadata, TraceList, TraceResults};
-use super::run::{TraceOverlay, TraceRunWorkflowResult};
+use super::parsing::{
+    TraceArtifact, TraceComponentsProvenance, TraceEvidenceMetadata, TraceGitProvenance, TraceList,
+    TraceResults, TraceScenario, TraceToolchainProvenance,
+};
+use super::run::{TraceOverlay, TraceRunFailure, TraceRunWorkflowResult};
 use super::span_summary::{
     format_span_summary_metadata, format_span_summary_status, trace_span_summaries,
     TraceSpanSummaryOutput,
@@ -16,862 +19,890 @@ use crate::core::engine::detail_output::{bounded_items, DEFAULT_DETAIL_ITEM_LIMI
 use crate::core::rig::RigStateSnapshot;
 use crate::core::runner::is_reportable_artifact_evidence_path;
 
-#[derive(Serialize)]
-#[serde(untagged)]
-pub enum TraceCommandOutput {
-    Run(Box<TraceRunOutput>),
-    Summary(TraceRunSummaryOutput),
-    Aggregate(TraceAggregateOutput),
-    Compare(TraceCompareOutput),
-    Matrix(TraceVariantMatrixOutput),
-    ScenarioMatrix(TraceScenarioMatrixOutput),
-    List(TraceListOutput),
-    OverlayLocks(TraceOverlayLocksOutput),
+pub use aggregate_types::*;
+pub use builders::*;
+pub use compare_types::*;
+pub use envelope_types::*;
+pub use markdown::*;
+pub use matrix_types::*;
+
+mod envelope_types {
+    use super::*;
+
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    pub enum TraceCommandOutput {
+        Run(Box<TraceRunOutput>),
+        Summary(TraceRunSummaryOutput),
+        Aggregate(TraceAggregateOutput),
+        Compare(TraceCompareOutput),
+        Matrix(TraceVariantMatrixOutput),
+        ScenarioMatrix(TraceScenarioMatrixOutput),
+        List(TraceListOutput),
+        OverlayLocks(TraceOverlayLocksOutput),
+    }
+
+    #[derive(Serialize)]
+    pub struct TraceRunOutput {
+        pub passed: bool,
+        pub status: String,
+        pub component: String,
+        pub exit_code: i32,
+        pub evidence: TraceEvidenceMetadata,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub artifacts: Vec<TraceArtifact>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub results: Option<TraceResults>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub span_summaries: Vec<TraceSpanSummaryOutput>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub rig_state: Option<RigStateSnapshot>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub failure: Option<TraceRunFailure>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub overlays: Vec<TraceOverlay>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub baseline_comparison: Option<TraceBaselineComparison>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub hints: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub profile: Option<TraceResolvedProfileOutput>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub toolchain: Option<TraceToolchainProvenance>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub components: Option<TraceComponentsProvenance>,
+    }
+
+    #[derive(Serialize)]
+    pub struct TraceRunSummaryOutput {
+        pub summary_only: bool,
+        pub passed: bool,
+        pub status: String,
+        pub component: String,
+        pub exit_code: i32,
+        pub evidence: TraceEvidenceMetadata,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub scenario_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub summary: Option<String>,
+        pub assertion_count: usize,
+        pub artifact_count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub rig_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub overlays: Vec<TraceOverlay>,
+        pub span_count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub hints: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub profile: Option<TraceResolvedProfileOutput>,
+    }
+
+    #[derive(Serialize)]
+    pub struct TraceListOutput {
+        pub command: &'static str,
+        pub component: String,
+        pub component_id: String,
+        pub count: usize,
+        pub scenarios: Vec<TraceScenario>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub profiles: Vec<TraceProfileListItem>,
+    }
+
+    #[derive(Serialize, Clone, Debug, PartialEq)]
+    pub struct TraceResolvedProfileOutput {
+        pub id: String,
+        pub rig_id: Option<String>,
+        pub component: String,
+        pub scenario: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub overlays: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub variants: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        pub settings: BTreeMap<String, serde_json::Value>,
+    }
+
+    #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+    pub struct TraceProfileListItem {
+        pub id: String,
+        pub rig_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub component: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub scenario: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    pub struct TraceOverlayLocksOutput {
+        pub command: &'static str,
+        pub count: usize,
+        pub active_count: usize,
+        pub stale_count: usize,
+        pub unknown_count: usize,
+        pub locks: Vec<TraceOverlayLockRecord>,
+    }
 }
 
-#[derive(Serialize)]
-pub struct TraceRunOutput {
-    pub passed: bool,
-    pub status: String,
-    pub component: String,
-    pub exit_code: i32,
-    pub evidence: TraceEvidenceMetadata,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<TraceArtifact>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub results: Option<TraceResults>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub span_summaries: Vec<TraceSpanSummaryOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rig_state: Option<RigStateSnapshot>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure: Option<super::run::TraceRunFailure>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overlays: Vec<TraceOverlay>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_comparison: Option<TraceBaselineComparison>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hints: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<TraceResolvedProfileOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub toolchain: Option<super::parsing::TraceToolchainProvenance>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub components: Option<super::parsing::TraceComponentsProvenance>,
+mod aggregate_types {
+    use super::*;
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceAggregateOutput {
+        pub command: &'static str,
+        pub passed: bool,
+        pub status: String,
+        pub component: String,
+        pub scenario_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub phase_preset: Option<String>,
+        pub repeat: usize,
+        pub run_count: usize,
+        pub failure_count: usize,
+        pub exit_code: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub schedule: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub run_order: Vec<TraceRunOrderEntryOutput>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub rig_state: Option<RigStateSnapshot>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub overlays: Vec<TraceOverlay>,
+        pub runs: Vec<TraceAggregateRunOutput>,
+        pub spans: Vec<TraceAggregateSpanOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub metrics: Vec<TraceAggregateMetricOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub guardrails: Vec<TraceGuardrailOutput>,
+        #[serde(default, skip_serializing_if = "is_default_usize")]
+        pub guardrail_failure_count: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub focus_span_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub focus_spans: Vec<TraceAggregateSpanOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub classification_summaries: Vec<TraceClassificationSummaryOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub unmatched_span_metadata_ids: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub profile: Option<TraceResolvedProfileOutput>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceRunOrderEntryOutput {
+        pub index: usize,
+        pub group: String,
+        pub iteration: usize,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceAggregateRunOutput {
+        pub index: usize,
+        pub passed: bool,
+        pub status: String,
+        pub exit_code: i32,
+        pub artifact_path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub scenario_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub summary: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub failure: Option<String>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceAggregateSpanOutput {
+        pub id: String,
+        pub n: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub min_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub median_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub avg_ms: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub stddev_ms: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub p75_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub p90_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub p95_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub max_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub max_run_index: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub max_artifact_path: Option<String>,
+        pub failures: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub samples: Vec<TraceAggregateSpanSampleOutput>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub metadata: Option<TraceSpanMetadata>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceAggregateMetricOutput {
+        pub id: String,
+        pub n: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub min: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub median: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub max: Option<f64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub samples: Vec<TraceAggregateMetricSampleOutput>,
+    }
+
+    #[derive(Serialize, Deserialize, Clone)]
+    pub struct TraceAggregateMetricSampleOutput {
+        pub run_index: usize,
+        pub value: f64,
+        pub artifact_path: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+    pub struct TraceSpanMetadata {
+        #[serde(default, skip_serializing_if = "is_default_bool")]
+        pub critical: bool,
+        #[serde(default, skip_serializing_if = "is_default_bool")]
+        pub blocking: bool,
+        #[serde(default, skip_serializing_if = "is_default_bool")]
+        pub cacheable: bool,
+        #[serde(default, skip_serializing_if = "is_default_bool")]
+        pub prewarmable: bool,
+        #[serde(default, skip_serializing_if = "is_default_bool")]
+        pub deferrable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub blocks: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub category: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize, Clone)]
+    pub struct TraceClassificationSummaryOutput {
+        pub classification: String,
+        pub span_count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub total_median_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub total_avg_ms: Option<f64>,
+    }
+
+    #[derive(Serialize, Deserialize, Clone)]
+    pub struct TraceGuardrailOutput {
+        pub label: String,
+        pub source: String,
+        pub passed: bool,
+        pub status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub failure: Option<String>,
+    }
 }
 
-#[derive(Serialize)]
-pub struct TraceRunSummaryOutput {
-    pub summary_only: bool,
-    pub passed: bool,
-    pub status: String,
-    pub component: String,
-    pub exit_code: i32,
-    pub evidence: TraceEvidenceMetadata,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scenario_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    pub assertion_count: usize,
-    pub artifact_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rig_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overlays: Vec<TraceOverlay>,
-    pub span_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hints: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<TraceResolvedProfileOutput>,
+mod compare_types {
+    use super::*;
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceCompareOutput {
+        pub command: &'static str,
+        pub before_path: String,
+        pub after_path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_target: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_target: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_git_sha: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_git_sha: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_status: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_status: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_exit_code: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_exit_code: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub output_dir: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub summary_path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_component: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_component: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_scenario_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_scenario_id: Option<String>,
+        pub span_count: usize,
+        pub spans: Vec<TraceCompareSpanOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub metrics: Vec<TraceCompareMetricOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub metric_guardrails: Vec<TraceMetricGuardrailOutput>,
+        #[serde(default, skip_serializing_if = "is_default_usize")]
+        pub metric_guardrail_failure_count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub metric_guardrail_status: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub focus_span_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub focus_spans: Vec<TraceCompareSpanOutput>,
+        #[serde(default, skip_serializing_if = "is_default_usize")]
+        pub focus_regression_count: usize,
+        #[serde(default, skip_serializing_if = "is_default_usize")]
+        pub focus_failure_count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub focus_status: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub before_guardrails: Vec<TraceGuardrailOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub after_guardrails: Vec<TraceGuardrailOutput>,
+        #[serde(default, skip_serializing_if = "is_default_usize")]
+        pub guardrail_failure_count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub guardrail_status: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub classification_summaries: Vec<TraceCompareClassificationSummaryOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub proof_run_order: Vec<TraceCompareRunOrderOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub caveats: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub browser_proof: Option<TraceBrowserProofOutput>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceCompareRunOrderOutput {
+        pub index: usize,
+        pub group: String,
+        pub iteration: usize,
+        pub status: String,
+        pub exit_code: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub artifact_path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub failure: Option<String>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceBrowserProofOutput {
+        pub baseline_dirs: Vec<String>,
+        pub candidate_dirs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub baseline_runs: Vec<TraceBrowserProofRunRefOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub candidate_runs: Vec<TraceBrowserProofRunRefOutput>,
+        pub markdown: String,
+        pub report: serde_json::Value,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceBrowserProofRunRefOutput {
+        pub index: usize,
+        pub status: String,
+        pub exit_code: i32,
+        pub artifact_path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub artifact_dir: Option<String>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceCompareClassificationSummaryOutput {
+        pub classification: String,
+        pub span_count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_total_median_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_total_median_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub median_delta_ms: Option<i64>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceCompareMetricOutput {
+        pub id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_n: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_n: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_min: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_min: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_median: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_median: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub median_delta: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub median_delta_percent: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_max: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_max: Option<f64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub before_samples: Vec<TraceAggregateMetricSampleOutput>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub after_samples: Vec<TraceAggregateMetricSampleOutput>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceMetricGuardrailOutput {
+        pub metric: String,
+        pub policy: String,
+        pub statistic: String,
+        pub passed: bool,
+        pub status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub threshold: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_value: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_value: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub delta: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub delta_percent: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub failure: Option<String>,
+    }
 }
 
-#[derive(Serialize)]
-pub struct TraceListOutput {
-    pub command: &'static str,
-    pub component: String,
-    pub component_id: String,
-    pub count: usize,
-    pub scenarios: Vec<super::parsing::TraceScenario>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub profiles: Vec<TraceProfileListItem>,
+mod matrix_types {
+    use super::*;
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceVariantMatrixOutput {
+        pub command: &'static str,
+        pub passed: bool,
+        pub status: String,
+        pub component: String,
+        pub scenario_id: String,
+        pub matrix: String,
+        pub output_dir: String,
+        pub baseline_path: String,
+        pub summary_path: String,
+        pub run_count: usize,
+        pub failure_count: usize,
+        pub exit_code: i32,
+        pub runs: Vec<TraceVariantMatrixRunOutput>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceVariantMatrixRunOutput {
+        pub label: String,
+        pub variants: Vec<String>,
+        pub overlays: Vec<String>,
+        pub aggregate_path: String,
+        pub compare_path: String,
+        pub passed: bool,
+        pub status: String,
+        pub exit_code: i32,
+        pub span_count: usize,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceScenarioMatrixOutput {
+        pub command: &'static str,
+        pub passed: bool,
+        pub status: String,
+        pub component: String,
+        pub scenario_id: String,
+        pub output_dir: String,
+        pub matrix_path: String,
+        pub summary_path: String,
+        pub axes: Vec<TraceScenarioMatrixAxisOutput>,
+        pub cell_count: usize,
+        pub failure_count: usize,
+        pub exit_code: i32,
+        pub cells: Vec<TraceScenarioMatrixCellOutput>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceScenarioMatrixAxisOutput {
+        pub name: String,
+        pub values: Vec<String>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceScenarioMatrixCellOutput {
+        pub index: usize,
+        pub label: String,
+        pub axes: BTreeMap<String, String>,
+        pub passed: bool,
+        pub status: String,
+        pub exit_code: i32,
+        pub artifact_path: String,
+        pub artifact_dir: String,
+        pub output_path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub failure: Option<String>,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct TraceCompareSpanOutput {
+        pub id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_n: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_n: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_median_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_median_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub median_delta_ms: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub median_delta_percent: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_avg_ms: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_avg_ms: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub avg_delta_ms: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub avg_delta_percent: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub before_failures: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub after_failures: Option<usize>,
+    }
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
-pub struct TraceResolvedProfileOutput {
-    pub id: String,
-    pub rig_id: Option<String>,
-    pub component: String,
-    pub scenario: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overlays: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub variants: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub settings: BTreeMap<String, serde_json::Value>,
-}
+mod builders {
+    use super::*;
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct TraceProfileListItem {
-    pub id: String,
-    pub rig_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scenario: Option<String>,
-}
+    pub(crate) fn is_default_usize(value: &usize) -> bool {
+        value.eq(&usize::default())
+    }
 
-#[derive(Serialize)]
-pub struct TraceOverlayLocksOutput {
-    pub command: &'static str,
-    pub count: usize,
-    pub active_count: usize,
-    pub stale_count: usize,
-    pub unknown_count: usize,
-    pub locks: Vec<TraceOverlayLockRecord>,
-}
+    pub(crate) fn is_default_bool(value: &bool) -> bool {
+        !*value
+    }
 
-#[derive(Serialize, Clone)]
-pub struct TraceAggregateOutput {
-    pub command: &'static str,
-    pub passed: bool,
-    pub status: String,
-    pub component: String,
-    pub scenario_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase_preset: Option<String>,
-    pub repeat: usize,
-    pub run_count: usize,
-    pub failure_count: usize,
-    pub exit_code: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schedule: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub run_order: Vec<TraceRunOrderEntryOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rig_state: Option<RigStateSnapshot>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overlays: Vec<TraceOverlay>,
-    pub runs: Vec<TraceAggregateRunOutput>,
-    pub spans: Vec<TraceAggregateSpanOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub metrics: Vec<TraceAggregateMetricOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub guardrails: Vec<TraceGuardrailOutput>,
-    #[serde(default, skip_serializing_if = "is_default_usize")]
-    pub guardrail_failure_count: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub focus_span_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub focus_spans: Vec<TraceAggregateSpanOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub classification_summaries: Vec<TraceClassificationSummaryOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unmatched_span_metadata_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<TraceResolvedProfileOutput>,
-}
+    pub fn from_main_workflow(
+        result: TraceRunWorkflowResult,
+        rig_state: Option<RigStateSnapshot>,
+        summary_only: bool,
+    ) -> (TraceCommandOutput, i32) {
+        let (output, _, exit_code) = from_main_workflow_outputs(result, rig_state, summary_only);
+        (output, exit_code)
+    }
 
-#[derive(Serialize, Clone)]
-pub struct TraceRunOrderEntryOutput {
-    pub index: usize,
-    pub group: String,
-    pub iteration: usize,
-}
+    pub fn from_main_workflow_outputs(
+        result: TraceRunWorkflowResult,
+        rig_state: Option<RigStateSnapshot>,
+        summary_only: bool,
+    ) -> (TraceCommandOutput, Option<TraceCommandOutput>, i32) {
+        let exit_code = result.exit_code;
+        if summary_only {
+            let full_output = from_run_workflow_result(result.clone(), rig_state.clone());
+            let output = TraceRunSummaryOutput {
+                summary_only: true,
+                passed: exit_code == 0 && result.status == "pass",
+                status: result.status,
+                component: result.component,
+                exit_code,
+                evidence: result.evidence,
+                scenario_id: result.results.as_ref().map(|r| r.scenario_id.clone()),
+                summary: result.results.as_ref().and_then(|r| r.summary.clone()),
+                assertion_count: result
+                    .results
+                    .as_ref()
+                    .map(|r| r.assertions.len())
+                    .unwrap_or(0),
+                artifact_count: result
+                    .results
+                    .as_ref()
+                    .map(|r| r.artifacts.len())
+                    .unwrap_or(0),
+                rig_id: rig_state.as_ref().map(|r| r.rig_id.clone()),
+                overlays: result.overlays,
+                span_count: result
+                    .results
+                    .as_ref()
+                    .map(|r| r.span_results.len())
+                    .unwrap_or(0),
+                hints: result.hints,
+                profile: None,
+            };
+            return (
+                TraceCommandOutput::Summary(output),
+                Some(full_output),
+                exit_code,
+            );
+        }
 
-#[derive(Serialize, Clone)]
-pub struct TraceAggregateRunOutput {
-    pub index: usize,
-    pub passed: bool,
-    pub status: String,
-    pub exit_code: i32,
-    pub artifact_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scenario_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure: Option<String>,
-}
+        (from_run_workflow_result(result, rig_state), None, exit_code)
+    }
 
-#[derive(Serialize, Clone)]
-pub struct TraceAggregateSpanOutput {
-    pub id: String,
-    pub n: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub median_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub avg_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stddev_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub p75_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub p90_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub p95_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_run_index: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_artifact_path: Option<String>,
-    pub failures: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub samples: Vec<TraceAggregateSpanSampleOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<TraceSpanMetadata>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceAggregateMetricOutput {
-    pub id: String,
-    pub n: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub median: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max: Option<f64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub samples: Vec<TraceAggregateMetricSampleOutput>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TraceAggregateMetricSampleOutput {
-    pub run_index: usize,
-    pub value: f64,
-    pub artifact_path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
-pub struct TraceSpanMetadata {
-    #[serde(default, skip_serializing_if = "is_default_bool")]
-    pub critical: bool,
-    #[serde(default, skip_serializing_if = "is_default_bool")]
-    pub blocking: bool,
-    #[serde(default, skip_serializing_if = "is_default_bool")]
-    pub cacheable: bool,
-    #[serde(default, skip_serializing_if = "is_default_bool")]
-    pub prewarmable: bool,
-    #[serde(default, skip_serializing_if = "is_default_bool")]
-    pub deferrable: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TraceClassificationSummaryOutput {
-    pub classification: String,
-    pub span_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_median_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_avg_ms: Option<f64>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TraceGuardrailOutput {
-    pub label: String,
-    pub source: String,
-    pub passed: bool,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure: Option<String>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceCompareOutput {
-    pub command: &'static str,
-    pub before_path: String,
-    pub after_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_target: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_target: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_git_sha: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_git_sha: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_exit_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_exit_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_dir: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_component: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_component: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_scenario_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_scenario_id: Option<String>,
-    pub span_count: usize,
-    pub spans: Vec<TraceCompareSpanOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub metrics: Vec<TraceCompareMetricOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub metric_guardrails: Vec<TraceMetricGuardrailOutput>,
-    #[serde(default, skip_serializing_if = "is_default_usize")]
-    pub metric_guardrail_failure_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metric_guardrail_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub focus_span_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub focus_spans: Vec<TraceCompareSpanOutput>,
-    #[serde(default, skip_serializing_if = "is_default_usize")]
-    pub focus_regression_count: usize,
-    #[serde(default, skip_serializing_if = "is_default_usize")]
-    pub focus_failure_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub focus_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub before_guardrails: Vec<TraceGuardrailOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub after_guardrails: Vec<TraceGuardrailOutput>,
-    #[serde(default, skip_serializing_if = "is_default_usize")]
-    pub guardrail_failure_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub guardrail_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub classification_summaries: Vec<TraceCompareClassificationSummaryOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub proof_run_order: Vec<TraceCompareRunOrderOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub caveats: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub browser_proof: Option<TraceBrowserProofOutput>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceCompareRunOrderOutput {
-    pub index: usize,
-    pub group: String,
-    pub iteration: usize,
-    pub status: String,
-    pub exit_code: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure: Option<String>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceBrowserProofOutput {
-    pub baseline_dirs: Vec<String>,
-    pub candidate_dirs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub baseline_runs: Vec<TraceBrowserProofRunRefOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidate_runs: Vec<TraceBrowserProofRunRefOutput>,
-    pub markdown: String,
-    pub report: serde_json::Value,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceBrowserProofRunRefOutput {
-    pub index: usize,
-    pub status: String,
-    pub exit_code: i32,
-    pub artifact_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_dir: Option<String>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceCompareClassificationSummaryOutput {
-    pub classification: String,
-    pub span_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_total_median_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_total_median_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub median_delta_ms: Option<i64>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceCompareMetricOutput {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_n: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_n: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_min: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_min: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_median: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_median: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub median_delta: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub median_delta_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_max: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_max: Option<f64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub before_samples: Vec<TraceAggregateMetricSampleOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub after_samples: Vec<TraceAggregateMetricSampleOutput>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceMetricGuardrailOutput {
-    pub metric: String,
-    pub policy: String,
-    pub statistic: String,
-    pub passed: bool,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub threshold: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_value: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_value: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure: Option<String>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceVariantMatrixOutput {
-    pub command: &'static str,
-    pub passed: bool,
-    pub status: String,
-    pub component: String,
-    pub scenario_id: String,
-    pub matrix: String,
-    pub output_dir: String,
-    pub baseline_path: String,
-    pub summary_path: String,
-    pub run_count: usize,
-    pub failure_count: usize,
-    pub exit_code: i32,
-    pub runs: Vec<TraceVariantMatrixRunOutput>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceVariantMatrixRunOutput {
-    pub label: String,
-    pub variants: Vec<String>,
-    pub overlays: Vec<String>,
-    pub aggregate_path: String,
-    pub compare_path: String,
-    pub passed: bool,
-    pub status: String,
-    pub exit_code: i32,
-    pub span_count: usize,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceScenarioMatrixOutput {
-    pub command: &'static str,
-    pub passed: bool,
-    pub status: String,
-    pub component: String,
-    pub scenario_id: String,
-    pub output_dir: String,
-    pub matrix_path: String,
-    pub summary_path: String,
-    pub axes: Vec<TraceScenarioMatrixAxisOutput>,
-    pub cell_count: usize,
-    pub failure_count: usize,
-    pub exit_code: i32,
-    pub cells: Vec<TraceScenarioMatrixCellOutput>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceScenarioMatrixAxisOutput {
-    pub name: String,
-    pub values: Vec<String>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceScenarioMatrixCellOutput {
-    pub index: usize,
-    pub label: String,
-    pub axes: BTreeMap<String, String>,
-    pub passed: bool,
-    pub status: String,
-    pub exit_code: i32,
-    pub artifact_path: String,
-    pub artifact_dir: String,
-    pub output_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure: Option<String>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TraceCompareSpanOutput {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_n: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_n: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_median_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_median_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub median_delta_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub median_delta_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_avg_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_avg_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub avg_delta_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub avg_delta_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_failures: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_failures: Option<usize>,
-}
-
-fn is_default_usize(value: &usize) -> bool {
-    value.eq(&usize::default())
-}
-
-fn is_default_bool(value: &bool) -> bool {
-    !*value
-}
-
-pub fn from_main_workflow(
-    result: TraceRunWorkflowResult,
-    rig_state: Option<RigStateSnapshot>,
-    summary_only: bool,
-) -> (TraceCommandOutput, i32) {
-    let (output, _, exit_code) = from_main_workflow_outputs(result, rig_state, summary_only);
-    (output, exit_code)
-}
-
-pub fn from_main_workflow_outputs(
-    result: TraceRunWorkflowResult,
-    rig_state: Option<RigStateSnapshot>,
-    summary_only: bool,
-) -> (TraceCommandOutput, Option<TraceCommandOutput>, i32) {
-    let exit_code = result.exit_code;
-    if summary_only {
-        let full_output = from_run_workflow_result(result.clone(), rig_state.clone());
-        let output = TraceRunSummaryOutput {
-            summary_only: true,
-            passed: exit_code == 0 && result.status == "pass",
+    fn from_run_workflow_result(
+        result: TraceRunWorkflowResult,
+        rig_state: Option<RigStateSnapshot>,
+    ) -> TraceCommandOutput {
+        let artifacts = result
+            .results
+            .as_ref()
+            .map(|r| reportable_trace_artifacts(&r.artifacts))
+            .unwrap_or_default();
+        let span_summaries = result
+            .results
+            .as_ref()
+            .map(|results| trace_span_summaries(results, &BTreeMap::new()))
+            .unwrap_or_default();
+        TraceCommandOutput::Run(Box::new(TraceRunOutput {
+            passed: result.exit_code == 0 && result.status == "pass",
             status: result.status,
             component: result.component,
-            exit_code,
+            exit_code: result.exit_code,
             evidence: result.evidence,
-            scenario_id: result.results.as_ref().map(|r| r.scenario_id.clone()),
-            summary: result.results.as_ref().and_then(|r| r.summary.clone()),
-            assertion_count: result
-                .results
-                .as_ref()
-                .map(|r| r.assertions.len())
-                .unwrap_or(0),
-            artifact_count: result
-                .results
-                .as_ref()
-                .map(|r| r.artifacts.len())
-                .unwrap_or(0),
-            rig_id: rig_state.as_ref().map(|r| r.rig_id.clone()),
+            artifacts,
+            results: result.results,
+            span_summaries,
+            rig_state,
+            failure: result.failure,
             overlays: result.overlays,
-            span_count: result
-                .results
-                .as_ref()
-                .map(|r| r.span_results.len())
-                .unwrap_or(0),
+            baseline_comparison: result.baseline_comparison,
             hints: result.hints,
             profile: None,
+            toolchain: result.toolchain,
+            components: result.components,
+        }))
+    }
+}
+
+mod markdown {
+    use super::*;
+
+    pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("# Trace: `{}`\n\n", results.scenario_id));
+        out.push_str(&format!("- **Component:** `{}`\n", results.component_id));
+        out.push_str(&format!("- **Status:** `{}`\n", results.status.as_str()));
+        if let Some(evidence) = &results.evidence {
+            out.push_str(&format!(
+                "- **Canonical evidence:** `{}` (`{}` mode)\n",
+                evidence.canonical, evidence.mode
+            ));
+            for reason in &evidence.reasons {
+                out.push_str(&format!("  - Non-canonical reason: {}\n", reason));
+            }
+        }
+        if let Some(summary) = &results.summary {
+            out.push_str(&format!("- **Summary:** {}\n", summary));
+        }
+        if let Some(failure) = &results.failure {
+            out.push_str(&format!("- **Failure:** {}\n", failure));
+        }
+
+        push_toolchain_markdown(&mut out, results);
+
+        push_overlay_markdown(&mut out, overlays);
+
+        if !results.span_results.is_empty() {
+            out.push_str("\n## Spans\n\n");
+            out.push_str("| Span | From | To | Duration | Status | Metadata |\n");
+            out.push_str("|---|---|---|---:|---|---|\n");
+            let summaries = trace_span_summaries(results, &BTreeMap::new());
+            let (spans, metadata) = bounded_items(&summaries, DEFAULT_DETAIL_ITEM_LIMIT);
+            for span in spans {
+                let duration = span
+                    .duration_ms
+                    .map(|ms| format!("{}ms", ms))
+                    .unwrap_or_else(|| "-".to_string());
+                let status = format_span_summary_status(span);
+                let metadata = format_span_summary_metadata(span.metadata.as_ref());
+                out.push_str(&format!(
+                    "| `{}` | `{}` | `{}` | {} | {} | {} |\n",
+                    span.id, span.from, span.to, duration, status, metadata
+                ));
+            }
+            push_omitted_detail_line(&mut out, "span(s)", &metadata);
+        }
+
+        if !results.assertions.is_empty() {
+            out.push_str("\n## Assertions\n\n");
+            let (assertions, metadata) =
+                bounded_items(&results.assertions, DEFAULT_DETAIL_ITEM_LIMIT);
+            for assertion in assertions {
+                let status = assertion.status.as_str();
+                match &assertion.message {
+                    Some(message) => out.push_str(&format!(
+                        "- `{}`: **{}** - {}\n",
+                        assertion.id, status, message
+                    )),
+                    None => out.push_str(&format!("- `{}`: **{}**\n", assertion.id, status)),
+                }
+            }
+            push_omitted_detail_line(&mut out, "assertion(s)", &metadata);
+        }
+
+        let artifacts = reportable_trace_artifacts(&results.artifacts);
+        if !artifacts.is_empty() {
+            out.push_str("\n## Artifacts\n\n");
+            let (artifacts, metadata) = bounded_items(&artifacts, DEFAULT_DETAIL_ITEM_LIMIT);
+            for artifact in artifacts {
+                out.push_str(&format!("- **{}:** `{}`\n", artifact.label, artifact.path));
+            }
+            push_omitted_detail_line(&mut out, "artifact(s)", &metadata);
+        }
+
+        if !results.timeline.is_empty() {
+            out.push_str("\n## Timeline\n\n");
+            let (events, metadata) = bounded_items(&results.timeline, DEFAULT_DETAIL_ITEM_LIMIT);
+            for event in events {
+                out.push_str(&format!(
+                    "- `{}ms` `{}.{}`\n",
+                    event.t_ms, event.source, event.event
+                ));
+            }
+            push_omitted_detail_line(&mut out, "timeline event(s)", &metadata);
+        }
+
+        out
+    }
+
+    fn push_toolchain_markdown(out: &mut String, results: &TraceResults) {
+        let Some(toolchain) = &results.toolchain else {
+            return;
         };
-        return (
-            TraceCommandOutput::Summary(output),
-            Some(full_output),
-            exit_code,
-        );
-    }
 
-    (from_run_workflow_result(result, rig_state), None, exit_code)
-}
-
-fn from_run_workflow_result(
-    result: TraceRunWorkflowResult,
-    rig_state: Option<RigStateSnapshot>,
-) -> TraceCommandOutput {
-    let artifacts = result
-        .results
-        .as_ref()
-        .map(|r| reportable_trace_artifacts(&r.artifacts))
-        .unwrap_or_default();
-    let span_summaries = result
-        .results
-        .as_ref()
-        .map(|results| trace_span_summaries(results, &BTreeMap::new()))
-        .unwrap_or_default();
-    TraceCommandOutput::Run(Box::new(TraceRunOutput {
-        passed: result.exit_code == 0 && result.status == "pass",
-        status: result.status,
-        component: result.component,
-        exit_code: result.exit_code,
-        evidence: result.evidence,
-        artifacts,
-        results: result.results,
-        span_summaries,
-        rig_state,
-        failure: result.failure,
-        overlays: result.overlays,
-        baseline_comparison: result.baseline_comparison,
-        hints: result.hints,
-        profile: None,
-        toolchain: result.toolchain,
-        components: result.components,
-    }))
-}
-
-pub fn render_markdown(results: &TraceResults, overlays: &[TraceOverlay]) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("# Trace: `{}`\n\n", results.scenario_id));
-    out.push_str(&format!("- **Component:** `{}`\n", results.component_id));
-    out.push_str(&format!("- **Status:** `{}`\n", results.status.as_str()));
-    if let Some(evidence) = &results.evidence {
+        out.push_str("\n## Toolchain Provenance\n\n");
         out.push_str(&format!(
-            "- **Canonical evidence:** `{}` (`{}` mode)\n",
-            evidence.canonical, evidence.mode
+            "- **Mode:** `{}` ({})\n",
+            toolchain.mode,
+            if toolchain.canonical {
+                "canonical"
+            } else {
+                "non-canonical"
+            }
         ));
-        for reason in &evidence.reasons {
-            out.push_str(&format!("  - Non-canonical reason: {}\n", reason));
+        if !toolchain.reasons.is_empty() {
+            out.push_str("- **Reason(s):** ");
+            out.push_str(&toolchain.reasons.join("; "));
+            out.push('\n');
+        }
+        push_git_provenance_line(out, "Homeboy", &toolchain.homeboy);
+        for (id, provenance) in &toolchain.toolchains {
+            push_git_provenance_line(out, id, provenance);
+        }
+        if let Some(components) = &results.components {
+            push_git_provenance_line(out, "Target", &components.target);
+        }
+        if let Some(node) = &toolchain.node {
+            out.push_str(&format!("- **Node:** `{}`\n", node));
         }
     }
-    if let Some(summary) = &results.summary {
-        out.push_str(&format!("- **Summary:** {}\n", summary));
+
+    fn push_git_provenance_line(out: &mut String, label: &str, provenance: &TraceGitProvenance) {
+        let sha = provenance.sha.as_deref().unwrap_or("unknown");
+        let branch = provenance.branch.as_deref().unwrap_or("unknown");
+        let dirty = provenance
+            .dirty
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        out.push_str(&format!(
+            "- **{}:** `{}` @ `{}` (branch `{}`, dirty `{}`)\n",
+            label, provenance.path, sha, branch, dirty
+        ));
     }
-    if let Some(failure) = &results.failure {
-        out.push_str(&format!("- **Failure:** {}\n", failure));
+
+    pub(crate) fn reportable_trace_artifacts(artifacts: &[TraceArtifact]) -> Vec<TraceArtifact> {
+        artifacts
+            .iter()
+            .filter(|artifact| is_reportable_artifact_evidence_path(&artifact.path))
+            .cloned()
+            .collect()
     }
 
-    push_toolchain_markdown(&mut out, results);
+    pub fn push_overlay_markdown(out: &mut String, overlays: &[TraceOverlay]) {
+        if overlays.is_empty() {
+            return;
+        }
 
-    push_overlay_markdown(&mut out, overlays);
-
-    if !results.span_results.is_empty() {
-        out.push_str("\n## Spans\n\n");
-        out.push_str("| Span | From | To | Duration | Status | Metadata |\n");
-        out.push_str("|---|---|---|---:|---|---|\n");
-        let summaries = trace_span_summaries(results, &BTreeMap::new());
-        let (spans, metadata) = bounded_items(&summaries, DEFAULT_DETAIL_ITEM_LIMIT);
-        for span in spans {
-            let duration = span
-                .duration_ms
-                .map(|ms| format!("{}ms", ms))
-                .unwrap_or_else(|| "-".to_string());
-            let status = format_span_summary_status(span);
-            let metadata = format_span_summary_metadata(span.metadata.as_ref());
+        out.push_str("\n## Trace Overlays\n\n");
+        for overlay in overlays {
+            let status = if overlay.kept { "kept" } else { "reverted" };
+            let variant = overlay
+                .variant
+                .as_ref()
+                .map(|name| format!(" variant `{name}`,"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "| `{}` | `{}` | `{}` | {} | {} | {} |\n",
-                span.id, span.from, span.to, duration, status, metadata
+                "- **Patch:**{} `{}` (`{}`)\n",
+                variant, overlay.path, status
             ));
-        }
-        push_omitted_detail_line(&mut out, "span(s)", &metadata);
-    }
-
-    if !results.assertions.is_empty() {
-        out.push_str("\n## Assertions\n\n");
-        let (assertions, metadata) = bounded_items(&results.assertions, DEFAULT_DETAIL_ITEM_LIMIT);
-        for assertion in assertions {
-            let status = assertion.status.as_str();
-            match &assertion.message {
-                Some(message) => out.push_str(&format!(
-                    "- `{}`: **{}** - {}\n",
-                    assertion.id, status, message
-                )),
-                None => out.push_str(&format!("- `{}`: **{}**\n", assertion.id, status)),
+            out.push_str(&format!(
+                "  - Applied relative to: `{}`\n",
+                overlay.component_path
+            ));
+            if overlay.touched_files.is_empty() {
+                out.push_str("  - Touched files: none reported by `git apply --numstat`\n");
+            } else {
+                out.push_str("  - Touched files:\n");
+                let (files, metadata) =
+                    bounded_items(&overlay.touched_files, DEFAULT_DETAIL_ITEM_LIMIT);
+                for file in files {
+                    out.push_str(&format!("    - `{}`\n", file));
+                }
+                push_indented_omitted_detail_line(out, "touched file(s)", &metadata);
             }
         }
-        push_omitted_detail_line(&mut out, "assertion(s)", &metadata);
     }
 
-    let artifacts = reportable_trace_artifacts(&results.artifacts);
-    if !artifacts.is_empty() {
-        out.push_str("\n## Artifacts\n\n");
-        let (artifacts, metadata) = bounded_items(&artifacts, DEFAULT_DETAIL_ITEM_LIMIT);
-        for artifact in artifacts {
-            out.push_str(&format!("- **{}:** `{}`\n", artifact.label, artifact.path));
-        }
-        push_omitted_detail_line(&mut out, "artifact(s)", &metadata);
-    }
-
-    if !results.timeline.is_empty() {
-        out.push_str("\n## Timeline\n\n");
-        let (events, metadata) = bounded_items(&results.timeline, DEFAULT_DETAIL_ITEM_LIMIT);
-        for event in events {
+    fn push_omitted_detail_line(
+        out: &mut String,
+        label: &str,
+        metadata: &crate::core::engine::detail_output::DetailOutputMetadata,
+    ) {
+        if metadata.truncated {
             out.push_str(&format!(
-                "- `{}ms` `{}.{}`\n",
-                event.t_ms, event.source, event.event
+                "- _... {} more {} omitted (shown: {}, total: {}, limit: {})_\n",
+                metadata.omitted_item_count,
+                label,
+                metadata.items_rendered,
+                metadata.items_seen,
+                metadata.item_limit
             ));
         }
-        push_omitted_detail_line(&mut out, "timeline event(s)", &metadata);
     }
 
-    out
-}
-
-fn push_toolchain_markdown(out: &mut String, results: &TraceResults) {
-    let Some(toolchain) = &results.toolchain else {
-        return;
-    };
-
-    out.push_str("\n## Toolchain Provenance\n\n");
-    out.push_str(&format!(
-        "- **Mode:** `{}` ({})\n",
-        toolchain.mode,
-        if toolchain.canonical {
-            "canonical"
-        } else {
-            "non-canonical"
-        }
-    ));
-    if !toolchain.reasons.is_empty() {
-        out.push_str("- **Reason(s):** ");
-        out.push_str(&toolchain.reasons.join("; "));
-        out.push('\n');
-    }
-    push_git_provenance_line(out, "Homeboy", &toolchain.homeboy);
-    for (id, provenance) in &toolchain.toolchains {
-        push_git_provenance_line(out, id, provenance);
-    }
-    if let Some(components) = &results.components {
-        push_git_provenance_line(out, "Target", &components.target);
-    }
-    if let Some(node) = &toolchain.node {
-        out.push_str(&format!("- **Node:** `{}`\n", node));
-    }
-}
-
-fn push_git_provenance_line(
-    out: &mut String,
-    label: &str,
-    provenance: &super::parsing::TraceGitProvenance,
-) {
-    let sha = provenance.sha.as_deref().unwrap_or("unknown");
-    let branch = provenance.branch.as_deref().unwrap_or("unknown");
-    let dirty = provenance
-        .dirty
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    out.push_str(&format!(
-        "- **{}:** `{}` @ `{}` (branch `{}`, dirty `{}`)\n",
-        label, provenance.path, sha, branch, dirty
-    ));
-}
-
-fn reportable_trace_artifacts(artifacts: &[TraceArtifact]) -> Vec<TraceArtifact> {
-    artifacts
-        .iter()
-        .filter(|artifact| is_reportable_artifact_evidence_path(&artifact.path))
-        .cloned()
-        .collect()
-}
-
-pub fn push_overlay_markdown(out: &mut String, overlays: &[TraceOverlay]) {
-    if overlays.is_empty() {
-        return;
-    }
-
-    out.push_str("\n## Trace Overlays\n\n");
-    for overlay in overlays {
-        let status = if overlay.kept { "kept" } else { "reverted" };
-        let variant = overlay
-            .variant
-            .as_ref()
-            .map(|name| format!(" variant `{name}`,"))
-            .unwrap_or_default();
-        out.push_str(&format!(
-            "- **Patch:**{} `{}` (`{}`)\n",
-            variant, overlay.path, status
-        ));
-        out.push_str(&format!(
-            "  - Applied relative to: `{}`\n",
-            overlay.component_path
-        ));
-        if overlay.touched_files.is_empty() {
-            out.push_str("  - Touched files: none reported by `git apply --numstat`\n");
-        } else {
-            out.push_str("  - Touched files:\n");
-            let (files, metadata) =
-                bounded_items(&overlay.touched_files, DEFAULT_DETAIL_ITEM_LIMIT);
-            for file in files {
-                out.push_str(&format!("    - `{}`\n", file));
-            }
-            push_indented_omitted_detail_line(out, "touched file(s)", &metadata);
+    fn push_indented_omitted_detail_line(
+        out: &mut String,
+        label: &str,
+        metadata: &crate::core::engine::detail_output::DetailOutputMetadata,
+    ) {
+        if metadata.truncated {
+            out.push_str(&format!(
+                "    - _... {} more {} omitted (shown: {}, total: {}, limit: {})_\n",
+                metadata.omitted_item_count,
+                label,
+                metadata.items_rendered,
+                metadata.items_seen,
+                metadata.item_limit
+            ));
         }
     }
-}
 
-fn push_omitted_detail_line(
-    out: &mut String,
-    label: &str,
-    metadata: &crate::core::engine::detail_output::DetailOutputMetadata,
-) {
-    if metadata.truncated {
-        out.push_str(&format!(
-            "- _... {} more {} omitted (shown: {}, total: {}, limit: {})_\n",
-            metadata.omitted_item_count,
-            label,
-            metadata.items_rendered,
-            metadata.items_seen,
-            metadata.item_limit
-        ));
+    pub fn from_list_workflow(component: String, list: TraceList) -> (TraceCommandOutput, i32) {
+        let count = list.scenarios.len();
+        (
+            TraceCommandOutput::List(TraceListOutput {
+                command: "trace.list",
+                component,
+                component_id: list.component_id,
+                count,
+                scenarios: list.scenarios,
+                profiles: Vec::new(),
+            }),
+            0,
+        )
     }
-}
-
-fn push_indented_omitted_detail_line(
-    out: &mut String,
-    label: &str,
-    metadata: &crate::core::engine::detail_output::DetailOutputMetadata,
-) {
-    if metadata.truncated {
-        out.push_str(&format!(
-            "    - _... {} more {} omitted (shown: {}, total: {}, limit: {})_\n",
-            metadata.omitted_item_count,
-            label,
-            metadata.items_rendered,
-            metadata.items_seen,
-            metadata.item_limit
-        ));
-    }
-}
-
-pub fn from_list_workflow(component: String, list: TraceList) -> (TraceCommandOutput, i32) {
-    let count = list.scenarios.len();
-    (
-        TraceCommandOutput::List(TraceListOutput {
-            command: "trace.list",
-            component,
-            component_id: list.component_id,
-            count,
-            scenarios: list.scenarios,
-            profiles: Vec::new(),
-        }),
-        0,
-    )
 }
 
 #[cfg(test)]
