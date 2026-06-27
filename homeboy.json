@@ -673,7 +673,6 @@
         "field_patterns::src/core/api_jobs/remote_runner.rs::RepeatedFieldPattern",
         "field_patterns::src/core/ci_failure_log_triage.rs::RepeatedFieldPattern",
         "field_patterns::src/core/engine/resource.rs::RepeatedFieldPattern",
-        "field_patterns::src/core/extension/bench/metric_policy_preset.rs::RepeatedFieldPattern",
         "field_patterns::src/core/extension/bench/responsiveness.rs::RepeatedFieldPattern",
         "field_patterns::src/core/extension/trace/report.rs::RepeatedFieldPattern",
         "field_patterns::src/core/fuzz/types.rs::RepeatedFieldPattern",
