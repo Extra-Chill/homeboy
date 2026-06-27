@@ -953,6 +953,7 @@ mod tests {
                 daemon: true,
                 concurrency_limit: Some(2),
                 artifact_policy: Some("copy".to_string()),
+                ..RunnerSettings::default()
             },
             env: HashMap::from([
                 ("PATH".to_string(), "/runner/bin".to_string()),

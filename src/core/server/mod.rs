@@ -71,6 +71,14 @@ pub struct RunnerSettings {
     pub concurrency_limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_policy: Option<String>,
+    /// When `true`, the Lab offload controller↔runner version gate requires a
+    /// byte-identical Homeboy version on the runner. Default (unset/`false`) is
+    /// compatibility-aware: patch drift within the same MAJOR.MINOR is allowed
+    /// with a warning, and only MAJOR/MINOR drift hard-refuses. The
+    /// `HOMEBOY_REQUIRE_EXACT_RUNNER_VERSION` env var forces strict mode for a
+    /// single run regardless of this setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_exact_homeboy_version: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
