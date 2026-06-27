@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.22.2] - 2026-06-27
+
+### Changed
+- Single-source shared shell runner libs to top-level scripts/lib
+
 ## [1.22.1] - 2026-06-26
 
 ### Changed
