@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::core::agent_task_scheduler::AgentTaskPlan;
-use crate::core::{agent_task_provider, component, Error, Result};
+use crate::core::worktree::TaskWorktreeState;
+use crate::core::{agent_task_provider, component, worktree, Error, Result};
 
 use super::lab_workspaces_deps::{
     accepted_extra_lab_workspaces, add_candidate_extra_workspace, bare_module_imports,
@@ -45,6 +46,8 @@ pub(super) struct LabWorkspaceMappingEntry {
     snapshot_identity: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dependency_freshness: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_provenance: Option<serde_json::Value>,
 }
 
 impl LabWorkspaceMappingEntry {
@@ -71,6 +74,16 @@ pub(super) struct ExtraLabWorkspace {
     pub(super) path: PathBuf,
     pub(super) snapshot_includes: Vec<String>,
     pub(super) bootstrap_node_dependencies: bool,
+    pub(super) source_provenance: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WorkspaceRefResolution {
+    pub(super) raw_ref: String,
+    pub(super) handle: String,
+    pub(super) subpath: Option<String>,
+    pub(super) workspace_path: PathBuf,
+    pub(super) resolved_path: PathBuf,
 }
 
 /// An opaque dependency-install step declared by a runtime overlay. The
@@ -164,7 +177,8 @@ pub(super) fn sync_extra_lab_workspaces(
             },
         )?
         .0;
-        let entry = workspace_mapping_entry(&extra.role, &synced);
+        let mut entry = workspace_mapping_entry(&extra.role, &synced);
+        entry.source_provenance = extra.source_provenance.clone();
         if extra.bootstrap_node_dependencies {
             bootstrap_source_cli_node_dependencies(
                 runner_id,
@@ -190,6 +204,7 @@ pub(super) fn workspace_mapping_entry(
         sync_mode: synced.sync_mode.label().to_string(),
         snapshot_identity: synced.snapshot_identity.clone(),
         dependency_freshness: None,
+        source_provenance: None,
     }
 }
 
@@ -215,6 +230,7 @@ pub(super) fn workspace_mapping_entry_for_validation_dependency(
             "evidence_path": dependency.evidence_path.as_str(),
             "source_provenance": "validation_dependency_sibling",
         })),
+        source_provenance: None,
     }
 }
 
@@ -245,6 +261,7 @@ pub(super) fn workspace_mapping_entry_for_git_dependency(
                 "clean_git"
             },
         })),
+        source_provenance: None,
     }
 }
 
@@ -275,6 +292,7 @@ pub(super) fn workspace_mapping_entries_for_git_dependency(
             sync_mode: dependency.sync_mode.label().to_string(),
             snapshot_identity: dependency.head.clone(),
             dependency_freshness: None,
+            source_provenance: None,
         });
     }
     entries
@@ -364,6 +382,7 @@ pub(super) fn parse_runtime_overlays(
                 path,
                 snapshot_includes: spec.snapshot_includes,
                 bootstrap_node_dependencies: false,
+                source_provenance: None,
             },
             install: spec.install,
             expose_remote_path_env,
@@ -608,6 +627,7 @@ pub(super) fn agent_task_plan_extra_workspaces(
                         path: canon,
                         snapshot_includes: Vec::new(),
                         bootstrap_node_dependencies: false,
+                        source_provenance: None,
                     });
                 }
             }
@@ -767,6 +787,77 @@ pub(super) fn path_setting_extra_workspaces(
     }
 
     Ok(workspaces)
+}
+
+pub(super) fn resolve_path_setting_workspace_refs_in_args(
+    args: &[String],
+) -> Result<(Vec<String>, Vec<WorkspaceRefResolution>)> {
+    let mut resolutions = Vec::new();
+    let rewritten = rewrite_path_setting_workspace_refs_in_args(args, &mut resolutions)?;
+    Ok((rewritten, resolutions))
+}
+
+pub(super) fn workspace_ref_extra_workspaces(
+    resolutions: &[WorkspaceRefResolution],
+    source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    let mut seen = BTreeSet::new();
+    let mut workspaces = Vec::new();
+
+    for resolution in resolutions {
+        add_candidate_workspace_ref_extra_workspace(
+            resolution,
+            &source_canon,
+            &mut seen,
+            &mut workspaces,
+        )?;
+    }
+
+    Ok(workspaces)
+}
+
+fn add_candidate_workspace_ref_extra_workspace(
+    resolution: &WorkspaceRefResolution,
+    source_canon: &Path,
+    seen: &mut BTreeSet<PathBuf>,
+    workspaces: &mut Vec<ExtraLabWorkspace>,
+) -> Result<()> {
+    if !resolution.workspace_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "workspace_ref",
+            format!(
+                "Lab offload workspace ref `{}` resolved to a controller path that does not exist",
+                resolution.raw_ref
+            ),
+            Some(resolution.resolved_path.display().to_string()),
+            Some(vec![
+                "Use an active Homeboy worktree handle and an existing optional subpath, e.g. @workspace:repo@branch/path/to/file.".to_string(),
+            ]),
+        ));
+    }
+    let path = resolution.workspace_path.clone();
+    let canon = canonical_existing_dir(&path.display().to_string(), "workspace_ref")?;
+    if canon == source_canon || canon.starts_with(source_canon) || !seen.insert(canon.clone()) {
+        return Ok(());
+    }
+    workspaces.push(ExtraLabWorkspace {
+        role: "path_setting_workspace_ref".to_string(),
+        path: canon,
+        snapshot_includes: Vec::new(),
+        bootstrap_node_dependencies: false,
+        source_provenance: Some(serde_json::json!({
+            "source_provenance": "workspace_ref",
+            "ref": resolution.raw_ref,
+            "handle": resolution.handle,
+            "subpath": resolution.subpath,
+            "workspace_path": resolution.workspace_path.display().to_string(),
+            "resolved_path": resolution.resolved_path.display().to_string(),
+        })),
+    });
+    Ok(())
 }
 
 pub(super) fn rig_component_path_env_extra_workspaces(
@@ -1042,9 +1133,218 @@ fn push_path_setting_value(raw: &str, values: &mut Vec<String>) {
     let Some((key, value)) = raw.split_once('=') else {
         return;
     };
-    if !key.trim().is_empty() && !value.trim().is_empty() {
+    if key.trim().is_empty() || value.trim().is_empty() {
+        return;
+    }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+        collect_path_setting_json_values(&json, values);
+    } else {
         values.push(value.to_string());
     }
+}
+
+fn collect_path_setting_json_values(value: &serde_json::Value, values: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => values.push(text.to_string()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_path_setting_json_values(item, values);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                collect_path_setting_json_values(item, values);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_path_setting_workspace_refs_in_args(
+    args: &[String],
+    resolutions: &mut Vec<WorkspaceRefResolution>,
+) -> Result<Vec<String>> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--setting" {
+            out.push(arg.clone());
+            if let Some(raw) = iter.next() {
+                out.push(rewrite_path_setting_workspace_ref_pair(
+                    raw,
+                    false,
+                    resolutions,
+                )?);
+            }
+            continue;
+        }
+        if arg == "--setting-json" {
+            out.push(arg.clone());
+            if let Some(raw) = iter.next() {
+                out.push(rewrite_path_setting_workspace_ref_pair(
+                    raw,
+                    true,
+                    resolutions,
+                )?);
+            }
+            continue;
+        }
+        if let Some(raw) = arg.strip_prefix("--setting=") {
+            out.push(format!(
+                "--setting={}",
+                rewrite_path_setting_workspace_ref_pair(raw, false, resolutions)?
+            ));
+            continue;
+        }
+        if let Some(raw) = arg.strip_prefix("--setting-json=") {
+            out.push(format!(
+                "--setting-json={}",
+                rewrite_path_setting_workspace_ref_pair(raw, true, resolutions)?
+            ));
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    Ok(out)
+}
+
+fn rewrite_path_setting_workspace_ref_pair(
+    raw: &str,
+    is_json: bool,
+    resolutions: &mut Vec<WorkspaceRefResolution>,
+) -> Result<String> {
+    let Some((key, value)) = raw.split_once('=') else {
+        return Ok(raw.to_string());
+    };
+    if is_json {
+        let mut json: serde_json::Value = match serde_json::from_str(value) {
+            Ok(value) => value,
+            Err(_) => {
+                let rewritten = rewrite_workspace_ref_value(value, resolutions)?;
+                return Ok(format!("{key}={rewritten}"));
+            }
+        };
+        rewrite_workspace_refs_in_json_value(&mut json, resolutions)?;
+        return serde_json::to_string(&json)
+            .map(|value| format!("{key}={value}"))
+            .map_err(|err| Error::internal_json(err.to_string(), Some(key.to_string())));
+    }
+
+    let rewritten = rewrite_workspace_ref_value(value, resolutions)?;
+    Ok(format!("{key}={rewritten}"))
+}
+
+fn rewrite_workspace_refs_in_json_value(
+    value: &mut serde_json::Value,
+    resolutions: &mut Vec<WorkspaceRefResolution>,
+) -> Result<()> {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some(rewritten) = maybe_resolve_workspace_ref(text, resolutions)? {
+                *text = rewritten;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rewrite_workspace_refs_in_json_value(item, resolutions)?;
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                rewrite_workspace_refs_in_json_value(item, resolutions)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn rewrite_workspace_ref_value(
+    value: &str,
+    resolutions: &mut Vec<WorkspaceRefResolution>,
+) -> Result<String> {
+    maybe_resolve_workspace_ref(value, resolutions)
+        .map(|resolved| resolved.unwrap_or_else(|| value.to_string()))
+}
+
+fn maybe_resolve_workspace_ref(
+    value: &str,
+    resolutions: &mut Vec<WorkspaceRefResolution>,
+) -> Result<Option<String>> {
+    let Some((handle, subpath)) = parse_workspace_ref(value) else {
+        return Ok(None);
+    };
+    let record = worktree::resolve(&handle).map_err(|_| {
+        Error::validation_invalid_argument(
+            "workspace_ref",
+            format!("Lab offload workspace ref `{value}` does not match a known Homeboy worktree"),
+            Some(value.to_string()),
+            Some(vec![
+                "Create or list Homeboy task worktrees with `homeboy worktree create` and `homeboy worktree list`.".to_string(),
+            ]),
+        )
+    })?;
+    if record.state != TaskWorktreeState::Active {
+        return Err(Error::validation_invalid_argument(
+            "workspace_ref",
+            format!("Lab offload workspace ref `{value}` points at a stale Homeboy worktree"),
+            Some(record.id),
+            Some(vec![
+                "Use an active worktree handle or create a fresh worktree before Lab offload."
+                    .to_string(),
+            ]),
+        ));
+    }
+    let workspace_path = PathBuf::from(&record.worktree_path);
+    let mut resolved = workspace_path.clone();
+    if let Some(subpath) = subpath.as_deref() {
+        resolved.push(subpath);
+    }
+    if !resolved.exists() {
+        return Err(Error::validation_invalid_argument(
+            "workspace_ref",
+            format!("Lab offload workspace ref `{value}` resolved to a missing controller path"),
+            Some(resolved.display().to_string()),
+            Some(vec![
+                "Use an existing optional subpath under the referenced Homeboy worktree."
+                    .to_string(),
+            ]),
+        ));
+    }
+    resolutions.push(WorkspaceRefResolution {
+        raw_ref: value.to_string(),
+        handle,
+        subpath,
+        workspace_path,
+        resolved_path: resolved.clone(),
+    });
+    Ok(Some(resolved.display().to_string()))
+}
+
+fn parse_workspace_ref(value: &str) -> Option<(String, Option<String>)> {
+    let rest = value.strip_prefix("@workspace:")?;
+    let rest = rest.trim();
+    if rest.is_empty() || rest.contains("://") {
+        return None;
+    }
+    let (handle, subpath) = rest
+        .split_once('/')
+        .map(|(handle, subpath)| (handle, Some(subpath)))
+        .unwrap_or((rest, None));
+    if handle.trim().is_empty() || subpath.is_some_and(|value| value.trim().is_empty()) {
+        return None;
+    }
+    Some((handle.to_string(), subpath.map(str::to_string)))
 }
 
 fn subcommand_index(args: &[String], subcommand: &str) -> Option<usize> {
@@ -1053,15 +1353,17 @@ fn subcommand_index(args: &[String], subcommand: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod provider_config_candidate_paths_tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use super::{
         agent_task_fanout_extra_workspaces, agent_task_plan_extra_workspaces, agent_task_plan_spec,
-        path_setting_extra_workspaces, preflight_provider_config_source_cli_dependencies,
-        provider_config_candidate_paths, provider_config_extra_workspaces,
+        path_setting_extra_workspaces, path_setting_values,
+        preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
+        provider_config_extra_workspaces, resolve_path_setting_workspace_refs_in_args,
         rig_component_path_env_extra_workspaces_from_entries,
-        workspace_mapping_entries_for_git_dependency,
+        workspace_mapping_entries_for_git_dependency, workspace_ref_extra_workspaces,
+        ExtraLabWorkspace,
     };
     use crate::core::runner::{
         ByteFileCounts, RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode,
@@ -1503,6 +1805,191 @@ mod provider_config_candidate_paths_tests {
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));
         assert!(workspaces[0].bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn path_setting_workspace_ref_resolves_to_controller_path_and_syncs_workspace() {
+        crate::test_support::with_isolated_home(|home| {
+            let store = crate::core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("task-worktrees");
+            std::fs::create_dir_all(&store).expect("worktree store");
+            let source = home.path().join("primary");
+            let worktree = home.path().join("repo@cook");
+            let nested = worktree.join("fixtures/input.json");
+            std::fs::create_dir_all(&source).expect("source dir");
+            std::fs::create_dir_all(nested.parent().unwrap()).expect("nested dir");
+            std::fs::write(&nested, "{}\n").expect("nested file");
+            std::fs::write(
+                store.join("repo_cook.json"),
+                serde_json::json!({
+                    "id": "repo@cook",
+                    "component_id": "repo",
+                    "source_checkout": home.path().join("repo").display().to_string(),
+                    "worktree_path": worktree.display().to_string(),
+                    "branch": "cook",
+                    "base_ref": "HEAD",
+                    "cleanup_policy": "preserve_on_failure",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "state": "active"
+                })
+                .to_string(),
+            )
+            .expect("worktree record");
+            let args = vec![
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "--setting".to_string(),
+                "fixture=@workspace:repo@cook/fixtures/input.json".to_string(),
+            ];
+
+            let (rewritten, resolutions) =
+                resolve_path_setting_workspace_refs_in_args(&args).expect("resolve refs");
+            let expected = format!("fixture={}", nested.display());
+
+            assert_eq!(rewritten[3], expected);
+            assert_eq!(resolutions.len(), 1);
+            assert_eq!(resolutions[0].handle, "repo@cook");
+            assert_eq!(
+                resolutions[0].subpath.as_deref(),
+                Some("fixtures/input.json")
+            );
+
+            let workspaces =
+                workspace_ref_extra_workspaces(&resolutions, &source).expect("extra workspaces");
+            assert_eq!(workspaces.len(), 1);
+            assert_eq!(workspaces[0].role, "path_setting_workspace_ref");
+            assert_eq!(workspaces[0].path, worktree.canonicalize().unwrap());
+            assert_eq!(
+                workspaces[0].source_provenance.as_ref().unwrap()["ref"],
+                "@workspace:repo@cook/fixtures/input.json"
+            );
+        });
+    }
+
+    #[test]
+    fn path_setting_workspace_ref_resolves_inside_setting_json() {
+        crate::test_support::with_isolated_home(|home| {
+            let store = crate::core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("task-worktrees");
+            std::fs::create_dir_all(&store).expect("worktree store");
+            let worktree = home.path().join("repo@cook");
+            let nested = worktree.join("data/corpus");
+            std::fs::create_dir_all(&nested).expect("nested dir");
+            std::fs::write(
+                store.join("repo_cook.json"),
+                serde_json::json!({
+                    "id": "repo@cook",
+                    "component_id": "repo",
+                    "source_checkout": home.path().join("repo").display().to_string(),
+                    "worktree_path": worktree.display().to_string(),
+                    "branch": "cook",
+                    "base_ref": "HEAD",
+                    "cleanup_policy": "preserve_on_failure",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "state": "active"
+                })
+                .to_string(),
+            )
+            .expect("worktree record");
+            let args = vec![
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "--setting-json".to_string(),
+                r#"paths={"corpus":"@workspace:repo@cook/data/corpus","label":"kept"}"#.to_string(),
+            ];
+
+            let (rewritten, resolutions) =
+                resolve_path_setting_workspace_refs_in_args(&args).expect("resolve refs");
+            let raw = rewritten[3].strip_prefix("paths=").expect("paths setting");
+            let json: serde_json::Value = serde_json::from_str(raw).expect("setting json");
+
+            assert_eq!(json["corpus"], nested.display().to_string());
+            assert_eq!(json["label"], "kept");
+            assert_eq!(resolutions.len(), 1);
+            assert!(path_setting_values(&rewritten)
+                .iter()
+                .any(|value| value == &nested.display().to_string()));
+        });
+    }
+
+    #[test]
+    fn path_setting_workspace_ref_missing_handle_fails_locally() {
+        crate::test_support::with_isolated_home(|_| {
+            let args = vec![
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "--setting=fixture=@workspace:missing@cook/file.json".to_string(),
+            ];
+
+            let err = resolve_path_setting_workspace_refs_in_args(&args)
+                .expect_err("missing workspace ref should fail");
+
+            assert_eq!(err.details["field"], "workspace_ref");
+            assert!(err
+                .message
+                .contains("does not match a known Homeboy worktree"));
+        });
+    }
+
+    #[test]
+    fn path_setting_workspace_ref_removed_record_fails_as_stale() {
+        crate::test_support::with_isolated_home(|home| {
+            let store = crate::core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("task-worktrees");
+            std::fs::create_dir_all(&store).expect("worktree store");
+            let worktree = home.path().join("repo@old");
+            std::fs::create_dir_all(&worktree).expect("worktree dir");
+            std::fs::write(
+                store.join("repo_old.json"),
+                serde_json::json!({
+                    "id": "repo@old",
+                    "component_id": "repo",
+                    "source_checkout": home.path().join("repo").display().to_string(),
+                    "worktree_path": worktree.display().to_string(),
+                    "branch": "old",
+                    "base_ref": "HEAD",
+                    "cleanup_policy": "preserve_on_failure",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "state": "removed"
+                })
+                .to_string(),
+            )
+            .expect("worktree record");
+            let args = vec![
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "--setting".to_string(),
+                "fixture=@workspace:repo@old".to_string(),
+            ];
+
+            let err = resolve_path_setting_workspace_refs_in_args(&args)
+                .expect_err("removed workspace ref should fail");
+
+            assert_eq!(err.details["field"], "workspace_ref");
+            assert!(err.message.contains("stale Homeboy worktree"));
+        });
+    }
+
+    #[test]
+    fn workspace_ref_provenance_is_recorded_on_mapping_entry() {
+        let workspace = ExtraLabWorkspace {
+            role: "path_setting_workspace_ref".to_string(),
+            path: PathBuf::from("/local/repo@cook"),
+            snapshot_includes: Vec::new(),
+            bootstrap_node_dependencies: false,
+            source_provenance: Some(serde_json::json!({
+                "source_provenance": "workspace_ref",
+                "ref": "@workspace:repo@cook/file.json"
+            })),
+        };
+
+        assert_eq!(
+            workspace.source_provenance.as_ref().unwrap()["source_provenance"],
+            "workspace_ref"
+        );
     }
 
     #[test]

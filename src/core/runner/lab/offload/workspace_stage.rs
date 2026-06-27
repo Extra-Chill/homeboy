@@ -106,6 +106,8 @@ fn prepare_lab_offload_workspace_stage_inner(
     }
     let offload_args =
         inject_agent_task_default_provider_config_in_args(&changed_since_preflight.args)?;
+    let (offload_args, workspace_ref_resolutions) =
+        resolve_path_setting_workspace_refs_in_args(&offload_args)?;
     let mut extra_workspaces = lab_extra_workspaces(source_path)?;
     // Sync any controller-local directories referenced by --provider-config
     // (runtime components, provider plugins, extra mount sources) so the cook
@@ -124,6 +126,10 @@ fn prepare_lab_offload_workspace_stage_inner(
     )?);
     extra_workspaces.extend(agent_task_provider_runtime_component_extra_workspaces(
         &offload_args,
+        source_path,
+    )?);
+    extra_workspaces.extend(workspace_ref_extra_workspaces(
+        &workspace_ref_resolutions,
         source_path,
     )?);
     extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, source_path)?);
