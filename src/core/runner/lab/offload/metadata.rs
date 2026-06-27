@@ -225,17 +225,156 @@ pub(crate) fn lab_runner_homeboy_metadata(
     })
 }
 
-pub(crate) fn lab_runner_homeboy_has_blocking_drift(status: &RunnerStatusReport) -> bool {
-    status.stale_daemon.is_some() || lab_runner_homeboy_version_drift(status)
+/// Env var that forces strict exact-match for the controller↔runner version
+/// gate for a single run, regardless of per-runner configuration. Accepts the
+/// usual truthy spellings (`1`, `true`, `yes`, `on`).
+pub(crate) const REQUIRE_EXACT_RUNNER_VERSION_ENV: &str = "HOMEBOY_REQUIRE_EXACT_RUNNER_VERSION";
+
+/// Classification of controller↔runner Homeboy version drift for the Lab
+/// offload dispatch gate.
+///
+/// Patch-level drift within the same `MAJOR.MINOR` is wire-compatible: the
+/// runner daemon and the controller speak the same provider/job contract, so
+/// the run can proceed with a warning. `MAJOR`/`MINOR` drift can genuinely
+/// change that contract and is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunnerHomeboyVersionDrift {
+    /// Controller and runner report the same version (no drift).
+    None,
+    /// Same `MAJOR.MINOR`, patch differs — wire-compatible; proceed with a warning.
+    CompatiblePatch,
+    /// `MAJOR`/`MINOR` differs, or a version string could not be parsed while the
+    /// raw strings differ — the provider contract could genuinely differ; refuse.
+    Incompatible,
 }
 
-fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
+/// Resolve whether the controller↔runner version gate should enforce exact
+/// byte-identical match. Defaults to compatibility-aware (`false`). Operators
+/// opt into strict exact-match either per-runner (the
+/// `require_exact_homeboy_version` runner setting) or for a single run via the
+/// `HOMEBOY_REQUIRE_EXACT_RUNNER_VERSION` env var.
+pub(crate) fn require_exact_runner_version(
+    settings: &crate::core::server::RunnerSettings,
+) -> bool {
+    if std::env::var(REQUIRE_EXACT_RUNNER_VERSION_ENV)
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+    {
+        return true;
+    }
+    settings.require_exact_homeboy_version.unwrap_or(false)
+}
+
+/// Extract the `(MAJOR, MINOR)` pair from a Homeboy version string, tolerating a
+/// leading label (e.g. `homeboy 0.266.1`) and trailing build/prerelease
+/// metadata (e.g. `0.266.1+abc`). Mirrors the lenient parsing already used by
+/// the runner version probe so the gate accepts the same shapes.
+fn parse_major_minor(version: &str) -> Option<(u64, u64)> {
+    let candidate = version
+        .split_whitespace()
+        .find(|token| token.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .unwrap_or_else(|| version.trim());
+    let mut parts = candidate.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor: u64 = parts
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((major, minor))
+}
+
+/// Classify controller↔runner Homeboy version drift using the same drift
+/// evidence the metadata builder reports (runner session version vs the
+/// compiled controller version).
+pub(crate) fn classify_runner_homeboy_version_drift(
+    status: &RunnerStatusReport,
+) -> RunnerHomeboyVersionDrift {
     let controller_version = env!("CARGO_PKG_VERSION");
-    status
+    let Some(runner_version) = status
         .session
         .as_ref()
         .map(|session| session.homeboy_version.as_str())
-        .is_some_and(|version| version != controller_version)
+    else {
+        // No connected session means no version evidence to compare; leave
+        // connectivity gating to the dedicated preflight checks.
+        return RunnerHomeboyVersionDrift::None;
+    };
+
+    // Preserve the existing exact-match fast path: byte-identical strings are
+    // unambiguously the same build.
+    if runner_version == controller_version {
+        return RunnerHomeboyVersionDrift::None;
+    }
+
+    match (
+        parse_major_minor(controller_version),
+        parse_major_minor(runner_version),
+    ) {
+        (Some(controller), Some(runner)) if controller == runner => {
+            RunnerHomeboyVersionDrift::CompatiblePatch
+        }
+        // Same-MAJOR.MINOR was handled above; any other parseable pair differs
+        // at MAJOR/MINOR. Unparseable strings that already differ are refused
+        // conservatively.
+        _ => RunnerHomeboyVersionDrift::Incompatible,
+    }
+}
+
+pub(crate) fn lab_runner_homeboy_has_blocking_drift(
+    status: &RunnerStatusReport,
+    require_exact: bool,
+) -> bool {
+    // Build-identity drift within the runner (active daemon control plane vs the
+    // configured job command binary) is an internal-inconsistency signal that is
+    // always blocking regardless of the controller↔runner version policy.
+    if status.stale_daemon.is_some() {
+        return true;
+    }
+    match classify_runner_homeboy_version_drift(status) {
+        RunnerHomeboyVersionDrift::None => false,
+        RunnerHomeboyVersionDrift::CompatiblePatch => require_exact,
+        RunnerHomeboyVersionDrift::Incompatible => true,
+    }
+}
+
+/// Warning to surface when the runner is on a wire-compatible patch-drifted
+/// version and the gate is allowing the run to proceed. Returns `None` when
+/// there is nothing to warn about (no drift, refused incompatibility, or strict
+/// mode where the drift is instead surfaced as an error).
+pub(crate) fn lab_runner_homeboy_compatible_drift_warning(
+    status: &RunnerStatusReport,
+    require_exact: bool,
+) -> Option<String> {
+    if require_exact {
+        return None;
+    }
+    if !matches!(
+        classify_runner_homeboy_version_drift(status),
+        RunnerHomeboyVersionDrift::CompatiblePatch
+    ) {
+        return None;
+    }
+    let controller_version = env!("CARGO_PKG_VERSION");
+    let runner_version = status
+        .session
+        .as_ref()
+        .map(|session| session.homeboy_version.as_str())
+        .unwrap_or("<unknown>");
+    Some(format!(
+        "Lab offload: runner reports Homeboy `{runner_version}` while the controller is `{controller_version}`; same MAJOR.MINOR (patch drift only) is wire-compatible, proceeding. Set runner setting `require_exact_homeboy_version` or export `{REQUIRE_EXACT_RUNNER_VERSION_ENV}=1` to enforce exact-match."
+    ))
+}
+
+fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
+    classify_runner_homeboy_version_drift(status) != RunnerHomeboyVersionDrift::None
 }
 
 pub(crate) fn lab_source_checkout_metadata(source_path: &Path) -> serde_json::Value {

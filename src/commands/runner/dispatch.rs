@@ -43,6 +43,7 @@ pub fn run(
                 daemon,
                 concurrency_limit,
                 artifact_policy,
+                ..RunnerSettings::default()
             },
         })),
         RunnerCommand::Enable {
@@ -60,6 +61,7 @@ pub fn run(
                 daemon,
                 concurrency_limit,
                 artifact_policy,
+                ..RunnerSettings::default()
             },
         )),
         RunnerCommand::List => map_registry(list()),

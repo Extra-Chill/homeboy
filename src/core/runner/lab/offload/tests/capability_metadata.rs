@@ -277,7 +277,14 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
 fn runner_homeboy_version_drift_blocks_offload_with_upgrade_guidance() {
     let status = reverse_status("homeboy-lab");
 
-    assert!(lab_runner_homeboy_has_blocking_drift(&status));
+    // `reverse_status` reports runner `0.0.0` against the controller's current
+    // version, a MINOR/MAJOR mismatch that is blocking regardless of strict mode.
+    assert!(lab_runner_homeboy_has_blocking_drift(&status, false));
+    assert!(lab_runner_homeboy_has_blocking_drift(&status, true));
+    assert_eq!(
+        classify_runner_homeboy_version_drift(&status),
+        RunnerHomeboyVersionDrift::Incompatible
+    );
 
     let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
 
@@ -297,6 +304,146 @@ fn runner_homeboy_version_drift_blocks_offload_with_upgrade_guidance() {
     assert!(tried.iter().any(|hint| hint
         .as_str()
         .is_some_and(|hint| hint.contains("refresh or select a clean runner binary"))));
+}
+
+/// Build a reverse-connected status whose runner session reports `version`.
+fn status_with_runner_version(runner_id: &str, version: &str) -> RunnerStatusReport {
+    let mut status = reverse_status(runner_id);
+    if let Some(session) = status.session.as_mut() {
+        session.homeboy_version = version.to_string();
+        session.homeboy_build_identity = Some(format!("{version}+test"));
+    }
+    status
+}
+
+/// A version string sharing the controller's MAJOR.MINOR but a different patch.
+fn same_minor_patch_drift_version(prefix: &str) -> String {
+    let controller = env!("CARGO_PKG_VERSION");
+    let mut parts = controller.split('.');
+    let major = parts.next().unwrap_or("0");
+    let minor = parts.next().unwrap_or("0");
+    let patch: u64 = parts
+        .next()
+        .and_then(|p| {
+            p.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0);
+    format!("{prefix}{major}.{minor}.{}", patch.wrapping_add(1))
+}
+
+#[test]
+fn same_minor_patch_drift_is_compatible_and_proceeds_with_warning() {
+    let status = status_with_runner_version(
+        "homeboy-lab",
+        &same_minor_patch_drift_version("homeboy "),
+    );
+
+    assert_eq!(
+        classify_runner_homeboy_version_drift(&status),
+        RunnerHomeboyVersionDrift::CompatiblePatch
+    );
+    // Compatibility-aware default: patch drift proceeds.
+    assert!(!lab_runner_homeboy_has_blocking_drift(&status, false));
+    let warning = lab_runner_homeboy_compatible_drift_warning(&status, false)
+        .expect("compatible patch drift should warn");
+    assert!(warning.contains("wire-compatible"));
+    assert!(warning.contains("require_exact_homeboy_version"));
+}
+
+#[test]
+fn same_minor_patch_drift_is_refused_under_strict_mode() {
+    let status =
+        status_with_runner_version("homeboy-lab", &same_minor_patch_drift_version(""));
+
+    // Strict override restores exact-match: patch drift now refuses.
+    assert!(lab_runner_homeboy_has_blocking_drift(&status, true));
+    // No "proceeding" warning is emitted under strict mode; the drift surfaces
+    // as the refusal error instead.
+    assert!(lab_runner_homeboy_compatible_drift_warning(&status, true).is_none());
+}
+
+#[test]
+fn minor_version_drift_is_incompatible_and_refused() {
+    let controller = env!("CARGO_PKG_VERSION");
+    let mut parts = controller.split('.');
+    let major = parts.next().unwrap_or("0");
+    let minor: u64 = parts
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    let drifted = format!("{major}.{}.0", minor.wrapping_add(1));
+    let status = status_with_runner_version("homeboy-lab", &drifted);
+
+    assert_eq!(
+        classify_runner_homeboy_version_drift(&status),
+        RunnerHomeboyVersionDrift::Incompatible
+    );
+    assert!(lab_runner_homeboy_has_blocking_drift(&status, false));
+    assert!(lab_runner_homeboy_has_blocking_drift(&status, true));
+    assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
+}
+
+#[test]
+fn exact_version_match_has_no_drift() {
+    let status = status_with_runner_version("homeboy-lab", env!("CARGO_PKG_VERSION"));
+
+    assert_eq!(
+        classify_runner_homeboy_version_drift(&status),
+        RunnerHomeboyVersionDrift::None
+    );
+    assert!(!lab_runner_homeboy_has_blocking_drift(&status, false));
+    assert!(!lab_runner_homeboy_has_blocking_drift(&status, true));
+    assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
+}
+
+#[test]
+fn stale_daemon_build_identity_drift_always_blocks_even_on_compatible_version() {
+    // Runner version matches the controller exactly, but the runner's active
+    // daemon was started by a different build than its job command binary: that
+    // internal inconsistency is always blocking, independent of the version policy.
+    let mut status = status_with_runner_version("homeboy-lab", env!("CARGO_PKG_VERSION"));
+    status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "homeboy 0.228.0".to_string(),
+        "homeboy 0.229.11".to_string(),
+        Some("homeboy 0.228.0+old".to_string()),
+        Some("homeboy 0.229.11+new".to_string()),
+    ));
+
+    assert_eq!(
+        classify_runner_homeboy_version_drift(&status),
+        RunnerHomeboyVersionDrift::None
+    );
+    assert!(lab_runner_homeboy_has_blocking_drift(&status, false));
+}
+
+#[test]
+fn require_exact_runner_version_resolves_from_setting_and_env() {
+    use crate::core::server::RunnerSettings;
+
+    let default_settings = RunnerSettings::default();
+    assert!(!require_exact_runner_version(&default_settings));
+
+    let strict_settings = RunnerSettings {
+        require_exact_homeboy_version: Some(true),
+        ..RunnerSettings::default()
+    };
+    assert!(require_exact_runner_version(&strict_settings));
+
+    // Env override forces strict mode even when the setting is unset/false.
+    let prior = std::env::var(REQUIRE_EXACT_RUNNER_VERSION_ENV).ok();
+    std::env::set_var(REQUIRE_EXACT_RUNNER_VERSION_ENV, "1");
+    assert!(require_exact_runner_version(&default_settings));
+    std::env::set_var(REQUIRE_EXACT_RUNNER_VERSION_ENV, "off");
+    assert!(!require_exact_runner_version(&default_settings));
+    match prior {
+        Some(value) => std::env::set_var(REQUIRE_EXACT_RUNNER_VERSION_ENV, value),
+        None => std::env::remove_var(REQUIRE_EXACT_RUNNER_VERSION_ENV),
+    }
 }
 
 #[test]

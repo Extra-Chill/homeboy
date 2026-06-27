@@ -277,13 +277,14 @@ pub(crate) fn run_lab_offload_inner(
     }
     let source_checkout = lab_source_checkout_metadata(&source_path);
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let require_exact_runner_version = require_exact_runner_version(&runner.settings);
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
     plan = with_step(
         plan,
         PlanStep::builder(
             "lab.runner_homeboy",
             "lab.runner_homeboy",
-            if lab_runner_homeboy_has_blocking_drift(&runner_status) {
+            if lab_runner_homeboy_has_blocking_drift(&runner_status, require_exact_runner_version) {
                 PlanStepStatus::Failed
             } else {
                 PlanStepStatus::Ready
@@ -314,12 +315,18 @@ pub(crate) fn run_lab_offload_inner(
                 shell::quote_arg(runner_id)
             ))
     );
-    if lab_runner_homeboy_has_blocking_drift(&runner_status) {
+    if lab_runner_homeboy_has_blocking_drift(&runner_status, require_exact_runner_version) {
         return Err(stale_runner_homeboy_error(
             runner_id,
             homeboy_path,
             &runner_status,
         ));
+    }
+    if let Some(warning) =
+        lab_runner_homeboy_compatible_drift_warning(&runner_status, require_exact_runner_version)
+    {
+        eprintln!("{warning}");
+        messages.push(warning);
     }
     let command_prefix = lab_offload_command_prefix(&source_path, homeboy_path);
     eprintln!(
