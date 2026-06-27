@@ -21,6 +21,17 @@ fn runtime_tmpdir_env() -> String {
     crate::core::product_identity::PRODUCT_IDENTITY.env_var("RUNTIME_TMPDIR")
 }
 
+/// Inspected/planned/removed byte totals shared across cleanup output DTOs.
+/// Flattened into the parent structs so the JSON wire format keeps
+/// `inspected_count`, `planned_size_bytes`, and `removed_size_bytes` as
+/// top-level keys.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CleanupSizeTotals {
+    pub inspected_count: usize,
+    pub planned_size_bytes: u64,
+    pub removed_size_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RuntimeTempCleanupOutput {
     pub command: &'static str,
@@ -28,11 +39,10 @@ pub struct RuntimeTempCleanupOutput {
     pub runtime_tmp_root: String,
     pub older_than_days: u64,
     pub prefix: Option<String>,
-    pub inspected_count: usize,
+    #[serde(flatten)]
+    pub totals: CleanupSizeTotals,
     pub planned_count: usize,
-    pub planned_size_bytes: u64,
     pub removed_count: usize,
-    pub removed_size_bytes: u64,
     pub skipped_count: usize,
     pub rows: Vec<RuntimeTempCleanupRow>,
 }
@@ -59,11 +69,13 @@ pub fn cleanup_runtime_tmp(
         runtime_tmp_root: root.display().to_string(),
         older_than_days,
         prefix: prefix.map(str::to_string),
-        inspected_count: 0,
+        totals: CleanupSizeTotals {
+            inspected_count: 0,
+            planned_size_bytes: 0,
+            removed_size_bytes: 0,
+        },
         planned_count: 0,
-        planned_size_bytes: 0,
         removed_count: 0,
-        removed_size_bytes: 0,
         skipped_count: 0,
         rows: Vec::new(),
     };
@@ -83,7 +95,7 @@ pub fn cleanup_runtime_tmp(
     entries.sort_by_key(|entry| entry.file_name());
 
     for entry in entries.into_iter().take(limit.max(1)) {
-        output.inspected_count += 1;
+        output.totals.inspected_count += 1;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         let mut row = RuntimeTempCleanupRow {
@@ -118,11 +130,11 @@ pub fn cleanup_runtime_tmp(
             row.reason = "runtime tmp entry is eligible".to_string();
             row.size_bytes = path_size_bytes(&path, &metadata)?;
             output.planned_count += 1;
-            output.planned_size_bytes += row.size_bytes;
+            output.totals.planned_size_bytes += row.size_bytes;
             if apply {
                 remove_runtime_tmp_entry(&path, &metadata)?;
                 output.removed_count += 1;
-                output.removed_size_bytes += row.size_bytes;
+                output.totals.removed_size_bytes += row.size_bytes;
             }
         }
 
