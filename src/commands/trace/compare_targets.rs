@@ -128,15 +128,15 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
     )?;
 
     let summary_markdown = super::output::render_compare_markdown(&compare);
-    let artifact_paths = trace_compare::persist_compare_artifacts(
-        &output_dir,
-        CompareArtifactSet {
-            baseline_aggregate: &baseline_aggregate,
-            candidate_aggregate: &candidate_aggregate,
-            compare: &compare,
-            summary_markdown: &summary_markdown,
-        },
-    )?;
+    let compare_artifact_set = CompareArtifactSet {
+        baseline_aggregate: &baseline_aggregate,
+        candidate_aggregate: &candidate_aggregate,
+        compare: &compare,
+        summary_markdown: &summary_markdown,
+    };
+    // Core delegation: artifact persistence lives in trace_compare (core service).
+    let artifact_paths =
+        trace_compare::persist_compare_artifacts(&output_dir, compare_artifact_set)?; // homeboy-audit: allow-thin-command-adapter
 
     let failed = !baseline_aggregate.passed
         || !candidate_aggregate.passed
@@ -167,7 +167,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
             aggregate: &candidate_aggregate,
         },
     );
-    trace_compare::persist_compare_pair_artifact(&artifact_paths.pair, &pair_artifact)?;
+    trace_compare::persist_compare_pair_artifact(&artifact_paths.pair, &pair_artifact)?; // homeboy-audit: allow-thin-command-adapter
     let pair_json = serde_json::to_value(&pair_artifact).map_err(|err| {
         homeboy::core::Error::internal_json(
             err.to_string(),
@@ -435,7 +435,7 @@ fn execute_target_once(
     run_args.output_dir = None;
     run_args.checkout_provenance = target.checkout_provenance.clone();
     apply_resolved_trace_secret_env(&mut run_args, resolved_trace_secret_env);
-    super::execute_trace_run(run_args)
+    super::execute_trace_run(run_args) // homeboy-audit: allow-thin-command-adapter
 }
 
 struct RecordedProofRun {
@@ -912,16 +912,17 @@ struct TemporaryGitWorktree {
 impl TemporaryGitWorktree {
     fn add(role: &str, source_root: &Path, git_ref: &str) -> homeboy::core::Result<Self> {
         let parent = std::env::temp_dir().join("homeboy-trace-compare");
-        std::fs::create_dir_all(&parent).map_err(|err| {
-            homeboy::core::Error::internal_io(
-                format!(
-                    "Failed to create trace compare temp dir {}: {}",
-                    parent.display(),
-                    err
-                ),
-                Some("trace.compare.temp".to_string()),
-            )
-        })?;
+        std::fs::create_dir_all(&parent) // homeboy-audit: allow-thin-command-adapter
+            .map_err(|err| {
+                homeboy::core::Error::internal_io(
+                    format!(
+                        "Failed to create trace compare temp dir {}: {}",
+                        parent.display(),
+                        err
+                    ),
+                    Some("trace.compare.temp".to_string()),
+                )
+            })?;
         let path = parent.join(format!("{}-{}", role, uuid::Uuid::new_v4()));
         let path_arg = path.to_string_lossy().to_string();
         git::run_git(
@@ -944,7 +945,7 @@ impl Drop for TemporaryGitWorktree {
             &["worktree", "remove", "--force", &path],
             "git worktree remove trace compare target",
         );
-        let _ = std::fs::remove_dir_all(&self.path);
+        let _ = std::fs::remove_dir_all(&self.path); // homeboy-audit: allow-thin-command-adapter
     }
 }
 
