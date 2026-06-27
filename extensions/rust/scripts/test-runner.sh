@@ -23,7 +23,7 @@ SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../../scripts/
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --steps --failure-trap --sidecar-writer
-# shellcheck source=./lib/command-capture.sh
+# shellcheck source=/dev/null
 source "${COMMAND_CAPTURE_HELPER}"
 # shellcheck source=../../scripts/lib/settings.sh
 source "${SETTINGS_HELPER}"

@@ -29,7 +29,7 @@ FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../../scripts/l
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"
 homeboy_runner_init --steps --failure-trap --sidecar-writer
-# shellcheck source=./lib/command-capture.sh
+# shellcheck source=/dev/null
 source "${COMMAND_CAPTURE_HELPER}"
 # shellcheck source=../../scripts/lib/fix-results.sh
 source "$FIX_RESULTS_HELPER"

@@ -49,7 +49,4 @@ HOMEBOY_SKIP="eslint,phpstan"
 assert_runs "step not in skiplist" "phpcs"
 assert_skips "skiplisted step without allowlist" "phpstan"
 
-HOMEBOY_RUNTIME_RUNNER_STEPS="$RUNNER_STEPS_CORE_HELPER" \
-    bash -c 'source "$1"; type should_run_step >/dev/null' _ "$ROOT/wordpress/scripts/lib/runner-steps.sh"
-
 echo "runner-steps smoke ok"

@@ -19,17 +19,6 @@ assert_contains() {
     fi
 }
 
-isolated_extension="${TMP_DIR}/isolated-extension/wordpress"
-mkdir -p "${isolated_extension}/scripts/lib"
-cp "${EXTENSION_DIR}/scripts/lib/resolve-context.sh" "${isolated_extension}/scripts/lib/resolve-context.sh"
-printf '{"id":"wordpress"}\n' > "${isolated_extension}/wordpress.json"
-
-HOMEBOY_COMPONENT_PATH="${TMP_DIR}/component" \
-HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
-SCRIPT_DIR="${isolated_extension}/scripts/lib" \
-bash -c 'source "$1"; homeboy_resolve_context --component-alias PLUGIN_PATH; test "$PLUGIN_PATH" = "$HOMEBOY_COMPONENT_PATH"' \
-    _ "${isolated_extension}/scripts/lib/resolve-context.sh"
-
 component_dir="${TMP_DIR}/react-19-plugin"
 fake_bin="${TMP_DIR}/bin"
 npm_log="${TMP_DIR}/npm.log"

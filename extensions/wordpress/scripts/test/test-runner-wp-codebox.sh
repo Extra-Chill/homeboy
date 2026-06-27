@@ -19,7 +19,7 @@ PHPUNIT_RECIPE_BUILDER="${HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER:-${SCRIPT_DI
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context --component-alias PLUGIN_PATH
-# shellcheck source=../lib/runner-steps.sh
+# shellcheck source=/dev/null
 if [ -f "$RUNNER_STEPS_HELPER" ]; then
     source "$RUNNER_STEPS_HELPER"
 fi

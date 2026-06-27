@@ -100,7 +100,7 @@ fi
 # Resolve execution context (shared helper)
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
-# shellcheck source=../lib/resolve-context.sh
+# shellcheck source=/dev/null
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH
 # shellcheck source=/dev/null
