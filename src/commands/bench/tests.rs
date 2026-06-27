@@ -444,1350 +444,1418 @@ fn run_args_with_profile(component: Option<&str>, rig: Vec<String>, profile: &st
     args
 }
 
-#[test]
-fn filter_strips_boolean_flags() {
-    let args = vec!["--ratchet".to_string(), "--filter=Scenario".to_string()];
-    let result = filter_homeboy_flags(&args);
-    assert_eq!(result, vec!["--filter=Scenario"]);
-}
+mod warmup_tests {
+    use super::*;
 
-#[test]
-fn parses_force_hot_after_bench_without_losing_settings() {
-    let normalized = crate::commands::utils::args::normalize(
-        [
-            "homeboy",
-            "bench",
-            "--rig",
-            "studio-bfb",
-            "--iterations",
-            "1",
-            "--force-hot",
-            "--setting",
-            "studio_site_build_prompt_variant=astro-docs-content-collection",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-    );
+    #[test]
+    fn parses_warmup_flag() {
+        let cli = TestCli::try_parse_from(["bench", "homeboy", "--warmup", "3"])
+            .expect("bench --warmup should parse");
 
-    let cli = crate::cli_surface::Cli::try_parse_from(normalized)
-        .expect("bench --force-hot --setting should parse");
+        assert_eq!(cli.bench.run.warmup, Some(3));
+    }
 
-    assert!(cli.force_hot);
-    let crate::cli_surface::Commands::Bench(args) = cli.command else {
-        panic!("expected bench command");
-    };
-    assert_eq!(
-        args.run.setting_args.setting,
-        vec![(
-            "studio_site_build_prompt_variant".to_string(),
-            "astro-docs-content-collection".to_string()
-        )]
-    );
-    assert!(
-        !args.run.args.iter().any(|arg| arg == "--force-hot"),
-        "--force-hot must not be forwarded to bench workloads"
-    );
-}
-
-#[test]
-fn run_list_uses_rig_default_component_and_workloads() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig(home, "studio-bfb", "studio", component_dir.path());
-
-        let (output, exit_code) = run_list(&list_args(None, vec!["studio-bfb".to_string()]))
-            .expect("rig bench list should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::List(result) => {
-                assert_eq!(result.component, "studio");
-                assert_eq!(result.component_id, "studio");
-                assert_eq!(result.count, 2);
-                assert_eq!(result.scenarios[0].id, "rig-extra");
-            }
-            _ => panic!("expected list output"),
-        }
-    });
-}
-
-#[test]
-fn run_list_serializes_installed_rig_package_evidence() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        let package_root = install_rig_package(home, "studio-bfb", "studio", component_dir.path());
-
-        let (output, exit_code) = run_list(&list_args(None, vec!["studio-bfb".to_string()]))
-            .expect("rig bench list should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::List(result) => {
-                let package_root = package_root.to_string_lossy().to_string();
-                assert_eq!(result.scenarios[0].id, "package-extra");
-                let evidence = result.rig_package.expect("rig package evidence");
-                assert_eq!(evidence.rig_id, "studio-bfb");
-                assert_eq!(evidence.package_root, package_root);
-                assert_eq!(evidence.source, package_root);
-                assert!(!evidence.freshness_verified);
-                assert_eq!(
-                    evidence.freshness,
-                    homeboy::core::extension::bench::parsing::RigPackageFreshness::Unknown
-                );
-                assert!(evidence
-                    .refresh_command
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("homeboy rig install"));
-            }
-            _ => panic!("expected list output"),
-        }
-    });
-}
-
-#[test]
-fn run_list_prefers_enclosing_local_rig_package_over_installed_package() {
-    let _guard = current_dir_lock().lock().expect("lock current dir");
-    let original_dir = std::env::current_dir().expect("current dir");
-
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        install_rig_package(home, "studio-bfb", "studio", component_dir.path());
-
-        let local_package = tempfile::TempDir::new().expect("local package");
-        write_local_rig_package(
-            local_package.path(),
-            "studio-bfb",
-            "studio",
-            component_dir.path(),
-            "fresh-checkout-extra",
-        );
-        std::env::set_current_dir(local_package.path()).expect("enter local package");
-
-        let result = run_list(&list_args(None, vec!["studio-bfb".to_string()]));
-        std::env::set_current_dir(&original_dir).expect("restore current dir");
-        let (output, exit_code) = result.expect("rig bench list should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::List(result) => {
-                assert_eq!(result.scenarios[0].id, "fresh-checkout-extra");
-                let evidence = result.rig_package.expect("rig package evidence");
-                assert_eq!(
-                    std::path::PathBuf::from(evidence.package_root)
-                        .canonicalize()
-                        .expect("canonical evidence root"),
-                    local_package
-                        .path()
-                        .canonicalize()
-                        .expect("canonical local package")
-                );
-                assert!(evidence.freshness_verified);
-            }
-            _ => panic!("expected list output"),
-        }
-    });
-
-    std::env::set_current_dir(original_dir).expect("restore current dir");
-}
-
-#[test]
-fn single_rig_run_records_installed_rig_package_evidence_in_metadata() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        let package_root = install_rig_package(home, "studio-bfb", "studio", component_dir.path());
-
-        let (output, exit_code) = run(
-            run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("rig bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let package_root = package_root.to_string_lossy().to_string();
-                let metadata = result
-                    .results
-                    .expect("bench results")
-                    .run_metadata
-                    .expect("run metadata");
-                let evidence = metadata.rig_package.expect("rig package evidence");
-                assert_eq!(evidence.package_root, package_root);
-                assert_eq!(evidence.rig_id, "studio-bfb");
-                assert_eq!(evidence.source_root.as_deref(), Some(package_root.as_str()));
-            }
-            _ => panic!("expected single output"),
-        }
-    });
-}
-
-#[test]
-fn run_list_prefers_rig_workloads_over_component_bench_script() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig_with_component_script(home, "studio-bfb", "studio", component_dir.path());
-
-        let (output, exit_code) = run_list(&list_args(None, vec!["studio-bfb".to_string()]))
-            .expect("rig bench list should use rig workloads");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::List(result) => {
-                assert_eq!(result.count, 1);
-                assert_eq!(result.scenarios[0].id, "rig-extra");
-            }
-            _ => panic!("expected list output"),
-        }
-    });
-}
-
-#[test]
-fn run_list_preserves_registered_component_path() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let (output, exit_code) =
-            run_list(&list_args(Some("studio"), Vec::new())).expect("plain bench list should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::List(result) => {
-                assert_eq!(result.component, "studio");
-                assert_eq!(result.component_id, "studio");
-                assert_eq!(result.count, 2);
-                assert_eq!(result.scenarios[0].id, "in-tree");
-            }
-            _ => panic!("expected list output"),
-        }
-    });
-}
-
-#[test]
-fn run_list_filters_selected_scenario() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let mut args = list_args(Some("studio"), Vec::new());
-        args.scenario_ids = vec!["slow".to_string()];
-        let (output, exit_code) = run_list(&args).expect("plain bench list should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::List(result) => {
-                assert_eq!(result.count, 1);
-                assert_eq!(result.scenarios[0].id, "slow");
-            }
-            _ => panic!("expected list output"),
-        }
-    });
-}
-
-#[test]
-fn run_selects_single_scenario() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let (output, exit_code) = run(
-            run_args(Some("studio"), Vec::new(), vec!["slow".to_string()]),
-            &GlobalArgs {},
-        )
-        .expect("selected bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let scenarios = result.results.expect("results").scenarios;
-                assert_eq!(scenarios.len(), 1);
-                assert_eq!(scenarios[0].id, "slow");
-            }
-            _ => panic!("expected single output"),
-        }
-    });
-}
-
-#[test]
-fn selected_scenario_workload_failure_preserves_runner_error() {
-    with_isolated_home(|home| {
-        write_failing_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let (output, exit_code) = run(
-            run_args(
-                Some("studio"),
-                Vec::new(),
-                vec!["studio-agent-site-build".to_string()],
-            ),
-            &GlobalArgs {},
-        )
-        .expect("runner failure should return structured bench output");
-
-        assert_eq!(exit_code, 7);
-        match output {
-            BenchOutput::Single(result) => {
-                assert_eq!(result.status, "failed");
-                assert_eq!(result.exit_code, 7);
-                assert_eq!(result.results.expect("partial results").scenarios.len(), 0);
-                let failure = result.failure.expect("runner failure metadata");
-                assert_eq!(
-                    failure.scenario_id.as_deref(),
-                    Some("studio-agent-site-build")
-                );
-                assert!(failure.stderr_tail.contains("WORKLOAD_ERROR"));
-                assert!(failure.stderr_tail.contains("warmup iteration 1/1"));
-                assert!(failure.stderr_tail.contains("component id `studio`"));
-                assert!(failure
-                    .stderr_tail
-                    .contains("workload id `studio-agent-site-build`"));
-                assert!(failure
-                    .stderr_tail
-                    .contains("scenario id `studio-agent-site-build`"));
-                assert!(failure.stderr_tail.contains("phase `warmup`"));
-                assert!(failure.stderr_tail.contains("iteration 1/1"));
-                assert!(failure
-                    .stderr_tail
-                    .contains("artifact key `visual_comparison_dir`"));
-                assert!(failure.stderr_tail.contains("Omit optional artifacts"));
-            }
-            _ => panic!("expected single output"),
-        }
-    });
-}
-
-#[test]
-fn parses_rig_run_options_without_component() {
-    let cli = TestCli::try_parse_from([
-        "bench",
-        "--rig",
-        "studio-agent-sdk,studio-agent-pi",
-        "--scenario",
-        "studio-agent-runtime",
-        "--runs",
-        "3",
-        "--iterations",
-        "1",
-    ])
-    .expect("rig bench options without component should parse");
-
-    assert_eq!(
-        cli.bench.run.rig,
-        vec!["studio-agent-sdk", "studio-agent-pi"]
-    );
-    assert_eq!(cli.bench.run.scenario_ids, vec!["studio-agent-runtime"]);
-    assert_eq!(cli.bench.run.runs, 3);
-    assert_eq!(cli.bench.run.iterations, 1);
-    assert!(cli.bench.run.comp.id().is_none());
-}
-
-#[test]
-fn parses_rig_order_flag() {
-    let cli = TestCli::try_parse_from([
-        "bench",
-        "--rig",
-        "studio-agent-sdk,studio-agent-pi",
-        "--rig-order",
-        "reverse",
-    ])
-    .expect("bench --rig-order should parse");
-
-    assert_eq!(cli.bench.run.rig_order, BenchRigOrder::Reverse);
-}
-
-#[test]
-fn parses_rig_concurrency_flag() {
-    let cli = TestCli::try_parse_from([
-        "bench",
-        "--rig",
-        "studio-agent-sdk,studio-agent-pi",
-        "--rig-concurrency",
-        "2",
-    ])
-    .expect("bench --rig-concurrency should parse");
-
-    assert_eq!(cli.bench.run.rig_concurrency, 2);
-}
-
-#[test]
-fn rejects_allow_stale_dependencies_flag() {
-    let err = match TestCli::try_parse_from(["bench", "homeboy", "--allow-stale-dependencies"]) {
-        Ok(_) => panic!("stale dependency bypass should not parse"),
-        Err(err) => err,
-    };
-
-    assert_eq!(err.kind(), ErrorKind::UnknownArgument);
-}
-
-#[test]
-fn run_selects_multiple_scenarios() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let (output, exit_code) = run(
-            run_args(
-                Some("studio"),
-                Vec::new(),
-                vec!["in-tree".to_string(), "slow".to_string()],
-            ),
-            &GlobalArgs {},
-        )
-        .expect("selected bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let scenario_ids: Vec<String> = result
-                    .results
-                    .expect("results")
-                    .scenarios
-                    .into_iter()
-                    .map(|scenario| scenario.id)
-                    .collect();
-                assert_eq!(
-                    scenario_ids,
-                    vec!["in-tree".to_string(), "slow".to_string()]
-                );
-            }
-            _ => panic!("expected single output"),
-        }
-    });
-}
-
-#[test]
-fn unknown_scenario_reports_discovered_ids() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let err = match run(
-            run_args(Some("studio"), Vec::new(), vec!["missing".to_string()]),
-            &GlobalArgs {},
-        ) {
-            Ok(_) => panic!("unknown scenario should fail"),
+    #[test]
+    fn rejects_negative_warmup_flag() {
+        let err = match TestCli::try_parse_from(["bench", "homeboy", "--warmup", "-1"]) {
+            Ok(_) => panic!("negative warmup must fail at parse time"),
             Err(err) => err,
         };
-        let message = err.to_string();
 
-        assert!(message.contains("missing"), "got: {}", message);
-        assert!(message.contains("in-tree"), "got: {}", message);
-        assert!(message.contains("slow"), "got: {}", message);
-    });
+        assert!(
+            err.to_string().contains("invalid value"),
+            "expected invalid value error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn filter_strips_warmup_forms() {
+        let args = vec![
+            "--warmup".to_string(),
+            "3".to_string(),
+            "--filter=Scenario".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
+
+        let args = vec!["--warmup=3".to_string(), "--keep".to_string()];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
+    }
+
+    #[test]
+    fn unrigged_bench_forwards_cli_warmup() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let mut args = run_args(Some("studio"), Vec::new(), Vec::new());
+            args.run.warmup = Some(4);
+
+            let (output, exit_code) = run(args, &GlobalArgs {}).expect("bench should run");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(first_warmup_metric(output), 4.0);
+        });
+    }
+
+    #[test]
+    fn unrigged_bench_omits_warmup_env_by_default() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let (output, exit_code) = run(
+                run_args(Some("studio"), Vec::new(), Vec::new()),
+                &GlobalArgs {},
+            )
+            .expect("bench should run");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(first_warmup_metric(output), -1.0);
+        });
+    }
+
+    #[test]
+    fn single_rig_bench_forwards_rig_warmup() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig(home, "rig-a", "studio", component_dir.path());
+            set_rig_warmup(home, "rig-a", 6);
+
+            let (output, exit_code) = run(
+                run_args(None, vec!["rig-a".to_string()], Vec::new()),
+                &GlobalArgs {},
+            )
+            .expect("rig bench should run");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(first_warmup_metric(output), 6.0);
+        });
+    }
+
+    #[test]
+    fn cli_warmup_overrides_rig_warmup() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig(home, "rig-a", "studio", component_dir.path());
+            set_rig_warmup(home, "rig-a", 6);
+
+            let mut args = run_args(None, vec!["rig-a".to_string()], Vec::new());
+            args.run.warmup = Some(2);
+
+            let (output, exit_code) = run(args, &GlobalArgs {}).expect("rig bench should run");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(first_warmup_metric(output), 2.0);
+        });
+    }
+
+    #[test]
+    fn cross_rig_bench_uses_each_rig_warmup() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig(home, "rig-a", "studio", component_a.path());
+            write_rig(home, "rig-b", "studio", component_b.path());
+            set_rig_warmup(home, "rig-a", 2);
+            set_rig_warmup(home, "rig-b", 5);
+
+            let (output, exit_code) = run(
+                run_args(
+                    None,
+                    vec!["rig-a".to_string(), "rig-b".to_string()],
+                    Vec::new(),
+                ),
+                &GlobalArgs {},
+            )
+            .expect("cross-rig bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Comparison(result) => {
+                    assert_eq!(result.rigs.len(), 2);
+                    assert_eq!(
+                        result.rigs[0]
+                            .results
+                            .as_ref()
+                            .expect("rig-a results")
+                            .scenarios[0]
+                            .metrics
+                            .get("warmup_iterations"),
+                        Some(2.0)
+                    );
+                    assert_eq!(
+                        result.rigs[1]
+                            .results
+                            .as_ref()
+                            .expect("rig-b results")
+                            .scenarios[0]
+                            .metrics
+                            .get("warmup_iterations"),
+                        Some(5.0)
+                    );
+                }
+                _ => panic!("expected comparison output"),
+            }
+        });
+    }
+
+    #[test]
+    fn cross_rig_cli_warmup_overrides_all_rigs() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig(home, "rig-a", "studio", component_a.path());
+            write_rig(home, "rig-b", "studio", component_b.path());
+            set_rig_warmup(home, "rig-a", 2);
+            set_rig_warmup(home, "rig-b", 5);
+
+            let mut args = run_args(
+                None,
+                vec!["rig-a".to_string(), "rig-b".to_string()],
+                Vec::new(),
+            );
+            args.run.warmup = Some(9);
+
+            let (output, exit_code) =
+                run(args, &GlobalArgs {}).expect("cross-rig bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Comparison(result) => {
+                    assert_eq!(result.rigs.len(), 2);
+                    for rig in result.rigs {
+                        assert_eq!(
+                            rig.results.expect("rig results").scenarios[0]
+                                .metrics
+                                .get("warmup_iterations"),
+                            Some(9.0)
+                        );
+                    }
+                }
+                _ => panic!("expected comparison output"),
+            }
+        });
+    }
 }
 
-#[test]
-fn cross_rig_run_passes_selector_to_each_rig() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_a = tempfile::TempDir::new().expect("component a");
-        let component_b = tempfile::TempDir::new().expect("component b");
-        write_rig(home, "rig-a", "studio", component_a.path());
-        write_rig(home, "rig-b", "studio", component_b.path());
+mod cross_rig_tests {
+    use super::*;
 
-        let (output, exit_code) = run(
-            run_args(
+    #[test]
+    fn cross_rig_run_passes_selector_to_each_rig() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig(home, "rig-a", "studio", component_a.path());
+            write_rig(home, "rig-b", "studio", component_b.path());
+
+            let (output, exit_code) = run(
+                run_args(
+                    None,
+                    vec!["rig-a".to_string(), "rig-b".to_string()],
+                    vec!["rig-slow".to_string()],
+                ),
+                &GlobalArgs {},
+            )
+            .expect("cross-rig selected bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Comparison(result) => {
+                    assert_eq!(result.rigs.len(), 2);
+                    for rig in result.rigs {
+                        let scenarios = rig.results.expect("rig results").scenarios;
+                        assert_eq!(scenarios.len(), 1);
+                        assert_eq!(scenarios[0].id, "rig-slow");
+                    }
+                }
+                _ => panic!("expected comparison output"),
+            }
+        });
+    }
+
+    #[test]
+    fn cross_rig_json_summary_omits_full_results_payload() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig(home, "rig-a", "studio", component_a.path());
+            write_rig(home, "rig-b", "studio", component_b.path());
+
+            let mut args = run_args(
                 None,
                 vec!["rig-a".to_string(), "rig-b".to_string()],
                 vec!["rig-slow".to_string()],
-            ),
-            &GlobalArgs {},
-        )
-        .expect("cross-rig selected bench should run");
+            );
+            args.run.json_summary = true;
 
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Comparison(result) => {
-                assert_eq!(result.rigs.len(), 2);
-                for rig in result.rigs {
-                    let scenarios = rig.results.expect("rig results").scenarios;
+            let (output, exit_code) =
+                run(args, &GlobalArgs {}).expect("cross-rig selected bench summary should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::ComparisonSummary(result) => {
+                    assert!(result.summary_only);
+                    assert_eq!(result.rigs.len(), 2);
+                    assert_eq!(result.rigs[0].rig_id, "rig-a");
+                    assert_eq!(result.rigs[1].rig_id, "rig-b");
+
+                    let value = serde_json::to_value(result).expect("serialize summary");
+                    assert!(value.get("diff").is_none());
+                    assert!(value["rigs"][0].get("results").is_none());
+                    assert!(value["rigs"][0].get("artifacts").is_none());
+                    assert!(value["rigs"][0].get("rig_state").is_none());
+                }
+                _ => panic!("expected comparison summary output"),
+            }
+        });
+    }
+
+    #[test]
+    fn cross_rig_reverse_order_flips_reference_and_execution_order() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig(home, "rig-a", "studio", component_a.path());
+            write_rig(home, "rig-b", "studio", component_b.path());
+
+            let mut args = run_args(
+                None,
+                vec!["rig-a".to_string(), "rig-b".to_string()],
+                vec!["rig-slow".to_string()],
+            );
+            args.run.rig_order = BenchRigOrder::Reverse;
+
+            let (output, exit_code) = run(args, &GlobalArgs {})
+                .expect("cross-rig selected bench should run in reverse order");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Comparison(result) => {
+                    assert_eq!(result.rigs.len(), 2);
+                    assert_eq!(result.rigs[0].rig_id, "rig-b");
+                    assert_eq!(result.rigs[1].rig_id, "rig-a");
+                }
+                _ => panic!("expected comparison output"),
+            }
+        });
+    }
+
+    #[test]
+    fn cross_rig_runs_preserve_run_level_summaries_after_selection() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig(home, "rig-a", "studio", component_a.path());
+            write_rig(home, "rig-b", "studio", component_b.path());
+            let mut args = run_args(
+                None,
+                vec!["rig-a".to_string(), "rig-b".to_string()],
+                vec!["rig-slow".to_string()],
+            );
+            args.run.runs = 3;
+
+            let (output, exit_code) = run(args, &GlobalArgs {})
+                .expect("cross-rig selected bench should run multiple runs");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Comparison(result) => {
+                    assert_eq!(result.rigs.len(), 2);
+                    assert!(result
+                        .summary
+                        .iter()
+                        .all(|summary| summary.rows.iter().all(|row| row.n == Some(3))));
+                    for rig in result.rigs {
+                        let scenarios = rig.results.expect("rig results").scenarios;
+                        assert_eq!(scenarios.len(), 1);
+                        assert_eq!(scenarios[0].id, "rig-slow");
+                        assert_eq!(scenarios[0].runs.as_ref().expect("runs").len(), 3);
+                    }
+                }
+                _ => panic!("expected comparison output"),
+            }
+        });
+    }
+
+    #[test]
+    fn cross_rig_profile_requires_every_rig_to_define_profile() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig_with_profiles(
+                home,
+                "rig-a",
+                "studio",
+                component_a.path(),
+                r#"{ "substrate": ["rig-extra"] }"#,
+            );
+            write_rig_with_profiles(
+                home,
+                "rig-b",
+                "studio",
+                component_b.path(),
+                r#"{ "smoke": ["rig-slow"] }"#,
+            );
+
+            let err = match run(
+                run_args_with_profile(
+                    None,
+                    vec!["rig-a".to_string(), "rig-b".to_string()],
+                    "substrate",
+                ),
+                &GlobalArgs {},
+            ) {
+                Ok(_) => panic!("missing cross-rig profile should fail"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+
+            assert!(message.contains("rig-b"), "got: {}", message);
+            assert!(message.contains("substrate"), "got: {}", message);
+            assert!(message.contains("smoke"), "got: {}", message);
+        });
+    }
+
+    #[test]
+    fn cross_rig_profile_selects_profile_for_each_rig() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_a = tempfile::TempDir::new().expect("component a");
+            let component_b = tempfile::TempDir::new().expect("component b");
+            write_rig_with_profiles(
+                home,
+                "rig-a",
+                "studio",
+                component_a.path(),
+                r#"{ "substrate": ["rig-extra"] }"#,
+            );
+            write_rig_with_profiles(
+                home,
+                "rig-b",
+                "studio",
+                component_b.path(),
+                r#"{ "substrate": ["rig-slow"] }"#,
+            );
+
+            let (output, exit_code) = run(
+                run_args_with_profile(
+                    None,
+                    vec!["rig-a".to_string(), "rig-b".to_string()],
+                    "substrate",
+                ),
+                &GlobalArgs {},
+            )
+            .expect("cross-rig profile bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Comparison(result) => {
+                    assert_eq!(result.rigs.len(), 2);
+                    assert_eq!(
+                        result.rigs[0]
+                            .results
+                            .as_ref()
+                            .expect("rig a results")
+                            .scenarios[0]
+                            .id,
+                        "rig-extra"
+                    );
+                    assert_eq!(
+                        result.rigs[1]
+                            .results
+                            .as_ref()
+                            .expect("rig b results")
+                            .scenarios[0]
+                            .id,
+                        "rig-slow"
+                    );
+                }
+                _ => panic!("expected comparison output"),
+            }
+        });
+    }
+}
+
+mod run_list_tests {
+    use super::*;
+
+    #[test]
+    fn run_list_uses_rig_default_component_and_workloads() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig(home, "studio-bfb", "studio", component_dir.path());
+
+            let (output, exit_code) = run_list(&list_args(None, vec!["studio-bfb".to_string()]))
+                .expect("rig bench list should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::List(result) => {
+                    assert_eq!(result.component, "studio");
+                    assert_eq!(result.component_id, "studio");
+                    assert_eq!(result.count, 2);
+                    assert_eq!(result.scenarios[0].id, "rig-extra");
+                }
+                _ => panic!("expected list output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_list_serializes_installed_rig_package_evidence() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            let package_root =
+                install_rig_package(home, "studio-bfb", "studio", component_dir.path());
+
+            let (output, exit_code) = run_list(&list_args(None, vec!["studio-bfb".to_string()]))
+                .expect("rig bench list should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::List(result) => {
+                    let package_root = package_root.to_string_lossy().to_string();
+                    assert_eq!(result.scenarios[0].id, "package-extra");
+                    let evidence = result.rig_package.expect("rig package evidence");
+                    assert_eq!(evidence.rig_id, "studio-bfb");
+                    assert_eq!(evidence.package_root, package_root);
+                    assert_eq!(evidence.source, package_root);
+                    assert!(!evidence.freshness_verified);
+                    assert_eq!(
+                        evidence.freshness,
+                        homeboy::core::extension::bench::parsing::RigPackageFreshness::Unknown
+                    );
+                    assert!(evidence
+                        .refresh_command
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("homeboy rig install"));
+                }
+                _ => panic!("expected list output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_list_prefers_enclosing_local_rig_package_over_installed_package() {
+        let _guard = current_dir_lock().lock().expect("lock current dir");
+        let original_dir = std::env::current_dir().expect("current dir");
+
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            install_rig_package(home, "studio-bfb", "studio", component_dir.path());
+
+            let local_package = tempfile::TempDir::new().expect("local package");
+            write_local_rig_package(
+                local_package.path(),
+                "studio-bfb",
+                "studio",
+                component_dir.path(),
+                "fresh-checkout-extra",
+            );
+            std::env::set_current_dir(local_package.path()).expect("enter local package");
+
+            let result = run_list(&list_args(None, vec!["studio-bfb".to_string()]));
+            std::env::set_current_dir(&original_dir).expect("restore current dir");
+            let (output, exit_code) = result.expect("rig bench list should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::List(result) => {
+                    assert_eq!(result.scenarios[0].id, "fresh-checkout-extra");
+                    let evidence = result.rig_package.expect("rig package evidence");
+                    assert_eq!(
+                        std::path::PathBuf::from(evidence.package_root)
+                            .canonicalize()
+                            .expect("canonical evidence root"),
+                        local_package
+                            .path()
+                            .canonicalize()
+                            .expect("canonical local package")
+                    );
+                    assert!(evidence.freshness_verified);
+                }
+                _ => panic!("expected list output"),
+            }
+        });
+
+        std::env::set_current_dir(original_dir).expect("restore current dir");
+    }
+
+    #[test]
+    fn run_list_prefers_rig_workloads_over_component_bench_script() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig_with_component_script(home, "studio-bfb", "studio", component_dir.path());
+
+            let (output, exit_code) = run_list(&list_args(None, vec!["studio-bfb".to_string()]))
+                .expect("rig bench list should use rig workloads");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::List(result) => {
+                    assert_eq!(result.count, 1);
+                    assert_eq!(result.scenarios[0].id, "rig-extra");
+                }
+                _ => panic!("expected list output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_list_preserves_registered_component_path() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let (output, exit_code) = run_list(&list_args(Some("studio"), Vec::new()))
+                .expect("plain bench list should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::List(result) => {
+                    assert_eq!(result.component, "studio");
+                    assert_eq!(result.component_id, "studio");
+                    assert_eq!(result.count, 2);
+                    assert_eq!(result.scenarios[0].id, "in-tree");
+                }
+                _ => panic!("expected list output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_list_filters_selected_scenario() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let mut args = list_args(Some("studio"), Vec::new());
+            args.scenario_ids = vec!["slow".to_string()];
+            let (output, exit_code) = run_list(&args).expect("plain bench list should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::List(result) => {
+                    assert_eq!(result.count, 1);
+                    assert_eq!(result.scenarios[0].id, "slow");
+                }
+                _ => panic!("expected list output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_list_requires_rig_default_component_when_component_omitted() {
+        with_isolated_home(|home| {
+            let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+            fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+            fs::write(rig_dir.join("empty.json"), r#"{ "bench": {} }"#).expect("write rig");
+
+            let err = match run_list(&list_args(None, vec!["empty".to_string()])) {
+                Ok(_) => panic!("missing default component should error"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+            assert!(
+                message.contains("bench.default_component"),
+                "expected default-component error, got: {}",
+                message
+            );
+        });
+    }
+}
+
+mod scenario_run_tests {
+    use super::*;
+
+    #[test]
+    fn single_rig_run_records_installed_rig_package_evidence_in_metadata() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            let package_root =
+                install_rig_package(home, "studio-bfb", "studio", component_dir.path());
+
+            let (output, exit_code) = run(
+                run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
+                &GlobalArgs {},
+            )
+            .expect("rig bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let package_root = package_root.to_string_lossy().to_string();
+                    let metadata = result
+                        .results
+                        .expect("bench results")
+                        .run_metadata
+                        .expect("run metadata");
+                    let evidence = metadata.rig_package.expect("rig package evidence");
+                    assert_eq!(evidence.package_root, package_root);
+                    assert_eq!(evidence.rig_id, "studio-bfb");
+                    assert_eq!(evidence.source_root.as_deref(), Some(package_root.as_str()));
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_selects_single_scenario() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let (output, exit_code) = run(
+                run_args(Some("studio"), Vec::new(), vec!["slow".to_string()]),
+                &GlobalArgs {},
+            )
+            .expect("selected bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let scenarios = result.results.expect("results").scenarios;
+                    assert_eq!(scenarios.len(), 1);
+                    assert_eq!(scenarios[0].id, "slow");
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
+    fn selected_scenario_workload_failure_preserves_runner_error() {
+        with_isolated_home(|home| {
+            write_failing_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let (output, exit_code) = run(
+                run_args(
+                    Some("studio"),
+                    Vec::new(),
+                    vec!["studio-agent-site-build".to_string()],
+                ),
+                &GlobalArgs {},
+            )
+            .expect("runner failure should return structured bench output");
+
+            assert_eq!(exit_code, 7);
+            match output {
+                BenchOutput::Single(result) => {
+                    assert_eq!(result.status, "failed");
+                    assert_eq!(result.exit_code, 7);
+                    assert_eq!(result.results.expect("partial results").scenarios.len(), 0);
+                    let failure = result.failure.expect("runner failure metadata");
+                    assert_eq!(
+                        failure.scenario_id.as_deref(),
+                        Some("studio-agent-site-build")
+                    );
+                    assert!(failure.stderr_tail.contains("WORKLOAD_ERROR"));
+                    assert!(failure.stderr_tail.contains("warmup iteration 1/1"));
+                    assert!(failure.stderr_tail.contains("component id `studio`"));
+                    assert!(failure
+                        .stderr_tail
+                        .contains("workload id `studio-agent-site-build`"));
+                    assert!(failure
+                        .stderr_tail
+                        .contains("scenario id `studio-agent-site-build`"));
+                    assert!(failure.stderr_tail.contains("phase `warmup`"));
+                    assert!(failure.stderr_tail.contains("iteration 1/1"));
+                    assert!(failure
+                        .stderr_tail
+                        .contains("artifact key `visual_comparison_dir`"));
+                    assert!(failure.stderr_tail.contains("Omit optional artifacts"));
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
+    fn run_selects_multiple_scenarios() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let (output, exit_code) = run(
+                run_args(
+                    Some("studio"),
+                    Vec::new(),
+                    vec!["in-tree".to_string(), "slow".to_string()],
+                ),
+                &GlobalArgs {},
+            )
+            .expect("selected bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let scenario_ids: Vec<String> = result
+                        .results
+                        .expect("results")
+                        .scenarios
+                        .into_iter()
+                        .map(|scenario| scenario.id)
+                        .collect();
+                    assert_eq!(
+                        scenario_ids,
+                        vec!["in-tree".to_string(), "slow".to_string()]
+                    );
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
+    fn unknown_scenario_reports_discovered_ids() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
+
+            let err = match run(
+                run_args(Some("studio"), Vec::new(), vec!["missing".to_string()]),
+                &GlobalArgs {},
+            ) {
+                Ok(_) => panic!("unknown scenario should fail"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+
+            assert!(message.contains("missing"), "got: {}", message);
+            assert!(message.contains("in-tree"), "got: {}", message);
+            assert!(message.contains("slow"), "got: {}", message);
+        });
+    }
+
+    #[test]
+    fn single_rig_selector_filters_extra_workloads_before_execution() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig(home, "rig-a", "studio", component_dir.path());
+
+            let (output, exit_code) = run(
+                run_args(
+                    None,
+                    vec!["rig-a".to_string()],
+                    vec!["rig-slow".to_string()],
+                ),
+                &GlobalArgs {},
+            )
+            .expect("single-rig selected bench should run");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    assert_eq!(result.iterations, 1);
+                    let scenarios = result.results.expect("results").scenarios;
                     assert_eq!(scenarios.len(), 1);
                     assert_eq!(scenarios[0].id, "rig-slow");
+                    assert_eq!(scenarios[0].iterations, 1);
                 }
+                _ => panic!("expected single output"),
             }
-            _ => panic!("expected comparison output"),
-        }
-    });
-}
+        });
+    }
 
-#[test]
-fn cross_rig_json_summary_omits_full_results_payload() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_a = tempfile::TempDir::new().expect("component a");
-        let component_b = tempfile::TempDir::new().expect("component b");
-        write_rig(home, "rig-a", "studio", component_a.path());
-        write_rig(home, "rig-b", "studio", component_b.path());
+    #[test]
+    fn rig_bench_component_expands_extension_settings() {
+        let monorepo = tempfile::TempDir::new().expect("monorepo dir");
+        let plugin_path = monorepo.path().join("plugins").join("woocommerce");
+        fs::create_dir_all(&plugin_path).expect("create plugin path");
 
-        let mut args = run_args(
-            None,
-            vec!["rig-a".to_string(), "rig-b".to_string()],
-            vec!["rig-slow".to_string()],
-        );
-        args.run.json_summary = true;
-
-        let (output, exit_code) =
-            run(args, &GlobalArgs {}).expect("cross-rig selected bench summary should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::ComparisonSummary(result) => {
-                assert!(result.summary_only);
-                assert_eq!(result.rigs.len(), 2);
-                assert_eq!(result.rigs[0].rig_id, "rig-a");
-                assert_eq!(result.rigs[1].rig_id, "rig-b");
-
-                let value = serde_json::to_value(result).expect("serialize summary");
-                assert!(value.get("diff").is_none());
-                assert!(value["rigs"][0].get("results").is_none());
-                assert!(value["rigs"][0].get("artifacts").is_none());
-                assert!(value["rigs"][0].get("rig_state").is_none());
-            }
-            _ => panic!("expected comparison summary output"),
-        }
-    });
-}
-
-#[test]
-fn cross_rig_reverse_order_flips_reference_and_execution_order() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_a = tempfile::TempDir::new().expect("component a");
-        let component_b = tempfile::TempDir::new().expect("component b");
-        write_rig(home, "rig-a", "studio", component_a.path());
-        write_rig(home, "rig-b", "studio", component_b.path());
-
-        let mut args = run_args(
-            None,
-            vec!["rig-a".to_string(), "rig-b".to_string()],
-            vec!["rig-slow".to_string()],
-        );
-        args.run.rig_order = BenchRigOrder::Reverse;
-
-        let (output, exit_code) = run(args, &GlobalArgs {})
-            .expect("cross-rig selected bench should run in reverse order");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Comparison(result) => {
-                assert_eq!(result.rigs.len(), 2);
-                assert_eq!(result.rigs[0].rig_id, "rig-b");
-                assert_eq!(result.rigs[1].rig_id, "rig-a");
-            }
-            _ => panic!("expected comparison output"),
-        }
-    });
-}
-
-#[test]
-fn single_rig_selector_filters_extra_workloads_before_execution() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig(home, "rig-a", "studio", component_dir.path());
-
-        let (output, exit_code) = run(
-            run_args(
-                None,
-                vec!["rig-a".to_string()],
-                vec!["rig-slow".to_string()],
-            ),
-            &GlobalArgs {},
-        )
-        .expect("single-rig selected bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                assert_eq!(result.iterations, 1);
-                let scenarios = result.results.expect("results").scenarios;
-                assert_eq!(scenarios.len(), 1);
-                assert_eq!(scenarios[0].id, "rig-slow");
-                assert_eq!(scenarios[0].iterations, 1);
-            }
-            _ => panic!("expected single output"),
-        }
-    });
-}
-
-#[test]
-fn rig_bench_component_expands_extension_settings() {
-    let monorepo = tempfile::TempDir::new().expect("monorepo dir");
-    let plugin_path = monorepo.path().join("plugins").join("woocommerce");
-    fs::create_dir_all(&plugin_path).expect("create plugin path");
-
-    let spec: RigSpec = serde_json::from_value(serde_json::json!({
-        "id": "example-performance",
-        "components": {
-            "example": {
-                "path": plugin_path.to_string_lossy(),
-                "extensions": {
-                    "example-extension": {
-                        "source_root": "${components.example.path}/../..",
-                        "source_subpath": "plugins/example",
-                        "file_mounts": [
-                            { "source": "${components.example.path}/example.php" }
-                        ]
+        let spec: RigSpec = serde_json::from_value(serde_json::json!({
+            "id": "example-performance",
+            "components": {
+                "example": {
+                    "path": plugin_path.to_string_lossy(),
+                    "extensions": {
+                        "example-extension": {
+                            "source_root": "${components.example.path}/../..",
+                            "source_subpath": "plugins/example",
+                            "file_mounts": [
+                                { "source": "${components.example.path}/example.php" }
+                            ]
+                        }
                     }
                 }
             }
-        }
-    }))
-    .expect("parse rig spec");
+        }))
+        .expect("parse rig spec");
 
-    let component =
-        matrix::rig_component_for_bench(&spec, "example").expect("resolve rig bench component");
-    let extension = component
-        .extensions
-        .as_ref()
-        .and_then(|extensions| extensions.get("example-extension"))
-        .expect("example extension settings");
+        let component =
+            matrix::rig_component_for_bench(&spec, "example").expect("resolve rig bench component");
+        let extension = component
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("example-extension"))
+            .expect("example extension settings");
 
-    assert_eq!(
-        extension.settings.get("source_root"),
-        Some(&serde_json::Value::String(
-            plugin_path.join("../..").to_string_lossy().into_owned()
-        ))
-    );
-    let expected_mount_source = plugin_path
-        .join("example.php")
-        .to_string_lossy()
-        .into_owned();
-    assert_eq!(
-        extension
-            .settings
-            .get("file_mounts")
-            .and_then(|value| value.as_array())
-            .and_then(|items| items.first())
-            .and_then(|item| item.get("source"))
-            .and_then(|value| value.as_str()),
-        Some(expected_mount_source.as_str())
-    );
-}
-
-#[test]
-fn run_prefers_rig_workloads_over_component_bench_script() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig_with_component_script(home, "studio-bfb", "studio", component_dir.path());
-
-        let (output, exit_code) = run(
-            run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("rig bench should use rig workloads");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let scenarios = result.results.expect("results").scenarios;
-                assert_eq!(scenarios.len(), 1);
-                assert_eq!(scenarios[0].id, "rig-extra");
-            }
-            _ => panic!("expected single output"),
-        }
-    });
-}
-
-#[test]
-fn run_profile_selects_rig_profile_scenarios() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig_with_profiles(
-            home,
-            "studio-bfb",
-            "studio",
-            component_dir.path(),
-            r#"{ "substrate": ["rig-extra"] }"#,
+        assert_eq!(
+            extension.settings.get("source_root"),
+            Some(&serde_json::Value::String(
+                plugin_path.join("../..").to_string_lossy().into_owned()
+            ))
         );
-
-        let (output, exit_code) = run(
-            run_args_with_profile(None, vec!["studio-bfb".to_string()], "substrate"),
-            &GlobalArgs {},
-        )
-        .expect("profile bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let scenarios = result.results.expect("results").scenarios;
-                assert_eq!(scenarios.len(), 1);
-                assert_eq!(scenarios[0].id, "rig-extra");
-            }
-            _ => panic!("expected single output"),
-        }
-    });
-}
-
-#[test]
-fn single_rig_runs_preserve_run_level_summaries_after_selection() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig(home, "rig-a", "studio", component_dir.path());
-        let mut args = run_args(
-            None,
-            vec!["rig-a".to_string()],
-            vec!["rig-slow".to_string()],
+        let expected_mount_source = plugin_path
+            .join("example.php")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            extension
+                .settings
+                .get("file_mounts")
+                .and_then(|value| value.as_array())
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("source"))
+                .and_then(|value| value.as_str()),
+            Some(expected_mount_source.as_str())
         );
-        args.run.runs = 3;
+    }
 
-        let (output, exit_code) =
-            run(args, &GlobalArgs {}).expect("single-rig selected bench should run multiple runs");
+    #[test]
+    fn run_prefers_rig_workloads_over_component_bench_script() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig_with_component_script(home, "studio-bfb", "studio", component_dir.path());
 
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let scenarios = result.results.expect("results").scenarios;
-                assert_eq!(scenarios.len(), 1);
-                let runs = scenarios[0].runs.as_ref().expect("per-run metrics");
-                assert_eq!(runs.len(), 3);
-                assert!(scenarios[0].runs_summary.as_ref().is_some_and(|summary| {
-                    summary.get("p95_ms").is_some_and(|metric| metric.n == 3)
-                }));
-            }
-            _ => panic!("expected single output"),
-        }
-    });
-}
+            let (output, exit_code) = run(
+                run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
+                &GlobalArgs {},
+            )
+            .expect("rig bench should use rig workloads");
 
-#[test]
-fn unknown_profile_lists_available_profiles() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig_with_profiles(
-            home,
-            "studio-bfb",
-            "studio",
-            component_dir.path(),
-            r#"{ "substrate": ["rig-extra"], "smoke": ["rig-slow"] }"#,
-        );
-
-        let err = match run(
-            run_args_with_profile(None, vec!["studio-bfb".to_string()], "agentic"),
-            &GlobalArgs {},
-        ) {
-            Ok(_) => panic!("unknown profile should fail"),
-            Err(err) => err,
-        };
-        let message = err.to_string();
-
-        assert!(message.contains("agentic"), "got: {}", message);
-        assert!(message.contains("substrate"), "got: {}", message);
-        assert!(message.contains("smoke"), "got: {}", message);
-    });
-}
-
-#[test]
-fn profile_with_unknown_scenario_lists_discovered_scenarios() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig_with_profiles(
-            home,
-            "studio-bfb",
-            "studio",
-            component_dir.path(),
-            r#"{ "broken": ["missing-scenario"] }"#,
-        );
-
-        let err = match run(
-            run_args_with_profile(None, vec!["studio-bfb".to_string()], "broken"),
-            &GlobalArgs {},
-        ) {
-            Ok(_) => panic!("unknown scenario in profile should fail"),
-            Err(err) => err,
-        };
-        let message = err.to_string();
-
-        assert!(message.contains("missing-scenario"), "got: {}", message);
-        assert!(message.contains("rig-extra"), "got: {}", message);
-        assert!(message.contains("rig-slow"), "got: {}", message);
-    });
-}
-
-#[test]
-fn cross_rig_runs_preserve_run_level_summaries_after_selection() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_a = tempfile::TempDir::new().expect("component a");
-        let component_b = tempfile::TempDir::new().expect("component b");
-        write_rig(home, "rig-a", "studio", component_a.path());
-        write_rig(home, "rig-b", "studio", component_b.path());
-        let mut args = run_args(
-            None,
-            vec!["rig-a".to_string(), "rig-b".to_string()],
-            vec!["rig-slow".to_string()],
-        );
-        args.run.runs = 3;
-
-        let (output, exit_code) =
-            run(args, &GlobalArgs {}).expect("cross-rig selected bench should run multiple runs");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Comparison(result) => {
-                assert_eq!(result.rigs.len(), 2);
-                assert!(result
-                    .summary
-                    .iter()
-                    .all(|summary| summary.rows.iter().all(|row| row.n == Some(3))));
-                for rig in result.rigs {
-                    let scenarios = rig.results.expect("rig results").scenarios;
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let scenarios = result.results.expect("results").scenarios;
                     assert_eq!(scenarios.len(), 1);
-                    assert_eq!(scenarios[0].id, "rig-slow");
-                    assert_eq!(scenarios[0].runs.as_ref().expect("runs").len(), 3);
+                    assert_eq!(scenarios[0].id, "rig-extra");
                 }
+                _ => panic!("expected single output"),
             }
-            _ => panic!("expected comparison output"),
-        }
-    });
-}
+        });
+    }
 
-#[test]
-fn cross_rig_profile_requires_every_rig_to_define_profile() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_a = tempfile::TempDir::new().expect("component a");
-        let component_b = tempfile::TempDir::new().expect("component b");
-        write_rig_with_profiles(
-            home,
-            "rig-a",
-            "studio",
-            component_a.path(),
-            r#"{ "substrate": ["rig-extra"] }"#,
-        );
-        write_rig_with_profiles(
-            home,
-            "rig-b",
-            "studio",
-            component_b.path(),
-            r#"{ "smoke": ["rig-slow"] }"#,
-        );
+    #[test]
+    fn run_profile_selects_rig_profile_scenarios() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig_with_profiles(
+                home,
+                "studio-bfb",
+                "studio",
+                component_dir.path(),
+                r#"{ "substrate": ["rig-extra"] }"#,
+            );
 
-        let err = match run(
-            run_args_with_profile(
-                None,
-                vec!["rig-a".to_string(), "rig-b".to_string()],
-                "substrate",
-            ),
-            &GlobalArgs {},
-        ) {
-            Ok(_) => panic!("missing cross-rig profile should fail"),
-            Err(err) => err,
-        };
-        let message = err.to_string();
+            let (output, exit_code) = run(
+                run_args_with_profile(None, vec!["studio-bfb".to_string()], "substrate"),
+                &GlobalArgs {},
+            )
+            .expect("profile bench should run");
 
-        assert!(message.contains("rig-b"), "got: {}", message);
-        assert!(message.contains("substrate"), "got: {}", message);
-        assert!(message.contains("smoke"), "got: {}", message);
-    });
-}
-
-#[test]
-fn cross_rig_profile_selects_profile_for_each_rig() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_a = tempfile::TempDir::new().expect("component a");
-        let component_b = tempfile::TempDir::new().expect("component b");
-        write_rig_with_profiles(
-            home,
-            "rig-a",
-            "studio",
-            component_a.path(),
-            r#"{ "substrate": ["rig-extra"] }"#,
-        );
-        write_rig_with_profiles(
-            home,
-            "rig-b",
-            "studio",
-            component_b.path(),
-            r#"{ "substrate": ["rig-slow"] }"#,
-        );
-
-        let (output, exit_code) = run(
-            run_args_with_profile(
-                None,
-                vec!["rig-a".to_string(), "rig-b".to_string()],
-                "substrate",
-            ),
-            &GlobalArgs {},
-        )
-        .expect("cross-rig profile bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Comparison(result) => {
-                assert_eq!(result.rigs.len(), 2);
-                assert_eq!(
-                    result.rigs[0]
-                        .results
-                        .as_ref()
-                        .expect("rig a results")
-                        .scenarios[0]
-                        .id,
-                    "rig-extra"
-                );
-                assert_eq!(
-                    result.rigs[1]
-                        .results
-                        .as_ref()
-                        .expect("rig b results")
-                        .scenarios[0]
-                        .id,
-                    "rig-slow"
-                );
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let scenarios = result.results.expect("results").scenarios;
+                    assert_eq!(scenarios.len(), 1);
+                    assert_eq!(scenarios[0].id, "rig-extra");
+                }
+                _ => panic!("expected single output"),
             }
-            _ => panic!("expected comparison output"),
-        }
-    });
+        });
+    }
+
+    #[test]
+    fn single_rig_runs_preserve_run_level_summaries_after_selection() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig(home, "rig-a", "studio", component_dir.path());
+            let mut args = run_args(
+                None,
+                vec!["rig-a".to_string()],
+                vec!["rig-slow".to_string()],
+            );
+            args.run.runs = 3;
+
+            let (output, exit_code) = run(args, &GlobalArgs {})
+                .expect("single-rig selected bench should run multiple runs");
+
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::Single(result) => {
+                    let scenarios = result.results.expect("results").scenarios;
+                    assert_eq!(scenarios.len(), 1);
+                    let runs = scenarios[0].runs.as_ref().expect("per-run metrics");
+                    assert_eq!(runs.len(), 3);
+                    assert!(scenarios[0].runs_summary.as_ref().is_some_and(|summary| {
+                        summary.get("p95_ms").is_some_and(|metric| metric.n == 3)
+                    }));
+                }
+                _ => panic!("expected single output"),
+            }
+        });
+    }
+
+    #[test]
+    fn unknown_profile_lists_available_profiles() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig_with_profiles(
+                home,
+                "studio-bfb",
+                "studio",
+                component_dir.path(),
+                r#"{ "substrate": ["rig-extra"], "smoke": ["rig-slow"] }"#,
+            );
+
+            let err = match run(
+                run_args_with_profile(None, vec!["studio-bfb".to_string()], "agentic"),
+                &GlobalArgs {},
+            ) {
+                Ok(_) => panic!("unknown profile should fail"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+
+            assert!(message.contains("agentic"), "got: {}", message);
+            assert!(message.contains("substrate"), "got: {}", message);
+            assert!(message.contains("smoke"), "got: {}", message);
+        });
+    }
+
+    #[test]
+    fn profile_with_unknown_scenario_lists_discovered_scenarios() {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_rig_with_profiles(
+                home,
+                "studio-bfb",
+                "studio",
+                component_dir.path(),
+                r#"{ "broken": ["missing-scenario"] }"#,
+            );
+
+            let err = match run(
+                run_args_with_profile(None, vec!["studio-bfb".to_string()], "broken"),
+                &GlobalArgs {},
+            ) {
+                Ok(_) => panic!("unknown scenario in profile should fail"),
+                Err(err) => err,
+            };
+            let message = err.to_string();
+
+            assert!(message.contains("missing-scenario"), "got: {}", message);
+            assert!(message.contains("rig-extra"), "got: {}", message);
+            assert!(message.contains("rig-slow"), "got: {}", message);
+        });
+    }
 }
 
-#[test]
-fn run_list_requires_rig_default_component_when_component_omitted() {
-    with_isolated_home(|home| {
-        let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
-        fs::create_dir_all(&rig_dir).expect("mkdir rigs");
-        fs::write(rig_dir.join("empty.json"), r#"{ "bench": {} }"#).expect("write rig");
+mod parsing_tests {
+    use super::*;
 
-        let err = match run_list(&list_args(None, vec!["empty".to_string()])) {
-            Ok(_) => panic!("missing default component should error"),
-            Err(err) => err,
+    #[test]
+    fn filter_strips_boolean_flags() {
+        let args = vec!["--ratchet".to_string(), "--filter=Scenario".to_string()];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=Scenario"]);
+    }
+
+    #[test]
+    fn parses_force_hot_after_bench_without_losing_settings() {
+        let normalized = crate::commands::utils::args::normalize(
+            [
+                "homeboy",
+                "bench",
+                "--rig",
+                "studio-bfb",
+                "--iterations",
+                "1",
+                "--force-hot",
+                "--setting",
+                "studio_site_build_prompt_variant=astro-docs-content-collection",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        );
+
+        let cli = crate::cli_surface::Cli::try_parse_from(normalized)
+            .expect("bench --force-hot --setting should parse");
+
+        assert!(cli.force_hot);
+        let crate::cli_surface::Commands::Bench(args) = cli.command else {
+            panic!("expected bench command");
         };
-        let message = err.to_string();
+        assert_eq!(
+            args.run.setting_args.setting,
+            vec![(
+                "studio_site_build_prompt_variant".to_string(),
+                "astro-docs-content-collection".to_string()
+            )]
+        );
         assert!(
-            message.contains("bench.default_component"),
-            "expected default-component error, got: {}",
-            message
+            !args.run.args.iter().any(|arg| arg == "--force-hot"),
+            "--force-hot must not be forwarded to bench workloads"
         );
-    });
-}
+    }
 
-#[test]
-fn filter_strips_all_boolean_flags() {
-    let args = vec![
-        "--baseline".to_string(),
-        "--ignore-baseline".to_string(),
-        "--ratchet".to_string(),
-        "--json-summary".to_string(),
-    ];
-    assert!(filter_homeboy_flags(&args).is_empty());
-}
+    #[test]
+    fn parses_rig_run_options_without_component() {
+        let cli = TestCli::try_parse_from([
+            "bench",
+            "--rig",
+            "studio-agent-sdk,studio-agent-pi",
+            "--scenario",
+            "studio-agent-runtime",
+            "--runs",
+            "3",
+            "--iterations",
+            "1",
+        ])
+        .expect("rig bench options without component should parse");
 
-#[test]
-fn filter_strips_iterations_space_form() {
-    let args = vec![
-        "--iterations".to_string(),
-        "50".to_string(),
-        "--filter=Scenario".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
-}
-
-#[test]
-fn filter_strips_iterations_equals_form() {
-    let args = vec!["--iterations=50".to_string(), "--keep".to_string()];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
-}
-
-#[test]
-fn parses_warmup_flag() {
-    let cli = TestCli::try_parse_from(["bench", "homeboy", "--warmup", "3"])
-        .expect("bench --warmup should parse");
-
-    assert_eq!(cli.bench.run.warmup, Some(3));
-}
-
-#[test]
-fn parses_side_by_side_report_flag() {
-    let cli = TestCli::try_parse_from([
-        "bench",
-        "studio",
-        "--rig",
-        "baseline,candidate",
-        "--report",
-        "side-by-side",
-    ])
-    .expect("bench --report side-by-side should parse");
-
-    assert_eq!(cli.bench.run.report, vec![BenchReportFormat::SideBySide]);
-}
-
-#[test]
-fn rejects_negative_warmup_flag() {
-    let err = match TestCli::try_parse_from(["bench", "homeboy", "--warmup", "-1"]) {
-        Ok(_) => panic!("negative warmup must fail at parse time"),
-        Err(err) => err,
-    };
-
-    assert!(
-        err.to_string().contains("invalid value"),
-        "expected invalid value error, got: {}",
-        err
-    );
-}
-
-#[test]
-fn filter_strips_warmup_forms() {
-    let args = vec![
-        "--warmup".to_string(),
-        "3".to_string(),
-        "--filter=Scenario".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
-
-    let args = vec!["--warmup=3".to_string(), "--keep".to_string()];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
-}
-
-#[test]
-fn unrigged_bench_forwards_cli_warmup() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let mut args = run_args(Some("studio"), Vec::new(), Vec::new());
-        args.run.warmup = Some(4);
-
-        let (output, exit_code) = run(args, &GlobalArgs {}).expect("bench should run");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(first_warmup_metric(output), 4.0);
-    });
-}
-
-#[test]
-fn unrigged_bench_omits_warmup_env_by_default() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let (output, exit_code) = run(
-            run_args(Some("studio"), Vec::new(), Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("bench should run");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(first_warmup_metric(output), -1.0);
-    });
-}
-
-#[test]
-fn single_rig_bench_forwards_rig_warmup() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig(home, "rig-a", "studio", component_dir.path());
-        set_rig_warmup(home, "rig-a", 6);
-
-        let (output, exit_code) = run(
-            run_args(None, vec!["rig-a".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("rig bench should run");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(first_warmup_metric(output), 6.0);
-    });
-}
-
-#[test]
-fn cli_warmup_overrides_rig_warmup() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig(home, "rig-a", "studio", component_dir.path());
-        set_rig_warmup(home, "rig-a", 6);
-
-        let mut args = run_args(None, vec!["rig-a".to_string()], Vec::new());
-        args.run.warmup = Some(2);
-
-        let (output, exit_code) = run(args, &GlobalArgs {}).expect("rig bench should run");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(first_warmup_metric(output), 2.0);
-    });
-}
-
-#[test]
-fn cross_rig_bench_uses_each_rig_warmup() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_a = tempfile::TempDir::new().expect("component a");
-        let component_b = tempfile::TempDir::new().expect("component b");
-        write_rig(home, "rig-a", "studio", component_a.path());
-        write_rig(home, "rig-b", "studio", component_b.path());
-        set_rig_warmup(home, "rig-a", 2);
-        set_rig_warmup(home, "rig-b", 5);
-
-        let (output, exit_code) = run(
-            run_args(
-                None,
-                vec!["rig-a".to_string(), "rig-b".to_string()],
-                Vec::new(),
-            ),
-            &GlobalArgs {},
-        )
-        .expect("cross-rig bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Comparison(result) => {
-                assert_eq!(result.rigs.len(), 2);
-                assert_eq!(
-                    result.rigs[0]
-                        .results
-                        .as_ref()
-                        .expect("rig-a results")
-                        .scenarios[0]
-                        .metrics
-                        .get("warmup_iterations"),
-                    Some(2.0)
-                );
-                assert_eq!(
-                    result.rigs[1]
-                        .results
-                        .as_ref()
-                        .expect("rig-b results")
-                        .scenarios[0]
-                        .metrics
-                        .get("warmup_iterations"),
-                    Some(5.0)
-                );
-            }
-            _ => panic!("expected comparison output"),
-        }
-    });
-}
-
-#[test]
-fn cross_rig_cli_warmup_overrides_all_rigs() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_a = tempfile::TempDir::new().expect("component a");
-        let component_b = tempfile::TempDir::new().expect("component b");
-        write_rig(home, "rig-a", "studio", component_a.path());
-        write_rig(home, "rig-b", "studio", component_b.path());
-        set_rig_warmup(home, "rig-a", 2);
-        set_rig_warmup(home, "rig-b", 5);
-
-        let mut args = run_args(
-            None,
-            vec!["rig-a".to_string(), "rig-b".to_string()],
-            Vec::new(),
+        assert_eq!(
+            cli.bench.run.rig,
+            vec!["studio-agent-sdk", "studio-agent-pi"]
         );
-        args.run.warmup = Some(9);
+        assert_eq!(cli.bench.run.scenario_ids, vec!["studio-agent-runtime"]);
+        assert_eq!(cli.bench.run.runs, 3);
+        assert_eq!(cli.bench.run.iterations, 1);
+        assert!(cli.bench.run.comp.id().is_none());
+    }
 
-        let (output, exit_code) = run(args, &GlobalArgs {}).expect("cross-rig bench should run");
+    #[test]
+    fn parses_rig_order_flag() {
+        let cli = TestCli::try_parse_from([
+            "bench",
+            "--rig",
+            "studio-agent-sdk,studio-agent-pi",
+            "--rig-order",
+            "reverse",
+        ])
+        .expect("bench --rig-order should parse");
 
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Comparison(result) => {
-                assert_eq!(result.rigs.len(), 2);
-                for rig in result.rigs {
-                    assert_eq!(
-                        rig.results.expect("rig results").scenarios[0]
-                            .metrics
-                            .get("warmup_iterations"),
-                        Some(9.0)
-                    );
-                }
-            }
-            _ => panic!("expected comparison output"),
-        }
-    });
+        assert_eq!(cli.bench.run.rig_order, BenchRigOrder::Reverse);
+    }
+
+    #[test]
+    fn parses_rig_concurrency_flag() {
+        let cli = TestCli::try_parse_from([
+            "bench",
+            "--rig",
+            "studio-agent-sdk,studio-agent-pi",
+            "--rig-concurrency",
+            "2",
+        ])
+        .expect("bench --rig-concurrency should parse");
+
+        assert_eq!(cli.bench.run.rig_concurrency, 2);
+    }
+
+    #[test]
+    fn rejects_allow_stale_dependencies_flag() {
+        let err = match TestCli::try_parse_from(["bench", "homeboy", "--allow-stale-dependencies"])
+        {
+            Ok(_) => panic!("stale dependency bypass should not parse"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn filter_strips_all_boolean_flags() {
+        let args = vec![
+            "--baseline".to_string(),
+            "--ignore-baseline".to_string(),
+            "--ratchet".to_string(),
+            "--json-summary".to_string(),
+        ];
+        assert!(filter_homeboy_flags(&args).is_empty());
+    }
+
+    #[test]
+    fn filter_strips_iterations_space_form() {
+        let args = vec![
+            "--iterations".to_string(),
+            "50".to_string(),
+            "--filter=Scenario".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
+    }
+
+    #[test]
+    fn filter_strips_iterations_equals_form() {
+        let args = vec!["--iterations=50".to_string(), "--keep".to_string()];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
+    }
+
+    #[test]
+    fn parses_side_by_side_report_flag() {
+        let cli = TestCli::try_parse_from([
+            "bench",
+            "studio",
+            "--rig",
+            "baseline,candidate",
+            "--report",
+            "side-by-side",
+        ])
+        .expect("bench --report side-by-side should parse");
+
+        assert_eq!(cli.bench.run.report, vec![BenchReportFormat::SideBySide]);
+    }
+
+    #[test]
+    fn parses_shared_state_and_concurrency_flags() {
+        let cli = TestCli::try_parse_from([
+            "bench",
+            "homeboy",
+            "--shared-state",
+            "/tmp/foo",
+            "--concurrency",
+            "4",
+        ])
+        .expect("shared-state and concurrency flags should parse");
+
+        assert_eq!(cli.bench.run.shared_state, Some(PathBuf::from("/tmp/foo")));
+        assert_eq!(cli.bench.run.concurrency, 4);
+    }
+
+    #[test]
+    fn filter_strips_shared_state_and_concurrency_forms() {
+        let args = vec![
+            "--shared-state".to_string(),
+            "/tmp/foo".to_string(),
+            "--concurrency".to_string(),
+            "4".to_string(),
+            "--filter=Scenario".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
+
+        let args = vec![
+            "--shared-state=/tmp/foo".to_string(),
+            "--concurrency=4".to_string(),
+            "--keep".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
+    }
+
+    #[test]
+    fn filter_strips_rig_order_forms() {
+        let args = vec![
+            "--rig-order".to_string(),
+            "reverse".to_string(),
+            "--filter=Scenario".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
+
+        let args = vec!["--rig-order=reverse".to_string(), "--keep".to_string()];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
+    }
+
+    #[test]
+    fn filter_strips_report_forms() {
+        let args = vec![
+            "--report".to_string(),
+            "side-by-side".to_string(),
+            "--filter=Scenario".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
+
+        let args = vec!["--report=side-by-side".to_string(), "--keep".to_string()];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
+    }
+
+    #[test]
+    fn filter_strips_rig_concurrency_forms() {
+        let args = vec![
+            "--rig-concurrency".to_string(),
+            "2".to_string(),
+            "--filter=Scenario".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
+
+        let args = vec!["--rig-concurrency=2".to_string(), "--keep".to_string()];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
+    }
+
+    #[test]
+    fn filter_strips_regression_threshold_forms() {
+        let args = vec![
+            "--regression-threshold".to_string(),
+            "10".to_string(),
+            "--keep".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
+
+        let args = vec![
+            "--regression-threshold=10".to_string(),
+            "--keep".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
+    }
+
+    #[test]
+    fn filter_preserves_unknown_flags() {
+        let args = vec![
+            "--filter=Scenario".to_string(),
+            "--verbose".to_string(),
+            "extra".to_string(),
+        ];
+        assert_eq!(filter_homeboy_flags(&args), args);
+    }
+
+    #[test]
+    fn filter_handles_empty() {
+        assert!(filter_homeboy_flags(&[]).is_empty());
+    }
+
+    #[test]
+    fn filter_handles_mixed() {
+        let args = vec![
+            "--ratchet".to_string(),
+            "--iterations".to_string(),
+            "25".to_string(),
+            "--filter=hot_path".to_string(),
+            "--regression-threshold=7.5".to_string(),
+            "--verbose".to_string(),
+        ];
+        assert_eq!(
+            filter_homeboy_flags(&args),
+            vec!["--filter=hot_path", "--verbose"]
+        );
+    }
 }
 
-#[test]
-fn parses_shared_state_and_concurrency_flags() {
-    let cli = TestCli::try_parse_from([
-        "bench",
-        "homeboy",
-        "--shared-state",
-        "/tmp/foo",
-        "--concurrency",
-        "4",
-    ])
-    .expect("shared-state and concurrency flags should parse");
+mod output_tests {
+    use super::*;
 
-    assert_eq!(cli.bench.run.shared_state, Some(PathBuf::from("/tmp/foo")));
-    assert_eq!(cli.bench.run.concurrency, 4);
-}
-
-#[test]
-fn filter_strips_shared_state_and_concurrency_forms() {
-    let args = vec![
-        "--shared-state".to_string(),
-        "/tmp/foo".to_string(),
-        "--concurrency".to_string(),
-        "4".to_string(),
-        "--filter=Scenario".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
-
-    let args = vec![
-        "--shared-state=/tmp/foo".to_string(),
-        "--concurrency=4".to_string(),
-        "--keep".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
-}
-
-#[test]
-fn filter_strips_rig_order_forms() {
-    let args = vec![
-        "--rig-order".to_string(),
-        "reverse".to_string(),
-        "--filter=Scenario".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
-
-    let args = vec!["--rig-order=reverse".to_string(), "--keep".to_string()];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
-}
-
-#[test]
-fn filter_strips_report_forms() {
-    let args = vec![
-        "--report".to_string(),
-        "side-by-side".to_string(),
-        "--filter=Scenario".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
-
-    let args = vec!["--report=side-by-side".to_string(), "--keep".to_string()];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
-}
-
-#[test]
-fn filter_strips_rig_concurrency_forms() {
-    let args = vec![
-        "--rig-concurrency".to_string(),
-        "2".to_string(),
-        "--filter=Scenario".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
-
-    let args = vec!["--rig-concurrency=2".to_string(), "--keep".to_string()];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
-}
-
-#[test]
-fn filter_strips_regression_threshold_forms() {
-    let args = vec![
-        "--regression-threshold".to_string(),
-        "10".to_string(),
-        "--keep".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
-
-    let args = vec![
-        "--regression-threshold=10".to_string(),
-        "--keep".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
-}
-
-#[test]
-fn filter_preserves_unknown_flags() {
-    let args = vec![
-        "--filter=Scenario".to_string(),
-        "--verbose".to_string(),
-        "extra".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), args);
-}
-
-#[test]
-fn filter_handles_empty() {
-    assert!(filter_homeboy_flags(&[]).is_empty());
-}
-
-#[test]
-fn filter_handles_mixed() {
-    let args = vec![
-        "--ratchet".to_string(),
-        "--iterations".to_string(),
-        "25".to_string(),
-        "--filter=hot_path".to_string(),
-        "--regression-threshold=7.5".to_string(),
-        "--verbose".to_string(),
-    ];
-    assert_eq!(
-        filter_homeboy_flags(&args),
-        vec!["--filter=hot_path", "--verbose"]
-    );
-}
-
-#[test]
-fn bench_output_single_serializes_with_tagged_payload() {
-    let single = BenchCommandOutput {
-        passed: true,
-        status: "passed".to_string(),
-        component: "studio".to_string(),
-        exit_code: 0,
-        iterations: 10,
-        artifacts: Vec::new(),
-        results: None,
-        budget_findings: Vec::new(),
-        gate_results: Vec::new(),
-        gate_failures: Vec::new(),
-        baseline_comparison: None,
-        hints: None,
-        rig_state: None,
-        failure: None,
-        diagnostics: Vec::new(),
-        ci_context: None,
-        persisted_run: None,
-    };
-    let value = serde_json::to_value(BenchOutput::Single(single)).unwrap();
-    assert_eq!(
-        value.get("variant"),
-        Some(&serde_json::Value::String("single".to_string()))
-    );
-    let payload = value
-        .get("payload")
-        .expect("single bench output has payload");
-    assert_eq!(payload.get("passed"), Some(&serde_json::Value::Bool(true)));
-    assert_eq!(
-        payload.get("component"),
-        Some(&serde_json::Value::String("studio".to_string()))
-    );
-}
-
-#[test]
-fn bench_output_comparison_serializes_with_tagged_payload() {
-    let (cmp, _) = aggregate_comparison("studio".to_string(), 10, Vec::new());
-    let value = serde_json::to_value(BenchOutput::Comparison(cmp)).unwrap();
-    assert_eq!(
-        value.get("variant"),
-        Some(&serde_json::Value::String("comparison".to_string()))
-    );
-    assert_eq!(
-        value
+    #[test]
+    fn bench_output_single_serializes_with_tagged_payload() {
+        let single = BenchCommandOutput {
+            passed: true,
+            status: "passed".to_string(),
+            component: "studio".to_string(),
+            exit_code: 0,
+            iterations: 10,
+            artifacts: Vec::new(),
+            results: None,
+            budget_findings: Vec::new(),
+            gate_results: Vec::new(),
+            gate_failures: Vec::new(),
+            baseline_comparison: None,
+            hints: None,
+            rig_state: None,
+            failure: None,
+            diagnostics: Vec::new(),
+            ci_context: None,
+            persisted_run: None,
+        };
+        let value = serde_json::to_value(BenchOutput::Single(single)).unwrap();
+        assert_eq!(
+            value.get("variant"),
+            Some(&serde_json::Value::String("single".to_string()))
+        );
+        let payload = value
             .get("payload")
-            .and_then(|payload| payload.get("comparison")),
-        Some(&serde_json::Value::String("cross_rig".to_string()))
-    );
+            .expect("single bench output has payload");
+        assert_eq!(payload.get("passed"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            payload.get("component"),
+            Some(&serde_json::Value::String("studio".to_string()))
+        );
+    }
+
+    #[test]
+    fn bench_output_comparison_serializes_with_tagged_payload() {
+        let (cmp, _) = aggregate_comparison("studio".to_string(), 10, Vec::new());
+        let value = serde_json::to_value(BenchOutput::Comparison(cmp)).unwrap();
+        assert_eq!(
+            value.get("variant"),
+            Some(&serde_json::Value::String("comparison".to_string()))
+        );
+        assert_eq!(
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("comparison")),
+            Some(&serde_json::Value::String("cross_rig".to_string()))
+        );
+    }
+}
+
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_setting_key_warns_before_run() {
+        let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env", "iterations"]);
+        let setting_args = SettingArgs {
+            // `bench_env` is a typo for the declared `workflow_bench_env`.
+            setting: vec![("bench_env.CORPUS".to_string(), "1000".to_string())],
+            setting_json: Vec::new(),
+        };
+
+        let warning =
+            unknown_setting_keys_warning(&ctx, &setting_args).expect("unknown key should warn");
+        assert!(
+            warning.contains("bench_env"),
+            "warning names the typo: {warning}"
+        );
+        assert!(
+            warning.contains("workflow_bench_env"),
+            "warning lists accepted settings: {warning}"
+        );
+        assert!(
+            warning.contains("extension 'rust'"),
+            "warning names the resolved extension: {warning}"
+        );
+    }
+
+    #[test]
+    fn declared_setting_key_does_not_warn() {
+        let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env"]);
+        let setting_args = SettingArgs {
+            setting: vec![("workflow_bench_env.CORPUS".to_string(), "1000".to_string())],
+            setting_json: Vec::new(),
+        };
+
+        assert!(unknown_setting_keys_warning(&ctx, &setting_args).is_none());
+    }
 }
 
 fn ctx_with_accepted_setting_keys(
@@ -1804,42 +1872,6 @@ fn ctx_with_accepted_setting_keys(
         settings: Vec::new(),
         accepted_setting_keys: accepted.iter().map(|s| s.to_string()).collect(),
     }
-}
-
-#[test]
-fn unknown_setting_key_warns_before_run() {
-    let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env", "iterations"]);
-    let setting_args = SettingArgs {
-        // `bench_env` is a typo for the declared `workflow_bench_env`.
-        setting: vec![("bench_env.CORPUS".to_string(), "1000".to_string())],
-        setting_json: Vec::new(),
-    };
-
-    let warning =
-        unknown_setting_keys_warning(&ctx, &setting_args).expect("unknown key should warn");
-    assert!(
-        warning.contains("bench_env"),
-        "warning names the typo: {warning}"
-    );
-    assert!(
-        warning.contains("workflow_bench_env"),
-        "warning lists accepted settings: {warning}"
-    );
-    assert!(
-        warning.contains("extension 'rust'"),
-        "warning names the resolved extension: {warning}"
-    );
-}
-
-#[test]
-fn declared_setting_key_does_not_warn() {
-    let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env"]);
-    let setting_args = SettingArgs {
-        setting: vec![("workflow_bench_env.CORPUS".to_string(), "1000".to_string())],
-        setting_json: Vec::new(),
-    };
-
-    assert!(unknown_setting_keys_warning(&ctx, &setting_args).is_none());
 }
 
 #[cfg(test)]
