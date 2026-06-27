@@ -495,7 +495,20 @@ where
 }
 
 fn git_root(path: &Path) -> Result<PathBuf> {
-    let output = git::run_git(path, &["rev-parse", "--show-toplevel"], "git root")?;
+    let output = git::run_git(path, &["rev-parse", "--show-toplevel"], "git root").map_err(|_| {
+        Error::validation_invalid_argument(
+            "path",
+            format!(
+                "{} is not inside a git checkout; run `homeboy cleanup artifacts` from a checkout or pass `--path <PATH>`",
+                path.display()
+            ),
+            Some(path.to_string_lossy().to_string()),
+            None,
+        )
+        .with_hint(
+            "Run from a git checkout or pass `--path <PATH>`, for example: `homeboy cleanup artifacts --path /path/to/checkout`.",
+        )
+    })?;
     Ok(PathBuf::from(output.trim()))
 }
 
@@ -589,6 +602,27 @@ mod tests {
         .expect_err("reject ambiguous cleanup root");
 
         assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
+    fn cleanup_artifacts_outside_git_checkout_suggests_path_override() {
+        let tmp = TempDir::new().expect("tempdir");
+        let err = resolve_root(&ArtifactCleanupOptions {
+            path: Some(tmp.path().to_path_buf()),
+            apply: false,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            merged_only: false,
+        })
+        .expect_err("reject non-git cleanup root");
+
+        assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains("not inside a git checkout"));
+        assert!(err.message.contains("--path <PATH>"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("Run from a git checkout")));
     }
 
     #[test]
