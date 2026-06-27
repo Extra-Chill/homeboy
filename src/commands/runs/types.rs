@@ -204,6 +204,7 @@ pub struct RunsArtifactsOutput {
     pub run_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_id: Option<String>,
+    pub path_guide: RunsArtifactPathGuide,
     pub artifacts: Vec<ArtifactRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview_entrypoints: Vec<ArtifactPreviewEntrypoint>,
@@ -211,6 +212,41 @@ pub struct RunsArtifactsOutput {
     pub matrix_summary: Option<MatrixArtifactSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fuzz_result_envelopes: Vec<FuzzResultEnvelopeArtifactInspection>,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactPathGuide {
+    pub listing_source: String,
+    pub operator_local_path_fields: Vec<&'static str>,
+    pub runner_path_fields: Vec<&'static str>,
+    pub local_path_scope: &'static str,
+    pub runner_path_scope: &'static str,
+    pub fetch_hint: String,
+}
+
+impl RunsArtifactPathGuide {
+    pub fn for_listing(run_id: &str, runner_id: Option<&str>) -> Self {
+        let listing_source = runner_id
+            .map(|runner_id| format!("connected_runner:{runner_id}"))
+            .unwrap_or_else(|| "operator_local_persisted_store".to_string());
+
+        Self {
+            listing_source,
+            operator_local_path_fields: vec![
+                "artifacts[].path when artifacts[].type is file or directory",
+                "preview_entrypoints[].public_url when present",
+            ],
+            runner_path_fields: vec![
+                "artifacts[].path when artifacts[].type is remote_file",
+                "artifacts[].path values using runner-artifact://",
+            ],
+            local_path_scope: "Operator-local paths are readable by the Homeboy process that printed this output.",
+            runner_path_scope: "Runner paths and runner-artifact:// refs are runner-resident references, not operator-local filesystem paths.",
+            fetch_hint: format!(
+                "Use `homeboy runs artifact get {run_id} <artifact-id>` to copy an artifact to an operator-local output path. Add `--runner <runner-id>` when fetching directly from a connected runner daemon."
+            ),
+        }
+    }
 }
 
 #[derive(Args, Clone)]

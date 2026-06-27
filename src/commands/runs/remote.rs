@@ -3,7 +3,7 @@ use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::runners as runner;
 use homeboy::core::Error;
 
-use super::types::{RunsArtifactGetArgs, RunsArtifactsOutput};
+use super::types::{RunsArtifactGetArgs, RunsArtifactPathGuide, RunsArtifactsOutput};
 use super::{remote_artifact, CmdResult, RunsListArgs, RunsListOutput, RunsOutput};
 
 pub fn list_runner_runs(
@@ -53,6 +53,7 @@ pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> 
             command: "runs.artifacts",
             run_id: run_id.to_string(),
             runner_id: Some(runner_id.to_string()),
+            path_guide: RunsArtifactPathGuide::for_listing(run_id, Some(runner_id)),
             artifacts,
             preview_entrypoints: Vec::new(),
             matrix_summary: None,
@@ -162,5 +163,20 @@ mod tests {
         assert_eq!(artifacts[0].id, "report-json");
         assert_eq!(artifacts[0].run_id, "run-123");
         assert_eq!(artifacts[0].mime.as_deref(), Some("application/json"));
+    }
+
+    #[test]
+    fn connected_runner_path_guide_labels_runner_resident_refs() {
+        let guide = RunsArtifactPathGuide::for_listing("run-a", Some("runner-a"));
+
+        assert_eq!(guide.listing_source, "connected_runner:runner-a");
+        assert!(guide
+            .runner_path_fields
+            .iter()
+            .any(|field| field.contains("runner-artifact://")));
+        assert!(guide
+            .runner_path_scope
+            .contains("not operator-local filesystem paths"));
+        assert!(guide.fetch_hint.contains("--runner <runner-id>"));
     }
 }

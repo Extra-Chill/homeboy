@@ -169,6 +169,19 @@ fn runs_artifacts_surfaces_matrix_summary_from_typed_packets() {
         let RunsOutput::Artifacts(output) = output else {
             panic!("expected artifacts output");
         };
+        assert_eq!(
+            output.path_guide.listing_source,
+            "operator_local_persisted_store"
+        );
+        assert!(output
+            .path_guide
+            .operator_local_path_fields
+            .iter()
+            .any(|field| field.contains("artifacts[].path")));
+        assert!(output
+            .path_guide
+            .runner_path_scope
+            .contains("not operator-local filesystem paths"));
         let summary = output.matrix_summary.expect("matrix summary");
 
         assert_eq!(summary.fixture_count, 2);

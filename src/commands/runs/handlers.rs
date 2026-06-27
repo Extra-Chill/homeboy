@@ -18,7 +18,7 @@ use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
     RunDetail, RunsArtifactArgs, RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactGetOutput,
-    RunsArtifactsArgs, RunsArtifactsOutput, RunsEnvKeyOutput, RunsEnvOutput,
+    RunsArtifactPathGuide, RunsArtifactsArgs, RunsArtifactsOutput, RunsEnvKeyOutput, RunsEnvOutput,
     RunsEnvSourceLayerOutput, RunsEnvSummary, RunsListArgs, RunsListOutput, RunsOutput,
     RunsResumePlanOutput, RunsShowOutput,
 };
@@ -183,8 +183,9 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
-            run_id: args.run_id,
+            run_id: args.run_id.clone(),
             runner_id: None,
+            path_guide: RunsArtifactPathGuide::for_listing(&args.run_id, None),
             artifacts,
             preview_entrypoints,
             matrix_summary,
