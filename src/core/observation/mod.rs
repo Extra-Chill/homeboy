@@ -17,7 +17,8 @@ mod test_findings;
 pub mod timeline;
 
 pub use lifecycle::{
-    merge_metadata, run_owner_pid, running_status_note, ActiveObservation, ACTIVE_RUN_ID_ENV,
+    finish_run_best_effort, merge_metadata, run_owner_pid, running_status_note, ActiveObservation,
+    ACTIVE_RUN_ID_ENV,
 };
 
 pub use budget_findings::finding_records_from_budget;
