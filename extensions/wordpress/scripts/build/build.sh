@@ -804,10 +804,18 @@ validate_build() {
         fi
 
     elif [ "$PROJECT_TYPE" = "theme" ]; then
-        # Theme validation: classic themes need index.php; block themes use
-        # templates/index.html as the fallback template.
+        # Theme validation: every theme needs style.css plus a root fallback
+        # template. Block themes provide templates/index.html; classic themes
+        # provide index.php. Detect by the canonical block-theme signal
+        # (presence of templates/index.html, which is what WP core's
+        # wp_is_block_theme() checks) -- NOT by the presence of theme.json.
+        # A theme.json does NOT make a theme a block theme: classic themes
+        # legitimately ship theme.json for global styles, color palettes, and
+        # font registration (wp_theme_json_data_theme) while still rendering
+        # via index.php. Keying off theme.json misdetects those classic themes
+        # as block themes and wrongly requires templates/index.html.
         local required_files=("style.css")
-        if [ -f "$staging_dir/theme.json" ]; then
+        if [ -f "$staging_dir/templates/index.html" ]; then
             required_files+=("templates/index.html")
         else
             required_files+=("index.php")
