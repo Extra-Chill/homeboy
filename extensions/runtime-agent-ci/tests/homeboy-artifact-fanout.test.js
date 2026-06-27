@@ -58,12 +58,11 @@ try {
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const output = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
   const batch = output.artifacts.iterator_fanout_batch;
-  assert.equal(batch.schema, 'homeboy-extensions/ArtifactFanoutBatch/v1');
-  assert.equal(batch.batch_id, 'loop-1-action-2');
+  assert.equal(batch.schema, 'homeboy-extensions/artifact-fanout-materializer-result/v1');
   assert.equal(batch.item_count, 2);
   assert.equal(batch.group_count, 1);
-  assert.equal(batch.task_requests[0].task_id, 'task-repo-a:cause-1');
-  assert.match(batch.task_requests[0].inputs.finding_group, /"id":"a"/);
+  assert.equal(batch.plan.tasks[0].task_id, 'task-repo-a:cause-1');
+  assert.deepEqual(batch.plan.tasks[0].inputs.finding_group.map((item) => item.id), ['a', 'b']);
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }

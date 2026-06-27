@@ -32,6 +32,7 @@
     "homeboy-run-agent-task-to-review": "./scripts/run-agent-task-to-review.cjs"
   },
   "scripts": {
+    "test": "set -e; for test in tests/*.test.js; do node \"$test\"; done",
     "test:controller-loop-proof-validator": "node ../tests/controller-loop-proof-validator.test.mjs",
     "test:generic-fanout-reconcile-boundary": "node ../tests/generic-fanout-reconcile-boundary.test.mjs",
     "test:workspace-publication-lifecycle": "node tests/workspace-publication-lifecycle.test.js",

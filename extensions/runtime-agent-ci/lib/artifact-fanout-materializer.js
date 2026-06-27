@@ -100,6 +100,10 @@ function artifactFromControllerInput(input, config = {}) {
   if (!artifactId) {
     return undefined;
   }
+  const requestArtifact = artifactFromOutputs(controller.request?.inputs, artifactId);
+  if (requestArtifact !== undefined) {
+    return requestArtifact;
+  }
   const lineages = Array.isArray(controller.controller?.task_lineage) ? controller.controller.task_lineage : [];
   for (const lineage of [...lineages].reverse()) {
     const artifact = artifactFromOutputs(lineage.outputs, artifactId);
@@ -133,6 +137,12 @@ function artifactFromOutputs(outputs, artifactId) {
 function itemsFromArtifact(artifact, itemPath) {
   if (Array.isArray(artifact)) {
     return artifact;
+  }
+  if (artifact?.payload !== undefined) {
+    const payloadItems = itemsFromArtifact(artifact.payload, itemPath);
+    if (payloadItems.length > 0) {
+      return payloadItems;
+    }
   }
   const configured = getPath(artifact, itemPath);
   if (Array.isArray(configured)) {

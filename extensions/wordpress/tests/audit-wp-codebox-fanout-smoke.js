@@ -326,9 +326,10 @@ try {
   assert.equal(IMPLEMENTATION_SCOPE.runtime_adapter, 'wordpress/lib/audit-fanout-runtime-adapter.js');
   assert.ok(IMPLEMENTATION_SCOPE.public_entrypoints.includes('wordpress/lib/audit-wp-codebox-fanout.js'));
 
-  const defaultRuntimeInvocation = auditFanoutRuntimeInvocation();
-  assert.equal(defaultRuntimeInvocation.runtime.id, 'wp-codebox');
-  assert.equal(defaultRuntimeInvocation.command, 'wp-codebox');
+  assert.throws(
+    () => auditFanoutRuntimeInvocation(),
+    /requires explicit runtime=wp-codebox or an explicit command/
+  );
   const previousWpCodeboxEnv = {
     HOMEBOY_WP_CODEBOX_TASK_REQUEST: process.env.HOMEBOY_WP_CODEBOX_TASK_REQUEST,
     HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID: process.env.HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID,
@@ -351,13 +352,13 @@ try {
   assert.equal(genericEnv.HOMEBOY_AGENT_TASK_GROUP_KEY, 'docs');
   assert.equal(Object.hasOwn(genericEnv, 'HOMEBOY_WP_CODEBOX_TASK_REQUEST'), false);
   assert.equal(Object.hasOwn(genericEnv, 'HOMEBOY_WP_CODEBOX_GROUP_KEY'), false);
-  const explicitRuntimeInvocation = auditFanoutRuntimeInvocation({
+  const explicitRuntimeInvocation = auditFanoutRuntimeInvocation(wpCodeboxAuditRuntimeOptions({
     wp_codebox_command: process.execPath,
     wp_codebox_args: ['fixture-command.cjs'],
-  });
-  assert.equal(explicitRuntimeInvocation.runtime.id, 'wp-codebox');
-  assert.equal(explicitRuntimeInvocation.command, 'wp-codebox');
-  assert.deepEqual(explicitRuntimeInvocation.args, []);
+  }));
+  assert.equal(explicitRuntimeInvocation.runtime, null);
+  assert.equal(explicitRuntimeInvocation.command, process.execPath);
+  assert.deepEqual(explicitRuntimeInvocation.args, ['fixture-command.cjs']);
   const codeboxRuntimeOptions = wpCodeboxAuditRuntimeOptions({
     wp_codebox_command: process.execPath,
     wp_codebox_args: ['fixture-command.cjs'],
