@@ -11,12 +11,6 @@ pub(super) fn is_generated_build_path(rel_path: &str) -> bool {
     rel_path == build_dir || rel_path.starts_with(&format!("{build_dir}/"))
 }
 
-pub(super) fn unexpected_uncommitted_files_excluding_generated_build(
-    component: &Component,
-) -> Result<Vec<String>> {
-    Ok(uncommitted_file_report_excluding_known_generated(component)?.unexpected)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UncommittedFileReport {
     pub(super) unexpected: Vec<String>,
@@ -191,7 +185,6 @@ mod tests {
     use super::{
         cleanup_generated_build_artifacts, is_deploy_target_debris_path, is_generated_build_path,
         uncommitted_file_report_excluding_known_generated,
-        unexpected_uncommitted_files_excluding_generated_build,
     };
     use crate::core::component::{CleanupArtifactDeclaration, Component};
     use crate::core::defaults::deploy_generated_build_dir;
@@ -247,8 +240,9 @@ mod tests {
             local_path: dir.to_string_lossy().to_string(),
             ..Component::default()
         };
-        let unexpected =
-            unexpected_uncommitted_files_excluding_generated_build(&component).expect("status");
+        let unexpected = uncommitted_file_report_excluding_known_generated(&component)
+            .expect("status")
+            .unexpected;
 
         assert_eq!(unexpected, vec!["src.rs"]);
     }

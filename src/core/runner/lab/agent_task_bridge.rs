@@ -156,20 +156,6 @@ fn agent_task_run_plan_lifecycle_output<'a>(
     output_file_content.unwrap_or(stdout)
 }
 
-pub(super) fn parse_offloaded_dispatch_envelope(stdout: &str) -> Result<Option<serde_json::Value>> {
-    Ok(parse_offloaded_agent_task_handoff(stdout)?.map(|handoff| handoff.envelope))
-}
-
-pub(super) fn parse_offloaded_dispatch_envelope_from_outputs(
-    stdout: &str,
-    stderr: &str,
-) -> Result<Option<serde_json::Value>> {
-    Ok(
-        parse_offloaded_agent_task_handoff_from_outputs(stdout, stderr)?
-            .map(|handoff| handoff.envelope),
-    )
-}
-
 pub(super) fn parse_offloaded_agent_task_handoff_from_outputs(
     stdout: &str,
     stderr: &str,
@@ -627,8 +613,9 @@ mod tests {
             "{\"success\":false,\"data\":{\"schema\":\"homeboy/agent-task-dispatch/v1\",\"run_id\":\"run-1\",\"state\":\"failed\",\"record\":{},\"aggregate\":{\"status\":\"failed\"}}}\n"
         );
 
-        let parsed = parse_offloaded_dispatch_envelope(stdout)
+        let parsed = parse_offloaded_agent_task_handoff(stdout)
             .expect("parse dispatch stdout")
+            .map(|handoff| handoff.envelope)
             .expect("dispatch envelope found");
 
         assert_eq!(parsed["run_id"], "run-1");
@@ -665,8 +652,9 @@ mod tests {
             "}\n"
         );
 
-        let parsed = parse_offloaded_dispatch_envelope_from_outputs(stdout, stderr)
+        let parsed = parse_offloaded_agent_task_handoff_from_outputs(stdout, stderr)
             .expect("parse dispatch outputs")
+            .map(|handoff| handoff.envelope)
             .expect("dispatch envelope found");
 
         assert_eq!(

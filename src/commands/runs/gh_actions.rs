@@ -560,12 +560,6 @@ fn parse_runs_payload(body: &[u8]) -> homeboy::core::Result<Vec<GhWorkflowRun>> 
     Ok(runs)
 }
 
-fn parse_run_payload(body: &[u8]) -> homeboy::core::Result<GhWorkflowRun> {
-    let raw: GhWorkflowRunRaw = serde_json::from_slice(body)
-        .map_err(|e| Error::internal_json(e.to_string(), Some("parse workflow run".into())))?;
-    Ok(GhWorkflowRun::from(raw))
-}
-
 /// Drop runs whose `created_at` is older than the `--since` window.
 fn filter_runs_by_since(
     runs: Vec<GhWorkflowRun>,
@@ -878,36 +872,6 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].common.id, 100);
         assert_eq!(runs[0].pull_request_numbers, vec![98]);
-    }
-
-    #[test]
-    fn parse_run_payload_handles_single_run_response() {
-        let raw = serde_json::to_vec(&serde_json::json!({
-            "id": 26731420339u64,
-            "run_number": 42,
-            "name": "Static site validation iterator",
-            "workflow_id": 123,
-            "head_branch": "main",
-            "head_sha": "deadbeef",
-            "event": "workflow_dispatch",
-            "status": "completed",
-            "conclusion": "failure",
-            "run_started_at": "2026-05-31T10:00:00Z",
-            "created_at": "2026-05-31T09:59:00Z",
-            "updated_at": "2026-05-31T10:05:00Z",
-            "run_attempt": 1,
-            "pull_requests": []
-        }))
-        .unwrap();
-
-        let run = parse_run_payload(&raw).expect("parse run");
-        assert_eq!(run.common.id, 26731420339);
-        assert_eq!(
-            run.workflow_name.as_deref(),
-            Some("Static site validation iterator")
-        );
-        assert_eq!(run.common.workflow_id, Some(123));
-        assert_eq!(map_gh_conclusion_to_status(&run), "fail");
     }
 
     #[test]
