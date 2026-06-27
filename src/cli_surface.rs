@@ -922,6 +922,21 @@ mod tests {
             ["homeboy", "runner", "disconnect", "homeboy-lab"].as_slice(),
             [
                 "homeboy",
+                "runner",
+                "workspace",
+                "pull",
+                "homeboy-lab",
+                "--remote-path",
+                "/srv/homeboy/workspace",
+                "--include",
+                "fixtures/*.fig",
+                "--to",
+                "fixtures",
+                "--dry-run",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
                 "db",
                 "delete-row",
                 "mysite",

@@ -3,7 +3,8 @@ use serde::Serialize;
 
 use homeboy::core::runners::{
     self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput,
-    RunnerWorkspacePruneOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePullOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOutput,
 };
 
 use super::CmdResult;
@@ -13,6 +14,7 @@ use super::CmdResult;
 pub enum RunnerWorkspaceOutput {
     List(RunnerWorkspaceListOutput),
     Sync(RunnerWorkspaceSyncOutput),
+    Pull(RunnerWorkspacePullOutput),
     Apply(RunnerWorkspaceApplyOutput),
     Prune(RunnerWorkspacePruneOutput),
 }
@@ -44,6 +46,27 @@ pub(super) enum RunnerWorkspaceCommand {
         /// Permit git sync to overwrite a dirty runner-side workspace.
         #[arg(long)]
         allow_dirty_lab_workspace: bool,
+    },
+    /// Copy selected files from a runner workspace back to the controller
+    Pull {
+        /// Runner ID
+        runner_id: String,
+
+        /// Absolute runner-side workspace or snapshot path to pull from
+        #[arg(long)]
+        remote_path: String,
+
+        /// Relative glob to copy from the remote path. Repeat for multiple globs.
+        #[arg(long = "include")]
+        includes: Vec<String>,
+
+        /// Local destination directory on the controller
+        #[arg(long)]
+        to: String,
+
+        /// Validate and print the copy plan without transferring files
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Apply a Lab-generated patch/delta back to its local source worktree
     Apply {
@@ -94,6 +117,22 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             allow_dirty_lab_workspace,
         } => sync(&runner_id, path, mode, allow_dirty_lab_workspace)
             .map(|(output, exit_code)| (RunnerWorkspaceOutput::Sync(output), exit_code)),
+        RunnerWorkspaceCommand::Pull {
+            runner_id,
+            remote_path,
+            includes,
+            to,
+            dry_run,
+        } => runner::pull_workspace(
+            &runner_id,
+            runner::RunnerWorkspacePullOptions {
+                remote_path,
+                includes,
+                to,
+                dry_run,
+            },
+        )
+        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Pull(output), exit_code)),
         RunnerWorkspaceCommand::Apply { input, force } => {
             runner::apply_workspace_patch(runner::RunnerWorkspaceApplyOptions { input, force })
                 .map(|(output, exit_code)| (RunnerWorkspaceOutput::Apply(output), exit_code))
