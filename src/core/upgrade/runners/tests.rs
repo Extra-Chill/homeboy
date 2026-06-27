@@ -1546,6 +1546,8 @@ fn exec_output(
         patch: None,
         mutation_artifacts: None,
         artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
         metrics: None,
         capture: None,
         runner_result: None,

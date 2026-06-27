@@ -68,7 +68,13 @@ Observation metadata records the routing decision under `metadata.lab_offload` w
 Commands launched through non-local `homeboy runner exec` run with `HOMEBOY_RUNNER_HOSTED_EXEC=1`. That marker is Homeboy's first-class runner-side dispatch signal: nested runner commands such as `homeboy agent-task cook` are allowed to pass the non-interactive resource preflight without adding `--force-hot`, because the work is already intentionally hosted on the selected runner.
 
 For reviewer-facing output, treat `runner exec` stdout as operator context and
-record durable artifacts through the run/artifact loop. See
+record durable artifacts through the run/artifact loop. Pass `--run-id <id>` plus
+`--artifact <path>` for files/directories and `--summary <path>` for compact
+summary evidence produced by the runner command. JSON summary files are echoed in
+the structured `runner.exec` response under `structured_summaries`, with the run
+id, runner id, command, declared path, and promoted artifact id/path so LLM
+workflows can consume the compact result without spelunking remote stdout or
+artifact directories. See
 [Artifact loop for runner and matrix workflows](../operators/artifact-loop-runner-matrix.md)
 for static HTML and matrix examples, plus proposed attach/promote command shapes
 for successful runner jobs that produced files but registered zero artifacts.
