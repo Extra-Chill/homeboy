@@ -38,6 +38,7 @@ module.exports = {
 	...require('./lib/agent-terminal-actions'),
 	...require('./lib/agent-task-runner-spec'),
 	...require('./lib/wp-codebox-apply-adapter'),
+	...require('./lib/codebox-client'),
 	...require('./lib/codebox-provider-adapter'),
 	...require('./lib/wp-codebox-recipe-helper'),
 	...require('./lib/wp-codebox-resolver'),
@@ -71,6 +72,7 @@ module.exports = {
 	wpCodebox: {
 		...require('./lib/codebox-memory-report'),
 		...require('./lib/wp-codebox-apply-adapter'),
+		...require('./lib/codebox-client'),
 		...require('./lib/codebox-provider-adapter'),
 		...require('./lib/wp-codebox-recipe-helper'),
 		...require('./lib/wp-codebox-resolver'),
