@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::{git, Error, Result};
 
@@ -47,9 +47,26 @@ pub struct ArtifactCleanupOutput {
     pub applied_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
+    pub summary: ArtifactCleanupSummary,
     pub candidates: Vec<ArtifactCleanupCandidate>,
     pub skipped: Vec<ArtifactCleanupSkipped>,
     pub applied: Vec<ArtifactCleanupApplied>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ArtifactCleanupSummary {
+    pub invocation_reclaimed_bytes: u64,
+    pub remaining_candidate_count: usize,
+    pub remaining_candidate_bytes: u64,
+    pub previous_session_reclaimed_bytes: u64,
+    pub cumulative_session_reclaimed_bytes: u64,
+    pub session_state_path: Option<String>,
+    pub session_state_error: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ArtifactCleanupSessionState {
+    cumulative_reclaimed_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -183,6 +200,15 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
 
     let estimated_bytes = candidates.iter().map(|row| row.size_bytes).sum();
     let reclaimed_bytes = applied.iter().map(|row| row.size_bytes).sum();
+    let (remaining_candidate_count, remaining_candidate_bytes) =
+        remaining_candidate_totals(&candidates, options.apply);
+    let summary = cleanup_summary(
+        &root,
+        options.apply,
+        reclaimed_bytes,
+        remaining_candidate_count,
+        remaining_candidate_bytes,
+    );
 
     Ok(ArtifactCleanupOutput {
         command: "cleanup.artifacts",
@@ -194,10 +220,108 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
         applied_count: applied.len(),
         estimated_bytes,
         reclaimed_bytes,
+        summary,
         candidates,
         skipped,
         applied,
     })
+}
+
+fn cleanup_summary(
+    root: &Path,
+    apply: bool,
+    invocation_reclaimed_bytes: u64,
+    remaining_candidate_count: usize,
+    remaining_candidate_bytes: u64,
+) -> ArtifactCleanupSummary {
+    let mut session_state_path = None;
+    let mut session_state_error = None;
+    let mut previous_session_reclaimed_bytes = 0;
+    let mut cumulative_session_reclaimed_bytes = invocation_reclaimed_bytes;
+
+    match cleanup_session_state_path(root) {
+        Ok(path) => {
+            session_state_path = Some(path.to_string_lossy().to_string());
+            let mut state = read_cleanup_session_state(&path);
+            previous_session_reclaimed_bytes = state.cumulative_reclaimed_bytes;
+            if apply {
+                state.cumulative_reclaimed_bytes = state
+                    .cumulative_reclaimed_bytes
+                    .saturating_add(invocation_reclaimed_bytes);
+                cumulative_session_reclaimed_bytes = state.cumulative_reclaimed_bytes;
+                if let Err(error) = write_cleanup_session_state(&path, &state) {
+                    session_state_error = Some(error);
+                }
+            } else {
+                cumulative_session_reclaimed_bytes = state.cumulative_reclaimed_bytes;
+            }
+        }
+        Err(error) => {
+            session_state_error = Some(error.to_string());
+        }
+    }
+
+    ArtifactCleanupSummary {
+        invocation_reclaimed_bytes,
+        remaining_candidate_count,
+        remaining_candidate_bytes,
+        previous_session_reclaimed_bytes,
+        cumulative_session_reclaimed_bytes,
+        session_state_path,
+        session_state_error,
+    }
+}
+
+fn cleanup_session_state_path(root: &Path) -> Result<PathBuf> {
+    let output = git::run_git(root, &["rev-parse", "--git-common-dir"], "git common dir")?;
+    let git_common_dir = PathBuf::from(output.trim());
+    let git_common_dir = if git_common_dir.is_absolute() {
+        git_common_dir
+    } else {
+        root.join(git_common_dir)
+    };
+    Ok(git_common_dir.join("homeboy-cleanup-artifacts-session.json"))
+}
+
+fn read_cleanup_session_state(path: &Path) -> ArtifactCleanupSessionState {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_cleanup_session_state(
+    path: &Path,
+    state: &ArtifactCleanupSessionState,
+) -> std::result::Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(state).map_err(|error| error.to_string())?;
+    fs::write(path, raw).map_err(|error| error.to_string())
+}
+
+fn remaining_candidate_totals(
+    candidates: &[ArtifactCleanupCandidate],
+    apply: bool,
+) -> (usize, u64) {
+    if !apply {
+        return (
+            candidates.len(),
+            candidates.iter().map(|row| row.size_bytes).sum(),
+        );
+    }
+
+    let mut count = 0;
+    let mut bytes = 0;
+    for candidate in candidates {
+        let path = Path::new(&candidate.path);
+        if path.exists() {
+            count += 1;
+            bytes += path_size(path).unwrap_or(candidate.size_bytes);
+        }
+    }
+    (count, bytes)
 }
 
 fn resolve_root(options: &ArtifactCleanupOptions) -> Result<PathBuf> {
@@ -929,6 +1053,61 @@ mod tests {
             "changed source"
         );
         assert!(output.candidates.iter().any(|row| row.source_dirty));
+    }
+
+    #[test]
+    fn apply_reports_remaining_and_cumulative_session_totals_across_retries() {
+        let repo = git_repo();
+        write_file(&repo.path().join("target/debug/app"), "first");
+
+        let first = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            merged_only: false,
+        })
+        .expect("first apply cleanup");
+
+        assert_eq!(
+            first.summary.invocation_reclaimed_bytes,
+            first.reclaimed_bytes
+        );
+        assert_eq!(first.summary.previous_session_reclaimed_bytes, 0);
+        assert_eq!(first.summary.remaining_candidate_count, 0);
+        assert_eq!(first.summary.remaining_candidate_bytes, 0);
+        assert_eq!(
+            first.summary.cumulative_session_reclaimed_bytes,
+            first.reclaimed_bytes
+        );
+
+        write_file(&repo.path().join("node_modules/pkg/index.js"), "second");
+
+        let second = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            merged_only: false,
+        })
+        .expect("second apply cleanup");
+
+        assert_eq!(
+            second.summary.invocation_reclaimed_bytes,
+            second.reclaimed_bytes
+        );
+        assert_eq!(
+            second.summary.previous_session_reclaimed_bytes,
+            first.summary.cumulative_session_reclaimed_bytes
+        );
+        assert_eq!(
+            second.summary.cumulative_session_reclaimed_bytes,
+            first.reclaimed_bytes + second.reclaimed_bytes
+        );
+        assert_eq!(second.summary.remaining_candidate_count, 0);
+        assert_eq!(second.summary.remaining_candidate_bytes, 0);
+        assert!(second.summary.session_state_path.is_some());
+        assert_eq!(second.summary.session_state_error, None);
     }
 
     #[test]
