@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.24] - 2026-06-27
+
+### Changed
+- Remove agent-task-contract reexport shims
+
 ## [3.19.23] - 2026-06-27
 
 ### Changed

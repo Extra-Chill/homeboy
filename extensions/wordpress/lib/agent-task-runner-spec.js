@@ -1,3 +1,3 @@
 'use strict';
 
-module.exports = require('./agent-task-runner-contract');
+module.exports = require('../../agent-task-contracts/agent-task-runner-contract');

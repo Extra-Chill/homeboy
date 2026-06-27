@@ -11,7 +11,7 @@ const {
   genericAgentTaskRequest,
   genericAgentTaskRunnerSpec,
   normalizeRuntimeExecutionDescriptor,
-} = require('./generic-agent-task-plan');
+} = require('../../agent-task-contracts/generic-agent-task-plan');
 const { normalizeRuntimeId, resolveRuntimeProvider, runtimeIdFromOptions } = require('./runtime-provider-resolver.cjs');
 const {
   expandAgentTaskCapabilityBundles,
