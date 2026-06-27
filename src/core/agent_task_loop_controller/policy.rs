@@ -91,12 +91,6 @@ pub enum AgentTaskLoopPolicyAction {
         #[serde(default, skip_serializing_if = "Value::is_null")]
         request_template: Value,
     },
-    ValidateCandidatePatch {
-        candidate: AgentTaskLoopCandidatePatch,
-        validation: AgentTaskLoopCandidateValidation,
-        #[serde(default)]
-        limits: AgentTaskLoopCandidateLoopLimits,
-    },
     Join {
         wait_key: String,
     },
@@ -186,43 +180,6 @@ pub struct AgentTaskLoopFindingPacket {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskLoopCandidatePatch {
-    pub candidate_id: String,
-    pub patch: AgentTaskLoopArtifactRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finding_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree: Option<String>,
-    #[serde(default)]
-    pub attempt: u32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lineage: Vec<AgentTaskLoopArtifactRef>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskLoopCandidateValidation {
-    pub validation_id: String,
-    pub status: AgentTaskLoopCandidateValidationStatus,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<AgentTaskLoopArtifactRef>,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub details: Value,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskLoopCandidateValidationStatus {
-    Passed,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskLoopCandidateLoopLimits {
-    #[serde(default = "default_candidate_max_attempts")]
-    pub max_attempts: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskPrOwnershipRequest {
     pub ownership_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -286,15 +243,6 @@ pub enum AgentTaskPrOwnershipState {
     WaitingForMerge,
     Merged,
     MissingPr,
-    Stopped,
-}
-
-impl Default for AgentTaskLoopCandidateLoopLimits {
-    fn default() -> Self {
-        Self {
-            max_attempts: default_candidate_max_attempts(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

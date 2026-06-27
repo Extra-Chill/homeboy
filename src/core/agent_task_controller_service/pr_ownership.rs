@@ -204,8 +204,6 @@ pub(super) fn queue_pr_ownership_follow_up(
                 "owned PR lifecycle completed",
             );
         }
-        AgentTaskPrOwnershipState::MissingPr
-        | AgentTaskPrOwnershipState::Stopped
-        | AgentTaskPrOwnershipState::Tracking => {}
+        AgentTaskPrOwnershipState::MissingPr | AgentTaskPrOwnershipState::Tracking => {}
     }
 }

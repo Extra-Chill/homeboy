@@ -375,3 +375,68 @@ fn apply_event_persists_actions_and_keeps_event_envelope() {
             .all(|event| event.event_type == "controller.action.claimed"));
     });
 }
+
+#[test]
+fn controller_escalates_when_action_cap_is_reached() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-action-cap".to_string(),
+            phase: "verify".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+
+        // Fill the controller to its lifetime action cap with non-dedupable
+        // actions, mirroring a stuck loop that keeps recording follow-ups.
+        for index in 0..MAX_CONTROLLER_LIFETIME_ACTIONS {
+            record.record_action(
+                AgentTaskLoopPolicyAction::Retry {
+                    target_run_id: format!("run-{index}"),
+                },
+                "stuck loop follow-up",
+            );
+        }
+        assert_eq!(record.next_actions.len(), MAX_CONTROLLER_LIFETIME_ACTIONS);
+        controller::write_controller(&record).expect("controller written");
+
+        // The next execution must not claim and run another action: it escalates.
+        let result = run_next(
+            "loop-service-action-cap",
+            CapturingExecutor::default(),
+            &NoopDispatchHook,
+        )
+        .expect("cap guard returns a report");
+        assert_eq!(result.exit_code, 1);
+        assert!(!result.value.claimed);
+        assert_eq!(result.value.status.as_deref(), Some("escalated"));
+
+        let loaded =
+            controller::load_controller("loop-service-action-cap").expect("controller loaded");
+        assert_eq!(loaded.state, AgentTaskLoopControllerState::Escalated);
+        assert_eq!(loaded.terminal_outcomes.len(), 1);
+        assert_eq!(
+            loaded.terminal_outcomes[0].status,
+            AgentTaskLoopTerminalStatus::Failed
+        );
+        assert!(loaded
+            .next_actions
+            .iter()
+            .all(|action| action.status == AgentTaskLoopActionStatus::Pending));
+
+        // Re-running against an already-escalated controller is idempotent: it
+        // claims no further action, so growth halts and no duplicate terminal
+        // outcomes are appended.
+        let again = run_next(
+            "loop-service-action-cap",
+            CapturingExecutor::default(),
+            &NoopDispatchHook,
+        )
+        .expect("escalated controller returns a report again");
+        assert_eq!(again.exit_code, 0);
+        assert!(!again.value.claimed);
+        let reloaded =
+            controller::load_controller("loop-service-action-cap").expect("controller reloaded");
+        assert_eq!(reloaded.terminal_outcomes.len(), 1);
+        assert_eq!(reloaded.next_actions.len(), MAX_CONTROLLER_LIFETIME_ACTIONS);
+    });
+}

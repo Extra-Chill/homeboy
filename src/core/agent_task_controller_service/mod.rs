@@ -102,6 +102,16 @@ pub use spec_source::{load_materialize_spec_source, MaterializeSpecSource};
 
 const DEFAULT_CONTROLLER_RESUME_MAX_ACTIONS: usize = 100;
 
+/// Hard lifetime cap on the number of actions a single controller may
+/// accumulate in `next_actions`. Each executed action can record further
+/// follow-up actions (gates, PR-ownership polls, retries, etc.), and several of
+/// those actions are non-dedupable, so a stuck loop grows its action log
+/// without bound across repeated `run`/`resume` cycles. When the cap is
+/// reached the controller escalates to a terminal state instead of executing
+/// (and recording) more actions — mirroring the deterministic loop's
+/// max-iteration guard.
+pub(crate) const MAX_CONTROLLER_LIFETIME_ACTIONS: usize = 1000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControllerResumeOptions {
     pub max_actions: usize,

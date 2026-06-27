@@ -45,10 +45,6 @@ pub(crate) fn open_wait_status() -> AgentTaskLoopWaitStatus {
     AgentTaskLoopWaitStatus::Open
 }
 
-pub(crate) fn default_candidate_max_attempts() -> u32 {
-    3
-}
-
 pub(crate) fn default_pr_ownership_max_retries() -> u32 {
     3
 }
