@@ -665,11 +665,16 @@ function writeHomeboyFuzzArtifactFiles(artifactRoot, result = {}) {
 		return [];
 	}
 	const files = [];
-	const hotspotSummary = result.hotspot_summary || result.wp_codebox_result?.hotspot_summary || result.coverage?.hotspot_summary;
+	const hotspotSummary = result.hotspot_summary || result.wp_codebox_result?.hotspot_summary || result.coverage?.hotspot_summary || rawWpCodeboxHotspotArtifact(result);
 	if (hotspotSummary) {
 		files.push(writeJsonArtifactFile({ artifactRoot, relativePath: 'files/wordpress-hotspots.json', payload: hotspotSummary }));
 	}
 	return files;
+}
+
+function rawWpCodeboxHotspotArtifact(result = {}) {
+	return result.wp_codebox_result?.wordpress_fuzz_result?.metadata?.artifacts?.wordpressHotspots
+		|| result.wp_codebox_result?.metadata?.artifacts?.wordpressHotspots;
 }
 
 function writeJsonArtifactFile({ artifactRoot, relativePath, payload }) {

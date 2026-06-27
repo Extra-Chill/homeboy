@@ -32,6 +32,7 @@ const {
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 	buildWordPressFuzzRunnerResult,
 	runWordPressFuzzRunnerResult,
+	writeHomeboyFuzzArtifactFiles,
 } = require('../lib/wordpress-fuzz-runner');
 
 Module._load = originalLoad;
@@ -590,6 +591,26 @@ assert.equal(dispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].p
 const dispatchHotspots = JSON.parse(fs.readFileSync(path.join(dispatchArtifactsDir, 'files', 'wordpress-hotspots.json'), 'utf8'));
 assert.equal(dispatchHotspots.schema, 'homeboy/fuzz-hotspot-set/v1');
 assert.equal(dispatchHotspots.items[0].value, 42);
+
+const emptyHotspotArtifactsDir = path.join(tempDir, 'empty-hotspot-artifacts');
+writeHomeboyFuzzArtifactFiles(emptyHotspotArtifactsDir, {
+	wp_codebox_result: {
+		wordpress_fuzz_result: {
+			metadata: {
+				artifacts: {
+					wordpressHotspots: {
+						schema: 'wp-codebox/wordpress-hotspots/v1',
+						hotspots: [],
+						summary: { total: 0 },
+					},
+				},
+			},
+		},
+	},
+});
+const emptyHotspots = JSON.parse(fs.readFileSync(path.join(emptyHotspotArtifactsDir, 'files', 'wordpress-hotspots.json'), 'utf8'));
+assert.equal(emptyHotspots.schema, 'wp-codebox/wordpress-hotspots/v1');
+assert.deepEqual(emptyHotspots.hotspots, []);
 
 const taskAdapterCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-task-adapter-wp-codebox.js');
 fs.writeFileSync(taskAdapterCodeboxBin, `#!/usr/bin/env node
