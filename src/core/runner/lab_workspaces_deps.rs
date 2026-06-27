@@ -44,7 +44,7 @@ pub(super) fn add_candidate_extra_workspace(
     let expanded = shellexpand::tilde(candidate).to_string();
     let path = Path::new(&expanded);
     let (workspace_path, snapshot_includes, bootstrap_node_dependencies) = if path.is_dir() {
-        (path.to_path_buf(), Vec::new(), false)
+        (containing_checkout_or_dir(path)?, Vec::new(), false)
     } else if path.is_file() {
         let workspace_path = containing_checkout_or_parent(path)?;
         let snapshot_includes = provider_config_file_snapshot_includes(&workspace_path, path);
@@ -179,6 +179,13 @@ pub(super) fn containing_checkout_or_parent(path: &Path) -> Result<PathBuf> {
         return Ok(PathBuf::from(root));
     }
     canonical_existing_dir(&dir.display().to_string(), "provider_config")
+}
+
+fn containing_checkout_or_dir(path: &Path) -> Result<PathBuf> {
+    if let Ok(root) = git_output(path, &["rev-parse", "--show-toplevel"]) {
+        return Ok(PathBuf::from(root));
+    }
+    canonical_existing_dir(&path.display().to_string(), "provider_config")
 }
 
 pub(super) fn bare_module_imports(content: &str) -> BTreeSet<String> {

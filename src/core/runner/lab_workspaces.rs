@@ -1515,6 +1515,15 @@ mod provider_config_candidate_paths_tests {
         let transformer_root = controller.path().join("blocks-engine@matrix");
         std::fs::create_dir_all(&source).expect("source dir");
         std::fs::create_dir_all(&fixture_root).expect("fixture root");
+        std::fs::write(transformer_root.join("README.md"), "fixture owner\n").expect("repo marker");
+        git(&transformer_root, &["init", "-b", "main"]);
+        git(
+            &transformer_root,
+            &["config", "user.email", "test@example.com"],
+        );
+        git(&transformer_root, &["config", "user.name", "Homeboy Test"]);
+        git(&transformer_root, &["add", "."]);
+        git(&transformer_root, &["commit", "-m", "initial"]);
 
         let args = vec![
             "homeboy".to_string(),
@@ -1534,11 +1543,9 @@ mod provider_config_candidate_paths_tests {
 
         let workspaces = path_setting_extra_workspaces(&args, &source).expect("workspaces");
 
-        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].role, "path_setting");
-        assert_eq!(workspaces[0].path, fixture_root.canonicalize().unwrap());
-        assert_eq!(workspaces[1].role, "path_setting");
-        assert_eq!(workspaces[1].path, transformer_root.canonicalize().unwrap());
+        assert_eq!(workspaces[0].path, transformer_root.canonicalize().unwrap());
     }
 
     #[test]
