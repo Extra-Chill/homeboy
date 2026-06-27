@@ -1,10 +1,10 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use homeboy::core::extension::trace as extension_trace;
+use homeboy::core::trace_experiment;
 
 use super::output::{
     fmt_delta_avg_ms, fmt_delta_ms, fmt_ms, render_compare_markdown, TraceAggregateInput,
@@ -78,16 +78,7 @@ pub(super) fn write_trace_experiment_bundle(
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(".homeboy").join("experiments"));
     let bundle_dir = bundle_root.join(&experiment);
-    fs::create_dir_all(&bundle_dir).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to create trace experiment bundle {}: {}",
-                bundle_dir.display(),
-                err
-            ),
-            Some("trace.experiment.mkdir".to_string()),
-        )
-    })?;
+    trace_experiment::prepare_experiment_bundle_dir(&bundle_dir)?;
 
     let baseline_path = bundle_dir.join("baseline.json");
     let variant_filename = format!("variant-{}.json", experiment);
@@ -95,18 +86,22 @@ pub(super) fn write_trace_experiment_bundle(
     let compare_filename = format!("compare-{}.json", experiment);
     let compare_path = bundle_dir.join(&compare_filename);
     let report_path = bundle_dir.join("report.md");
-    write_file(
+    trace_experiment::write_experiment_file(
         &baseline_path,
         request.before_json,
         "trace.experiment.baseline",
     )?;
-    write_file(
+    trace_experiment::write_experiment_file(
         &variant_path,
         request.after_json,
         "trace.experiment.variant",
     )?;
-    write_json_file(&compare_path, request.compare, "trace.experiment.compare")?;
-    write_file(
+    trace_experiment::write_experiment_json_file(
+        &compare_path,
+        request.compare,
+        "trace.experiment.compare",
+    )?;
+    trace_experiment::write_experiment_file(
         &report_path,
         &render_experiment_report(request.name, request.before, request.after, request.compare),
         "trace.experiment.report",
@@ -148,7 +143,7 @@ pub(super) fn write_trace_experiment_bundle(
         ],
         overlays,
     };
-    write_json_file(
+    trace_experiment::write_experiment_json_file(
         &bundle_dir.join("manifest.json"),
         &manifest,
         "trace.experiment.manifest",
@@ -227,42 +222,15 @@ fn copy_overlay_file(
     overlay_dir: &Path,
     index: usize,
 ) -> homeboy::core::Result<PathBuf> {
-    fs::create_dir_all(overlay_dir).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to create overlay bundle dir {}: {}",
-                overlay_dir.display(),
-                err
-            ),
-            Some("trace.experiment.overlay.mkdir".to_string()),
-        )
-    })?;
+    trace_experiment::prepare_experiment_overlay_dir(overlay_dir)?;
     let filename = source
         .file_name()
         .and_then(|name| name.to_str())
         .map(sanitize_path_component)
         .unwrap_or_else(|| format!("overlay-{}.patch", index + 1));
     let target = overlay_dir.join(format!("{}-{}", role, filename));
-    let bytes = fs::read(source).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to read trace overlay {} for bundling: {}",
-                source.display(),
-                err
-            ),
-            Some("trace.experiment.overlay.read".to_string()),
-        )
-    })?;
-    fs::write(&target, bytes).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to write bundled trace overlay {}: {}",
-                target.display(),
-                err
-            ),
-            Some("trace.experiment.overlay.write".to_string()),
-        )
-    })?;
+    let bytes = trace_experiment::read_experiment_overlay(source)?;
+    trace_experiment::write_experiment_overlay(&target, &bytes)?;
     Ok(target)
 }
 
@@ -437,33 +405,8 @@ fn rig_components(input: &TraceAggregateInput) -> Vec<TraceExperimentComponentMa
         .unwrap_or_default()
 }
 
-fn write_file(path: &Path, content: &str, context: &str) -> homeboy::core::Result<()> {
-    fs::write(path, content).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!("Failed to write {}: {}", path.display(), err),
-            Some(context.to_string()),
-        )
-    })
-}
-
-fn write_json_file<T: Serialize>(
-    path: &Path,
-    value: &T,
-    context: &str,
-) -> homeboy::core::Result<()> {
-    let content = serde_json::to_string_pretty(value).map_err(|err| {
-        homeboy::core::Error::internal_json(err.to_string(), Some(context.to_string()))
-    })?;
-    write_file(path, &(content + "\n"), context)
-}
-
 fn sha256_file(path: &Path) -> homeboy::core::Result<String> {
-    let bytes = fs::read(path).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!("Failed to read {} for checksum: {}", path.display(), err),
-            Some("trace.experiment.overlay.sha256".to_string()),
-        )
-    })?;
+    let bytes = trace_experiment::read_experiment_overlay_for_checksum(path)?;
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Ok(format!("{:x}", hasher.finalize()))
