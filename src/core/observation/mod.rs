@@ -9,6 +9,7 @@ pub mod context;
 pub mod disk_budget;
 pub mod evidence_report;
 mod lifecycle;
+pub mod observed_workflow;
 pub mod records;
 mod run_failure_causes;
 pub mod runs_service;
@@ -23,6 +24,10 @@ pub use lifecycle::{
 
 pub use budget_findings::finding_records_from_budget;
 pub use context::{RunContext, RunProvenance};
+pub use observed_workflow::{
+    finish_adapted_observed_workflow, finish_observed_workflow, ObservationPersistenceWarning,
+    ObservedWorkflowRunner, WorkflowObservationAdapter,
+};
 pub use records::{
     finding_record_from_audit, finding_record_from_lint, finding_records_from_annotation_file,
     finding_records_from_annotations_dir, finding_records_from_audit,
