@@ -29,26 +29,17 @@
     {
       "file": "package.json",
       "pattern": "\"version\"\\s*:\\s*\"(\\d+\\.\\d+\\.\\d+)\""
-    },
-    {
-      "file": "composer.json",
-      "pattern": "\"version\"\\s*:\\s*\"(\\d+\\.\\d+\\.\\d+)\""
-    },
-    {
-      "file": "style.css",
-      "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
     }
   ],
   "test_drift": {
-    "source_dirs": ["src", "inc", "lib"],
+    "source_dirs": ["src"],
     "test_dirs": ["tests"],
-    "file_extensions": ["php"],
+    "file_extensions": [],
     "inline_tests": false
   },
   "direct_test_file_suffixes": [
     "_test.rs",
     "_tests.rs",
-    "Test.php",
     ".test.js",
     ".test.jsx",
     ".test.ts",
@@ -59,5 +50,21 @@
     ".spec.ts",
     ".spec.tsx",
     ".spec.mjs"
-  ]
+  ],
+  "detector_profile": {
+    "version_guard_constants": [
+      "PHP_VERSION",
+      "$wp_version",
+      "JETPACK__VERSION",
+      "WC_VERSION",
+      "GUTENBERG_VERSION",
+      "AKISMET_VERSION"
+    ],
+    "version_guard_regexes": [
+      "version_compare\\s*\\(\\s*([A-Z_][A-Z0-9_]*|\\$wp_version|PHP_VERSION)\\s*,\\s*['\"]([^'\"]+)['\"]\\s*,\\s*['\"]<=?['\"]\\s*\\)"
+    ],
+    "tracker_reference_regexes": [
+      "core\\.trac\\.wordpress\\.org/ticket/\\d+"
+    ]
+  }
 }

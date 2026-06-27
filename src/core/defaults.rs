@@ -18,6 +18,7 @@ pub use policy::{
 pub(crate) use io::reset_config_cache_for_test;
 
 pub(crate) use builtins::deploy_generated_build_dir;
+pub(crate) use builtins::extension_provided_detector_profile;
 pub(crate) use builtins::extension_provided_direct_test_file_suffixes;
 pub(crate) use builtins::extension_provided_test_drift_config;
 

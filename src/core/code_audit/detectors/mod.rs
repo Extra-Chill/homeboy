@@ -2,7 +2,6 @@ pub(super) mod aggregate_construction;
 pub(super) mod artifact_portability;
 pub(super) mod command_status_contracts;
 pub(super) mod config_key_usage;
-pub(super) mod core_boundary_leak;
 pub(super) mod dead_guard;
 pub(super) mod deprecation_age;
 pub(super) mod enum_dispatch_contracts;

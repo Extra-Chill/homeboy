@@ -1088,7 +1088,7 @@ if ( validate_redirect_destination( $redirect_uri ) ) {
         );
         let rule = RequestedDetectorRule {
             id: "redirect-dominance".to_string(),
-            kind: "undominated_redirect_param".to_string(),
+            kind: "redirect_validation".to_string(),
             severity: "warning".to_string(),
             convention: "requested_detectors".to_string(),
             language: Some("php".to_string()),
@@ -1106,7 +1106,7 @@ if ( validate_redirect_destination( $redirect_uri ) ) {
 
         let findings = run(&[&unsafe_redirect], &config(rule));
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, AuditFinding::UndominatedRedirectParam);
+        assert_eq!(findings[0].kind, AuditFinding::RedirectValidation);
         assert!(findings[0].description.contains("$redirect_uri"));
     }
 
@@ -1128,7 +1128,7 @@ final class ToolPolicyResolver { public function resolve() {} }
         );
         let rule = RequestedDetectorRule {
             id: "public-registry-resolver".to_string(),
-            kind: "public_registry_resolver_bypass".to_string(),
+            kind: "public_registry_exposure".to_string(),
             severity: "warning".to_string(),
             convention: "requested_detectors".to_string(),
             language: Some("php".to_string()),
@@ -1171,7 +1171,7 @@ $this->assertSame( array(), $config['enabled_tools'] );
         );
         let rule = RequestedDetectorRule {
             id: "config-write-only".to_string(),
-            kind: "config_key_write_only".to_string(),
+            kind: "write_only_config_key".to_string(),
             severity: "warning".to_string(),
             convention: "requested_detectors".to_string(),
             language: Some("php".to_string()),
@@ -1194,7 +1194,7 @@ $this->assertSame( array(), $config['enabled_tools'] );
 
         let findings = run(&[&writer, &reader, &test_mirror], &config(rule));
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, AuditFinding::ConfigKeyWriteOnly);
+        assert_eq!(findings[0].kind, AuditFinding::WriteOnlyConfigKey);
         assert!(findings[0].description.contains("enabled_tools"));
         assert!(!findings[0].description.contains("user_message"));
     }

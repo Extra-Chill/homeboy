@@ -224,16 +224,17 @@ impl Language {
     }
 }
 
-/// Builtin tracker-reference regex defaults shipped with Homeboy. These match
-/// the concrete issue/PR/ticket URL shapes used by common upstream trackers.
-/// The ecosystem-specific URL literals (e.g. project-tracker hosts) live here
-/// in the agnostic conventions home so detector implementations under
-/// `code_audit::detectors` stay free of hardcoded ecosystem literals — they
-/// pull this default set when a component opts into builtin profile defaults.
+/// Generic, framework-agnostic tracker-reference regex defaults shipped with
+/// Homeboy core. These match issue/PR/ticket URL shapes that are not tied to
+/// any single ecosystem (a generic code-host issue/PR URL and an `@see <url>`
+/// provenance reference). Ecosystem-specific tracker hosts (e.g. a particular
+/// framework's bug tracker) are not hardcoded in core — they ship in the
+/// extension-provided defaults asset and are merged in when a component opts
+/// into builtin profile defaults, keeping core free of framework literals
+/// (#2240).
 pub fn builtin_tracker_reference_regexes() -> &'static [&'static str] {
     &[
         r"https?://github\.com/[\w\-.]+/[\w\-.]+/(?:issues|pull)/\d+",
-        r"core\.trac\.wordpress\.org/ticket/\d+",
         r"@see\s+https?://[^\s)]+",
     ]
 }
@@ -440,22 +441,8 @@ pub enum AuditFinding {
     /// Configured mutating handler/resource-id path lacks a direct ownership or
     /// access check, or a trusted delegation marker known to enforce one.
     MutatingResourceAccess,
-    /// Config-like key/value is written, migrated, or surfaced by an accessor
-    /// without a corresponding production read/consumer.
-    ConfigKeyWriteOnly,
     /// Config/schema key appears in one side of a round-trip path but not the other.
     ConfigRoundtripAsymmetry,
-    /// Public metadata endpoint reads a raw registry/config source without the
-    /// project-local resolver/policy companion.
-    PublicRegistryResolverBypass,
-    /// Mutating resource handler lacks the configured ownership/access companion.
-    MutatingResourceOwnershipMissing,
-    /// Request-derived redirect destination lacks a dominating validation companion.
-    UndominatedRedirectParam,
-    /// Direct construction bypasses a configured factory/filter/resolver seam.
-    FactorySeamBypass,
-    /// Internal REST/API proxy call lacks a configured namespace or scope guard.
-    InternalProxyScopeMissing,
     /// Public endpoint exposes registry/config metadata through a raw getter
     /// while a permission-aware resolver/helper exists nearby.
     PublicRegistryExposure,
@@ -542,13 +529,7 @@ impl AuditFinding {
             "core_boundary_leak",
             "source_policy_violation",
             "mutating_resource_access",
-            "config_key_write_only",
             "config_roundtrip_asymmetry",
-            "public_registry_resolver_bypass",
-            "mutating_resource_ownership_missing",
-            "undominated_redirect_param",
-            "factory_seam_bypass",
-            "internal_proxy_scope_missing",
             "public_registry_exposure",
             "redirect_validation",
             "non_portable_artifact_path",

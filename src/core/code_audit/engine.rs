@@ -10,9 +10,9 @@ use std::path::Path;
 use super::descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
 use super::detectors::layer_ownership::run as run_layer_ownership;
 use super::detectors::{
-    artifact_portability, command_status_contracts, config_key_usage, core_boundary_leak,
-    dead_guard, deprecation_age, enum_dispatch_contracts, field_patterns, global_env_guard,
-    mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
+    artifact_portability, command_status_contracts, config_key_usage, dead_guard, deprecation_age,
+    enum_dispatch_contracts, field_patterns, global_env_guard, mutating_resource_access,
+    parallel_runner_setup, public_registry_exposure, redirect_validation,
     remote_execution_preflight, requested_detectors, source_policy, test_coverage,
     thin_command_adapter, unbounded_output_capture, wrapper_inference,
 };
@@ -652,7 +652,12 @@ pub(super) fn audit_internal(
         &mut timing,
         "detector.core_boundary_leaks",
         plan.run_core_boundary_leaks(),
-        || core_boundary_leak::run(per_file_fingerprints, &audit_config.core_boundary_leaks),
+        || {
+            source_policy::run(
+                per_file_fingerprints,
+                &audit_config.core_boundary_leaks.to_source_policy_rules(),
+            )
+        },
         Vec::new,
     );
     if !core_boundary_findings.is_empty() {

@@ -41,6 +41,67 @@ impl CoreBoundaryLeakConfig {
             &other.example_path_contains,
         );
     }
+
+    /// Lower this config into generic source-policy rules. Core-boundary-leak
+    /// detection is a thin preset over the generic source-policy engine: it
+    /// scans configured core paths for configured ecosystem terms. Returns an
+    /// empty rule set (no findings) when nothing is configured.
+    pub fn to_source_policy_rules(&self) -> Vec<SourcePolicyRule> {
+        if self.terms.is_empty() || self.scan_path_contains.is_empty() {
+            return Vec::new();
+        }
+
+        vec![SourcePolicyRule {
+            id: "core-boundary-leak".to_string(),
+            kind: "core_boundary_leak".to_string(),
+            severity: "warning".to_string(),
+            convention: "core_boundary_leak".to_string(),
+            language: None,
+            file_extensions: Vec::new(),
+            include_path_contains: self.scan_path_contains.clone(),
+            exclude_path_contains: self.allow_path_contains.clone(),
+            allow_line_contains: self.allow_line_contains.clone(),
+            ignore_line_prefixes: Vec::new(),
+            ignore_after_line_equals: Vec::new(),
+            example_path_contains: self.example_path_contains.clone(),
+            example_classification: None,
+            description:
+                "Core boundary leak: configured ecosystem term `{term}` appears at line {line} in {classification} context `{context}`"
+                    .to_string(),
+            suggestion: "Move ecosystem-specific behavior into extension metadata/rules, or add an explicit audit allowlist for intentional examples.".to_string(),
+            rule: SourcePolicyRuleBody::ForbiddenTerms {
+                terms: self
+                    .terms
+                    .iter()
+                    .filter_map(|term| core_boundary_term(term))
+                    .collect(),
+                default_match: SourcePolicyMatchMode::Literal,
+                case_insensitive: true,
+            },
+        }]
+    }
+}
+
+/// Build a source-policy term from a raw core-boundary term. Identifier-shaped
+/// terms match on token boundaries; everything else matches literally.
+fn core_boundary_term(term: &str) -> Option<SourcePolicyTerm> {
+    let value = term.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let match_mode = if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        SourcePolicyMatchMode::Token
+    } else {
+        SourcePolicyMatchMode::Literal
+    };
+    Some(SourcePolicyTerm {
+        value: value.to_string(),
+        label: None,
+        match_mode: Some(match_mode),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
