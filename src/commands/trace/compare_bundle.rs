@@ -5,9 +5,9 @@ use homeboy::core::extension::trace::{self as extension_trace, TraceCommandOutpu
 use serde::Serialize;
 
 use super::compare_targets::run_compare_targets;
-use super::matrix::write_json_artifact;
 use super::TraceArgs;
 use crate::commands::CmdResult;
+use homeboy::core::trace_compare::write_json_artifact;
 
 pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     if args.baseline_target.is_none() || args.candidate.is_none() {

@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::TraceCommandOutput;
+use homeboy::core::trace_compare::{
+    prepare_matrix_cell_dir, prepare_matrix_output_dir, prepare_variant_matrix_output_dir,
+    write_json_artifact, write_matrix_summary, write_variant_matrix_summary,
+};
 
 use super::output::{
     compare_trace_aggregates_with_focus, render_matrix_markdown, TraceAggregateIdentity,
@@ -193,16 +197,7 @@ pub(super) fn run_scenario_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutp
             chrono::Utc::now().format("%Y%m%d%H%M%S")
         ))
     });
-    std::fs::create_dir_all(&output_dir).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to create trace matrix output dir {}: {}",
-                output_dir.display(),
-                err
-            ),
-            Some("trace.matrix.output_dir".to_string()),
-        )
-    })?;
+    prepare_matrix_output_dir(&output_dir)?;
 
     let mut outputs = Vec::new();
     let mut failure_count = 0;
@@ -210,16 +205,7 @@ pub(super) fn run_scenario_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutp
         let mut cell_args = args.clone();
         apply_trace_matrix_cell_to_args(&mut cell_args, &cell);
         let cell_dir = output_dir.join(format!("cell-{:03}-{}", cell.index + 1, cell.label));
-        std::fs::create_dir_all(&cell_dir).map_err(|err| {
-            homeboy::core::Error::internal_io(
-                format!(
-                    "Failed to create trace matrix cell dir {}: {}",
-                    cell_dir.display(),
-                    err
-                ),
-                Some("trace.matrix.cell_dir".to_string()),
-            )
-        })?;
+        prepare_matrix_cell_dir(&cell_dir)?;
         let output_path = cell_dir.join("trace.json");
         let (passed, status, exit_code, artifact_path, artifact_dir, failure) =
             match execute_trace_run(cell_args) {
@@ -319,20 +305,10 @@ pub(super) fn run_scenario_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutp
         cells: outputs,
     };
     write_json_artifact(&matrix_path, &output)?;
-    std::fs::write(
+    write_matrix_summary(
         &summary_path,
-        super::output::render_scenario_matrix_markdown(&output),
-    )
-    .map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to write trace matrix summary {}: {}",
-                summary_path.display(),
-                err
-            ),
-            Some("trace.matrix.summary".to_string()),
-        )
-    })?;
+        &super::output::render_scenario_matrix_markdown(&output),
+    )?;
 
     Ok((TraceCommandOutput::ScenarioMatrix(output), exit_code))
 }
@@ -357,16 +333,7 @@ pub(super) fn run_variant_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutpu
             chrono::Utc::now().format("%Y%m%d%H%M%S")
         ))
     });
-    std::fs::create_dir_all(&output_dir).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to create trace variant output dir {}: {}",
-                output_dir.display(),
-                err
-            ),
-            Some("trace.variant.output_dir".to_string()),
-        )
-    })?;
+    prepare_variant_matrix_output_dir(&output_dir)?;
 
     let baseline = run_variant_aggregate(&args, Vec::new())?;
     let baseline_path = output_dir.join("baseline.aggregate.json");
@@ -437,16 +404,7 @@ pub(super) fn run_variant_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         exit_code,
         runs,
     };
-    std::fs::write(&summary_path, render_matrix_markdown(&output)).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to write trace variant summary {}: {}",
-                summary_path.display(),
-                err
-            ),
-            Some("trace.variant.summary".to_string()),
-        )
-    })?;
+    write_variant_matrix_summary(&summary_path, &render_matrix_markdown(&output))?;
 
     Ok((TraceCommandOutput::Matrix(output), exit_code))
 }
@@ -607,19 +565,4 @@ pub(super) fn aggregate_to_compare_input(
         guardrails: aggregate.guardrails.clone(),
         guardrail_failure_count: aggregate.guardrail_failure_count,
     }
-}
-
-pub(super) fn write_json_artifact<T: serde::Serialize>(
-    path: &Path,
-    value: &T,
-) -> homeboy::core::Result<()> {
-    let content = serde_json::to_string_pretty(value).map_err(|err| {
-        homeboy::core::Error::internal_json(err.to_string(), Some("trace.variant.json".to_string()))
-    })?;
-    std::fs::write(path, content).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!("Failed to write trace artifact {}: {}", path.display(), err),
-            Some("trace.variant.write".to_string()),
-        )
-    })
 }

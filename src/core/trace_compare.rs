@@ -369,3 +369,83 @@ pub fn write_compare_variant_summary(path: &Path, summary: &str) -> crate::core:
         )
     })
 }
+
+/// Create the top-level output directory for a scenario-matrix run, mirroring
+/// `mkdir -p`. Owns the filesystem orchestration so the command layer only
+/// computes the directory it needs.
+pub fn prepare_matrix_output_dir(output_dir: &Path) -> crate::core::Result<()> {
+    std::fs::create_dir_all(output_dir).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!(
+                "Failed to create trace matrix output dir {}: {}",
+                output_dir.display(),
+                err
+            ),
+            Some("trace.matrix.output_dir".to_string()),
+        )
+    })
+}
+
+/// Create the per-cell output directory for a scenario-matrix run, mirroring
+/// `mkdir -p`. Each matrix cell writes its own artifacts, so the directory
+/// orchestration lives here, keeping the command a thin adapter.
+pub fn prepare_matrix_cell_dir(cell_dir: &Path) -> crate::core::Result<()> {
+    std::fs::create_dir_all(cell_dir).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!(
+                "Failed to create trace matrix cell dir {}: {}",
+                cell_dir.display(),
+                err
+            ),
+            Some("trace.matrix.cell_dir".to_string()),
+        )
+    })
+}
+
+/// Write the pre-rendered scenario-matrix summary markdown to `path`. The
+/// command layer renders the markdown; this owns the filesystem write so
+/// persistence orchestration never accumulates in the command.
+pub fn write_matrix_summary(path: &Path, summary: &str) -> crate::core::Result<()> {
+    std::fs::write(path, summary).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!(
+                "Failed to write trace matrix summary {}: {}",
+                path.display(),
+                err
+            ),
+            Some("trace.matrix.summary".to_string()),
+        )
+    })
+}
+
+/// Create the top-level output directory for a variant-matrix run, mirroring
+/// `mkdir -p`. Owns the filesystem orchestration so the command layer only
+/// computes the directory it needs.
+pub fn prepare_variant_matrix_output_dir(output_dir: &Path) -> crate::core::Result<()> {
+    std::fs::create_dir_all(output_dir).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!(
+                "Failed to create trace variant output dir {}: {}",
+                output_dir.display(),
+                err
+            ),
+            Some("trace.variant.output_dir".to_string()),
+        )
+    })
+}
+
+/// Write the pre-rendered variant-matrix summary markdown to `path`. The
+/// command layer renders the markdown; this owns the filesystem write so
+/// persistence orchestration never accumulates in the command.
+pub fn write_variant_matrix_summary(path: &Path, summary: &str) -> crate::core::Result<()> {
+    std::fs::write(path, summary).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!(
+                "Failed to write trace variant summary {}: {}",
+                path.display(),
+                err
+            ),
+            Some("trace.variant.summary".to_string()),
+        )
+    })
+}
