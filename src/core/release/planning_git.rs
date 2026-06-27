@@ -53,8 +53,9 @@ pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
 
 pub(super) fn validate_default_branch_ancestry(component: &Component) -> Result<()> {
     let current_branch = current_branch(component)?;
+    let remote = source_remote(component);
     let default_branch = default_branch(component);
-    let remote_default_ref = format!("origin/{default_branch}");
+    let remote_default_ref = format!("{remote}/{default_branch}");
 
     let remote_default_revision = git::run_git(
         std::path::Path::new(&component.local_path),
@@ -74,8 +75,8 @@ pub(super) fn validate_default_branch_ancestry(component: &Component) -> Result<
             None,
             Some(vec![
                 format!(
-                    "Fetch the default branch before running `homeboy release --apply`: git fetch origin {}",
-                    default_branch
+                    "Fetch the default branch before running `homeboy release --apply`: git fetch {} {}",
+                    remote, default_branch
                 ),
                 format!(
                     "Release from '{}' so the tag target is published through the default branch",
@@ -116,8 +117,9 @@ pub(super) fn validate_head_reachable_from_default_branch(component: &Component)
         &["symbolic-ref", "--short", "HEAD"],
     )
     .unwrap_or_else(|| "detached HEAD".to_string());
+    let remote = source_remote(component);
     let default_branch = default_branch(component);
-    let remote_default_ref = format!("origin/{default_branch}");
+    let remote_default_ref = format!("{remote}/{default_branch}");
     let remote_default_revision = git::run_git(
         std::path::Path::new(&component.local_path),
         &["rev-parse", &remote_default_ref],
@@ -135,8 +137,8 @@ pub(super) fn validate_head_reachable_from_default_branch(component: &Component)
             ),
             None,
             Some(vec![format!(
-                "Fetch the default branch before running `homeboy release --apply`: git fetch origin {}",
-                default_branch
+                "Fetch the default branch before running `homeboy release --apply`: git fetch {} {}",
+                remote, default_branch
             )]),
         )
     })?;
@@ -184,14 +186,13 @@ fn current_branch(component: &Component) -> Result<String> {
 }
 
 fn default_branch(component: &Component) -> String {
-    command::run_in_optional(
-        &component.local_path,
-        "git",
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    )
-    .map(|value| value.trim().trim_start_matches("origin/").to_string())
-    .filter(|value| !value.is_empty())
-    .unwrap_or_else(|| "main".to_string())
+    git::default_branch_name(std::path::Path::new(&component.local_path))
+        .unwrap_or_else(|| "main".to_string())
+}
+
+/// Remote name to use for the component's source repo (resolved, not assumed).
+fn source_remote(component: &Component) -> String {
+    git::resolve_default_remote(std::path::Path::new(&component.local_path))
 }
 
 #[cfg(test)]
@@ -238,6 +239,37 @@ mod tests {
         run_git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
 
         validate_default_branch(&git_component(dir)).expect("main should be allowed");
+    }
+
+    #[test]
+    fn test_validate_default_branch_allows_default_branch_with_non_origin_remote() {
+        // A framework-agnostic orchestrator must release repos whose remote is
+        // not named `origin`. Clone, rename the remote to `upstream`, and verify
+        // the default-branch validation still resolves the default through the
+        // renamed remote.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let checkout = temp.path().join("checkout");
+        let remote_str = remote.to_string_lossy().to_string();
+
+        run_git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_str],
+        );
+        run_git(temp.path(), &["clone", &remote_str, "seed"]);
+        configure_git_user(&seed);
+        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
+        run_git(&seed, &["push", "-q", "origin", "main"]);
+
+        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
+        configure_git_user(&checkout);
+        run_git(&checkout, &["remote", "rename", "origin", "upstream"]);
+
+        validate_default_branch(&git_component(&checkout))
+            .expect("default branch should be allowed through a non-origin remote");
     }
 
     #[test]

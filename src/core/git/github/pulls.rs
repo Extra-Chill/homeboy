@@ -6,21 +6,21 @@ use std::process::Command;
 
 use crate::core::error::{Error, Result};
 
-use super::super::gh_client::{delete_branch_ref_api_args, pr_merge_api_args};
+use super::super::gh_client::{delete_branch_ref_api_args, pr_merge_api_args, GhClient};
 use super::super::github_types::{
     GithubFindItem, GithubFindOutput, GithubPrOutput, GithubPrView, PrCreateOptions, PrEditOptions,
     PrFindOptions, PrMergeOptions,
 };
 use super::client::{
-    ensure_gh_ready, parse_issue_number_from_url, resolve_component_github, run_gh, string_value,
+    default_gh_host, parse_issue_number_from_url, resolve_component_github, string_value,
 };
 use super::push_markdown_body_file_arg;
 use super::readiness::classify_pr_ci;
 
 /// Open a new pull request.
 pub fn pr_create(component_id: Option<&str>, options: PrCreateOptions) -> Result<GithubPrOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
 
     if options.title.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -58,7 +58,7 @@ pub fn pr_create(component_id: Option<&str>, options: PrCreateOptions) -> Result
         args.push("--draft".into());
     }
 
-    let output = run_gh(&args)?;
+    let output = gh.run(&args)?;
     let url = output.trim().to_string();
     let number = parse_issue_number_from_url(&url);
 
@@ -80,8 +80,8 @@ pub fn pr_create(component_id: Option<&str>, options: PrCreateOptions) -> Result
 
 /// Edit an existing pull request's title and/or body.
 pub fn pr_edit(component_id: Option<&str>, options: PrEditOptions) -> Result<GithubPrOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
 
     if options.title.is_none() && options.body.is_none() {
         return Err(Error::validation_invalid_argument(
@@ -109,7 +109,7 @@ pub fn pr_edit(component_id: Option<&str>, options: PrEditOptions) -> Result<Git
         push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", body)?;
     }
 
-    let output = run_gh(&args)?;
+    let output = gh.run(&args)?;
     Ok(GithubPrOutput {
         component_id: id,
         owner: repo.owner,
@@ -125,8 +125,8 @@ pub fn pr_edit(component_id: Option<&str>, options: PrEditOptions) -> Result<Git
 
 /// Find PRs matching the given filter.
 pub fn pr_find(component_id: Option<&str>, options: PrFindOptions) -> Result<GithubFindOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
     let limit = if options.limit == 0 {
@@ -155,7 +155,7 @@ pub fn pr_find(component_id: Option<&str>, options: PrFindOptions) -> Result<Git
         args.push(head.clone());
     }
 
-    let raw = run_gh(&args)?;
+    let raw = gh.run(&args)?;
     let items = parse_pr_list_json(&raw)?;
 
     Ok(GithubFindOutput {
@@ -178,7 +178,13 @@ pub fn pr_find_by_commit(
     repo: Option<&str>,
     limit: usize,
 ) -> Result<Vec<GithubFindItem>> {
-    ensure_gh_ready()?;
+    // Resolve a host-aware client so readiness (and the GH_HOST passed to the
+    // raw `gh` below) target the repo's actual host, not always github.com.
+    let client = match repo {
+        Some(repo) => GhClient::from_repo_arg(repo)?,
+        None => GhClient::for_host(default_gh_host()),
+    };
+    client.ensure_ready()?;
 
     let mut args: Vec<String> = vec![
         "pr".into(),
@@ -197,9 +203,12 @@ pub fn pr_find_by_commit(
         args.push(repo.to_string());
     }
 
-    let output = Command::new("gh")
-        .args(&args)
-        .current_dir(repo_path)
+    let mut command = Command::new("gh");
+    command.args(&args).current_dir(repo_path);
+    if client.host() != "github.com" {
+        command.env("GH_HOST", client.host());
+    }
+    let output = command
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| {
@@ -228,8 +237,8 @@ pub fn pr_view(
     number: u64,
     path: Option<String>,
 ) -> Result<GithubPrView> {
-    let (id, repo) = resolve_component_github(component_id, path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, path.as_deref())?;
+    gh.ensure_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
     let args: Vec<String> = vec![
@@ -241,7 +250,7 @@ pub fn pr_view(
         "--json".into(),
         "author,baseRefName,headRefName,headRepository,title,url,state,isDraft,mergedAt,headRefOid,reviewDecision,mergeStateStatus,statusCheckRollup".into(),
     ];
-    let raw = run_gh(&args)?;
+    let raw = gh.run(&args)?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         Error::internal_json(
             format!("Failed to parse gh pr view JSON: {}", e),
@@ -319,8 +328,8 @@ pub fn pr_files(
     number: u64,
     path: Option<String>,
 ) -> Result<Vec<String>> {
-    let (_id, repo) = resolve_component_github(component_id, path.as_deref())?;
-    ensure_gh_ready()?;
+    let (_id, repo, gh) = resolve_component_github(component_id, path.as_deref())?;
+    gh.ensure_ready()?;
     let args: Vec<String> = vec![
         "api".into(),
         "--paginate".into(),
@@ -328,7 +337,7 @@ pub fn pr_files(
         "--jq".into(),
         ".[].filename".into(),
     ];
-    let raw = run_gh(&args)?;
+    let raw = gh.run(&args)?;
     Ok(raw
         .lines()
         .map(str::trim)
@@ -340,8 +349,8 @@ pub fn pr_files(
 /// Merge a PR with an explicit method.
 pub fn pr_merge(component_id: Option<&str>, options: PrMergeOptions) -> Result<GithubPrOutput> {
     let method = validate_pr_merge_method(&options.method)?;
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
     let branch_to_delete = if options.delete_branch {
         let view = pr_view(Some(&id), options.number, options.path.clone())?;
@@ -351,11 +360,11 @@ pub fn pr_merge(component_id: Option<&str>, options: PrMergeOptions) -> Result<G
         None
     };
 
-    run_gh(&pr_merge_api_args(&repo_flag, options.number, &method))?;
+    gh.run(&pr_merge_api_args(&repo_flag, options.number, &method))?;
 
     let mut warnings = Vec::new();
     if let Some(branch) = branch_to_delete {
-        if let Err(error) = run_gh(&delete_branch_ref_api_args(&repo_flag, &branch)) {
+        if let Err(error) = gh.run(&delete_branch_ref_api_args(&repo_flag, &branch)) {
             warnings.push(format!("failed to delete branch {branch}: {error}"));
         }
     }

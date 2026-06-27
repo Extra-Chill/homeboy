@@ -54,10 +54,11 @@ pub fn remote_tag_commit(path: &str, tag_name: &str) -> Result<Option<String>> {
 }
 
 fn remote_ref_commit(path: &str, ref_name: &str) -> Option<String> {
+    let remote = super::resolve_default_remote(Path::new(path));
     crate::core::engine::command::run_in_optional(
         path,
         "git",
-        &["ls-remote", "--tags", "origin", ref_name],
+        &["ls-remote", "--tags", &remote, ref_name],
     )
     .and_then(|output| {
         output
@@ -97,11 +98,12 @@ pub fn get_head_commit(path: &str) -> Result<String> {
 /// were created — the partial-release state in issue #3611, where the tag push
 /// succeeded but the branch push was rejected as non-fast-forward.
 pub fn remote_branch_commit(path: &str, branch: &str) -> Result<Option<String>> {
+    let remote = super::resolve_default_remote(Path::new(path));
     let ref_name = format!("refs/heads/{}", branch);
     Ok(crate::core::engine::command::run_in_optional(
         path,
         "git",
-        &["ls-remote", "--heads", "origin", &ref_name],
+        &["ls-remote", "--heads", &remote, &ref_name],
     )
     .and_then(|output| {
         output
@@ -110,12 +112,20 @@ pub fn remote_branch_commit(path: &str, branch: &str) -> Result<Option<String>> 
     }))
 }
 
-/// Fetch `origin` so remote-tracking refs reflect the current remote state.
+/// Fetch the resolved default remote so remote-tracking refs reflect the
+/// current remote state.
 ///
 /// A thin wrapper used by release recovery before it inspects how far the local
-/// branch has diverged from the advanced remote (issue #3611).
+/// branch has diverged from the advanced remote (issue #3611). The remote is
+/// resolved from the repository (preferring `origin`) rather than assumed.
 pub fn fetch_origin(path: &str) -> Result<()> {
-    crate::core::engine::command::run_in(path, "git", &["fetch", "origin"], "git fetch origin")?;
+    let remote = super::resolve_default_remote(Path::new(path));
+    crate::core::engine::command::run_in(
+        path,
+        "git",
+        &["fetch", &remote],
+        &format!("git fetch {remote}"),
+    )?;
     Ok(())
 }
 
@@ -155,11 +165,12 @@ pub fn delete_local_tag(path: &str, tag_name: &str) -> Result<GitOutput> {
     Ok(GitOutput::from_output(id, resolved, "tag.delete", output))
 }
 
-/// Delete a tag on the `origin` remote.
+/// Delete a tag on the resolved default remote.
 pub fn delete_remote_tag(path: &str, tag_name: &str) -> Result<GitOutput> {
     let (id, resolved) = resolve_target(None, Some(path))?;
+    let remote = super::resolve_default_remote(Path::new(&resolved));
     let refspec = format!(":refs/tags/{}", tag_name);
-    let output = execute_git(&resolved, &["push", "origin", &refspec])
+    let output = execute_git(&resolved, &["push", &remote, &refspec])
         .map_err(|e| Error::git_command_failed(e.to_string()))?;
     Ok(GitOutput::from_output(
         id,

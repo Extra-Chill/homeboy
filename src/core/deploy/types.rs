@@ -373,7 +373,7 @@ impl ComponentDeployResult {
         self.git_branch = git_output(path, &["branch", "--show-current"]);
         self.git_head = git_output(path, &["rev-parse", "HEAD"]);
         self.upstream_branch = git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"])
-            .or_else(|| default_remote_branch(path));
+            .or_else(|| crate::core::git::default_remote_branch(path));
         self.upstream_head = self
             .upstream_branch
             .as_deref()
@@ -443,24 +443,6 @@ fn detect_linked_worktree(path: &Path) -> Option<bool> {
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
     Some(git_dir != common_dir)
-}
-
-fn default_remote_branch(path: &Path) -> Option<String> {
-    git_output(
-        path,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-    )
-    .or_else(|| {
-        ["origin/main", "origin/trunk", "origin/master"]
-            .iter()
-            .find(|branch| git_output(path, &["rev-parse", "--verify", branch]).is_some())
-            .map(|branch| (*branch).to_string())
-    })
 }
 
 #[cfg(test)]

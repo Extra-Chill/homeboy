@@ -3,12 +3,12 @@
 
 use crate::core::error::Result;
 
-use super::super::gh_client::pr_merge_api_args;
+use super::super::gh_client::{pr_merge_api_args, GhClient};
 use super::super::github_types::{
     GithubPrCheckRollup, GithubPrFleetItem, GithubPrFleetOutput, GithubPrFleetSummary,
     GithubPrView, PrFleetOptions,
 };
-use super::client::{ensure_gh_ready, resolve_component_github, run_gh};
+use super::client::resolve_component_github;
 use super::pulls::{pr_view, validate_pr_merge_method};
 
 /// Report and optionally land a fleet of PRs.
@@ -16,8 +16,8 @@ pub fn pr_fleet(
     component_id: Option<&str>,
     options: PrFleetOptions,
 ) -> Result<GithubPrFleetOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
     let merge_method = validate_pr_merge_method(&options.merge_method)?;
 
@@ -48,7 +48,7 @@ pub fn pr_fleet(
                 "-R".into(),
                 repo_flag.clone(),
             ];
-            match run_gh(&args) {
+            match gh.run(&args) {
                 Ok(_) => {
                     updated = true;
                     view = pr_view(Some(&id), parsed, options.path.clone())?;
@@ -63,13 +63,13 @@ pub fn pr_fleet(
             }
         }
 
-        let rollup = pr_fleet_check_rollup(&repo_flag, parsed)?;
+        let rollup = pr_fleet_check_rollup(&gh, &repo_flag, parsed)?;
         let mut item = pr_fleet_item(input, &view, rollup);
         item.updated = updated;
 
         if options.apply && item.mergeable {
             let args = pr_merge_api_args(&repo_flag, parsed, &merge_method);
-            match run_gh(&args) {
+            match gh.run(&args) {
                 Ok(_) => {
                     item.merged = true;
                     item.required_action = "merged".to_string();
@@ -133,7 +133,11 @@ fn pr_fleet_should_update_branch(view: &GithubPrView) -> bool {
     view.state == "OPEN" && view.merge_state.as_deref() == Some("BEHIND")
 }
 
-fn pr_fleet_check_rollup(repo_flag: &str, number: u64) -> Result<GithubPrCheckRollup> {
+fn pr_fleet_check_rollup(
+    gh: &GhClient,
+    repo_flag: &str,
+    number: u64,
+) -> Result<GithubPrCheckRollup> {
     let args: Vec<String> = vec![
         "pr".into(),
         "view".into(),
@@ -143,7 +147,7 @@ fn pr_fleet_check_rollup(repo_flag: &str, number: u64) -> Result<GithubPrCheckRo
         "--json".into(),
         "statusCheckRollup".into(),
     ];
-    let raw = run_gh(&args)?;
+    let raw = gh.run(&args)?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         crate::core::error::Error::internal_json(
             format!("Failed to parse gh pr view statusCheckRollup JSON: {e}"),

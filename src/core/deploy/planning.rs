@@ -526,7 +526,7 @@ impl GitProbeCache {
         }
 
         self.fetch_origin(git_root);
-        let default_branch = default_remote_branch(Path::new(git_root));
+        let default_branch = git::default_remote_branch(Path::new(git_root));
         self.default_remote_branch
             .insert(git_root.to_string(), default_branch.clone());
 
@@ -535,7 +535,7 @@ impl GitProbeCache {
 
     fn fetch_origin(&mut self, git_root: &str) {
         if self.fetched_origin.insert(git_root.to_string()) {
-            fetch_origin(Path::new(git_root));
+            fetch_default_remote(Path::new(git_root));
         }
     }
 }
@@ -580,9 +580,10 @@ pub(super) fn calculate_component_status_with_git_cache(
     version_status
 }
 
-fn fetch_origin(path: &Path) {
+fn fetch_default_remote(path: &Path) {
+    let remote = git::resolve_default_remote(path);
     let _ = Command::new("git")
-        .args(["fetch", "--quiet", "origin"])
+        .args(["fetch", "--quiet", &remote])
         .current_dir(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -603,24 +604,6 @@ fn git_output(path: &Path, args: &[&str]) -> Option<String> {
             let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
             (!value.is_empty()).then_some(value)
         })
-}
-
-fn default_remote_branch(path: &Path) -> Option<String> {
-    git_output(
-        path,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-    )
-    .or_else(|| {
-        ["origin/main", "origin/trunk", "origin/master"]
-            .iter()
-            .find(|branch| git_output(path, &["rev-parse", "--verify", branch]).is_some())
-            .map(|branch| (*branch).to_string())
-    })
 }
 
 /// Calculate release state for a component.

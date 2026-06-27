@@ -53,7 +53,7 @@ pub use super::github_types::{
 // re-exported at this module path so existing `super::github::X` paths keep
 // resolving after the split.
 pub(in crate::core) use body_file::push_markdown_body_file_arg;
-pub(in crate::core::git) use client::{ensure_gh_ready, resolve_component_github, run_gh};
+pub(in crate::core::git) use client::resolve_component_github;
 
 // Public probe/token helpers.
 pub use client::{gh_probe_succeeds, github_token_from_env_or_gh};

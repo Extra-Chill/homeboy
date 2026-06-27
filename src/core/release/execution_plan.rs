@@ -252,11 +252,12 @@ fn latest_release_tag(local_path: &str, tag_prefix: Option<&str>) -> Result<Opti
 }
 
 fn latest_remote_release_tag(local_path: &str, tag_prefix: Option<&str>) -> Result<Option<String>> {
-    let output = git::execute_git_for_release(local_path, &["ls-remote", "--tags", "origin"])
+    let remote = git::resolve_default_remote(std::path::Path::new(local_path));
+    let output = git::execute_git_for_release(local_path, &["ls-remote", "--tags", &remote])
         .map_err(|e| {
             Error::internal_io(
                 format!("Failed to inspect remote release tags: {}", e),
-                Some("git ls-remote --tags origin".to_string()),
+                Some(format!("git ls-remote --tags {remote}")),
             )
         })?;
 

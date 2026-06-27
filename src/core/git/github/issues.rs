@@ -6,9 +6,7 @@ use super::super::github_types::{
     GithubFindItem, GithubFindOutput, GithubIssueOutput, IssueCloseOptions, IssueCommentOptions,
     IssueCreateOptions, IssueEditOptions, IssueFindOptions,
 };
-use super::client::{
-    ensure_gh_ready, parse_issue_number_from_url, resolve_component_github, run_gh,
-};
+use super::client::{parse_issue_number_from_url, resolve_component_github};
 use super::push_markdown_body_file_arg;
 
 /// Create a new issue on the component's GitHub repository.
@@ -16,8 +14,8 @@ pub fn issue_create(
     component_id: Option<&str>,
     options: IssueCreateOptions,
 ) -> Result<GithubIssueOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
 
     if options.title.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -44,7 +42,7 @@ pub fn issue_create(
         args.push(label.clone());
     }
 
-    let output = run_gh(&args)?;
+    let output = gh.run(&args)?;
     let url = output.trim().to_string();
     let number = parse_issue_number_from_url(&url);
 
@@ -66,8 +64,8 @@ pub fn issue_comment(
     component_id: Option<&str>,
     options: IssueCommentOptions,
 ) -> Result<GithubIssueOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
     let mut args: Vec<String> = vec![
@@ -80,7 +78,7 @@ pub fn issue_comment(
     let mut body_files = Vec::new();
     push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &options.body)?;
 
-    let output = run_gh(&args)?;
+    let output = gh.run(&args)?;
     Ok(GithubIssueOutput {
         component_id: id,
         owner: repo.owner,
@@ -105,8 +103,8 @@ pub fn issue_close(
     component_id: Option<&str>,
     options: IssueCloseOptions,
 ) -> Result<GithubIssueOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
     let mut args: Vec<String> = vec![
@@ -123,7 +121,7 @@ pub fn issue_close(
         args.push(comment.clone());
     }
 
-    let _ = run_gh(&args)?;
+    let _ = gh.run(&args)?;
     Ok(GithubIssueOutput {
         component_id: id,
         owner: repo.owner,
@@ -148,8 +146,8 @@ pub fn issue_edit(
     component_id: Option<&str>,
     options: IssueEditOptions,
 ) -> Result<GithubIssueOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
 
     if options.title.is_none()
         && options.body.is_none()
@@ -189,7 +187,7 @@ pub fn issue_edit(
         args.push(label.clone());
     }
 
-    let output = run_gh(&args)?;
+    let output = gh.run(&args)?;
     Ok(GithubIssueOutput {
         component_id: id,
         owner: repo.owner,
@@ -212,8 +210,8 @@ pub fn issue_find(
     component_id: Option<&str>,
     options: IssueFindOptions,
 ) -> Result<GithubFindOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
     let limit = if options.limit == 0 {
@@ -241,7 +239,7 @@ pub fn issue_find(
         args.push(label.clone());
     }
 
-    let raw = run_gh(&args)?;
+    let raw = gh.run(&args)?;
     let items = parse_issue_list_json(&raw, &options)?;
 
     Ok(GithubFindOutput {
