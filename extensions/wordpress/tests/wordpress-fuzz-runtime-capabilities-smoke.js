@@ -7,6 +7,7 @@ const {
 	WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA,
 	gateWordPressFuzzCaseForMutationPolicy,
 	gateWordPressFuzzCaseForRuntimeCapabilities,
+	normalizeWordPressFuzzExecutionTier,
 	normalizeWordPressFuzzMutationMode,
 	normalizeWordPressFuzzRuntimeCapabilities,
 	normalizeWordPressFuzzRuntimeCapability,
@@ -18,6 +19,10 @@ assert.equal(normalizeWordPressFuzzRuntimeCapability('database_reset'), 'reset')
 assert.equal(normalizeWordPressFuzzRuntimeCapability('unknown'), '');
 assert.equal(normalizeWordPressFuzzMutationMode('destructive_deny'), 'destructive-deny');
 assert.equal(normalizeWordPressFuzzMutationMode('read-only'), 'read_only');
+assert.equal(normalizeWordPressFuzzExecutionTier('read-only-executable'), 'read_only_executable');
+assert.equal(normalizeWordPressFuzzExecutionTier('', { discovered: true }), 'discovered');
+assert.equal(normalizeWordPressFuzzExecutionTier('', { executable: false }), 'plan_only');
+assert.equal(normalizeWordPressFuzzExecutionTier('', { executable: true, mutates: true }), 'isolated_mutating_executable');
 
 const contract = normalizeWordPressFuzzRuntimeCapabilities({
 	capabilities: ['snapshots', 'rollback', 'reset-db', 'crud-execution'],
@@ -41,6 +46,7 @@ const skipped = gateWordPressFuzzCaseForRuntimeCapabilities({
 	metadata: { planned: true },
 }, { capabilities: ['crud'] }, { required_capabilities: ['crud', 'snapshot', 'restore', 'reset'] });
 assert.equal(skipped.executable, false);
+assert.equal(skipped.execution_tier, 'plan_only');
 assert.deepEqual(skipped.required_capabilities, ['crud', 'reset', 'restore', 'snapshot']);
 assert.deepEqual(skipped.metadata.missing_capabilities, ['reset', 'restore', 'snapshot']);
 assert.deepEqual(skipped.skip_reasons, ['explicit-opt-in-required', 'missing-runtime-fuzz-capabilities']);
@@ -51,6 +57,7 @@ const executable = gateWordPressFuzzCaseForRuntimeCapabilities({
 	metadata: {},
 }, { capabilities: ['crud', 'snapshot', 'restore', 'reset'] }, { required_capabilities: ['crud', 'snapshot', 'restore', 'reset'] });
 assert.equal(executable.executable, true);
+assert.equal(executable.execution_tier, 'read_only_executable');
 assert.equal(executable.metadata.executable, true);
 assert.equal(executable.metadata.gated, false);
 assert.equal(executable.metadata.runtime_capability_gated, false);
@@ -61,6 +68,7 @@ const policyDenied = gateWordPressFuzzCaseForMutationPolicy({
 	metadata: { planned: true },
 }, { mutation_mode: 'read_only' });
 assert.equal(policyDenied.executable, false);
+assert.equal(policyDenied.execution_tier, 'plan_only');
 assert.equal(policyDenied.metadata.mutation_policy.schema, WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA);
 assert.equal(policyDenied.metadata.mutation_policy.mode, 'read_only');
 assert.deepEqual(policyDenied.skip_reasons, ['mutation-policy-read-only']);
@@ -75,6 +83,7 @@ const capabilityAndPolicyDenied = gateWordPressFuzzCaseForRuntimeCapabilities({
 	mutates: true,
 });
 assert.equal(capabilityAndPolicyDenied.executable, false);
+assert.equal(capabilityAndPolicyDenied.execution_tier, 'plan_only');
 assert.equal(capabilityAndPolicyDenied.metadata.runtime_capability_gated, undefined);
 assert.equal(capabilityAndPolicyDenied.metadata.mutation_policy_gated, true);
 assert.deepEqual(capabilityAndPolicyDenied.skip_reasons, ['mutation-policy-destructive-deny']);

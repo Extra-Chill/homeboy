@@ -65,6 +65,7 @@ assert.deepEqual(discovery.surfaces.map((surface) => surface.id), [
 	'rest:/wp/v2/posts',
 ]);
 assert.equal(discovery.surfaces.find((surface) => surface.id === 'rest:/wp/v2/posts').metadata.sources.includes('rest-index'), true);
+assert.equal(discovery.surfaces.every((surface) => surface.execution_tier === 'read_only_executable'), true);
 assert.deepEqual(discovery.unsupported_surfaces.map((surface) => surface.id), [
 	'capability:edit_posts',
 	'cron:wp_version_check',
@@ -77,6 +78,7 @@ assert.deepEqual(discovery.unsupported_surfaces.map((surface) => surface.id), [
 	'user:all',
 	'wp-cli:plugin list',
 ]);
+assert.equal(discovery.unsupported_surfaces.every((surface) => surface.execution_tier === 'discovered'), true);
 assert.equal(discovery.diagnostics.length, 10);
 
 const manifest = buildWordPressRuntimeSurfaceCoverageManifest(discovery);
@@ -89,5 +91,6 @@ assert.deepEqual(manifest.surfaces.map((surface) => surface.type), [
 	'frontend_url',
 	'rest_route',
 ]);
+assert.equal(manifest.surfaces.every((surface) => surface.execution_tier === 'read_only_executable'), true);
 
 console.log('WordPress runtime surface discovery smoke passed.');
