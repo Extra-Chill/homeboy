@@ -14,10 +14,10 @@ homeboy runs fuzz-compare --from-run <run-id> --to-run <run-id> [--hotspot-polic
 homeboy runs show <run-id> [--json]
 homeboy runs resume-plan <run-id>
 homeboy runs evidence <run-id>
-homeboy runs artifacts <run-id>
+homeboy runs artifacts <run-id> [--runner <runner-id>]
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
 homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>
-homeboy runs artifact get <run-id> <artifact-id> [--output <path>]
+homeboy runs artifact get <run-id> <artifact-id> [--runner <runner-id>] [--output <path>]
 homeboy runs artifact cleanup-downloads [--runner <runner-id>] [--run-id <run-id>] [--apply]
 homeboy runs artifact cleanup-persisted [--older-than-days <days>] [--run-id <run-id>] [--apply]
 homeboy runs findings <run-id> [--tool <tool>] [--file <path>] [--fingerprint <fingerprint>] [--limit 100]
@@ -62,6 +62,8 @@ then promote or attach artifacts through the command-specific surface when it is
 available. See
 [Artifact loop for runner and matrix workflows](../operators/artifact-loop-runner-matrix.md)
 for generic runner, static HTML, and matrix examples.
+
+`homeboy runs artifacts <run-id> --runner <runner-id>` queries a connected runner daemon for the run's artifact records from the controller machine. `homeboy runs artifact get <run-id> <artifact-id> --runner <runner-id>` pulls selected runner-side artifact bytes through that connection into the local artifact cache, or into `--output` when provided, and reports the runner id plus source content path in JSON output. Use these commands when a controller-side agent has a run id and artifact id but should not SSH into the runner or know runner filesystem paths.
 
 `homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>` copies an existing runner-side file into the local persisted artifact store and records it against an existing run. The runner path must be absolute and under the runner's configured `workspace_root`, `policy.workspace_roots`, or `HOMEBOY_ARTIFACT_ROOT` output root. Use this for post-run evidence files that already exist on the runner; it does not promote runner exec output or infer changed files.
 
@@ -157,7 +159,7 @@ The structured output includes stable Homeboy run/artifact IDs and persisted loc
 Most `homeboy runs` subcommands are readers. These subcommands write files,
 delete files, or update the local observation store:
 
-- `artifact get`: copies a recorded file artifact to a local destination.
+- `artifact get`: copies a recorded or selected runner-side file artifact to a local destination.
 - `artifact attach`: copies an existing runner-side file into the persisted local artifact store and inserts an artifact record.
 - `artifact cleanup-downloads --apply`: deletes locally cached runner artifact downloads.
 - `artifact cleanup-persisted --apply`: deletes persisted local artifact files/directories and their database records.

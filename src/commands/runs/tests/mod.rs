@@ -689,6 +689,7 @@ fn artifact_get_copies_registered_file_without_raw_path_lookup() {
         let (output, _) = artifact_get(RunsArtifactGetArgs {
             run_id: run.id.clone(),
             artifact_id: artifact.id.clone(),
+            runner: None,
             output: Some(output_path.clone()),
         })
         .expect("get artifact");
@@ -706,6 +707,7 @@ fn artifact_get_copies_registered_file_without_raw_path_lookup() {
         let err = match artifact_get(RunsArtifactGetArgs {
             run_id: run.id,
             artifact_id: artifact_path.display().to_string(),
+            runner: None,
             output: Some(home.path().join("bad.json")),
         }) {
             Ok(_) => panic!("raw paths are not accepted as artifact ids"),
@@ -765,6 +767,7 @@ fn artifact_get_fetches_nested_publication_artifact_store_ref() {
         let (output, _) = artifact_get(RunsArtifactGetArgs {
             run_id: run.id.clone(),
             artifact_id: "nested-result".to_string(),
+            runner: None,
             output: Some(output_path.clone()),
         })
         .expect("get nested artifact");

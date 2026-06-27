@@ -307,6 +307,7 @@ fn bundle_import_marks_file_artifacts_metadata_only_and_query_reports_skip() {
         let err = super::artifact_get(super::RunsArtifactGetArgs {
             run_id,
             artifact_id: artifacts[0].id.clone(),
+            runner: None,
             output: None,
         })
         .err()

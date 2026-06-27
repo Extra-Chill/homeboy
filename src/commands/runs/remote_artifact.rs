@@ -32,6 +32,19 @@ pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsO
             command: "runs.artifact.get",
             run_id: download.run_id,
             artifact_id: download.artifact_id,
+            runner_id: download
+                .artifact_ref
+                .as_ref()
+                .map(|artifact_ref| {
+                    artifact_ref
+                        .path
+                        .as_deref()
+                        .and_then(runner_id_from_artifact_ref)
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .filter(|runner_id| !runner_id.is_empty()),
+            source_content_url: None,
             output_path: download.output_path.display().to_string(),
             content_type: download.content_type,
             size_bytes: download.size_bytes,
@@ -40,6 +53,11 @@ pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsO
         }),
         0,
     ))
+}
+
+fn runner_id_from_artifact_ref(path: &str) -> Option<&str> {
+    let path = path.strip_prefix("runner-artifact://")?;
+    path.split('/').next()
 }
 
 pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
