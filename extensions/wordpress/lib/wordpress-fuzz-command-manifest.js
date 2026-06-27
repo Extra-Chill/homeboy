@@ -71,7 +71,10 @@ function requiredWpCodeboxContractsForFuzzPlan(plan = {}) {
 
 function requiredWpCodeboxContractsForFuzzCase(testCase = {}) {
 	const intent = String(testCase.intent || '').trim();
-	return cloneRequirements(CASE_INTENT_REQUIREMENTS[intent] || CASE_INTENT_REQUIREMENTS.workload);
+	return mergeRequirements([
+		CASE_INTENT_REQUIREMENTS[intent] || CASE_INTENT_REQUIREMENTS.workload,
+		{ capabilities: arrayOf(testCase.required_capabilities || testCase.requiredCapabilities || testCase.metadata?.required_capabilities || testCase.metadata?.requiredCapabilities) },
+	]);
 }
 
 function mergeRequirements(requirements) {

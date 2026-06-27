@@ -26,6 +26,7 @@ const {
 
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const DB_MUTATION_REQUIRED_CAPABILITIES = requiredCapabilitiesForWordPressFuzzCase('db_mutation');
+const REST_ROLLBACK_ANY_CAPABILITIES = Object.freeze([Object.freeze(['restore', 'reset'])]);
 
 function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode || input.mutation_mode || input.mutationMode);
@@ -241,7 +242,8 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 			rest_method: method,
 			fixture_binding: fixtureMetadata,
 			auth: surface.auth || surface.authentication || surface.authorization || null,
-			safety: safeMethod ? { level: 'safe', mutates: false } : { level: 'mutating', mutates: true, requires_explicit_opt_in: true },
+			safety: safeMethod ? { level: 'safe', mutates: false } : { level: 'mutating', mutates: true, requires_explicit_opt_in: true, rollback_required: true },
+			rollback_contract: safeMethod ? undefined : restMutationRollbackContract({ surface, method }),
 			planned: !safeMethod,
 			gated: !safeMethod,
 		},
@@ -251,6 +253,7 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 	}
 	return gateWordPressFuzzCaseForRuntimeCapabilities(testCase, options.runtimeCapabilities || options.runtime_capabilities, {
 		required_capabilities: requiredCapabilitiesForWordPressFuzzCase('mutating_rest'),
+		required_any_capabilities: REST_ROLLBACK_ANY_CAPABILITIES,
 		mutation_mode: mutationMode,
 		mutates: true,
 	});
@@ -302,6 +305,10 @@ function crudCaseForSurface(surface, resource, action, options = {}) {
 	const operation = bindCrudOperationFixtures(crudOperationForSurface(surface, resource, action), fixtureBinding);
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
 	const mutates = mutatingCrudAction(action.action);
+	const restTransport = operation.transport?.type === 'rest';
+	const requiredCapabilities = mutates && restTransport
+		? requiredCapabilitiesForWordPressFuzzCase('rest_crud_mutation')
+		: requiredCapabilitiesForWordPressFuzzCase('mutating_crud');
 	const gateReasons = crudMutationGateReasons(surface, action.action, mutates, mutationMode);
 	const fixtureMetadata = fixtureBindingMetadata(fixtureBinding);
 	const testCase = {
@@ -310,21 +317,41 @@ function crudCaseForSurface(surface, resource, action, options = {}) {
 		operation_id: operation.id,
 		operation,
 		seed: options.seed,
-		required_capabilities: mutates ? requiredCapabilitiesForWordPressFuzzCase('mutating_crud') : undefined,
+		required_capabilities: mutates ? requiredCapabilities : undefined,
 		skip_reasons: [
 			...reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
 			...gateReasons,
 		],
 		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
-		metadata: { surface, crud: { resource_type: resource.type, intent: action.intent, action: action.action }, fixture_binding: fixtureMetadata },
+		metadata: stripUndefined({
+			surface,
+			crud: { resource_type: resource.type, intent: action.intent, action: action.action },
+			fixture_binding: fixtureMetadata,
+			rollback_contract: mutates && restTransport ? restMutationRollbackContract({ surface, method: operation.transport.method, action: action.action }) : undefined,
+		}),
 	};
 	if (!mutates || gateReasons.length > 0) {
 		return annotateWordPressFuzzCaseExecutionTier(testCase, { mutates, executable: !mutates && testCase.skip_reasons.length === 0 });
 	}
 	return gateWordPressFuzzCaseForRuntimeCapabilities(testCase, options.runtimeCapabilities || options.runtime_capabilities, {
-		required_capabilities: requiredCapabilitiesForWordPressFuzzCase('mutating_crud'),
+		required_capabilities: requiredCapabilities,
+		required_any_capabilities: restTransport ? REST_ROLLBACK_ANY_CAPABILITIES : undefined,
 		mutation_mode: mutationMode,
 		mutates: true,
+	});
+}
+
+function restMutationRollbackContract({ surface = {}, method, action } = {}) {
+	return stripUndefined({
+		schema: 'homeboy/wordpress-rest-mutation-rollback-contract/v1',
+		strategy: 'checkpoint-restore-or-reset',
+		required_capabilities: requiredCapabilitiesForWordPressFuzzCase(action ? 'rest_crud_mutation' : 'mutating_rest'),
+		required_any_capabilities: REST_ROLLBACK_ANY_CAPABILITIES.map((group) => [...group]),
+		restore_boundary: 'after_each_case',
+		delete_boundary_artifacts: method === 'DELETE' || action === 'delete',
+		route: surface.route,
+		method,
+		action,
 	});
 }
 
@@ -442,10 +469,17 @@ function transportForCrudAction(surface, resource, action) {
 	}
 	return stripUndefined({
 		type: surface.route ? 'rest' : undefined,
-		method: action.action === 'read' ? (surface.method || 'GET') : undefined,
+		method: surface.route ? restMethodForCrudAction(surface, action.action) : undefined,
 		route: surface.route,
 		path: surface.path,
 	});
+}
+
+function restMethodForCrudAction(surface, action) {
+	if (surface.method && action === 'read') {
+		return surface.method;
+	}
+	return { create: 'POST', read: 'GET', update: 'PUT', delete: 'DELETE' }[action];
 }
 
 function inputForCrudAction(surface, resource, action) {

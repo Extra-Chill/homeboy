@@ -9,6 +9,7 @@ const WORDPRESS_FUZZ_RUNTIME_CAPABILITIES = Object.freeze([
 	'snapshot',
 	'checkpoint',
 	'restore',
+	'rest-rollback',
 	'transaction',
 	'reset',
 	'crud',
@@ -25,6 +26,12 @@ const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_ALIASES = new Map([
 	['rollback', 'restore'],
 	['rollback-snapshot', 'restore'],
 	['rollback_snapshot', 'restore'],
+	['rest-rollback-safe', 'rest-rollback'],
+	['rest_rollback_safe', 'rest-rollback'],
+	['rest-mutation-rollback', 'rest-rollback'],
+	['rest_mutation_rollback', 'rest-rollback'],
+	['rollback-safe-rest', 'rest-rollback'],
+	['rollback_safe_rest', 'rest-rollback'],
 	['db-transaction', 'transaction'],
 	['db_transaction', 'transaction'],
 	['transactions', 'transaction'],
@@ -51,7 +58,8 @@ const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SET = new Set(WORDPRESS_FUZZ_RUNTIME_CAP
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_REQUIREMENTS = Object.freeze({
 	mutating_crud: Object.freeze(['crud', 'snapshot', 'restore', 'reset']),
-	mutating_rest: Object.freeze(['rest', 'snapshot', 'restore', 'reset']),
+	mutating_rest: Object.freeze(['rest', 'checkpoint', 'rest-rollback']),
+	rest_crud_mutation: Object.freeze(['crud', 'rest', 'checkpoint', 'rest-rollback']),
 	admin_mutation: Object.freeze(['admin', 'snapshot', 'restore', 'reset']),
 	db_mutation: Object.freeze(['database', 'snapshot', 'transaction', 'reset']),
 });
@@ -116,11 +124,13 @@ function gateWordPressFuzzCaseForRuntimeCapabilities(testCase, runtimeCapabiliti
 		return testCase;
 	}
 	const declared = new Set(normalizeWordPressFuzzRuntimeCapabilities(runtimeCapabilities).capabilities);
+	const requiredAny = normalizeRequiredCapabilityGroups(options.required_any_capabilities || options.requiredAnyCapabilities || testCase.required_any_capabilities || testCase.requiredAnyCapabilities);
 	const missing = required.filter((capability) => !declared.has(capability));
+	const missingAny = requiredAny.filter((group) => !group.some((capability) => declared.has(capability)));
 	const skipReasons = reasonList(testCase.skip_reasons || testCase.skipReasons || testCase.skip_reason || testCase.skipReason);
 	const metadata = isObject(testCase.metadata) ? { ...testCase.metadata } : {};
 
-	if (missing.length === 0) {
+	if (missing.length === 0 && missingAny.length === 0) {
 		const mutates = fuzzCaseMutates(testCase, options);
 		const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
 		const mutationTierGated = mutates && mutationMode !== 'isolated';
@@ -145,6 +155,7 @@ function gateWordPressFuzzCaseForRuntimeCapabilities(testCase, runtimeCapabiliti
 				execution_tier_gated: mutationTierGated,
 				runtime_capability_contract: WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA,
 				required_capabilities: required,
+				required_any_capabilities: requiredAny.length > 0 ? requiredAny : undefined,
 			},
 		};
 	}
@@ -164,7 +175,9 @@ function gateWordPressFuzzCaseForRuntimeCapabilities(testCase, runtimeCapabiliti
 			runtime_capability_gated: true,
 			runtime_capability_contract: WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA,
 			required_capabilities: required,
+			required_any_capabilities: requiredAny.length > 0 ? requiredAny : undefined,
 			missing_capabilities: missing,
+			missing_any_capabilities: missingAny.length > 0 ? missingAny : undefined,
 		},
 	};
 }
@@ -266,6 +279,12 @@ function normalizeRequiredCapabilities(value) {
 	return [...new Set((Array.isArray(value) ? value : [value])
 		.map(normalizeWordPressFuzzRuntimeCapability)
 		.filter(Boolean))].sort();
+}
+
+function normalizeRequiredCapabilityGroups(value) {
+	return (Array.isArray(value) ? value : [])
+		.map((group) => normalizeRequiredCapabilities(Array.isArray(group) ? group : [group]))
+		.filter((group) => group.length > 0);
 }
 
 function normalizeWordPressFuzzMutationMode(value) {
