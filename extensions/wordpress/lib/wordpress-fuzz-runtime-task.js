@@ -136,7 +136,7 @@ function observationId({ defaults = {}, family, caseId, targetId, operationId, m
 
 function normalizeObservationFamily(value) {
 	const family = String(value || '').trim().toLowerCase().replace(/[\s.-]+/g, '_');
-	if (['action', 'query', 'resource', 'timing', 'counter'].includes(family)) {
+	if (['action', 'query', 'resource', 'timing', 'counter', 'rollback'].includes(family)) {
 		return family;
 	}
 	return undefined;

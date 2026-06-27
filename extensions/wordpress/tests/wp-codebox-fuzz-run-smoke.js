@@ -203,6 +203,26 @@ const preflightPassed = preflightWpCodeboxFuzzCapabilityContract({
 });
 assert.equal(preflightPassed.ok, true);
 
+const rollbackRestPlanRequest = wpCodeboxFuzzSuiteTaskRequest({
+	taskId: 'rollback-rest-plan-task',
+	input: {
+		id: 'rollback-rest-plan-suite',
+		workload: {
+			plan: {
+				targets: [{ cases: [{ intent: 'request-rest-route', required_capabilities: ['rest', 'checkpoint', 'rest-rollback'] }] }],
+			},
+		},
+	},
+});
+const preflightMissingRuntimeCapability = preflightWpCodeboxFuzzCapabilityContract({
+	request: rollbackRestPlanRequest,
+	runtimeContractManifest: manifest,
+	publicCliCapabilities: { commands: { 'run-fuzz-suite': true, 'run-wordpress-workload': true }, capabilities: ['rest', 'checkpoint'] },
+});
+assert.equal(preflightMissingRuntimeCapability.ok, false);
+assert.equal(preflightMissingRuntimeCapability.missing_contracts.some((contract) => contract.type === 'runtime_capability' && contract.capability === 'rest-rollback'), true);
+assert.equal(preflightMissingRuntimeCapability.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_runtime_capability'), true);
+
 const mismatchRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-mismatch-'));
 const mismatchCliRoot = path.join(mismatchRoot, 'wp-codebox@cli');
 const mismatchCoreRoot = path.join(mismatchRoot, 'wp-codebox@core');
@@ -356,6 +376,31 @@ assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name 
 assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'replay-data'), true);
 assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'coverage-summary'), true);
 assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'result-envelope' && artifact.role === 'result_envelope'), false);
+
+const deleteBoundaryRollbackSummary = normalizeWpCodeboxFuzzSuiteResult({
+	schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+	request_id: 'delete-boundary-rollbacks',
+	status: 'passed',
+	cases: [{ id: 'delete-case', status: 'passed' }],
+	delete_boundary_rollback_artifacts: [{
+		name: 'delete-boundary-rollback',
+		path: 'rollback/delete-boundary.json',
+		content_type: 'application/json',
+		schema: 'wp-codebox/delete-boundary-rollback-artifact/v1',
+		case_id: 'delete-case',
+		operation_id: 'rest:posts:delete',
+		status: 'passed',
+	}],
+});
+const rollbackArtifact = deleteBoundaryRollbackSummary.artifacts.find((artifact) => artifact.role === 'rollback_boundary');
+assert.equal(rollbackArtifact.semantic_key, 'fuzz.rollback.delete_boundary');
+assert.equal(rollbackArtifact.path, 'rollback/delete-boundary.json');
+assert.equal(rollbackArtifact.metadata.schema, 'wp-codebox/delete-boundary-rollback-artifact/v1');
+const rollbackObservation = deleteBoundaryRollbackSummary.observation_set.observations.find((observation) => observation.family === 'rollback');
+assert.equal(rollbackObservation.subject, 'delete_boundary');
+assert.equal(rollbackObservation.case_id, 'delete-case');
+assert.equal(rollbackObservation.metric, 'rollback_artifact');
+assert.equal(rollbackObservation.value, 1);
 
 const genericPrimitiveManifest = {
 	schema: 'homeboy/fuzz-workload/v1',

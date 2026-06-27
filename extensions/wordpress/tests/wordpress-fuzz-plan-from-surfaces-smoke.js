@@ -194,7 +194,10 @@ for (const method of ['POST', 'DELETE']) {
 	assert(testCase.skip_reasons.includes('mutating_rest_method_requires_explicit_opt_in'));
 	assert(testCase.skip_reasons.includes('missing-runtime-fuzz-capabilities'));
 	assert(testCase.destructive_reasons.includes('rest_method_mutates_state'));
-	assert.deepEqual(testCase.required_capabilities, ['reset', 'rest', 'restore', 'snapshot']);
+	assert.deepEqual(testCase.required_capabilities, ['checkpoint', 'rest', 'rest-rollback']);
+	assert.deepEqual(testCase.metadata.required_any_capabilities, [['reset', 'restore']]);
+	assert.equal(testCase.metadata.rollback_contract.schema, 'homeboy/wordpress-rest-mutation-rollback-contract/v1');
+	assert.equal(testCase.metadata.rollback_contract.delete_boundary_artifacts, method === 'DELETE');
 	assert.equal(testCase.metadata.planned, true);
 	assert.equal(testCase.metadata.gated, true);
 	assert.equal(testCase.execution_tier, 'plan_only');
@@ -213,7 +216,8 @@ assert.equal(resourcePlan.targets[0].cases[2].operation.resource_type, 'setting'
 assert.equal(resourcePlan.targets[0].cases[2].operation.capability_context.required[0], 'manage_options');
 assert.deepEqual(resourcePlan.targets[0].cases[2].skip_reasons, ['requires-isolated-mutation-runtime']);
 assert.equal(resourcePlan.targets[0].cases[2].executable, false);
-assert.deepEqual(resourcePlan.targets[0].cases[2].required_capabilities, ['crud', 'reset', 'restore', 'snapshot']);
+assert.deepEqual(resourcePlan.targets[0].cases[2].required_capabilities, ['checkpoint', 'crud', 'rest', 'rest-rollback']);
+assert.equal(resourcePlan.targets[0].cases[2].metadata.rollback_contract.schema, 'homeboy/wordpress-rest-mutation-rollback-contract/v1');
 assert.equal(resourcePlan.targets[0].cases[2].execution_tier, 'plan_only');
 assert.equal(resourcePlan.targets[1].cases.length, 1);
 assert.equal(resourcePlan.targets[1].cases[0].intent, 'exercise-wordpress-surface');
@@ -265,7 +269,7 @@ const capablePlan = buildWordPressFuzzPlanFromSurfaces({
 	rest: [{ id: 'rest:posts', route: '/wp/v2/posts', methods: ['POST'] }],
 }, {
 	runtimeCapabilities: {
-		capabilities: ['crud', 'rest', 'admin', 'database', 'snapshot', 'restore', 'transaction', 'reset'],
+		capabilities: ['crud', 'rest', 'admin', 'database', 'snapshot', 'restore', 'transaction', 'reset', 'checkpoint', 'rest-rollback'],
 	},
 });
 const capableCases = capablePlan.targets.flatMap((target) => target.cases);
@@ -297,7 +301,7 @@ const isolatedMutationPlan = buildWordPressFuzzPlanFromSurfaces({
 }, {
 	mutation_mode: 'isolated',
 	runtimeCapabilities: {
-		capabilities: ['crud', 'rest', 'admin', 'snapshot', 'restore', 'reset'],
+		capabilities: ['crud', 'rest', 'admin', 'snapshot', 'restore', 'reset', 'checkpoint', 'rest-rollback'],
 	},
 });
 assert.equal(isolatedMutationPlan.metadata.mutation_mode, 'isolated');
@@ -309,6 +313,9 @@ for (const intent of ['create-post', 'request-rest-route', 'plan-admin-page-muta
 	assert.equal(testCase.execution_tier, 'isolated_mutating_executable');
 	assert.equal(testCase.metadata.runtime_capability_gated, false);
 }
+const isolatedRestMutation = isolatedCases.find((entry) => entry.intent === 'request-rest-route');
+assert.equal(isolatedRestMutation.metadata.rollback_contract.schema, 'homeboy/wordpress-rest-mutation-rollback-contract/v1');
+assert.deepEqual(isolatedRestMutation.metadata.required_any_capabilities, [['reset', 'restore']]);
 
 const readOnlyMutationPlan = buildWordPressFuzzPlanFromSurfaces({
 	post_types: [{ id: 'post:read-only', post_type: 'post', allowCrudMutations: true }],

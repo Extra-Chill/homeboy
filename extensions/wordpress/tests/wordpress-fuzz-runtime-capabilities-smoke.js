@@ -16,6 +16,7 @@ const {
 
 assert.equal(normalizeWordPressFuzzRuntimeCapability('db-transaction'), 'transaction');
 assert.equal(normalizeWordPressFuzzRuntimeCapability('database_reset'), 'reset');
+assert.equal(normalizeWordPressFuzzRuntimeCapability('rollback-safe-rest'), 'rest-rollback');
 assert.equal(normalizeWordPressFuzzRuntimeCapability('unknown'), '');
 assert.equal(normalizeWordPressFuzzMutationMode('destructive_deny'), 'destructive-deny');
 assert.equal(normalizeWordPressFuzzMutationMode('read-only'), 'read_only');
@@ -39,6 +40,7 @@ assert.equal(contract.execution.rest, true);
 assert.deepEqual(contract.metadata, { runtime: 'fixture' });
 
 assert.deepEqual(requiredCapabilitiesForWordPressFuzzCase('mutating_crud'), ['crud', 'snapshot', 'restore', 'reset']);
+assert.deepEqual(requiredCapabilitiesForWordPressFuzzCase('mutating_rest'), ['rest', 'checkpoint', 'rest-rollback']);
 
 const skipped = gateWordPressFuzzCaseForRuntimeCapabilities({
 	id: 'case-1',
@@ -61,6 +63,33 @@ assert.equal(executable.execution_tier, 'read_only_executable');
 assert.equal(executable.metadata.executable, true);
 assert.equal(executable.metadata.gated, false);
 assert.equal(executable.metadata.runtime_capability_gated, false);
+
+const restMutationExecutable = gateWordPressFuzzCaseForRuntimeCapabilities({
+	id: 'case-rest',
+	skip_reasons: [],
+	metadata: { safety: { mutates: true } },
+}, { capabilities: ['rest', 'checkpoint', 'rest-rollback', 'reset'] }, {
+	required_capabilities: ['rest', 'checkpoint', 'rest-rollback'],
+	required_any_capabilities: [['restore', 'reset']],
+	mutation_mode: 'isolated',
+	mutates: true,
+});
+assert.equal(restMutationExecutable.executable, true);
+assert.equal(restMutationExecutable.execution_tier, 'isolated_mutating_executable');
+assert.deepEqual(restMutationExecutable.metadata.required_any_capabilities, [['reset', 'restore']]);
+
+const restMutationMissingRollback = gateWordPressFuzzCaseForRuntimeCapabilities({
+	id: 'case-rest-missing',
+	skip_reasons: [],
+	metadata: { safety: { mutates: true } },
+}, { capabilities: ['rest', 'checkpoint', 'rest-rollback'] }, {
+	required_capabilities: ['rest', 'checkpoint', 'rest-rollback'],
+	required_any_capabilities: [['restore', 'reset']],
+	mutation_mode: 'isolated',
+	mutates: true,
+});
+assert.equal(restMutationMissingRollback.executable, false);
+assert.deepEqual(restMutationMissingRollback.metadata.missing_any_capabilities, [['reset', 'restore']]);
 
 const policyDenied = gateWordPressFuzzCaseForMutationPolicy({
 	id: 'case-3',
