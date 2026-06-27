@@ -11,33 +11,11 @@ RESOLVE_CONTEXT_CORE_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_D
 RUNNER_STEPS_CORE_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-steps.sh}"
 COMMAND_CAPTURE_CORE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/command-capture.sh}"
 PROJECT_SCRIPTS_HELPER="${ROOT_DIR}/scripts/lib/project-scripts.sh"
-RUNNER_PRELUDE_HELPERS=(
-    "${ROOT_DIR}/nodejs/scripts/lib/runner-prelude.sh"
-    "${ROOT_DIR}/rust/scripts/lib/runner-prelude.sh"
-    "${ROOT_DIR}/wordpress/scripts/lib/runner-prelude.sh"
-)
-RESOLVE_CONTEXT_HELPERS=(
-    "${ROOT_DIR}/nodejs/scripts/lib/resolve-context.sh"
-    "${ROOT_DIR}/rust/scripts/lib/resolve-context.sh"
-    "${ROOT_DIR}/wordpress/scripts/lib/resolve-context.sh"
-    "${ROOT_DIR}/swift/scripts/lib/resolve-context.sh"
-)
-RUNNER_STEPS_HELPERS=(
-    "${ROOT_DIR}/wordpress/scripts/lib/runner-steps.sh"
-)
-SIDECAR_WRITER_HELPERS=(
-    "${ROOT_DIR}/wordpress/scripts/lib/sidecar-writer.sh"
-)
 # Extension-owned shared libs are single-sourced in the top-level scripts/lib
 # shared asset (materialized as an extensions/scripts/lib sibling at install).
 FIX_RESULTS_HELPER="${ROOT_DIR}/scripts/lib/fix-results.sh"
 BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
 SETTINGS_HELPER="${ROOT_DIR}/scripts/lib/settings.sh"
-COMMAND_CAPTURE_HELPERS=(
-    "${ROOT_DIR}/nodejs/scripts/lib/command-capture.sh"
-    "${ROOT_DIR}/rust/scripts/lib/command-capture.sh"
-    "${ROOT_DIR}/wordpress/scripts/lib/command-capture.sh"
-)
 
 assert_file() {
     local path="$1"
@@ -81,30 +59,12 @@ assert_file "$PROJECT_SCRIPTS_HELPER"
 bash -c 'source "$1"; type homeboy_sidecar_emit >/dev/null; type homeboy_sidecar_write >/dev/null; type homeboy_sidecar_merge >/dev/null; type homeboy_merge_lint_findings >/dev/null; type homeboy_merge_test_failures >/dev/null; type homeboy_write_fix_results >/dev/null; type homeboy_merge_annotations >/dev/null' _ "$SIDECAR_WRITER_HELPER"
 bash -c 'source "$1"; homeboy_require_bash_version 4' _ "$BASH_PREFLIGHT_HELPER"
 bash -c 'source "$1"; type homeboy_project_init >/dev/null; type homeboy_project_has_script >/dev/null; type homeboy_project_run_script_command >/dev/null' _ "$PROJECT_SCRIPTS_HELPER"
-for runner_prelude_helper in "${RUNNER_PRELUDE_HELPERS[@]}"; do
-    assert_file "$runner_prelude_helper"
-    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_CORE_HELPER" bash -c 'source "$1"; type homeboy_runner_init >/dev/null; type homeboy_source_runtime_helper >/dev/null; type homeboy_require_bash_version >/dev/null' _ "$runner_prelude_helper"
-done
+bash -c 'source "$1"; type homeboy_runner_init >/dev/null; type homeboy_source_runtime_helper >/dev/null; type homeboy_require_bash_version >/dev/null' _ "$RUNNER_PRELUDE_CORE_HELPER"
 assert_file "$FIX_RESULTS_HELPER"
 bash -c 'source "$1"; type homeboy_fix_results_capture >/dev/null; type homeboy_fix_results_append_changed >/dev/null; type homeboy_fix_results_write >/dev/null' _ "$FIX_RESULTS_HELPER"
 assert_file "$SETTINGS_HELPER"
 bash -c 'source "$1"; type homeboy_setting >/dev/null; type homeboy_setting_bool >/dev/null; type homeboy_setting_array >/dev/null' _ "$SETTINGS_HELPER"
-for command_capture_helper in "${COMMAND_CAPTURE_HELPERS[@]}"; do
-    assert_file "$command_capture_helper"
-    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_CORE_HELPER" bash -c 'source "$1"; type homeboy_run_step >/dev/null; type homeboy_run_step_capture >/dev/null; type homeboy_cleanup_step_capture >/dev/null' _ "$command_capture_helper"
-done
-
-if ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[1]}" \
-    || ! cmp -s "${COMMAND_CAPTURE_HELPERS[0]}" "${COMMAND_CAPTURE_HELPERS[2]}"; then
-    echo "Command capture wrappers should stay identical across installed extension trees" >&2
-    exit 1
-fi
-
-if ! cmp -s "${RUNNER_PRELUDE_HELPERS[0]}" "${RUNNER_PRELUDE_HELPERS[1]}" \
-    || ! cmp -s "${RUNNER_PRELUDE_HELPERS[0]}" "${RUNNER_PRELUDE_HELPERS[2]}"; then
-    echo "Runner prelude wrappers should stay identical across installed extension trees" >&2
-    exit 1
-fi
+bash -c 'source "$1"; type homeboy_run_step >/dev/null; type homeboy_run_step_capture >/dev/null; type homeboy_cleanup_step_capture >/dev/null' _ "$COMMAND_CAPTURE_CORE_HELPER"
 
 # Single-source guarantee: extension-owned shared libs (settings, fix-results,
 # project-scripts) live only in the top-level scripts/lib shared asset and are
@@ -119,6 +79,29 @@ for vendored in \
     nodejs/scripts/lib/project-scripts.sh; do
     if [ -e "${ROOT_DIR}/${vendored}" ]; then
         echo "Shared lib must be single-sourced in scripts/lib; found vendored copy: ${vendored}" >&2
+        exit 1
+    fi
+done
+
+# Core-owned runtime helpers (runner-prelude, runner-steps, command-capture,
+# resolve-context, sidecar-writer) are materialized by homeboy core and resolved
+# by every runner via the required HOMEBOY_RUNTIME_* env vars. They must never be
+# re-vendored as per-language scripts/lib shims.
+for core_owned in \
+    nodejs/scripts/lib/runner-prelude.sh \
+    rust/scripts/lib/runner-prelude.sh \
+    wordpress/scripts/lib/runner-prelude.sh \
+    nodejs/scripts/lib/resolve-context.sh \
+    rust/scripts/lib/resolve-context.sh \
+    wordpress/scripts/lib/resolve-context.sh \
+    swift/scripts/lib/resolve-context.sh \
+    nodejs/scripts/lib/command-capture.sh \
+    rust/scripts/lib/command-capture.sh \
+    wordpress/scripts/lib/command-capture.sh \
+    wordpress/scripts/lib/runner-steps.sh \
+    wordpress/scripts/lib/sidecar-writer.sh; do
+    if [ -e "${ROOT_DIR}/${core_owned}" ]; then
+        echo "Core-owned runtime helper must resolve from homeboy core, not a vendored shim: ${core_owned}" >&2
         exit 1
     fi
 done
@@ -151,24 +134,6 @@ assert_resolves nodejs/scripts/lib     ../../../scripts/lib/project-scripts.sh  
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-
-RUNTIME_STUB="$TMP_DIR/runtime-stub.sh"
-printf 'HOMEBOY_WRAPPER_USED=runtime\n' > "$RUNTIME_STUB"
-for runner_prelude_helper in "${RUNNER_PRELUDE_HELPERS[@]}"; do
-    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$runner_prelude_helper"
-done
-for resolve_context_helper in "${RESOLVE_CONTEXT_HELPERS[@]}"; do
-    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$resolve_context_helper"
-done
-for runner_steps_helper in "${RUNNER_STEPS_HELPERS[@]}"; do
-    HOMEBOY_RUNTIME_RUNNER_STEPS="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$runner_steps_helper"
-done
-for command_capture_helper in "${COMMAND_CAPTURE_HELPERS[@]:1}"; do
-    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$command_capture_helper"
-done
-for sidecar_writer_helper in "${SIDECAR_WRITER_HELPERS[@]}"; do
-    HOMEBOY_RUNTIME_SIDECAR_WRITER="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$sidecar_writer_helper"
-done
 
 ANNOTATIONS_DIR="$TMP_DIR/annotations"
 ANNOTATIONS_SOURCE="$TMP_DIR/extra-annotations.json"

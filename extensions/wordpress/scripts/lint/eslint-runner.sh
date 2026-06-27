@@ -27,7 +27,7 @@ RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOL
 # below degrade to no-ops — they are observability output, not lint results, so
 # they must never fail the lint gate (homeboy-extensions#1402).
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
-# shellcheck source=../lib/resolve-context.sh
+# shellcheck source=/dev/null
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH
 # shellcheck source=/dev/null

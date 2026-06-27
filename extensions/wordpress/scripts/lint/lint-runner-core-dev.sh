@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
-# shellcheck source=../lib/resolve-context.sh
+# shellcheck source=/dev/null
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH
 
