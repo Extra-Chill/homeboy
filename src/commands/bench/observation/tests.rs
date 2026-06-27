@@ -107,8 +107,8 @@ fn recorded_bench_artifact_reports_unreachable_public_viewer_url() {
         Some("artifact-1")
     );
     assert!(artifact.public_url.is_some());
-    assert!(artifact.viewer_links.is_empty());
-    assert_eq!(artifact.viewer_url, None);
+    assert!(artifact.viewer_refs.viewer_links.is_empty());
+    assert_eq!(artifact.viewer_refs.viewer_url, None);
     assert_eq!(diagnostic.class, "bench_public_artifact_url_unreachable");
     assert_eq!(diagnostic.metadata["status_code"], 404);
 }
@@ -314,12 +314,13 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
             .expect("public url")
             .starts_with(&format!("{public_artifact_base}/")));
         assert!(transcript_artifact
+            .viewer_refs
             .viewer_url
             .as_deref()
             .expect("viewer url")
             .starts_with("https://playground.wordpress.net/?blueprint-url="));
         assert_eq!(
-            transcript_artifact.viewer_links[0].kind,
+            transcript_artifact.viewer_refs.viewer_links[0].kind,
             "wordpress-playground-blueprint"
         );
         assert!(

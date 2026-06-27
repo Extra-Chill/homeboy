@@ -234,8 +234,13 @@ pub(in crate::commands::bench::observation) fn apply_recorded_bench_artifact_lin
     artifact.observation_artifact_id = Some(record.id.clone());
     let public_url = artifact_links::public_artifact_url(record)?;
     artifact.public_url = Some(public_url.clone());
-    artifact.viewer_links = artifact_links::cached_validated_viewer_links(record, &public_url);
-    artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
+    artifact.viewer_refs.viewer_links =
+        artifact_links::cached_validated_viewer_links(record, &public_url);
+    artifact.viewer_refs.viewer_url = artifact
+        .viewer_refs
+        .viewer_links
+        .first()
+        .map(|link| link.url.clone());
     let validation = record.metadata_json.get("public_url_validation")?;
     let reachable = validation
         .get("reachable")

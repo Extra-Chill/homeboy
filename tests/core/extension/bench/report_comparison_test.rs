@@ -5,7 +5,9 @@ use super::{
     aggregate_comparison, aggregate_comparison_with_axes, BenchComparisonDiff, BenchPhaseGroups,
     RigBenchEntry,
 };
-use crate::core::extension::bench::artifact::{BenchArtifact, BenchPreviewLifecycleMetadata};
+use crate::core::extension::bench::artifact::{
+    BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata,
+};
 use crate::core::extension::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 use crate::core::extension::bench::distribution::BenchRunDistribution;
 use crate::core::extension::bench::parsing::{
@@ -172,8 +174,7 @@ mod fixtures {
             preview_url: Some(preview_url.to_string()),
             public_url: Some(preview_url.to_string()),
             viewer: None,
-            viewer_url: None,
-            viewer_links: Vec::new(),
+            viewer_refs: BenchArtifactViewer::default(),
             local_url: Some("http://127.0.0.1:8080".to_string()),
             status: Some(status.to_string()),
             preview_lifecycle: BenchPreviewLifecycleMetadata {
@@ -339,10 +340,13 @@ fn comparison_side_by_side_uses_viewer_url_as_preview_link() {
             kind: Some("json".to_string()),
             label: Some("Generated site replay".to_string()),
             public_url: Some("https://artifacts.example.test/runs/1/blueprint.after".to_string()),
-            viewer_url: Some(
-                "https://playground.wordpress.net/?blueprint-url=https%3A%2F%2Fartifacts.example.test%2Fruns%2F1%2Fblueprint.after"
-                    .to_string(),
-            ),
+            viewer_refs: BenchArtifactViewer {
+                viewer_url: Some(
+                    "https://playground.wordpress.net/?blueprint-url=https%3A%2F%2Fartifacts.example.test%2Fruns%2F1%2Fblueprint.after"
+                        .to_string(),
+                ),
+                ..BenchArtifactViewer::default()
+            },
             ..BenchArtifact::default()
         },
     );
