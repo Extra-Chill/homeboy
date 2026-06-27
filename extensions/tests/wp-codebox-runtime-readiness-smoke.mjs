@@ -4,10 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { skipUnlessWpCodeboxCanonicalContract } from './lib/wp-codebox-runtime-contract-availability.mjs';
+
+skipUnlessWpCodeboxCanonicalContract('wp-codebox runtime readiness smoke');
 
 const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(rootDir, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 
 const {
   RUNTIME_CONTRACT_FAILURE_CLASS,
@@ -48,6 +50,14 @@ try {
 
   fs.mkdirSync(path.join(overlayRoot, 'vendor'), { recursive: true });
   fs.writeFileSync(path.join(overlayRoot, 'vendor', 'autoload.php'), "<?php\n");
+  // A prepared php-ai-client overlay must also expose ProviderMetadata::getDescription();
+  // readiness flags the overlay until that contract surface is present.
+  const providerMetadataDir = path.join(overlayRoot, 'src', 'Providers', 'DTO');
+  fs.mkdirSync(providerMetadataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(providerMetadataDir, 'ProviderMetadata.php'),
+    "<?php\nclass ProviderMetadata {\n\tpublic function getDescription() {\n\t\treturn '';\n\t}\n}\n"
+  );
   assert.deepEqual(runtimeOverlayReadinessDiagnostics(overlayTaskInput), []);
   assert.deepEqual(wpCodeboxRuntimeReadinessDiagnostics(overlayTaskInput), []);
 } finally {

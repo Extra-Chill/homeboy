@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { skipUnlessWpCodeboxCanonicalContract } from './lib/wp-codebox-runtime-contract-availability.mjs';
+
+skipUnlessWpCodeboxCanonicalContract('wp-codebox callback data smoke');
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runnerPath = path.join(repoRoot, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-wp-codebox-task-runner.cjs');
@@ -39,11 +42,18 @@ fs.writeFileSync(callbackPath, JSON.stringify({
   data: { ...initial.data, packet_url: 'https://example.com/packet.json', count: 2 },
   events: [{ schema: 'homeboy/runtime-callback-event/v1', name: 'packet.ready', payload: { id: 'packet-1' } }],
 }, null, 2));
+const agentResult = { outputs: { direct_output: 'ok' } };
+const execution = {
+  recipeCommand: 'wp-codebox.agent-sandbox-run',
+  exitCode: 0,
+  stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(agentResult) }),
+};
 process.stdout.write(JSON.stringify({
   schema: 'wp-codebox/agent-task-run/v1',
   success: true,
   status: 'completed',
-  run: { agentResult: { outputs: { direct_output: 'ok' } } },
+  run: { agentResult },
+  executions: [execution],
 }));
 `);
 
