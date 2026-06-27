@@ -2,8 +2,10 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const childProcess = require('node:child_process');
 
 const DEFAULT_RUNTIME_ID = 'local-shell';
+const RUNTIME_SOURCE_METADATA = Symbol('homeboy.runtimeSourceMetadata');
 
 function repoRootFromHere() {
 	return path.resolve(__dirname, '..', '..');
@@ -22,20 +24,176 @@ function runtimeRegistry(options = {}) {
 	const manifests = {};
 	const runtimesRoot = path.join(repoRoot, 'agent-runtimes');
 	for (const manifestPath of runtimeManifestPaths(runtimesRoot)) {
-		let manifest;
-		try {
-			manifest = readJson(manifestPath);
-		} catch {
-			continue;
-		}
-		if (!isRuntimeManifest(manifest)) {
+		const manifest = loadRuntimeManifest(manifestPath, {
+			kind: 'repo',
+			source_path: path.dirname(manifestPath),
+		});
+		if (!manifest) {
 			continue;
 		}
 		if (!manifests[manifest.id]) {
 			manifests[manifest.id] = manifest;
 		}
 	}
+	for (const manifestPath of explicitRuntimeManifestPaths(options)) {
+		const manifest = loadRuntimeManifest(manifestPath, {
+			kind: 'manifest',
+			source_path: path.dirname(manifestPath),
+		});
+		if (!manifest) {
+			continue;
+		}
+		if (!manifests[manifest.id]) {
+			manifests[manifest.id] = manifest;
+		}
+	}
+	for (const runtimePackage of explicitRuntimePackages(options)) {
+		const manifest = loadRuntimePackageManifest(runtimePackage, options);
+		if (!manifests[manifest.id]) {
+			manifests[manifest.id] = manifest;
+		}
+	}
 	return manifests;
+}
+
+function loadRuntimeManifest(manifestPath, source = {}) {
+	const resolvedManifestPath = path.resolve(manifestPath);
+	let manifest;
+	try {
+		manifest = readJson(resolvedManifestPath);
+	} catch {
+		return null;
+	}
+	if (!isRuntimeManifest(manifest)) {
+		return null;
+	}
+	return attachRuntimeSourceMetadata(manifest, {
+		...source,
+		manifest_path: resolvedManifestPath,
+		source_path: source.source_path ? path.resolve(source.source_path) : path.dirname(resolvedManifestPath),
+		...gitSourceRevision(source.source_path || path.dirname(resolvedManifestPath)),
+	});
+}
+
+function loadRuntimePackageManifest(runtimePackage, options = {}) {
+	const spec = typeof runtimePackage === 'string' ? runtimePackage : runtimePackage?.package || runtimePackage?.name;
+	if (!spec || typeof spec !== 'string') {
+		throw new Error('Runtime package entries require a package name or specifier.');
+	}
+	const packageRoot = resolveRuntimePackageRoot(spec, options);
+	const packageJsonPath = path.join(packageRoot, 'package.json');
+	const packageJson = readJson(packageJsonPath);
+	const manifestRelativePath = firstString(
+		typeof runtimePackage === 'object' ? runtimePackage.manifest : '',
+		packageJson.homeboy?.agent_runtime_manifest,
+		packageJson.homeboy?.runtime_manifest,
+		packageJson.agent_runtime_manifest,
+		packageJson.runtime_manifest,
+		'agent-runtime.json',
+		'runtime.json'
+	);
+	const manifestPath = path.resolve(packageRoot, manifestRelativePath);
+	const manifest = loadRuntimeManifest(manifestPath, {
+		kind: 'package',
+		package: spec,
+		source_path: packageRoot,
+	});
+	if (!manifest) {
+		throw new Error(`Runtime package ${spec} does not expose a valid Homeboy agent runtime manifest at ${manifestPath}. Add package.json homeboy.agent_runtime_manifest or pass an explicit manifest path.`);
+	}
+	return manifest;
+}
+
+function resolveRuntimePackageRoot(spec, options = {}) {
+	const basePaths = runtimePackageBasePaths(options);
+	try {
+		return path.dirname(require.resolve(`${spec}/package.json`, { paths: basePaths }));
+	} catch (error) {
+		throw new Error(`Runtime package ${spec} could not be resolved from ${basePaths.join(', ')}. Install the package or pass runtimeManifests/runtimeManifestPath for local iteration. Original error: ${error.message}`);
+	}
+}
+
+function explicitRuntimeManifestPaths(options = {}) {
+	return normalizeStringList(
+		options.runtimeManifests,
+		options.runtime_manifest_paths,
+		options.runtimeManifestPaths,
+		options.runtimeManifest,
+		options.runtime_manifest,
+		options.runtimeManifestPath,
+		options.runtime_manifest_path,
+		options.env?.AGENT_RUNTIME_MANIFESTS,
+		options.env?.AGENT_RUNTIME_MANIFEST,
+		process.env.AGENT_RUNTIME_MANIFESTS,
+		process.env.AGENT_RUNTIME_MANIFEST
+	).map((manifestPath) => path.resolve(manifestPath));
+}
+
+function explicitRuntimePackages(options = {}) {
+	return [
+		...normalizeList(options.runtimePackages, options.runtime_packages, options.runtimePackage, options.runtime_package),
+		...normalizeStringList(options.env?.AGENT_RUNTIME_PACKAGES, options.env?.AGENT_RUNTIME_PACKAGE, process.env.AGENT_RUNTIME_PACKAGES, process.env.AGENT_RUNTIME_PACKAGE),
+	];
+}
+
+function runtimePackageBasePaths(options = {}) {
+	return normalizeStringList(options.packageBasePaths, options.package_base_paths, options.packageBasePath, options.package_base_path, process.cwd());
+}
+
+function normalizeStringList(...values) {
+	return normalizeList(...values).flatMap((value) => typeof value === 'string' ? value.split(path.delimiter).map((entry) => entry.trim()).filter(Boolean) : []);
+}
+
+function normalizeList(...values) {
+	const entries = [];
+	for (const value of values) {
+		if (Array.isArray(value)) {
+			entries.push(...value.filter(Boolean));
+			continue;
+		}
+		if (value) {
+			entries.push(value);
+		}
+	}
+	return entries;
+}
+
+function attachRuntimeSourceMetadata(manifest, source) {
+	Object.defineProperty(manifest, RUNTIME_SOURCE_METADATA, {
+		value: normalizeRuntimeSource(source),
+		enumerable: false,
+		configurable: true,
+	});
+	return manifest;
+}
+
+function runtimeSourceMetadata(manifest, fallback = {}) {
+	return normalizeRuntimeSource(manifest?.[RUNTIME_SOURCE_METADATA] || fallback);
+}
+
+function normalizeRuntimeSource(source = {}) {
+	const sourcePath = firstString(source.source_path, source.path);
+	return {
+		kind: firstString(source.kind, 'registry'),
+		...(source.package ? { package: source.package } : {}),
+		...(sourcePath ? { source_path: sourcePath } : {}),
+		...(source.manifest_path ? { manifest_path: source.manifest_path } : {}),
+		...(source.revision ? { revision: source.revision } : {}),
+		...(source.ref ? { ref: source.ref } : {}),
+	};
+}
+
+function gitSourceRevision(sourcePath) {
+	try {
+		const revision = childProcess.execFileSync('git', ['-C', sourcePath, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+		const ref = childProcess.execFileSync('git', ['-C', sourcePath, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+		return {
+			...(revision ? { revision } : {}),
+			...(ref && ref !== 'HEAD' ? { ref } : {}),
+		};
+	} catch {
+		return {};
+	}
 }
 
 function runtimeManifestPaths(runtimesRoot) {
@@ -125,6 +283,11 @@ function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 	if (!manifest) {
 		throw new Error(`Unsupported agent_runtime: ${id}. Registered runtimes: ${Object.keys(registry).sort().join(', ') || '(none)'}.`);
 	}
+	const source = runtimeSourceMetadata(manifest, {
+		kind: 'registry',
+		source_path: path.join(options.repoRoot || repoRootFromHere(), 'agent-runtimes', id),
+		manifest_path: runtimeManifestPath(id, options.repoRoot || repoRootFromHere()),
+	});
 
 	const materialization = manifest.ci_materialization || {};
 	const workspace = options.workspace || process.env.GITHUB_WORKSPACE || process.cwd();
@@ -141,12 +304,13 @@ function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 		id,
 		requested_id: requestedId,
 		...(aliasDeprecation ? { deprecated_runtime_alias: aliasDeprecation } : {}),
+		source,
 		manifest,
 		checkout,
 		setupCommands: normalizeCommands(materialization.setup_commands || []),
 		buildCommands: normalizeCommands(materialization.build_commands || []),
 		paths: resolvePaths(materialization.paths || {}, workspace, options.env || process.env),
-		executor: resolveExecutor(manifest, options.repoRoot || repoRootFromHere(), options),
+		executor: resolveExecutor(manifest, source, options),
 	};
 }
 
@@ -249,9 +413,9 @@ function isWorkspaceRelativePath(value) {
 	return value.startsWith('.') || value.includes('/') || value.includes('\\');
 }
 
-function resolveExecutor(manifest, repoRoot, options = {}) {
+function resolveExecutor(manifest, source, options = {}) {
 	const provider = selectExecutor(manifest, executorSelectionFromOptions(options));
-	const runtimePath = path.join(repoRoot, 'agent-runtimes', manifest.id);
+	const runtimePath = source.source_path || path.join(options.repoRoot || repoRootFromHere(), 'agent-runtimes', manifest.id);
 	const invocation = resolveExecutorInvocation(provider, runtimePath, options);
 	const scriptArg = invocation.argv.find((arg) => typeof arg === 'string' && arg.includes(runtimePath)) || executorScriptArg(provider);
 	return {

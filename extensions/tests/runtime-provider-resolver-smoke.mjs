@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +26,9 @@ assert.ok(registry.opencode, 'opencode is registered as a selectable runtime pro
 
 const defaultRuntime = resolveRuntimeProvider(undefined, { repoRoot: rootDir, workspace });
 assert.equal(defaultRuntime.id, 'local-shell');
+assert.equal(defaultRuntime.source.kind, 'repo');
+assert.equal(defaultRuntime.source.source_path, path.join(rootDir, 'agent-runtimes/local-shell'));
+assert.equal(defaultRuntime.source.manifest_path, path.join(rootDir, 'agent-runtimes/local-shell/local-shell.json'));
 assert.equal(defaultRuntime.executor.backend, 'local-shell');
 assert.equal(defaultRuntime.executor.path, path.join(rootDir, 'agent-runtimes/local-shell/scripts/agent/homeboy-local-shell-agent-task-executor.cjs'));
 
@@ -100,6 +105,54 @@ assert.equal(opencodeRuntime.executor.backend, 'opencode');
 assert.equal(opencodeRuntime.executor.path, path.join(rootDir, 'agent-runtimes/opencode/scripts/agent/homeboy-opencode-agent-task-executor.cjs'));
 assert.equal(opencodeRuntime.manifest.agent_task_executors[0].status, 'active');
 assert.equal(opencodeRuntime.manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
+
+const tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-provider-')));
+const externalRuntimeDir = path.join(tempDir, 'external-runtime');
+fs.mkdirSync(path.join(externalRuntimeDir, 'scripts'), { recursive: true });
+const externalManifestPath = path.join(externalRuntimeDir, 'external-runtime.json');
+fs.writeFileSync(externalManifestPath, JSON.stringify({
+	schema: 'homeboy/agent-runtime-manifest/v1',
+	id: 'external-runtime',
+	agent_task_executors: [executorFixture('external.agent', 'external-shell', 'active', [])],
+}, null, 2));
+const externalRuntime = resolveRuntimeProvider('external-runtime', {
+	repoRoot: rootDir,
+	runtimeManifestPath: externalManifestPath,
+	workspace,
+});
+assert.equal(externalRuntime.source.kind, 'manifest');
+assert.equal(externalRuntime.source.source_path, externalRuntimeDir);
+assert.equal(externalRuntime.source.manifest_path, externalManifestPath);
+assert.equal(externalRuntime.executor.path, path.join(externalRuntimeDir, 'scripts/external.agent.cjs'));
+
+const packageRoot = path.join(tempDir, 'node_modules/@example/homeboy-runtime');
+fs.mkdirSync(packageRoot, { recursive: true });
+fs.writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({
+	name: '@example/homeboy-runtime',
+	version: '1.0.0',
+	homeboy: { agent_runtime_manifest: 'runtime-manifest.json' },
+}, null, 2));
+fs.writeFileSync(path.join(packageRoot, 'runtime-manifest.json'), JSON.stringify({
+	schema: 'homeboy/agent-runtime-manifest/v1',
+	id: 'packaged-runtime',
+	agent_task_executors: [executorFixture('packaged.agent', 'package-shell', 'active', [])],
+}, null, 2));
+const packagedRuntime = resolveRuntimeProvider('packaged-runtime', {
+	repoRoot: rootDir,
+	runtimePackage: '@example/homeboy-runtime',
+	packageBasePath: tempDir,
+	workspace,
+});
+assert.equal(packagedRuntime.source.kind, 'package');
+assert.equal(packagedRuntime.source.package, '@example/homeboy-runtime');
+assert.equal(packagedRuntime.source.source_path, packageRoot);
+assert.equal(packagedRuntime.source.manifest_path, path.join(packageRoot, 'runtime-manifest.json'));
+assert.equal(packagedRuntime.executor.path, path.join(packageRoot, 'scripts/packaged.agent.cjs'));
+
+assert.throws(
+	() => runtimeRegistry({ repoRoot: rootDir, runtimePackage: '@example/missing-runtime', packageBasePath: tempDir }),
+	/Runtime package @example\/missing-runtime could not be resolved .* Install the package or pass runtimeManifests\/runtimeManifestPath for local iteration\./
+);
 
 const multiRegistry = {
 	'multi-executor': {
