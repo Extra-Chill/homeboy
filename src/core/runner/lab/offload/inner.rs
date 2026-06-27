@@ -669,6 +669,22 @@ pub(crate) fn run_lab_offload_inner(
         &source_path,
         &remote_cwd,
     )?;
+    let path_remaps = workspace_mapping
+        .iter()
+        .map(|entry| LabPathRemap {
+            local: entry.local_path().to_string(),
+            remote: entry.remote_path().to_string(),
+        })
+        .collect::<Vec<_>>();
+    preflight_remote_path_bearing_surfaces(
+        "Lab offload",
+        runner_id,
+        &command,
+        &env,
+        &source_path,
+        &remote_cwd,
+        &path_remaps,
+    )?;
     overhead.record(LabOffloadPhase::Preflight, pre_dispatch_started.elapsed());
     // Time the workload command itself (kept separate from overhead so reports
     // can subtract `lab_overhead_ms` from the workload duration).

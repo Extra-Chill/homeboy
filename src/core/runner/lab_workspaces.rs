@@ -1808,6 +1808,49 @@ mod provider_config_candidate_paths_tests {
     }
 
     #[test]
+    fn path_setting_bench_env_directory_values_sync_extra_workspaces() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let fixture_root = controller
+            .path()
+            .join("blocks-engine@matrix/fixtures/websites");
+        let transformer_root = controller.path().join("blocks-engine@matrix");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(&fixture_root).expect("fixture root");
+        std::fs::write(transformer_root.join("README.md"), "fixture owner\n").expect("repo marker");
+        git(&transformer_root, &["init", "-b", "main"]);
+        git(
+            &transformer_root,
+            &["config", "user.email", "test@example.com"],
+        );
+        git(&transformer_root, &["config", "user.name", "Homeboy Test"]);
+        git(&transformer_root, &["add", "."]);
+        git(&transformer_root, &["commit", "-m", "initial"]);
+
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--rig".to_string(),
+            "static-site-importer-fixture-matrix".to_string(),
+            "--setting".to_string(),
+            format!(
+                "bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT={}",
+                fixture_root.display()
+            ),
+            format!(
+                "--setting=bench_env.SSI_FIXTURE_MATRIX_BLOCKS_ENGINE_PHP_TRANSFORMER_PATH={}",
+                transformer_root.display()
+            ),
+        ];
+
+        let workspaces = path_setting_extra_workspaces(&args, &source).expect("workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "path_setting");
+        assert_eq!(workspaces[0].path, transformer_root.canonicalize().unwrap());
+    }
+
+    #[test]
     fn path_setting_workspace_ref_resolves_to_controller_path_and_syncs_workspace() {
         crate::test_support::with_isolated_home(|home| {
             let store = crate::core::paths::homeboy_data()

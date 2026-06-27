@@ -359,13 +359,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     // to their synced remote locations, using every local->remote pair recorded
     // during workspace sync. Without this the remote sandbox cannot resolve the
     // workspace or runtime components a hand-authored cook config references.
-    let path_remaps: Vec<LabPathRemap> = workspace_mapping
-        .iter()
-        .map(|entry| LabPathRemap {
-            local: entry.local_path().to_string(),
-            remote: entry.remote_path().to_string(),
-        })
-        .collect();
+    let path_remaps = path_remaps_from_workspace_mapping(&workspace_mapping);
     preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
     preflight_provider_config_paths_materialized_in_args(&offload_args, &path_remaps)?;
     let remapped_args = rig_materialization::remap_bench_rig_default_component_to_primary_snapshot(
@@ -388,6 +382,27 @@ fn prepare_lab_offload_workspace_stage_inner(
             synced_entry.step_id,
         );
     }
+    let late_path_setting_workspaces =
+        path_setting_extra_workspaces(&remapped_args, Path::new(&synced.local_path))?;
+    let late_synced_path_settings = sync_extra_lab_workspaces(
+        runner_id,
+        &synced.local_path,
+        late_path_setting_workspaces,
+        &mut workspace_mapping,
+    )?;
+    if !late_synced_path_settings.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_late_path_settings", "lab.sync_late_path_settings")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", late_synced_path_settings.len())
+                        .json("workspaces", &late_synced_path_settings),
+                )
+                .build(),
+        );
+    }
+    let path_remaps = path_remaps_from_workspace_mapping(&workspace_mapping);
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
     let (remapped_args, agent_task_run_id) =
@@ -405,7 +420,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         }
     }
     command.extend(
-        rewrite_lab_offload_args(
+        rewrite_lab_offload_remote_command_args(
             &remapped_args,
             &remote_cwd,
             &path_remaps,
@@ -440,4 +455,110 @@ fn prepare_lab_offload_workspace_stage_inner(
         runtime_overlay_env,
         runtime_overlay_metadata,
     })
+}
+
+fn path_remaps_from_workspace_mapping(
+    workspace_mapping: &[LabWorkspaceMappingEntry],
+) -> Vec<LabPathRemap> {
+    workspace_mapping
+        .iter()
+        .map(|entry| LabPathRemap {
+            local: entry.local_path().to_string(),
+            remote: entry.remote_path().to_string(),
+        })
+        .collect()
+}
+
+fn rewrite_lab_offload_remote_command_args(
+    args: &[String],
+    remote_cwd: &str,
+    path_remaps: &[LabPathRemap],
+    remote_output_file: Option<&str>,
+) -> Vec<String> {
+    let args = rewrite_lab_offload_args(args, remote_cwd, path_remaps, remote_output_file);
+    remap_path_settings_in_args(&args, path_remaps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_remote_command_remaps_bench_env_path_settings() {
+        let controller_workspace = "/controller/workspaces/toolkit";
+        let fixture_root = format!("{controller_workspace}/fixtures/websites");
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--rig".to_string(),
+            "fixture-matrix".to_string(),
+            "--setting".to_string(),
+            format!("bench_env.FIXTURE_ROOT={fixture_root}"),
+            format!("--setting=bench_env.TOOLKIT_ROOT={controller_workspace}"),
+        ];
+        let mappings = vec![
+            LabPathRemap {
+                local: fixture_root,
+                remote: "/runner/workspaces/fixtures-websites".to_string(),
+            },
+            LabPathRemap {
+                local: controller_workspace.to_string(),
+                remote: "/runner/workspaces/toolkit".to_string(),
+            },
+        ];
+
+        let command = rewrite_lab_offload_remote_command_args(
+            &args,
+            "/runner/workspaces/primary",
+            &mappings,
+            None,
+        );
+
+        assert_eq!(
+            command,
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "--rig".to_string(),
+                "fixture-matrix".to_string(),
+                "--setting".to_string(),
+                "bench_env.FIXTURE_ROOT=/runner/workspaces/fixtures-websites".to_string(),
+                "--setting=bench_env.TOOLKIT_ROOT=/runner/workspaces/toolkit".to_string(),
+            ]
+        );
+        assert!(!command.iter().any(|arg| arg.contains("/controller/")));
+    }
+
+    #[test]
+    fn final_remote_command_remaps_bench_env_subdirectory_under_extra_workspace() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--setting".to_string(),
+            "bench_env.CONFIG_DIR=/controller/workspaces/toolkit/config/matrix".to_string(),
+        ];
+        let mappings = vec![LabPathRemap {
+            local: "/controller/workspaces/toolkit".to_string(),
+            remote: "/runner/workspaces/toolkit".to_string(),
+        }];
+
+        let command = rewrite_lab_offload_remote_command_args(
+            &args,
+            "/runner/workspaces/primary",
+            &mappings,
+            None,
+        );
+
+        assert_eq!(
+            command,
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "--setting".to_string(),
+                "bench_env.CONFIG_DIR=/runner/workspaces/toolkit/config/matrix".to_string(),
+            ]
+        );
+    }
 }
