@@ -517,6 +517,49 @@ fn controller_run_from_spec_reconcile_stale_recovers_without_manual_cleanup() {
     });
 }
 
+#[test]
+fn controller_run_from_spec_fork_isolates_repeated_replays_from_stale_child_runs() {
+    with_temp_home(|| {
+        controller_run_from_spec_with_test_executor(
+            run_from_spec_proof_args("run-from-spec-fork-isolation", "Draft the brief.", false),
+            ArtifactCapturingExecutor::default(),
+        )
+        .expect("base proof run");
+
+        let mut first_fork_args =
+            run_from_spec_proof_args("run-from-spec-fork-isolation", "Rewrite the brief.", false);
+        first_fork_args.fork = true;
+        let mut second_fork_args =
+            run_from_spec_proof_args("run-from-spec-fork-isolation", "Rewrite the brief.", false);
+        second_fork_args.fork = true;
+
+        let (first, first_exit_code) = controller_run_from_spec_with_test_executor(
+            first_fork_args,
+            ArtifactCapturingExecutor::default(),
+        )
+        .expect("first fork run");
+        let (second, second_exit_code) = controller_run_from_spec_with_test_executor(
+            second_fork_args,
+            ArtifactCapturingExecutor::default(),
+        )
+        .expect("second fork run");
+
+        assert_eq!(first_exit_code, 0, "{first:#}");
+        assert_eq!(second_exit_code, 0, "{second:#}");
+        assert_ne!(first["loop_id"], second["loop_id"]);
+        assert_eq!(first["from_spec"]["resume_state"]["action"], "forking");
+        assert_eq!(second["from_spec"]["resume_state"]["action"], "forking");
+        assert_eq!(first["results"][0]["claimed"], true);
+        assert_eq!(second["results"][0]["claimed"], true);
+        assert_ne!(
+            first["results"][0]["execution"]["result"]["run_id"],
+            second["results"][0]["execution"]["result"]["run_id"]
+        );
+        assert_eq!(first["status"]["controller"]["loop_id"], first["loop_id"]);
+        assert_eq!(second["status"]["controller"]["loop_id"], second["loop_id"]);
+    });
+}
+
 #[derive(Clone, Default)]
 struct ArtifactCapturingExecutor {
     observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,

@@ -390,6 +390,16 @@ mod init_from_spec_resume_tests {
             assert_ne!(report.loop_id, "repo-loop-resume-fork");
             assert!(report.loop_id.starts_with("repo-loop-resume-fork-fork-"));
 
+            let second_report = init_from_spec_for_resume_with_resolution(
+                ControllerFromSpecRequest { spec: changed },
+                ControllerResumeStateResolution::Fork,
+            )
+            .expect("a second fork gets a fresh controller");
+            assert_ne!(second_report.loop_id, report.loop_id);
+            assert!(second_report
+                .loop_id
+                .starts_with("repo-loop-resume-fork-fork-"));
+
             // The original controller still carries the base fingerprint, untouched.
             let original = status("repo-loop-resume-fork").expect("original controller intact");
             assert_eq!(
