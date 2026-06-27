@@ -704,7 +704,6 @@
         "structural::src/core/code_audit/detectors/field_patterns.rs::GodFile",
         "structural::src/core/extension/trace/report.rs::HighItemCount",
         "structural::src/core/observation/runs_service.rs::HighItemCount",
-        "structural::src/core/observation/store.rs::GodFile",
         "structural::src/core::DirectorySprawl",
         "structural::tests/core_agnostic_test.rs::HighItemCount",
         "test_quality::src/commands/bench/tests/scenario_run_tests.rs::VacuousTest",
