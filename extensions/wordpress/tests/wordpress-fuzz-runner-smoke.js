@@ -390,7 +390,7 @@ const dispatchPromise = runWordPressFuzzRunnerResult({
 	assert.equal(dispatchedResult.succeeded, true);
 	assert.equal(dispatchedResult.wp_codebox_result.request_id, 'dispatch-run');
 	assert.equal(dispatchedResult.wp_codebox_result.coverage_summary.surface_count, 1);
-	assert.deepEqual(dispatchedResult.wp_codebox_result.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage']);
+	assert.deepEqual(dispatchedResult.wp_codebox_result.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'result_envelope']);
 	assert.equal(dispatchedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].semantic_key, 'fuzz.report');
 	assert.equal(dispatchedResult.homeboy_fuzz_campaign.metadata.artifact_refs[1].semantic_key, 'fuzz.coverage');
 });

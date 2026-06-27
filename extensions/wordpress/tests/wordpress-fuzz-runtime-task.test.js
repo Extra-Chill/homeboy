@@ -21,6 +21,9 @@ const {
 	aggregateWordPressFuzzCoverage,
 	formatWordPressFuzzCoverageMarkdownReport,
 } = require('../lib/wordpress-fuzz-coverage-aggregate');
+const {
+	buildWordPressFuzzMutationLifecycleContract,
+} = require('../lib/wordpress-fuzz-mutation-lifecycle');
 
 const genericRequest = buildWordPressFuzzRuntimeTaskRequest({
 	taskId: 'generic-runtime-task',
@@ -154,10 +157,10 @@ Promise.all([
 		}),
 	}).then((summary) => {
 		assert.equal(summary.status, 'succeeded');
-		assert.equal(summary.artifacts.length, 1);
+		assert.equal(summary.artifacts.length, 2);
 		assert.equal(summary.artifacts[0].semantic_key, 'fuzz.report');
-		assert.equal(summary.artifacts.some((artifact) => artifact.role === 'result_envelope'), false);
-		assert.equal(summary.runtime_task_result.artifacts.length, 1);
+		assert.equal(summary.artifacts.some((artifact) => artifact.role === 'result_envelope'), true);
+		assert.equal(summary.runtime_task_result.artifacts.length, 2);
 		assert.equal(summary.runtime_task_result.artifacts[0].semantic_key, 'fuzz.report');
 	}),
 
@@ -189,6 +192,29 @@ Promise.all([
 		assert.equal(aggregate.hotspot_summary.items[0].metadata.operation_key, 'GET /wp/v2/posts');
 		assert.match(formatWordPressFuzzCoverageMarkdownReport(aggregate), /## Hotspots/);
 		assert.match(formatWordPressFuzzCoverageMarkdownReport(aggregate), /duration_ms/);
+	}),
+
+	runWpCodeboxFuzzSuite({
+		taskId: 'mutation-evidence-missing-runtime',
+		input: {
+			id: 'mutation-evidence-missing-runtime',
+			cases: [{
+				id: 'delete-post-case',
+				metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' }) },
+			}],
+		},
+		runFuzzSuite: async () => ({
+			json: {
+				schema: 'wp-codebox/fuzz-suite-result/v1',
+				request_id: 'mutation-evidence-missing-runtime',
+				status: 'succeeded',
+				cases: [{ id: 'delete-post-case', status: 'passed' }],
+			},
+		}),
+	}).then((summary) => {
+		assert.equal(summary.status, 'failed');
+		assert.equal(summary.failures[0].code, 'wp_codebox_fuzz_mutation_lifecycle_evidence_missing');
+		assert(summary.failures[0].missing_evidence.some((entry) => entry.kind === 'delete-boundary'));
 	}),
 ]).then(() => {
 	console.log('WordPress fuzz runtime task contract tests passed.');

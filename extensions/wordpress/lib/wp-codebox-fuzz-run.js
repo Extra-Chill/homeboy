@@ -32,6 +32,11 @@ const {
 	normalizeWordPressFuzzRuntimeCapabilities,
 } = require('./wordpress-fuzz-runtime-capabilities');
 const {
+	normalizeWordPressFuzzMutationLifecycleContract,
+	wordpressFuzzMutationLifecycleDiagnosticsForCase,
+} = require('./wordpress-fuzz-mutation-lifecycle');
+const {
+	resolveWpCodeboxIdentity,
 	wpCodeboxIdentityMismatchDiagnostics,
 } = require('./wp-codebox-resolver');
 const {
@@ -371,6 +376,10 @@ function homeboyFuzzRuntimeCommandArgs(input) {
 }
 
 function homeboyFuzzPlanCaseRuntimeCommand(entry = {}) {
+	const runtimeOperation = objectOrUndefined(entry.runtime_operation || entry.runtimeOperation || entry.metadata?.runtime_operation || entry.metadata?.runtimeOperation);
+	if (typeof runtimeOperation?.command === 'string' && runtimeOperation.command.trim() !== '') {
+		return runtimeOperation.command.trim();
+	}
 	return entry.command || entry.target?.entrypoint || entry.target?.id || 'wordpress.run-fuzz-case';
 }
 
@@ -385,6 +394,8 @@ function homeboyFuzzPlanCaseRuntimeInput(entry = {}, manifest = {}, caseId) {
 		intent: entry.intent,
 		operation_id: entry.operation_id || entry.operationId,
 		operation: objectOrUndefined(entry.operation),
+		mutation_lifecycle: objectOrUndefined(entry.metadata?.mutation_lifecycle || entry.metadata?.mutationLifecycle || entry.mutation_lifecycle || entry.mutationLifecycle),
+		runtime_operation: objectOrUndefined(entry.runtime_operation || entry.runtimeOperation || entry.metadata?.runtime_operation || entry.metadata?.runtimeOperation),
 		seed: entry.seed || manifest.seed,
 		skip_reasons: nonEmptyArray(entry.skip_reasons || entry.skipReasons),
 		destructive_reasons: nonEmptyArray(entry.destructive_reasons || entry.destructiveReasons),
@@ -1409,9 +1420,46 @@ function wpCodeboxFuzzContractFailures({ source = {}, result = {}, context = {},
 
 	const requiredOutputFailures = requiredFuzzOutputFailures({ source, context, artifacts, normalizedResult, hotspotSummary });
 	failures.push(...requiredOutputFailures);
+	failures.push(...mutationLifecycleContractFailures({ source, context, artifacts, normalizedResult }));
 	failures.push(...validateWordPressFuzzPostprocessOutputs({ source, context, artifacts, derivedArtifacts, hotspotSummary, normalizedResult }));
 
 	return failures;
+}
+
+function mutationLifecycleContractFailures({ source = {}, context = {}, artifacts = [], normalizedResult } = {}) {
+	const planCases = requestPlanCases(context.request || context.taskRequest || {});
+	if (planCases.length === 0) {
+		return [];
+	}
+	const resultCases = new Map(normalizeArray(normalizedResult?.cases || source.cases || source.fuzz_cases || source.fuzzCases).map((testCase) => [testCase.id || testCase.case_id || testCase.caseId, testCase]));
+	return planCases.flatMap((planCase) => {
+		const contract = normalizeWordPressFuzzMutationLifecycleContract(planCase.metadata?.mutation_lifecycle || planCase.metadata?.mutationLifecycle || planCase.mutation_lifecycle || planCase.mutationLifecycle);
+		if (!contract) {
+			return [];
+		}
+		const caseId = planCase.id || planCase.case_id || planCase.caseId;
+		const resultCase = resultCases.get(caseId);
+		if (!resultCase || String(resultCase.status || '').toLowerCase() === 'skipped') {
+			return [];
+		}
+		return wordpressFuzzMutationLifecycleDiagnosticsForCase({
+			...resultCase,
+			metadata: { ...(objectOrUndefined(resultCase.metadata) || {}), mutation_lifecycle: contract },
+		}, artifacts).map((diagnostic) => ({
+			...diagnostic,
+			code: 'wp_codebox_fuzz_mutation_lifecycle_evidence_missing',
+			message: 'WP Codebox fuzz result claimed WordPress mutation execution without required sandbox rollback lifecycle evidence.',
+		}));
+	});
+}
+
+function requestPlanCases(request = {}) {
+	const input = wpCodeboxFuzzRequestInput(request);
+	const plan = input.homeboy_fuzz_workload?.plan || input.homeboyFuzzWorkload?.plan || input.metadata?.workload?.plan || input.plan || request.input?.plan || {};
+	return [
+		...normalizeArray(plan.targets).flatMap((target) => normalizeArray(target.cases)),
+		...normalizeArray(input.cases),
+	];
 }
 
 function buildWordPressFuzzObservation({ source = {}, status, artifacts = [], coverageSummary, hotspotSummary, normalizedResult, failures = [], context = {} } = {}) {

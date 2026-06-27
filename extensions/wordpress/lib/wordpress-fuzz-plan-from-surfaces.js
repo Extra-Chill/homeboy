@@ -23,6 +23,12 @@ const {
 	normalizeWordPressFuzzMutationMode,
 	requiredCapabilitiesForWordPressFuzzCase,
 } = require('./wordpress-fuzz-runtime-capabilities');
+const {
+	buildWordPressFuzzMutationLifecycleContract,
+} = require('./wordpress-fuzz-mutation-lifecycle');
+const {
+	attachWordPressFuzzRuntimeWorkloadOperationDescriptor,
+} = require('./wordpress-fuzz-runtime-workload-operations');
 
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const DB_MUTATION_REQUIRED_CAPABILITIES = requiredCapabilitiesForWordPressFuzzCase('db_mutation');
@@ -37,7 +43,7 @@ function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 		label: input.label || options.label || 'WordPress surface discovery',
 		surfaces: collectWordPressFuzzPlanSurfaces(input),
 	});
-	const targets = discovery.surfaces.map((surface) => targetFromSurface(surface, targetOptions));
+	const targets = decoratePlanTargets(discovery.surfaces.map((surface) => targetFromSurface(surface, targetOptions)), targetOptions);
 
 	return normalizeWordPressFuzzPlan({
 		schema: WORDPRESS_FUZZ_PLAN_SCHEMA,
@@ -51,6 +57,17 @@ function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 			mutation_mode: mutationMode || undefined,
 			execution_tiers: summarizeExecutionTiers(targets),
 		},
+	});
+}
+
+function decoratePlanTargets(targets, options = {}) {
+	return targets.map((target) => {
+		const cases = target.cases.map((testCase) => attachWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase, options));
+		const metadata = {
+			...(target.metadata || {}),
+			execution_tiers: summarizeExecutionTiers([{ ...target, cases }]),
+		};
+		return { ...target, cases, metadata };
 	});
 }
 
@@ -243,6 +260,7 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 			fixture_binding: fixtureMetadata,
 			auth: surface.auth || surface.authentication || surface.authorization || null,
 			safety: safeMethod ? { level: 'safe', mutates: false } : { level: 'mutating', mutates: true, requires_explicit_opt_in: true, rollback_required: true },
+			mutation_lifecycle: safeMethod ? undefined : mutationLifecycleContract({ kind: 'rest', surface, method }),
 			rollback_contract: safeMethod ? undefined : restMutationRollbackContract({ surface, method }),
 			planned: !safeMethod,
 			gated: !safeMethod,
@@ -327,6 +345,7 @@ function crudCaseForSurface(surface, resource, action, options = {}) {
 			surface,
 			crud: { resource_type: resource.type, intent: action.intent, action: action.action },
 			fixture_binding: fixtureMetadata,
+			mutation_lifecycle: mutates ? mutationLifecycleContract({ kind: restTransport ? 'rest_crud' : 'crud', surface, method: operation.transport?.method, action: action.action }) : undefined,
 			rollback_contract: mutates && restTransport ? restMutationRollbackContract({ surface, method: operation.transport.method, action: action.action }) : undefined,
 		}),
 	};
@@ -352,6 +371,22 @@ function restMutationRollbackContract({ surface = {}, method, action } = {}) {
 		route: surface.route,
 		method,
 		action,
+	});
+}
+
+function mutationLifecycleContract({ kind, surface = {}, method, action } = {}) {
+	return buildWordPressFuzzMutationLifecycleContract({
+		kind,
+		method,
+		action,
+		delete_boundary: method === 'DELETE' || action === 'delete',
+		metadata: stripUndefined({
+			surface_id: surface.id,
+			surface_type: surface.type,
+			route: surface.route,
+			path: surface.path,
+			table: surface.table,
+		}),
 	});
 }
 
@@ -761,7 +796,7 @@ function dbMutationCasesFromSurface(surface, operationId, options = {}) {
 			required_capabilities: DB_MUTATION_REQUIRED_CAPABILITIES,
 			skip_reasons: [],
 			destructive_reasons: ['db-mutation'],
-			metadata: { surface, mutation },
+			metadata: { surface, mutation, mutation_lifecycle: mutationLifecycleContract({ kind: 'database', surface }) },
 		}, options.runtimeCapabilities || options.runtime_capabilities, {
 			mutation_mode: options.mutation_mode || options.mutationMode,
 			mutates: true,
@@ -839,6 +874,7 @@ function adminPageInteractionCase(surface, interaction, options = {}) {
 			safety,
 			capability_context: normalizeCapabilityContext(interaction),
 			nonce_context: normalizeNonceContext(interaction),
+			mutation_lifecycle: gated ? mutationLifecycleContract({ kind: 'admin', surface, method: interaction.method, action: interaction.action }) : undefined,
 			executable: !gated,
 			gated,
 			requires_explicit_opt_in: gated || undefined,

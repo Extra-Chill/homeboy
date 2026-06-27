@@ -10,6 +10,9 @@ const {
 	normalizeWordPressFuzzPlan,
 	normalizeWordPressFuzzResult,
 } = require('../lib/wordpress-fuzz-schemas');
+const {
+	buildWordPressFuzzMutationLifecycleContract,
+} = require('../lib/wordpress-fuzz-mutation-lifecycle');
 
 const discovery = normalizeWordPressSurfaceDiscovery({
 	schema: WORDPRESS_SURFACE_DISCOVERY_SCHEMA,
@@ -290,6 +293,41 @@ const errorStatusResult = normalizeWordPressFuzzResult({
 
 assert.equal(errorStatusResult.status, 'errored');
 assert.equal(errorStatusResult.cases[0].status, 'errored');
+
+const missingMutationEvidenceResult = normalizeWordPressFuzzResult({
+	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
+	id: 'missing-mutation-evidence-result',
+	cases: [{
+		id: 'rest-delete-post',
+		status: 'passed',
+		metadata: {
+			mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' }),
+		},
+	}],
+});
+assert.equal(missingMutationEvidenceResult.status, 'failed');
+assert.equal(missingMutationEvidenceResult.cases[0].status, 'failed');
+assert.equal(missingMutationEvidenceResult.cases[0].diagnostics[0].code, 'wordpress_fuzz_mutation_lifecycle_evidence_missing');
+assert(missingMutationEvidenceResult.cases[0].diagnostics[0].missing_evidence.some((entry) => entry.kind === 'delete-boundary'));
+
+const evidencedMutationResult = normalizeWordPressFuzzResult({
+	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
+	id: 'evidenced-mutation-result',
+	cases: [{
+		id: 'admin-submit',
+		status: 'passed',
+		metadata: {
+			mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'admin' }),
+			evidence: [
+				{ kind: 'snapshot', path: 'artifacts/snapshot.json' },
+				{ kind: 'restore', path: 'artifacts/restore.json' },
+				{ kind: 'reset', path: 'artifacts/reset.json' },
+			],
+		},
+	}],
+});
+assert.equal(evidencedMutationResult.status, 'passed');
+assert.equal(evidencedMutationResult.cases[0].diagnostics.length, 0);
 
 assert.throws(() => normalizeWordPressSurfaceDiscovery({ schema: 'other/v1' }), /Unsupported/);
 assert.throws(() => normalizeWordPressSurfaceDiscovery({ surfaces: [{ type: 'woocommerce-product' }] }), /Unsupported WordPress surface type/);
