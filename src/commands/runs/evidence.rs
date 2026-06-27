@@ -1,7 +1,7 @@
 use homeboy::core::observation::evidence_report::{self, RunEvidenceReport};
 use homeboy::core::observation::{runs_service, ObservationStore};
 
-use super::{disk, reconcile, require_run, run_summary, CmdResult, RunSummary, RunsOutput};
+use super::{disk, require_run, run_summary, CmdResult, RunSummary, RunsOutput};
 
 /// `runs evidence` output. The report shaping lives in
 /// [`homeboy::core::observation::evidence_report`]; this adapter only embeds
@@ -18,50 +18,20 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
         "artifact",
         "disk budget probing is not implemented for this platform",
     );
-    let stale_reason = reconcile::running_status_note(&run);
-    let metadata = evidence_report::evidence_metadata(&run.metadata_json);
-    let artifact_index = evidence_report::evidence_artifact_index(&artifacts);
-    let failure = evidence_report::evidence_failure_summary(&run);
-    let retention = evidence_report::evidence_retention(&artifact_root, &run.id);
-    let evidence_links = evidence_report::evidence_links(&artifacts);
-    let agent_task_lifecycle_event =
-        evidence_report::evidence_agent_task_lifecycle_event(&run.metadata_json);
-    let matrix_summary = evidence_report::evidence_matrix_summary(&run, &artifacts);
-    let (evidence_manifest, evidence_manifest_errors) =
-        evidence_report::evidence_manifest(&run, &artifacts);
-    let tracker_refs =
-        evidence_report::evidence_tracker_refs(&run.metadata_json, evidence_manifest.as_ref());
+    // The full report assembly lives in core so non-CLI consumers (HTTP API,
+    // MCP, automation) can reuse it; this adapter only supplies the CLI-owned
+    // `RunSummary`, disk budget, and command label.
+    let run_summary = run_summary(run.clone());
+    let report = evidence_report::build_run_evidence_report(evidence_report::RunEvidenceReportInputs {
+        command: "runs.evidence",
+        run,
+        run_summary,
+        artifacts,
+        artifact_root,
+        disk_budget,
+    });
 
-    Ok((
-        RunsOutput::Evidence(RunsEvidenceOutput {
-            command: "runs.evidence",
-            run_id: run.id.clone(),
-            run: run_summary(run.clone()),
-            homeboy_version: run.homeboy_version.clone(),
-            metadata,
-            tracker_refs,
-            heartbeat: evidence_report::EvidenceHeartbeat {
-                status: run.status.clone(),
-                stale: stale_reason.is_some(),
-                stale_reason,
-                owner_pid: homeboy::core::observation::run_owner_pid(&run),
-                updated_at: run
-                    .finished_at
-                    .clone()
-                    .unwrap_or_else(|| run.started_at.clone()),
-            },
-            artifact_index,
-            retention,
-            failure,
-            disk_budget,
-            evidence_links,
-            agent_task_lifecycle_event,
-            matrix_summary,
-            evidence_manifest,
-            evidence_manifest_errors,
-        }),
-        0,
-    ))
+    Ok((RunsOutput::Evidence(report), 0))
 }
 
 #[cfg(test)]

@@ -16,12 +16,12 @@
 //! byte-for-byte equivalent to the previous inline command implementation.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{ArtifactRecord, RunRecord};
+use super::{run_owner_pid, running_status_note, ArtifactRecord, RunRecord};
 use crate::core::artifact_address::{ArtifactAddress, ArtifactAddressKind};
 use crate::core::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 use crate::core::artifact_ref::{ArtifactRef, EvidenceRef};
@@ -60,6 +60,86 @@ pub struct RunEvidenceReport<S: Serialize> {
     pub evidence_manifest: Option<EvidenceManifest>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub evidence_manifest_errors: Vec<String>,
+}
+
+/// Command-supplied inputs for [`build_run_evidence_report`].
+///
+/// The run record, its enriched artifacts, and the artifact root are the only
+/// observation-store reads a caller has to perform (via
+/// [`crate::core::observation::runs_service`]); everything else in the report
+/// is derived here. `command`, `run_summary`, and `disk_budget` stay
+/// caller-owned so the CLI can embed its own enriched `RunSummary` and platform
+/// disk probing without leaking those concerns into core.
+pub struct RunEvidenceReportInputs<S: Serialize> {
+    pub command: &'static str,
+    pub run: RunRecord,
+    pub run_summary: S,
+    pub artifacts: Vec<ArtifactRecord>,
+    pub artifact_root: PathBuf,
+    pub disk_budget: DiskBudget,
+}
+
+/// Assemble the full, stable `runs evidence` report from a loaded run and its
+/// enriched artifacts.
+///
+/// This is the single reusable surface for the evidence report: it composes
+/// every metadata bucket, the artifact index, heartbeat, retention guidance,
+/// failure summary, evidence links, lifecycle event, matrix summary, embedded
+/// manifest, and tracker refs. Consumers outside the CLI (HTTP API, MCP,
+/// automation) can build the same report without re-deriving the orchestration
+/// from the `commands::runs` adapter. Output is byte-for-byte equivalent to the
+/// previous inline command implementation.
+pub fn build_run_evidence_report<S: Serialize>(
+    inputs: RunEvidenceReportInputs<S>,
+) -> RunEvidenceReport<S> {
+    let RunEvidenceReportInputs {
+        command,
+        run,
+        run_summary,
+        artifacts,
+        artifact_root,
+        disk_budget,
+    } = inputs;
+
+    let metadata = evidence_metadata(&run.metadata_json);
+    let artifact_index = evidence_artifact_index(&artifacts);
+    let failure = evidence_failure_summary(&run);
+    let retention = evidence_retention(&artifact_root, &run.id);
+    let evidence_links = evidence_links(&artifacts);
+    let agent_task_lifecycle_event = evidence_agent_task_lifecycle_event(&run.metadata_json);
+    let matrix_summary = evidence_matrix_summary(&run, &artifacts);
+    let (evidence_manifest, evidence_manifest_errors) = evidence_manifest(&run, &artifacts);
+    let tracker_refs = evidence_tracker_refs(&run.metadata_json, evidence_manifest.as_ref());
+    let stale_reason = running_status_note(&run);
+    let heartbeat = EvidenceHeartbeat {
+        status: run.status.clone(),
+        stale: stale_reason.is_some(),
+        stale_reason,
+        owner_pid: run_owner_pid(&run),
+        updated_at: run
+            .finished_at
+            .clone()
+            .unwrap_or_else(|| run.started_at.clone()),
+    };
+
+    RunEvidenceReport {
+        command,
+        run_id: run.id.clone(),
+        run: run_summary,
+        homeboy_version: run.homeboy_version.clone(),
+        metadata,
+        tracker_refs,
+        heartbeat,
+        artifact_index,
+        retention,
+        failure,
+        disk_budget,
+        evidence_links,
+        agent_task_lifecycle_event,
+        matrix_summary,
+        evidence_manifest,
+        evidence_manifest_errors,
+    }
 }
 
 #[derive(Serialize)]
@@ -494,4 +574,97 @@ fn is_evidence_manifest_artifact(artifact: &ArtifactRecord) -> bool {
     artifact.kind == "evidence_manifest"
         || artifact.metadata_json.get("schema").and_then(Value::as_str)
             == Some(EVIDENCE_MANIFEST_SCHEMA)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Coverage for the reusable full-report builder. The CLI adapter in
+    //! `commands::runs::evidence` keeps the integration coverage (JSON shape,
+    //! manifest resolution, links); here we prove the standalone composition
+    //! surface assembles the same fields so non-CLI consumers can rely on it.
+
+    use super::*;
+    use crate::core::observation::disk_budget::DiskBudget;
+
+    fn sample_run() -> RunRecord {
+        RunRecord {
+            id: "run-1".to_string(),
+            kind: "trace".to_string(),
+            component_id: Some("homeboy".to_string()),
+            started_at: "2026-06-12T00:00:00Z".to_string(),
+            finished_at: Some("2026-06-12T00:01:00Z".to_string()),
+            status: "pass".to_string(),
+            command: Some("homeboy trace".to_string()),
+            cwd: None,
+            homeboy_version: Some("test-version".to_string()),
+            git_sha: None,
+            rig_id: None,
+            metadata_json: Value::Null,
+        }
+    }
+
+    fn url_artifact() -> ArtifactRecord {
+        ArtifactRecord {
+            id: "frontend_url".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "frontend_url".to_string(),
+            artifact_type: "url".to_string(),
+            path: "https://example.test/".to_string(),
+            url: Some("https://example.test/".to_string()),
+            public_url: Some("https://example.test/".to_string()),
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: Value::Null,
+            created_at: "2026-06-12T00:00:30Z".to_string(),
+        }
+    }
+
+    fn sample_disk_budget() -> DiskBudget {
+        DiskBudget {
+            path: "/tmp".to_string(),
+            available_bytes: None,
+            total_bytes: None,
+            used_percent: None,
+            status: "unavailable".to_string(),
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn build_run_evidence_report_composes_stable_fields() {
+        let run = sample_run();
+        let report = build_run_evidence_report(RunEvidenceReportInputs {
+            command: "runs.evidence",
+            run: run.clone(),
+            run_summary: serde_json::json!({ "id": run.id }),
+            artifacts: vec![url_artifact()],
+            artifact_root: PathBuf::from("/tmp/artifacts"),
+            disk_budget: sample_disk_budget(),
+        });
+
+        assert_eq!(report.command, "runs.evidence");
+        assert_eq!(report.run_id, "run-1");
+        assert_eq!(report.homeboy_version.as_deref(), Some("test-version"));
+        // Heartbeat derives from the run record: a finished, passing run is not
+        // stale and reports its finished_at as updated_at.
+        assert_eq!(report.heartbeat.status, "pass");
+        assert!(!report.heartbeat.stale);
+        assert!(report.heartbeat.stale_reason.is_none());
+        assert_eq!(report.heartbeat.updated_at, "2026-06-12T00:01:00Z");
+        // Artifact index reflects the single URL artifact.
+        assert_eq!(report.artifact_index.count, 1);
+        assert_eq!(report.artifact_index.url_count, 1);
+        // Retention guidance embeds the run id and the default window.
+        assert!(report.retention.cleanup_command.contains("run-1"));
+        assert_eq!(report.retention.default_retention_days, DEFAULT_RETENTION_DAYS);
+        // A passing run is not a failure.
+        assert!(!report.failure.failed);
+        assert_eq!(report.failure.status, "pass");
+        // No manifest in metadata or artifacts means a clean (None, empty) result.
+        assert!(report.evidence_manifest.is_none());
+        assert!(report.evidence_manifest_errors.is_empty());
+    }
 }
