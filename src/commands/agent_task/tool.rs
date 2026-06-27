@@ -22,10 +22,15 @@ pub enum AgentTaskToolCommand {
 #[derive(Args, Debug)]
 pub struct AgentTaskToolDispatchArgs {}
 
-pub fn dispatch_raw(_args: AgentTaskToolDispatchArgs) -> i32 {
-    // homeboy-audit: allow-thin-command-adapter
-    match dispatch_raw_result() {
-        // homeboy-audit: allow-thin-command-adapter
+// `dispatch_raw` is a textbook thin command adapter: it parses args and delegates
+// to the core `dispatch_agent_tool_request` service. The orchestration detector's
+// `dispatch_[A-Za-z0-9_]+\(` marker is a false positive here (it matches this
+// command's own entry-point names and the legit core-service call). The
+// `#[rustfmt::skip]` keeps the per-line `homeboy-audit: allow-thin-command-adapter`
+// markers as trailing comments on the exact lines the detector scans.
+#[rustfmt::skip]
+pub fn dispatch_raw(_args: AgentTaskToolDispatchArgs) -> i32 { // homeboy-audit: allow-thin-command-adapter (thin: delegates to core dispatch_agent_tool_request)
+    match dispatch_raw_result() { // homeboy-audit: allow-thin-command-adapter (thin: delegates to core dispatch_agent_tool_request)
         Ok(result) => {
             println!("{}", result);
             0
@@ -37,8 +42,8 @@ pub fn dispatch_raw(_args: AgentTaskToolDispatchArgs) -> i32 {
     }
 }
 
-fn dispatch_raw_result() -> Result<String, String> {
-    // homeboy-audit: allow-thin-command-adapter
+#[rustfmt::skip]
+fn dispatch_raw_result() -> Result<String, String> { // homeboy-audit: allow-thin-command-adapter (thin: delegates to core dispatch_agent_tool_request)
     let mut stdin = String::new();
     std::io::stdin()
         .read_to_string(&mut stdin)
@@ -48,7 +53,7 @@ fn dispatch_raw_result() -> Result<String, String> {
         .map_err(|error| format!("invalid agent tool request JSON: {error}"))?;
     let policy = policy_from_env()?;
     let outcome =
-        dispatch_agent_tool_request(&policy, &request, &HomeboyAgentToolControlPlaneDispatcher); // homeboy-audit: allow-thin-command-adapter
+        dispatch_agent_tool_request(&policy, &request, &HomeboyAgentToolControlPlaneDispatcher); // homeboy-audit: allow-thin-command-adapter (thin: delegates to core dispatch_agent_tool_request)
 
     serde_json::to_string(&outcome.result)
         .map_err(|error| format!("failed to serialize agent tool result JSON: {error}"))
