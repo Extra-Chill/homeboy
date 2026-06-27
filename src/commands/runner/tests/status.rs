@@ -262,6 +262,42 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
 }
 
 #[test]
+fn declared_runtime_diagnostics_preserve_generic_runtime_status_shape() {
+    let runtime = declared_runtime_diagnostics(
+        &sample_runtime_declaration(),
+        Some("homeboy-lab"),
+        &BTreeMap::from([(
+            "HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string(),
+            "/home/chubes/.cache/homeboy/sample-runtime".to_string(),
+        )]),
+    );
+
+    assert_eq!(runtime.runtime, "sample-runtime");
+    assert_eq!(
+        runtime
+            .packages
+            .iter()
+            .find(|package| package.field == "playground_package")
+            .expect("playground package diagnostics")
+            .package,
+        "@automattic/sample-runtime-playground"
+    );
+    assert_eq!(
+        runtime
+            .probes
+            .get("source_git_sha")
+            .expect("source git sha probe")
+            .source,
+        "runtime_probe_command"
+    );
+    let serialized = serde_json::to_string(&runtime).expect("serialize generic diagnostics");
+
+    assert!(serialized.contains("\"runtime\":\"sample-runtime\""));
+    assert!(serialized.contains("\"packages\""));
+    assert!(!serialized.contains("\"playground_package\":{"));
+}
+
+#[test]
 fn sample_runtime_diagnostics_accept_single_managed_checkout() {
     let diagnostics = declared_runtime_source_diagnostics(
         &sample_runtime_declaration().source_consistency,

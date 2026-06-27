@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::core::fuzz::{
     fuzz_gate_profile_contract, FuzzExecutionRequest, FuzzOperation, FuzzOperationFamily,
-    FuzzSafetyClass, FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    FuzzSafetyClass, FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism, FuzzSamplingRequest,
+    FuzzSamplingStratum, FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    FUZZ_SAMPLING_REQUEST_SCHEMA,
 };
 
 use super::execution::fuzz_runner_contract;
@@ -58,6 +60,20 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         args.run.inventory.as_deref(),
     )?;
     let planning_metadata = plan_inventory_selection(&args, &target_inventory)?;
+    let sampling: FuzzSamplingRequest = serde_json::from_value(
+        planning_metadata
+            .get("sampling")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Null),
+    )
+    .map_err(|err| {
+        homeboy::core::Error::validation_invalid_argument(
+            "sampling",
+            format!("invalid fuzz sampling request: {err}"),
+            None,
+            None,
+        )
+    })?;
 
     Ok(FuzzPlanOutput {
         command: "fuzz.plan".to_string(),
@@ -77,6 +93,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
             args: args.run.args,
             required_artifacts,
             gates,
+            sampling,
             metadata: planning_metadata,
             extra: std::collections::BTreeMap::new(),
         },
@@ -177,7 +194,7 @@ pub(super) fn plan_inventory_selection(
             target_selected = true;
             selected_target_ids.insert(target.id.clone());
             if let Some(family) = family {
-                selected_families.insert(operation_family_name(family));
+                selected_families.insert(operation_family_name(family).to_string());
                 if matches!(
                     family,
                     FuzzOperationFamily::Create
@@ -229,18 +246,80 @@ pub(super) fn plan_inventory_selection(
         .seeds
         .iter()
         .filter(|seed| selected_seed_ids.contains(&seed.id))
-        .map(|seed| {
-            json!({
-                "id": seed.id,
-                "kind": seed.kind,
-                "artifact": seed.artifact,
-                "has_inline_value": seed.value.is_some(),
-            })
+        .map(|seed| FuzzSamplingCorpusRef {
+            id: seed.id.clone(),
+            kind: seed.kind.clone(),
+            artifact: seed
+                .artifact
+                .as_ref()
+                .and_then(|artifact| serde_json::to_value(artifact).ok()),
+            has_inline_value: seed.value.is_some(),
         })
         .collect::<Vec<_>>();
 
     let (profile_artifacts, profile_gates) =
         fuzz_gate_profile_contract(args.run.gate_profile.as_core());
+    let target_ids = selected_target_ids.into_iter().collect::<Vec<_>>();
+    let operation_families = selected_families.into_iter().collect::<Vec<_>>();
+    let case_budget = args
+        .case_budget
+        .or_else(|| workload.and_then(|workload| workload.case_budget));
+    let duration_budget_seconds = args
+        .duration_budget_seconds
+        .or_else(|| workload.and_then(|workload| workload.duration_budget_seconds));
+    let seed_source = if args.run.seed.is_some() {
+        "caller"
+    } else if selected_seed_ids.is_empty() {
+        "none"
+    } else {
+        "corpus"
+    };
+    let replay_batch_id = args
+        .run
+        .run_id
+        .clone()
+        .or_else(|| args.run.workload_id.clone())
+        .map(|id| format!("{id}-sampling"));
+    let sampling = FuzzSamplingRequest {
+        schema: FUZZ_SAMPLING_REQUEST_SCHEMA.to_string(),
+        strategy: args.strategy.as_str().to_string(),
+        seed: args.run.seed.clone(),
+        case_budget,
+        duration_budget_seconds,
+        target_strata: vec![FuzzSamplingStratum {
+            id: "selected-targets".to_string(),
+            kind: "target".to_string(),
+            values: target_ids.clone(),
+        }],
+        operation_strata: vec![
+            FuzzSamplingStratum {
+                id: "selected-operation-families".to_string(),
+                kind: "operation_family".to_string(),
+                values: operation_families.clone(),
+            },
+            FuzzSamplingStratum {
+                id: "selected-operations".to_string(),
+                kind: "operation".to_string(),
+                values: selected_operations
+                    .iter()
+                    .filter_map(|operation| operation.get("operation_id"))
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect(),
+            },
+        ],
+        corpus_refs: seed_refs.clone(),
+        replay: FuzzSamplingReplayDeterminism {
+            deterministic: true,
+            seed_source: seed_source.to_string(),
+            replay_batch_id,
+        },
+        metadata: json!({
+            "operation_filters": args.operations,
+            "operation_family_filters": args.operation_families,
+            "gate_profile": args.run.gate_profile.as_str(),
+        }),
+        extra: BTreeMap::new(),
+    };
 
     Ok(json!({
         "planner": {
@@ -250,17 +329,18 @@ pub(super) fn plan_inventory_selection(
             "gate_profile": args.run.gate_profile.as_str(),
         },
         "selection": {
-            "target_ids": selected_target_ids.into_iter().collect::<Vec<_>>(),
-            "operation_families": selected_families.into_iter().collect::<Vec<_>>(),
+            "target_ids": target_ids,
+            "operation_families": operation_families,
             "operations": selected_operations,
             "seed_ids": selected_seed_ids,
             "seed_refs": seed_refs,
         },
         "budgets": {
-            "case_budget": args.case_budget.or_else(|| workload.and_then(|workload| workload.case_budget)),
-            "duration_budget_seconds": args.duration_budget_seconds.or_else(|| workload.and_then(|workload| workload.duration_budget_seconds)),
+            "case_budget": case_budget,
+            "duration_budget_seconds": duration_budget_seconds,
             "max_duration": args.run.max_duration,
         },
+        "sampling": sampling,
         "isolation": {
             "required": isolation_required,
             "requirements": if isolation_required { vec!["isolated_mutation"] } else { Vec::<&str>::new() },

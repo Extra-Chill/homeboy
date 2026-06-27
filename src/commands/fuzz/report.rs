@@ -142,6 +142,20 @@ pub(super) fn fuzz_result_envelope_from_campaign(
             args: run.args.clone(),
             required_artifacts: required_artifacts.clone(),
             gates: gates.clone(),
+            sampling: homeboy::core::fuzz::FuzzSamplingRequest {
+                seed: run.seed.clone(),
+                replay: homeboy::core::fuzz::FuzzSamplingReplayDeterminism {
+                    deterministic: true,
+                    seed_source: if run.seed.is_some() {
+                        "caller"
+                    } else {
+                        "unspecified"
+                    }
+                    .to_string(),
+                    replay_batch_id: run.run_id.clone(),
+                },
+                ..Default::default()
+            },
             metadata: serde_json::Value::Null,
             extra: std::collections::BTreeMap::new(),
         },
