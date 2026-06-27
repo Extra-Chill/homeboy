@@ -2,6 +2,20 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.1] - 2026-06-27
+
+### Changed
+- Batch fixture workload matrix runs
+- Wire runtime agent CI package tests
+- Stream WP Codebox recipe output
+- Declare WordPress helper env provider
+- Preserve WP Codebox runtime artifacts
+- Support WP Codebox PHPUnit source roots
+- Use controller client runtime task input
+
+### Fixed
+- Fix Codebox provider plugin path precedence
+
 ## [3.19.0] - 2026-06-26
 
 ### Added
