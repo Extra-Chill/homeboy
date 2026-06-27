@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.18] - 2026-06-27
+
+### Changed
+- Wire WordPress fuzz runtime readiness
+
 ## [3.19.17] - 2026-06-27
 
 ### Fixed
