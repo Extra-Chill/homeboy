@@ -146,6 +146,63 @@ fn agent_task_discovery_help_documents_typed_flags() {
 }
 
 #[test]
+fn deprecated_bench_reader_aliases_are_removed() {
+    assert!(Cli::try_parse_from(["homeboy", "bench", "history", "studio-web"]).is_err());
+    assert!(Cli::try_parse_from([
+        "homeboy",
+        "bench",
+        "distribution",
+        "studio-web",
+        "--field",
+        "results.total_elapsed_ms",
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from([
+        "homeboy",
+        "bench",
+        "compare",
+        "--from-run",
+        "run-a",
+        "--to-run",
+        "run-b",
+    ])
+    .is_err());
+
+    Cli::try_parse_from([
+        "homeboy",
+        "runs",
+        "list",
+        "--kind",
+        "bench",
+        "--component",
+        "studio-web",
+    ])
+    .expect("bench runs list should remain parseable");
+    Cli::try_parse_from([
+        "homeboy",
+        "runs",
+        "distribution",
+        "--kind",
+        "bench",
+        "--component",
+        "studio-web",
+        "--field",
+        "results.total_elapsed_ms",
+    ])
+    .expect("bench runs distribution should remain parseable");
+    Cli::try_parse_from([
+        "homeboy",
+        "runs",
+        "bench-compare",
+        "--from-run",
+        "run-a",
+        "--to-run",
+        "run-b",
+    ])
+    .expect("runs bench-compare should remain parseable");
+}
+
+#[test]
 fn agent_task_tool_bridge_stays_hidden_but_parseable() {
     let surface = current_command_surface();
 
