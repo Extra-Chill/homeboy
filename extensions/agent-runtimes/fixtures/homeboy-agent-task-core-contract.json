@@ -1,63 +1,26 @@
 {
-  "schema": "homeboy/agent-task-core-contract/v1",
-  "schemas": {
-    "request": "homeboy/agent-task-request/v1",
-    "outcome": "homeboy/agent-task-outcome/v1",
-    "artifact": "homeboy/agent-task-artifact/v1",
-    "artifact_declaration": "homeboy/agent-task-artifact-declaration/v1",
-    "evidence_ref": "homeboy/agent-task-evidence-ref/v1",
-    "workflow": "homeboy/agent-task-workflow/v1",
-    "plan": "homeboy/agent-task-plan/v1",
-    "aggregate": "homeboy/agent-task-aggregate/v1",
-    "matrix_plan": "homeboy/agent-task-matrix-plan/v1",
-    "matrix_aggregate": "homeboy/agent-task-matrix-aggregate/v1",
-    "provider": "homeboy/agent-task-executor-provider/v1",
-    "provider_capability_contract": "homeboy/agent-task-provider-capability-contract/v1",
-    "tool_request": "homeboy/agent-tool-request/v1",
-    "tool_result": "homeboy/agent-tool-result/v1",
-    "tool_policy": "homeboy/agent-tool-policy/v1",
-    "tool_dispatch_evidence": "homeboy/agent-tool-dispatch-evidence/v1",
-    "gate_report": "homeboy/agent-task-gate-report/v1",
-    "promotion_report": "homeboy/agent-task-promotion-report/v1",
-    "cook_loop_report": "homeboy/agent-task-cook-loop-report/v1",
-    "loop_controller": "homeboy/agent-task-loop-controller/v1",
-    "loop_controller_status": "homeboy/agent-task-loop-controller-status/v1",
-    "loop_definition": "homeboy/agent-task-loop-definition/v1",
-    "secret_env_plan": "homeboy/secret-env-plan/v1",
-    "secret_env_requirement": "homeboy/secret-env-requirement/v1",
-    "command_invocation": "homeboy/command-invocation/v1",
-    "fanout_reconcile_config": "homeboy/generic-fanout-reconcile-config/v1",
-    "fanout_reconcile_plan": "homeboy/fanout-reconcile-plan/v1",
-    "fanout_reconcile_run": "homeboy/fanout-reconcile-run/v1",
-    "fanout_reconcile_result": "homeboy/generic-fanout-reconcile-result/v1",
-    "fanout_reconcile_reconciliation": "homeboy/generic-fanout-reconcile-reconciliation/v1",
-    "finding_packet_fanout_config": "homeboy/generic-finding-packet-fanout-config/v1"
-  },
-  "provider_capability": {
-    "schema": "homeboy/agent-task-provider-capability-contract/v1",
-    "provider_schema": "homeboy/agent-task-executor-provider/v1",
-    "request_schema": "homeboy/agent-task-request/v1",
-    "outcome_schema": "homeboy/agent-task-outcome/v1",
-    "tool_request_schema": "homeboy/agent-tool-request/v1",
-    "tool_result_schema": "homeboy/agent-tool-result/v1",
-    "tool_policy_schema": "homeboy/agent-tool-policy/v1",
-    "request_required_fields": [
-      "schema",
-      "task_id",
-      "executor.backend",
-      "instructions"
-    ],
-    "outcome_statuses": [
+  "enums": {
+    "aggregate_status": [
       "succeeded",
-      "no_op",
-      "unable_to_remediate",
-      "provider_error",
-      "timeout",
+      "partial_failure",
       "failed",
-      "follow_up_issue",
       "cancelled"
     ],
-    "failure_classifications": [
+    "execution_handle_kind": [
+      "queued_record",
+      "local_pid",
+      "runner_job",
+      "provider_run"
+    ],
+    "execution_state": [
+      "queued",
+      "running",
+      "waiting",
+      "succeeded",
+      "failed",
+      "cancelled"
+    ],
+    "failure_classification": [
       "provider",
       "transient",
       "timeout",
@@ -67,24 +30,71 @@
       "execution_failed",
       "unknown"
     ],
-    "redacted_metadata_keys": [
-      "secret_env_values",
-      "secretEnvValues",
-      "secrets"
+    "fanout_record_status": [
+      "completed",
+      "failed",
+      "missing_record"
     ],
-    "provider_capability_fields": [
-      "schema",
-      "provider_schema",
-      "request_schema",
-      "outcome_schema",
-      "request_required_fields",
-      "outcome_statuses",
-      "failure_classifications",
-      "redacted_metadata_keys",
-      "tool_request_schema",
-      "tool_result_schema",
-      "tool_policy_schema"
+    "fanout_run_status": [
+      "incomplete",
+      "completed",
+      "failed"
     ],
+    "outcome_status": [
+      "succeeded",
+      "no_op",
+      "unable_to_remediate",
+      "provider_error",
+      "timeout",
+      "failed",
+      "follow_up_issue",
+      "cancelled"
+    ],
+    "run_state": [
+      "queued",
+      "running",
+      "succeeded",
+      "partial_failure",
+      "failed",
+      "cancelled"
+    ],
+    "task_state": [
+      "queued",
+      "blocked",
+      "skipped",
+      "running",
+      "succeeded",
+      "failed",
+      "cancelled",
+      "timed_out"
+    ],
+    "workflow_step_status": [
+      "pending",
+      "running",
+      "succeeded",
+      "failed",
+      "skipped",
+      "cancelled"
+    ]
+  },
+  "orchestration": {
+    "agent_task_outcome_to_fanout_record_status": {
+      "cancelled": "failed",
+      "failed": "failed",
+      "follow_up_issue": "failed",
+      "no_op": "completed",
+      "provider_error": "failed",
+      "succeeded": "completed",
+      "timeout": "failed",
+      "unable_to_remediate": "failed"
+    },
+    "fanout_success_statuses": [
+      "completed",
+      "success",
+      "passed"
+    ]
+  },
+  "provider_capability": {
     "executor_provider_fields": [
       "schema",
       "id",
@@ -121,52 +131,8 @@
       "runtime_id",
       "runtime_path",
       "extra"
-    ]
-  },
-  "enums": {
-    "execution_state": [
-      "queued",
-      "running",
-      "waiting",
-      "succeeded",
-      "failed",
-      "cancelled"
     ],
-    "task_state": [
-      "queued",
-      "blocked",
-      "skipped",
-      "running",
-      "succeeded",
-      "failed",
-      "cancelled",
-      "timed_out"
-    ],
-    "run_state": [
-      "queued",
-      "running",
-      "succeeded",
-      "partial_failure",
-      "failed",
-      "cancelled"
-    ],
-    "aggregate_status": [
-      "succeeded",
-      "partial_failure",
-      "failed",
-      "cancelled"
-    ],
-    "outcome_status": [
-      "succeeded",
-      "no_op",
-      "unable_to_remediate",
-      "provider_error",
-      "timeout",
-      "failed",
-      "follow_up_issue",
-      "cancelled"
-    ],
-    "failure_classification": [
+    "failure_classifications": [
       "provider",
       "transient",
       "timeout",
@@ -176,62 +142,70 @@
       "execution_failed",
       "unknown"
     ],
-    "workflow_step_status": [
-      "pending",
-      "running",
+    "outcome_schema": "homeboy/agent-task-outcome/v1",
+    "outcome_statuses": [
       "succeeded",
+      "no_op",
+      "unable_to_remediate",
+      "provider_error",
+      "timeout",
       "failed",
-      "skipped",
+      "follow_up_issue",
       "cancelled"
     ],
-    "fanout_record_status": [
-      "completed",
-      "failed",
-      "missing_record"
+    "provider_capability_fields": [
+      "schema",
+      "provider_schema",
+      "request_schema",
+      "outcome_schema",
+      "request_required_fields",
+      "outcome_statuses",
+      "failure_classifications",
+      "redacted_metadata_keys",
+      "tool_request_schema",
+      "tool_result_schema",
+      "tool_policy_schema"
     ],
-    "fanout_run_status": [
-      "incomplete",
-      "completed",
-      "failed"
-    ]
-  },
-  "orchestration": {
-    "agent_task_outcome_to_fanout_record_status": {
-      "succeeded": "completed",
-      "no_op": "completed",
-      "unable_to_remediate": "failed",
-      "provider_error": "failed",
-      "timeout": "failed",
-      "failed": "failed",
-      "follow_up_issue": "failed",
-      "cancelled": "failed"
-    },
-    "fanout_success_statuses": [
-      "completed",
-      "success",
-      "passed"
+    "provider_schema": "homeboy/agent-task-executor-provider/v1",
+    "redacted_metadata_keys": [
+      "secret_env_values",
+      "secretEnvValues",
+      "secrets"
+    ],
+    "request_required_fields": [
+      "schema",
+      "task_id",
+      "executor.backend",
+      "instructions"
+    ],
+    "request_schema": "homeboy/agent-task-request/v1",
+    "schema": "homeboy/agent-task-provider-capability-contract/v1",
+    "tool_policy_schema": "homeboy/agent-tool-policy/v1",
+    "tool_request_schema": "homeboy/agent-tool-request/v1",
+    "tool_result_schema": "homeboy/agent-tool-result/v1",
+    "workspace_materialization_fields": [
+      "cwd",
+      "requires_git",
+      "write_scope",
+      "artifact_paths",
+      "spec",
+      "mounts",
+      "apply_back",
+      "extra"
+    ],
+    "workspace_mount_spec_fields": [
+      "handle",
+      "repo",
+      "host_path",
+      "target_path",
+      "mode",
+      "materialization",
+      "metadata",
+      "extra"
     ]
   },
   "redaction_defaults": {
     "replacement": "[REDACTED]",
-    "sensitive_keys": [
-      "api_key",
-      "apikey",
-      "auth",
-      "authorization",
-      "bearer",
-      "client_secret",
-      "cookie",
-      "key",
-      "nonce",
-      "passwd",
-      "password",
-      "refresh_token",
-      "secret",
-      "session",
-      "sid",
-      "token"
-    ],
     "sensitive_headers": [
       "authorization",
       "cookie",
@@ -241,6 +215,66 @@
       "x-auth-token",
       "x-csrf-token",
       "x-wp-nonce"
+    ],
+    "sensitive_keys": [
+      "api_key",
+      "apikey",
+      "auth",
+      "authorization",
+      "bearer",
+      "client_secret",
+      "cookie",
+      "credential",
+      "key",
+      "nonce",
+      "passwd",
+      "password",
+      "refresh_token",
+      "secret",
+      "session",
+      "sid",
+      "token"
     ]
+  },
+  "schema": "homeboy/agent-task-core-contract/v1",
+  "schemas": {
+    "aggregate": "homeboy/agent-task-aggregate/v1",
+    "artifact": "homeboy/agent-task-artifact/v1",
+    "artifact_declaration": "homeboy/agent-task-artifact-declaration/v1",
+    "artifact_handoff": "homeboy/agent-task-artifact-handoff/v1",
+    "batch_cook_fanout_plan": "homeboy/agent-task-batch-cook-fanout-plan/v1",
+    "batch_cook_fanout_run": "homeboy/agent-task-batch-cook-fanout-run/v1",
+    "batch_cook_fanout_submit": "homeboy/agent-task-batch-cook-fanout-submit/v1",
+    "command_invocation": "homeboy/command-invocation/v1",
+    "cook_feedback_report": "homeboy/agent-task-cook-feedback-report/v1",
+    "diagnostic_ranking": "homeboy/agent-task-diagnostic-ranking/v1",
+    "evidence_ref": "homeboy/agent-task-evidence-ref/v1",
+    "fanout_reconcile_config": "homeboy/generic-fanout-reconcile-config/v1",
+    "fanout_reconcile_plan": "homeboy/fanout-reconcile-plan/v1",
+    "fanout_reconcile_reconciliation": "homeboy/generic-fanout-reconcile-reconciliation/v1",
+    "fanout_reconcile_result": "homeboy/generic-fanout-reconcile-result/v1",
+    "fanout_reconcile_run": "homeboy/fanout-reconcile-run/v1",
+    "finding_packet_fanout_config": "homeboy/generic-finding-packet-fanout-config/v1",
+    "gate_report": "homeboy/agent-task-gate-report/v1",
+    "loop_action": "homeboy/agent-task-loop-action/v1",
+    "loop_controller": "homeboy/agent-task-loop-controller/v1",
+    "loop_controller_status": "homeboy/agent-task-loop-controller-status/v1",
+    "loop_definition": "homeboy/agent-task-loop-definition/v1",
+    "matrix_aggregate": "homeboy/agent-task-matrix-aggregate/v1",
+    "matrix_plan": "homeboy/agent-task-matrix-plan/v1",
+    "outcome": "homeboy/agent-task-outcome/v1",
+    "plan": "homeboy/agent-task-plan/v1",
+    "promotion_report": "homeboy/agent-task-promotion-report/v1",
+    "provider": "homeboy/agent-task-executor-provider/v1",
+    "provider_capability_contract": "homeboy/agent-task-provider-capability-contract/v1",
+    "provider_outcome_contract": "homeboy/agent-task-provider-outcome-contract/v1",
+    "request": "homeboy/agent-task-request/v1",
+    "secret_env_plan": "homeboy/secret-env-plan/v1",
+    "secret_env_requirement": "homeboy/secret-env-requirement/v1",
+    "tool_dispatch_evidence": "homeboy/agent-tool-dispatch-evidence/v1",
+    "tool_policy": "homeboy/agent-tool-policy/v1",
+    "tool_request": "homeboy/agent-tool-request/v1",
+    "tool_result": "homeboy/agent-tool-result/v1",
+    "workflow": "homeboy/agent-task-workflow/v1"
   }
 }
