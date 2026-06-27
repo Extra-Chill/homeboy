@@ -8,12 +8,12 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(repoRoot, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const { buildConfig, projectRuntimeConfig } = require(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/build-runner-config.cjs'));
 
 const genericProjection = projectRuntimeConfig({
   env: {
     ARTIFACT_DECLARATIONS: JSON.stringify([{ name: 'packet', kind: 'application/vnd.example.packet+json' }]),
-    EXTRA_WP_CONFIG_DEFINES: JSON.stringify({ EXAMPLE_DEFINE: true }),
   },
   runtime: {
     id: 'generic-runtime',
@@ -22,7 +22,6 @@ const genericProjection = projectRuntimeConfig({
       id: 'generic-runtime',
       runner_config_projection: {
         transcript_guest_dir_template: '/runtime/{workload_id}/transcript',
-        wp_config_defines: { GENERIC_DEFINE: 'yes' },
         runtime_fields: {
           runtime_example_version: { env: 'RUNTIME_EXAMPLE_VERSION', default: '1.0' },
         },
@@ -41,7 +40,7 @@ assert.deepEqual(genericProjection.artifact_declarations, [
 ]);
 assert.equal(genericProjection.transcript_dir, '/runtime/projection-smoke/transcript');
 assert.equal(genericProjection.transcript_dir.includes('/wordpress/wp-content/plugins'), false);
-assert.deepEqual(genericProjection.wp_config_defines, { GENERIC_DEFINE: 'yes', EXAMPLE_DEFINE: true });
+assert.deepEqual(genericProjection.wp_config_defines, {});
 assert.deepEqual(genericProjection.runtime_fields, { runtime_example_version: '1.0' });
 
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-projection-'));

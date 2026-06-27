@@ -145,6 +145,13 @@ assert.deepEqual(
   `WP Codebox audit fanout references must stay in the quarantined implementation, CLI, and package metadata. Violations: ${auditFanoutReferenceFiles.join(', ')}`,
 );
 
+const genericSetupRuntime = fs.readFileSync(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/setup-runtime.cjs'), 'utf8');
+assert.equal(
+  /WordPress|wordpress|wp-codebox|Codebox|requires_wordpress_dependencies|wordpress_dependencies/.test(genericSetupRuntime),
+  false,
+  'Generic runtime setup must delegate runtime-specific setup through manifest adapters instead of naming WordPress or WP Codebox concerns.',
+);
+
 const quarantineCounts = quarantinedTermFiles.reduce((counts, relativePath) => {
   const parts = relativePath.split('/');
   const root = parts[0] === '.github'

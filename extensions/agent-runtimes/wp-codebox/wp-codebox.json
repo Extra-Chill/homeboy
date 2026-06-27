@@ -66,6 +66,10 @@
   },
   "ci_materialization": {
     "requires_wordpress_dependencies": true,
+    "setup_adapter": {
+      "module": "agent-runtimes/wp-codebox/lib/runtime-setup.cjs",
+      "export": "setupRuntime"
+    },
     "checkout": {
       "repo": "Automattic/wp-codebox",
       "target": ".ci/wp-codebox",

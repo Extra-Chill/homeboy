@@ -363,7 +363,6 @@ function projectRuntimeConfig({ env, runtime, workspace, componentId, componentP
     ),
     wp_config_defines: {
       ...(plainObject(projection.wp_config_defines) ? projection.wp_config_defines : {}),
-      ...parseJsonInput('extra_wp_config_defines', env.EXTRA_WP_CONFIG_DEFINES || '{}', 'object', {}),
     },
     runtime_fields: runtimeFieldsFromProjection(projection.runtime_fields, env),
   };
