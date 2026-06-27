@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.20] - 2026-06-27
+
+### Changed
+- Trust fuzz readiness preflight
+
 ## [3.19.19] - 2026-06-27
 
 ### Fixed
