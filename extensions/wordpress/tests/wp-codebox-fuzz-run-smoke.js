@@ -526,6 +526,31 @@ assert.deepEqual(genericPlanWorkloadInput.cases[0].phases.action[0].args, [
 	'operation={"hook":"init"}',
 ]);
 
+const descriptorPlanWorkloadInput = wpCodeboxFuzzSuiteInput({
+	id: 'descriptor-plan-workload-run',
+	homeboyFuzzWorkload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'descriptor-plan-workload',
+		plan: {
+			schema: 'wordpress-fuzz-plan/v1',
+			id: 'descriptor-plan',
+			targets: [{
+				id: 'rest:posts',
+				surface_id: 'rest:posts',
+				cases: [{
+					id: 'rest:posts-get',
+					intent: 'request-rest-route',
+					operation: { method: 'GET', route: '/wp/v2/posts' },
+					runtime_operation: { schema: 'homeboy/wordpress-fuzz-runtime-workload-operation/v1', command: 'wordpress.request-rest-route', family: 'rest', status: 'ready' },
+				}],
+			}],
+		},
+	},
+});
+assert.equal(descriptorPlanWorkloadInput.cases[0].target.entrypoint, 'wordpress.request-rest-route');
+assert.equal(descriptorPlanWorkloadInput.cases[0].phases.action[0].command, 'wordpress.request-rest-route');
+assert.equal(descriptorPlanWorkloadInput.cases[0].input.runtime_operation.family, 'rest');
+
 const genericPlanTaskRequest = wpCodeboxFuzzSuiteTaskRequest({ taskId: 'generic-plan-task', input: genericPlanWorkloadInput });
 const genericPlanPreflight = preflightWpCodeboxFuzzCapabilityContract({
 	request: genericPlanTaskRequest,

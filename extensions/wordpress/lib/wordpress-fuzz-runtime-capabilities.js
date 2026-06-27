@@ -17,6 +17,9 @@ const WORDPRESS_FUZZ_RUNTIME_CAPABILITIES = Object.freeze([
 	'admin',
 	'database',
 	'browser',
+	'block',
+	'block-editor',
+	'query-observation',
 ]);
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_ALIASES = new Map([
@@ -52,6 +55,20 @@ const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_ALIASES = new Map([
 	['database_execution', 'database'],
 	['browser-execution', 'browser'],
 	['browser_execution', 'browser'],
+	['frontend', 'browser'],
+	['page', 'browser'],
+	['page-load', 'browser'],
+	['page_load', 'browser'],
+	['block-render', 'block'],
+	['block_render', 'block'],
+	['block-exercise', 'block'],
+	['block_exercise', 'block'],
+	['editor-block', 'block-editor'],
+	['editor_block', 'block-editor'],
+	['database-query-observation', 'query-observation'],
+	['database_query_observation', 'query-observation'],
+	['query-timing', 'query-observation'],
+	['query_timing', 'query-observation'],
 ]);
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SET = new Set(WORDPRESS_FUZZ_RUNTIME_CAPABILITIES);
@@ -106,6 +123,9 @@ function normalizeExecutionContract(value = {}, capabilitySet = new Set()) {
 		admin: capabilityFlag(capabilitySet, execution, 'admin'),
 		database: capabilityFlag(capabilitySet, execution, 'database'),
 		browser: capabilityFlag(capabilitySet, execution, 'browser'),
+		block: capabilityFlag(capabilitySet, execution, 'block'),
+		block_editor: capabilityFlag(capabilitySet, execution, 'block-editor'),
+		query_observation: capabilityFlag(capabilitySet, execution, 'query-observation'),
 	};
 }
 
