@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.17] - 2026-06-27
+
+### Fixed
+- detect block themes by templates/index.html, not theme.json
+
 ## [3.19.16] - 2026-06-27
 
 ### Changed
