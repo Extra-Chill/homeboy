@@ -90,6 +90,14 @@ pub struct LabRunnerHomeboyOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_daemon_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_command_binary_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_command_binary_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_daemon_severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_daemon_refresh_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_daemon: Option<Value>,
     pub version_drift: bool,
     pub command_availability_checks: Vec<String>,
