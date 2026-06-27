@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.6] - 2026-06-27
+
+### Changed
+- Tier WordPress fuzz surface execution
+
 ## [3.19.5] - 2026-06-27
 
 ### Changed
