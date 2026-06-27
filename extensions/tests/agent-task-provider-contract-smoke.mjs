@@ -39,14 +39,17 @@ for (const [shimPath, canonicalPath] of [
 	['runtime-agent-ci/lib/agent-task-provider-contract.js', canonicalProviderContractPath],
 	['agent-runtimes/lib/agent-task-runner-contract.js', canonicalRunnerContractPath],
 	['runtime-agent-ci/lib/agent-task-runner-contract.js', canonicalRunnerContractPath],
+	['wordpress/lib/agent-task-runner-contract.js', canonicalRunnerContractPath],
 ]) {
 	const shimFullPath = path.join(rootDir, shimPath);
+	const shimSource = fs.readFileSync(shimFullPath, 'utf8');
 	assert.equal(require(shimFullPath), require(canonicalPath), `${shimPath} must re-export the canonical agent-task-contracts module`);
 	assert.match(
-		fs.readFileSync(shimFullPath, 'utf8'),
+		shimSource,
 		/require\('\.\.\/\.\.\/agent-task-contracts\/agent-task-(?:provider|runner)-contract'\)/,
 		`${shimPath} must stay a compatibility re-export of agent-task-contracts`,
 	);
+	assert.match(shimSource, /Compatibility re-export/, `${shimPath} must document that the path is compatibility-only`);
 }
 
 assert.equal(AGENT_TASK_ARTIFACT_SCHEMA, 'homeboy/agent-task-artifact/v1');

@@ -72,9 +72,10 @@ function surfaceUrl(target, surface, reportPath, sitePath) {
 			return '';
 		}
 		const url = new URL(frontendUrl);
-		url.pathname = '/studio-auto-login';
+		url.pathname = '/wp-admin/post.php';
 		url.search = '';
-		url.searchParams.set('redirect_to', `/wp-admin/post.php?post=${postId}&action=edit`);
+		url.searchParams.set('post', String(postId));
+		url.searchParams.set('action', 'edit');
 		return url.toString();
 	}
 	return configured;

@@ -23,7 +23,6 @@
   },
   "scripts": {
     "test:codebox-agent-task-executor-boundary": "node ../../wordpress/tests/codebox-agent-task-executor-boundary.test.js",
-    "test:wp-codebox-adapter-boundary": "node ../../tests/wp-codebox-adapter-boundary-smoke.mjs",
     "test:wp-codebox-adapter-contract": "node ../../tests/wp-codebox-adapter-contract-smoke.mjs",
     "test:wp-codebox-runtime-contract-source": "node ../../tests/wp-codebox-runtime-contract-source-smoke.mjs",
     "test:codebox-agent-task-executor": "node ../../wordpress/tests/codebox-agent-task-executor-smoke.js"

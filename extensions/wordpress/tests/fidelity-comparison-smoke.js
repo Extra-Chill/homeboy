@@ -55,7 +55,7 @@ async function main() {
 	assert.equal(resolveSourceStaticFile('/wordpress/wp-content/source.html', '/tmp/report/report.json', '/site'), '/site/wp-content/source.html');
 	assert.equal(resolveSourceStaticFile('source.html', '/tmp/report/report.json', ''), '/tmp/report/source.html');
 	assert.equal(surfaceUrl(target, 'wordpress_frontend', importReport.reportPath, ''), 'https://example.test/home/');
-	assert.equal(surfaceUrl(target, 'wordpress_editor', importReport.reportPath, ''), 'https://example.test/studio-auto-login?redirect_to=%2Fwp-admin%2Fpost.php%3Fpost%3D12%26action%3Dedit');
+	assert.equal(surfaceUrl(target, 'wordpress_editor', importReport.reportPath, ''), 'https://example.test/wp-admin/post.php?post=12&action=edit');
 	assert.deepEqual(visualProbeGroups(target).map((group) => group.name), ['nav_chrome', 'hero_probe', 'visible_chrome', 'footer_chrome']);
 	assert.deepEqual(semanticTargetSelectorGroups(target).map((group) => group.name), ['nav_chrome', 'hero', 'visible_chrome', 'footer_chrome', 'brand_hooks', 'interaction_hooks']);
 
