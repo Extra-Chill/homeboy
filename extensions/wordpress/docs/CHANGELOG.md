@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.16] - 2026-06-27
+
+### Changed
+- Use public Codebox artifact APIs
+
 ## [3.19.15] - 2026-06-27
 
 ### Changed
