@@ -856,17 +856,18 @@ assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.ability_
 assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task_ability_normalization, controllerClientContextArtifactsTaskInput.runtime_task.ability_normalization);
 assert.equal(controllerClientContextArtifactsTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
 assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.package, { slug: 'website-idea-agent', source: 'bundles/website-idea-agent' });
-assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.artifacts, [{
+assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.artifact_declarations, [{
+  schema: 'wp-codebox/artifact-declaration/v1',
   name: 'concept_packet',
+  artifact_schema: 'wp-site-generator/ConceptPacket/v1',
   required: true,
-  schema: 'wp-site-generator/ConceptPacket/v1',
-  output: 'outputs.typed_artifacts.concept_packet.payload',
 }]);
+assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
 assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'runtime_package'), false);
 assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'agent'), false);
 assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'metadata'), false);
-assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'required_artifacts'), false);
 assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'engine_data_outputs'), false);
+assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'artifacts'), false);
 
 const controllerClientContextRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -1117,12 +1118,13 @@ const providerAndControllerArtifactsTaskInput = codeboxTaskRequestFromAgentTaskR
 });
 assert.deepEqual(providerAndControllerArtifactsTaskInput.artifact_declarations.map((declaration) => declaration.name), ['concept_packet']);
 assert.equal(providerAndControllerArtifactsTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
-assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.artifacts, [{
+assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.artifact_declarations, [{
+  schema: 'wp-codebox/artifact-declaration/v1',
   name: 'concept_packet',
+  artifact_schema: 'wp-site-generator/ConceptPacket/v1',
   required: true,
-  schema: 'wp-site-generator/ConceptPacket/v1',
-  output: 'outputs.typed_artifacts.concept_packet.payload',
 }]);
+assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
 
 const placeholderArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   schema: 'homeboy/agent-task-request/v1',
@@ -1658,17 +1660,18 @@ assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.package
 assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.workflow, { id: 'store-idea-artifact-flow' });
 assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.package.source === 'bundles/store-idea-agent', false);
 assert.equal(JSON.stringify(runtimePackageTypedArtifactTaskInput.runtime_task).includes('"source":"bundles/store-idea-agent"'), false);
-assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.artifacts, [{
+assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.artifact_declarations, [{
+  schema: 'wp-codebox/artifact-declaration/v1',
   name: 'concept_packet',
+  artifact_schema: 'example/ConceptPacket/v1',
   required: true,
-  schema: 'example/ConceptPacket/v1',
-  output: 'outputs.typed_artifacts.concept_packet.payload',
 }]);
+assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
 assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'runtime_package'), false);
 assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'agent'), false);
 assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'metadata'), false);
-assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'required_artifacts'), false);
 assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'engine_data_outputs'), false);
+assert.equal(Object.hasOwn(runtimePackageTypedArtifactTaskInput.runtime_task.input, 'artifacts'), false);
 
 const runtimePackageTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult(runtimePackageTypedArtifactRequest, {
   success: true,

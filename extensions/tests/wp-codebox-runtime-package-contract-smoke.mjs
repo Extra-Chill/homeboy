@@ -80,16 +80,17 @@ try {
 		slug: 'proof-loop',
 		source: '/workspace/workspace/packages/proof-loop',
 	});
-	assert.deepEqual(runtimeTask.input.artifacts, [{
+	assert.deepEqual(runtimeTask.input.artifact_declarations, [{
+		schema: 'wp-codebox/artifact-declaration/v1',
 		name: 'review_packet',
+		artifact_schema: 'example/review-packet/v1',
 		required: true,
-		schema: 'example/review-packet/v1',
-		output: 'outputs.typed_artifacts.review_packet.payload',
 	}]);
+	assert.deepEqual(runtimeTask.input.required_artifacts, ['review_packet']);
 	assert.equal(Object.hasOwn(runtimeTask.input, 'runtime_package'), false);
 	assert.equal(Object.hasOwn(runtimeTask.input, 'agent'), false);
-	assert.equal(Object.hasOwn(runtimeTask.input, 'required_artifacts'), false);
 	assert.equal(Object.hasOwn(runtimeTask.input, 'engine_data_outputs'), false);
+	assert.equal(Object.hasOwn(runtimeTask.input, 'artifacts'), false);
 
 	assert.deepEqual(runtimePackageTaskInputForCodebox({
 		package: { slug: 'proof-loop', source: 'packages/proof-loop' },
@@ -99,6 +100,7 @@ try {
 			slug: 'proof-loop',
 			source: '/workspace/source/packages/proof-loop',
 		},
+		artifact_declarations: [],
 	});
 
 	assert.throws(

@@ -1045,9 +1045,21 @@ function runtimePackageTaskInputForCodebox(input, options = {}) {
   if (normalizedPackage.package) {
     normalized.package = normalizedPackage.package;
   }
+  const artifactDeclarations = normalizeRuntimePackageTaskArtifactDeclarations(firstDefined(
+    normalized.artifact_declarations,
+    normalized.artifactDeclarations,
+    []
+  ));
+  normalized.artifact_declarations = artifactDeclarations;
+  const requiredArtifacts = runtimePackageRequiredArtifacts(normalized.required_artifacts, artifactDeclarations);
+  if (requiredArtifacts.length > 0 || normalized.required_artifacts !== undefined) {
+    normalized.required_artifacts = requiredArtifacts;
+  }
   delete normalized.runtime_package;
   delete normalized.agent;
   delete normalized.agent_slug;
+  delete normalized.artifactDeclarations;
+  delete normalized.artifacts;
   return normalized;
 }
 
@@ -1150,41 +1162,43 @@ function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, 
   const declarations = codeboxTaskArtifactDeclarations(artifactDeclarationsFromAgentTaskRequest(request, config, inputs))
     .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && typedArtifactNameFromDeclaration(declaration));
   if (declarations.length === 0) {
-    return input;
+    return {
+      ...input,
+      artifact_declarations: normalizeRuntimePackageTaskArtifactDeclarations(firstDefined(input.artifact_declarations, input.artifactDeclarations, [])),
+    };
   }
 
-  const artifacts = normalizeRuntimePackageTaskArtifacts(input.artifacts);
-  for (const declaration of declarations) {
-    const name = typedArtifactNameFromDeclaration(declaration);
-    if (name && !artifacts.some((artifact) => artifact.name === name)) {
-      artifacts.push(runtimePackageArtifactFromDeclaration(declaration));
-    }
-  }
+  const artifactDeclarations = uniqueArtifactDeclarations([
+    ...normalizeRuntimePackageTaskArtifactDeclarations(firstDefined(input.artifact_declarations, input.artifactDeclarations, [])),
+    ...declarations.map(runtimePackageArtifactDeclarationFromDeclaration).filter(Boolean),
+  ]);
+  const requiredArtifacts = runtimePackageRequiredArtifacts(input.required_artifacts, artifactDeclarations);
 
   return {
     ...input,
-    artifacts,
+    artifact_declarations: artifactDeclarations,
+    required_artifacts: requiredArtifacts,
   };
 }
 
-function normalizeRuntimePackageTaskArtifacts(artifacts) {
-  return normalizeArray(artifacts)
-    .filter((artifact) => artifact && typeof artifact === 'object' && !Array.isArray(artifact))
-    .map((artifact) => ({ ...artifact }));
+function normalizeRuntimePackageTaskArtifactDeclarations(declarations) {
+  return uniqueArtifactDeclarations(normalizeArray(declarations)
+    .map(runtimePackageArtifactDeclarationFromDeclaration)
+    .filter(Boolean));
 }
 
-function runtimePackageArtifactFromDeclaration(declaration) {
-  const name = typedArtifactNameFromDeclaration(declaration);
-  return withoutUndefinedValues({
-    name,
-    required: declaration.required === true,
-    schema: declaration.artifact_schema || declaration.artifactSchema,
-    output: runtimePackageOutputProjectionPath(name),
-  });
+function runtimePackageArtifactDeclarationFromDeclaration(declaration) {
+  return wpCodeboxArtifactDeclarationFromHomeboy(declaration);
 }
 
-function runtimePackageOutputProjectionPath(name) {
-  return `outputs.typed_artifacts.${name}.payload`;
+function runtimePackageRequiredArtifacts(requiredArtifacts, artifactDeclarations = []) {
+  return Array.from(new Set([
+    ...normalizeArray(requiredArtifacts),
+    ...artifactDeclarations
+      .filter((declaration) => declaration && declaration.required === true)
+      .map((declaration) => typedArtifactNameFromDeclaration(declaration))
+      .filter(Boolean),
+  ]));
 }
 
 function runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared = {}) {
