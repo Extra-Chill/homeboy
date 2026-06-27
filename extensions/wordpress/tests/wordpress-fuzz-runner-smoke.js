@@ -391,7 +391,9 @@ const dispatchPromise = runWordPressFuzzRunnerResult({
 	assert.equal(dispatchedResult.succeeded, true);
 	assert.equal(dispatchedResult.wp_codebox_result.request_id, 'dispatch-run');
 	assert.equal(dispatchedResult.wp_codebox_result.coverage_summary.surface_count, 1);
-	assert.deepEqual(dispatchedResult.wp_codebox_result.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'result_envelope']);
+	assert.equal(dispatchedResult.wp_codebox_result.artifacts.some((artifact) => artifact.role === 'case_log'), true);
+	assert.equal(dispatchedResult.wp_codebox_result.artifacts.some((artifact) => artifact.role === 'replay_data'), true);
+	assert.equal(dispatchedResult.wp_codebox_result.artifacts.some((artifact) => artifact.role === 'coverage_summary'), true);
 	assert.equal(dispatchedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].semantic_key, 'fuzz.report');
 	assert.equal(dispatchedResult.homeboy_fuzz_campaign.metadata.artifact_refs[1].semantic_key, 'fuzz.coverage');
 });
@@ -588,9 +590,17 @@ const dispatchCliResult = JSON.parse(dispatchCli.stdout);
 assert.equal(dispatchCliResult.succeeded, true, JSON.stringify(dispatchCliResult.wp_codebox_result));
 assert.equal(dispatchCliResult.wp_codebox_result.request_id, 'dispatch-cli-run');
 assert.equal(dispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'fake/fuzz-report.json');
+const dispatchCampaign = JSON.parse(fs.readFileSync(dispatchResultsPath, 'utf8'));
+assert.equal(dispatchCampaign.metadata.fuzz_result_envelope.gates.required_artifacts.every((artifact) => artifact.status === 'present'), true);
 const dispatchHotspots = JSON.parse(fs.readFileSync(path.join(dispatchArtifactsDir, 'files', 'wordpress-hotspots.json'), 'utf8'));
 assert.equal(dispatchHotspots.schema, 'homeboy/fuzz-hotspot-set/v1');
 assert.equal(dispatchHotspots.items[0].value, 42);
+assert.equal(fs.existsSync(path.join(dispatchArtifactsDir, 'files', 'wp-codebox-fuzz-suite-result.json')), true);
+assert.equal(fs.existsSync(path.join(dispatchArtifactsDir, 'files', 'wordpress-fuzz-coverage.json')), true);
+assert.equal(fs.existsSync(path.join(dispatchArtifactsDir, 'files', 'coverage-summary.json')), true);
+assert.equal(fs.existsSync(path.join(dispatchArtifactsDir, 'files', 'case-log.jsonl')), true);
+assert.equal(fs.existsSync(path.join(dispatchArtifactsDir, 'files', 'replay-data.json')), true);
+assert.equal(fs.existsSync(path.join(dispatchArtifactsDir, 'dispatch-cli-workload', 'dispatch-cli-workload.json')), true);
 
 const emptyHotspotArtifactsDir = path.join(tempDir, 'empty-hotspot-artifacts');
 writeHomeboyFuzzArtifactFiles(emptyHotspotArtifactsDir, {
