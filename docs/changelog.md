@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.266.1] - 2026-06-27
+
+### Changed
+- clear field_patterns in git/pr_land via serde flatten
+- clear field_patterns in runs/gh_actions via serde flatten
+- record path materialization plan
+- add durable execution record
+- Fail bench runs on rig result gates
+- Add fuzz artifact hotspot cohorts
+- runs artifacts: add --pull to retrieve artifact bytes locally
+- warn loudly when a runner stays version-degraded
+- clear field_patterns via serde flatten (batch 6)
+
+### Fixed
+- clear error when rig spec uses an unrecognized component schema
+
 ## [0.266.0] - 2026-06-27
 
 ### Added
