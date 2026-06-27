@@ -5,7 +5,10 @@ use std::path::{Component, Path, PathBuf};
 
 use homeboy::core::engine::shell;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
-use homeboy::core::runners::{self as runner, RunnerExecOutput, RunnerKind};
+use homeboy::core::runners::{
+    self as runner, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
+    RunnerKind,
+};
 use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::{server, Error};
 
@@ -25,6 +28,7 @@ pub(super) fn exec(
     dry_run: bool,
     run_id: Option<String>,
     artifact_outputs: Vec<String>,
+    artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
@@ -35,12 +39,14 @@ pub(super) fn exec(
     let prepared_command = prepare_runner_exec_command(script.as_ref(), command)?;
     let env = prepare_runner_exec_env(env, script.as_deref())?;
     let required_commands = prepared_command.first().cloned().into_iter().collect();
-    let has_declared_outputs = !artifact_outputs.is_empty() || !summary_outputs.is_empty();
+    let has_declared_outputs = !artifact_outputs.is_empty()
+        || !artifact_dir_outputs.is_empty()
+        || !summary_outputs.is_empty();
 
     if !dry_run && has_declared_outputs && run_id.is_none() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "run_id",
-            "runner exec --artifact/--summary requires --run-id so evidence can be attached to a persisted run",
+            "runner exec --artifact/--artifact-dir/--summary requires --run-id so evidence can be attached to a persisted run",
             None,
             None,
         ));
@@ -59,7 +65,7 @@ pub(super) fn exec(
 
     let validated_run_id = validate_runner_exec_run_id(run_id)?;
 
-    let (output, exit_code) = runner::exec(
+    let (mut output, exit_code) = runner::exec(
         runner_id,
         runner::RunnerExecOptions {
             cwd,
@@ -88,8 +94,32 @@ pub(super) fn exec(
         },
     )?;
     if let Some(run_id) = validated_run_id.as_deref() {
-        promote_runner_exec_artifacts(run_id, &output, &artifact_outputs)?;
-        promote_runner_exec_summaries(run_id, &output, &summary_outputs)?;
+        let artifacts = promote_runner_exec_artifacts(run_id, &output, &artifact_outputs)?;
+        let promoted_artifacts = artifacts
+            .iter()
+            .filter_map(|record| promoted_output(&output, record))
+            .collect::<Vec<_>>();
+        let artifact_dir_records =
+            promote_runner_exec_artifact_dirs(run_id, &output, &artifact_dir_outputs)?;
+        let promoted_artifact_dir_records = artifact_dir_records
+            .iter()
+            .filter_map(|record| promoted_output(&output, record))
+            .collect::<Vec<_>>();
+        let summaries = promote_runner_exec_summaries(run_id, &output, &summary_outputs)?;
+        let structured_summaries = summaries
+            .iter()
+            .filter_map(|summary| runner_exec_structured_summary(&output, summary))
+            .collect::<Vec<_>>();
+        let promoted_summaries = summaries
+            .iter()
+            .filter_map(|record| promoted_output(&output, record))
+            .collect::<Vec<_>>();
+        output.promoted_outputs.extend(promoted_artifacts);
+        output
+            .promoted_outputs
+            .extend(promoted_artifact_dir_records);
+        output.structured_summaries.extend(structured_summaries);
+        output.promoted_outputs.extend(promoted_summaries);
     }
     Ok((output, exit_code))
 }
@@ -254,6 +284,93 @@ pub(super) fn promote_runner_exec_artifacts(
     )
 }
 
+pub(super) fn promote_runner_exec_artifact_dirs(
+    run_id: &str,
+    output: &RunnerExecOutput,
+    artifact_dir_outputs: &[String],
+) -> homeboy::core::Result<Vec<ArtifactRecord>> {
+    if artifact_dir_outputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let store = ObservationStore::open_initialized()?;
+    let runner = match output.mode {
+        runner::RunnerExecMode::Local => None,
+        runner::RunnerExecMode::Daemon
+        | runner::RunnerExecMode::ReverseBroker
+        | runner::RunnerExecMode::DiagnosticSsh => Some(runner::load(&output.runner_id)?),
+    };
+    let mut records = Vec::new();
+    for declared_dir in artifact_dir_outputs {
+        let runner_dir = resolve_runner_exec_artifact_path(&output.remote_cwd, declared_dir);
+        let record_dir = if let Some(runner) = runner.as_ref() {
+            copy_runner_exec_artifact_source(runner, &runner_dir)?
+        } else {
+            runner_dir.clone()
+        };
+        if !record_dir.is_dir() {
+            return Err(Error::validation_invalid_argument(
+                "artifact_dir",
+                format!(
+                    "runner exec artifact directory is not a directory: {}",
+                    runner_dir.display()
+                ),
+                Some(declared_dir.to_string()),
+                None,
+            ));
+        }
+        let mut children = fs::read_dir(&record_dir)
+            .map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!("read {}", record_dir.display())),
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!("read {}", record_dir.display())),
+                )
+            })?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let record_path = child.path();
+            let metadata = child.metadata().map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!("stat {}", record_path.display())),
+                )
+            })?;
+            if !metadata.is_file() && !metadata.is_dir() {
+                continue;
+            }
+            let name = child.file_name().to_string_lossy().to_string();
+            let declared_path = Path::new(declared_dir).join(&name).display().to_string();
+            let runner_path = runner_dir.join(&name);
+            let mut artifact_metadata = serde_json::json!({
+                "artifact_dir": declared_dir,
+                "declared_path": declared_path,
+                "evidence_role": RunnerExecEvidenceRole::Artifact.as_str(),
+                "promoted_by": "runner.exec",
+                "runner_path": runner_path.display().to_string(),
+            });
+            if let Some(runner) = runner.as_ref() {
+                artifact_metadata["source"] = serde_json::json!("runner_path_attach");
+                artifact_metadata["runner_id"] = serde_json::json!(runner.id.clone());
+            }
+            records.push(record_runner_exec_output(
+                &store,
+                run_id,
+                &runner_exec_artifact_kind(&name),
+                &record_path,
+                artifact_metadata,
+            )?);
+        }
+    }
+    Ok(records)
+}
+
 pub(super) fn promote_runner_exec_summaries(
     run_id: &str,
     output: &RunnerExecOutput,
@@ -315,6 +432,7 @@ fn promote_runner_exec_outputs(
                 "declared_path": declared,
                 "evidence_role": role.as_str(),
                 "promoted_by": "runner.exec",
+                "runner_path": runner_path.display().to_string(),
             });
             let record_path = if let Some(runner) = runner.as_ref() {
                 metadata["source"] = serde_json::json!("runner_path_attach");
@@ -324,13 +442,78 @@ fn promote_runner_exec_outputs(
             } else {
                 runner_path.clone()
             };
-            if record_path.is_dir() {
-                store.record_directory_artifact_with_metadata(run_id, &kind, &record_path, metadata)
-            } else {
-                store.record_artifact_with_metadata(run_id, &kind, &record_path, metadata)
-            }
+            let record = record_runner_exec_output(&store, run_id, &kind, &record_path, metadata)?;
+            Ok(record)
         })
         .collect()
+}
+
+fn record_runner_exec_output(
+    store: &ObservationStore,
+    run_id: &str,
+    kind: &str,
+    record_path: &Path,
+    metadata: serde_json::Value,
+) -> homeboy::core::Result<ArtifactRecord> {
+    if record_path.is_dir() {
+        store.record_directory_artifact_with_metadata(run_id, kind, record_path, metadata)
+    } else {
+        store.record_artifact_with_metadata(run_id, kind, record_path, metadata)
+    }
+}
+
+fn promoted_output(
+    output: &RunnerExecOutput,
+    record: &ArtifactRecord,
+) -> Option<RunnerExecPromotedOutput> {
+    let role = record
+        .metadata_json
+        .get("evidence_role")?
+        .as_str()?
+        .to_string();
+    let declared_path = record
+        .metadata_json
+        .get("declared_path")?
+        .as_str()?
+        .to_string();
+    let runner_path = record
+        .metadata_json
+        .get("runner_path")?
+        .as_str()?
+        .to_string();
+    Some(RunnerExecPromotedOutput {
+        role,
+        run_id: record.run_id.clone(),
+        runner_id: output.runner_id.clone(),
+        command: output.argv.clone(),
+        declared_path,
+        runner_path,
+        artifact_id: record.id.clone(),
+        artifact_kind: record.kind.clone(),
+        artifact_path: record.path.clone(),
+    })
+}
+
+fn runner_exec_structured_summary(
+    output: &RunnerExecOutput,
+    record: &ArtifactRecord,
+) -> Option<RunnerExecStructuredSummary> {
+    if record.artifact_type != "file" || record.mime.as_deref() != Some("application/json") {
+        return None;
+    }
+    let summary = fs::read_to_string(&record.path)
+        .ok()
+        .and_then(|body| serde_json::from_str(&body).ok())?;
+    let promoted = promoted_output(output, record)?;
+    Some(RunnerExecStructuredSummary {
+        run_id: promoted.run_id,
+        runner_id: promoted.runner_id,
+        command: promoted.command,
+        declared_path: promoted.declared_path,
+        artifact_id: promoted.artifact_id,
+        artifact_path: promoted.artifact_path,
+        summary,
+    })
 }
 
 fn copy_runner_exec_artifact_source(
@@ -632,6 +815,8 @@ fn runner_exec_dry_run(
             patch: None,
             mutation_artifacts: None,
             artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
             metrics: None,
             capture: None,
             runner_result: None,
@@ -640,6 +825,7 @@ fn runner_exec_dry_run(
                 runner_workspace_root: runner.workspace_root,
                 source_snapshot_remote_path: None,
                 required_paths: require_paths,
+                homeboy_binaries: None,
                 hints: vec!["dry run only; no runner command was executed".to_string()],
             }),
         },

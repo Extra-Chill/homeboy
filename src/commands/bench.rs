@@ -19,7 +19,7 @@ use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
     PositionalComponentArgs, SettingArgs,
 };
-use super::{runs, CmdResult, GlobalArgs};
+use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, CommandPortabilityContract,
     LabCommandContract, BENCH_LAB_LABEL,
@@ -62,8 +62,7 @@ impl BenchArgs {
 
     /// Whether this invocation is a bench *run* (the variants that emit the
     /// large `BenchCommandOutput`/comparison envelopes the compact summary
-    /// targets). Subcommands like `list`, `history`, `distribution`, and
-    /// `compare` keep their existing output.
+    /// targets). Subcommands like `list` keep their existing output.
     pub fn is_run_invocation(&self) -> bool {
         matches!(self.command, None | Some(BenchCommand::Matrix(_)))
     }
@@ -110,10 +109,7 @@ impl BenchArgs {
         match &self.command {
             None => Some(&self.run),
             Some(BenchCommand::Matrix(args)) => Some(args.run_args()),
-            Some(BenchCommand::History(_)) => None,
-            Some(BenchCommand::List(_))
-            | Some(BenchCommand::Distribution(_))
-            | Some(BenchCommand::Compare(_)) => None,
+            Some(BenchCommand::List(_)) => None,
         }
     }
 }
@@ -125,64 +121,6 @@ enum BenchCommand {
     Matrix(settings_matrix::BenchMatrixArgs),
     /// List declared benchmark scenarios without executing them
     List(BenchListArgs),
-    /// Deprecated compatibility alias for `homeboy runs list --kind bench --component <component>`
-    #[command(hide = true)]
-    History(BenchHistoryArgs),
-    /// Deprecated compatibility alias for `homeboy runs distribution --kind bench --component <component>`
-    #[command(hide = true)]
-    Distribution(BenchDistributionArgs),
-    /// Deprecated compatibility alias for `homeboy runs bench-compare --from-run <id> --to-run <id>`
-    #[command(hide = true)]
-    Compare(BenchCompareArgs),
-}
-
-#[derive(Args)]
-struct BenchHistoryArgs {
-    /// Component ID
-    component: String,
-    /// Scenario ID
-    #[arg(long = "scenario")]
-    scenario_id: Option<String>,
-    /// Rig ID
-    #[arg(long)]
-    rig: Option<String>,
-    /// Maximum runs to return
-    #[arg(long, default_value_t = 20)]
-    limit: i64,
-}
-
-#[derive(Args)]
-struct BenchDistributionArgs {
-    /// Component ID
-    component: String,
-    /// Scenario ID
-    #[arg(long = "scenario")]
-    scenario_id: Option<String>,
-    /// Rig ID
-    #[arg(long)]
-    rig: Option<String>,
-    /// Run status
-    #[arg(long)]
-    status: Option<String>,
-    /// Dot-separated metadata path to aggregate
-    #[arg(long = "field", required = true)]
-    fields: Vec<String>,
-    /// Maximum runs to inspect before scenario filtering
-    #[arg(long, default_value_t = 20)]
-    limit: i64,
-}
-
-#[derive(Args)]
-struct BenchCompareArgs {
-    /// Earlier run ID
-    #[arg(long = "from-run")]
-    from_run: String,
-    /// Later run ID
-    #[arg(long = "to-run")]
-    to_run: String,
-    /// Metric to include. Repeat to compare multiple metrics. Defaults to all shared numeric metrics.
-    #[arg(long = "metric")]
-    metrics: Vec<String>,
 }
 
 #[derive(Args)]
@@ -457,7 +395,6 @@ pub enum BenchOutput {
     MatrixFanout(fanout::BenchMatrixFanoutOutput),
     SettingsMatrix(settings_matrix::BenchSettingsMatrixOutput),
     List(BenchListWorkflowResult),
-    Observation(runs::RunsOutput),
 }
 
 pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
@@ -469,55 +406,6 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
                 Ok((BenchOutput::SettingsMatrix(output), exit))
             }
             BenchCommand::List(list_args) => run_list(list_args),
-            BenchCommand::History(history_args) => {
-                eprintln!(
-                    "warning: `homeboy bench history` is deprecated; use `homeboy runs list --kind bench --component <component>`"
-                );
-                let (output, exit_code) = runs::list_runs(
-                    runs::RunsListArgs {
-                        runner: None,
-                        kind: Some("bench".to_string()),
-                        component_id: Some(history_args.component.clone()),
-                        rig: history_args.rig.clone(),
-                        scenario_id: history_args.scenario_id.clone(),
-                        status: None,
-                        limit: history_args.limit,
-                        include_active_runner_jobs: false,
-                    },
-                    "runs.list",
-                )?;
-                Ok((BenchOutput::Observation(output), exit_code))
-            }
-            BenchCommand::Distribution(distribution_args) => {
-                eprintln!(
-                    "warning: `homeboy bench distribution` is deprecated; use `homeboy runs distribution --kind bench --component <component>`"
-                );
-                let (output, exit_code) = runs::runs_distribution(
-                    runs::RunsDistributionArgs {
-                        kind: Some("bench".to_string()),
-                        component_id: Some(distribution_args.component.clone()),
-                        rig: distribution_args.rig.clone(),
-                        scenario_id: distribution_args.scenario_id.clone(),
-                        status: distribution_args.status.clone(),
-                        fields: distribution_args.fields.clone(),
-                        limit: distribution_args.limit,
-                    },
-                    "runs.distribution",
-                )?;
-                Ok((BenchOutput::Observation(output), exit_code))
-            }
-            BenchCommand::Compare(compare_args) => {
-                eprintln!(
-                    "warning: `homeboy bench compare` is deprecated; use `homeboy runs bench-compare`"
-                );
-                let (output, exit_code) =
-                    runs::bench_compare_from_args(runs::RunsBenchCompareArgs {
-                        from_run: compare_args.from_run.clone(),
-                        to_run: compare_args.to_run.clone(),
-                        metrics: compare_args.metrics.clone(),
-                    })?;
-                Ok((BenchOutput::Observation(output), exit_code))
-            }
         };
     }
 
@@ -738,6 +626,9 @@ fn validate_report_selection_for_single_run(args: &BenchRunArgs) -> homeboy::cor
 fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
     let passthrough_args = filter_homeboy_flags(&args.args);
     let rig_context = load_list_rig(args)?;
+    if let Some(context) = rig_context.as_ref() {
+        report_list_rig_source(context);
+    }
     let rig_spec = rig_context.as_ref().map(|context| &context.spec);
     let effective_id = resolve_list_component_id(args, rig_spec)?;
     let path_override = args.comp.path.clone().or_else(|| {
@@ -793,6 +684,18 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
             passthrough_args,
             scenario_ids: args.scenario_ids.clone(),
             extra_workloads,
+            env_provider_extensions: rig_spec
+                .as_ref()
+                .and_then(|spec| {
+                    ctx.extension_id.as_deref().map(|id| {
+                        rig::env_provider_extensions_for_extension_workloads(
+                            spec,
+                            rig::RigWorkloadKind::Bench,
+                            id,
+                        )
+                    })
+                })
+                .unwrap_or_default(),
             rig_package: rig_context
                 .as_ref()
                 .and_then(|context| rig::package_evidence(&context.spec.id)),
@@ -803,6 +706,15 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
     let output = output?;
 
     Ok((BenchOutput::List(output), 0))
+}
+
+fn report_list_rig_source(context: &ListRigContext) {
+    if let Some(evidence) = rig::package_evidence(&context.spec.id) {
+        eprintln!(
+            "bench rig source: rig={} package_root={} freshness={:?}",
+            evidence.rig_id, evidence.package_root, evidence.freshness
+        );
+    }
 }
 
 fn effective_extension_overrides(
@@ -830,7 +742,7 @@ type ListRigContext = rig::RigSourceContext;
 fn load_list_rig(args: &BenchListArgs) -> homeboy::core::Result<Option<ListRigContext>> {
     match args.rig.as_slice() {
         [] => Ok(None),
-        [rig_id] => Ok(Some(rig::RigSourceContext::load(rig_id)?)),
+        [rig_id] => Ok(Some(rig::RigSourceContext::load_for_invocation(rig_id)?)),
         _ => Err(homeboy::core::Error::validation_invalid_argument(
             "--rig",
             "bench list accepts exactly one rig id",

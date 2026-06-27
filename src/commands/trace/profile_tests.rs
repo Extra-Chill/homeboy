@@ -150,6 +150,73 @@ fn trace_profile_cli_fields_override_profile_fields() {
 }
 
 #[test]
+fn trace_profile_required_env_fails_before_run() {
+    with_isolated_home(|home| {
+        let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+        fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+        fs::write(
+            rig_dir.join("wallet-rig.json"),
+            r#"{
+                "components": { "stripe": { "path": "/tmp/stripe" } },
+                "trace_profiles": {
+                    "wallet": {
+                        "component": "stripe",
+                        "scenario": "wallet",
+                        "required_env": ["HOMEBOY_PROFILE_TEST_MISSING_ENV"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write rig");
+        std::env::remove_var("HOMEBOY_PROFILE_TEST_MISSING_ENV");
+
+        let err = resolve_trace_profile_args(&mut trace_args_for_profile("wallet"))
+            .expect_err("missing env should fail profile resolution");
+
+        assert!(err.to_string().contains("HOMEBOY_PROFILE_TEST_MISSING_ENV"));
+    });
+}
+
+#[test]
+fn trace_profile_resolves_compare_bundle_metadata() {
+    with_isolated_home(|home| {
+        let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+        fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+        fs::write(
+            rig_dir.join("stripe-rig.json"),
+            r#"{
+                "components": { "stripe": { "path": "/tmp/stripe" } },
+                "trace_profiles": {
+                    "wallet-compare": {
+                        "compare_bundle": {
+                            "component": "stripe",
+                            "scenarios": ["waterfall", "scroll"],
+                            "repeat": 5,
+                            "schedule": "interleaved",
+                            "canonical": true
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write rig");
+        let mut args = trace_args_for_profile("wallet-compare");
+        args.comp.component = Some("compare-bundle".to_string());
+        args.baseline_target = Some("origin/main".to_string());
+        args.candidate = Some("HEAD".to_string());
+
+        resolve_trace_profile_args(&mut args).expect("profile resolves");
+
+        assert_eq!(args.rig.as_deref(), Some("stripe-rig"));
+        assert_eq!(args.scenario.as_deref(), Some("stripe"));
+        assert_eq!(args.scenario_arg.as_deref(), Some("waterfall,scroll"));
+        assert_eq!(args.repeat, 5);
+        assert_eq!(args.schedule, TraceSchedule::Interleaved);
+        assert!(args.canonical);
+    });
+}
+
+#[test]
 fn trace_list_profiles_lists_rig_profiles() {
     with_isolated_home(|home| {
         let component_dir = tempfile::TempDir::new().expect("component dir");

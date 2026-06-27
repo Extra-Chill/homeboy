@@ -3,8 +3,8 @@ use serde_json::Value;
 
 use homeboy::core::api_jobs::{Job, JobEvent};
 use homeboy::core::runners::{
-    ReverseRunnerWorkerOutput, Runner, RunnerConnectReport, RunnerDisconnectReport,
-    RunnerExecOutput, RunnerStatusReport,
+    ReverseRunnerWorkerOutput, Runner, RunnerAvailability, RunnerConnectReport,
+    RunnerDisconnectReport, RunnerExecOutput, RunnerStatusReport,
 };
 use homeboy::core::EntityCrudOutput;
 
@@ -60,6 +60,10 @@ pub struct LabSelectedRunnerOutput {
     pub kind: String,
     pub configured_executable: String,
     pub runner_homeboy: LabRunnerHomeboyOutput,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub executable_requirements: Vec<RunnerExecutableRequirementDiagnostics>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runtime_diagnostics: Vec<RunnerRuntimeDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wp_codebox_runtime: Option<WpCodeboxRuntimeOutput>,
     pub daemon_enabled: bool,
@@ -67,6 +71,7 @@ pub struct LabSelectedRunnerOutput {
     pub workspace_root: Option<String>,
     pub readiness_state: String,
     pub connected: bool,
+    pub availability: RunnerAvailability,
     pub status: RunnerStatusReport,
 }
 
@@ -75,6 +80,11 @@ pub struct LabRunnerHomeboyOutput {
     pub controller_version: String,
     pub controller_build_identity: String,
     pub configured_executable: String,
+    pub controller_cli: RunnerHomeboyBinaryRole,
+    pub active_daemon: RunnerHomeboyBinaryRole,
+    pub configured_job_binary: RunnerHomeboyBinaryRole,
+    pub binary_roles: Vec<RunnerHomeboyBinaryRole>,
+    pub workflow_binary_guidance: RunnerWorkflowBinaryGuidance,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_daemon_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,6 +96,26 @@ pub struct LabRunnerHomeboyOutput {
     pub artifact_features: RunnerArtifactFeatureDiagnostics,
     pub refresh_commands: Vec<String>,
     pub upgrade_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerHomeboyBinaryRole {
+    pub role: &'static str,
+    pub owner: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<String>,
+    pub purpose: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerWorkflowBinaryGuidance {
+    pub recent_workflows: &'static str,
+    pub explicit_workflows: &'static str,
+    pub capability_checks: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,6 +140,23 @@ pub struct RunnerToolDiagnostics {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerExecutableRequirementDiagnostics {
+    pub runtime: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub version_command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
+    pub diagnostic_state: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WpCodeboxRuntimeOutput {
     pub tool: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +172,34 @@ pub struct WpCodeboxRuntimeOutput {
     pub runtime_probe_command: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<WpCodeboxRuntimeDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerRuntimeDiagnostics {
+    pub runtime: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_binary: Option<String>,
+    pub configured_binary_source: String,
+    pub managed_cache_source: String,
+    pub managed_cache_binary: String,
+    pub effective_binary_rule: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<RunnerRuntimePackageDiagnostics>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub probes: BTreeMap<String, WpCodeboxProbeValue>,
+    pub runtime_probe_command: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<WpCodeboxRuntimeDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerRuntimePackageDiagnostics {
+    pub field: String,
+    pub package: String,
+    pub expected_path: String,
+    pub resolution: WpCodeboxProbeValue,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

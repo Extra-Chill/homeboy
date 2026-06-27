@@ -115,6 +115,9 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     )?;
     selection_timer.finish();
     let Some(selection) = selection else {
+        if !request.force_hot {
+            fail_if_no_default_runner_accepts_jobs(&contract)?;
+        }
         let reason = if request.force_hot && request.local_policy.allow_local_hot() {
             "force_hot_local_override"
         } else if request.force_hot {
@@ -195,6 +198,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     prepare_timer.finish();
     match preparation {
         LabRunnerPreparation::Ready => {
+            preflight_lab_runner_availability(&contract, &selection)?;
             plan = with_step(
                 plan,
                 PlanStep::ready("lab.connect_runner", "lab.connect_runner").build(),

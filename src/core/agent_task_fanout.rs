@@ -12,6 +12,7 @@ use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
 pub const AGENT_TASK_FANOUT_PLAN_SCHEMA: &str = "homeboy/agent-task-fanout-plan/v1";
 pub const AGENT_TASK_FANOUT_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-fanout-aggregate/v1";
 pub const AGENT_TASK_FANOUT_CANONICAL_PATH: &str = "homeboy-durable-scheduler-to-runtime-executor";
+pub const AGENT_TASK_FANOUT_RUNTIME_BOUNDARY: &str = "manifest_declared_runtime_executor";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskFanoutPlan {
@@ -125,12 +126,12 @@ impl AgentTaskFanoutPlan {
             Value::String(AGENT_TASK_FANOUT_CANONICAL_PATH.to_string()),
         );
         plan.inputs.insert(
-            "ownership".to_string(),
+            "runtime_boundary".to_string(),
             serde_json::json!({
-                "substrate": "agents-api",
+                "boundary": AGENT_TASK_FANOUT_RUNTIME_BOUNDARY,
                 "durable_scheduler": "homeboy",
-                "runtime_executor_adapter": "homeboy-extensions",
-                "sandbox_worker_runtime": "wp-codebox"
+                "executor": "declared_by_task_executor",
+                "runtime": "declared_by_task_runtime"
             }),
         );
         if let Some(group_key) = &self.group_key {
@@ -440,9 +441,14 @@ mod tests {
             json!(AGENT_TASK_FANOUT_CANONICAL_PATH)
         );
         assert_eq!(
-            homeboy_plan.inputs["ownership"]["durable_scheduler"],
+            homeboy_plan.inputs["runtime_boundary"]["durable_scheduler"],
             json!("homeboy")
         );
+        assert_eq!(
+            homeboy_plan.inputs["runtime_boundary"]["runtime"],
+            json!("declared_by_task_runtime")
+        );
+        assert!(!homeboy_plan.inputs.contains_key("ownership"));
         assert!(homeboy_plan.steps.iter().all(|step| {
             step.inputs["canonical_path"] == json!(AGENT_TASK_FANOUT_CANONICAL_PATH)
                 && step.inputs["owner"] == json!("homeboy")

@@ -1,4 +1,12 @@
 use super::*;
+use crate::core::agent_task::{
+    AgentTaskDiagnostic, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
+};
+use crate::core::agent_task_lifecycle;
+use crate::core::agent_task_schedule::{
+    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
+    AGENT_TASK_AGGREGATE_SCHEMA,
+};
 use crate::test_support::with_isolated_home;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -205,6 +213,100 @@ fn status_diagnostics_flag_missing_referenced_run_records() {
     assert!(action
         .problems
         .contains(&"referenced run record is missing".to_string()));
+}
+
+#[test]
+fn status_diagnostics_surface_failed_child_run_root_cause() {
+    with_isolated_home(|_| {
+        let plan = AgentTaskPlan::new("child-plan", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some("agent-task-child-1"))
+            .expect("child run submitted");
+        let aggregate = AgentTaskAggregate {
+            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: "child-plan".to_string(),
+            status: AgentTaskAggregateStatus::Failed,
+            totals: AgentTaskAggregateTotals {
+                failed: 1,
+                ..AgentTaskAggregateTotals::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: "child-task".to_string(),
+                status: AgentTaskOutcomeStatus::Failed,
+                summary: None,
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: vec![AgentTaskDiagnostic {
+                    class: "runtime.provider_import_failed".to_string(),
+                    message: "Provider runtime import failed: module not found".to_string(),
+                    data: Value::Null,
+                }],
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        };
+        agent_task_lifecycle::record_run_aggregate("agent-task-child-1", &plan, &aggregate)
+            .expect("aggregate recorded");
+
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "finding:abc:repair".to_string(),
+                entity_id: Some("finding:abc".to_string()),
+                request: json!({ "run_id": "agent-task-child-1" }),
+            },
+            "finding emitted",
+        );
+        record.next_actions[0].status = AgentTaskLoopActionStatus::Failed;
+        record.next_actions[0]
+            .diagnostics
+            .push(AgentTaskLoopActionDiagnostic {
+                code: "child_run_failed".to_string(),
+                message:
+                    "Agent runtime did not produce required typed artifacts: concept_packet, design_packet."
+                        .to_string(),
+                runner: None,
+                details: Value::Null,
+            });
+
+        let diagnostics = controller_status_diagnostics_with(
+            &record,
+            DateTime::parse_from_rfc3339("2026-06-11T00:05:00Z")
+                .expect("now")
+                .with_timezone(&Utc),
+            |_| Ok(true),
+        )
+        .expect("diagnostics");
+
+        assert_eq!(diagnostics.summary.failed_child_action_count, 1);
+        let failed = &diagnostics.failed_child_actions[0];
+        assert_eq!(failed.action_id, "action-1");
+        assert_eq!(failed.dedupe_key.as_deref(), Some("finding:abc:repair"));
+        assert_eq!(failed.child_run_id.as_deref(), Some("agent-task-child-1"));
+        assert_eq!(failed.child_run_status.as_deref(), Some("failed"));
+        assert_eq!(
+            failed.top_diagnostic,
+            "Agent runtime did not produce required typed artifacts: concept_packet, design_packet."
+        );
+        assert_eq!(
+            failed.hydrated_root_cause.as_deref(),
+            Some("Provider runtime import failed: module not found")
+        );
+        assert_eq!(failed.owner_surface, "agent_runtime");
+        assert_eq!(
+            failed.next_command,
+            "homeboy agent-task status agent-task-child-1 --full"
+        );
+    });
 }
 
 #[test]

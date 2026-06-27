@@ -26,8 +26,8 @@ mod spec;
 pub use lab::{
     lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
     lab_runner_supports_contract_label, lab_runner_unsupported_hint,
-    lab_runner_unsupported_message, CommandPortabilityContract, LabCommandContract,
-    LabCommandPortability, LabCommandRequiredTool, LabCommandRouteContract,
+    lab_runner_unsupported_message, AgentTaskDispatchIdentity, CommandPortabilityContract,
+    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabCommandRouteContract,
     LabLocalExecutionPolicy, LabLocalHotPolicy, LabRoutingPolicy, LabRunnerSupportSummary,
     LabSelectedRunnerFallbackPolicy, LabSourcePathMode, LabWorkspaceModePolicy,
     RunnerHandoffEnvelope, RunnerHandoffFollowCommands, RunnerWorkload, RunnerWorkloadArtifactRef,
@@ -46,7 +46,8 @@ pub use output::{
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};
 pub use spec::{
     registered_command, registered_command_dispatch_family, registered_command_json_family,
-    CommandLabSupportSummary, CommandRegistryEntry, CommandSpec, COMMAND_REGISTRY, COMMAND_SPECS,
+    CommandLabSupportSummary, CommandRegistryEntry, CommandSafetySpec, CommandSpec,
+    COMMAND_REGISTRY, COMMAND_SPECS,
 };
 pub(crate) use spec::{
     AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REVIEW_LAB_LABEL,

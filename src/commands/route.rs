@@ -1501,11 +1501,64 @@ mod tests {
             "agent-task controller from-spec --resume/run-from-spec/materialize"
         );
         assert!(command.portable);
-        assert!(!command.routing_policy.default_lab_offload);
+        assert!(command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.requires_extension_parity);
         assert_eq!(
             command.workspace_mode_policy,
             runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
         );
+    }
+
+    #[test]
+    fn agent_task_controller_materialization_family_auto_selects_default_lab_runner() {
+        for args in [
+            [
+                "homeboy",
+                "agent-task",
+                "controller",
+                "from-spec",
+                "loop.json",
+                "--resume",
+                "--max-actions",
+                "1",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "controller",
+                "run-from-spec",
+                "loop.json",
+                "--max-actions",
+                "1",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "controller",
+                "materialize",
+                "loop.json",
+            ]
+            .as_slice(),
+        ] {
+            let cli = Cli::parse_from(args);
+
+            let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+            assert_eq!(
+                command.hot_label,
+                "agent-task controller from-spec --resume/run-from-spec/materialize"
+            );
+            assert!(command.portable);
+            assert!(command.routing_policy.default_lab_offload);
+            assert!(command.routing_policy.infer_source_path_tools);
+            assert!(!command.routing_policy.requires_extension_parity);
+            assert_eq!(
+                command.workspace_mode_policy,
+                runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
+            );
+        }
     }
 
     #[test]

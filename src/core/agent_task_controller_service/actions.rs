@@ -995,7 +995,8 @@ where
     match mode {
         "run_plan" => {
             let plan = plan_from_controller_request(request)?;
-            let run_id = controller_request_run_id(request, dedupe_key, &action.action_id);
+            let run_id =
+                controller_request_run_id(request, &record.loop_id, dedupe_key, &action.action_id);
             let submitted = if lifecycle::run_record_exists(&run_id)? {
                 lifecycle::status(&run_id)?
             } else {
@@ -1033,7 +1034,8 @@ where
         }
         "submit" => {
             let plan = plan_from_controller_request(request)?;
-            let run_id = controller_request_run_id(request, dedupe_key, &action.action_id);
+            let run_id =
+                controller_request_run_id(request, &record.loop_id, dedupe_key, &action.action_id);
             let submitted = lifecycle::submit_plan(&plan, Some(&run_id))?;
             record_controller_spawn(
                 record,
@@ -1202,7 +1204,7 @@ where
     let mut results = Vec::new();
     let mut exit_code = 0;
     for entity_id in expanded_entity_ids.iter().take(max_items) {
-        let request = materialize_fan_out_request(request_template, entity_id);
+        let request = materialize_fan_out_request(request_template, &record.loop_id, entity_id);
         let child_dedupe_key = format!("{dedupe_key}:{entity_id}");
         let child_action = AgentTaskLoopPolicyActionRecord {
             action_id: format!("{}:{entity_id}", action.action_id),

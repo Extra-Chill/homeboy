@@ -23,6 +23,7 @@ pub struct RigWorkloadPathExpansion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RigExtensionWorkloadInputs {
     pub workload_paths: Vec<PathBuf>,
+    pub env_provider_extensions: Vec<String>,
     pub invocation_requirements: InvocationRequirements,
 }
 
@@ -56,6 +57,11 @@ pub fn extension_workload_inputs(
 ) -> RigExtensionWorkloadInputs {
     RigExtensionWorkloadInputs {
         workload_paths: workloads_for_extension(rig_spec, kind, package_root, extension_id),
+        env_provider_extensions: env_provider_extensions_for_extension_workloads(
+            rig_spec,
+            kind,
+            extension_id,
+        ),
         invocation_requirements: invocation_requirements_for_extension_workloads(
             rig_spec,
             kind,
@@ -85,6 +91,34 @@ pub fn workload_path_expansions_for_extension(
             expanded_path: expand_workload_path(rig_spec, package_root, workload.path()),
         })
         .collect()
+}
+
+pub fn env_provider_extensions_for_extension_workloads(
+    rig_spec: &RigSpec,
+    kind: RigWorkloadKind,
+    extension_id: &str,
+) -> Vec<String> {
+    let workloads = match kind {
+        RigWorkloadKind::Bench => &rig_spec.bench_workloads,
+        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
+        RigWorkloadKind::Trace => &rig_spec.trace_workloads,
+    };
+    let Some(entries) = workloads.get(extension_id) else {
+        return Vec::new();
+    };
+
+    let mut extensions = BTreeSet::new();
+    for entry in entries {
+        extensions.extend(
+            entry
+                .env_provider_extensions()
+                .iter()
+                .filter(|extension| !extension.is_empty())
+                .cloned(),
+        );
+    }
+
+    extensions.into_iter().collect()
 }
 
 pub fn trace_dependencies_for_extension(

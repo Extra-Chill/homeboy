@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use homeboy::core::agent_runtime_manifest::{
-    AgentRuntimePackageDiagnosticDeclaration, AgentRuntimeProbeDiagnosticDeclaration,
-    AgentRuntimeRuntimeDiagnosticDeclaration, AgentRuntimeSourceConsistencyDiagnostic,
-    AgentRuntimeToolDiagnosticDeclaration,
+    AgentRuntimeExecutableRequirement, AgentRuntimePackageDiagnosticDeclaration,
+    AgentRuntimeProbeDiagnosticDeclaration, AgentRuntimeRuntimeDiagnosticDeclaration,
+    AgentRuntimeSourceConsistencyDiagnostic, AgentRuntimeToolDiagnosticDeclaration,
 };
 use homeboy::core::api_jobs::{JobEvent, JobStatus};
 use homeboy::core::runner::{RunnerActiveJobSource, RunnerActiveJobState};
@@ -11,7 +11,9 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 
 use super::super::jobs::format_job_event;
 use super::super::status::{
-    declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
+    declared_executable_requirement_diagnostics, declared_run_followups_for_legacy,
+    declared_runtime_diagnostics, declared_runtime_diagnostics_for_legacy,
+    declared_runtime_source_diagnostics, declared_tool_diagnostics, lab_runner_homeboy_output,
     runner_artifact_feature_diagnostics, runner_status_operator_commands,
 };
 
@@ -173,7 +175,7 @@ fn wp_codebox_diagnostics_distinguish_configured_managed_and_effective() {
 }
 
 #[test]
-fn wp_codebox_runtime_reports_package_paths_probe_and_mixed_source_warnings() {
+fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warnings() {
     let declaration = wp_codebox_runtime_declaration();
     let runtime = declared_runtime_diagnostics(
         &declaration,
@@ -194,26 +196,51 @@ fn wp_codebox_runtime_reports_package_paths_probe_and_mixed_source_warnings() {
         ]),
     );
 
-    assert_eq!(runtime.tool, "wp-codebox");
+    assert_eq!(runtime.runtime, "wp-codebox");
+    assert_eq!(runtime.legacy_output.as_deref(), Some("wp_codebox_runtime"));
     assert_eq!(
         runtime.managed_cache_source,
         "/home/chubes/.cache/homeboy/wp-codebox/source"
     );
+    let playground_package = runtime
+        .packages
+        .iter()
+        .find(|package| package.field == "playground_package")
+        .expect("playground package diagnostics");
     assert_eq!(
-        runtime.playground_package.package,
+        playground_package.package,
         "@automattic/wp-codebox-playground"
     );
     assert_eq!(
-        runtime.playground_package.expected_path,
+        playground_package.expected_path,
         "/home/chubes/.cache/homeboy/wp-codebox/source/packages/playground"
     );
-    assert_eq!(runtime.core_package.package, "@automattic/wp-codebox-core");
+    let core_package = runtime
+        .packages
+        .iter()
+        .find(|package| package.field == "core_package")
+        .expect("core package diagnostics");
+    assert_eq!(core_package.package, "@automattic/wp-codebox-core");
     assert_eq!(
-        runtime.core_package.expected_path,
+        core_package.expected_path,
         "/other/wp-codebox/packages/core/dist/index.js"
     );
-    assert_eq!(runtime.source_git_sha.source, "runtime_probe_command");
-    assert_eq!(runtime.dist_build_freshness.source, "runtime_probe_command");
+    assert_eq!(
+        runtime
+            .probes
+            .get("source_git_sha")
+            .expect("source git sha probe")
+            .source,
+        "runtime_probe_command"
+    );
+    assert_eq!(
+        runtime
+            .probes
+            .get("dist_build_freshness")
+            .expect("dist freshness probe")
+            .source,
+        "runtime_probe_command"
+    );
     assert!(runtime
         .runtime_probe_command
         .contains("@automattic/wp-codebox-playground"));
@@ -228,6 +255,40 @@ fn wp_codebox_runtime_reports_package_paths_probe_and_mixed_source_warnings() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.id == "wp_codebox.mixed_core_source"));
+}
+
+#[test]
+fn declared_runtime_legacy_projection_preserves_wp_codebox_status_shape() {
+    let runtime = declared_runtime_diagnostics_for_legacy(
+        "wp_codebox_runtime",
+        Some("homeboy-lab"),
+        &BTreeMap::from([(
+            "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
+            "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+        )]),
+    );
+
+    let runtime = runtime.expect("catalog declares legacy wp_codebox_runtime projection");
+    assert_eq!(runtime.tool, "wp-codebox");
+    assert_eq!(
+        runtime.playground_package.package,
+        "@automattic/wp-codebox-playground"
+    );
+    assert_eq!(runtime.source_git_sha.source, "runtime_probe_command");
+
+    let generic = declared_runtime_diagnostics(
+        &wp_codebox_runtime_declaration(),
+        Some("homeboy-lab"),
+        &BTreeMap::from([(
+            "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
+            "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+        )]),
+    );
+    let serialized = serde_json::to_string(&generic).expect("serialize generic diagnostics");
+
+    assert!(serialized.contains("\"runtime\":\"wp-codebox\""));
+    assert!(serialized.contains("\"packages\""));
+    assert!(!serialized.contains("\"playground_package\":{"));
 }
 
 #[test]
@@ -268,6 +329,72 @@ fn unknown_runtime_declaration_does_not_emit_wp_specific_guidance() {
     assert!(serialized.contains("other-runtime"));
     assert!(!serialized.contains("wp-codebox"));
     assert!(!serialized.contains("HOMEBOY_WP_CODEBOX"));
+}
+
+#[test]
+fn declared_executable_requirement_status_projection_is_generic() {
+    let diagnostics = declared_executable_requirement_diagnostics(
+        "example-runtime",
+        AgentRuntimeExecutableRequirement {
+            id: "example-runtime-cli".to_string(),
+            label: Some("Example Runtime CLI".to_string()),
+            env: vec!["EXAMPLE_RUNTIME_BIN".to_string()],
+            candidates: vec!["example-runtime".to_string()],
+            version_command: vec!["--version".to_string()],
+            install_hint: Some("Install example-runtime on the runner PATH.".to_string()),
+            extra: BTreeMap::new(),
+        },
+    );
+
+    assert_eq!(diagnostics.runtime, "example-runtime");
+    assert_eq!(diagnostics.id, "example-runtime-cli");
+    assert_eq!(diagnostics.label.as_deref(), Some("Example Runtime CLI"));
+    assert_eq!(diagnostics.env, vec!["EXAMPLE_RUNTIME_BIN".to_string()]);
+    assert_eq!(diagnostics.candidates, vec!["example-runtime".to_string()]);
+    assert_eq!(diagnostics.version_command, vec!["--version".to_string()]);
+    assert_eq!(diagnostics.diagnostic_state, "declared");
+    let serialized = serde_json::to_string(&diagnostics).expect("serialize diagnostics");
+    assert!(serialized.contains("example-runtime"));
+    assert!(!serialized.contains("wp-codebox"));
+}
+
+#[test]
+fn declared_bench_followups_preserve_existing_status_guidance() {
+    let followups = declared_run_followups_for_legacy("managed_followups", Some("bench"), None);
+    let serialized = serde_json::to_string(&followups).expect("serialize followups");
+
+    assert!(serialized.contains("latest_bench_run"));
+    assert!(serialized.contains("homeboy runs latest-run --kind bench"));
+    assert!(serialized.contains("homeboy runs refs --kind bench --limit 10"));
+    assert!(serialized.contains("homeboy runs artifacts <run-id>"));
+    assert!(!serialized.contains("latest_fuzz_run"));
+    assert!(!serialized.contains("homeboy runs refs --kind fuzz --limit 10"));
+}
+
+#[test]
+fn declared_fuzz_followups_preserve_existing_status_guidance() {
+    let followups = declared_run_followups_for_legacy("managed_followups", Some("fuzz"), None);
+    let serialized = serde_json::to_string(&followups).expect("serialize followups");
+
+    assert!(serialized.contains("latest_fuzz_run"));
+    assert!(serialized.contains("homeboy runs latest-run --kind fuzz"));
+    assert!(serialized.contains("homeboy runs refs --kind fuzz --limit 10"));
+    assert!(serialized.contains("homeboy runs evidence <run-id>"));
+    assert!(!serialized.contains("latest_bench_run"));
+    assert!(!serialized.contains("homeboy runs refs --kind bench --limit 10"));
+}
+
+#[test]
+fn unknown_workload_does_not_emit_declared_bench_or_fuzz_followups() {
+    let followups = declared_run_followups_for_legacy("managed_followups", Some("unknown"), None);
+    let serialized = serde_json::to_string(&followups).expect("serialize followups");
+
+    assert!(serialized.contains("recent_runs"));
+    assert!(serialized.contains("run_artifacts"));
+    assert!(!serialized.contains("latest_bench_run"));
+    assert!(!serialized.contains("latest_fuzz_run"));
+    assert!(!serialized.contains("--kind bench"));
+    assert!(!serialized.contains("--kind fuzz"));
 }
 
 #[test]
@@ -326,6 +453,62 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
     assert!(serialized
         .contains("homeboy runner exec homeboy-lab -- homeboy runs artifact attach --help"));
     assert!(serialized.contains("version/build drift"));
+}
+
+#[test]
+fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
+    let report = RunnerStatusReport {
+        runner_id: "homeboy-lab".to_string(),
+        connected: true,
+        state: runner::RunnerSessionState::Connected,
+        session: Some(RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: runner::RunnerSessionRole::Controller,
+            server_id: Some("homeboy-lab".to_string()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:7357".to_string()),
+            local_port: Some(7357),
+            local_url: Some("http://127.0.0.1:7357".to_string()),
+            tunnel_pid: Some(123),
+            remote_daemon_pid: Some(456),
+            homeboy_version: "0.262.0".to_string(),
+            homeboy_build_identity: Some("0.262.0 old-build".to_string()),
+            connected_at: "2026-06-19T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+        }),
+        stale_daemon: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_jobs: Vec::new(),
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Available,
+        active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
+        active_job_error: None,
+        session_path: "/tmp/session.json".to_string(),
+    };
+
+    let output = lab_runner_homeboy_output("homeboy-lab", "/opt/homeboy/bin/homeboy", &report);
+    let serialized = serde_json::to_string(&output).expect("serialize runner homeboy output");
+
+    assert!(serialized.contains("controller_cli"));
+    assert!(serialized.contains("active_daemon"));
+    assert!(serialized.contains("configured_job_binary"));
+    assert!(serialized.contains("runner_config.settings.homeboy_path"));
+    assert!(serialized.contains("/opt/homeboy/bin/homeboy tunnel artifact-origin dom-boxes --help"));
+    assert!(serialized.contains("Recent or already-queued runner workflows"));
+    assert_eq!(output.controller_cli.role, "controller_cli");
+    assert_eq!(output.active_daemon.role, "active_daemon");
+    assert_eq!(output.configured_job_binary.role, "configured_job_binary");
+    assert_eq!(
+        output.configured_job_binary.path.as_deref(),
+        Some("/opt/homeboy/bin/homeboy")
+    );
+    assert_eq!(output.active_daemon_version.as_deref(), Some("0.262.0"));
 }
 
 fn wp_codebox_tool_declaration() -> AgentRuntimeToolDiagnosticDeclaration {

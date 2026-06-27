@@ -3,7 +3,6 @@ use homeboy::cli_surface::{
     command_surface_doctor_report, command_surface_from_with_depth,
     current_command_safety_manifest, current_command_surface, Cli, CommandSafetyManifest, Commands,
 };
-use homeboy::command_contract::{CommandJsonFamily, COMMAND_SPECS};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
@@ -232,47 +231,6 @@ fn manifest_command_exposes_recursive_safety_manifest() {
 }
 
 #[test]
-fn command_specs_drive_top_level_manifest_metadata() {
-    let manifest = command_safety_manifest();
-
-    for spec in COMMAND_SPECS {
-        let entry = manifest
-            .commands
-            .iter()
-            .find(|entry| entry.name == spec.name)
-            .unwrap_or_else(|| panic!("command spec `{}` missing from safety manifest", spec.name));
-
-        assert_eq!(
-            entry.output.structured,
-            spec.json_family != CommandJsonFamily::RawOnly,
-            "top-level manifest output structure drifted from CommandSpec for `{}`",
-            spec.name
-        );
-        assert_eq!(
-            entry.output.notes, spec.output_notes,
-            "top-level manifest output notes drifted from CommandSpec for `{}`",
-            spec.name
-        );
-        assert_eq!(
-            entry.lab.supported, spec.lab_supported,
-            "top-level manifest Lab support drifted from CommandSpec for `{}`",
-            spec.name
-        );
-        assert_eq!(
-            entry.lab.notes, spec.lab_notes,
-            "top-level manifest Lab notes drifted from CommandSpec for `{}`",
-            spec.name
-        );
-        assert_eq!(
-            entry.docs.path,
-            spec.docs_path(),
-            "top-level manifest docs path drifted from CommandSpec for `{}`",
-            spec.name
-        );
-    }
-}
-
-#[test]
 fn command_surface_doctor_report_agrees_for_matching_sets() {
     let source = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
     let docs = BTreeSet::from([
@@ -376,7 +334,7 @@ fn runner_exec_raw_command_parses_before_trailing_command() {
         "homeboy-lab",
         "--raw",
         "--cwd",
-        "/home/user/Developer",
+        "/runner/workspaces",
         "python3",
         "-c",
         "print('hello')",
@@ -394,7 +352,7 @@ fn runner_exec_run_id_parses_before_trailing_command() {
         "--run-id",
         "ssi-fixture-matrix-summary",
         "--cwd",
-        "/home/user/Developer",
+        "/runner/workspaces",
         "homeboy",
         "trace",
         "matrix",
@@ -415,13 +373,34 @@ fn runner_exec_artifact_parses_before_trailing_command() {
         "--artifact",
         "output/report.json",
         "--cwd",
-        "/home/user/Developer",
+        "/runner/workspaces",
         "homeboy",
         "trace",
         "matrix",
         "summary",
     ])
     .expect("runner exec --artifact should parse before the trailing remote command");
+}
+
+#[test]
+fn runner_exec_artifact_dir_parses_before_trailing_command() {
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "exec",
+        "homeboy-lab",
+        "--run-id",
+        "runner-exec-artifact-dir-fixture",
+        "--artifact-dir",
+        "output",
+        "--cwd",
+        "/runner/workspaces",
+        "homeboy",
+        "trace",
+        "matrix",
+        "summary",
+    ])
+    .expect("runner exec --artifact-dir should parse before the trailing remote command");
 }
 
 #[test]

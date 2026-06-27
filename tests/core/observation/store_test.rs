@@ -63,198 +63,202 @@ impl Drop for EnvGuard {
     }
 }
 
-#[test]
-fn test_status() {
-    with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+mod store_init_tests {
+    use super::*;
 
-        let status = store::status().expect("status");
+    #[test]
+    fn test_status() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
 
-        assert!(!status.exists);
-        assert_eq!(status.schema_version, 0);
-        assert_eq!(status.migration_count, 0);
-        assert_eq!(status.table_count, 0);
-        assert_eq!(
-            status.path,
-            home.path()
-                .join(".local/share/homeboy/homeboy.sqlite")
-                .to_string_lossy()
-        );
-        assert!(
-            !std::path::Path::new(&status.path).exists(),
-            "read-only status must not create the DB"
-        );
-    });
-}
+            let status = store::status().expect("status");
 
-#[test]
-fn test_database_path() {
-    with_isolated_home(|home| {
-        let data_home = home.path().join("xdg-data");
-        let _xdg = XdgGuard::set(&data_home);
+            assert!(!status.exists);
+            assert_eq!(status.schema_version, 0);
+            assert_eq!(status.migration_count, 0);
+            assert_eq!(status.table_count, 0);
+            assert_eq!(
+                status.path,
+                home.path()
+                    .join(".local/share/homeboy/homeboy.sqlite")
+                    .to_string_lossy()
+            );
+            assert!(
+                !std::path::Path::new(&status.path).exists(),
+                "read-only status must not create the DB"
+            );
+        });
+    }
 
-        let path = store::database_path().expect("db path");
+    #[test]
+    fn test_database_path() {
+        with_isolated_home(|home| {
+            let data_home = home.path().join("xdg-data");
+            let _xdg = XdgGuard::set(&data_home);
 
-        assert_eq!(path, data_home.join("homeboy/homeboy.sqlite"));
-    });
-}
+            let path = store::database_path().expect("db path");
 
-#[test]
-fn test_open_initialized() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
+            assert_eq!(path, data_home.join("homeboy/homeboy.sqlite"));
+        });
+    }
 
-        let store = ObservationStore::open_initialized().expect("init store");
-        let status = store.status().expect("status");
+    #[test]
+    fn test_open_initialized() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
 
-        assert!(status.exists);
-        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(status.migration_count, 6);
-        assert_eq!(status.table_count, 7);
-    });
-}
+            let store = ObservationStore::open_initialized().expect("init store");
+            let status = store.status().expect("status");
 
-#[test]
-fn initialization_is_idempotent() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-
-        ObservationStore::open_initialized().expect("first init");
-        let second = ObservationStore::open_initialized().expect("second init");
-        let status = second.status().expect("status");
-
-        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(status.migration_count, 6);
-        assert_eq!(status.table_count, 7);
-    });
-}
-
-#[test]
-fn initialization_recovers_when_artifact_type_migration_was_interrupted() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-
-        ObservationStore::open_initialized().expect("initial migration");
-        let path = store::database_path().expect("db path");
-        let connection = rusqlite::Connection::open(&path).expect("open raw db");
-        connection
-            .execute("DELETE FROM schema_migrations WHERE version = 4", [])
-            .expect("remove migration marker");
-        drop(connection);
-
-        let reopened = ObservationStore::open_initialized().expect("resume migration");
-        let status = reopened.status().expect("status");
-
-        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(status.migration_count, 6);
-    });
-}
-
-#[test]
-fn initialization_is_safe_under_concurrent_setup() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let workers = 4;
-        let barrier = Arc::new(Barrier::new(workers));
-        let handles = (0..workers)
-            .map(|_| {
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    ObservationStore::open_initialized()
-                        .expect("concurrent init")
-                        .status()
-                        .expect("status")
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for handle in handles {
-            let status = handle.join().expect("worker joined");
+            assert!(status.exists);
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
             assert_eq!(status.migration_count, 6);
-        }
-    });
-}
+            assert_eq!(status.table_count, 7);
+        });
+    }
 
-#[test]
-fn test_record_finding() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("lint", "homeboy"))
-            .expect("start run");
+    #[test]
+    fn initialization_is_idempotent() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
 
-        let record = store
-            .record_finding(&sample_finding(&run.id, "security", "src/foo.php"))
-            .expect("record finding");
-        let fetched = store
-            .get_finding(&record.id)
-            .expect("get finding")
-            .expect("finding exists");
+            ObservationStore::open_initialized().expect("first init");
+            let second = ObservationStore::open_initialized().expect("second init");
+            let status = second.status().expect("status");
 
-        assert_eq!(fetched.message, "Missing security");
-        assert_eq!(fetched.fixable, Some(true));
-    });
-}
+            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+            assert_eq!(status.migration_count, 6);
+            assert_eq!(status.table_count, 7);
+        });
+    }
 
-#[test]
-fn test_record_findings() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("lint", "homeboy"))
-            .expect("start run");
+    #[test]
+    fn initialization_recovers_when_artifact_type_migration_was_interrupted() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
 
-        let records = store
-            .record_findings(&[
-                sample_finding(&run.id, "security", "src/foo.php"),
-                sample_finding(&run.id, "i18n", "src/bar.php"),
-            ])
-            .expect("record findings");
+            ObservationStore::open_initialized().expect("initial migration");
+            let path = store::database_path().expect("db path");
+            let connection = rusqlite::Connection::open(&path).expect("open raw db");
+            connection
+                .execute("DELETE FROM schema_migrations WHERE version = 4", [])
+                .expect("remove migration marker");
+            drop(connection);
 
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].rule.as_deref(), Some("security"));
-        assert_eq!(records[1].rule.as_deref(), Some("i18n"));
-    });
-}
+            let reopened = ObservationStore::open_initialized().expect("resume migration");
+            let status = reopened.status().expect("status");
 
-#[test]
-fn test_list_findings() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("lint", "homeboy"))
-            .expect("start run");
-        let records = store
-            .record_findings(&[
-                sample_finding(&run.id, "security", "src/foo.php"),
-                sample_finding(&run.id, "i18n", "src/bar.php"),
-            ])
-            .expect("record findings");
+            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+            assert_eq!(status.migration_count, 6);
+        });
+    }
 
-        let all = store
-            .list_findings(FindingListFilter {
-                run_id: Some(run.id.clone()),
-                tool: Some("lint".to_string()),
-                ..FindingListFilter::default()
-            })
-            .expect("list findings");
-        let filtered = store
-            .list_findings(FindingListFilter {
-                run_id: Some(run.id),
-                file: Some("src/foo.php".to_string()),
-                ..FindingListFilter::default()
-            })
-            .expect("list file findings");
+    #[test]
+    fn initialization_is_safe_under_concurrent_setup() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let workers = 4;
+            let barrier = Arc::new(Barrier::new(workers));
+            let handles = (0..workers)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        ObservationStore::open_initialized()
+                            .expect("concurrent init")
+                            .status()
+                            .expect("status")
+                    })
+                })
+                .collect::<Vec<_>>();
 
-        assert_eq!(all.len(), 2);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].id, records[0].id);
-    });
+            for handle in handles {
+                let status = handle.join().expect("worker joined");
+                assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+                assert_eq!(status.migration_count, 6);
+            }
+        });
+    }
+
+    #[test]
+    fn test_record_finding() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("lint", "homeboy"))
+                .expect("start run");
+
+            let record = store
+                .record_finding(&sample_finding(&run.id, "security", "src/foo.php"))
+                .expect("record finding");
+            let fetched = store
+                .get_finding(&record.id)
+                .expect("get finding")
+                .expect("finding exists");
+
+            assert_eq!(fetched.message, "Missing security");
+            assert_eq!(fetched.fixable, Some(true));
+        });
+    }
+
+    #[test]
+    fn test_record_findings() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("lint", "homeboy"))
+                .expect("start run");
+
+            let records = store
+                .record_findings(&[
+                    sample_finding(&run.id, "security", "src/foo.php"),
+                    sample_finding(&run.id, "i18n", "src/bar.php"),
+                ])
+                .expect("record findings");
+
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].rule.as_deref(), Some("security"));
+            assert_eq!(records[1].rule.as_deref(), Some("i18n"));
+        });
+    }
+
+    #[test]
+    fn test_list_findings() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("lint", "homeboy"))
+                .expect("start run");
+            let records = store
+                .record_findings(&[
+                    sample_finding(&run.id, "security", "src/foo.php"),
+                    sample_finding(&run.id, "i18n", "src/bar.php"),
+                ])
+                .expect("record findings");
+
+            let all = store
+                .list_findings(FindingListFilter {
+                    run_id: Some(run.id.clone()),
+                    tool: Some("lint".to_string()),
+                    ..FindingListFilter::default()
+                })
+                .expect("list findings");
+            let filtered = store
+                .list_findings(FindingListFilter {
+                    run_id: Some(run.id),
+                    file: Some("src/foo.php".to_string()),
+                    ..FindingListFilter::default()
+                })
+                .expect("list file findings");
+
+            assert_eq!(all.len(), 2);
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].id, records[0].id);
+        });
+    }
 }
 
 fn sample_finding(run_id: &str, rule: &str, file: &str) -> NewFindingRecord {
@@ -586,336 +590,341 @@ fn test_latest_run() {
     });
 }
 
-#[test]
-fn test_record_artifact() {
-    with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("trace", "homeboy"))
-            .expect("start run");
-        let artifact_path = home.path().join("trace-results.json");
-        std::fs::write(&artifact_path, br#"{"status":"pass"}"#).expect("write artifact");
+mod store_artifact_tests {
+    use super::*;
 
-        let artifact = store
-            .record_artifact(&run.id, "trace-results", &artifact_path)
-            .expect("record artifact");
-        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+    #[test]
+    fn test_record_artifact() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("trace", "homeboy"))
+                .expect("start run");
+            let artifact_path = home.path().join("trace-results.json");
+            std::fs::write(&artifact_path, br#"{"status":"pass"}"#).expect("write artifact");
 
-        assert_eq!(artifacts, vec![artifact.clone()]);
-        assert_eq!(artifact.run_id, run.id);
-        assert_eq!(artifact.kind, "trace-results");
-        assert_eq!(artifact.artifact_type, "file");
-        assert_ne!(artifact.path, artifact_path.to_string_lossy());
-        assert!(std::path::PathBuf::from(&artifact.path).is_file());
-        assert_eq!(
-            std::fs::read_to_string(&artifact.path).expect("read persisted artifact"),
-            "{\"status\":\"pass\"}"
-        );
-        assert_eq!(artifact.url, None);
-        assert_eq!(artifact.size_bytes, Some(17));
-        assert_eq!(artifact.mime.as_deref(), Some("application/json"));
-        assert_eq!(
-            artifact.sha256.as_deref(),
-            Some("117367705c6e7ef5d779dd71de15a95ee62339e1ef635f08246f8e1ec99167e2")
-        );
-    });
-}
+            let artifact = store
+                .record_artifact(&run.id, "trace-results", &artifact_path)
+                .expect("record artifact");
+            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
 
-#[test]
-fn publication_manifest_artifact_store_refs_are_indexed() {
-    with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start run");
-        let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
-        let artifact_root = home.path().join(".local/share/homeboy/artifacts");
-        let nested_path = artifact_root.join(locator);
-        std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
-            .expect("create artifact-store parent");
-        std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
-        let manifest_path = home.path().join("publication-manifest.json");
-        std::fs::write(
-            &manifest_path,
-            serde_json::json!({
-                "schema": "example/publication-manifest/v1",
-                "id": "publish-run-1",
-                "artifacts": [{
-                    "schema": "example/artifact-reference/v1",
-                    "id": "scenario/adapter/attempt-1/blueprint.after",
-                    "kind": "published-blueprint-after",
-                    "role": "output",
-                    "locator": {
-                        "type": "artifact-store",
-                        "value": locator,
+            assert_eq!(artifacts, vec![artifact.clone()]);
+            assert_eq!(artifact.run_id, run.id);
+            assert_eq!(artifact.kind, "trace-results");
+            assert_eq!(artifact.artifact_type, "file");
+            assert_ne!(artifact.path, artifact_path.to_string_lossy());
+            assert!(std::path::PathBuf::from(&artifact.path).is_file());
+            assert_eq!(
+                std::fs::read_to_string(&artifact.path).expect("read persisted artifact"),
+                "{\"status\":\"pass\"}"
+            );
+            assert_eq!(artifact.url, None);
+            assert_eq!(artifact.size_bytes, Some(17));
+            assert_eq!(artifact.mime.as_deref(), Some("application/json"));
+            assert_eq!(
+                artifact.sha256.as_deref(),
+                Some("117367705c6e7ef5d779dd71de15a95ee62339e1ef635f08246f8e1ec99167e2")
+            );
+        });
+    }
+
+    #[test]
+    fn publication_manifest_artifact_store_refs_are_indexed() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy"))
+                .expect("start run");
+            let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
+            let artifact_root = home.path().join(".local/share/homeboy/artifacts");
+            let nested_path = artifact_root.join(locator);
+            std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
+                .expect("create artifact-store parent");
+            std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
+            let manifest_path = home.path().join("publication-manifest.json");
+            std::fs::write(
+                &manifest_path,
+                serde_json::json!({
+                    "schema": "example/publication-manifest/v1",
+                    "id": "publish-run-1",
+                    "artifacts": [{
+                        "schema": "example/artifact-reference/v1",
+                        "id": "scenario/adapter/attempt-1/blueprint.after",
+                        "kind": "published-blueprint-after",
+                        "role": "output",
+                        "locator": {
+                            "type": "artifact-store",
+                            "value": locator,
+                        },
+                        "media_type": "application/json",
+                        "bytes": 12,
+                        "sha256": "abc123",
+                        "created_at": "2026-06-11T15:42:42Z"
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("manifest artifact");
+
+            let source = store
+                .record_artifact(&run.id, "publication_manifest", &manifest_path)
+                .expect("record manifest");
+            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+            let nested = artifacts
+                .iter()
+                .find(|artifact| artifact.id != source.id)
+                .expect("nested artifact indexed");
+
+            assert_eq!(artifacts.len(), 2);
+            assert_eq!(nested.kind, "published-blueprint-after");
+            assert_eq!(nested.artifact_type, "file");
+            assert_eq!(nested.path, nested_path.to_string_lossy());
+            assert_eq!(nested.mime.as_deref(), Some("application/json"));
+            assert_eq!(nested.size_bytes, Some(12));
+            assert_eq!(nested.sha256.as_deref(), Some("abc123"));
+            assert_eq!(
+                nested.metadata_json["source_manifest_artifact_id"].as_str(),
+                Some(source.id.as_str())
+            );
+            assert_eq!(
+                nested.metadata_json["original_manifest_id"].as_str(),
+                Some("scenario/adapter/attempt-1/blueprint.after")
+            );
+            assert_eq!(
+                nested.metadata_json["name"].as_str(),
+                Some("blueprint.after")
+            );
+            assert_eq!(
+                store
+                    .get_artifact_for_run_token(&run.id, "blueprint.after")
+                    .expect("lookup by name")
+                    .expect("artifact by name")
+                    .id,
+                nested.id
+            );
+        });
+    }
+
+    #[test]
+    fn publication_manifest_public_url_refs_are_indexed_from_artifact_origin() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy"))
+                .expect("start run");
+            let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
+            let artifact_root = home.path().join(".local/share/homeboy/artifacts");
+            let nested_path = artifact_root.join(locator);
+            std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
+                .expect("create artifact-store parent");
+            std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
+            let manifest_path = home.path().join("publication-manifest.json");
+            std::fs::write(
+                &manifest_path,
+                serde_json::json!({
+                    "schema": "example/publication-manifest/v1",
+                    "id": "publish-run-1",
+                    "publication": {
+                        "public_base_url": "https://artifacts.example.test",
+                        "artifact_base": "homeboy/workflow-bench"
                     },
-                    "media_type": "application/json",
-                    "bytes": 12,
-                    "sha256": "abc123",
-                    "created_at": "2026-06-11T15:42:42Z"
-                }]
-            })
-            .to_string(),
-        )
-        .expect("manifest artifact");
+                    "artifacts": [{
+                        "schema": "example/artifact-reference/v1",
+                        "id": "scenario/adapter/attempt-1/blueprint.after",
+                        "kind": "published-blueprint-after",
+                        "role": "output",
+                        "locator": {
+                            "type": "url",
+                            "value": "https://artifacts.example.test/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json"
+                        },
+                        "media_type": "application/json",
+                        "bytes": 12,
+                        "sha256": "abc123",
+                        "created_at": "2026-06-11T15:42:42Z"
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("manifest artifact");
 
-        let source = store
-            .record_artifact(&run.id, "publication_manifest", &manifest_path)
-            .expect("record manifest");
-        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
-        let nested = artifacts
-            .iter()
-            .find(|artifact| artifact.id != source.id)
-            .expect("nested artifact indexed");
+            let source = store
+                .record_artifact(&run.id, "publication_manifest", &manifest_path)
+                .expect("record manifest");
+            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+            let nested = artifacts
+                .iter()
+                .find(|artifact| artifact.id != source.id)
+                .expect("nested artifact indexed");
 
-        assert_eq!(artifacts.len(), 2);
-        assert_eq!(nested.kind, "published-blueprint-after");
-        assert_eq!(nested.artifact_type, "file");
-        assert_eq!(nested.path, nested_path.to_string_lossy());
-        assert_eq!(nested.mime.as_deref(), Some("application/json"));
-        assert_eq!(nested.size_bytes, Some(12));
-        assert_eq!(nested.sha256.as_deref(), Some("abc123"));
-        assert_eq!(
-            nested.metadata_json["source_manifest_artifact_id"].as_str(),
-            Some(source.id.as_str())
-        );
-        assert_eq!(
-            nested.metadata_json["original_manifest_id"].as_str(),
-            Some("scenario/adapter/attempt-1/blueprint.after")
-        );
-        assert_eq!(
-            nested.metadata_json["name"].as_str(),
-            Some("blueprint.after")
-        );
-        assert_eq!(
-            store
-                .get_artifact_for_run_token(&run.id, "blueprint.after")
-                .expect("lookup by name")
-                .expect("artifact by name")
-                .id,
-            nested.id
-        );
-    });
-}
+            assert_eq!(artifacts.len(), 2);
+            assert_eq!(nested.kind, "published-blueprint-after");
+            assert_eq!(nested.path, nested_path.to_string_lossy());
+            assert_eq!(
+                nested.metadata_json["locator"]["value"].as_str(),
+                Some(locator)
+            );
+            assert_eq!(
+                nested.metadata_json["public_url"].as_str(),
+                Some("https://artifacts.example.test/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json")
+            );
+        });
+    }
 
-#[test]
-fn publication_manifest_public_url_refs_are_indexed_from_artifact_origin() {
-    with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start run");
-        let locator = "homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json";
-        let artifact_root = home.path().join(".local/share/homeboy/artifacts");
-        let nested_path = artifact_root.join(locator);
-        std::fs::create_dir_all(nested_path.parent().expect("nested parent"))
-            .expect("create artifact-store parent");
-        std::fs::write(&nested_path, br#"{"steps":[]}"#).expect("nested artifact");
-        let manifest_path = home.path().join("publication-manifest.json");
-        std::fs::write(
-            &manifest_path,
-            serde_json::json!({
-                "schema": "example/publication-manifest/v1",
-                "id": "publish-run-1",
-                "publication": {
-                    "public_base_url": "https://artifacts.example.test",
-                    "artifact_base": "homeboy/workflow-bench"
-                },
-                "artifacts": [{
-                    "schema": "example/artifact-reference/v1",
-                    "id": "scenario/adapter/attempt-1/blueprint.after",
-                    "kind": "published-blueprint-after",
-                    "role": "output",
-                    "locator": {
-                        "type": "url",
-                        "value": "https://artifacts.example.test/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json"
-                    },
-                    "media_type": "application/json",
-                    "bytes": 12,
-                    "sha256": "abc123",
-                    "created_at": "2026-06-11T15:42:42Z"
-                }]
-            })
-            .to_string(),
-        )
-        .expect("manifest artifact");
+    #[test]
+    fn test_record_directory_artifact() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy"))
+                .expect("start run");
+            let artifact_path = home.path().join("visual-comparisons");
+            std::fs::create_dir_all(artifact_path.join("nested")).expect("mkdir artifact");
+            std::fs::write(artifact_path.join("summary.json"), br#"{"status":"skip"}"#)
+                .expect("write artifact");
+            std::fs::write(artifact_path.join("nested/detail.txt"), "detail")
+                .expect("write nested");
 
-        let source = store
-            .record_artifact(&run.id, "publication_manifest", &manifest_path)
-            .expect("record manifest");
-        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
-        let nested = artifacts
-            .iter()
-            .find(|artifact| artifact.id != source.id)
-            .expect("nested artifact indexed");
+            let artifact = store
+                .record_directory_artifact(&run.id, "bench_artifact", &artifact_path)
+                .expect("record directory artifact");
+            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
 
-        assert_eq!(artifacts.len(), 2);
-        assert_eq!(nested.kind, "published-blueprint-after");
-        assert_eq!(nested.path, nested_path.to_string_lossy());
-        assert_eq!(
-            nested.metadata_json["locator"]["value"].as_str(),
-            Some(locator)
-        );
-        assert_eq!(
-            nested.metadata_json["public_url"].as_str(),
-            Some("https://artifacts.example.test/homeboy/workflow-bench/runs/run-1/artifacts/scenario/adapter/attempt-1/blueprint.after.json")
-        );
-    });
-}
+            assert_eq!(artifacts, vec![artifact.clone()]);
+            assert_eq!(artifact.run_id, run.id);
+            assert_eq!(artifact.kind, "bench_artifact");
+            assert_eq!(artifact.artifact_type, "directory");
+            assert_ne!(artifact.path, artifact_path.to_string_lossy());
+            let persisted = std::path::PathBuf::from(&artifact.path);
+            assert!(persisted.is_dir());
+            assert_eq!(
+                std::fs::read_to_string(persisted.join("summary.json")).expect("read persisted"),
+                "{\"status\":\"skip\"}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(persisted.join("nested/detail.txt")).expect("read nested"),
+                "detail"
+            );
+            assert_eq!(artifact.url, None);
+            assert_eq!(artifact.size_bytes, None);
+            assert_eq!(artifact.mime, None);
+            assert_eq!(artifact.sha256, None);
+        });
+    }
 
-#[test]
-fn test_record_directory_artifact() {
-    with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start run");
-        let artifact_path = home.path().join("visual-comparisons");
-        std::fs::create_dir_all(artifact_path.join("nested")).expect("mkdir artifact");
-        std::fs::write(artifact_path.join("summary.json"), br#"{"status":"skip"}"#)
-            .expect("write artifact");
-        std::fs::write(artifact_path.join("nested/detail.txt"), "detail").expect("write nested");
+    #[test]
+    fn test_record_url_artifact() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy"))
+                .expect("start run");
 
-        let artifact = store
-            .record_directory_artifact(&run.id, "bench_artifact", &artifact_path)
-            .expect("record directory artifact");
-        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+            let artifact = store
+                .record_url_artifact(&run.id, "frontend_url", "https://example.test/")
+                .expect("record URL artifact");
+            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
 
-        assert_eq!(artifacts, vec![artifact.clone()]);
-        assert_eq!(artifact.run_id, run.id);
-        assert_eq!(artifact.kind, "bench_artifact");
-        assert_eq!(artifact.artifact_type, "directory");
-        assert_ne!(artifact.path, artifact_path.to_string_lossy());
-        let persisted = std::path::PathBuf::from(&artifact.path);
-        assert!(persisted.is_dir());
-        assert_eq!(
-            std::fs::read_to_string(persisted.join("summary.json")).expect("read persisted"),
-            "{\"status\":\"skip\"}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(persisted.join("nested/detail.txt")).expect("read nested"),
-            "detail"
-        );
-        assert_eq!(artifact.url, None);
-        assert_eq!(artifact.size_bytes, None);
-        assert_eq!(artifact.mime, None);
-        assert_eq!(artifact.sha256, None);
-    });
-}
+            assert_eq!(artifacts, vec![artifact.clone()]);
+            assert_eq!(artifact.kind, "frontend_url");
+            assert_eq!(artifact.artifact_type, "url");
+            assert_eq!(artifact.path, "https://example.test/");
+            assert_eq!(artifact.url.as_deref(), Some("https://example.test/"));
+            assert_eq!(artifact.sha256, None);
+            assert_eq!(artifact.size_bytes, None);
+            assert_eq!(artifact.mime, None);
+        });
+    }
 
-#[test]
-fn test_record_url_artifact() {
-    with_isolated_home(|_home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start run");
+    #[test]
+    fn test_list_artifacts() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("trace", "homeboy"))
+                .expect("start run");
+            let first_path = home.path().join("first.json");
+            let second_path = home.path().join("second.log");
+            std::fs::write(&first_path, b"first").expect("write first");
+            std::fs::write(&second_path, b"second").expect("write second");
 
-        let artifact = store
-            .record_url_artifact(&run.id, "frontend_url", "https://example.test/")
-            .expect("record URL artifact");
-        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+            let first = store
+                .record_artifact(&run.id, "first", &first_path)
+                .expect("record first");
+            let second = store
+                .record_artifact(&run.id, "second", &second_path)
+                .expect("record second");
 
-        assert_eq!(artifacts, vec![artifact.clone()]);
-        assert_eq!(artifact.kind, "frontend_url");
-        assert_eq!(artifact.artifact_type, "url");
-        assert_eq!(artifact.path, "https://example.test/");
-        assert_eq!(artifact.url.as_deref(), Some("https://example.test/"));
-        assert_eq!(artifact.sha256, None);
-        assert_eq!(artifact.size_bytes, None);
-        assert_eq!(artifact.mime, None);
-    });
-}
+            let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
+            assert_eq!(artifacts.len(), 2);
+            assert_eq!(artifacts[0].id, first.id);
+            assert_eq!(artifacts[1].id, second.id);
+        });
+    }
 
-#[test]
-fn test_list_artifacts() {
-    with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("trace", "homeboy"))
-            .expect("start run");
-        let first_path = home.path().join("first.json");
-        let second_path = home.path().join("second.log");
-        std::fs::write(&first_path, b"first").expect("write first");
-        std::fs::write(&second_path, b"second").expect("write second");
+    #[test]
+    fn test_list_artifacts_for_runs() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let first_run = store
+                .start_run(sample_run("trace", "homeboy"))
+                .expect("start first run");
+            let second_run = store
+                .start_run(sample_run("bench", "homeboy"))
+                .expect("start second run");
+            let empty_run = store
+                .start_run(sample_run("lint", "homeboy"))
+                .expect("start empty run");
+            let first_path = home.path().join("first.json");
+            let second_path = home.path().join("second.log");
+            std::fs::write(&first_path, b"first").expect("write first");
+            std::fs::write(&second_path, b"second").expect("write second");
 
-        let first = store
-            .record_artifact(&run.id, "first", &first_path)
-            .expect("record first");
-        let second = store
-            .record_artifact(&run.id, "second", &second_path)
-            .expect("record second");
+            let first = store
+                .record_artifact(&first_run.id, "first", &first_path)
+                .expect("record first");
+            let second = store
+                .record_artifact(&second_run.id, "second", &second_path)
+                .expect("record second");
 
-        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
-        assert_eq!(artifacts.len(), 2);
-        assert_eq!(artifacts[0].id, first.id);
-        assert_eq!(artifacts[1].id, second.id);
-    });
-}
+            let artifacts = store
+                .list_artifacts_for_runs(&[
+                    first_run.id.clone(),
+                    second_run.id.clone(),
+                    empty_run.id.clone(),
+                ])
+                .expect("list artifacts for runs");
+            assert_eq!(artifacts[&first_run.id], vec![first]);
+            assert_eq!(artifacts[&second_run.id], vec![second]);
+            assert!(artifacts[&empty_run.id].is_empty());
+        });
+    }
 
-#[test]
-fn test_list_artifacts_for_runs() {
-    with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let first_run = store
-            .start_run(sample_run("trace", "homeboy"))
-            .expect("start first run");
-        let second_run = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start second run");
-        let empty_run = store
-            .start_run(sample_run("lint", "homeboy"))
-            .expect("start empty run");
-        let first_path = home.path().join("first.json");
-        let second_path = home.path().join("second.log");
-        std::fs::write(&first_path, b"first").expect("write first");
-        std::fs::write(&second_path, b"second").expect("write second");
+    #[test]
+    fn missing_artifact_file_returns_clear_error() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("init store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy"))
+                .expect("start run");
+            let missing = home.path().join("missing.json");
 
-        let first = store
-            .record_artifact(&first_run.id, "first", &first_path)
-            .expect("record first");
-        let second = store
-            .record_artifact(&second_run.id, "second", &second_path)
-            .expect("record second");
+            let err = store
+                .record_artifact(&run.id, "missing", &missing)
+                .expect_err("missing artifact should fail");
 
-        let artifacts = store
-            .list_artifacts_for_runs(&[
-                first_run.id.clone(),
-                second_run.id.clone(),
-                empty_run.id.clone(),
-            ])
-            .expect("list artifacts for runs");
-        assert_eq!(artifacts[&first_run.id], vec![first]);
-        assert_eq!(artifacts[&second_run.id], vec![second]);
-        assert!(artifacts[&empty_run.id].is_empty());
-    });
-}
-
-#[test]
-fn missing_artifact_file_returns_clear_error() {
-    with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
-        let store = ObservationStore::open_initialized().expect("init store");
-        let run = store
-            .start_run(sample_run("bench", "homeboy"))
-            .expect("start run");
-        let missing = home.path().join("missing.json");
-
-        let err = store
-            .record_artifact(&run.id, "missing", &missing)
-            .expect_err("missing artifact should fail");
-
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("artifact file not found"));
-        assert!(err.details.to_string().contains("missing.json"));
-    });
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("artifact file not found"));
+            assert!(err.details.to_string().contains("missing.json"));
+        });
+    }
 }
 
 mod write_retry {

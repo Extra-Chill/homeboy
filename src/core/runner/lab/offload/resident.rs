@@ -142,7 +142,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         },
     ]);
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    env.extend(secret_env_handoff.env_delta);
+    env.extend(secret_env_handoff.env_delta.clone());
     for (name, value) in &request.job_overrides.env {
         env.insert(name.clone(), value.clone());
     }
@@ -150,6 +150,7 @@ pub(crate) fn run_runner_resident_lab_offload(
     secret_env_names.extend(request.job_overrides.secret_env_names.clone());
     secret_env_names.sort();
     secret_env_names.dedup();
+    preflight_lab_secret_env_handoff(runner_id, None, &env, &secret_env_handoff)?;
 
     let exec_timer = overhead.phase(LabOffloadPhase::RemoteExec);
     let (exec_output, exit_code) = exec(

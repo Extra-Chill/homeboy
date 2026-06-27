@@ -40,9 +40,12 @@ fn prepare_rig_bench_context(
     rig_id: &str,
     args: &BenchRunArgs,
 ) -> homeboy::core::Result<RigBenchContext> {
-    let mut spec = rig::load(rig_id)?;
+    let mut source = rig::RigSourceContext::load_for_invocation(rig_id)?;
+    report_rig_source(&source);
+    let mut spec = source.spec.clone();
     let declared_spec = spec.clone();
     apply_bench_path_override(&mut spec, args);
+    source.spec = spec.clone();
     let lease = rig::lease::acquire_active_run_lease(&spec, "bench")?;
     let prepare_settings = bench_prepare_settings(args);
     if let Some(prepare) = rig::run_bench_prepare(&spec, &prepare_settings)? {
@@ -58,10 +61,19 @@ fn prepare_rig_bench_context(
     let id = spec.id.clone();
     Ok(RigBenchContext {
         id,
-        source: rig::RigSourceContext::from_spec(spec),
+        source,
         snapshot,
         _lease: lease,
     })
+}
+
+fn report_rig_source(source: &rig::RigSourceContext) {
+    if let Some(evidence) = rig::package_evidence(&source.spec.id) {
+        eprintln!(
+            "bench rig source: rig={} package_root={} freshness={:?}",
+            evidence.rig_id, evidence.package_root, evidence.freshness
+        );
+    }
 }
 
 fn bench_prepare_failure_message(prepare: &BenchPrepareReport) -> String {
@@ -602,7 +614,7 @@ fn run_component_with_rig_context(
         effective_id
     )));
 
-    let (extra_workloads, invocation_requirements) =
+    let (extra_workloads, env_provider_extensions, invocation_requirements) =
         rig_workload_runtime_inputs(rig_context, rig_spec, ctx.extension_id.as_deref());
 
     let selected_scenarios = selected_scenario_ids(args, rig_spec)?;
@@ -646,6 +658,7 @@ fn run_component_with_rig_context(
             rig_id: rig_id.clone(),
             shared_state: shared_state_override.or_else(|| args.shared_state.clone()),
             extra_workloads,
+            env_provider_extensions,
             rig_package: rig_id
                 .as_deref()
                 .and_then(homeboy::core::rig::package_evidence),
@@ -717,12 +730,12 @@ fn rig_workload_runtime_inputs(
     rig_context: Option<&RigBenchContext>,
     rig_spec: Option<&RigSpec>,
     extension_id: Option<&str>,
-) -> (Vec<PathBuf>, InvocationRequirements) {
+) -> (Vec<PathBuf>, Vec<String>, InvocationRequirements) {
     let Some(spec) = rig_spec else {
-        return (Vec::new(), InvocationRequirements::default());
+        return (Vec::new(), Vec::new(), InvocationRequirements::default());
     };
     let Some(extension_id) = extension_id else {
-        return (Vec::new(), InvocationRequirements::default());
+        return (Vec::new(), Vec::new(), InvocationRequirements::default());
     };
 
     let package_root = rig_context.and_then(|context| context.package_root());
@@ -731,6 +744,11 @@ fn rig_workload_runtime_inputs(
             spec,
             rig::RigWorkloadKind::Bench,
             package_root,
+            extension_id,
+        ),
+        rig::env_provider_extensions_for_extension_workloads(
+            spec,
+            rig::RigWorkloadKind::Bench,
             extension_id,
         ),
         rig::invocation_requirements_for_extension_workloads(

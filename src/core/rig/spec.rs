@@ -412,6 +412,12 @@ pub struct BenchSpec {
     /// scenario ids; values map metric names to pass/fail conditions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_gates: BTreeMap<String, BTreeMap<String, BenchMetricGateCondition>>,
+
+    /// Result-level metric gates declared by the rig. Matrix/fanout runners
+    /// evaluate these against generic numeric metrics in each cell outcome,
+    /// preserving executor success while failing the declared result gate.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub result_gates: BTreeMap<String, BenchMetricGateCondition>,
 }
 
 /// Fuzz composition for a rig. Pins which component `homeboy fuzz --rig <id>`
@@ -486,6 +492,9 @@ pub struct TraceConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadSpec {
     pub path: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_provider_extensions: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_postprocess: Vec<ArtifactPostprocessSpec>,
@@ -714,6 +723,7 @@ mod tests {
     fn test_trace_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -887,6 +897,7 @@ mod tests {
     fn test_trace_default_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -916,6 +927,7 @@ mod tests {
     fn test_port_range_size() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -945,6 +957,7 @@ mod tests {
     fn test_named_leases() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,

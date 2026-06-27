@@ -2,18 +2,23 @@ use std::collections::BTreeMap;
 
 use homeboy::core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, AgentRuntimeDiagnosticFollowup,
-    AgentRuntimeDiagnosticsContract, AgentRuntimeRuntimeDiagnosticDeclaration,
-    AgentRuntimeSourceConsistencyDiagnostic, AgentRuntimeToolDiagnosticDeclaration,
+    AgentRuntimeDiagnosticsContract, AgentRuntimeExecutableRequirement,
+    AgentRuntimeRuntimeDiagnosticDeclaration, AgentRuntimeSourceConsistencyDiagnostic,
+    AgentRuntimeToolDiagnosticDeclaration,
 };
-use homeboy::core::runner::RunnerActiveJobState;
-use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, RunnerTunnelMode};
+use homeboy::core::runners::{
+    self as runner, RunnerActiveJobState, RunnerAvailability, RunnerSession, RunnerStatusReport,
+    RunnerTunnelMode,
+};
 
 use super::super::CmdResult;
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
-    RunnerConnectionOutput, RunnerExtra, RunnerOperatorCommand, RunnerOutput,
-    RunnerToolDiagnostics, WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue,
-    WpCodeboxRuntimeDiagnostic, WpCodeboxRuntimeOutput,
+    RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
+    RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOutput, RunnerRuntimeDiagnostics,
+    RunnerRuntimePackageDiagnostics, RunnerToolDiagnostics, RunnerWorkflowBinaryGuidance,
+    WpCodeboxPackageRuntimeOutput, WpCodeboxProbeValue, WpCodeboxRuntimeDiagnostic,
+    WpCodeboxRuntimeOutput,
 };
 
 pub(super) fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
@@ -91,25 +96,71 @@ fn selected_lab_runner_status(
     let effective_env = runner::effective_env(runner_id)?
         .into_iter()
         .collect::<BTreeMap<_, _>>();
+    let runtime_diagnostics =
+        declared_runtime_diagnostics_collection(Some(runner_id), &effective_env);
+    let executable_requirements = declared_executable_requirement_diagnostics_collection();
     Ok(Some(LabSelectedRunnerOutput {
         runner_id: runner_id.to_string(),
         kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
         configured_executable: configured_executable.clone(),
         runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
-        wp_codebox_runtime: declared_runtime_diagnostics_for_legacy(
-            "wp_codebox_runtime",
-            Some(runner_id),
-            &effective_env,
-        ),
+        executable_requirements,
+        wp_codebox_runtime: runtime_diagnostics
+            .iter()
+            .find(|diagnostics| diagnostics.legacy_output.as_deref() == Some("wp_codebox_runtime"))
+            .map(wp_codebox_runtime_output_from_generic),
+        runtime_diagnostics,
         daemon_enabled: runner_config.settings.daemon,
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
         connected: status.connected,
+        availability: RunnerAvailability::from_status_parts(
+            runner_id,
+            status.connected,
+            status.stale_daemon.is_some(),
+            status.active_job_count,
+            &status.active_job_state,
+            runner_config.settings.concurrency_limit,
+        ),
         status,
     }))
 }
 
-fn lab_runner_homeboy_output(
+pub(super) fn declared_executable_requirement_diagnostics_collection(
+) -> Vec<RunnerExecutableRequirementDiagnostics> {
+    discover_agent_runtime_catalog()
+        .manifests
+        .into_iter()
+        .flat_map(|manifest| {
+            let runtime = manifest.id;
+            manifest
+                .materialization
+                .executable_requirements
+                .into_iter()
+                .map(move |requirement| {
+                    declared_executable_requirement_diagnostics(&runtime, requirement)
+                })
+        })
+        .collect()
+}
+
+pub(super) fn declared_executable_requirement_diagnostics(
+    runtime: &str,
+    requirement: AgentRuntimeExecutableRequirement,
+) -> RunnerExecutableRequirementDiagnostics {
+    RunnerExecutableRequirementDiagnostics {
+        runtime: runtime.to_string(),
+        id: requirement.id,
+        label: requirement.label,
+        env: requirement.env,
+        candidates: requirement.candidates,
+        version_command: requirement.version_command,
+        install_hint: requirement.install_hint,
+        diagnostic_state: "declared",
+    }
+}
+
+pub(super) fn lab_runner_homeboy_output(
     runner_id: &str,
     configured_executable: &str,
     status: &RunnerStatusReport,
@@ -123,10 +174,23 @@ fn lab_runner_homeboy_output(
     let version_drift = active_daemon_version
         .as_ref()
         .is_some_and(|version| version != &controller_version);
+    let binary_roles = runner_homeboy_binary_roles(
+        configured_executable,
+        &status.session,
+        &active_daemon_version,
+    );
+    let controller_cli = binary_roles[0].clone();
+    let active_daemon = binary_roles[1].clone();
+    let configured_job_binary = binary_roles[2].clone();
     LabRunnerHomeboyOutput {
         controller_version,
         controller_build_identity,
         configured_executable: configured_executable.to_string(),
+        controller_cli,
+        active_daemon,
+        configured_job_binary,
+        binary_roles,
+        workflow_binary_guidance: runner_workflow_binary_guidance(),
         active_daemon_version,
         active_daemon_build_identity: status
             .session
@@ -174,6 +238,7 @@ pub(crate) fn declared_runtime_diagnostics_for_legacy(
         .flat_map(|contract| contract.runtimes.iter())
         .find(|declaration| declaration.legacy_output.as_deref() == Some(legacy_output))
         .map(|declaration| declared_runtime_diagnostics(declaration, runner_id, env))
+        .map(|diagnostics| wp_codebox_runtime_output_from_generic(&diagnostics))
 }
 
 pub(crate) fn declared_tool_diagnostics(
@@ -210,7 +275,7 @@ pub(crate) fn declared_runtime_diagnostics(
     declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
     runner_id: Option<&str>,
     env: &BTreeMap<String, String>,
-) -> WpCodeboxRuntimeOutput {
+) -> RunnerRuntimeDiagnostics {
     let (configured, configured_binary_source) =
         configured_value(env, &declaration.configured_binary_env);
     let install_dir = install_dir(
@@ -234,19 +299,78 @@ pub(crate) fn declared_runtime_diagnostics(
         &managed_cache_source,
     );
 
-    WpCodeboxRuntimeOutput {
-        tool: declaration.tool.clone(),
+    RunnerRuntimeDiagnostics {
+        runtime: declaration.tool.clone(),
+        legacy_output: declaration.legacy_output.clone(),
         configured_binary: configured,
         configured_binary_source,
         managed_cache_source: managed_cache_source.clone(),
         managed_cache_binary,
         effective_binary_rule: declaration.effective_binary_rule.clone(),
-        playground_package: packages.first().cloned().unwrap_or_else(empty_package),
-        core_package: packages.get(1).cloned().unwrap_or_else(empty_package),
-        source_git_sha: declared_probe_value(declaration, "source_git_sha"),
-        dist_build_freshness: declared_probe_value(declaration, "dist_build_freshness"),
+        packages,
+        probes: declared_probe_values(declaration),
         runtime_probe_command: diagnostic_command(runner_id, &declaration.runtime_probe_script),
         diagnostics,
+    }
+}
+
+pub(crate) fn declared_runtime_diagnostics_collection(
+    runner_id: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Vec<RunnerRuntimeDiagnostics> {
+    declared_diagnostics_contracts()
+        .iter()
+        .flat_map(|contract| contract.runtimes.iter())
+        .map(|declaration| declared_runtime_diagnostics(declaration, runner_id, env))
+        .collect()
+}
+
+fn wp_codebox_runtime_output_from_generic(
+    diagnostics: &RunnerRuntimeDiagnostics,
+) -> WpCodeboxRuntimeOutput {
+    WpCodeboxRuntimeOutput {
+        tool: diagnostics.runtime.clone(),
+        configured_binary: diagnostics.configured_binary.clone(),
+        configured_binary_source: diagnostics.configured_binary_source.clone(),
+        managed_cache_source: diagnostics.managed_cache_source.clone(),
+        managed_cache_binary: diagnostics.managed_cache_binary.clone(),
+        effective_binary_rule: diagnostics.effective_binary_rule.clone(),
+        playground_package: diagnostics
+            .packages
+            .iter()
+            .find(|package| package.field == "playground_package")
+            .or_else(|| diagnostics.packages.first())
+            .map(wp_codebox_package_output_from_generic)
+            .unwrap_or_else(empty_package),
+        core_package: diagnostics
+            .packages
+            .iter()
+            .find(|package| package.field == "core_package")
+            .or_else(|| diagnostics.packages.get(1))
+            .map(wp_codebox_package_output_from_generic)
+            .unwrap_or_else(empty_package),
+        source_git_sha: diagnostics
+            .probes
+            .get("source_git_sha")
+            .cloned()
+            .unwrap_or_else(default_runtime_probe_value),
+        dist_build_freshness: diagnostics
+            .probes
+            .get("dist_build_freshness")
+            .cloned()
+            .unwrap_or_else(default_runtime_probe_value),
+        runtime_probe_command: diagnostics.runtime_probe_command.clone(),
+        diagnostics: diagnostics.diagnostics.clone(),
+    }
+}
+
+fn wp_codebox_package_output_from_generic(
+    package: &RunnerRuntimePackageDiagnostics,
+) -> WpCodeboxPackageRuntimeOutput {
+    WpCodeboxPackageRuntimeOutput {
+        package: package.package.clone(),
+        expected_path: package.expected_path.clone(),
+        resolution: package.resolution.clone(),
     }
 }
 
@@ -329,11 +453,12 @@ fn declared_runtime_packages(
     env: &BTreeMap<String, String>,
     install_dir: &str,
     managed_cache_source: &str,
-) -> Vec<WpCodeboxPackageRuntimeOutput> {
+) -> Vec<RunnerRuntimePackageDiagnostics> {
     declaration
         .packages
         .iter()
-        .map(|package| WpCodeboxPackageRuntimeOutput {
+        .map(|package| RunnerRuntimePackageDiagnostics {
+            field: package.field.clone(),
             package: package.package.clone(),
             expected_path: package
                 .env_override
@@ -365,19 +490,28 @@ fn empty_package() -> WpCodeboxPackageRuntimeOutput {
     }
 }
 
-fn declared_probe_value(
+fn declared_probe_values(
     declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-    field: &str,
-) -> WpCodeboxProbeValue {
-    let source = declaration
+) -> BTreeMap<String, WpCodeboxProbeValue> {
+    declaration
         .probes
         .iter()
-        .find(|probe| probe.field == field)
-        .map(|probe| probe.source.clone())
-        .unwrap_or_else(|| "runtime_probe_command".to_string());
+        .map(|probe| {
+            (
+                probe.field.clone(),
+                WpCodeboxProbeValue {
+                    value: None,
+                    source: probe.source.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn default_runtime_probe_value() -> WpCodeboxProbeValue {
     WpCodeboxProbeValue {
         value: None,
-        source,
+        source: "runtime_probe_command".to_string(),
     }
 }
 
@@ -398,10 +532,59 @@ fn lab_command_availability_checks(homeboy_path: &str) -> Vec<String> {
         format!("{binary} --version"),
         format!("{binary} runner exec --help"),
         format!("{binary} runs artifact --help"),
+        format!("{binary} tunnel artifact-origin dom-boxes --help"),
         format!("{binary} fuzz --help"),
         format!("{binary} runs evidence --help"),
         format!("{binary} extension list"),
     ]
+}
+
+fn runner_homeboy_binary_roles(
+    configured_executable: &str,
+    session: &Option<RunnerSession>,
+    active_daemon_version: &Option<String>,
+) -> Vec<RunnerHomeboyBinaryRole> {
+    let controller_identity = homeboy::core::build_identity::current();
+    vec![
+        RunnerHomeboyBinaryRole {
+            role: "controller_cli",
+            owner: "operator_command",
+            path: std::env::current_exe()
+                .ok()
+                .map(|path| path.display().to_string()),
+            version: Some(controller_identity.version),
+            build_identity: Some(controller_identity.display),
+            purpose: "Renders this status output and submits runner jobs; it does not prove what the runner daemon or job command binary supports.",
+        },
+        RunnerHomeboyBinaryRole {
+            role: "active_daemon",
+            owner: "runner_session",
+            path: session
+                .as_ref()
+                .and_then(|session| session.remote_daemon_address.clone()),
+            version: active_daemon_version.clone(),
+            build_identity: session
+                .as_ref()
+                .and_then(|session| session.homeboy_build_identity.clone()),
+            purpose: "Accepts connected daemon jobs until the runner is disconnected/reconnected; it can lag behind the configured job binary after refresh-homeboy.",
+        },
+        RunnerHomeboyBinaryRole {
+            role: "configured_job_binary",
+            owner: "runner_config.settings.homeboy_path",
+            path: Some(configured_executable.to_string()),
+            version: None,
+            build_identity: None,
+            purpose: "Binary path selected for runner-side Homeboy subcommands and capability checks; use command_availability_checks to verify required subcommands on the runner.",
+        },
+    ]
+}
+
+fn runner_workflow_binary_guidance() -> RunnerWorkflowBinaryGuidance {
+    RunnerWorkflowBinaryGuidance {
+        recent_workflows: "Recent or already-queued runner workflows may still be owned by the active_daemon session shown here until the runner reconnects.",
+        explicit_workflows: "Explicit runner workflow commands and capability checks use configured_job_binary unless the workflow overrides the command binary itself.",
+        capability_checks: "Use command_availability_checks or artifact_features.runner_command_checks to verify the configured_job_binary on the runner before assuming controller_cli features are available remotely.",
+    }
 }
 
 pub(super) fn runner_artifact_feature_diagnostics(
@@ -458,45 +641,7 @@ fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
 }
 
 pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
-    let mut followups = vec![
-        LabFollowup {
-            label: "recent_runs".to_string(),
-            command: "homeboy runs list --limit 5".to_string(),
-            purpose: "Find recent persisted run records before digging into runner state."
-                .to_string(),
-        },
-        LabFollowup {
-            label: "latest_bench_run".to_string(),
-            command: "homeboy runs latest-run --kind bench".to_string(),
-            purpose: "Resolve the latest benchmark run id for evidence inspection.".to_string(),
-        },
-        LabFollowup {
-            label: "latest_fuzz_run".to_string(),
-            command: "homeboy runs latest-run --kind fuzz".to_string(),
-            purpose: "Resolve the latest fuzz run id for evidence inspection.".to_string(),
-        },
-        LabFollowup {
-            label: "run_artifacts".to_string(),
-            command: "homeboy runs artifacts <run-id>".to_string(),
-            purpose: "List recorded run artifacts through Homeboy.".to_string(),
-        },
-        LabFollowup {
-            label: "run_evidence".to_string(),
-            command: "homeboy runs evidence <run-id>".to_string(),
-            purpose: "Show stable evidence summary and reviewer-facing commands for one run."
-                .to_string(),
-        },
-        LabFollowup {
-            label: "run_refs".to_string(),
-            command: "homeboy runs refs --kind bench --limit 10".to_string(),
-            purpose: "List recent benchmark run and artifact refs.".to_string(),
-        },
-        LabFollowup {
-            label: "fuzz_run_refs".to_string(),
-            command: "homeboy runs refs --kind fuzz --limit 10".to_string(),
-            purpose: "List recent fuzz run and artifact refs.".to_string(),
-        },
-    ];
+    let mut followups = declared_run_followups_for_legacy("managed_followups", None, runner_id);
     let Some(runner_id) = runner_id else {
         return followups;
     };
@@ -537,6 +682,7 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
     ]);
     followups.extend(declared_followups_for_legacy(
         "managed_followups",
+        None,
         Some(runner_id),
     ));
     if let Ok(path) = std::env::current_dir() {
@@ -552,13 +698,111 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
     followups
 }
 
-fn declared_followups_for_legacy(legacy_output: &str, runner_id: Option<&str>) -> Vec<LabFollowup> {
+pub(crate) fn declared_run_followups_for_legacy(
+    legacy_output: &str,
+    run_kind: Option<&str>,
+    _runner_id: Option<&str>,
+) -> Vec<LabFollowup> {
+    default_run_followup_declarations()
+        .iter()
+        .filter(|followup| followup_matches(followup, legacy_output, run_kind))
+        .map(declared_run_followup)
+        .collect()
+}
+
+fn declared_followups_for_legacy(
+    legacy_output: &str,
+    run_kind: Option<&str>,
+    runner_id: Option<&str>,
+) -> Vec<LabFollowup> {
     declared_diagnostics_contracts()
         .iter()
         .flat_map(|contract| contract.followups.iter())
-        .filter(|followup| followup.legacy_output.as_deref() == Some(legacy_output))
+        .filter(|followup| followup_matches(followup, legacy_output, run_kind))
         .map(|followup| declared_followup(followup, runner_id))
         .collect()
+}
+
+fn followup_matches(
+    followup: &AgentRuntimeDiagnosticFollowup,
+    legacy_output: &str,
+    run_kind: Option<&str>,
+) -> bool {
+    if followup.legacy_output.as_deref() != Some(legacy_output) {
+        return false;
+    }
+    let declared_kind = followup
+        .run_kind
+        .as_deref()
+        .or(followup.workload.as_deref());
+    match (run_kind, declared_kind) {
+        (None, _) => true,
+        (Some(_), None) => true,
+        (Some(run_kind), Some(declared_kind)) => run_kind == declared_kind,
+    }
+}
+
+fn default_run_followup_declarations() -> Vec<AgentRuntimeDiagnosticFollowup> {
+    vec![
+        run_followup(
+            "recent_runs",
+            None,
+            "homeboy runs list --limit 5",
+            "Find recent persisted run records before digging into runner state.",
+        ),
+        run_followup(
+            "latest_bench_run",
+            Some("bench"),
+            "homeboy runs latest-run --kind bench",
+            "Resolve the latest benchmark run id for evidence inspection.",
+        ),
+        run_followup(
+            "latest_fuzz_run",
+            Some("fuzz"),
+            "homeboy runs latest-run --kind fuzz",
+            "Resolve the latest fuzz run id for evidence inspection.",
+        ),
+        run_followup(
+            "run_artifacts",
+            None,
+            "homeboy runs artifacts <run-id>",
+            "List recorded run artifacts through Homeboy.",
+        ),
+        run_followup(
+            "run_evidence",
+            None,
+            "homeboy runs evidence <run-id>",
+            "Show stable evidence summary and reviewer-facing commands for one run.",
+        ),
+        run_followup(
+            "run_refs",
+            Some("bench"),
+            "homeboy runs refs --kind bench --limit 10",
+            "List recent benchmark run and artifact refs.",
+        ),
+        run_followup(
+            "fuzz_run_refs",
+            Some("fuzz"),
+            "homeboy runs refs --kind fuzz --limit 10",
+            "List recent fuzz run and artifact refs.",
+        ),
+    ]
+}
+
+fn run_followup(
+    label: &str,
+    run_kind: Option<&str>,
+    command_script: &str,
+    purpose: &str,
+) -> AgentRuntimeDiagnosticFollowup {
+    AgentRuntimeDiagnosticFollowup {
+        label: label.to_string(),
+        legacy_output: Some("managed_followups".to_string()),
+        run_kind: run_kind.map(str::to_string),
+        workload: None,
+        command_script: command_script.to_string(),
+        purpose: purpose.to_string(),
+    }
 }
 
 fn declared_followup(
@@ -568,6 +812,14 @@ fn declared_followup(
     LabFollowup {
         label: declaration.label.clone(),
         command: diagnostic_command(runner_id, &declaration.command_script),
+        purpose: declaration.purpose.clone(),
+    }
+}
+
+fn declared_run_followup(declaration: &AgentRuntimeDiagnosticFollowup) -> LabFollowup {
+    LabFollowup {
+        label: declaration.label.clone(),
+        command: declaration.command_script.clone(),
         purpose: declaration.purpose.clone(),
     }
 }

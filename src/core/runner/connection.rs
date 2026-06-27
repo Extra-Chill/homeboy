@@ -605,556 +605,573 @@ pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
     })
 }
 
-fn resolve_ssh_runner(runner: &Runner) -> Result<Option<(String, Server, SshClient)>> {
-    if runner.kind != RunnerKind::Ssh {
-        return Ok(None);
-    }
-    let server_id = runner.server_id.clone().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "server_id",
-            "SSH runner requires server_id",
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
-    let server = server::load(&server_id)?;
-    let mut client = SshClient::from_server(&server, &server_id)?;
-    client.env.extend(runner.env.clone());
-    Ok(Some((server_id, server, client)))
-}
+mod remote_daemon {
+    use super::*;
 
-fn remote_homeboy_version(
-    client: &SshClient,
-    homeboy: &str,
-) -> std::result::Result<String, String> {
-    let command = format!("{} --version", shell::quote_arg(homeboy));
-    let output = client.execute(&command);
-    if !output.success {
-        return Err(command_failure_message(
-            "remote Homeboy version check failed",
-            &output,
-        ));
-    }
-    let version = output.stdout.trim().to_string();
-    if version.is_empty() {
-        return Err("remote Homeboy version check returned empty output".to_string());
-    }
-    Ok(version)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RemoteHomeboyIdentity {
-    version: String,
-    display: String,
-}
-
-fn remote_homeboy_identity(
-    client: &SshClient,
-    homeboy: &str,
-) -> std::result::Result<RemoteHomeboyIdentity, String> {
-    let command = format!("{} self identity", shell::quote_arg(homeboy));
-    let output = client.execute(&command);
-    if output.success {
-        if let Some(identity) = parse_self_identity_output(&output.stdout) {
-            return Ok(identity);
+    pub(super) fn resolve_ssh_runner(
+        runner: &Runner,
+    ) -> Result<Option<(String, Server, SshClient)>> {
+        if runner.kind != RunnerKind::Ssh {
+            return Ok(None);
         }
-    }
-
-    let version = remote_homeboy_version(client, homeboy)?;
-    Ok(RemoteHomeboyIdentity {
-        version: normalize_homeboy_version_owned(&version),
-        display: version,
-    })
-}
-
-fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyIdentity> {
-    let body: Value = serde_json::from_str(output.trim()).ok()?;
-    let data = body.get("data").unwrap_or(&body);
-    let version = data.get("version")?.as_str()?.trim();
-    let display = data
-        .get("display")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(version);
-    if version.is_empty() {
-        return None;
-    }
-    Some(RemoteHomeboyIdentity {
-        version: version.to_string(),
-        display: display.to_string(),
-    })
-}
-
-fn identities_match(left: Option<&str>, right: Option<&str>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => versions_match(left, right),
-        _ => false,
-    }
-}
-
-pub(super) struct SshTunnelOutput {
-    pub(super) pid: Option<u32>,
-    pub(super) stderr: String,
-    pub(super) success: bool,
-}
-
-pub(super) fn open_loopback_tunnel(
-    server: &Server,
-    local_port: u16,
-    remote_host: &str,
-    remote_port: u16,
-) -> SshTunnelOutput {
-    if is_loopback_host(&server.host) {
-        return SshTunnelOutput {
-            pid: None,
-            stderr: String::new(),
-            success: true,
-        };
-    }
-
-    let mut args = Vec::new();
-    if let Some(identity_file) = server
-        .identity_file
-        .as_deref()
-        .filter(|path| !path.is_empty())
-    {
-        args.push("-i".to_string());
-        args.push(shellexpand::tilde(identity_file).to_string());
-    }
-    if server.port != 22 {
-        args.push("-p".to_string());
-        args.push(server.port.to_string());
-    }
-    if let Some(auth) = &server.auth {
-        if auth.mode == ServerAuthMode::KeyPlusPasswordControlmaster {
-            let control_path = auth
-                .session
-                .control_path
-                .as_deref()
-                .unwrap_or("~/.ssh/controlmasters/%h-%p-%r");
-            let persist = auth.session.persist.as_deref().unwrap_or("4h");
-            args.extend([
-                "-o".to_string(),
-                "ControlMaster=auto".to_string(),
-                "-o".to_string(),
-                format!("ControlPath={}", shellexpand::tilde(control_path)),
-                "-o".to_string(),
-                format!("ControlPersist={}", persist),
-            ]);
-        }
-    }
-    args.extend([
-        "-o".to_string(),
-        "BatchMode=yes".to_string(),
-        "-o".to_string(),
-        "ExitOnForwardFailure=yes".to_string(),
-        "-o".to_string(),
-        "ConnectTimeout=10".to_string(),
-        "-N".to_string(),
-        "-L".to_string(),
-        format!("127.0.0.1:{}:{}:{}", local_port, remote_host, remote_port),
-        format!("{}@{}", server.user, server.host),
-    ]);
-
-    let child = std::process::Command::new("ssh")
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    match child {
-        Ok(child) => SshTunnelOutput {
-            pid: Some(child.id()),
-            stderr: String::new(),
-            success: true,
-        },
-        Err(err) => SshTunnelOutput {
-            pid: None,
-            stderr: format!("SSH tunnel error: {}", err),
-            success: false,
-        },
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct RemoteDaemon {
-    pub(super) address: String,
-    pub(super) pid: Option<u32>,
-}
-
-fn ensure_remote_daemon(
-    client: &SshClient,
-    homeboy: &str,
-) -> std::result::Result<RemoteDaemon, String> {
-    if let Some(daemon) = remote_daemon_status(client, homeboy)? {
-        if let Some(stale_reason) = remote_daemon_binary_stale(client, homeboy, &daemon)? {
-            log_status!(
-                "runner",
-                "Remote managed daemon is stale ({stale_reason}); restarting it"
-            );
-            remote_daemon_stop(client, homeboy)?;
-            return remote_daemon_start(client, homeboy);
-        }
-        return Ok(daemon);
-    }
-    remote_daemon_start(client, homeboy)
-}
-
-fn remote_daemon_binary_stale(
-    client: &SshClient,
-    homeboy: &str,
-    daemon: &RemoteDaemon,
-) -> std::result::Result<Option<String>, String> {
-    let Some(pid) = daemon.pid else {
-        return Ok(None);
-    };
-    let command = remote_daemon_binary_probe_command(homeboy, pid);
-    let output = client.execute(&command);
-    match classify_remote_daemon_binary_probe(output.exit_code, &output.stdout) {
-        RemoteDaemonBinaryProbe::Fresh | RemoteDaemonBinaryProbe::Unknown => Ok(None),
-        RemoteDaemonBinaryProbe::Stale(reason) => Ok(Some(reason)),
-        RemoteDaemonBinaryProbe::Failed => Err(command_failure_message(
-            "remote daemon binary freshness probe failed",
-            &output,
-        )),
-    }
-}
-
-/// Stop a remote homeboy daemon over SSH, surfacing a command-failure message on
-/// non-zero exit. Shared by the connection and connection-daemon refresh paths
-/// so the stop command + error handling lives in one place (#5362).
-pub(super) fn remote_daemon_stop(
-    client: &SshClient,
-    homeboy: &str,
-) -> std::result::Result<(), String> {
-    let command = format!("{} daemon stop", shell::quote_arg(homeboy));
-    let output = client.execute(&command);
-    if !output.success {
-        return Err(command_failure_message(
-            "remote daemon stop failed while refreshing stale daemon",
-            &output,
-        ));
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RemoteDaemonBinaryProbe {
-    Fresh,
-    Stale(String),
-    Unknown,
-    Failed,
-}
-
-fn classify_remote_daemon_binary_probe(exit_code: i32, stdout: &str) -> RemoteDaemonBinaryProbe {
-    match exit_code {
-        0 => RemoteDaemonBinaryProbe::Fresh,
-        10 => RemoteDaemonBinaryProbe::Stale(stdout.trim().to_string()),
-        2 => RemoteDaemonBinaryProbe::Unknown,
-        _ => RemoteDaemonBinaryProbe::Failed,
-    }
-}
-
-fn remote_daemon_binary_probe_command(homeboy: &str, pid: u32) -> String {
-    let quoted_homeboy = shell::quote_arg(homeboy);
-    format!(
-        r#"set -eu
-pid={pid}
-current=$(command -v {quoted_homeboy} 2>/dev/null || printf '%s\n' {quoted_homeboy})
-current=$(readlink -f "$current" 2>/dev/null || printf '%s\n' "$current")
-if [ ! -e "/proc/$pid/exe" ]; then
-  exit 2
-fi
-exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
-if [ -z "$exe" ]; then
-  exit 2
-fi
-case "$exe" in
-  *" (deleted)")
-    printf 'daemon pid %s executable has been replaced: %s\n' "$pid" "$exe"
-    exit 10
-    ;;
-esac
-current_id=$(stat -Lc '%d:%i' "$current" 2>/dev/null || true)
-daemon_id=$(stat -Lc '%d:%i' "/proc/$pid/exe" 2>/dev/null || true)
-if [ -z "$current_id" ] || [ -z "$daemon_id" ]; then
-  exit 2
-fi
-if [ "$current_id" != "$daemon_id" ]; then
-  printf 'daemon pid %s executable inode differs from current Homeboy binary %s\n' "$pid" "$current"
-  exit 10
-fi
-exit 0"#
-    )
-}
-
-fn remote_daemon_status(
-    client: &SshClient,
-    homeboy: &str,
-) -> std::result::Result<Option<RemoteDaemon>, String> {
-    let command = format!("{} daemon status", shell::quote_arg(homeboy));
-    let output = client.execute(&command);
-    if !output.success {
-        return Ok(None);
-    }
-    let envelope = parse_envelope(&output.stdout)
-        .map_err(|err| format!("remote daemon status returned invalid JSON: {}", err))?;
-    if !envelope.success {
-        return Ok(None);
-    }
-    let Some(data) = envelope.data else {
-        return Ok(None);
-    };
-    if !data
-        .get("running")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Ok(None);
-    }
-    let Some(state) = data.get("state") else {
-        return Ok(None);
-    };
-    Ok(Some(RemoteDaemon {
-        address: state
-            .get("address")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        pid: state
-            .get("pid")
-            .and_then(Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok()),
-    }))
-}
-
-pub(super) fn remote_daemon_start(
-    client: &SshClient,
-    homeboy: &str,
-) -> std::result::Result<RemoteDaemon, String> {
-    let command = format!(
-        "{} daemon start --addr 127.0.0.1:0",
-        shell::quote_arg(homeboy)
-    );
-    let output = client.execute(&command);
-    if !output.success {
-        return Err(command_failure_message(
-            "remote daemon startup failed",
-            &output,
-        ));
-    }
-    let envelope = parse_envelope(&output.stdout)
-        .map_err(|err| format!("remote daemon start returned invalid JSON: {}", err))?;
-    if !envelope.success {
-        return Err(format!(
-            "remote daemon start failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        ));
-    }
-    let data = envelope
-        .data
-        .ok_or_else(|| "remote daemon start returned no data".to_string())?;
-    Ok(RemoteDaemon {
-        address: data
-            .get("address")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        pid: data
-            .get("pid")
-            .and_then(Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok()),
-    })
-}
-
-fn parse_envelope(stdout: &str) -> serde_json::Result<CliEnvelope> {
-    serde_json::from_str(stdout.trim())
-}
-
-pub(super) fn parse_loopback_daemon_addr(address: &str) -> std::result::Result<SocketAddr, ()> {
-    let addr: SocketAddr = address.parse().map_err(|_| ())?;
-    if addr.ip().is_loopback() {
-        Ok(addr)
-    } else {
-        Err(())
-    }
-}
-
-pub(super) fn reserve_loopback_port() -> Result<u16> {
-    let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0)).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("reserve local tunnel port".to_string()),
-        )
-    })?;
-    let port = listener
-        .local_addr()
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read local tunnel port".to_string()))
-        })?
-        .port();
-    drop(listener);
-    Ok(port)
-}
-
-pub(super) fn wait_for_tcp(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
-
-fn session_is_live(session: &RunnerSession) -> bool {
-    if session.mode != RunnerTunnelMode::DirectSsh {
-        return false;
-    }
-    if let Some(pid) = session.tunnel_pid {
-        if !crate::core::process::pid_is_running(pid) {
-            return false;
-        }
-    }
-    session
-        .local_port
-        .is_some_and(|port| wait_for_tcp(port, Duration::from_millis(200)))
-}
-
-fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {
-    let Some(last_seen_at) = session.last_seen_at.as_deref() else {
-        return false;
-    };
-    let Ok(last_seen_at) = DateTime::parse_from_rfc3339(last_seen_at) else {
-        return false;
-    };
-    let age = Utc::now().signed_duration_since(last_seen_at.with_timezone(&Utc));
-    match age.to_std() {
-        Ok(age) => age <= REVERSE_RUNNER_HEARTBEAT_TTL,
-        Err(_) => true,
-    }
-}
-
-fn session_state(session: Option<&RunnerSession>) -> RunnerSessionState {
-    match session {
-        Some(session)
-            if session.mode == RunnerTunnelMode::Reverse
-                && session.role == RunnerSessionRole::Controller =>
-        {
-            if reverse_controller_session_is_live(session) {
-                RunnerSessionState::Connected
-            } else {
-                RunnerSessionState::Recorded
-            }
-        }
-        Some(session) if session.mode == RunnerTunnelMode::Reverse => RunnerSessionState::Recorded,
-        Some(session) if session_is_live(session) => RunnerSessionState::Connected,
-        Some(_) => RunnerSessionState::Disconnected,
-        None => RunnerSessionState::Disconnected,
-    }
-}
-
-fn hostname_fallback() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "unknown-host".to_string())
-}
-
-fn session_path(runner_id: &str) -> Result<PathBuf> {
-    paths::runner_session_file(runner_id)
-}
-
-fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
-    let path = session_path(runner_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(format!("read {}", path.display())))
-    })?;
-    serde_json::from_str(&raw)
-        .map(Some)
-        .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))
-}
-
-fn write_session(session: &RunnerSession) -> Result<()> {
-    let path = session_path(&session.runner_id)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!("create {}", parent.display())),
+        let server_id = runner.server_id.clone().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "server_id",
+                "SSH runner requires server_id",
+                Some(runner.id.clone()),
+                None,
             )
         })?;
+        let server = server::load(&server_id)?;
+        let mut client = SshClient::from_server(&server, &server_id)?;
+        client.env.extend(runner.env.clone());
+        Ok(Some((server_id, server, client)))
     }
-    let body = serde_json::to_string_pretty(session).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("serialize runner session".to_string()),
+
+    pub(super) fn remote_homeboy_version(
+        client: &SshClient,
+        homeboy: &str,
+    ) -> std::result::Result<String, String> {
+        let command = format!("{} --version", shell::quote_arg(homeboy));
+        let output = client.execute(&command);
+        if !output.success {
+            return Err(command_failure_message(
+                "remote Homeboy version check failed",
+                &output,
+            ));
+        }
+        let version = output.stdout.trim().to_string();
+        if version.is_empty() {
+            return Err("remote Homeboy version check returned empty output".to_string());
+        }
+        Ok(version)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct RemoteHomeboyIdentity {
+        pub(super) version: String,
+        pub(super) display: String,
+    }
+
+    pub(super) fn remote_homeboy_identity(
+        client: &SshClient,
+        homeboy: &str,
+    ) -> std::result::Result<RemoteHomeboyIdentity, String> {
+        let command = format!("{} self identity", shell::quote_arg(homeboy));
+        let output = client.execute(&command);
+        if output.success {
+            if let Some(identity) = parse_self_identity_output(&output.stdout) {
+                return Ok(identity);
+            }
+        }
+
+        let version = remote_homeboy_version(client, homeboy)?;
+        Ok(RemoteHomeboyIdentity {
+            version: normalize_homeboy_version_owned(&version),
+            display: version,
+        })
+    }
+
+    pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyIdentity> {
+        let body: Value = serde_json::from_str(output.trim()).ok()?;
+        let data = body.get("data").unwrap_or(&body);
+        let version = data.get("version")?.as_str()?.trim();
+        let display = data
+            .get("display")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(version);
+        if version.is_empty() {
+            return None;
+        }
+        Some(RemoteHomeboyIdentity {
+            version: version.to_string(),
+            display: display.to_string(),
+        })
+    }
+
+    pub(super) fn identities_match(left: Option<&str>, right: Option<&str>) -> bool {
+        match (left, right) {
+            (Some(left), Some(right)) => versions_match(left, right),
+            _ => false,
+        }
+    }
+
+    pub(super) struct SshTunnelOutput {
+        pub(super) pid: Option<u32>,
+        pub(super) stderr: String,
+        pub(super) success: bool,
+    }
+
+    pub(super) fn open_loopback_tunnel(
+        server: &Server,
+        local_port: u16,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> SshTunnelOutput {
+        if is_loopback_host(&server.host) {
+            return SshTunnelOutput {
+                pid: None,
+                stderr: String::new(),
+                success: true,
+            };
+        }
+
+        let mut args = Vec::new();
+        if let Some(identity_file) = server
+            .identity_file
+            .as_deref()
+            .filter(|path| !path.is_empty())
+        {
+            args.push("-i".to_string());
+            args.push(shellexpand::tilde(identity_file).to_string());
+        }
+        if server.port != 22 {
+            args.push("-p".to_string());
+            args.push(server.port.to_string());
+        }
+        if let Some(auth) = &server.auth {
+            if auth.mode == ServerAuthMode::KeyPlusPasswordControlmaster {
+                let control_path = auth
+                    .session
+                    .control_path
+                    .as_deref()
+                    .unwrap_or("~/.ssh/controlmasters/%h-%p-%r");
+                let persist = auth.session.persist.as_deref().unwrap_or("4h");
+                args.extend([
+                    "-o".to_string(),
+                    "ControlMaster=auto".to_string(),
+                    "-o".to_string(),
+                    format!("ControlPath={}", shellexpand::tilde(control_path)),
+                    "-o".to_string(),
+                    format!("ControlPersist={}", persist),
+                ]);
+            }
+        }
+        args.extend([
+            "-o".to_string(),
+            "BatchMode=yes".to_string(),
+            "-o".to_string(),
+            "ExitOnForwardFailure=yes".to_string(),
+            "-o".to_string(),
+            "ConnectTimeout=10".to_string(),
+            "-N".to_string(),
+            "-L".to_string(),
+            format!("127.0.0.1:{}:{}:{}", local_port, remote_host, remote_port),
+            format!("{}@{}", server.user, server.host),
+        ]);
+
+        let child = std::process::Command::new("ssh")
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match child {
+            Ok(child) => SshTunnelOutput {
+                pid: Some(child.id()),
+                stderr: String::new(),
+                success: true,
+            },
+            Err(err) => SshTunnelOutput {
+                pid: None,
+                stderr: format!("SSH tunnel error: {}", err),
+                success: false,
+            },
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct RemoteDaemon {
+        pub(super) address: String,
+        pub(super) pid: Option<u32>,
+    }
+
+    pub(super) fn ensure_remote_daemon(
+        client: &SshClient,
+        homeboy: &str,
+    ) -> std::result::Result<RemoteDaemon, String> {
+        if let Some(daemon) = remote_daemon_status(client, homeboy)? {
+            if let Some(stale_reason) = remote_daemon_binary_stale(client, homeboy, &daemon)? {
+                log_status!(
+                    "runner",
+                    "Remote managed daemon is stale ({stale_reason}); restarting it"
+                );
+                remote_daemon_stop(client, homeboy)?;
+                return remote_daemon_start(client, homeboy);
+            }
+            return Ok(daemon);
+        }
+        remote_daemon_start(client, homeboy)
+    }
+
+    pub(super) fn remote_daemon_binary_stale(
+        client: &SshClient,
+        homeboy: &str,
+        daemon: &RemoteDaemon,
+    ) -> std::result::Result<Option<String>, String> {
+        let Some(pid) = daemon.pid else {
+            return Ok(None);
+        };
+        let command = remote_daemon_binary_probe_command(homeboy, pid);
+        let output = client.execute(&command);
+        match classify_remote_daemon_binary_probe(output.exit_code, &output.stdout) {
+            RemoteDaemonBinaryProbe::Fresh | RemoteDaemonBinaryProbe::Unknown => Ok(None),
+            RemoteDaemonBinaryProbe::Stale(reason) => Ok(Some(reason)),
+            RemoteDaemonBinaryProbe::Failed => Err(command_failure_message(
+                "remote daemon binary freshness probe failed",
+                &output,
+            )),
+        }
+    }
+
+    /// Stop a remote homeboy daemon over SSH, surfacing a command-failure message on
+    /// non-zero exit. Shared by the connection and connection-daemon refresh paths
+    /// so the stop command + error handling lives in one place (#5362).
+    pub(super) fn remote_daemon_stop(
+        client: &SshClient,
+        homeboy: &str,
+    ) -> std::result::Result<(), String> {
+        let command = format!("{} daemon stop", shell::quote_arg(homeboy));
+        let output = client.execute(&command);
+        if !output.success {
+            return Err(command_failure_message(
+                "remote daemon stop failed while refreshing stale daemon",
+                &output,
+            ));
+        }
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) enum RemoteDaemonBinaryProbe {
+        Fresh,
+        Stale(String),
+        Unknown,
+        Failed,
+    }
+
+    pub(super) fn classify_remote_daemon_binary_probe(
+        exit_code: i32,
+        stdout: &str,
+    ) -> RemoteDaemonBinaryProbe {
+        match exit_code {
+            0 => RemoteDaemonBinaryProbe::Fresh,
+            10 => RemoteDaemonBinaryProbe::Stale(stdout.trim().to_string()),
+            2 => RemoteDaemonBinaryProbe::Unknown,
+            _ => RemoteDaemonBinaryProbe::Failed,
+        }
+    }
+
+    pub(super) fn remote_daemon_binary_probe_command(homeboy: &str, pid: u32) -> String {
+        let quoted_homeboy = shell::quote_arg(homeboy);
+        format!(
+            r#"set -eu
+    pid={pid}
+    current=$(command -v {quoted_homeboy} 2>/dev/null || printf '%s\n' {quoted_homeboy})
+    current=$(readlink -f "$current" 2>/dev/null || printf '%s\n' "$current")
+    if [ ! -e "/proc/$pid/exe" ]; then
+      exit 2
+    fi
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+    if [ -z "$exe" ]; then
+      exit 2
+    fi
+    case "$exe" in
+      *" (deleted)")
+        printf 'daemon pid %s executable has been replaced: %s\n' "$pid" "$exe"
+        exit 10
+        ;;
+    esac
+    current_id=$(stat -Lc '%d:%i' "$current" 2>/dev/null || true)
+    daemon_id=$(stat -Lc '%d:%i' "/proc/$pid/exe" 2>/dev/null || true)
+    if [ -z "$current_id" ] || [ -z "$daemon_id" ]; then
+      exit 2
+    fi
+    if [ "$current_id" != "$daemon_id" ]; then
+      printf 'daemon pid %s executable inode differs from current Homeboy binary %s\n' "$pid" "$current"
+      exit 10
+    fi
+    exit 0"#
         )
-    })?;
-    std::fs::write(&path, body).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
-    })
-}
-
-pub(super) fn failed_connect(
-    runner_id: &str,
-    session_path: PathBuf,
-    failure_kind: RunnerFailureKind,
-    failure_message: String,
-) -> (RunnerConnectReport, i32) {
-    (
-        RunnerConnectReport {
-            runner_id: runner_id.to_string(),
-            mode: None,
-            role: None,
-            connected: false,
-            recorded: None,
-            local_url: None,
-            broker_url: None,
-            controller_id: None,
-            remote_daemon_address: None,
-            tunnel_pid: None,
-            remote_daemon_pid: None,
-            homeboy_version: None,
-            homeboy_build_identity: None,
-            session_path: Some(session_path.display().to_string()),
-            failure_kind: Some(failure_kind),
-            failure_message: Some(failure_message),
-        },
-        20,
-    )
-}
-
-pub(super) fn command_failure_message(
-    prefix: &str,
-    output: &crate::core::server::CommandOutput,
-) -> String {
-    format!(
-        "{} (exit {}): stdout={}, stderr={}",
-        prefix,
-        output.exit_code,
-        output.stdout.trim(),
-        output.stderr.trim()
-    )
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
-pub(super) fn terminate_pid(pid: u32) {
-    if pid > i32::MAX as u32 {
-        return;
     }
-    #[cfg(unix)]
-    unsafe {
-        let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+
+    pub(super) fn remote_daemon_status(
+        client: &SshClient,
+        homeboy: &str,
+    ) -> std::result::Result<Option<RemoteDaemon>, String> {
+        let command = format!("{} daemon status", shell::quote_arg(homeboy));
+        let output = client.execute(&command);
+        if !output.success {
+            return Ok(None);
+        }
+        let envelope = parse_envelope(&output.stdout)
+            .map_err(|err| format!("remote daemon status returned invalid JSON: {}", err))?;
+        if !envelope.success {
+            return Ok(None);
+        }
+        let Some(data) = envelope.data else {
+            return Ok(None);
+        };
+        if !data
+            .get("running")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        let Some(state) = data.get("state") else {
+            return Ok(None);
+        };
+        Ok(Some(RemoteDaemon {
+            address: state
+                .get("address")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            pid: state
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok()),
+        }))
+    }
+
+    pub(super) fn remote_daemon_start(
+        client: &SshClient,
+        homeboy: &str,
+    ) -> std::result::Result<RemoteDaemon, String> {
+        let command = format!(
+            "{} daemon start --addr 127.0.0.1:0",
+            shell::quote_arg(homeboy)
+        );
+        let output = client.execute(&command);
+        if !output.success {
+            return Err(command_failure_message(
+                "remote daemon startup failed",
+                &output,
+            ));
+        }
+        let envelope = parse_envelope(&output.stdout)
+            .map_err(|err| format!("remote daemon start returned invalid JSON: {}", err))?;
+        if !envelope.success {
+            return Err(format!(
+                "remote daemon start failed: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ));
+        }
+        let data = envelope
+            .data
+            .ok_or_else(|| "remote daemon start returned no data".to_string())?;
+        Ok(RemoteDaemon {
+            address: data
+                .get("address")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            pid: data
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok()),
+        })
+    }
+
+    pub(super) fn parse_envelope(stdout: &str) -> serde_json::Result<CliEnvelope> {
+        serde_json::from_str(stdout.trim())
+    }
+
+    pub(super) fn parse_loopback_daemon_addr(address: &str) -> std::result::Result<SocketAddr, ()> {
+        let addr: SocketAddr = address.parse().map_err(|_| ())?;
+        if addr.ip().is_loopback() {
+            Ok(addr)
+        } else {
+            Err(())
+        }
+    }
+
+    pub(super) fn reserve_loopback_port() -> Result<u16> {
+        let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0)).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("reserve local tunnel port".to_string()),
+            )
+        })?;
+        let port = listener
+            .local_addr()
+            .map_err(|err| {
+                Error::internal_io(err.to_string(), Some("read local tunnel port".to_string()))
+            })?
+            .port();
+        drop(listener);
+        Ok(port)
+    }
+
+    pub(super) fn wait_for_tcp(port: u16, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
     }
 }
+use remote_daemon::*;
+
+mod session_store {
+    use super::*;
+
+    pub(super) fn session_is_live(session: &RunnerSession) -> bool {
+        if session.mode != RunnerTunnelMode::DirectSsh {
+            return false;
+        }
+        if let Some(pid) = session.tunnel_pid {
+            if !crate::core::process::pid_is_running(pid) {
+                return false;
+            }
+        }
+        session
+            .local_port
+            .is_some_and(|port| wait_for_tcp(port, Duration::from_millis(200)))
+    }
+
+    pub(super) fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {
+        let Some(last_seen_at) = session.last_seen_at.as_deref() else {
+            return false;
+        };
+        let Ok(last_seen_at) = DateTime::parse_from_rfc3339(last_seen_at) else {
+            return false;
+        };
+        let age = Utc::now().signed_duration_since(last_seen_at.with_timezone(&Utc));
+        match age.to_std() {
+            Ok(age) => age <= REVERSE_RUNNER_HEARTBEAT_TTL,
+            Err(_) => true,
+        }
+    }
+
+    pub(super) fn session_state(session: Option<&RunnerSession>) -> RunnerSessionState {
+        match session {
+            Some(session)
+                if session.mode == RunnerTunnelMode::Reverse
+                    && session.role == RunnerSessionRole::Controller =>
+            {
+                if reverse_controller_session_is_live(session) {
+                    RunnerSessionState::Connected
+                } else {
+                    RunnerSessionState::Recorded
+                }
+            }
+            Some(session) if session.mode == RunnerTunnelMode::Reverse => {
+                RunnerSessionState::Recorded
+            }
+            Some(session) if session_is_live(session) => RunnerSessionState::Connected,
+            Some(_) => RunnerSessionState::Disconnected,
+            None => RunnerSessionState::Disconnected,
+        }
+    }
+
+    pub(super) fn hostname_fallback() -> String {
+        std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "unknown-host".to_string())
+    }
+
+    pub(super) fn session_path(runner_id: &str) -> Result<PathBuf> {
+        paths::runner_session_file(runner_id)
+    }
+
+    pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
+        let path = session_path(runner_id)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&path).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("read {}", path.display())))
+        })?;
+        serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))
+    }
+
+    pub(super) fn write_session(session: &RunnerSession) -> Result<()> {
+        let path = session_path(&session.runner_id)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(format!("create {}", parent.display())),
+                )
+            })?;
+        }
+        let body = serde_json::to_string_pretty(session).map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("serialize runner session".to_string()),
+            )
+        })?;
+        std::fs::write(&path, body).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
+        })
+    }
+
+    pub(super) fn failed_connect(
+        runner_id: &str,
+        session_path: PathBuf,
+        failure_kind: RunnerFailureKind,
+        failure_message: String,
+    ) -> (RunnerConnectReport, i32) {
+        (
+            RunnerConnectReport {
+                runner_id: runner_id.to_string(),
+                mode: None,
+                role: None,
+                connected: false,
+                recorded: None,
+                local_url: None,
+                broker_url: None,
+                controller_id: None,
+                remote_daemon_address: None,
+                tunnel_pid: None,
+                remote_daemon_pid: None,
+                homeboy_version: None,
+                homeboy_build_identity: None,
+                session_path: Some(session_path.display().to_string()),
+                failure_kind: Some(failure_kind),
+                failure_message: Some(failure_message),
+            },
+            20,
+        )
+    }
+
+    pub(super) fn command_failure_message(
+        prefix: &str,
+        output: &crate::core::server::CommandOutput,
+    ) -> String {
+        format!(
+            "{} (exit {}): stdout={}, stderr={}",
+            prefix,
+            output.exit_code,
+            output.stdout.trim(),
+            output.stderr.trim()
+        )
+    }
+
+    pub(super) fn is_loopback_host(host: &str) -> bool {
+        matches!(host, "localhost" | "127.0.0.1" | "::1")
+    }
+
+    pub(super) fn terminate_pid(pid: u32) {
+        if pid > i32::MAX as u32 {
+            return;
+        }
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+}
+use session_store::*;
 
 #[cfg(test)]
 mod tests {

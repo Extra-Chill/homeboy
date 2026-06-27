@@ -109,24 +109,25 @@ pub(super) fn runner_exec_failure_context(
         .and_then(find_homeboy_error_in_result_value)
         .or_else(|| find_homeboy_error_in_text(input.stdout))
         .or_else(|| find_homeboy_error_in_text(input.stderr));
-    let contract_field = runner_error
-        .as_ref()
-        .and_then(error_contract_field)
-        .map(str::to_string);
+    let contract_field = runner_error.as_ref().and_then(error_contract_field);
     let error_code = runner_error
         .as_ref()
         .and_then(|error| error.get("code"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let error_message = runner_error
+    let raw_error_message = runner_error
         .as_ref()
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let error_message = runner_error
+        .as_ref()
+        .map(|error| normalized_error_message(error, raw_error_message.as_deref()))
+        .unwrap_or(raw_error_message);
     let error_details = runner_error
         .as_ref()
         .and_then(|error| error.get("details"))
-        .cloned();
+        .map(normalized_error_details);
     let reason = error_message
         .clone()
         .or_else(|| error_code.clone())
@@ -195,19 +196,81 @@ pub(crate) fn runner_exec_failure_context_remediation_hint(
     }
 }
 
-pub(super) fn error_contract_field(error: &Value) -> Option<&str> {
-    error
-        .get("details")
-        .and_then(|details| details.get("field"))
-        .and_then(Value::as_str)
-        .or_else(|| error.get("field").and_then(Value::as_str))
+pub(super) fn error_contract_field(error: &Value) -> Option<String> {
+    let field = error_contract_field_value(error);
+
+    match field.as_deref() {
+        Some("unknown contract field") => specific_unknown_contract_field(error),
+        Some(field) => Some(field.to_string()),
+        None => specific_unknown_contract_field(error),
+    }
+}
+
+fn specific_unknown_contract_field(error: &Value) -> Option<String> {
+    error_string_path(error, &["details", "unknown_field"])
+        .or_else(|| error_string_path(error, &["details", "unexpected_field"]))
+        .or_else(|| error_string_path(error, &["unknown_field"]))
+        .or_else(|| error_string_path(error, &["unexpected_field"]))
         .or_else(|| {
-            error
-                .get("details")
-                .and_then(|details| details.get("contract_field"))
-                .and_then(Value::as_str)
+            error_string_path(error, &["details", "problem"])
+                .and_then(|message| parse_unknown_field_name(&message))
         })
-        .or_else(|| error.get("contract_field").and_then(Value::as_str))
+        .or_else(|| {
+            error_string_path(error, &["message"])
+                .and_then(|message| parse_unknown_field_name(&message))
+        })
+}
+
+fn normalized_error_message(error: &Value, message: Option<&str>) -> Option<String> {
+    if error_contract_field_value(error).as_deref() != Some("unknown contract field") {
+        return message.map(str::to_string);
+    }
+
+    let problem = error_string_path(error, &["details", "problem"])
+        .filter(|problem| !problem.trim().is_empty());
+    problem.or_else(|| {
+        message.map(|message| {
+            message
+                .strip_prefix("Invalid argument 'unknown contract field': ")
+                .unwrap_or(message)
+                .to_string()
+        })
+    })
+}
+
+fn normalized_error_details(details: &Value) -> Value {
+    if details.get("field").and_then(Value::as_str) != Some("unknown contract field") {
+        return details.clone();
+    }
+
+    let mut details = details.clone();
+    if let Some(details) = details.as_object_mut() {
+        details.remove("field");
+    }
+    details
+}
+
+fn error_contract_field_value(error: &Value) -> Option<String> {
+    error_string_path(error, &["details", "field"])
+        .or_else(|| error_string_path(error, &["field"]))
+        .or_else(|| error_string_path(error, &["details", "contract_field"]))
+        .or_else(|| error_string_path(error, &["contract_field"]))
+}
+
+fn error_string_path(error: &Value, path: &[&str]) -> Option<String> {
+    let mut current = error;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str().map(str::to_string)
+}
+
+fn parse_unknown_field_name(message: &str) -> Option<String> {
+    let start = message.find("unknown field `")? + "unknown field `".len();
+    let rest = &message[start..];
+    let end = rest.find('`')?;
+    let field = rest[..end].trim();
+    (!field.is_empty()).then(|| field.to_string())
 }
 
 pub(super) fn find_homeboy_error_in_result_value(value: &Value) -> Option<Value> {

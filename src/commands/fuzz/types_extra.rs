@@ -1,9 +1,10 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+use homeboy::core::artifact_ref::EvidenceRef;
 use homeboy::core::fuzz::{
-    FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzReplayMetadata, FuzzRequiredArtifact,
-    FuzzResultEnvelope, FuzzTargetInventory,
+    FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzHotspotSet, FuzzReplayMetadata,
+    FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory,
 };
 use homeboy::core::performance_hotspots::PerformanceHotspotSummary;
 
@@ -75,11 +76,17 @@ pub struct FuzzInspectOutput {
     pub artifact_id: String,
     pub artifact_kind: String,
     pub artifact_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_ref: Option<EvidenceRef>,
     pub fetch_command: Option<String>,
     /// Parsed JSON body when the raw result is valid JSON; otherwise null.
     pub result: Option<serde_json::Value>,
     /// Raw text body when the result is not valid JSON (or `--raw` text fallback).
     pub raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_summary: Option<homeboy::core::fuzz::FuzzResultEnvelopeArtifactSummary>,
     pub candidates: Vec<FuzzInspectCandidate>,
     pub next_steps: Vec<String>,
 }
@@ -92,6 +99,7 @@ pub struct FuzzInspectCandidate {
     pub kind: String,
     pub artifact_type: String,
     pub path: String,
+    pub canonical_ref: String,
     pub exists: bool,
 }
 
@@ -160,6 +168,7 @@ pub struct FuzzRunOutput {
     pub results: Option<FuzzCampaign>,
     pub campaign_contract: FuzzCampaignContract,
     pub runner_contract: FuzzRunnerContract,
+    pub evidence_refs: Vec<EvidenceRef>,
     pub evidence_followups: Vec<String>,
 }
 
@@ -176,6 +185,8 @@ pub struct FuzzArtifactPostprocessOutput {
     pub stdout: String,
     pub stderr: String,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<homeboy::core::artifacts::ArtifactPostprocessProducedArtifact>,
 }
 
 #[derive(Serialize)]
@@ -200,6 +211,8 @@ pub struct FuzzValidateOutput {
     pub artifacts: usize,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
     pub performance_hotspots: PerformanceHotspotSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_hotspots: Option<FuzzHotspotSet>,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 
@@ -209,9 +222,12 @@ pub struct FuzzReportOutput {
     pub status: String,
     pub results_file: String,
     pub envelope_file: Option<String>,
+    pub evidence_refs: Vec<EvidenceRef>,
     pub envelope: FuzzResultEnvelope,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
     pub performance_hotspots: PerformanceHotspotSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_hotspots: Option<FuzzHotspotSet>,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 

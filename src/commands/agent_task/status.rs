@@ -5,21 +5,27 @@
 //! references, and a prominent risk-flag section (#4398). The full verbose
 //! payload is available behind `--full`.
 
+use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use homeboy::core::agent_task_service as agent_task_service_direct;
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
-use homeboy::core::agent_tasks::AgentTaskOutcomeStatus;
+use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
+use homeboy::core::redaction::{self, RedactionPolicy};
 
 use super::super::CmdResult;
-use super::args::{CancelArgs, StatusArgs};
+use super::args::{CancelArgs, DiagnoseArgs, EvidenceArgs, StatusArgs};
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
 /// aggregate cannot flood recovery output. Overflow is reported as an
 /// `omitted` count rather than dropped silently.
 const COMPACT_REF_LIMIT: usize = 12;
+const EVIDENCE_TEXT_LIMIT: usize = 16 * 1024;
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     if args.bridge {
@@ -131,11 +137,472 @@ pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
     Ok((serde_json::to_value(artifacts).unwrap_or(Value::Null), 0))
 }
 
+pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
+    let artifacts = agent_task_service::artifacts(&args.run_id)?;
+    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
+    let failed_tasks = failed_task_statuses(aggregate.as_ref());
+    let plan = agent_task_lifecycle::load_plan(&args.run_id).ok();
+
+    let mut hydrated = Vec::new();
+    for (evidence_ref, task_id) in
+        evidence_refs_with_tasks(&artifacts.evidence_refs, aggregate.as_ref())
+    {
+        if args
+            .kind
+            .as_deref()
+            .is_some_and(|kind| evidence_ref.kind != kind)
+        {
+            continue;
+        }
+        if args
+            .task
+            .as_deref()
+            .is_some_and(|task| task_id.as_deref() != Some(task))
+        {
+            continue;
+        }
+        if args.failure_only
+            && !task_id
+                .as_deref()
+                .is_some_and(|task| failed_tasks.contains_key(task))
+        {
+            continue;
+        }
+
+        hydrated.push(hydrate_evidence_ref(
+            &args.run_id,
+            &evidence_ref,
+            task_id.as_deref(),
+            plan.as_ref(),
+            aggregate.as_ref(),
+        ));
+    }
+
+    Ok((
+        serde_json::to_value(AgentTaskEvidenceReport {
+            schema: "homeboy/agent-task-evidence/v1",
+            run_id: args.run_id,
+            filters: AgentTaskEvidenceFilters {
+                kind: args.kind,
+                task: args.task,
+                failure_only: args.failure_only,
+            },
+            count: hydrated.len(),
+            evidence: hydrated,
+        })
+        .unwrap_or(Value::Null),
+        0,
+    ))
+}
+
+pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
+    let record = agent_task_service::status(&args.run_id)?;
+    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
+    let mut hydrated_evidence = Vec::new();
+    let mut nested_reasons = Vec::new();
+
+    if let Some(aggregate) = aggregate.as_ref() {
+        for outcome in &aggregate.outcomes {
+            for evidence in &outcome.evidence_refs {
+                if let Some(summary) = hydrate_evidence_summary(&outcome.task_id, evidence) {
+                    collect_nested_diagnostics(
+                        &outcome.task_id,
+                        summary.get("summary").unwrap_or(&Value::Null),
+                        "hydrated_evidence",
+                        &mut nested_reasons,
+                    );
+                    hydrated_evidence.push(summary);
+                }
+            }
+        }
+    }
+
+    let root_cause = ranked_diagnostics(nested_reasons)
+        .into_iter()
+        .map(collected_diagnostic_value)
+        .next()
+        .or_else(|| {
+            aggregate
+                .as_ref()
+                .and_then(|aggregate| failure_reasons_from_aggregate(aggregate).into_iter().next())
+        });
+
+    let missing_artifacts = aggregate
+        .as_ref()
+        .map(missing_artifact_summaries)
+        .unwrap_or_default();
+    let causal_chain = aggregate
+        .as_ref()
+        .map(causal_chain_from_aggregate)
+        .unwrap_or_default();
+    let next_commands = diagnose_next_commands(&args.run_id);
+
+    Ok((
+        json!({
+            "schema": "homeboy/agent-task-diagnose/v1",
+            "run_id": record.run_id,
+            "state": record.state,
+            "root_cause": root_cause,
+            "causal_chain": causal_chain,
+            "missing_artifacts": missing_artifacts,
+            "hydrated_evidence": hydrated_evidence,
+            "next_commands": next_commands,
+        }),
+        0,
+    ))
+}
+
 pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
     let record = agent_task_service::cancel(&args.run_id, args.reason.as_deref())?;
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     surface_cancellation_recovery(&mut value);
     Ok((value, 0))
+}
+
+#[derive(Serialize)]
+struct AgentTaskEvidenceReport {
+    schema: &'static str,
+    run_id: String,
+    filters: AgentTaskEvidenceFilters,
+    count: usize,
+    evidence: Vec<HydratedEvidence>,
+}
+
+#[derive(Serialize)]
+struct AgentTaskEvidenceFilters {
+    kind: Option<String>,
+    task: Option<String>,
+    failure_only: bool,
+}
+
+#[derive(Serialize)]
+struct HydratedEvidence {
+    kind: String,
+    label: Option<String>,
+    task_id: Option<String>,
+    uri: String,
+    source: String,
+    status: String,
+    truncated: bool,
+    bytes_read: Option<usize>,
+    omitted_bytes: Option<u64>,
+    content: Value,
+    error: Option<String>,
+}
+
+fn hydrate_evidence_ref(
+    run_id: &str,
+    evidence_ref: &AgentTaskEvidenceRef,
+    task_id: Option<&str>,
+    plan: Option<&AgentTaskPlan>,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> HydratedEvidence {
+    let hydrated = if evidence_ref.uri.starts_with("homeboy://agent-task/") {
+        hydrate_homeboy_evidence_ref(run_id, &evidence_ref.uri, task_id, plan, aggregate)
+    } else if evidence_ref.uri.starts_with("file://") {
+        hydrate_file_evidence_ref(&evidence_ref.uri)
+    } else if let Some(path) = local_evidence_path(&evidence_ref.uri) {
+        hydrate_local_path_evidence_ref(&path)
+    } else {
+        Ok(HydratedContent {
+            source: "unsupported".to_string(),
+            truncated: false,
+            bytes_read: None,
+            omitted_bytes: None,
+            content: json!({
+                "summary": "Evidence ref is recorded but this URI scheme is not hydratable by agent-task evidence yet.",
+                "unsupported_ref": evidence_ref.uri,
+                "supported_refs": ["homeboy://agent-task/run/<run-id>/<section>", "file://<absolute-path>", "local filesystem path"],
+                "next_action": "Use a file:// URI or local path for evidence stored on this machine; otherwise inspect the producing provider or artifact store for this ref.",
+            }),
+        })
+    };
+
+    match hydrated {
+        Ok(content) => HydratedEvidence {
+            kind: evidence_ref.kind.clone(),
+            label: evidence_ref.label.clone(),
+            task_id: task_id.map(str::to_string),
+            uri: evidence_ref.uri.clone(),
+            source: content.source,
+            status: "ok".to_string(),
+            truncated: content.truncated,
+            bytes_read: content.bytes_read,
+            omitted_bytes: content.omitted_bytes,
+            content: redaction::redact_json(&content.content),
+            error: None,
+        },
+        Err(error) => HydratedEvidence {
+            kind: evidence_ref.kind.clone(),
+            label: evidence_ref.label.clone(),
+            task_id: task_id.map(str::to_string),
+            uri: evidence_ref.uri.clone(),
+            source: "error".to_string(),
+            status: "error".to_string(),
+            truncated: false,
+            bytes_read: None,
+            omitted_bytes: None,
+            content: Value::Null,
+            error: Some(redaction::redact_string(&error.message)),
+        },
+    }
+}
+
+struct HydratedContent {
+    source: String,
+    truncated: bool,
+    bytes_read: Option<usize>,
+    omitted_bytes: Option<u64>,
+    content: Value,
+}
+
+fn hydrate_homeboy_evidence_ref(
+    run_id: &str,
+    uri: &str,
+    task_id: Option<&str>,
+    plan: Option<&AgentTaskPlan>,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> homeboy::core::Result<HydratedContent> {
+    let parsed = parse_agent_task_homeboy_uri(uri)?;
+    if parsed.run_id != run_id {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            format!(
+                "evidence ref points at run {} but command is hydrating run {run_id}",
+                parsed.run_id
+            ),
+            Some(uri.to_string()),
+            None,
+        ));
+    }
+
+    let content = match parsed.section.as_str() {
+        "plan" => match (plan, task_id.or(parsed.task.as_deref())) {
+            (Some(plan), Some(task_id)) => plan
+                .tasks
+                .iter()
+                .find(|task| task.task_id == task_id)
+                .map(|task| json!(task))
+                .unwrap_or_else(|| json!({ "missing_task": task_id })),
+            (Some(plan), None) => json!(plan),
+            (None, _) => json!({ "summary": "plan is not available for this run" }),
+        },
+        "aggregate" => match (aggregate, parsed.outcome.as_deref().or(task_id)) {
+            (Some(aggregate), Some(task_id)) => aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == task_id)
+                .map(|outcome| json!(outcome))
+                .unwrap_or_else(|| json!({ "missing_outcome": task_id })),
+            (Some(aggregate), None) => json!(aggregate),
+            (None, _) => json!({ "summary": "aggregate is not available for this run" }),
+        },
+        "artifacts" => match (aggregate, task_id.or(parsed.task.as_deref())) {
+            (Some(aggregate), Some(task_id)) => aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == task_id)
+                .map(|outcome| {
+                    json!({
+                        "task_id": outcome.task_id,
+                        "status": outcome.status,
+                        "summary": outcome.summary,
+                        "artifacts": outcome.artifacts,
+                        "typed_artifacts": outcome.typed_artifacts,
+                        "evidence_refs": outcome.evidence_refs,
+                        "diagnostics": outcome.diagnostics,
+                    })
+                })
+                .unwrap_or_else(|| json!({ "missing_outcome": task_id })),
+            _ => json!({ "summary": "outcome artifacts are not available for this run" }),
+        },
+        "logs" => serde_json::to_value(agent_task_service::logs(run_id)?)
+            .unwrap_or_else(|_| json!({ "summary": "logs could not be serialized" })),
+        "status" => serde_json::to_value(agent_task_service::status(run_id)?)
+            .unwrap_or_else(|_| json!({ "summary": "status could not be serialized" })),
+        section => json!({
+            "summary": format!("homeboy agent-task evidence does not hydrate section '{section}' yet"),
+        }),
+    };
+
+    Ok(HydratedContent {
+        source: "homeboy".to_string(),
+        truncated: false,
+        bytes_read: None,
+        omitted_bytes: None,
+        content,
+    })
+}
+
+fn hydrate_file_evidence_ref(uri: &str) -> homeboy::core::Result<HydratedContent> {
+    let path = file_uri_path(uri)?;
+    hydrate_local_path_evidence_ref(&path)
+}
+
+fn hydrate_local_path_evidence_ref(path: &Path) -> homeboy::core::Result<HydratedContent> {
+    let metadata = fs::metadata(&path)
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    if !metadata.is_file() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            "file evidence ref does not point at a regular file",
+            None,
+            None,
+        ));
+    }
+
+    let bytes = fs::read(&path)
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let truncated = bytes.len() > EVIDENCE_TEXT_LIMIT;
+    let visible = &bytes[..bytes.len().min(EVIDENCE_TEXT_LIMIT)];
+    let text = String::from_utf8_lossy(visible);
+    let redacted_text = redaction::redact_string(&text);
+    let content = serde_json::from_str::<Value>(&redacted_text)
+        .map(|value| json!({ "format": "json", "value": value }))
+        .unwrap_or_else(|_| json!({ "format": "text", "text": redacted_text }));
+
+    Ok(HydratedContent {
+        source: "file".to_string(),
+        truncated,
+        bytes_read: Some(visible.len()),
+        omitted_bytes: truncated.then_some(bytes.len().saturating_sub(EVIDENCE_TEXT_LIMIT) as u64),
+        content,
+    })
+}
+
+fn local_evidence_path(uri: &str) -> Option<PathBuf> {
+    if uri.contains("://") || uri.contains('\0') || uri.trim().is_empty() {
+        return None;
+    }
+    let path = Path::new(uri);
+    if path.is_absolute() || path.exists() {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn file_uri_path(uri: &str) -> homeboy::core::Result<PathBuf> {
+    let raw = uri.strip_prefix("file://").ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            "file evidence ref must start with file://",
+            Some(uri.to_string()),
+            None,
+        )
+    })?;
+    if raw.is_empty() || raw.contains('\0') {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            "file evidence ref path is empty or invalid",
+            Some(uri.to_string()),
+            None,
+        ));
+    }
+    Ok(Path::new(raw).to_path_buf())
+}
+
+struct ParsedAgentTaskUri {
+    run_id: String,
+    section: String,
+    task: Option<String>,
+    outcome: Option<String>,
+}
+
+fn parse_agent_task_homeboy_uri(uri: &str) -> homeboy::core::Result<ParsedAgentTaskUri> {
+    let rest = uri
+        .strip_prefix("homeboy://agent-task/run/")
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "evidence_ref",
+                "unsupported homeboy agent-task evidence ref",
+                Some(uri.to_string()),
+                None,
+            )
+        })?;
+    let (path, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let mut parts = path.split('/');
+    let run_id = parts.next().unwrap_or_default();
+    let section = parts.next().unwrap_or_default();
+    if run_id.is_empty() || section.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "evidence_ref",
+            "homeboy agent-task evidence ref must include run id and section",
+            Some(uri.to_string()),
+            None,
+        ));
+    }
+
+    Ok(ParsedAgentTaskUri {
+        run_id: run_id.to_string(),
+        section: section.to_string(),
+        task: fragment_value(fragment, "task"),
+        outcome: fragment_value(fragment, "outcome"),
+    })
+}
+
+fn fragment_value(fragment: &str, key: &str) -> Option<String> {
+    fragment.split('&').find_map(|part| {
+        let (candidate, value) = part.split_once('=')?;
+        (candidate == key && !value.trim().is_empty()).then(|| value.to_string())
+    })
+}
+
+fn evidence_ref_task_id(evidence_ref: &AgentTaskEvidenceRef) -> Option<String> {
+    parse_agent_task_homeboy_uri(&evidence_ref.uri)
+        .ok()
+        .and_then(|parsed| parsed.task.or(parsed.outcome))
+}
+
+fn failed_task_statuses(
+    aggregate: Option<&AgentTaskAggregate>,
+) -> HashMap<String, AgentTaskOutcomeStatus> {
+    aggregate
+        .into_iter()
+        .flat_map(|aggregate| aggregate.outcomes.iter())
+        .filter(|outcome| {
+            matches!(
+                outcome.status,
+                AgentTaskOutcomeStatus::Failed
+                    | AgentTaskOutcomeStatus::ProviderError
+                    | AgentTaskOutcomeStatus::Timeout
+                    | AgentTaskOutcomeStatus::UnableToRemediate
+            )
+        })
+        .map(|outcome| (outcome.task_id.clone(), outcome.status.clone()))
+        .collect()
+}
+
+fn evidence_refs_with_tasks(
+    refs: &[AgentTaskEvidenceRef],
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Vec<(AgentTaskEvidenceRef, Option<String>)> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    if let Some(aggregate) = aggregate {
+        for outcome in &aggregate.outcomes {
+            for evidence_ref in &outcome.evidence_refs {
+                if seen.insert((evidence_ref.kind.clone(), evidence_ref.uri.clone())) {
+                    entries.push((evidence_ref.clone(), Some(outcome.task_id.clone())));
+                }
+            }
+            if let Some(workflow) = &outcome.workflow {
+                for step in &workflow.steps {
+                    for evidence_ref in &step.artifact_refs {
+                        if seen.insert((evidence_ref.kind.clone(), evidence_ref.uri.clone())) {
+                            entries.push((evidence_ref.clone(), Some(outcome.task_id.clone())));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for evidence_ref in refs {
+        if seen.insert((evidence_ref.kind.clone(), evidence_ref.uri.clone())) {
+            entries.push((evidence_ref.clone(), evidence_ref_task_id(evidence_ref)));
+        }
+    }
+    entries
 }
 
 /// Hoist live-cancellation recovery details to the top level of the cancel
@@ -202,14 +669,7 @@ pub(crate) fn completed_run_aggregate(
 }
 
 pub(crate) fn diagnostic_summary_from_aggregate(aggregate: &AgentTaskAggregate) -> Option<Value> {
-    aggregate.outcomes.iter().find_map(|outcome| {
-        let diagnostic = outcome.diagnostics.first()?;
-        Some(json!({
-            "task_id": outcome.task_id,
-            "class": diagnostic.class,
-            "message": diagnostic.message,
-        }))
-    })
+    failure_reasons_from_aggregate(aggregate).into_iter().next()
 }
 
 /// Cap the number of surfaced failure reasons so a pathological run with
@@ -274,8 +734,23 @@ pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> 
         );
     }
 
+    ranked_diagnostics(collected)
+        .into_iter()
+        .take(FAILURE_REASON_LIMIT)
+        .map(|item| {
+            json!({
+                "task_id": item.task_id,
+                "class": item.class,
+                "message": item.message,
+                "source": item.source,
+            })
+        })
+        .collect()
+}
+
+fn ranked_diagnostics(collected: Vec<CollectedDiagnostic>) -> Vec<CollectedDiagnostic> {
     // Dedupe by (class, message) keeping the first occurrence, then order the
-    // most actionable root-cause classes first.
+    // most actionable root-cause diagnostics first.
     let mut seen = std::collections::HashSet::new();
     let mut deduped: Vec<CollectedDiagnostic> = Vec::new();
     for item in collected {
@@ -290,20 +765,8 @@ pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> 
         deduped.push(item);
     }
 
-    deduped.sort_by_key(|item| class_priority(&item.class));
-
+    deduped.sort_by_key(|item| diagnostic_priority(&item.class, &item.message));
     deduped
-        .into_iter()
-        .take(FAILURE_REASON_LIMIT)
-        .map(|item| {
-            json!({
-                "task_id": item.task_id,
-                "class": item.class,
-                "message": item.message,
-                "source": item.source,
-            })
-        })
-        .collect()
 }
 
 struct CollectedDiagnostic {
@@ -317,22 +780,28 @@ struct CollectedDiagnostic {
 /// (validation/fatal/registration/missing-path) are surfaced before generic or
 /// transient noise so the first reason an operator sees is the one worth acting
 /// on.
-fn class_priority(class: &str) -> u8 {
-    let class = class.to_ascii_lowercase();
-    if class.contains("valid") || class.contains("recipe") || class.contains("schema") {
+fn diagnostic_priority(class: &str, message: &str) -> u8 {
+    let text = format!("{} {}", class, message).to_ascii_lowercase();
+    if text.contains("typed_artifacts_missing")
+        || text.contains("required_typed_artifacts_missing")
+        || text.contains("required typed artifacts")
+        || text.contains("declared artifact result envelope")
+    {
+        8
+    } else if text.contains("valid") || text.contains("recipe") || text.contains("schema") {
         0
-    } else if class.contains("fatal") || class.contains("error") || class.contains("exception") {
+    } else if text.contains("fatal") || text.contains("error") || text.contains("exception") {
         1
-    } else if class.contains("registr")
-        || class.contains("provider")
-        || class.contains("discovery")
-        || class.contains("capability")
+    } else if text.contains("registr")
+        || text.contains("provider")
+        || text.contains("discovery")
+        || text.contains("capability")
     {
         2
-    } else if class.contains("missing")
-        || class.contains("not_found")
-        || class.contains("path")
-        || class.contains("io")
+    } else if text.contains("missing")
+        || text.contains("not_found")
+        || text.contains("path")
+        || text.contains("io")
     {
         3
     } else {
@@ -685,6 +1154,190 @@ fn evidence_is_test(kind: &str, uri: &str) -> bool {
         || kind.contains("gate")
         || uri.contains("test")
         || uri.contains("transcript")
+}
+
+fn hydrate_evidence_summary(
+    task_id: &str,
+    evidence: &homeboy::core::agent_tasks::AgentTaskEvidenceRef,
+) -> Option<Value> {
+    let path = evidence.uri.strip_prefix("file://")?;
+    if !path.ends_with(".json") {
+        return None;
+    }
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let redacted = RedactionPolicy::default().redact_json(&value);
+    Some(json!({
+        "task_id": task_id,
+        "kind": evidence.kind,
+        "label": evidence.label,
+        "uri": evidence.uri,
+        "summary": evidence_json_summary(&redacted),
+    }))
+}
+
+fn evidence_json_summary(value: &Value) -> Value {
+    json!({
+        "status": find_string_field(value, &["status", "state"]),
+        "failure_classification": find_string_field(value, &["failure_classification", "failure_class", "classification", "class", "code", "kind"]),
+        "message": find_string_field(value, &["message", "summary", "error", "detail", "reason"]),
+        "command": find_string_field(value, &["command", "cmd", "failing_command"]),
+        "exit_code": find_number_field(value, &["exit_code", "exit_status", "status_code"]),
+        "stderr_excerpt": find_string_field(value, &["stderr", "stderr_excerpt"]).map(|text| excerpt(&text)),
+        "stdout_excerpt": find_string_field(value, &["stdout", "stdout_excerpt"]).map(|text| excerpt(&text)),
+        "diagnostics": first_diagnostics(value),
+    })
+}
+
+fn find_string_field(value: &Value, names: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(text) = map.get(*name).and_then(Value::as_str) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+            map.values()
+                .find_map(|nested| find_string_field(nested, names))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|nested| find_string_field(nested, names)),
+        _ => None,
+    }
+}
+
+fn find_number_field(value: &Value, names: &[&str]) -> Option<i64> {
+    match value {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(number) = map.get(*name).and_then(Value::as_i64) {
+                    return Some(number);
+                }
+            }
+            map.values()
+                .find_map(|nested| find_number_field(nested, names))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|nested| find_number_field(nested, names)),
+        _ => None,
+    }
+}
+
+fn first_diagnostics(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(items)) = map.get("diagnostics") {
+                return Value::Array(items.iter().take(5).cloned().collect());
+            }
+            map.values()
+                .find_map(|nested| {
+                    let diagnostics = first_diagnostics(nested);
+                    diagnostics
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+                        .then_some(diagnostics)
+                })
+                .unwrap_or_else(|| Value::Array(Vec::new()))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|nested| {
+                let diagnostics = first_diagnostics(nested);
+                diagnostics
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+                    .then_some(diagnostics)
+            })
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+        _ => Value::Array(Vec::new()),
+    }
+}
+
+fn excerpt(text: &str) -> String {
+    const MAX_CHARS: usize = 1200;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        return trimmed.to_string();
+    }
+    let truncated: String = trimmed.chars().take(MAX_CHARS).collect();
+    format!("{truncated}…")
+}
+
+fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
+    json!({
+        "task_id": item.task_id,
+        "class": item.class,
+        "message": item.message,
+        "source": item.source,
+    })
+}
+
+fn missing_artifact_summaries(aggregate: &AgentTaskAggregate) -> Vec<Value> {
+    aggregate
+        .outcomes
+        .iter()
+        .filter_map(|outcome| {
+            let expected: Vec<String> = outcome
+                .metadata
+                .get("expected_artifacts")
+                .or_else(|| outcome.outputs.get("expected_artifacts"))
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let produced: std::collections::HashSet<String> = outcome
+                .typed_artifacts
+                .iter()
+                .map(|artifact| artifact.name.clone())
+                .collect();
+            let missing: Vec<String> = expected
+                .into_iter()
+                .filter(|name| !produced.contains(name))
+                .collect();
+            (!missing.is_empty()).then(|| {
+                json!({
+                    "task_id": outcome.task_id,
+                    "missing": missing,
+                })
+            })
+        })
+        .collect()
+}
+
+fn causal_chain_from_aggregate(aggregate: &AgentTaskAggregate) -> Vec<Value> {
+    aggregate
+        .outcomes
+        .iter()
+        .map(|outcome| {
+            json!({
+                "task_id": outcome.task_id,
+                "surface": "agent-task",
+                "status": outcome.status,
+                "failure_classification": outcome.failure_classification,
+                "provider_summary": outcome.summary,
+                "evidence_kinds": outcome.evidence_refs.iter().map(|evidence| evidence.kind.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+fn diagnose_next_commands(run_id: &str) -> Vec<String> {
+    vec![
+        format!("homeboy agent-task status {run_id} --full"),
+        format!("homeboy agent-task artifacts {run_id}"),
+        format!("homeboy agent-task review {run_id}"),
+        format!("homeboy agent-task retry {run_id} --run"),
+    ]
 }
 
 #[cfg(test)]

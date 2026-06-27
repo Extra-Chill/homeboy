@@ -51,7 +51,7 @@ homeboy runner connect <runner-id>
 
 After this, `<runner-id>` is both the server ID and the runner ID.
 
-Commands that are both resource-policy hot and portable for Lab offload (`audit`, full `lint`, `test`, `bench run`, `fuzz run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
+Commands that are both resource-policy hot and portable for Lab offload (`agent-task controller from-spec --resume`, `agent-task controller run-from-spec`, `agent-task controller materialize`, `audit`, full `lint`, `test`, `bench run`, `fuzz run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
 - `--force-hot` only suppresses the resource-policy warning. If a default Lab runner is available for a portable hot command, Homeboy refuses to use `--force-hot` as an implicit local bypass.
@@ -68,7 +68,13 @@ Observation metadata records the routing decision under `metadata.lab_offload` w
 Commands launched through non-local `homeboy runner exec` run with `HOMEBOY_RUNNER_HOSTED_EXEC=1`. That marker is Homeboy's first-class runner-side dispatch signal: nested runner commands such as `homeboy agent-task cook` are allowed to pass the non-interactive resource preflight without adding `--force-hot`, because the work is already intentionally hosted on the selected runner.
 
 For reviewer-facing output, treat `runner exec` stdout as operator context and
-record durable artifacts through the run/artifact loop. See
+record durable artifacts through the run/artifact loop. Pass `--run-id <id>` plus
+`--artifact <path>` for files/directories and `--summary <path>` for compact
+summary evidence produced by the runner command. JSON summary files are echoed in
+the structured `runner.exec` response under `structured_summaries`, with the run
+id, runner id, command, declared path, and promoted artifact id/path so LLM
+workflows can consume the compact result without spelunking remote stdout or
+artifact directories. See
 [Artifact loop for runner and matrix workflows](../operators/artifact-loop-runner-matrix.md)
 for static HTML and matrix examples, plus proposed attach/promote command shapes
 for successful runner jobs that produced files but registered zero artifacts.
@@ -78,7 +84,8 @@ Lab offload support is intentionally command-specific:
 | Command | Auto offload | Explicit `--runner` | Decision |
 |---|---:|---:|---|
 | `agent-task cook` / `agent-task run-plan` | Yes | Yes | Portable agent-task execution when the command has deterministic gates where required. |
-| `agent-task controller from-spec --resume` / `agent-task controller materialize` / `agent-task controller resume` | No | Yes | Runner-hosted controller lifecycle work. |
+| `agent-task controller from-spec --resume` / `agent-task controller run-from-spec` / `agent-task controller materialize` | Yes | Yes | Portable controller spec materialization defaults to Lab when a default runner exists. |
+| `agent-task controller resume` | No | Yes | Runner-resident controller lifecycle work. |
 | `agent-task retry --run` | Yes | Yes | Retry plus execution follows the portable agent-task run path. |
 | `agent-task run` / `run-next` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |
 | `agent-task auth status` | No | Yes | Runner-resident auth diagnostics. |
@@ -144,12 +151,19 @@ It does not upgrade binaries, rewrite runner paths, or refresh Sample Runtime ca
 those remain explicit operator actions because they can be expensive or depend
 on environment-specific paths.
 
+`runner status` includes generic `selected_lab_runner.executable_requirements`
+from declared agent runtime manifests. Each entry names the runtime, requirement
+id, non-secret env vars, candidate executable names/paths, optional version
+arguments, and install hint. Homeboy owns the generic semantics: runtimes declare
+the executable they need; runner diagnostics expose the declaration without
+embedding product-specific checks in core.
+
 `runner status` also includes `selected_lab_runner.wp_codebox_runtime` for the
-runner job environment. That block shows the configured WP Codebox CLI, managed
-cache source/binary, expected `@automattic/wp-codebox-playground` and
-`@automattic/wp-codebox-core` paths, a runner-side probe command that prints the
-exact effective runtime and git SHA, and warnings when configured paths mix a
-stale checkout with the managed cache.
+legacy runner job environment projection. That block shows the configured WP
+Codebox CLI, managed cache source/binary, expected
+`@automattic/wp-codebox-playground` and `@automattic/wp-codebox-core` paths, a
+runner-side probe command that prints the exact effective runtime and git SHA,
+and warnings when configured paths mix a stale checkout with the managed cache.
 
 ### `refresh-homeboy`
 

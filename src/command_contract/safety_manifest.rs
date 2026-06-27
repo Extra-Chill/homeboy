@@ -168,6 +168,14 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         metadata.output_notes = top_level.output_notes;
         metadata.lab_supported = top_level.lab_supported;
         metadata.lab_notes = top_level.lab_notes;
+
+        if path.len() == 1 {
+            metadata.mutates = top_level.safety.mutates;
+            metadata.operator = top_level.safety.operator;
+            metadata.dry_run_flag = top_level.safety.dry_run_flag;
+            metadata.risk_exemption = top_level.safety.risk_exemption;
+            metadata.dangerous_flags = top_level.safety.dangerous_flags.to_vec();
+        }
     }
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
@@ -179,37 +187,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "default JSON output is non-mutating; pass --write to write markdown docs to disk";
             metadata.dangerous_flags = vec!["--write"];
         }
-        ["deploy"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.dry_run_flag = Some("--dry-run");
-            metadata.dangerous_flags = vec!["--head", "--force"];
-        }
-        ["release"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.dry_run_flag = Some("--dry-run");
-            metadata.dangerous_flags = vec![
-                "--apply",
-                "--deploy",
-                "--recover",
-                "--retag",
-                "--head",
-                "--skip-checks",
-                "--force-lower-bump",
-            ];
-        }
-        ["upgrade"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.dangerous_flags = vec!["--force", "--upgrade-runner"];
-        }
-        ["trace"] => {
-            metadata.mutates = true;
-        }
-        ["lint"] => {
-            metadata.dangerous_flags = vec!["--fix", "--force"];
-        }
         ["deps", "install"] | ["deps", "update"] | ["deps", "stack", "apply"] => {
             metadata.mutates = true;
             metadata.output_notes =
@@ -219,10 +196,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "commits and pushes prepared CI autofix changes";
-        }
-        ["cleanup"] => {
-            metadata.mutates = true;
-            metadata.dangerous_flags = vec!["--apply"];
         }
         ["cleanup", "artifacts"] => {
             metadata.mutates = true;
@@ -399,11 +372,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["file", "sync"] => {
             metadata.mutates = true;
         }
-        ["triage"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.dangerous_flags = vec!["--auto-merge"];
-        }
         ["fleet", "exec"] => {
             metadata.mutates = true;
             metadata.operator = true;
@@ -468,10 +436,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.output_notes =
                 "mutates persisted audit baseline data in component configuration";
-        }
-        ["refactor"] => {
-            metadata.mutates = true;
-            metadata.dangerous_flags = vec!["--write", "--commit"];
         }
         ["refactor", "rename"]
         | ["refactor", "add"]
@@ -547,6 +511,13 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.operator = true;
             metadata.output_notes = "materializes a local worktree into runner workspace state";
             metadata.dangerous_flags = vec!["--allow-dirty-lab-workspace"];
+        }
+        ["runner", "workspace", "pull"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes =
+                "copies selected files from runner workspace state to a local destination";
         }
         ["runner", "workspace", "apply"] => {
             metadata.mutates = true;
@@ -648,8 +619,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "executes extension-owned runtime commands with forwarded arguments that may mutate the target system";
             metadata.dangerous_flags = vec!["extension runtime command", "passthrough args"];
         }
-        ["undo"] => {
+        ["extension", "action"] => {
             metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes =
+                "executes extension-owned actions that may mutate the target system";
+            metadata.dangerous_flags = vec!["extension action"];
         }
         ["undo", "delete"] => {
             metadata.mutates = true;
@@ -752,7 +727,8 @@ mod tests {
 
         matches!(
             name,
-            "apply"
+            "action"
+                | "apply"
                 | "cleanup"
                 | "cleanup-downloads"
                 | "cleanup-persisted"
@@ -760,6 +736,7 @@ mod tests {
                 | "create"
                 | "delete"
                 | "disconnect"
+                | "exec"
                 | "generate"
                 | "import"
                 | "init"
@@ -882,6 +859,7 @@ mod tests {
             ["extension", "update"].as_slice(),
             ["extension", "uninstall"].as_slice(),
             ["extension", "run"].as_slice(),
+            ["extension", "action"].as_slice(),
             ["extension", "exec"].as_slice(),
             ["config", "set"].as_slice(),
             ["config", "remove"].as_slice(),
@@ -1038,6 +1016,7 @@ mod tests {
             ["runner", "connect"].as_slice(),
             ["runner", "work"].as_slice(),
             ["extension", "run"].as_slice(),
+            ["extension", "action"].as_slice(),
             ["extension", "exec"].as_slice(),
         ] {
             let entry = manifest_path(&manifest, path);

@@ -283,7 +283,7 @@ pub(crate) fn run_lab_offload_inner(
         PlanStep::builder(
             "lab.runner_homeboy",
             "lab.runner_homeboy",
-            if runner_status.stale_daemon.is_some() {
+            if lab_runner_homeboy_has_blocking_drift(&runner_status) {
                 PlanStepStatus::Failed
             } else {
                 PlanStepStatus::Ready
@@ -314,7 +314,7 @@ pub(crate) fn run_lab_offload_inner(
                 shell::quote_arg(runner_id)
             ))
     );
-    if runner_status.stale_daemon.is_some() {
+    if lab_runner_homeboy_has_blocking_drift(&runner_status) {
         return Err(stale_runner_homeboy_error(
             runner_id,
             homeboy_path,
@@ -636,6 +636,7 @@ pub(crate) fn run_lab_offload_inner(
     // The remaining pre-dispatch checks (secret-env, provider, path translation)
     // are still runner setup overhead before the workload executes.
     let pre_dispatch_started = std::time::Instant::now();
+    preflight_lab_secret_env_handoff(runner_id, Some(&runner), &env, &secret_env_handoff)?;
     preflight_agent_task_runner_secret_env_plan(
         runner_id,
         &runner,
@@ -824,11 +825,15 @@ pub(crate) fn run_lab_offload_inner(
         "Lab offload host telemetry: {}",
         host_telemetry.to_metadata()
     );
-    ensure_lab_offload_streams_not_truncated(&exec_output, output_file_content.is_some())?;
+    ensure_lab_offload_streams_not_truncated(
+        &exec_output,
+        lab_offload_structured_result_available(&exec_output, output_file_content.as_deref()),
+    )?;
     mirror_agent_task_run_plan_lifecycle(
         request.normalized_args,
         &exec_output.stdout,
         output_file_content.as_deref(),
+        exec_output.job_events.as_deref(),
     )?;
 
     let mut stderr = String::new();
@@ -942,9 +947,17 @@ pub(crate) fn ensure_lab_offload_streams_not_truncated(
     error.details["runner_id"] = serde_json::json!(exec_output.runner_id);
     error.details["remote_cwd"] = serde_json::json!(exec_output.remote_cwd);
     error.details["job_id"] = serde_json::json!(exec_output.job_id);
+    error.details["reason"] = serde_json::json!("output_too_large");
     error.details["capture"] =
         serde_json::to_value(capture).unwrap_or_else(|_| serde_json::json!({}));
     Err(error)
+}
+
+pub(crate) fn lab_offload_structured_result_available(
+    exec_output: &super::super::super::RunnerExecOutput,
+    output_file_content: Option<&str>,
+) -> bool {
+    output_file_content.is_some() || exec_output.runner_result.is_some()
 }
 
 pub(crate) fn download_lab_output_file(runner_id: &str, remote_path: &str) -> Result<String> {

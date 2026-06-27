@@ -743,57 +743,66 @@ fn persist_artifact_file(
     Ok(target)
 }
 
-fn sanitize_file_name(raw: &str) -> String {
-    raw.replace(['/', '\\', '\0'], "_")
+mod helpers {
+    use super::*;
+
+    pub fn sanitize_file_name(raw: &str) -> String {
+        raw.replace(['/', '\\', '\0'], "_")
+    }
+
+    pub fn list_runs_cache_key(repo: &str, workflow: &str) -> String {
+        let composite = format!("{repo}::{workflow}");
+        let digest = Sha256::digest(composite.as_bytes());
+        format!("{:x}", digest)
+    }
+
+    pub fn list_runs_cache_path(key: &str, ext: &str) -> homeboy::core::Result<PathBuf> {
+        let base = crate::core::paths::homeboy()?
+            .join("cache")
+            .join("gh-actions-runs");
+        fs::create_dir_all(&base).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("create cache dir {}", base.display())),
+            )
+        })?;
+        Ok(base.join(format!("{key}.{ext}")))
+    }
+
+    // ── Glob compilation ────────────────────────────────────────────────────
+
+    /// Compile a `--artifact-glob` value into a matcher. Uses the existing `glob`
+    /// crate's `Pattern` for shell-style matching (`*`, `?`, character classes).
+    pub fn compile_glob(raw: &str) -> homeboy::core::Result<glob::Pattern> {
+        glob::Pattern::new(raw).map_err(|e| {
+            Error::validation_invalid_argument(
+                "artifact_glob",
+                format!("invalid glob: {e}"),
+                Some(raw.to_string()),
+                None,
+            )
+        })
+    }
+
+    // ── Deterministic IDs ─────────────────────────────────────────────────────
+
+    pub fn deterministic_run_id(repo: &str, gh_run_id: u64) -> String {
+        let composite = format!("{repo}#{gh_run_id}");
+        let namespace = uuid::Uuid::from_bytes(*HOMEBOY_RUN_NAMESPACE);
+        uuid::Uuid::new_v5(&namespace, composite.as_bytes()).to_string()
+    }
+
+    pub fn deterministic_artifact_id(
+        homeboy_run_id: &str,
+        gh_artifact_id: u64,
+        file_name: &str,
+    ) -> String {
+        let composite = format!("{homeboy_run_id}#{gh_artifact_id}#{file_name}");
+        let namespace = uuid::Uuid::from_bytes(*HOMEBOY_ARTIFACT_NAMESPACE);
+        uuid::Uuid::new_v5(&namespace, composite.as_bytes()).to_string()
+    }
 }
-
-fn list_runs_cache_key(repo: &str, workflow: &str) -> String {
-    let composite = format!("{repo}::{workflow}");
-    let digest = Sha256::digest(composite.as_bytes());
-    format!("{:x}", digest)
-}
-
-fn list_runs_cache_path(key: &str, ext: &str) -> homeboy::core::Result<PathBuf> {
-    let base = crate::core::paths::homeboy()?
-        .join("cache")
-        .join("gh-actions-runs");
-    fs::create_dir_all(&base).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("create cache dir {}", base.display())),
-        )
-    })?;
-    Ok(base.join(format!("{key}.{ext}")))
-}
-
-// ── Glob compilation ────────────────────────────────────────────────────────
-
-/// Compile a `--artifact-glob` value into a matcher. Uses the existing `glob`
-/// crate's `Pattern` for shell-style matching (`*`, `?`, character classes).
-fn compile_glob(raw: &str) -> homeboy::core::Result<glob::Pattern> {
-    glob::Pattern::new(raw).map_err(|e| {
-        Error::validation_invalid_argument(
-            "artifact_glob",
-            format!("invalid glob: {e}"),
-            Some(raw.to_string()),
-            None,
-        )
-    })
-}
-
-// ── Deterministic IDs ───────────────────────────────────────────────────────
-
-fn deterministic_run_id(repo: &str, gh_run_id: u64) -> String {
-    let composite = format!("{repo}#{gh_run_id}");
-    let namespace = uuid::Uuid::from_bytes(*HOMEBOY_RUN_NAMESPACE);
-    uuid::Uuid::new_v5(&namespace, composite.as_bytes()).to_string()
-}
-
-fn deterministic_artifact_id(homeboy_run_id: &str, gh_artifact_id: u64, file_name: &str) -> String {
-    let composite = format!("{homeboy_run_id}#{gh_artifact_id}#{file_name}");
-    let namespace = uuid::Uuid::from_bytes(*HOMEBOY_ARTIFACT_NAMESPACE);
-    uuid::Uuid::new_v5(&namespace, composite.as_bytes()).to_string()
-}
+pub use helpers::*;
 
 #[cfg(test)]
 mod tests {

@@ -4,6 +4,121 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.264.2] - 2026-06-27
+
+### Changed
+- Add runs dossier command
+- Decouple runtime diagnostics from WP Codebox status
+- Add typed lab refresh handoff plan
+- Add runner workspace snapshot discovery
+- Add Lab refresh planning command
+- Add runner workspace pull recovery
+- Clarify runner workflow binary status
+- Add runner exec artifact dir promotion
+
+## [0.264.1] - 2026-06-27
+
+### Changed
+- split observation/store god-file into module dir
+- split component/inventory god-file into module dir
+- split triage tests.rs god-file into tests/ subdir
+- split controller_service tests.rs god-file into tests/ subdir
+- Hydrate runner artifacts from runs commands
+- Improve cleanup artifacts operator summary
+- Report cleanup artifact session totals
+- Improve cleanup artifacts non-git error
+- Clarify runner Homeboy binary roles
+- Preserve rig package source metadata
+- Recover Lab results after stream truncation
+- Surface runner exec structured summaries
+- Fail bench matrix on declared result gates
+- Remove deprecated bench reader aliases
+- Propagate run ids to claimed runner jobs
+- Classify extension action safety
+- Persist bench URL artifacts from run files
+- Fail closed on materialized runtime ref readiness
+
+### Fixed
+- retry transient artifact directory cleanup
+- Fix controller fork run isolation
+
+## [0.264.0] - 2026-06-27
+
+### Added
+- feat(agent-task): add issue cook batch fanout
+- feat(agent-task): stamp canonical fanout ownership
+
+### Changed
+- Improve controller failure diagnostics
+- split bench tests.rs god-file into tests/ subdir
+- Validate command workflow runtime kind
+- Support rig workload env providers
+- Allow rig dependencies in Lab materialized sources
+- Support rig package dependencies
+- Apply controller cwd defaults to command workflows
+- Recognize canonical fuzz result envelopes
+- Prefer local rig package for bench runs
+- Block Lab offload on runner version drift
+- Preflight Lab secret env handoff
+- Surface agent task lifecycle events in runs evidence
+- Clarify Lab failure context contract fields
+- Allow single-cell bench matrix runs
+- Support rig check path override
+- Install agent task contracts with extension assets
+- Add Lab runner availability preflight
+- Add typed agent-task runner lifecycle events
+- Add runner availability diagnostics
+- Add runs env provenance output
+- Decouple artifact browser capture providers
+- Declare runner workload followups
+- Make Composer installs deterministic
+- Add trace profile compare bundle metadata
+- Move top-level safety metadata into CommandSpec
+- Add runner handoff identity contract
+- Add typed lab secret env handoff entries
+- Add agent-task evidence hydration command
+- Surface controller child failure diagnostics
+- Move Lab support summaries into CommandSpec
+- Add agent-task diagnose evidence hydration
+- Auto-offload controller materialization to Lab
+- Support registry-backed rig components
+- Add Lab env provenance metadata
+- Add typed runner handoff envelope
+- Add runner diagnostic declarations
+- Consolidate command spec descriptor routing
+- Add static artifact DOM box capture
+- Add static artifact capture command
+- Add Lab runner file transfer abstraction
+- gate high-risk safety manifest metadata
+- Make PR checks direct and actionable
+- Detect stale runner runtime paths
+- Report WP Codebox runtime selection
+- Add typed runner lifecycle metadata
+- apply rustfmt to rig test
+- refactor(command-contract): centralize top-level command specs
+- Route rig sync source management to runner
+- Strip Lab routing flags from runner rig install
+- Translate runner rig source package paths
+- Parse runner refresh identity JSON payload
+- Allow owned stack refresh during rig reinstall
+
+### Fixed
+- Fix rig install schema compatibility errors
+- fix(agent-task): emit valid controller next commands
+- bind lab agent-task run ids
+- prune orphaned lab workspaces
+- fail proofs on expected metric mismatch
+- route trace dispatch timeout
+- mirror downloaded agent-task output
+- support directory exec artifacts
+- infer runtime provider secret env
+- bound command action execution
+- parse refresh identity after command output
+- fix(agent-task): initialize cook-batch workspace materialization
+- fix(agent-task): materialize fanout runner workspaces
+- Fix rig reinstall over stale registry specs
+- port from-spec loop primitives
+
 ## [0.263.0] - 2026-06-26
 
 ### Added

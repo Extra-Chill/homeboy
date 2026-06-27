@@ -7,18 +7,22 @@
 //! runner subsystem so the historical `workspace::*` paths keep resolving.
 
 mod git;
+mod pull;
 mod snapshot;
 mod sync;
 mod types;
 mod util;
 
+pub use pull::{plan_workspace_pull, pull_workspace};
 pub use sync::sync_workspace;
-pub use sync::{list_workspaces, prune_workspaces};
+pub use sync::{list_workspaces, prune_workspaces, workspace_snapshots};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
-    RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions,
+    RunnerWorkspacePullOutput, RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters,
+    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 pub(crate) use snapshot::{

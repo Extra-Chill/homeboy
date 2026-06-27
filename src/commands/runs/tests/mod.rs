@@ -2,10 +2,10 @@
 
 mod export_import;
 
-use super::handlers::{artifact_get, artifacts, show_run};
+use super::handlers::{artifact_get, artifacts, env, show_run};
 use super::{
-    bench_compare, dead_owned_run, findings, latest, list_runs, RunsArtifactGetArgs, RunsListArgs,
-    RunsOutput, WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER,
+    bench_compare, dead_owned_run, findings, latest, list_runs, runs_dossier, RunsArtifactGetArgs,
+    RunsListArgs, RunsOutput, WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER,
 };
 
 use homeboy::core::observation::runs_service;
@@ -188,6 +188,96 @@ fn run_show_includes_metadata_and_artifacts() {
 }
 
 #[test]
+fn runs_dossier_aggregates_failure_env_refs_artifacts_and_commands() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "bench",
+                "homeboy",
+                "studio",
+                serde_json::json!({
+                    "exit_code": 1,
+                    "error": "budget exceeded",
+                    "gate_failures": ["p95_ms exceeded"],
+                    "runner_job_id": "job-123",
+                    "handoff": { "ref": "handoff-123" },
+                    "result": { "ref": "result-123" },
+                    "env_resolution": {
+                        "schema": "homeboy/env-resolution/v1",
+                        "values_redacted": true,
+                        "keys": [
+                            {
+                                "key": "TOKEN",
+                                "classification": "secret",
+                                "shadowed_source_layers": ["env"]
+                            },
+                            {
+                                "key": "HOMEBOY_RUNTIME_DIR",
+                                "classification": "public",
+                                "shadowed_source_layers": []
+                            }
+                        ]
+                    }
+                }),
+            ))
+            .expect("run");
+        store
+            .finish_run(&run.id, RunStatus::Fail, None)
+            .expect("finish run");
+        let artifact_path = home.path().join("report.json");
+        std::fs::write(&artifact_path, b"{}").expect("artifact");
+        store
+            .record_artifact(&run.id, "report", &artifact_path)
+            .expect("record artifact");
+        store
+            .record_url_artifact(&run.id, "review", "https://example.test/evidence")
+            .expect("record url");
+
+        let (output, _) = runs_dossier(&run.id).expect("dossier");
+        let RunsOutput::Dossier(output) = output else {
+            panic!("expected dossier output");
+        };
+
+        assert_eq!(output.command, "runs.dossier");
+        assert_eq!(output.run_id, run.id);
+        assert_eq!(output.run_ref, format!("homeboy://run/{}", run.id));
+        assert_eq!(output.status.status, "fail");
+        assert_eq!(output.status.category.as_deref(), Some("gate_failure"));
+        assert_eq!(output.failure.error.as_deref(), Some("budget exceeded"));
+        assert_eq!(output.failure.gate_failures, vec!["p95_ms exceeded"]);
+        assert_eq!(output.refs.job_ref.as_deref(), Some("job-123"));
+        assert_eq!(output.refs.handoff_ref.as_deref(), Some("handoff-123"));
+        assert_eq!(output.refs.result_ref.as_deref(), Some("result-123"));
+        assert_eq!(
+            output.env.schema.as_deref(),
+            Some("homeboy/env-resolution/v1")
+        );
+        assert!(output.env.values_redacted);
+        assert_eq!(output.env.key_count, 2);
+        assert_eq!(output.env.secret_key_count, 1);
+        assert_eq!(output.env.public_key_count, 1);
+        assert_eq!(output.env.shadowed_key_count, 1);
+        assert_eq!(output.artifacts.count, 2);
+        assert_eq!(output.artifacts.reviewer_visible_count, 1);
+        assert_eq!(output.artifacts.fetchable_count, 1);
+        assert!(output
+            .artifacts
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.visibility_hint
+                == "operator-local; fetch before sharing with reviewers"));
+        assert!(output
+            .inspection_commands
+            .iter()
+            .any(|command| command.command == format!("homeboy runs evidence {}", run.id)));
+        assert!(output.next_commands.iter().any(|command| command.command
+            == format!("homeboy runs export --run {} --output <dir>", run.id)));
+    });
+}
+
+#[test]
 fn run_show_reconciles_owned_dead_running_run_before_displaying() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
@@ -204,6 +294,126 @@ fn run_show_reconciles_owned_dead_running_run_before_displaying() {
             output.run.metadata["homeboy_reconciled"]["reason"],
             "owner_process_not_running"
         );
+    });
+}
+
+#[test]
+fn runs_env_explains_redacted_lab_env_resolution() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "bench",
+                "homeboy",
+                "studio",
+                serde_json::json!({
+                    "env_resolution": {
+                        "schema": "homeboy/env-resolution/v1",
+                        "values_redacted": true,
+                        "keys": [
+                            {
+                                "key": "API_TOKEN",
+                                "classification": "secret",
+                                "value_status": "secret_redacted",
+                                "value_preview": "<redacted>",
+                                "winning_source_layer": "secret_env_plan_env_delta",
+                                "shadowed_source_layers": ["env_delta"],
+                                "source_layers": [
+                                    {
+                                        "source": "env_delta",
+                                        "status": "shadowed",
+                                        "classification": "secret",
+                                        "value_status": "secret_redacted"
+                                    },
+                                    {
+                                        "source": "secret_env_plan_env_delta",
+                                        "status": "winner",
+                                        "classification": "secret",
+                                        "value_status": "secret_redacted"
+                                    }
+                                ]
+                            },
+                            {
+                                "key": "HOMEBOY_RUNTIME_DIR",
+                                "classification": "public",
+                                "value_status": "redacted",
+                                "value_preview": "<redacted>",
+                                "winning_source_layer": "runtime_overlay",
+                                "shadowed_source_layers": [],
+                                "source_layers": [
+                                    {
+                                        "source": "runtime_overlay",
+                                        "status": "winner",
+                                        "classification": "public",
+                                        "value_status": "redacted"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }),
+            ))
+            .expect("run");
+
+        let (output, _) = env(&run.id).expect("runs env");
+        let RunsOutput::Env(output) = output else {
+            panic!("expected env output");
+        };
+
+        assert_eq!(output.command, "runs.env");
+        assert_eq!(output.run_id, run.id);
+        assert_eq!(output.schema, "homeboy/env-resolution/v1");
+        assert!(output.values_redacted);
+        assert_eq!(output.summary.key_count, 2);
+        assert_eq!(output.summary.secret_key_count, 1);
+        assert_eq!(output.summary.public_key_count, 1);
+        assert_eq!(output.summary.shadowed_key_count, 1);
+        let secret = output
+            .keys
+            .iter()
+            .find(|entry| entry.key == "API_TOKEN")
+            .expect("secret entry");
+        assert_eq!(secret.winning_source_layer, "secret_env_plan_env_delta");
+        assert_eq!(secret.shadowed_source_layers, vec!["env_delta"]);
+        assert_eq!(secret.value_preview, "<redacted>");
+        assert_eq!(secret.source_layers.len(), 2);
+        let serialized = serde_json::to_string(&output).expect("serialize output");
+        assert!(serialized.contains("secret_redacted"));
+        assert!(!serialized.contains("super-secret"));
+    });
+}
+
+#[test]
+fn runs_env_refuses_unredacted_env_resolution() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "bench",
+                "homeboy",
+                "studio",
+                serde_json::json!({
+                    "env_resolution": {
+                        "schema": "homeboy/env-resolution/v1",
+                        "values_redacted": false,
+                        "keys": [{
+                            "key": "API_TOKEN",
+                            "value_preview": "super-secret"
+                        }]
+                    }
+                }),
+            ))
+            .expect("run");
+
+        let error = match env(&run.id) {
+            Ok(_) => panic!("unredacted env must fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("not marked redacted"));
+        assert!(!message.contains("super-secret"));
     });
 }
 
@@ -569,6 +779,7 @@ fn artifact_get_copies_registered_file_without_raw_path_lookup() {
         let (output, _) = artifact_get(RunsArtifactGetArgs {
             run_id: run.id.clone(),
             artifact_id: artifact.id.clone(),
+            runner: None,
             output: Some(output_path.clone()),
         })
         .expect("get artifact");
@@ -586,6 +797,7 @@ fn artifact_get_copies_registered_file_without_raw_path_lookup() {
         let err = match artifact_get(RunsArtifactGetArgs {
             run_id: run.id,
             artifact_id: artifact_path.display().to_string(),
+            runner: None,
             output: Some(home.path().join("bad.json")),
         }) {
             Ok(_) => panic!("raw paths are not accepted as artifact ids"),
@@ -645,6 +857,7 @@ fn artifact_get_fetches_nested_publication_artifact_store_ref() {
         let (output, _) = artifact_get(RunsArtifactGetArgs {
             run_id: run.id.clone(),
             artifact_id: "nested-result".to_string(),
+            runner: None,
             output: Some(output_path.clone()),
         })
         .expect("get nested artifact");

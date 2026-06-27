@@ -4,6 +4,7 @@ use crate::core::rig::{
     declared_id, discover_rigs, install, list, list_ids, load, load_local_source,
     read_source_metadata, read_stack_source_metadata, run_check,
 };
+use crate::core::ErrorCode;
 use crate::test_support::HomeGuard;
 use std::fs;
 use std::path::Path;
@@ -243,6 +244,168 @@ mod install_flows {
     }
 
     #[test]
+    fn local_nested_package_dependency_records_repo_source_root() {
+        let _home = HomeGuard::new();
+        let repo = tempfile::tempdir().expect("repo");
+        let nested = repo.path().join("WordPress/static-site-importer");
+        fs::create_dir_all(repo.path().join("shared/wp-codebox")).expect("shared dir");
+        fs::write(
+            repo.path().join("shared/wp-codebox/recipe.mjs"),
+            "export default {};\n",
+        )
+        .expect("shared recipe");
+        write_single_rig(
+            &nested,
+            "static-site-importer-fixture-matrix",
+            r#"{
+                "id": "static-site-importer-fixture-matrix",
+                "package_dependencies": ["../../shared/wp-codebox"],
+                "bench_workloads": {
+                    "static-site-importer": [
+                        { "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs" }
+                    ]
+                }
+            }"#,
+        );
+        GitFixture::init(repo.path()).commit("nested package with shared dependency");
+
+        let result =
+            install(nested.to_str().unwrap(), None, false).expect("install nested package");
+        let metadata =
+            read_source_metadata("static-site-importer-fixture-matrix").expect("metadata");
+        let repo_root = repo.path().canonicalize().expect("canonical repo root");
+        let package_root = nested.canonicalize().expect("canonical package root");
+
+        assert_eq!(result.source_root, repo_root);
+        assert_eq!(result.package_path, package_root);
+        assert_eq!(
+            metadata.source_root.as_deref(),
+            Some(repo_root.to_str().unwrap())
+        );
+        assert_eq!(metadata.package_path, package_root.to_string_lossy());
+    }
+
+    #[test]
+    fn materialized_lab_nested_package_dependency_uses_snapshot_source_root() {
+        let _home = HomeGuard::new();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let snapshot = workspace
+            .path()
+            .join("_lab_workspaces/homeboy-rigs-fixture-123");
+        let nested = snapshot.join("WordPress/static-site-importer");
+        fs::create_dir_all(snapshot.join("shared/wp-codebox")).expect("shared dir");
+        fs::write(
+            snapshot.join("shared/wp-codebox/recipe.mjs"),
+            "export default {};\n",
+        )
+        .expect("shared recipe");
+        write_single_rig(
+            &nested,
+            "static-site-importer-fixture-matrix",
+            r#"{
+                "id": "static-site-importer-fixture-matrix",
+                "package_dependencies": ["../../shared/wp-codebox"],
+                "bench_workloads": {
+                    "static-site-importer": [
+                        { "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs" }
+                    ]
+                }
+            }"#,
+        );
+
+        let result =
+            install(nested.to_str().unwrap(), None, false).expect("install materialized package");
+        let metadata =
+            read_source_metadata("static-site-importer-fixture-matrix").expect("metadata");
+        let source_root = snapshot.canonicalize().expect("canonical source root");
+        let package_root = nested.canonicalize().expect("canonical package root");
+
+        assert_eq!(result.source_root, source_root);
+        assert_eq!(result.package_path, package_root);
+        assert_eq!(
+            metadata.source_root.as_deref(),
+            Some(source_root.to_str().unwrap())
+        );
+        assert_eq!(metadata.package_path, package_root.to_string_lossy());
+    }
+
+    #[test]
+    fn materialized_lab_package_dependency_outside_snapshot_is_rejected() {
+        let _home = HomeGuard::new();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let snapshot = workspace
+            .path()
+            .join("_lab_workspaces/homeboy-rigs-fixture-123");
+        let nested = snapshot.join("WordPress/static-site-importer");
+        fs::create_dir_all(workspace.path().join("_lab_workspaces/outside")).expect("outside dir");
+        write_single_rig(
+            &nested,
+            "bad-rig",
+            r#"{
+                "id": "bad-rig",
+                "package_dependencies": ["../../../outside"]
+            }"#,
+        );
+
+        let err = install(nested.to_str().unwrap(), None, false)
+            .expect_err("dependency outside snapshot should fail");
+
+        assert!(err
+            .message
+            .contains("package dependency paths must stay inside"));
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
+    fn package_dependency_outside_source_root_is_rejected() {
+        let _home = HomeGuard::new();
+        let parent = tempfile::tempdir().expect("parent");
+        let repo = parent.path().join("repo");
+        let outside = parent.path().join("outside-shared");
+        let nested = repo.join("packages/app");
+        fs::create_dir_all(&outside).expect("outside dir");
+        write_single_rig(
+            &nested,
+            "bad-rig",
+            r#"{
+                "id": "bad-rig",
+                "package_dependencies": ["../../../outside-shared"]
+            }"#,
+        );
+        GitFixture::init(&repo).commit("bad dependency");
+
+        let err = install(nested.to_str().unwrap(), None, false)
+            .expect_err("dependency outside repo should fail");
+
+        assert!(err
+            .message
+            .contains("package dependency paths must stay inside"));
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
+    fn absolute_package_dependency_is_rejected() {
+        let _home = HomeGuard::new();
+        let repo = tempfile::tempdir().expect("repo");
+        let nested = repo.path().join("packages/app");
+        write_single_rig(
+            &nested,
+            "bad-rig",
+            r#"{
+                "id": "bad-rig",
+                "package_dependencies": ["/tmp/shared"]
+            }"#,
+        );
+        GitFixture::init(repo.path()).commit("bad dependency");
+
+        let err = install(nested.to_str().unwrap(), None, false)
+            .expect_err("absolute dependency should fail");
+
+        assert!(err.message.contains("non-empty relative paths"));
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
     fn install_git_source_missing_subpath_reports_source_and_package_roots() {
         let _home = HomeGuard::new();
         let repo = tempfile::tempdir().expect("repo");
@@ -424,6 +587,63 @@ mod install_flows {
                 .expect("metadata")
                 .materialized
         );
+    }
+
+    #[test]
+    fn install_accepts_registry_backed_component_specs() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        write_rig(
+            package.path(),
+            "registry-backed",
+            r#"{
+            "id": "registry-backed",
+            "components": {
+                "app": {
+                    "component_id": "registry-app",
+                    "default_ref": "origin/main",
+                    "path_setting": "HOMEBOY_RIG_COMPONENT_PATH__REGISTRY_BACKED__APP",
+                    "branch": "main"
+                }
+            }
+        }"#,
+        );
+
+        let result = install(package.path().to_str().unwrap(), None, false)
+            .expect("install registry-backed component rig");
+
+        assert_eq!(result.installed.len(), 1);
+        let rig = load("registry-backed").expect("load registry-backed rig");
+        let component = &rig.components["app"];
+        assert!(component.path.is_empty());
+        assert_eq!(component.component_id.as_deref(), Some("registry-app"));
+        assert_eq!(component.default_ref.as_deref(), Some("origin/main"));
+        assert_eq!(component.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn install_reports_schema_errors_separately_from_invalid_json() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        fs::create_dir_all(package.path().join("rigs/schema-bad")).expect("rig dir");
+        fs::write(
+            package.path().join("rigs/schema-bad/rig.json"),
+            r#"{
+            "id": "schema-bad",
+            "app_launcher": {
+                "platform": "macos"
+            }
+        }"#,
+        )
+        .expect("rig json");
+
+        let err = install(package.path().to_str().unwrap(), None, false)
+            .expect_err("schema error should fail install discovery");
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.details["field"], "rig_spec");
+        assert!(err.message.contains("schema"));
+        assert!(err.message.contains("missing field"));
     }
 
     #[test]

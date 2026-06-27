@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use homeboy::core::artifact_links::ArtifactViewerDescriptor;
 use homeboy::core::artifacts::{ArtifactPreviewEntrypoint, MatrixArtifactSummary};
+use homeboy::core::fuzz::FuzzResultEnvelopeArtifactInspection;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::runners::RunnerArtifactRef;
@@ -21,6 +22,7 @@ use super::bundle::{RunsExportArgs, RunsExportOutput, RunsImportArgs, RunsImport
 use super::common::RunSummary;
 use super::compare::{RunsCompareArgs, RunsCompareOutput};
 use super::distribution::{RunsDistributionArgs, RunsDistributionOutput};
+use super::dossier::RunsDossierOutput;
 use super::drift::{RunsDriftArgs, RunsDriftOutput};
 use super::evidence::RunsEvidenceOutput;
 use super::findings;
@@ -57,15 +59,15 @@ pub struct RunsArgs {
 
 #[derive(Subcommand, Clone)]
 pub(super) enum RunsCommand {
-    /// List persisted observation runs; canonical replacement for `bench history` and `rig runs`
+    /// List persisted observation runs
     List(RunsListArgs),
-    /// Aggregate persisted run metadata; canonical replacement for `bench distribution`
+    /// Aggregate persisted run metadata
     Distribution(RunsDistributionArgs),
     /// Show the latest persisted observation run matching filters
     LatestRun(RunsLatestRunArgs),
     /// Compare selected metrics across persisted run history
     Compare(RunsCompareArgs),
-    /// Compare two persisted benchmark runs by exact run id; canonical replacement for `bench compare`
+    /// Compare two persisted benchmark runs by exact run id
     BenchCompare(RunsBenchCompareArgs),
     /// Compare two persisted fuzz runs by exact run id
     FuzzCompare(RunsFuzzCompareArgs),
@@ -83,12 +85,21 @@ pub(super) enum RunsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Aggregate the actionable read-only dossier for one persisted run
+    Dossier {
+        run_id: String,
+        /// Print the full JSON output instead of the compact human dossier.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show a generic resume plan for a validation-progress run
     ResumePlan { run_id: String },
     /// Show stable evidence registry data for one run; start here for reviewer-facing evidence
     Evidence { run_id: String },
+    /// Explain redacted Lab environment provenance for one run
+    Env { run_id: String },
     /// List artifacts recorded for one run
-    Artifacts { run_id: String },
+    Artifacts(RunsArtifactsArgs),
     /// Retrieve or sync recorded run artifacts
     Artifact(RunsArtifactArgs),
     /// List findings recorded for one run
@@ -148,8 +159,10 @@ pub enum RunsOutput {
     LatestRun(RunsLatestRunOutput),
     Compare(RunsCompareOutput),
     Show(RunsShowOutput),
+    Dossier(RunsDossierOutput),
     ResumePlan(RunsResumePlanOutput),
     Evidence(RunsEvidenceOutput),
+    Env(RunsEnvOutput),
     Artifacts(RunsArtifactsOutput),
     ArtifactAttach(RunsArtifactAttachOutput),
     ArtifactGet(RunsArtifactGetOutput),
@@ -189,11 +202,24 @@ pub struct RunsShowOutput {
 pub struct RunsArtifactsOutput {
     pub command: &'static str,
     pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
     pub artifacts: Vec<ArtifactRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview_entrypoints: Vec<ArtifactPreviewEntrypoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matrix_summary: Option<MatrixArtifactSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fuzz_result_envelopes: Vec<FuzzResultEnvelopeArtifactInspection>,
+}
+
+#[derive(Args, Clone)]
+pub struct RunsArtifactsArgs {
+    /// Observation run id that owns the artifacts
+    pub run_id: String,
+    /// Query artifacts from a connected execution runner daemon
+    #[arg(long)]
+    pub runner: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -208,6 +234,43 @@ pub struct RunsResumePlanOutput {
     pub active_command: Option<ValidationCommandSummary>,
     pub next_command: Option<ValidationCommandSummary>,
     pub hints: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEnvOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    pub schema: String,
+    pub values_redacted: bool,
+    pub summary: RunsEnvSummary,
+    pub keys: Vec<RunsEnvKeyOutput>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEnvSummary {
+    pub key_count: usize,
+    pub secret_key_count: usize,
+    pub public_key_count: usize,
+    pub shadowed_key_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct RunsEnvKeyOutput {
+    pub key: String,
+    pub classification: String,
+    pub value_status: String,
+    pub value_preview: String,
+    pub winning_source_layer: String,
+    pub shadowed_source_layers: Vec<String>,
+    pub source_layers: Vec<RunsEnvSourceLayerOutput>,
+}
+
+#[derive(Serialize)]
+pub struct RunsEnvSourceLayerOutput {
+    pub source: String,
+    pub status: String,
+    pub classification: String,
+    pub value_status: String,
 }
 
 #[derive(Args, Clone)]
@@ -262,6 +325,9 @@ pub struct RunsArtifactGetArgs {
     pub run_id: String,
     /// Artifact id/path token from `homeboy runs artifacts <run-id>`
     pub artifact_id: String,
+    /// Pull the artifact from a connected execution runner daemon
+    #[arg(long)]
+    pub runner: Option<String>,
     /// Destination file path. Defaults to the recorded artifact filename.
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
@@ -272,6 +338,10 @@ pub struct RunsArtifactGetOutput {
     pub command: &'static str,
     pub run_id: String,
     pub artifact_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_content_url: Option<String>,
     pub output_path: String,
     pub content_type: Option<String>,
     pub size_bytes: Option<i64>,
@@ -326,45 +396,55 @@ pub struct RunsArtifactCaptureArgs {
     pub viewport_height: u32,
 }
 
-#[derive(Serialize)]
-pub struct RunsArtifactCaptureOutput {
-    pub command: &'static str,
-    pub run_id: String,
-    pub artifact_id: String,
-    pub artifact_path: String,
-    pub output_dir: String,
-    pub manifest_path: String,
-    pub base_url: String,
-    pub viewport: RunsArtifactCaptureViewport,
-    pub browser: RunsArtifactCaptureBrowser,
-    pub pages: Vec<RunsArtifactCapturePage>,
-}
+/// Output payload types for the `runs artifact capture` subcommand.
+///
+/// Grouped into a nested module to keep the file's top-level item count under
+/// the structural threshold; `pub use capture_types::*` re-exports every type
+/// at the original path so external imports and field access are unchanged.
+mod capture_types {
+    use super::*;
 
-#[derive(Serialize, Clone)]
-pub struct RunsArtifactCaptureViewport {
-    pub width: u32,
-    pub height: u32,
-}
+    #[derive(Serialize)]
+    pub struct RunsArtifactCaptureOutput {
+        pub command: &'static str,
+        pub run_id: String,
+        pub artifact_id: String,
+        pub artifact_path: String,
+        pub output_dir: String,
+        pub manifest_path: String,
+        pub base_url: String,
+        pub viewport: RunsArtifactCaptureViewport,
+        pub browser: RunsArtifactCaptureBrowser,
+        pub pages: Vec<RunsArtifactCapturePage>,
+    }
 
-#[derive(Serialize)]
-pub struct RunsArtifactCaptureBrowser {
-    pub command: String,
-    pub available: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
+    #[derive(Serialize, Clone)]
+    pub struct RunsArtifactCaptureViewport {
+        pub width: u32,
+        pub height: u32,
+    }
 
-#[derive(Serialize)]
-pub struct RunsArtifactCapturePage {
-    pub entrypoint: String,
-    pub page_url: String,
-    pub screenshot_path: String,
-    pub viewport: RunsArtifactCaptureViewport,
-    pub status: String,
-    pub timing_ms: u128,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    #[derive(Serialize)]
+    pub struct RunsArtifactCaptureBrowser {
+        pub command: String,
+        pub available: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub error: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    pub struct RunsArtifactCapturePage {
+        pub entrypoint: String,
+        pub page_url: String,
+        pub screenshot_path: String,
+        pub viewport: RunsArtifactCaptureViewport,
+        pub status: String,
+        pub timing_ms: u128,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub error: Option<String>,
+    }
 }
+pub use capture_types::*;
 
 #[derive(Args, Clone, Default)]
 pub struct RunsArtifactCleanupDownloadsArgs {

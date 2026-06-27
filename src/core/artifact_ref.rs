@@ -2,11 +2,12 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::core::execution_contract::decode_uri_component;
+use crate::core::execution_contract::{decode_uri_component, encode_uri_component};
 use crate::core::observation::ArtifactRecord;
 
 pub const ARTIFACT_REF_SCHEMA: &str = "homeboy/artifact-ref/v1";
 pub const EVIDENCE_REF_SCHEMA: &str = "homeboy/evidence-ref/v1";
+pub const HOMEBOY_REF_SCHEME: &str = "homeboy://";
 pub const RUNNER_ARTIFACT_REF_SCHEME: &str = "runner-artifact://";
 pub const METADATA_ONLY_REF_SCHEME: &str = "metadata-only:";
 
@@ -129,6 +130,10 @@ impl ArtifactRef {
             semantic_key: None,
         }
     }
+
+    pub fn canonical_uri(&self) -> String {
+        artifact_uri(&self.run_id, &self.id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +166,39 @@ impl EvidenceRef {
             artifact: None,
         }
     }
+
+    pub fn for_artifact(
+        artifact: &ArtifactRecord,
+        label: impl Into<String>,
+        role: Option<String>,
+        semantic_key: Option<String>,
+    ) -> Self {
+        let mut artifact_ref = ArtifactRef::from_record(artifact);
+        artifact_ref.role = role.clone();
+        artifact_ref.semantic_key = semantic_key.clone();
+        Self {
+            schema: EVIDENCE_REF_SCHEMA.to_string(),
+            kind: "artifact".to_string(),
+            target: artifact_ref.canonical_uri(),
+            label: label.into(),
+            role,
+            semantic_key,
+            artifact: Some(artifact_ref),
+        }
+    }
+
+    pub fn canonical_uri(&self) -> &str {
+        &self.target
+    }
+}
+
+pub fn artifact_uri(run_id: &str, artifact_id: &str) -> String {
+    format!(
+        "{}run/{}/artifact/{}",
+        HOMEBOY_REF_SCHEME,
+        encode_uri_component(run_id),
+        encode_uri_component(artifact_id)
+    )
 }
 
 #[cfg(test)]
@@ -236,6 +274,43 @@ mod tests {
                 "role": "summary",
                 "semantic_key": "run.summary"
             })
+        );
+    }
+
+    #[test]
+    fn evidence_ref_builds_generic_homeboy_artifact_uri() {
+        let artifact = ArtifactRecord {
+            id: "artifact 1".to_string(),
+            run_id: "run/1".to_string(),
+            kind: "fuzz_result_envelope".to_string(),
+            artifact_type: "file".to_string(),
+            path: "summary.json".to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: json!({}),
+            created_at: "2026-06-27T00:00:00Z".to_string(),
+        };
+
+        let reference = EvidenceRef::for_artifact(
+            &artifact,
+            "Fuzz result envelope",
+            Some("result".to_string()),
+            Some("fuzz.result_envelope".to_string()),
+        );
+
+        assert_eq!(
+            reference.canonical_uri(),
+            "homeboy://run/run%2F1/artifact/artifact%201"
+        );
+        assert_eq!(reference.kind, "artifact");
+        assert_eq!(
+            reference.artifact.expect("artifact").role.as_deref(),
+            Some("result")
         );
     }
 }

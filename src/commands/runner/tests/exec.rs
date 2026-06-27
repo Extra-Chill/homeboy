@@ -1,7 +1,8 @@
 use super::super::dispatch::raw_exec_command_run;
 use super::super::exec::{
-    exec, prepare_runner_exec_command, prepare_runner_exec_env, promote_runner_exec_artifacts,
-    read_bounded, read_runner_exec_script, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
+    exec, prepare_runner_exec_command, prepare_runner_exec_env, promote_runner_exec_artifact_dirs,
+    promote_runner_exec_artifacts, read_bounded, read_runner_exec_script,
+    RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
 use super::super::types::RUNNER_EXEC_SCRIPT_ENV;
 
@@ -32,6 +33,8 @@ fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
             patch: None,
             mutation_artifacts: None,
             artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
             metrics: None,
             capture: None,
             runner_result: None,
@@ -144,7 +147,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             )
             .expect("run");
 
-        let (_output, exit_code) = exec(
+        let (output, exit_code) = exec(
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
@@ -157,6 +160,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             Some(run.id.clone()),
             vec!["out.txt".to_string(), "reports".to_string()],
             Vec::new(),
+            Vec::new(),
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
@@ -167,6 +171,19 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
         .expect("runner exec");
 
         assert_eq!(exit_code, 0);
+        let binaries = output
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.homeboy_binaries.as_ref())
+            .expect("runner exec reports Homeboy binary role diagnostics");
+        assert_eq!(binaries.controller_cli.owner, "operator_command");
+        assert_eq!(
+            binaries.job_command_binary.owner,
+            "runner_config.settings.homeboy_path"
+        );
+        assert!(binaries
+            .guidance
+            .contains("verify job_command_binary on the runner"));
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
         assert_eq!(artifacts.len(), 2);
         assert_eq!(artifacts[0].kind, "out_txt");
@@ -203,7 +220,7 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             )
             .expect("run");
 
-        let (_output, exit_code) = exec(
+        let (output, exit_code) = exec(
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
@@ -214,6 +231,7 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             Vec::new(),
             false,
             Some(run.id.clone()),
+            Vec::new(),
             Vec::new(),
             vec!["summary.json".to_string()],
             vec![
@@ -233,6 +251,78 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
         assert_eq!(artifacts[0].metadata_json["evidence_role"], "summary");
         assert_eq!(artifacts[0].metadata_json["promoted_by"], "runner.exec");
         assert!(std::path::Path::new(&artifacts[0].path).is_file());
+        assert_eq!(output.promoted_outputs.len(), 1);
+        assert_eq!(output.promoted_outputs[0].role, "summary");
+        assert_eq!(output.promoted_outputs[0].run_id, run.id);
+        assert_eq!(output.promoted_outputs[0].runner_id, "lab-local");
+        assert_eq!(output.promoted_outputs[0].declared_path, "summary.json");
+        assert_eq!(output.promoted_outputs[0].artifact_kind, "summary");
+        assert_eq!(
+            output.promoted_outputs[0].runner_path,
+            workspace.path().join("summary.json").display().to_string()
+        );
+        assert_eq!(output.structured_summaries.len(), 1);
+        assert_eq!(
+            output.structured_summaries[0].summary["matrix"]["passed"],
+            1
+        );
+        assert_eq!(
+            output.structured_summaries[0].artifact_id,
+            output.promoted_outputs[0].artifact_id
+        );
+    });
+}
+
+#[test]
+fn runner_exec_structured_summary_is_independent_of_large_stdout() {
+    homeboy::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        runner::create(
+            &format!(
+                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                workspace.path().display()
+            ),
+            false,
+        )
+        .expect("create local runner");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec lab-local".to_string())
+                    .cwd_path(workspace.path())
+                    .metadata(serde_json::json!({}))
+                    .build(),
+            )
+            .expect("run");
+
+        let (output, exit_code) = exec(
+            "lab-local",
+            Some(workspace.path().display().to_string()),
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            false,
+            Some(run.id.clone()),
+            Vec::new(),
+            Vec::new(),
+            vec!["summary.json".to_string()],
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                r#"yes noisy | head -n 2000; printf '{"status":"pass","count":2000}' > summary.json"#.to_string(),
+            ],
+        )
+        .expect("runner exec");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.stdout.len() > 10_000);
+        assert_eq!(output.structured_summaries.len(), 1);
+        assert_eq!(output.structured_summaries[0].summary["status"], "pass");
+        assert_eq!(output.structured_summaries[0].summary["count"], 2000);
     });
 }
 
@@ -352,6 +442,61 @@ fn runner_exec_promotes_offloaded_directory_artifacts_from_runner_path() {
 }
 
 #[test]
+fn runner_exec_promotes_artifact_dir_children_to_run_store() {
+    homeboy::test_support::with_isolated_home(|home| {
+        let artifact_root = home.path().join("artifacts");
+        homeboy::core::set_artifact_root_override(Some(artifact_root));
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outputs = workspace.path().join("outputs");
+        let report_dir = outputs.join("report");
+        std::fs::create_dir_all(&report_dir).expect("create report dir");
+        std::fs::write(outputs.join("summary.json"), r#"{"passed":true}"#).expect("write summary");
+        std::fs::write(report_dir.join("index.html"), "<h1>Report</h1>").expect("write report");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("runner-exec")
+                    .command("homeboy runner exec lab-local".to_string())
+                    .cwd_path(workspace.path())
+                    .metadata(serde_json::json!({}))
+                    .build(),
+            )
+            .expect("run");
+        let output = runner_exec_output(
+            "lab-local",
+            RunnerExecMode::Local,
+            &workspace.path().display().to_string(),
+        );
+
+        let promoted =
+            promote_runner_exec_artifact_dirs(&run.id, &output, &["outputs".to_string()])
+                .expect("promote artifact dir children");
+
+        assert_eq!(promoted.len(), 2);
+        let artifacts = store.list_artifacts(&run.id).expect("artifacts");
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].kind, "report");
+        assert_eq!(artifacts[0].artifact_type, "directory");
+        assert_eq!(artifacts[0].metadata_json["artifact_dir"], "outputs");
+        assert_eq!(
+            artifacts[0].metadata_json["declared_path"],
+            "outputs/report"
+        );
+        assert!(std::path::Path::new(&artifacts[0].path)
+            .join("index.html")
+            .is_file());
+        assert_eq!(artifacts[1].kind, "summary_json");
+        assert_eq!(artifacts[1].artifact_type, "file");
+        assert_eq!(artifacts[1].metadata_json["artifact_dir"], "outputs");
+        assert_eq!(
+            artifacts[1].metadata_json["declared_path"],
+            "outputs/summary.json"
+        );
+        assert!(std::path::Path::new(&artifacts[1].path).is_file());
+    });
+}
+
+#[test]
 fn runner_exec_rejects_artifacts_without_run_id() {
     let err = exec(
         "lab-local",
@@ -365,6 +510,7 @@ fn runner_exec_rejects_artifacts_without_run_id() {
         false,
         None,
         vec!["out.txt".to_string()],
+        Vec::new(),
         Vec::new(),
         vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
     )
@@ -395,6 +541,8 @@ fn runner_exec_output(runner_id: &str, mode: RunnerExecMode, remote_cwd: &str) -
         patch: None,
         mutation_artifacts: None,
         artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
         metrics: None,
         capture: None,
         runner_result: None,
@@ -416,6 +564,7 @@ fn runner_exec_rejects_summaries_without_run_id() {
         Vec::new(),
         false,
         None,
+        Vec::new(),
         Vec::new(),
         vec!["summary.json".to_string()],
         vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],

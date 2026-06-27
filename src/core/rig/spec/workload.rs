@@ -12,6 +12,10 @@ impl WorkloadSpec {
         &self.path
     }
 
+    pub fn env_provider_extensions(&self) -> &[String] {
+        &self.env_provider_extensions
+    }
+
     pub fn public_preview(&self) -> Option<&TracePublicPreviewSpec> {
         self.public_preview.as_ref()
     }

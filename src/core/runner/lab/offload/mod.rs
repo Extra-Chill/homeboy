@@ -75,6 +75,7 @@ use super::super::lab_env::{
 };
 use super::super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 use super::super::lab_selection::{
+    fail_if_no_default_runner_accepts_jobs, preflight_lab_runner_availability,
     prepare_lab_runner_for_offload, release_gate_local_hot_denied_error,
     resolve_lab_runner_selection, status_tunnel_mode, LabRunnerPreparation, LabRunnerSelection,
     LabRunnerSelectionSource,
@@ -114,6 +115,7 @@ use super::fallback::{
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
 use super::secrets::{
     build_lab_secret_env_handoff_plan, preflight_agent_task_runner_secret_env_plan,
+    preflight_lab_secret_env_handoff,
 };
 use super::trace_fetch_refs::lab_offload_git_fetch_refs;
 use super::workspace_plan::{lab_workspace_sync_mode, preflight_required_git_checkout_workspace};
