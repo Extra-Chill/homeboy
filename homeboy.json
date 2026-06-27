@@ -674,7 +674,6 @@
         "test_quality::tests/command_surface_test.rs::VacuousTest",
         "thin_command_adapter::src/commands/agent_task/tool.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/bench/settings_matrix.rs::ThinCommandAdapterViolation",
-        "thin_command_adapter::src/commands/doctor/resources/memory.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/observe.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/review/mod.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/runs/gh_actions.rs::ThinCommandAdapterViolation",

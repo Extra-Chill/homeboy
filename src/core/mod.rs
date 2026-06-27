@@ -120,6 +120,7 @@ pub mod refactor;
 pub mod release;
 pub mod report_compare;
 pub(crate) mod report_compare_render;
+pub mod resources;
 pub mod review;
 pub mod rig;
 pub mod run_lifecycle_record;
