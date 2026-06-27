@@ -253,14 +253,8 @@ pub struct RunnerJob {
     pub elapsed_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_age_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_by_runner_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim_expires_at_ms: Option<u64>,
+    #[serde(flatten)]
+    pub claim: crate::core::api_jobs::JobClaimMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_expires_in_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -302,10 +296,7 @@ impl From<&ActiveRunnerJobSummary> for RunnerJob {
             updated_at_ms: Some(job.updated_at_ms),
             elapsed_ms: Some(job.elapsed_ms),
             heartbeat_age_ms: Some(job.heartbeat_age_ms),
-            claim_id: job.claim_id.clone(),
-            claimed_by_runner_id: job.claimed_by_runner_id.clone(),
-            claimed_at_ms: job.claimed_at_ms,
-            claim_expires_at_ms: job.claim_expires_at_ms,
+            claim: job.claim.clone(),
             claim_expires_in_ms: job.claim_expires_in_ms,
             durable_run_id: job.durable_run_id.clone(),
             stale_reason: job.stale_reason.clone(),
@@ -342,10 +333,12 @@ impl RunnerJob {
             updated_at_ms: Some(job.updated_at_ms),
             elapsed_ms: None,
             heartbeat_age_ms: None,
-            claim_id: job.claim_id.clone(),
-            claimed_by_runner_id: job.claimed_by_runner_id.clone(),
-            claimed_at_ms: job.claimed_at_ms,
-            claim_expires_at_ms: job.claim_expires_at_ms,
+            claim: crate::core::api_jobs::JobClaimMetadata {
+                claim_id: job.claim_id.clone(),
+                claimed_by_runner_id: job.claimed_by_runner_id.clone(),
+                claimed_at_ms: job.claimed_at_ms,
+                claim_expires_at_ms: job.claim_expires_at_ms,
+            },
             claim_expires_in_ms: None,
             durable_run_id: None,
             stale_reason: job.stale_reason.clone(),

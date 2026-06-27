@@ -687,8 +687,10 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
             started_at: "2026-06-08T00:00:00Z".to_string(),
             finished_at: "2026-06-08T00:00:01Z".to_string(),
             duration_ms: 1000,
-            sampled_peak_rss_bytes: Some(2 * 1024 * 1024),
-            sampled_peak_cpu_percent: Some(3.5),
+            peak: crate::core::engine::resource::ChildResourcePeakSample {
+                sampled_peak_rss_bytes: Some(2 * 1024 * 1024),
+                sampled_peak_cpu_percent: Some(3.5),
+            },
             sampled_peak_at_ms: Some(100),
             sampled_peak_child_count: Some(1),
             samples: vec![ExtensionChildResourceSample {
@@ -713,7 +715,7 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
         phase_child.child.root_pid = 43;
         phase_child.child.command_label = "npm install".to_string();
         phase_child.phase = Some("install".to_string());
-        phase_child.sampled_peak_rss_bytes = Some(3 * 1024 * 1024);
+        phase_child.peak.sampled_peak_rss_bytes = Some(3 * 1024 * 1024);
         phase_child.samples[0].root_pid = 43;
         phase_child.samples[0].phase = Some("install".to_string());
         phase_child.samples[0].rss_bytes = 3 * 1024 * 1024;

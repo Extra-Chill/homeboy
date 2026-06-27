@@ -33,10 +33,12 @@ pub(super) fn active_runner_job_summary(
         updated_at_ms: job.updated_at_ms,
         elapsed_ms: now_ms.saturating_sub(started_at_ms),
         heartbeat_age_ms: now_ms.saturating_sub(job.updated_at_ms),
-        claim_id: job.claim_id.clone(),
-        claimed_by_runner_id: job.claimed_by_runner_id.clone(),
-        claimed_at_ms: job.claimed_at_ms,
-        claim_expires_at_ms: job.claim_expires_at_ms,
+        claim: super::types::JobClaimMetadata {
+            claim_id: job.claim_id.clone(),
+            claimed_by_runner_id: job.claimed_by_runner_id.clone(),
+            claimed_at_ms: job.claimed_at_ms,
+            claim_expires_at_ms: job.claim_expires_at_ms,
+        },
         claim_expires_in_ms: job
             .claim_expires_at_ms
             .map(|expires_at| expires_at.saturating_sub(now_ms)),

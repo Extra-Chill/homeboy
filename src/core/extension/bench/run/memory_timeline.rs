@@ -188,7 +188,7 @@ pub(crate) fn preserve_phase_memory_timeline_artifacts(
         let Some(phase) = resource.phase.as_deref().filter(|phase| !phase.is_empty()) else {
             continue;
         };
-        let peak_rss_bytes = resource.sampled_peak_rss_bytes.unwrap_or(0);
+        let peak_rss_bytes = resource.peak.sampled_peak_rss_bytes.unwrap_or(0);
         let peak_rss_mb = bytes_to_mb(peak_rss_bytes);
         sample_count += resource.samples.len();
         phases.insert(
@@ -275,7 +275,7 @@ pub(crate) fn preserve_memory_timeline_artifacts(
     let json_path = run_dir.step_file(&json_filename);
     let csv_path = run_dir.step_file(&csv_filename);
 
-    let peak_rss_bytes = child_resource.sampled_peak_rss_bytes.unwrap_or(0);
+    let peak_rss_bytes = child_resource.peak.sampled_peak_rss_bytes.unwrap_or(0);
     let peak_rss_mb = bytes_to_mb(peak_rss_bytes);
     let sample_count = child_resource.samples.len();
     let peak_child_count = child_resource.sampled_peak_child_count.unwrap_or(0);

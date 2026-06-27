@@ -44,6 +44,15 @@ pub struct ChildProcessIdentity {
     pub command_label: String,
 }
 
+/// Peak resource sample (RSS + CPU) shared by child-resource reporting structs.
+/// Flattened so the emitted JSON keys (`sampled_peak_rss_bytes`,
+/// `sampled_peak_cpu_percent`) are identical to the previously inlined fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChildResourcePeakSample {
+    pub sampled_peak_rss_bytes: Option<u64>,
+    pub sampled_peak_cpu_percent: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionChildResourceSummary {
     #[serde(flatten)]
@@ -53,8 +62,8 @@ pub struct ExtensionChildResourceSummary {
     pub started_at: String,
     pub finished_at: String,
     pub duration_ms: u128,
-    pub sampled_peak_rss_bytes: Option<u64>,
-    pub sampled_peak_cpu_percent: Option<f64>,
+    #[serde(flatten)]
+    pub peak: ChildResourcePeakSample,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampled_peak_at_ms: Option<u128>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,8 +437,10 @@ mod tests {
                     started_at: Utc::now().to_rfc3339(),
                     finished_at: Utc::now().to_rfc3339(),
                     duration_ms: 10,
-                    sampled_peak_rss_bytes: Some(2048),
-                    sampled_peak_cpu_percent: Some(12.5),
+                    peak: ChildResourcePeakSample {
+                        sampled_peak_rss_bytes: Some(2048),
+                        sampled_peak_cpu_percent: Some(12.5),
+                    },
                     sampled_peak_at_ms: Some(5),
                     sampled_peak_child_count: Some(1),
                     samples: Vec::new(),
@@ -487,8 +498,10 @@ mod tests {
                 started_at: "2026-04-30T00:00:00+00:00".to_string(),
                 finished_at: "2026-04-30T00:00:00.100+00:00".to_string(),
                 duration_ms: 100,
-                sampled_peak_rss_bytes: Some(4096),
-                sampled_peak_cpu_percent: Some(1.5),
+                peak: ChildResourcePeakSample {
+                    sampled_peak_rss_bytes: Some(4096),
+                    sampled_peak_cpu_percent: Some(1.5),
+                },
                 sampled_peak_at_ms: Some(50),
                 sampled_peak_child_count: Some(0),
                 samples: Vec::new(),

@@ -12,9 +12,9 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_executable_requirement_diagnostics, declared_run_followups_for_legacy,
-    declared_runtime_diagnostics,
-    declared_runtime_source_diagnostics, declared_tool_diagnostics, lab_runner_homeboy_output,
-    runner_artifact_feature_diagnostics, runner_status_operator_commands,
+    declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
+    lab_runner_homeboy_output, runner_artifact_feature_diagnostics,
+    runner_status_operator_commands,
 };
 
 #[test]
@@ -73,10 +73,12 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             updated_at_ms: 1500,
             elapsed_ms: 500,
             heartbeat_age_ms: 0,
-            claim_id: Some("claim-123".to_string()),
-            claimed_by_runner_id: Some("homeboy-lab".to_string()),
-            claimed_at_ms: Some(1000),
-            claim_expires_at_ms: Some(31_000),
+            claim: homeboy::core::api_jobs::JobClaimMetadata {
+                claim_id: Some("claim-123".to_string()),
+                claimed_by_runner_id: Some("homeboy-lab".to_string()),
+                claimed_at_ms: Some(1000),
+                claim_expires_at_ms: Some(31_000),
+            },
             claim_expires_in_ms: Some(29_500),
             lifecycle: None,
             durable_run_id: Some("run-123".to_string()),
@@ -100,10 +102,12 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             updated_at_ms: Some(1500),
             elapsed_ms: Some(500),
             heartbeat_age_ms: Some(0),
-            claim_id: Some("claim-123".to_string()),
-            claimed_by_runner_id: Some("homeboy-lab".to_string()),
-            claimed_at_ms: Some(1000),
-            claim_expires_at_ms: Some(31_000),
+            claim: homeboy::core::api_jobs::JobClaimMetadata {
+                claim_id: Some("claim-123".to_string()),
+                claimed_by_runner_id: Some("homeboy-lab".to_string()),
+                claimed_at_ms: Some(1000),
+                claim_expires_at_ms: Some(31_000),
+            },
             claim_expires_in_ms: Some(29_500),
             durable_run_id: Some("run-123".to_string()),
             stale_reason: None,
@@ -256,7 +260,6 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
         .iter()
         .any(|diagnostic| diagnostic.id == "selected_runtime.mixed_core_source"));
 }
-
 
 #[test]
 fn sample_runtime_diagnostics_accept_single_managed_checkout() {

@@ -44,10 +44,10 @@ fn test_execute_local_command_in_dir() {
     assert_eq!(child.child.command_label, "sleep 0.2");
     assert!(child.duration_ms > 0);
     assert!(
-        child.sampled_peak_rss_bytes.is_some() || !child.warnings.is_empty(),
+        child.peak.sampled_peak_rss_bytes.is_some() || !child.warnings.is_empty(),
         "resource probes should either sample RSS or explain why they could not"
     );
-    if child.sampled_peak_rss_bytes.is_some() {
+    if child.peak.sampled_peak_rss_bytes.is_some() {
         assert!(!child.samples.is_empty());
         assert!(child.sampled_peak_at_ms.is_some());
         assert!(child.sampled_peak_child_count.is_some());

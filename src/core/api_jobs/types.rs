@@ -87,6 +87,22 @@ pub struct Job {
     pub artifacts: Vec<JobArtifactMetadata>,
 }
 
+/// Shared lease/claim identity fields carried by jobs that can be claimed by a
+/// runner. Flattened into the owning structs so the on-wire JSON shape is
+/// identical to the previously inlined fields (each field keeps its
+/// `skip_serializing_if`/`default` attrs verbatim).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobClaimMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_expires_at_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveRunnerJobSummary {
     pub runner_id: String,
@@ -104,14 +120,8 @@ pub struct ActiveRunnerJobSummary {
     pub elapsed_ms: u64,
     #[serde(default)]
     pub heartbeat_age_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_by_runner_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim_expires_at_ms: Option<u64>,
+    #[serde(flatten)]
+    pub claim: JobClaimMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_expires_in_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
