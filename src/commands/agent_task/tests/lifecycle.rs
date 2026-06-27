@@ -256,6 +256,169 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 }
 
 #[test]
+fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
+    with_temp_home(|| {
+        let run_id = "run-contract-import-diagnostics";
+        let outcome = fixture_outcome(
+            "../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json",
+        );
+
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            FixtureOutcomeExecutor { outcome },
+        )
+        .expect("run completed with fixture outcome");
+
+        let (diagnose_value, diagnose_exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+        })
+        .expect("diagnose loaded");
+        assert_eq!(diagnose_exit_code, 0);
+        assert_eq!(
+            diagnose_value["root_cause"]["class"],
+            "runtime.import_failed"
+        );
+        assert_eq!(
+            diagnose_value["root_cause"]["message"],
+            "ImportError: cannot import runtime package module 'neutral_runtime.adapter'"
+        );
+        assert_eq!(
+            diagnose_value["missing_artifacts"][0]["missing"],
+            json!(["answer_packet"])
+        );
+
+        let (status_value, status_exit_code) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            bridge: false,
+            since_cursor: None,
+            full: true,
+        })
+        .expect("status loaded");
+        assert_eq!(status_exit_code, 0);
+        assert_eq!(
+            status_value["diagnostic_summary"]["class"],
+            "runtime.import_failed"
+        );
+        assert_eq!(
+            status_value["failure_reasons"][0]["message"],
+            "ImportError: cannot import runtime package module 'neutral_runtime.adapter'"
+        );
+    });
+}
+
+#[test]
+fn generic_contract_fixtures_hydrate_local_file_and_path_evidence() {
+    with_isolated_home(|home| {
+        let structured_path = home.path().join("structured-result.json");
+        let log_path = home.path().join("runtime.log");
+        std::fs::write(
+            &structured_path,
+            serde_json::to_string(&json!({
+                "status": "provider_error",
+                "diagnostics": [{
+                    "class": "runtime.import_failed",
+                    "message": "ImportError: cannot import runtime package module 'neutral_runtime.adapter'"
+                }],
+                "access_token": "secret-token"
+            }))
+            .expect("structured evidence json"),
+        )
+        .expect("write structured evidence");
+        std::fs::write(&log_path, "runtime import failed").expect("write log evidence");
+
+        let raw = include_str!(
+            "../../../../tests/fixtures/agent_task_contract/local_file_evidence_refs.json"
+        )
+        .replace(
+            "__LOCAL_FILE_URI__",
+            &format!("file://{}", structured_path.display()),
+        )
+        .replace("__LOCAL_PATH__", &log_path.display().to_string());
+        let outcome: AgentTaskOutcome = serde_json::from_str(&raw).expect("fixture outcome");
+        let run_id = "run-contract-local-evidence";
+
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            FixtureOutcomeExecutor { outcome },
+        )
+        .expect("run completed with fixture outcome");
+
+        let (value, exit_code) = evidence(EvidenceArgs {
+            run_id: run_id.to_string(),
+            kind: None,
+            task: Some("task-a".to_string()),
+            failure_only: true,
+        })
+        .expect("evidence loaded");
+        assert_eq!(exit_code, 0);
+        let entries = value["evidence"].as_array().expect("evidence entries");
+        let structured = entries
+            .iter()
+            .find(|entry| entry["kind"] == "executor-result")
+            .expect("structured evidence");
+        assert_eq!(structured["source"], "file");
+        assert_eq!(
+            structured["content"]["value"]["diagnostics"][0]["class"],
+            "runtime.import_failed"
+        );
+        assert_eq!(structured["content"]["value"]["access_token"], "[REDACTED]");
+
+        let plain = entries
+            .iter()
+            .find(|entry| entry["kind"] == "runtime-log")
+            .expect("plain path evidence");
+        assert_eq!(plain["source"], "file");
+        assert_eq!(plain["content"]["text"], "runtime import failed");
+    });
+}
+
+#[test]
+fn generic_contract_fixtures_accept_successful_required_artifact_handoff() {
+    let outcome = fixture_outcome(
+        "../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json",
+    );
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert!(outcome
+        .typed_artifacts
+        .iter()
+        .any(|artifact| artifact.name == "answer_packet"));
+    assert!(outcome
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.metadata["handoff_schema"]
+            == "homeboy/agent-task-artifact-handoff/v1"));
+}
+
+fn fixture_outcome(relative_path: &str) -> AgentTaskOutcome {
+    let raw = match relative_path {
+        "../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json" => include_str!("../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json"),
+        "../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json" => include_str!("../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json"),
+        "../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json" => include_str!("../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json"),
+        _ => panic!("unknown fixture {relative_path}"),
+    };
+    serde_json::from_str(raw).expect("fixture outcome")
+}
+
+struct FixtureOutcomeExecutor {
+    outcome: AgentTaskOutcome,
+}
+
+impl AgentTaskExecutorAdapter for FixtureOutcomeExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let mut outcome = self.outcome.clone();
+        outcome.task_id = request.task_id;
+        outcome
+    }
+}
+
+#[test]
 fn evidence_command_hydrates_plain_local_path_refs_and_summarizes_unsupported_refs() {
     with_isolated_home(|home| {
         let file_path = home.path().join("plain-evidence.txt");

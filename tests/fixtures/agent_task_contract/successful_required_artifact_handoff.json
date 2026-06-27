@@ -1,0 +1,40 @@
+{
+  "schema": "homeboy/agent-task-outcome/v1",
+  "task_id": "task-contract-success",
+  "status": "succeeded",
+  "summary": "Required artifact was produced and handed off.",
+  "artifacts": [
+    {
+      "schema": "homeboy/agent-task-artifact/v1",
+      "id": "artifact-answer-packet",
+      "kind": "typed-artifact",
+      "name": "answer_packet",
+      "label": "Answer packet",
+      "path": "artifacts/answer-packet.json",
+      "metadata": {
+        "handoff_schema": "homeboy/agent-task-artifact-handoff/v1",
+        "required": true
+      }
+    }
+  ],
+  "typed_artifacts": [
+    {
+      "name": "answer_packet",
+      "type": "json",
+      "artifact_schema": "example/answer-packet/v1",
+      "payload": {
+        "result": "accepted"
+      }
+    }
+  ],
+  "evidence_refs": [
+    {
+      "kind": "artifact-handoff",
+      "uri": "homeboy://agent-task/run/run-contract-success/artifacts#outcome=task-contract-success",
+      "label": "Required artifact handoff"
+    }
+  ],
+  "metadata": {
+    "expected_artifacts": ["answer_packet"]
+  }
+}

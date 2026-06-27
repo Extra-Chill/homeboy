@@ -49,8 +49,24 @@ fn contract_output_exports_core_agent_task_metadata() {
         "homeboy/agent-task-artifact-declaration/v1"
     );
     assert_eq!(
+        value["schemas"]["artifact_handoff"],
+        "homeboy/agent-task-artifact-handoff/v1"
+    );
+    assert_eq!(
         value["schemas"]["evidence_ref"],
         "homeboy/agent-task-evidence-ref/v1"
+    );
+    assert_eq!(
+        value["schemas"]["loop_action"],
+        "homeboy/agent-task-loop-action/v1"
+    );
+    assert_eq!(
+        value["schemas"]["provider_outcome_contract"],
+        "homeboy/agent-task-provider-outcome-contract/v1"
+    );
+    assert_eq!(
+        value["schemas"]["diagnostic_ranking"],
+        "homeboy/agent-task-diagnostic-ranking/v1"
     );
     assert_eq!(
         value["schemas"]["secret_env_requirement"],
@@ -88,4 +104,24 @@ fn contract_output_exports_core_agent_task_metadata() {
         .as_array()
         .expect("sensitive keys")
         .contains(&json!("refresh_token")));
+}
+
+#[test]
+fn generic_loop_contract_fixtures_are_versioned_and_provider_neutral() {
+    let fixtures = [
+        include_str!("../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json"),
+        include_str!("../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json"),
+        include_str!("../../../../tests/fixtures/agent_task_contract/local_file_evidence_refs.json"),
+        include_str!("../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json"),
+    ];
+
+    for raw in fixtures {
+        assert!(!raw.contains("WordPress"));
+        assert!(!raw.contains("WP Codebox"));
+        assert!(!raw.contains("Data Machine"));
+        assert!(!raw.contains("WPSG"));
+        assert!(!raw.contains("wp-codebox"));
+        let outcome: AgentTaskOutcome = serde_json::from_str(raw).expect("fixture outcome");
+        assert_eq!(outcome.schema, AGENT_TASK_OUTCOME_SCHEMA);
+    }
 }

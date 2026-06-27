@@ -183,28 +183,28 @@ mod tests {
     fn test_request() -> AgentTaskRequest {
         AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-            task_id: "wpsg/codebox proof".to_string(),
+            task_id: "neutral-runtime proof".to_string(),
             group_key: None,
             parent_plan_id: None,
             executor: AgentTaskExecutor {
-                backend: "codebox".to_string(),
+                backend: "example-provider".to_string(),
                 selector: None,
                 runtime_selection: None,
                 required_capabilities: Vec::new(),
                 secret_env: Vec::new(),
                 model: Some("claude-sonnet".to_string()),
                 config: json!({
-                    "runtime_component_paths": ["/runner/components/wpsg"],
+                    "runtime_component_paths": ["/runner/components/sample-runtime"],
                     "api_key": "sk-super-secret",
                 }),
             },
-            instructions: "prove the codebox typed artifact".to_string(),
+            instructions: "prove the typed artifact handoff".to_string(),
             inputs: Value::Null,
             source_refs: Vec::new(),
             workspace: AgentTaskWorkspace::default(),
             component_contracts: vec![AgentTaskComponentContract {
-                slug: Some("wpsg".to_string()),
-                path: Some("/runner/components/wpsg".to_string()),
+                slug: Some("sample-runtime".to_string()),
+                path: Some("/runner/components/sample-runtime".to_string()),
                 load_as: None,
                 activate: None,
                 extra: Map::new(),
@@ -220,7 +220,7 @@ mod tests {
     fn test_outcome() -> AgentTaskOutcome {
         AgentTaskOutcome {
             schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-            task_id: "wpsg/codebox proof".to_string(),
+            task_id: "neutral-runtime proof".to_string(),
             status: AgentTaskOutcomeStatus::Succeeded,
             summary: Some("token=abc done".to_string()),
             failure_classification: None,
@@ -297,7 +297,7 @@ mod tests {
             assert!(raw.contains("[REDACTED]"));
             // ...while component contracts, runtime/component paths, model, and
             // typed artifact expectations are retained.
-            assert!(raw.contains("/runner/components/wpsg"));
+            assert!(raw.contains("/runner/components/sample-runtime"));
             assert!(raw.contains("runtime_component_paths"));
             assert!(raw.contains("claude-sonnet"));
             assert!(raw.contains("component_contracts"));
