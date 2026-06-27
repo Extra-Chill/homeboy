@@ -410,9 +410,17 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
 
     assert!(serialized.contains("controller_cli"));
     assert!(serialized.contains("active_daemon"));
-    assert!(serialized.contains("job_command_binary"));
+    assert!(serialized.contains("configured_job_binary"));
     assert!(serialized.contains("runner_config.settings.homeboy_path"));
     assert!(serialized.contains("/opt/homeboy/bin/homeboy tunnel artifact-origin dom-boxes --help"));
+    assert!(serialized.contains("Recent or already-queued runner workflows"));
+    assert_eq!(output.controller_cli.role, "controller_cli");
+    assert_eq!(output.active_daemon.role, "active_daemon");
+    assert_eq!(output.configured_job_binary.role, "configured_job_binary");
+    assert_eq!(
+        output.configured_job_binary.path.as_deref(),
+        Some("/opt/homeboy/bin/homeboy")
+    );
     assert_eq!(output.active_daemon_version.as_deref(), Some("0.262.0"));
 }
 
