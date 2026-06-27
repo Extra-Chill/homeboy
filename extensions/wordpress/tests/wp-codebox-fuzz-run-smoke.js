@@ -352,7 +352,7 @@ assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name 
 assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'case-log'), true);
 assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'replay-data'), true);
 assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'coverage-summary'), true);
-assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'result-envelope' && artifact.role === 'result_envelope'), true);
+assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'result-envelope' && artifact.role === 'result_envelope'), false);
 
 const genericPrimitiveManifest = {
 	schema: 'homeboy/fuzz-workload/v1',
@@ -593,7 +593,7 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.observation_set.observations.some((observation) => observation.case_id === 'case-000' && observation.metric === 'query_count'), true);
 	assert.equal(summary.runtime_task_result.observation_set.observations[0].fingerprint, 'select-posts');
 	assert.equal(summary.derived_artifacts.artifacts.some((artifact) => artifact.role === 'hotspot_summary'), true);
-	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'normalized_fuzz_result', 'coverage_gap_report', 'hotspot_summary', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case', 'repro_case', 'result_envelope']);
+	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'normalized_fuzz_result', 'coverage_gap_report', 'hotspot_summary', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case', 'repro_case']);
 	assert.equal(summary.artifacts[0].semantic_key, 'fuzz.report');
 	assert.equal(summary.artifacts[9].semantic_key, 'fuzz.case.repro');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'coverage').semantic_key, 'fuzz.coverage');
@@ -605,7 +605,7 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'failing_case').semantic_key, 'fuzz.case.failing');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'case_artifact').semantic_key, 'fuzz.case.artifact');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'repro_case').semantic_key, 'fuzz.case.repro');
-	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'result_envelope').semantic_key, 'fuzz.result.envelope');
+	assert.equal(summary.artifacts.some((artifact) => artifact.role === 'result_envelope'), false);
 	assert.equal(summary.artifacts.some((artifact) => artifact.name === 'placeholder-only'), false);
 	assert.equal(summary.observation.schema, WORDPRESS_FUZZ_OBSERVATION_SCHEMA);
 	assert.equal(summary.observation.status, 'succeeded');
@@ -679,7 +679,6 @@ runWpCodeboxFuzzSuite({
 		['case_log', 'fuzz.case.log'],
 		['replay_data', 'fuzz.replay.data'],
 		['coverage_summary', 'fuzz.coverage.summary'],
-		['result_envelope', 'fuzz.result.envelope'],
 	]);
 
 	const normalized = normalizeWpCodeboxFuzzSuiteResult({ status: 'failed', failures: [{ message: 'boom' }] });

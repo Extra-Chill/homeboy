@@ -156,7 +156,9 @@ Promise.all([
 		assert.equal(summary.status, 'succeeded');
 		assert.equal(summary.artifacts.length, 1);
 		assert.equal(summary.artifacts[0].semantic_key, 'fuzz.report');
+		assert.equal(summary.artifacts.some((artifact) => artifact.role === 'result_envelope'), false);
 		assert.equal(summary.runtime_task_result.artifacts.length, 1);
+		assert.equal(summary.runtime_task_result.artifacts[0].semantic_key, 'fuzz.report');
 	}),
 
 	runWpCodeboxFuzzSuite({
