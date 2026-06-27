@@ -412,6 +412,12 @@ pub struct BenchSpec {
     /// scenario ids; values map metric names to pass/fail conditions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_gates: BTreeMap<String, BTreeMap<String, BenchMetricGateCondition>>,
+
+    /// Result-level metric gates declared by the rig. Matrix/fanout runners
+    /// evaluate these against generic numeric metrics in each cell outcome,
+    /// preserving executor success while failing the declared result gate.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub result_gates: BTreeMap<String, BenchMetricGateCondition>,
 }
 
 /// Fuzz composition for a rig. Pins which component `homeboy fuzz --rig <id>`
