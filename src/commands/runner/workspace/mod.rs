@@ -3,8 +3,8 @@ use serde::Serialize;
 
 use homeboy::core::runners::{
     self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput,
-    RunnerWorkspacePruneOutput, RunnerWorkspacePullOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOutput,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePullOutput, RunnerWorkspaceSnapshotFilters,
+    RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput,
 };
 
 use super::CmdResult;
@@ -13,6 +13,7 @@ use super::CmdResult;
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RunnerWorkspaceOutput {
     List(RunnerWorkspaceListOutput),
+    Snapshots(RunnerWorkspaceSnapshotsOutput),
     Sync(RunnerWorkspaceSyncOutput),
     Pull(RunnerWorkspacePullOutput),
     Apply(RunnerWorkspaceApplyOutput),
@@ -27,6 +28,31 @@ pub(super) enum RunnerWorkspaceCommand {
         runner_id: String,
 
         /// Maximum number of workspaces to return
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Discover metadata-backed runner workspace snapshots by repo, ref, commit, or run
+    Snapshots {
+        /// Runner ID
+        runner_id: String,
+
+        /// Source repository name, normally the local workspace basename before any @slug suffix
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Source git ref captured when the snapshot was synced
+        #[arg(long)]
+        source_ref: Option<String>,
+
+        /// Source git commit captured when the snapshot was synced
+        #[arg(long)]
+        source_commit: Option<String>,
+
+        /// Agent-task or Lab run id captured in snapshot metadata when available
+        #[arg(long = "run")]
+        run_id: Option<String>,
+
+        /// Maximum number of snapshots to return
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
@@ -110,6 +136,24 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             runner::list_workspaces(&runner_id, limit)
                 .map(|(output, exit_code)| (RunnerWorkspaceOutput::List(output), exit_code))
         }
+        RunnerWorkspaceCommand::Snapshots {
+            runner_id,
+            repo,
+            source_ref,
+            source_commit,
+            run_id,
+            limit,
+        } => runner::workspace_snapshots(
+            &runner_id,
+            RunnerWorkspaceSnapshotFilters {
+                repo,
+                source_ref,
+                source_commit,
+                run_id,
+                limit,
+            },
+        )
+        .map(|(output, exit_code)| (RunnerWorkspaceOutput::Snapshots(output), exit_code)),
         RunnerWorkspaceCommand::Sync {
             runner_id,
             path,

@@ -15,13 +15,14 @@ mod util;
 
 pub use pull::{plan_workspace_pull, pull_workspace};
 pub use sync::sync_workspace;
-pub use sync::{list_workspaces, prune_workspaces};
+pub use sync::{list_workspaces, prune_workspaces, workspace_snapshots};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
     RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions,
-    RunnerWorkspacePullOutput, RunnerWorkspacePullPlan, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    RunnerWorkspacePullOutput, RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters,
+    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 pub(crate) use snapshot::{

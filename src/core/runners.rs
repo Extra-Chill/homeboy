@@ -43,7 +43,7 @@ pub use super::runner::{
     refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
     resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token,
     runner_exec_failure_error, runner_job_cancel, runner_job_log_snapshot, status, statuses,
-    sync_workspace, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
+    sync_workspace, workspace_snapshots, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
     HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, LabJobOverrides, LabLocalExecutionPolicy,
     LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode,
     LabOffloadWorkspaceModePolicy, LabRunnerCapabilityContract, LabRunnerGateDecision,
@@ -62,8 +62,9 @@ pub use super::runner::{
     RunnerWorkspaceLeaseSet, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
     RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
     RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions, RunnerWorkspacePullOutput,
-    RunnerWorkspacePullPlan, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
@@ -115,12 +116,15 @@ pub mod workspace {
     pub use super::super::runner::{
         apply_change_artifact, apply_workspace_patch, list_workspaces,
         plan_managed_runner_source_sync, plan_managed_runner_source_syncs, plan_workspace_pull,
-        prune_workspaces, pull_workspace, sync_workspace, ManagedRunnerSourceSyncPlan,
-        RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
-        RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspacePruneEntry,
-        RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
-        RunnerWorkspacePullOptions, RunnerWorkspacePullOutput, RunnerWorkspacePullPlan,
-        RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+        prune_workspaces, pull_workspace, sync_workspace, workspace_snapshots,
+        ManagedRunnerSourceSyncPlan, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
+        RunnerWorkspaceApplyStatus, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
+        RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+        RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions, RunnerWorkspacePullOutput,
+        RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters,
+        RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters,
+        RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+        RunnerWorkspaceSyncOutput,
     };
 }
 
