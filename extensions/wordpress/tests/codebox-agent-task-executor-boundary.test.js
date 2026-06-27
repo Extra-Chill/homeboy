@@ -1540,4 +1540,35 @@ try {
 }
 assert.deepEqual(configuredCodexTaskInput.provider_plugin_paths, [providerPath]);
 
+const explicitProviderPath = path.join(providerRoot, 'explicit-provider-plugin');
+fs.mkdirSync(explicitProviderPath, { recursive: true });
+process.env.HOMEBOY_SETTINGS_JSON = JSON.stringify({
+  provider_plugin_paths: { codex: ['/missing/stale-openai-provider'] },
+});
+let explicitCodexTaskInput;
+try {
+  explicitCodexTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+    schema: 'homeboy/agent-task-request/v1',
+    task_id: 'explicit-codex-provider-path-codebox-task-1',
+    executor: {
+      backend: 'codebox',
+      config: {
+        provider: 'codex',
+        runtime_options: { providerPluginPaths: [explicitProviderPath] },
+      },
+    },
+    instructions: 'Run a Codex-backed Codebox task with an explicit provider checkout.',
+    inputs: {},
+  });
+} finally {
+  if (previousHomeboySettingsJson === undefined) {
+    delete process.env.HOMEBOY_SETTINGS_JSON;
+  } else {
+    process.env.HOMEBOY_SETTINGS_JSON = previousHomeboySettingsJson;
+  }
+}
+assert.deepEqual(explicitCodexTaskInput.provider_plugin_paths, [explicitProviderPath]);
+assert.equal(explicitCodexTaskInput.runtime_requirements.provider_plugins[0].path, explicitProviderPath);
+assert.equal(JSON.stringify(explicitCodexTaskInput.runtime_requirements.provider_plugins).includes('/missing/stale-openai-provider'), false);
+
 console.log('Codebox agent-task executor boundary contract passed');
