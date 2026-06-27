@@ -4,6 +4,9 @@
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
+  "env_provider": {
+    "script": "scripts/env-provider.js"
+  },
   "provides": {
     "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
     "capabilities": ["fingerprint", "refactor", "crossref", "validate", "fuzz"]
