@@ -13,8 +13,8 @@ use std::path::Path;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::observation::{
-    ActiveObservation, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord, ObservationStore,
-    RunStatus,
+    finish_run_best_effort, ActiveObservation, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord,
+    ObservationStore, RunStatus,
 };
 use homeboy::core::rig;
 
@@ -146,9 +146,12 @@ pub(crate) fn finish_lab_dispatch_observation(
         .metadata(metadata.clone())
         .build(),
     );
-    let _ = observation
-        .store
-        .finish_run(&observation.run_id, status, Some(metadata));
+    finish_run_best_effort(
+        &observation.store,
+        &observation.run_id,
+        status,
+        Some(metadata),
+    );
     Some(retrieval)
 }
 
@@ -224,7 +227,8 @@ pub(super) fn persist_trace_workflow_result(
         } else {
             run_status
         };
-    let _ = observation.active.store().finish_run(
+    finish_run_best_effort(
+        observation.active.store(),
         observation.active.run_id(),
         finish_status,
         Some(trace_run_finish_metadata(
@@ -263,7 +267,8 @@ pub(super) fn persist_trace_workflow_error(
         run_dir,
         None,
     );
-    let _ = observation.active.store().finish_run(
+    finish_run_best_effort(
+        observation.active.store(),
         observation.active.run_id(),
         RunStatus::Error,
         Some(merge_trace_artifact_metadata(

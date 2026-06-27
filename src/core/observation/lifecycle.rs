@@ -90,6 +90,23 @@ impl ActiveObservation {
     }
 }
 
+/// Best-effort persistence of a run's terminal state.
+///
+/// Encapsulates the `ObservationStore::finish_run` call plus the deliberate
+/// drop of its result so command/orchestration layers can hand off a computed
+/// status and finalized metadata without re-implementing the
+/// observation-persistence primitive. Failures to persist are intentionally
+/// swallowed: finishing a run is an observability side effect that must never
+/// abort the workflow it is recording.
+pub fn finish_run_best_effort(
+    store: &ObservationStore,
+    run_id: &str,
+    status: RunStatus,
+    metadata: Option<serde_json::Value>,
+) {
+    let _ = store.finish_run(run_id, status, metadata);
+}
+
 pub fn merge_metadata(
     mut initial: serde_json::Value,
     finish: serde_json::Value,
