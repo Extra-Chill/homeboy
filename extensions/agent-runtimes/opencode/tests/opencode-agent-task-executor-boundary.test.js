@@ -84,6 +84,9 @@ try {
 const assert = require('node:assert/strict');
 assert.equal(process.argv[2], 'run');
 assert.equal(process.argv.at(-1), 'Prove the OpenCode provider boundary without leaking secrets.');
+assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN, 'refresh-token-must-not-leak');
+assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, 'access-token-must-not-leak');
+assert.equal(process.env.UNDECLARED_SECRET, undefined);
 process.stdout.write(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN || 'missing secret');
 process.stderr.write(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN || 'missing secret');
 process.exit(0);
@@ -99,6 +102,10 @@ process.exit(0);
 		executor: {
 			backend: 'opencode',
 			runtime: 'opencode',
+			secret_env: [
+				'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+				'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+			],
 			config: {
 				provider: 'codex',
 				runtime_bin: process.execPath,
@@ -113,13 +120,30 @@ process.exit(0);
 			...process.env,
 			AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'refresh-token-must-not-leak',
 			AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-must-not-leak',
+			UNDECLARED_SECRET: 'must-not-reach-opencode',
 		},
 		input: JSON.stringify(request),
 	});
 	assert.equal(runResult.status, 0, runResult.stderr);
-	assert.deepEqual(JSON.parse(runResult.stdout), executeOpenCodeAgentTask(request));
+	const fixtureEnv = {
+		...process.env,
+		AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'refresh-token-must-not-leak',
+		AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-must-not-leak',
+		UNDECLARED_SECRET: 'must-not-reach-opencode',
+	};
+	assert.deepEqual(JSON.parse(runResult.stdout), executeOpenCodeAgentTask(request, { env: fixtureEnv }));
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('refresh-token-must-not-leak'), false);
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('access-token-must-not-leak'), false);
+
+	const missingArtifactResult = executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-missing-artifact',
+		expected_artifacts: ['opencode-report'],
+	}, { env: fixtureEnv });
+	assert.equal(missingArtifactResult.status, 'failed');
+	assert.equal(missingArtifactResult.failure_code, 'agent_task.opencode_missing_declared_artifacts');
+	assert.match(missingArtifactResult.summary, /opencode-report/);
+	assert.equal(missingArtifactResult.metadata.missing_declared_artifacts[0].name, 'opencode-report');
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }

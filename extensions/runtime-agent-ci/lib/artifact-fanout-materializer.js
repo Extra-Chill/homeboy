@@ -55,8 +55,9 @@ function runArtifactFanout(input = {}) {
   }
 
   const homeboyBin = text(input.homeboy_bin || input.homeboyBin || config.homeboy_bin || config.homeboyBin || process.env.HOMEBOY_BIN) || 'homeboy';
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-artifact-fanout-'));
-  const planPath = path.join(tmpRoot, 'plan.json');
+  const planLocation = fanoutPlanLocation(input, config, result.plan.plan_id);
+  fs.mkdirSync(planLocation.dir, { recursive: true });
+  const planPath = path.join(planLocation.dir, 'plan.json');
   fs.writeFileSync(planPath, `${JSON.stringify(result.plan, null, 2)}\n`);
 
   const batchId = renderedText(input.batch_id || input.batchId || config.batch_id || config.batchId || result.plan.plan_id);
@@ -67,6 +68,15 @@ function runArtifactFanout(input = {}) {
   const submitted = runHomeboy(homeboyBin, submitArgs, input.cwd || config.cwd);
   result.status = submitted.status === 0 ? 'submitted' : 'failed';
   result.plan_path = planPath;
+  result.plan_location = planLocation.metadata;
+  if (planLocation.metadata.storage === 'scratch') {
+    result.scratch = {
+      kind: 'caller-owned-temporary-directory',
+      path: planLocation.dir,
+      cleanup: 'caller',
+      note: 'Temporary fanout plan scratch is retained for command diagnostics; caller may remove it after collecting evidence.',
+    };
+  }
   result.submit = commandResult(submitted);
   result.batch_id = jsonPath(submitted.parsed, 'batch.batch_id') || batchId;
 
@@ -92,6 +102,33 @@ function runArtifactFanout(input = {}) {
     result.batch_artifacts = commandResult(artifacts);
   }
   return result;
+}
+
+function fanoutPlanLocation(input = {}, config = {}, planId = 'artifact-fanout') {
+  const configuredDir = text(input.plan_dir || input.planDir || config.plan_dir || config.planDir || input.output_dir || input.outputDir || config.output_dir || config.outputDir);
+  if (configuredDir) {
+    return {
+      dir: configuredDir,
+      metadata: {
+        storage: 'persistent',
+        path: configuredDir,
+        cleanup: 'retained',
+      },
+    };
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `homeboy-artifact-fanout-${safePathSegment(planId)}-`));
+  return {
+    dir,
+    metadata: {
+      storage: 'scratch',
+      path: dir,
+      cleanup: 'caller',
+    },
+  };
+}
+
+function safePathSegment(value) {
+  return String(value || 'plan').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'plan';
 }
 
 function artifactFromControllerInput(input, config = {}) {

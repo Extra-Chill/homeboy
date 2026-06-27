@@ -210,7 +210,7 @@ try {
   const shellExecutorPath = path.join(tmpRoot, 'fake-non-node-executor');
   fs.writeFileSync(shellExecutorPath, `#!/bin/sh
 cat > "$HOMEBOY_REQUEST_CAPTURE"
-printf '%s\n' '{"schema":"homeboy/agent-task-outcome/v1","task_id":"manifest-shell","status":"succeeded","summary":"Shell executor completed.","metadata":{"results":{"scenarios":[{"id":"manifest-shell","metrics":{"generic_agent_task_executor_mean":1},"metadata":{"job_status":"completed","success_status":"no_changes","completion_outcome":"done","completion_outcome_satisfied":true,"executor_env":"'"$HOMEBOY_EXECUTOR_ENV"'"}}]}}}'
+printf '%s\n' '{"schema":"homeboy/agent-task-outcome/v1","task_id":"manifest-shell","status":"succeeded","summary":"Shell executor completed.","metadata":{"results":{"scenarios":[{"id":"manifest-shell","metrics":{"generic_agent_task_executor_mean":1},"metadata":{"job_status":"completed","success_status":"no_changes","completion_outcome":"done","completion_outcome_satisfied":true,"executor_env":"'"$HOMEBOY_EXECUTOR_ENV"'","allowed_secret":"'"$ALLOWED_SECRET"'","leaked_env":"'"$UNDECLARED_SECRET"'"}}]}}}'
 `);
   fs.chmodSync(shellExecutorPath, 0o755);
 
@@ -232,12 +232,15 @@ printf '%s\n' '{"schema":"homeboy/agent-task-outcome/v1","task_id":"manifest-she
         },
       },
     },
-    plan: { ...plan, workload_id: 'manifest-shell' },
+    plan: { ...plan, workload_id: 'manifest-shell', secret_env: ['ALLOWED_SECRET'] },
     validationPolicy: { success_completion_outcomes: ['done'] },
+    env: { ...process.env, ALLOWED_SECRET: 'declared-secret', UNDECLARED_SECRET: 'ambient-secret' },
   });
   assert.equal(shellRun.outcome.status, 'succeeded');
   assert.equal(shellRun.outcome.metadata.runtime_invocation_result.command, shellExecutorPath);
   assert.equal(shellRun.results.scenarios[0].metadata.executor_env, 'from-manifest');
+  assert.equal(shellRun.results.scenarios[0].metadata.allowed_secret, 'declared-secret');
+  assert.equal(shellRun.results.scenarios[0].metadata.leaked_env, '');
   assert.equal(JSON.parse(fs.readFileSync(requestCapturePath, 'utf8')).task_id, 'manifest-shell');
 
   const nodeExecutorPath = path.join(tmpRoot, 'fake-node-executor.cjs');
