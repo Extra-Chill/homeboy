@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.265.1] - 2026-06-27
+
+### Changed
+- Stabilize Lab path remapping and daemon reads
+- Support lab workspace refs in path settings
+- Report lab Homeboy binary provenance
+- Add lab refresh workspace mapping contract
+
+### Fixed
+- Fix rig-owned bench setting warnings
+- Fix lab envelope workspace metadata
+
 ## [0.265.0] - 2026-06-27
 
 ### Added
