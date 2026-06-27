@@ -1,0 +1,19 @@
+{
+  "schema": "homeboy/agent-task-outcome/v1",
+  "task_id": "task-contract-missing-artifact",
+  "status": "provider_error",
+  "summary": "Required artifact answer_packet was not produced.",
+  "failure_classification": "provider",
+  "diagnostics": [
+    {
+      "class": "missing_required_artifact",
+      "message": "Required artifact answer_packet was not produced.",
+      "data": {
+        "missing": ["answer_packet"]
+      }
+    }
+  ],
+  "metadata": {
+    "expected_artifacts": ["answer_packet"]
+  }
+}

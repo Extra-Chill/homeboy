@@ -1,0 +1,19 @@
+{
+  "schema": "homeboy/agent-task-outcome/v1",
+  "task_id": "task-contract-local-evidence",
+  "status": "provider_error",
+  "summary": "Provider recorded local file evidence refs.",
+  "failure_classification": "provider",
+  "evidence_refs": [
+    {
+      "kind": "executor-result",
+      "uri": "__LOCAL_FILE_URI__",
+      "label": "Structured local result"
+    },
+    {
+      "kind": "runtime-log",
+      "uri": "__LOCAL_PATH__",
+      "label": "Plain local log"
+    }
+  ]
+}

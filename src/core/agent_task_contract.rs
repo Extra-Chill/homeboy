@@ -31,7 +31,12 @@ use crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA;
 pub const AGENT_TASK_CORE_CONTRACT_SCHEMA: &str = "homeboy/agent-task-core-contract/v1";
 pub const AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA: &str =
     "homeboy/agent-task-artifact-declaration/v1";
+pub const AGENT_TASK_ARTIFACT_HANDOFF_SCHEMA: &str = "homeboy/agent-task-artifact-handoff/v1";
 pub const AGENT_TASK_EVIDENCE_REF_SCHEMA: &str = "homeboy/agent-task-evidence-ref/v1";
+pub const AGENT_TASK_LOOP_ACTION_SCHEMA: &str = "homeboy/agent-task-loop-action/v1";
+pub const AGENT_TASK_PROVIDER_OUTCOME_CONTRACT_SCHEMA: &str =
+    "homeboy/agent-task-provider-outcome-contract/v1";
+pub const AGENT_TASK_DIAGNOSTIC_RANKING_SCHEMA: &str = "homeboy/agent-task-diagnostic-ranking/v1";
 pub const SECRET_ENV_REQUIREMENT_SCHEMA: &str = "homeboy/secret-env-requirement/v1";
 pub const AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA: &str =
     "homeboy/agent-task-batch-cook-fanout-plan/v1";
@@ -55,7 +60,11 @@ pub struct AgentTaskCoreContractSchemas {
     pub outcome: String,
     pub artifact: String,
     pub artifact_declaration: String,
+    pub artifact_handoff: String,
     pub evidence_ref: String,
+    pub loop_action: String,
+    pub provider_outcome_contract: String,
+    pub diagnostic_ranking: String,
     pub workflow: String,
     pub plan: String,
     pub aggregate: String,
@@ -130,7 +139,11 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             outcome: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             artifact: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
             artifact_declaration: AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA.to_string(),
+            artifact_handoff: AGENT_TASK_ARTIFACT_HANDOFF_SCHEMA.to_string(),
             evidence_ref: AGENT_TASK_EVIDENCE_REF_SCHEMA.to_string(),
+            loop_action: AGENT_TASK_LOOP_ACTION_SCHEMA.to_string(),
+            provider_outcome_contract: AGENT_TASK_PROVIDER_OUTCOME_CONTRACT_SCHEMA.to_string(),
+            diagnostic_ranking: AGENT_TASK_DIAGNOSTIC_RANKING_SCHEMA.to_string(),
             workflow: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
             plan: AGENT_TASK_PLAN_SCHEMA.to_string(),
             aggregate: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
