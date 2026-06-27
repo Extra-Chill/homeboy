@@ -23,5 +23,5 @@ mod tests;
 
 pub use cli::RunnerArgs;
 pub use dispatch::{run, run_command_output};
-pub(crate) use status::declared_tool_diagnostics_for_legacy;
+pub(crate) use status::declared_tool_diagnostics;
 pub use types::RunnerToolDiagnostics;

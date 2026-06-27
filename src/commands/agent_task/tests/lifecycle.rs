@@ -180,11 +180,17 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             &evidence_path,
             serde_json::to_string(&json!({
                 "status": "provider_error",
-                "diagnostics": [{
-                    "class": "runtime_task_ability_unavailable",
-                    "message": "The requested runtime task ability is not available inside the sandbox."
-                }],
-                "command": "wp-codebox runtime task run",
+                "diagnostics": [
+                    {
+                        "class": "runtime.required_typed_artifacts_missing",
+                        "message": "Agent runtime did not produce required typed artifacts: concept_packet, design_packet."
+                    },
+                    {
+                        "class": "agent_runtime.task_run_failed",
+                        "message": "RecipeValidationError: configured provider runtime path does not exist"
+                    }
+                ],
+                "command": "agent-runtime task run",
                 "exit_code": 1,
                 "stderr": "ability unavailable\nsecret=raw-secret"
             }))
@@ -210,15 +216,15 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
         assert_eq!(value["schema"], "homeboy/agent-task-diagnose/v1");
         assert_eq!(
             value["root_cause"]["class"],
-            "runtime_task_ability_unavailable"
+            "agent_runtime.task_run_failed"
         );
         assert_eq!(
             value["root_cause"]["message"],
-            "The requested runtime task ability is not available inside the sandbox."
+            "RecipeValidationError: configured provider runtime path does not exist"
         );
         assert_eq!(
             value["hydrated_evidence"][0]["summary"]["command"],
-            "wp-codebox runtime task run"
+            "agent-runtime task run"
         );
         assert_eq!(value["hydrated_evidence"][0]["summary"]["exit_code"], 1);
         assert!(value["hydrated_evidence"][0]["summary"]["stderr_excerpt"]
@@ -229,7 +235,111 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             value["next_commands"][0],
             "homeboy agent-task status run-cli-diagnose-evidence --full"
         );
+
+        let (status_value, status_exit_code) = status(StatusArgs {
+            run_id: "run-cli-diagnose-evidence".to_string(),
+            bridge: false,
+            since_cursor: None,
+            full: true,
+        })
+        .expect("status loaded");
+        assert_eq!(status_exit_code, 0);
+        assert_eq!(
+            status_value["diagnostic_summary"]["class"],
+            "agent_runtime.task_run_failed"
+        );
+        assert_eq!(
+            status_value["diagnostic_summary"]["message"],
+            "RecipeValidationError: configured provider runtime path does not exist"
+        );
     });
+}
+
+#[test]
+fn evidence_command_hydrates_plain_local_path_refs_and_summarizes_unsupported_refs() {
+    with_isolated_home(|home| {
+        let file_path = home.path().join("plain-evidence.txt");
+        std::fs::write(&file_path, "plain local evidence").expect("write evidence file");
+        let run_id = "run-cli-evidence-local-path";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            EvidencePathFixtureExecutor {
+                local_path: file_path.display().to_string(),
+                unsupported_uri: "provider-result://opaque/ref".to_string(),
+            },
+        )
+        .expect("run completed");
+
+        let (value, exit_code) = evidence(EvidenceArgs {
+            run_id: run_id.to_string(),
+            kind: None,
+            task: Some("task-a".to_string()),
+            failure_only: true,
+        })
+        .expect("evidence loaded");
+
+        assert_eq!(exit_code, 0);
+        assert!(value["count"].as_u64().expect("evidence count") >= 2);
+        let entries = value["evidence"].as_array().expect("evidence array");
+        let path_entry = entries
+            .iter()
+            .find(|entry| entry["uri"] == file_path.display().to_string())
+            .expect("local path evidence");
+        assert_eq!(path_entry["source"], "file");
+        assert_eq!(path_entry["content"]["text"], "plain local evidence");
+
+        let unsupported = entries
+            .iter()
+            .find(|entry| entry["source"] == "unsupported")
+            .expect("unsupported evidence");
+        assert_eq!(unsupported["status"], "ok");
+        assert_eq!(
+            unsupported["content"]["unsupported_ref"],
+            "provider-result://opaque/ref"
+        );
+        assert!(unsupported["content"]["next_action"].is_string());
+    });
+}
+
+struct EvidencePathFixtureExecutor {
+    local_path: String,
+    unsupported_uri: String,
+}
+
+impl AgentTaskExecutorAdapter for EvidencePathFixtureExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: Some("failed with path evidence".to_string()),
+            failure_classification: Some(AgentTaskFailureClassification::Provider),
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: vec![
+                AgentTaskEvidenceRef {
+                    kind: "executor-result".to_string(),
+                    uri: self.local_path.clone(),
+                    label: Some("Plain path".to_string()),
+                },
+                AgentTaskEvidenceRef {
+                    kind: "executor-result".to_string(),
+                    uri: self.unsupported_uri.clone(),
+                    label: Some("Unsupported ref".to_string()),
+                },
+            ],
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
 }
 
 #[test]
