@@ -22,6 +22,7 @@ use super::bundle::{RunsExportArgs, RunsExportOutput, RunsImportArgs, RunsImport
 use super::common::RunSummary;
 use super::compare::{RunsCompareArgs, RunsCompareOutput};
 use super::distribution::{RunsDistributionArgs, RunsDistributionOutput};
+use super::dossier::RunsDossierOutput;
 use super::drift::{RunsDriftArgs, RunsDriftOutput};
 use super::evidence::RunsEvidenceOutput;
 use super::findings;
@@ -81,6 +82,13 @@ pub(super) enum RunsCommand {
         /// The compact summary surfaces status, key metadata, and artifact
         /// pointers with inspect commands; the full payload is unchanged and
         /// always available with this flag or via `--output <file>`.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Aggregate the actionable read-only dossier for one persisted run
+    Dossier {
+        run_id: String,
+        /// Print the full JSON output instead of the compact human dossier.
         #[arg(long)]
         json: bool,
     },
@@ -151,6 +159,7 @@ pub enum RunsOutput {
     LatestRun(RunsLatestRunOutput),
     Compare(RunsCompareOutput),
     Show(RunsShowOutput),
+    Dossier(RunsDossierOutput),
     ResumePlan(RunsResumePlanOutput),
     Evidence(RunsEvidenceOutput),
     Env(RunsEnvOutput),

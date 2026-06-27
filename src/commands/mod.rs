@@ -233,6 +233,7 @@ pub mod rig;
 pub mod route;
 pub mod runner;
 pub mod runs;
+pub(crate) mod runs_dossier_summary;
 pub(crate) mod runs_summary;
 pub mod runtime;
 pub mod self_cmd;
