@@ -825,7 +825,10 @@ pub(crate) fn run_lab_offload_inner(
         "Lab offload host telemetry: {}",
         host_telemetry.to_metadata()
     );
-    ensure_lab_offload_streams_not_truncated(&exec_output, output_file_content.is_some())?;
+    ensure_lab_offload_streams_not_truncated(
+        &exec_output,
+        lab_offload_structured_result_available(&exec_output, output_file_content.as_deref()),
+    )?;
     mirror_agent_task_run_plan_lifecycle(
         request.normalized_args,
         &exec_output.stdout,
@@ -944,9 +947,17 @@ pub(crate) fn ensure_lab_offload_streams_not_truncated(
     error.details["runner_id"] = serde_json::json!(exec_output.runner_id);
     error.details["remote_cwd"] = serde_json::json!(exec_output.remote_cwd);
     error.details["job_id"] = serde_json::json!(exec_output.job_id);
+    error.details["reason"] = serde_json::json!("output_too_large");
     error.details["capture"] =
         serde_json::to_value(capture).unwrap_or_else(|_| serde_json::json!({}));
     Err(error)
+}
+
+pub(crate) fn lab_offload_structured_result_available(
+    exec_output: &super::super::super::RunnerExecOutput,
+    output_file_content: Option<&str>,
+) -> bool {
+    output_file_content.is_some() || exec_output.runner_result.is_some()
 }
 
 pub(crate) fn download_lab_output_file(runner_id: &str, remote_path: &str) -> Result<String> {
