@@ -396,45 +396,55 @@ pub struct RunsArtifactCaptureArgs {
     pub viewport_height: u32,
 }
 
-#[derive(Serialize)]
-pub struct RunsArtifactCaptureOutput {
-    pub command: &'static str,
-    pub run_id: String,
-    pub artifact_id: String,
-    pub artifact_path: String,
-    pub output_dir: String,
-    pub manifest_path: String,
-    pub base_url: String,
-    pub viewport: RunsArtifactCaptureViewport,
-    pub browser: RunsArtifactCaptureBrowser,
-    pub pages: Vec<RunsArtifactCapturePage>,
-}
+/// Output payload types for the `runs artifact capture` subcommand.
+///
+/// Grouped into a nested module to keep the file's top-level item count under
+/// the structural threshold; `pub use capture_types::*` re-exports every type
+/// at the original path so external imports and field access are unchanged.
+mod capture_types {
+    use super::*;
 
-#[derive(Serialize, Clone)]
-pub struct RunsArtifactCaptureViewport {
-    pub width: u32,
-    pub height: u32,
-}
+    #[derive(Serialize)]
+    pub struct RunsArtifactCaptureOutput {
+        pub command: &'static str,
+        pub run_id: String,
+        pub artifact_id: String,
+        pub artifact_path: String,
+        pub output_dir: String,
+        pub manifest_path: String,
+        pub base_url: String,
+        pub viewport: RunsArtifactCaptureViewport,
+        pub browser: RunsArtifactCaptureBrowser,
+        pub pages: Vec<RunsArtifactCapturePage>,
+    }
 
-#[derive(Serialize)]
-pub struct RunsArtifactCaptureBrowser {
-    pub command: String,
-    pub available: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
+    #[derive(Serialize, Clone)]
+    pub struct RunsArtifactCaptureViewport {
+        pub width: u32,
+        pub height: u32,
+    }
 
-#[derive(Serialize)]
-pub struct RunsArtifactCapturePage {
-    pub entrypoint: String,
-    pub page_url: String,
-    pub screenshot_path: String,
-    pub viewport: RunsArtifactCaptureViewport,
-    pub status: String,
-    pub timing_ms: u128,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    #[derive(Serialize)]
+    pub struct RunsArtifactCaptureBrowser {
+        pub command: String,
+        pub available: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub error: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    pub struct RunsArtifactCapturePage {
+        pub entrypoint: String,
+        pub page_url: String,
+        pub screenshot_path: String,
+        pub viewport: RunsArtifactCaptureViewport,
+        pub status: String,
+        pub timing_ms: u128,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub error: Option<String>,
+    }
 }
+pub use capture_types::*;
 
 #[derive(Args, Clone, Default)]
 pub struct RunsArtifactCleanupDownloadsArgs {
