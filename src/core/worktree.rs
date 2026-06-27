@@ -53,6 +53,61 @@ mod types {
         pub state: TaskWorktreeState,
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct AdoptedWorkspaceRecord {
+        pub handle: String,
+        pub path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub kind: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub provenance: Option<serde_json::Value>,
+        pub created_at: String,
+        pub state: TaskWorktreeState,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum WorkspaceRefRecord {
+        Task(TaskWorktreeRecord),
+        Adopted(AdoptedWorkspaceRecord),
+    }
+
+    impl WorkspaceRefRecord {
+        pub fn handle(&self) -> &str {
+            match self {
+                WorkspaceRefRecord::Task(record) => &record.id,
+                WorkspaceRefRecord::Adopted(record) => &record.handle,
+            }
+        }
+
+        pub fn path(&self) -> &str {
+            match self {
+                WorkspaceRefRecord::Task(record) => &record.worktree_path,
+                WorkspaceRefRecord::Adopted(record) => &record.path,
+            }
+        }
+
+        pub fn state(&self) -> &TaskWorktreeState {
+            match self {
+                WorkspaceRefRecord::Task(record) => &record.state,
+                WorkspaceRefRecord::Adopted(record) => &record.state,
+            }
+        }
+
+        pub fn source_kind(&self) -> &'static str {
+            match self {
+                WorkspaceRefRecord::Task(_) => "task_worktree",
+                WorkspaceRefRecord::Adopted(_) => "adopted_workspace",
+            }
+        }
+
+        pub fn provenance(&self) -> Option<&serde_json::Value> {
+            match self {
+                WorkspaceRefRecord::Task(_) => None,
+                WorkspaceRefRecord::Adopted(record) => record.provenance.as_ref(),
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
     pub struct WorktreeSafetyReport {
         pub dirty: bool,
@@ -67,6 +122,11 @@ mod types {
     #[derive(Debug, Clone, Serialize)]
     pub struct WorktreeCreateOutput {
         pub record: TaskWorktreeRecord,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WorktreeAdoptOutput {
+        pub record: AdoptedWorkspaceRecord,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -100,6 +160,14 @@ mod types {
         pub task_url: Option<String>,
         pub run_id: Option<String>,
         pub cleanup_policy: Option<CleanupPolicy>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct WorktreeAdoptOptions {
+        pub handle: String,
+        pub path: String,
+        pub kind: Option<String>,
+        pub provenance: Option<serde_json::Value>,
     }
 
     #[derive(Debug, Clone)]
@@ -166,7 +234,8 @@ mod types {
 }
 
 pub use types::{
-    CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState, WorktreeCleanupOutput,
+    AdoptedWorkspaceRecord, CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState,
+    WorkspaceRefRecord, WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeCleanupOutput,
     WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput, WorktreeQueueCreateOptions,
     WorktreeQueueCreateOutput, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
     WorktreeQueueLockHolder, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeSafetyReport,
@@ -175,6 +244,10 @@ pub use types::{
 
 pub fn create(options: WorktreeCreateOptions) -> Result<WorktreeCreateOutput> {
     create_with_store(options, &metadata_dir()?)
+}
+
+pub fn adopt(options: WorktreeAdoptOptions) -> Result<WorktreeAdoptOutput> {
+    adopt_with_store(options, &adopted_metadata_dir()?)
 }
 
 pub fn list() -> Result<WorktreeListOutput> {
@@ -189,6 +262,13 @@ pub fn resolve(id: &str) -> Result<TaskWorktreeRecord> {
     read_record(&metadata_dir()?, id)
 }
 
+pub fn resolve_workspace_ref(handle: &str) -> Result<WorkspaceRefRecord> {
+    if let Ok(record) = read_record(&metadata_dir()?, handle) {
+        return Ok(WorkspaceRefRecord::Task(record));
+    }
+    read_adopted_record(&adopted_metadata_dir()?, handle).map(WorkspaceRefRecord::Adopted)
+}
+
 pub fn remove(options: WorktreeRemoveOptions) -> Result<WorktreeRemoveOutput> {
     remove_with_store(options, &metadata_dir()?)
 }
@@ -200,6 +280,48 @@ pub fn cleanup(force: bool) -> Result<WorktreeCleanupOutput> {
 
 mod store_ops {
     use super::*;
+
+    pub(super) fn adopt_with_store(
+        options: WorktreeAdoptOptions,
+        store_dir: &Path,
+    ) -> Result<WorktreeAdoptOutput> {
+        if options.handle.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "handle",
+                "Adopted workspace handle must not be empty",
+                Some(options.handle),
+                None,
+            ));
+        }
+        let path = PathBuf::from(&options.path).canonicalize().map_err(|err| {
+            Error::validation_invalid_argument(
+                "path",
+                "Adopted workspace path must exist on the controller",
+                Some(format!("{} ({err})", options.path)),
+                Some(vec![
+                    "Pass an existing local checkout or workspace path.".to_string()
+                ]),
+            )
+        })?;
+        if !path.is_dir() {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                "Adopted workspace path must be a directory",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+        let record = AdoptedWorkspaceRecord {
+            handle: options.handle,
+            path: path.display().to_string(),
+            kind: options.kind,
+            provenance: options.provenance,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            state: TaskWorktreeState::Active,
+        };
+        write_adopted_record(store_dir, &record)?;
+        Ok(WorktreeAdoptOutput { record })
+    }
 
     pub(super) fn cleanup_with_store(force: bool, store: &Path) -> Result<WorktreeCleanupOutput> {
         let mut candidates = Vec::new();
@@ -485,6 +607,18 @@ mod store_ops {
         Ok(data_root.join("task-worktrees"))
     }
 
+    pub(super) fn adopted_metadata_dir() -> Result<PathBuf> {
+        let observation_db = paths::observation_db()?;
+        let data_root = observation_db.parent().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "observation database path `{}` has no parent directory",
+                observation_db.display()
+            ))
+        })?;
+
+        Ok(data_root.join("adopted-workspaces"))
+    }
+
     pub(super) fn record_path(store_dir: &Path, id: &str) -> PathBuf {
         store_dir.join(format!("{}.json", paths::sanitize_path_segment(id)))
     }
@@ -509,12 +643,51 @@ mod store_ops {
         Ok(())
     }
 
+    pub(super) fn write_adopted_record(
+        store_dir: &Path,
+        record: &AdoptedWorkspaceRecord,
+    ) -> Result<()> {
+        let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
+        fs::create_dir_all(store_dir).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
+        })?;
+        let json = serde_json::to_string_pretty(record)
+            .map_err(|err| Error::internal_json(err.to_string(), Some(record.handle.clone())))?;
+        let path = record_path(store_dir, &record.handle);
+        fs::write(&path, format!("{json}\n"))
+            .map_err(|err| Error::internal_io(err.to_string(), Some(record.handle.clone())))?;
+        ownership::normalize_created_path(
+            store_dir,
+            store_owner,
+            false,
+            "write adopted workspace metadata",
+        )?;
+        ownership::normalize_created_path(
+            &path,
+            store_owner,
+            false,
+            "write adopted workspace metadata",
+        )?;
+        Ok(())
+    }
+
     pub(super) fn read_record(store_dir: &Path, id: &str) -> Result<TaskWorktreeRecord> {
         read_record_path(&record_path(store_dir, id))
     }
 
     pub(super) fn read_record_path(path: &Path) -> Result<TaskWorktreeRecord> {
         let raw = fs::read_to_string(path)
+            .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+        serde_json::from_str(&raw)
+            .map_err(|err| Error::internal_json(err.to_string(), Some(path.display().to_string())))
+    }
+
+    pub(super) fn read_adopted_record(
+        store_dir: &Path,
+        handle: &str,
+    ) -> Result<AdoptedWorkspaceRecord> {
+        let path = record_path(store_dir, handle);
+        let raw = fs::read_to_string(&path)
             .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
         serde_json::from_str(&raw)
             .map_err(|err| Error::internal_json(err.to_string(), Some(path.display().to_string())))
