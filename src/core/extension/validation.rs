@@ -1,6 +1,6 @@
 use crate::core::error::Result;
 
-use super::registry::load_extension;
+use super::registry::{is_extension_linked, load_extension};
 use super::version;
 
 /// Validate that all extensions declared in a component's `extensions` field are installed.
@@ -102,7 +102,15 @@ pub fn validate_extension_requirements(
         match load_extension(extension_id) {
             Ok(extension) => match extension.semver() {
                 Ok(installed_version) => {
-                    if !constraint.matches(&installed_version) {
+                    // Linked (symlinked) dev installs intentionally track a local
+                    // worktree whose version may lag the published constraint.
+                    // Soften enforcement for those so a symlinked extension under
+                    // active iteration isn't rejected and steered to a re-clone via
+                    // `homeboy extension update`. Cloned/copied installs still
+                    // enforce, so genuinely incompatible non-dev versions are caught.
+                    if !constraint.matches(&installed_version)
+                        && !is_extension_linked(extension_id)
+                    {
                         errors.push(format!(
                             "'{}' requires {}, but {} is installed",
                             extension_id, constraint, installed_version
@@ -236,5 +244,69 @@ mod tests {
         };
 
         assert!(!extension_provides_build(&component));
+    }
+
+    fn component_requiring(extension_id: &str, version: &str) -> Component {
+        let mut extensions = std::collections::HashMap::new();
+        extensions.insert(
+            extension_id.to_string(),
+            crate::core::component::ScopedExtensionConfig {
+                version: Some(version.to_string()),
+                ..Default::default()
+            },
+        );
+        Component {
+            id: "consumer".to_string(),
+            extensions: Some(extensions),
+            ..Default::default()
+        }
+    }
+
+    fn write_extension_manifest(dir: &std::path::Path, id: &str, version: &str) {
+        std::fs::create_dir_all(dir).expect("extension dir");
+        std::fs::write(
+            dir.join(format!("{}.json", id)),
+            format!(r#"{{"name":"{} ext","version":"{}"}}"#, id, version),
+        )
+        .expect("extension manifest");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_constraint_softened_only_for_linked_install() {
+        crate::test_support::with_isolated_home(|home| {
+            let home = home.path();
+
+            // Linked (symlinked) install at v1.0.0 — should satisfy a ^2.0.0
+            // requirement because dev iteration may lag the published constraint.
+            let source = home.join("source/wordpress");
+            write_extension_manifest(&source, "wordpress", "1.0.0");
+            crate::core::extension::install(&source.to_string_lossy(), Some("wordpress"))
+                .expect("install linked extension");
+            assert!(super::is_extension_linked("wordpress"));
+
+            let component = component_requiring("wordpress", "^2.0.0");
+            assert!(
+                validate_extension_requirements(&component).is_ok(),
+                "linked dev install should soften the version constraint"
+            );
+        });
+    }
+
+    #[test]
+    fn version_constraint_enforced_for_copied_install() {
+        crate::test_support::with_isolated_home(|home| {
+            // Copied (real directory) install at v1.0.0 — must still be rejected
+            // against a ^2.0.0 requirement so genuinely incompatible non-dev
+            // versions are caught.
+            let extensions_dir = home.path().join(".config/homeboy/extensions/postgres");
+            write_extension_manifest(&extensions_dir, "postgres", "1.0.0");
+            assert!(!super::is_extension_linked("postgres"));
+
+            let component = component_requiring("postgres", "^2.0.0");
+            let err = validate_extension_requirements(&component)
+                .expect_err("copied install must enforce the version constraint");
+            assert!(err.message.contains("requires"));
+        });
     }
 }

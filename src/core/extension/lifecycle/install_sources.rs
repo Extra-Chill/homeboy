@@ -161,7 +161,9 @@ pub(crate) fn resolve_cloned_extension(
         let content = local_files::local().read(&manifest_in_subdir)?;
         let _manifest: ExtensionManifest = from_str(&content)?;
 
-        install_shared_assets_from_root(temp_dir, extension_dir)?;
+        // Cloned installs copy: the clone temp dir is discarded after install,
+        // so the shared trees must be materialized as standalone copies.
+        install_shared_assets_from_root(temp_dir, extension_dir, SharedAssetMode::Copy)?;
 
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
@@ -199,6 +201,21 @@ pub(crate) fn resolve_cloned_extension(
     )))
 }
 
+/// How a shared monorepo asset tree is materialized into `~/.config/homeboy/`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SharedAssetMode {
+    /// Copy the tree into place. Used for cloned installs, where the clone temp
+    /// directory is discarded after install and there is no live source to point
+    /// back to.
+    Copy,
+    /// Symlink the install target to its live source tree. Used for linked/dev
+    /// installs (local-path source): edits to the shared monorepo assets
+    /// (`agent-runtimes`, `runtime-agent-ci`, `scripts/lib`,
+    /// `agent-task-contracts`) in the source worktree are visible to the live
+    /// install immediately, with no reinstall or release. See #6396 / #1954.
+    Symlink,
+}
+
 /// Shared assets installed from a monorepo extension source root.
 ///
 /// Each entry maps a source-relative directory to its install target. The
@@ -208,7 +225,15 @@ pub(crate) fn resolve_cloned_extension(
 /// invocation. The rest of the monorepo `scripts/` tree is repo dev/CI tooling
 /// that never participates in the installed layout, so lifecycle no longer
 /// installs it under `~/.config/homeboy/extensions/scripts`.
-fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> Result<()> {
+///
+/// `mode` selects copy vs symlink materialization. Cloned installs copy;
+/// linked/dev installs symlink so local edits to the shared trees go live
+/// without a reinstall.
+fn install_shared_assets_from_root(
+    source_root: &Path,
+    extension_dir: &Path,
+    mode: SharedAssetMode,
+) -> Result<()> {
     let Some(extensions_dir) = extension_dir.parent() else {
         return Ok(());
     };
@@ -239,31 +264,81 @@ fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> 
                 )
             })?;
         }
-        if target.exists() {
-            std::fs::remove_dir_all(&target).map_err(|e| {
-                Error::internal_io(
-                    e.to_string(),
-                    Some(format!("replace shared extension {shared_dir}")),
-                )
-            })?;
+        remove_existing_target(&target, shared_dir)?;
+
+        match mode {
+            SharedAssetMode::Copy => copy_dir_recursive(&source, &target)?,
+            SharedAssetMode::Symlink => symlink_shared_asset(&source, &target, shared_dir)?,
         }
-        copy_dir_recursive(&source, &target)?;
     }
 
     Ok(())
 }
 
+/// Remove a shared-asset install target if present, handling both real
+/// directories (previous copy installs) and symlinks (previous linked installs)
+/// so re-installs are idempotent regardless of the prior materialization mode.
+fn remove_existing_target(target: &Path, shared_dir: &str) -> Result<()> {
+    let Ok(meta) = std::fs::symlink_metadata(target) else {
+        return Ok(());
+    };
+    let remove = if meta.file_type().is_symlink() || meta.is_file() {
+        std::fs::remove_file(target)
+    } else {
+        std::fs::remove_dir_all(target)
+    };
+    remove.map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("replace shared extension {shared_dir}")),
+        )
+    })
+}
+
+/// Symlink a shared-asset install target to its live source tree.
+///
+/// The source is canonicalized to an absolute path so the link stays valid
+/// regardless of the caller's working directory and resolves to the live source
+/// worktree (making in-place edits visible to the install).
+fn symlink_shared_asset(source: &Path, target: &Path, shared_dir: &str) -> Result<()> {
+    let resolved = std::fs::canonicalize(source).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("resolve shared extension source {shared_dir}")),
+        )
+    })?;
+
+    #[cfg(unix)]
+    let result = std::os::unix::fs::symlink(&resolved, target);
+
+    #[cfg(windows)]
+    let result = std::os::windows::fs::symlink_dir(&resolved, target);
+
+    result.map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("symlink shared extension {shared_dir}")),
+        )
+    })
+}
+
+/// Materialize shared monorepo assets for a linked (local-path) install.
+///
+/// Linked installs symlink the shared trees to their live source so that edits
+/// to `agent-runtimes`, `runtime-agent-ci`, `scripts/lib`, and
+/// `agent-task-contracts` in the source worktree take effect immediately,
+/// enabling rapid local iteration without a reinstall or release.
 pub(crate) fn install_linked_shared_assets(
     source: &Path,
     extension_dir: &Path,
     source_root: Option<&Path>,
 ) -> Result<()> {
     if let Some(source_root) = source_root {
-        return install_shared_assets_from_root(source_root, extension_dir);
+        return install_shared_assets_from_root(source_root, extension_dir, SharedAssetMode::Symlink);
     }
 
     if let Some(parent) = source.parent() {
-        install_shared_assets_from_root(parent, extension_dir)?;
+        install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink)?;
     }
     Ok(())
 }

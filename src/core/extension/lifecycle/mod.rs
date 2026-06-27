@@ -804,6 +804,35 @@ exec '{}' "$@"
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cloned_install_copies_shared_trees_rather_than_symlinking() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "wordpress");
+            write_shared_runtime_fixture(&source);
+            let remote = match prepare_git_repo(&source) {
+                Some(remote) => remote,
+                None => return,
+            };
+            let remote_url = remote.path().join("extension.git");
+
+            install(&remote_url.to_string_lossy(), Some("wordpress"))
+                .expect("install cloned extension");
+
+            // Cloned installs must keep copying: the clone temp dir is discarded,
+            // so the shared trees have to be standalone copies, not symlinks.
+            let runtimes = home.join(".config/homeboy/agent-runtimes");
+            let meta = fs::symlink_metadata(&runtimes).expect("agent-runtimes exists");
+            assert!(
+                meta.file_type().is_dir() && !meta.file_type().is_symlink(),
+                "cloned install should copy agent-runtimes as a real directory"
+            );
+        });
+    }
+
     #[test]
     fn extracted_monorepo_update_materializes_shared_agent_runtimes() {
         with_isolated_home(|home| {
@@ -895,6 +924,96 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
                 .exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_install_symlinks_shared_trees_instead_of_copying() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "wordpress");
+            write_shared_runtime_fixture(&source);
+            let shared_helper = source.join("scripts/lib/test-result-adapters.sh");
+            fs::create_dir_all(shared_helper.parent().expect("helper parent"))
+                .expect("shared scripts dir");
+            fs::write(&shared_helper, "noop() { :; }\n").expect("shared helper");
+
+            install(
+                &source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            // Each shared tree must be a symlink pointing back at the live source,
+            // not a standalone copy, so local edits go live without a reinstall.
+            for (target, link_source) in [
+                (
+                    home.join(".config/homeboy/agent-runtimes"),
+                    source.join("agent-runtimes"),
+                ),
+                (
+                    home.join(".config/homeboy/runtime-agent-ci"),
+                    source.join("runtime-agent-ci"),
+                ),
+                (
+                    home.join(".config/homeboy/agent-task-contracts"),
+                    source.join("agent-task-contracts"),
+                ),
+                (
+                    home.join(".config/homeboy/extensions/scripts/lib"),
+                    source.join("scripts/lib"),
+                ),
+            ] {
+                let meta = fs::symlink_metadata(&target)
+                    .unwrap_or_else(|_| panic!("shared target exists: {}", target.display()));
+                assert!(
+                    meta.file_type().is_symlink(),
+                    "{} should be a symlink for a linked install",
+                    target.display()
+                );
+                assert_eq!(
+                    fs::canonicalize(&target).expect("resolve symlink target"),
+                    fs::canonicalize(&link_source).expect("resolve link source"),
+                    "{} should resolve to the live source tree",
+                    target.display()
+                );
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editing_symlinked_shared_file_is_visible_to_linked_install() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "wordpress");
+            write_shared_runtime_fixture(&source);
+
+            install(
+                &source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            // Edit the shared asset in the source worktree after install. Because
+            // the install symlinks the tree, the edit must be visible at the live
+            // install path with no reinstall — the iteration-blocker fix.
+            let source_contract = source.join("agent-task-contracts/agent-task-provider-contract.js");
+            fs::write(&source_contract, "module.exports = { contract: 'edited-live' };\n")
+                .expect("edit shared source file");
+
+            let installed_contract =
+                home.join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js");
+            let observed = fs::read_to_string(&installed_contract).expect("read installed contract");
+            assert!(
+                observed.contains("edited-live"),
+                "edit to the symlinked shared tree should be visible to the install, got: {observed}"
+            );
         });
     }
 
