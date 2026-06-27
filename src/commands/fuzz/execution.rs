@@ -9,14 +9,16 @@ use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
-use homeboy::core::fuzz::{parse_fuzz_results_file, FuzzArtifact, FuzzCampaign, FuzzFindingStatus};
+use homeboy::core::fuzz::{
+    parse_fuzz_results_file, FuzzArtifact, FuzzCampaign, FuzzFindingStatus, FuzzGateProfile,
+};
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
 use super::report::{
-    evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
+    evaluate_expected_metric_gates, evaluate_fuzz_gates_for_profile, fuzz_coverage_completeness,
     fuzz_result_envelope_evidence_ref, fuzz_result_envelope_from_campaign, gate_status,
     persist_fuzz_run_result_envelope,
 };
@@ -126,6 +128,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         runner_output.timed_out,
         results.as_ref(),
         combined_results_error,
+        args.gate_profile.as_core(),
     );
     let exit_code = outcome.exit_code;
     let success = outcome.success;
@@ -178,7 +181,11 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             max_duration: args.max_duration.clone(),
             passthrough_args: args.args.clone(),
             requested_settings: fuzz_requested_settings(&args),
-            gates: fuzz_run_gates(results.as_ref(), &expected_metric_gates),
+            gates: fuzz_run_gates(
+                results.as_ref(),
+                args.gate_profile.as_core(),
+                &expected_metric_gates,
+            ),
             target_inventory: Some(target_inventory),
             execution: Some(FuzzExecutionOutput {
                 kind: "fuzz".to_string(),
@@ -268,9 +275,12 @@ pub(super) fn fuzz_expected_metric_error(
 
 fn fuzz_run_gates(
     results: Option<&FuzzCampaign>,
+    gate_profile: FuzzGateProfile,
     expected_metric_gates: &[super::types::FuzzGateEvaluation],
 ) -> Vec<super::types::FuzzGateEvaluation> {
-    let mut gates = results.map(evaluate_fuzz_gates).unwrap_or_default();
+    let mut gates = results
+        .map(|results| evaluate_fuzz_gates_for_profile(results, gate_profile))
+        .unwrap_or_default();
     gates.extend(expected_metric_gates.iter().cloned());
     gates
 }
@@ -458,6 +468,7 @@ pub(super) fn fuzz_run_outcome(
     runner_timed_out: bool,
     results: Option<&FuzzCampaign>,
     results_error: Option<&str>,
+    gate_profile: FuzzGateProfile,
 ) -> FuzzRunOutcome {
     if runner_timed_out {
         return FuzzRunOutcome {
@@ -479,7 +490,8 @@ pub(super) fn fuzz_run_outcome(
         };
     }
 
-    let campaign_failed = results.is_some_and(fuzz_campaign_reports_failure);
+    let campaign_failed = gate_profile != FuzzGateProfile::Measurement
+        && results.is_some_and(fuzz_campaign_reports_failure);
     let success = runner_success && !campaign_failed && results_error.is_none();
     FuzzRunOutcome {
         status: if success { "passed" } else { "failed" },
@@ -694,8 +706,16 @@ pub(super) fn persist_fuzz_run_evidence(
         "results_error": input.results_error,
         "missing_artifact_refs": input.missing_artifact_refs,
         "coverage_completeness": input.results.map(fuzz_coverage_completeness),
-        "gates": fuzz_run_gates(input.results, input.expected_metric_gates),
-        "gate_status": gate_status(&fuzz_run_gates(input.results, input.expected_metric_gates)),
+        "gates": fuzz_run_gates(
+            input.results,
+            input.args.gate_profile.as_core(),
+            input.expected_metric_gates
+        ),
+        "gate_status": gate_status(&fuzz_run_gates(
+            input.results,
+            input.args.gate_profile.as_core(),
+            input.expected_metric_gates
+        )),
     });
     let run = RunRecord {
         id: run_id.clone(),
@@ -730,7 +750,10 @@ pub(super) fn persist_fuzz_run_evidence(
     if let Some(campaign) = input.results {
         let mut envelope =
             fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
-        envelope.status = gate_status(&evaluate_fuzz_gates(campaign));
+        envelope.status = gate_status(&evaluate_fuzz_gates_for_profile(
+            campaign,
+            input.args.gate_profile.as_core(),
+        ));
         if let Some(artifact) = persist_fuzz_run_result_envelope(Some(&run_id), &envelope)? {
             evidence_refs.push(fuzz_result_envelope_evidence_ref(&artifact));
         }

@@ -232,7 +232,14 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
         "case_counts": { "passed": 2, "failed": 1, "errored": 0 }
     });
 
-    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Strict,
+    );
 
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.success);
@@ -261,11 +268,54 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
         extra: std::collections::BTreeMap::new(),
     }];
 
-    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Strict,
+    );
 
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.success);
     assert_eq!(outcome.exit_code, 1);
+}
+
+#[test]
+fn fuzz_run_outcome_measurement_profile_records_open_findings_without_failing() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.findings = vec![FuzzFinding {
+        schema: homeboy::core::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
+        id: "finding-1".to_string(),
+        title: "runner surfaced a failing case".to_string(),
+        severity: "high".to_string(),
+        status: FuzzFindingStatus::Open,
+        surface_id: None,
+        target_id: None,
+        operation_id: None,
+        case_id: Some("case-1".to_string()),
+        workload_id: None,
+        seed_id: None,
+        fingerprint: None,
+        artifact_ids: Vec::new(),
+        source_refs: Vec::new(),
+        metadata: serde_json::Value::Null,
+        extra: std::collections::BTreeMap::new(),
+    }];
+
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+    );
+
+    assert_eq!(outcome.status, "passed");
+    assert!(outcome.success);
+    assert_eq!(outcome.exit_code, 0);
 }
 
 #[test]
@@ -286,7 +336,14 @@ fn fuzz_run_expected_metric_gate_fails_when_observed_metric_differs() {
 
     let gates = evaluate_expected_metric_gates(Some(&campaign), &expectations);
     let error = fuzz_expected_metric_error(&gates).expect("expected metric failure");
-    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), Some(&error));
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        Some(&campaign),
+        Some(&error),
+        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+    );
 
     assert_eq!(gate_status(&gates), "failed");
     assert!(gates.iter().any(|gate| {
@@ -320,7 +377,14 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_failed_lifecycle_phase
         metadata: std::collections::BTreeMap::new(),
     });
 
-    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Strict,
+    );
 
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.success);
@@ -353,7 +417,14 @@ fn fuzz_run_outcome_fails_when_workload_reports_invariant_failure_count() {
         }
     });
 
-    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Strict,
+    );
 
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.success);
@@ -361,8 +432,54 @@ fn fuzz_run_outcome_fails_when_workload_reports_invariant_failure_count() {
 }
 
 #[test]
+fn fuzz_run_outcome_measurement_profile_records_failure_metadata_without_failing() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.metadata = serde_json::json!({
+        "status": "failed",
+        "success": false,
+        "case_counts": { "passed": 2, "failed": 1, "errored": 0 },
+        "nested": { "invariant_failure_count": 1 }
+    });
+    campaign.lifecycle = Some(LifecycleResultMetadata {
+        schema: LIFECYCLE_RESULT_SCHEMA.to_string(),
+        version: LIFECYCLE_CONTRACT_VERSION,
+        phases: vec![LifecyclePhaseResult {
+            id: "execute".to_string(),
+            phase: LifecyclePhaseKind::Snapshot,
+            status: LifecyclePhaseStatus::Failed,
+            snapshot_ref: None,
+            started_at: None,
+            finished_at: None,
+            message: Some("runner recorded a failing case".to_string()),
+        }],
+        snapshot_refs: Vec::new(),
+        metadata: std::collections::BTreeMap::new(),
+    });
+
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+    );
+
+    assert_eq!(outcome.status, "passed");
+    assert!(outcome.success);
+    assert_eq!(outcome.exit_code, 0);
+}
+
+#[test]
 fn fuzz_run_outcome_reports_timeout_as_non_pass() {
-    let outcome = fuzz_run_outcome(0, true, true, None, None);
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        true,
+        None,
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+    );
 
     assert_eq!(outcome.status, "timeout");
     assert!(!outcome.success);
@@ -388,7 +505,14 @@ fn fuzz_run_outcome_reports_skipped_lifecycle_as_non_proof() {
         metadata: std::collections::BTreeMap::new(),
     });
 
-    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+    );
 
     assert_eq!(outcome.status, "skipped");
     assert!(!outcome.success);
@@ -405,7 +529,14 @@ fn fuzz_run_outcome_reports_unsupported_metadata_as_non_proof() {
         }
     });
 
-    let outcome = fuzz_run_outcome(0, true, false, Some(&campaign), None);
+    let outcome = fuzz_run_outcome(
+        0,
+        true,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Measurement,
+    );
 
     assert_eq!(outcome.status, "unsupported");
     assert!(!outcome.success);

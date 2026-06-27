@@ -307,6 +307,7 @@ fn fuzz_validate_accepts_case_log_artifact() {
 
     let output = run_validate(FuzzValidateArgs {
         results_file,
+        gate_profile: FuzzGateProfileArg::Measurement,
         case_logs: vec![case_log.clone()],
     })
     .expect("validate fuzz campaign and case log");
@@ -342,6 +343,7 @@ fn fuzz_validate_rejects_invalid_case_log_artifact() {
 
     let err = match run_validate(FuzzValidateArgs {
         results_file,
+        gate_profile: FuzzGateProfileArg::Measurement,
         case_logs: vec![case_log],
     }) {
         Ok(_) => panic!("invalid case log should fail validation"),
@@ -349,6 +351,53 @@ fn fuzz_validate_rejects_invalid_case_log_artifact() {
     };
 
     assert!(err.message.contains("skip_reason"));
+}
+
+#[test]
+fn fuzz_validate_measurement_profile_is_non_blocking_but_strict_profile_blocks() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let results_file = dir.path().join("fuzz-results.json");
+    std::fs::write(
+        &results_file,
+        serde_json::json!({
+            "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+            "id": "campaign-1",
+            "safety_class": "read_only",
+            "findings": [{
+                "id": "finding-1",
+                "title": "open finding",
+                "severity": "high",
+                "status": "open"
+            }],
+            "metadata": {
+                "status": "failed",
+                "case_counts": { "passed": 1, "failed": 1 }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write campaign");
+
+    let measurement = run_validate(FuzzValidateArgs {
+        results_file: results_file.clone(),
+        gate_profile: FuzzGateProfileArg::Measurement,
+        case_logs: Vec::new(),
+    })
+    .expect("validate measurement campaign");
+    let strict = run_validate(FuzzValidateArgs {
+        results_file,
+        gate_profile: FuzzGateProfileArg::Strict,
+        case_logs: Vec::new(),
+    })
+    .expect("validate strict campaign");
+
+    assert_eq!(measurement.status, "passed");
+    assert_eq!(measurement.open_findings, 1);
+    assert!(measurement.gates.is_empty());
+    assert_eq!(strict.status, "failed");
+    assert!(strict.gates.iter().any(|gate| {
+        gate.gate_id == "no-open-findings" && gate.status == "failed" && gate.observed == 1.0
+    }));
 }
 
 #[test]

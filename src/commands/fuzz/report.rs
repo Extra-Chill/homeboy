@@ -3,10 +3,10 @@ use std::path::Path;
 
 use homeboy::core::artifact_ref::EvidenceRef;
 use homeboy::core::fuzz::{
-    default_fuzz_gates, fuzz_gate_profile_contract, parse_fuzz_case_log_file,
-    parse_fuzz_observation_set_value, parse_fuzz_results_file, parse_fuzz_target_inventory_file,
-    rank_fuzz_observation_set_hotspots, FuzzCampaign, FuzzExecutionRequest, FuzzHotspotSet,
-    FuzzProvenance, FuzzResultEnvelope, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    fuzz_gate_profile_contract, parse_fuzz_case_log_file, parse_fuzz_observation_set_value,
+    parse_fuzz_results_file, parse_fuzz_target_inventory_file, rank_fuzz_observation_set_hotspots,
+    FuzzCampaign, FuzzExecutionRequest, FuzzGateProfile, FuzzHotspotSet, FuzzProvenance,
+    FuzzResultEnvelope, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
@@ -27,7 +27,7 @@ pub(super) fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<Fuzz
     for path in &args.case_logs {
         case_log_entries += parse_fuzz_case_log_file(path)?.len();
     }
-    let gates = evaluate_fuzz_gates(&campaign);
+    let gates = evaluate_fuzz_gates_for_profile(&campaign, args.gate_profile.as_core());
     let coverage_completeness = fuzz_coverage_completeness(&campaign);
     let performance_hotspots = fuzz_performance_hotspots(&campaign);
     let observation_hotspots = fuzz_observation_hotspots(&campaign);
@@ -281,11 +281,20 @@ pub(super) fn fuzz_provenance(run_id: Option<String>) -> FuzzProvenance {
     }
 }
 
+#[cfg(test)]
 pub(super) fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvaluation> {
-    let profile = FuzzGateEvaluationProfile::default();
-    let metrics = FuzzGateMetrics::from_campaign(campaign, &profile);
+    evaluate_fuzz_gates_for_profile(campaign, FuzzGateProfile::Strict)
+}
 
-    default_fuzz_gates()
+pub(super) fn evaluate_fuzz_gates_for_profile(
+    campaign: &FuzzCampaign,
+    profile: FuzzGateProfile,
+) -> Vec<FuzzGateEvaluation> {
+    let evaluation_profile = FuzzGateEvaluationProfile::default();
+    let metrics = FuzzGateMetrics::from_campaign(campaign, &evaluation_profile);
+    let (_, gates) = fuzz_gate_profile_contract(profile);
+
+    gates
         .into_iter()
         .map(|gate| {
             let observed = match gate.metric.as_str() {
