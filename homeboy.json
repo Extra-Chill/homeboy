@@ -185,7 +185,7 @@
           "src/core/cleanup/self_artifacts.rs",
           "src/core/runner/lab_args/tests.rs",
           "src/core/release/executor/lockfile_guard.rs",
-          "src/core/triage/tests.rs",
+          "src/core/triage/tests",
           "src/core/extension/bench/baseline.rs"
         ],
         "id": "core-agnostic-source",
@@ -711,7 +711,6 @@
         "structural::src/core/observation/runs_service.rs::HighItemCount",
         "structural::src/core/observation/store.rs::GodFile",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
-        "structural::src/core/triage/tests.rs::GodFile",
         "structural::src/core::DirectorySprawl",
         "structural::tests/core_agnostic_test.rs::HighItemCount",
         "test_quality::src/commands/bench/tests/scenario_run_tests.rs::VacuousTest",
