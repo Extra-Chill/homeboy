@@ -75,27 +75,29 @@ try {
 
 	const runtimeTask = taskInput.runtime_task;
 	assert.equal(runtimeTask.ability, 'wp-codebox/run-runtime-package');
-	assert.equal(runtimeTask.input.runtime_package, '/workspace/workspace/packages/proof-loop');
-	assert.equal(runtimeTask.input.metadata.runtime_package_descriptor.source, runtimeTask.input.runtime_package);
-	assert.equal(runtimeTask.input.required_artifacts.includes('review_packet'), true);
+	assert.equal(runtimeTask.input.schema, 'wp-codebox/runtime-package-task/v1');
+	assert.deepEqual(runtimeTask.input.package, {
+		slug: 'proof-loop',
+		source: '/workspace/workspace/packages/proof-loop',
+	});
 	assert.deepEqual(runtimeTask.input.artifacts, [{
 		name: 'review_packet',
 		required: true,
 		schema: 'example/review-packet/v1',
 		output: 'outputs.typed_artifacts.review_packet.payload',
 	}]);
-	assert.equal(runtimeTask.input.engine_data_outputs.review_packet, 'outputs.typed_artifacts.review_packet.payload');
+	assert.equal(Object.hasOwn(runtimeTask.input, 'runtime_package'), false);
+	assert.equal(Object.hasOwn(runtimeTask.input, 'agent'), false);
+	assert.equal(Object.hasOwn(runtimeTask.input, 'required_artifacts'), false);
+	assert.equal(Object.hasOwn(runtimeTask.input, 'engine_data_outputs'), false);
 
 	assert.deepEqual(runtimePackageTaskInputForCodebox({
 		package: { slug: 'proof-loop', source: 'packages/proof-loop' },
 	}, { workspaceTarget: '/workspace/source' }), {
-		runtime_package: '/workspace/source/packages/proof-loop',
-		agent: 'proof-loop',
-		metadata: {
-			runtime_package_descriptor: {
-				slug: 'proof-loop',
-				source: '/workspace/source/packages/proof-loop',
-			},
+		schema: 'wp-codebox/runtime-package-task/v1',
+		package: {
+			slug: 'proof-loop',
+			source: '/workspace/source/packages/proof-loop',
 		},
 	});
 

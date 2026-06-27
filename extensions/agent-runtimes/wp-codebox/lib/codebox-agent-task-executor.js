@@ -80,6 +80,7 @@ const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const AGENT_TASK_EVENT_SCHEMA = 'homeboy/agent-task-event/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 const WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY = 'wp-codebox/run-runtime-package';
+const WP_CODEBOX_RUNTIME_PACKAGE_TASK_SCHEMA = 'wp-codebox/runtime-package-task/v1';
 const NEUTRAL_RUNTIME_PACKAGE_ABILITIES = new Set(['homeboy/run-runtime-package']);
 const LEGACY_RUNTIME_PACKAGE_ABILITIES = new Set(['agents/run-runtime-package', 'runtime-package/run']);
 const RUNTIME_PACKAGE_ABILITY_ALIASES = new Set([
@@ -1032,7 +1033,7 @@ function runtimePackageTaskInputForCodebox(input, options = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return input;
   }
-  const normalized = { ...input };
+  const normalized = { ...input, schema: WP_CODEBOX_RUNTIME_PACKAGE_TASK_SCHEMA };
   const runtimeOptions = normalized.options && typeof normalized.options === 'object' && !Array.isArray(normalized.options) ? normalized.options : {};
   for (const key of ['provider', 'model']) {
     if (!firstValue(normalized[key]) && firstValue(runtimeOptions[key])) {
@@ -1041,27 +1042,21 @@ function runtimePackageTaskInputForCodebox(input, options = {}) {
   }
   const packageDescriptor = normalized.runtime_package === undefined ? normalized.package : normalized.runtime_package;
   const normalizedPackage = normalizeRuntimePackageTaskPackage(packageDescriptor, options);
-  const runtimePackage = normalizedPackage.runtime_package;
-  const runtimePackageAgent = runtimePackageIdentifier(packageDescriptor);
-  if (runtimePackage) {
-    normalized.runtime_package = runtimePackage;
-    if (!firstValue(normalized.agent, normalized.agent_slug)) {
-      normalized.agent = runtimePackageAgent || runtimePackage;
-    }
+  if (normalizedPackage.package) {
+    normalized.package = normalizedPackage.package;
   }
-  if (packageDescriptor && typeof packageDescriptor === 'object' && !Array.isArray(packageDescriptor)) {
-    normalized.metadata = {
-      ...(normalized.metadata && typeof normalized.metadata === 'object' && !Array.isArray(normalized.metadata) ? normalized.metadata : {}),
-      runtime_package_descriptor: normalizedPackage.descriptor,
-    };
-  }
-  delete normalized.package;
+  delete normalized.runtime_package;
+  delete normalized.agent;
+  delete normalized.agent_slug;
   return normalized;
 }
 
 function normalizeRuntimePackageTaskPackage(packageDescriptor, options = {}) {
+  if (typeof packageDescriptor === 'string') {
+    return { package: runtimePackagePackageFromString(packageDescriptor, options) };
+  }
   if (!packageDescriptor || typeof packageDescriptor !== 'object' || Array.isArray(packageDescriptor)) {
-    return { runtime_package: runtimePackageImportPath(packageDescriptor, options), descriptor: packageDescriptor };
+    return { package: null };
   }
 
   const descriptor = runtimePackageDescriptorForCodebox(packageDescriptor, options);
@@ -1074,18 +1069,31 @@ function normalizeRuntimePackageTaskPackage(packageDescriptor, options = {}) {
     throw new Error(`WP Codebox runtime_package descriptor source fields cannot diverge: ${uniqueSources.join(', ')}`);
   }
 
-  const runtimePackage = uniqueSources[0] || firstValue(descriptor.slug, descriptor.id, descriptor.name, '');
-  for (const key of sourceKeys) {
-    if (descriptor[key]) {
-      descriptor[key] = runtimePackage;
-    }
-  }
-  return { runtime_package: runtimePackage, descriptor };
+  return { package: runtimePackagePackageFromDescriptor(descriptor, uniqueSources[0]) };
+}
+
+function runtimePackagePackageFromString(value, options = {}) {
+  const source = runtimePackageImportPath(value, options);
+  const slug = runtimePackageIdentifier(value);
+  return withoutUndefinedValues(relativeRuntimePackagePath(value) ? { slug, source } : { slug: source || slug });
+}
+
+function runtimePackagePackageFromDescriptor(descriptor, source = '') {
+  return withoutUndefinedValues({
+    ...descriptor,
+    slug: firstValue(descriptor.slug, descriptor.id, descriptor.name, runtimePackageIdentifier(source)),
+    ...(source ? { source } : {}),
+    path: undefined,
+    bundle_path: undefined,
+    bundlePath: undefined,
+    id: undefined,
+    name: undefined,
+  });
 }
 
 function runtimePackageIdentifier(value) {
   if (typeof value === 'string') {
-    return value;
+    return path.basename(String(value).replace(/\/+$/, '')) || value;
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return '';
@@ -1145,19 +1153,9 @@ function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, 
     return input;
   }
 
-  const requiredArtifacts = Array.from(new Set([
-    ...normalizeArray(input.required_artifacts),
-    ...declarations.map((declaration) => typedArtifactNameFromDeclaration(declaration)).filter(Boolean),
-  ]));
-  const engineDataOutputs = {
-    ...(input.engine_data_outputs && typeof input.engine_data_outputs === 'object' && !Array.isArray(input.engine_data_outputs) ? input.engine_data_outputs : {}),
-  };
   const artifacts = normalizeRuntimePackageTaskArtifacts(input.artifacts);
   for (const declaration of declarations) {
     const name = typedArtifactNameFromDeclaration(declaration);
-    if (name && !engineDataOutputs[name]) {
-      engineDataOutputs[name] = runtimePackageOutputProjectionPath(name);
-    }
     if (name && !artifacts.some((artifact) => artifact.name === name)) {
       artifacts.push(runtimePackageArtifactFromDeclaration(declaration));
     }
@@ -1166,8 +1164,6 @@ function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, 
   return {
     ...input,
     artifacts,
-    required_artifacts: requiredArtifacts,
-    engine_data_outputs: engineDataOutputs,
   };
 }
 
