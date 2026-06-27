@@ -299,11 +299,11 @@ fn effective_warmup_iterations(args: &BenchRunArgs, rig_spec: Option<&RigSpec>) 
     })
 }
 
-fn declared_scenario_gates(rig_spec: Option<&RigSpec>) -> BTreeMap<String, Vec<BenchGate>> {
+fn declared_bench_gates(rig_spec: Option<&RigSpec>) -> DeclaredBenchGates {
     rig_spec
         .and_then(|spec| spec.bench.as_ref())
         .map(|bench| {
-            bench
+            let scenario_gates = bench
                 .metric_gates
                 .iter()
                 .filter_map(|(scenario_id, metric_gates)| {
@@ -313,16 +313,28 @@ fn declared_scenario_gates(rig_spec: Option<&RigSpec>) -> BTreeMap<String, Vec<B
                         .collect();
                     (!gates.is_empty()).then(|| (scenario_id.clone(), gates))
                 })
-                .collect()
+                .collect();
+            let result_gates = bench
+                .result_gates
+                .iter()
+                .flat_map(|(metric, condition)| condition.to_gates(metric))
+                .collect();
+            DeclaredBenchGates {
+                scenario_gates,
+                result_gates,
+            }
         })
         .unwrap_or_default()
 }
 
-fn apply_declared_scenario_gates(
-    workflow: &mut BenchRunWorkflowResult,
+#[derive(Default)]
+struct DeclaredBenchGates {
     scenario_gates: BTreeMap<String, Vec<BenchGate>>,
-) {
-    if scenario_gates.is_empty() {
+    result_gates: Vec<BenchGate>,
+}
+
+fn apply_declared_bench_gates(workflow: &mut BenchRunWorkflowResult, gates: DeclaredBenchGates) {
+    if gates.scenario_gates.is_empty() && gates.result_gates.is_empty() {
         return;
     }
 
@@ -331,9 +343,10 @@ fn apply_declared_scenario_gates(
     };
 
     for scenario in &mut results.scenarios {
-        if let Some(gates) = scenario_gates.get(&scenario.id) {
+        if let Some(gates) = gates.scenario_gates.get(&scenario.id) {
             scenario.gates.extend(gates.clone());
         }
+        scenario.gates.extend(gates.result_gates.clone());
     }
 
     let failures = extension_bench::evaluate_gates(results);
@@ -690,7 +703,7 @@ fn run_component_with_rig_context(
     let mut persisted_run = None;
     let workflow = match workflow {
         Ok(mut workflow) => {
-            apply_declared_scenario_gates(&mut workflow, declared_scenario_gates(rig_spec));
+            apply_declared_bench_gates(&mut workflow, declared_bench_gates(rig_spec));
             if let Some(summary) = observation::finish_success(observation, &mut workflow, &run_dir)
             {
                 let hints = workflow.hints.get_or_insert_with(Vec::new);
@@ -954,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_scenario_gates_parse_from_rig_bench_spec() {
+    fn declared_bench_gates_parse_from_rig_bench_spec() {
         let rig_spec: RigSpec = serde_json::from_str(
             r#"{
                 "id": "studio-bfb",
@@ -965,14 +978,18 @@ mod tests {
                             "native_block_quality_pass": { "equals": 1 },
                             "tool_error_count": { "lte": 0 }
                         }
+                    },
+                    "result_gates": {
+                        "failed_fixture_count": { "lte": 0 }
                     }
                 }
             }"#,
         )
         .expect("parse rig spec");
 
-        let gates = declared_scenario_gates(Some(&rig_spec));
+        let gates = declared_bench_gates(Some(&rig_spec));
         let scenario_gates = gates
+            .scenario_gates
             .get("wordpress-is-dead")
             .expect("scenario gates should be declared");
 
@@ -987,6 +1004,69 @@ mod tests {
                 && gate.op == homeboy::core::extension::bench::BenchGateOp::Lte
                 && gate.value == 0.0
         }));
+        assert_eq!(gates.result_gates.len(), 1);
+        assert_eq!(gates.result_gates[0].metric, "failed_fixture_count");
+        assert_eq!(
+            gates.result_gates[0].op,
+            homeboy::core::extension::bench::BenchGateOp::Lte
+        );
+        assert_eq!(gates.result_gates[0].value, 0.0);
+    }
+
+    #[test]
+    fn declared_result_gate_fails_single_pass_workflow() {
+        let rig_spec: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "fixture-matrix",
+                "bench": {
+                    "result_gates": {
+                        "failed_fixture_count": { "lte": 0 }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse rig spec");
+        let results = homeboy::core::extension::bench::parse_bench_results_str(
+            r#"{
+                "component_id": "static-site-importer",
+                "iterations": 1,
+                "scenarios": [
+                    {
+                        "id": "static-site-fixture-matrix",
+                        "iterations": 1,
+                        "metrics": {
+                            "failed_fixture_count": 71,
+                            "fixture_count": 71
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .expect("parse bench results");
+        let mut workflow = BenchRunWorkflowResult {
+            status: "passed".to_string(),
+            component: "static-site-importer".to_string(),
+            exit_code: 0,
+            iterations: 1,
+            results: Some(results),
+            gate_results: Vec::new(),
+            gate_failures: Vec::new(),
+            baseline_comparison: None,
+            hints: None,
+            failure: None,
+            diagnostics: Vec::new(),
+        };
+
+        apply_declared_bench_gates(&mut workflow, declared_bench_gates(Some(&rig_spec)));
+
+        assert_eq!(workflow.status, "failed");
+        assert_eq!(workflow.exit_code, 1);
+        assert_eq!(workflow.gate_results.len(), 1);
+        assert_eq!(
+            workflow.gate_results[0].status,
+            homeboy::core::gate::HomeboyGateStatus::Failed
+        );
+        assert!(workflow.gate_failures[0].contains("failed_fixture_count lte 0"));
     }
 
     #[test]
