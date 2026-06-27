@@ -3,12 +3,13 @@ use std::path::Path;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::core::build_identity::BuildIdentity;
 use homeboy::core::runner_execution_envelope::{
     RunnerExecutionArtifactDeclaration, RunnerExecutionEnvelope, RunnerExecutionLifecyclePolicy,
     RunnerExecutionResultRefs, RUNNER_EXECUTION_ENVELOPE_SCHEMA,
 };
 use homeboy::core::runners;
-use homeboy::core::runners::RunnerWorkspaceSyncMode;
+use homeboy::core::runners::{RunnerSession, RunnerStaleDaemonWarning, RunnerWorkspaceSyncMode};
 use homeboy::core::secret_env_plan::SecretEnvPlan;
 
 use super::{CmdResult, GlobalArgs};
@@ -92,6 +93,7 @@ pub struct LabRefreshPlanHandoff {
     pub execution_envelope_ref: LabRefreshPlanExecutionEnvelopeRef,
     pub execution_envelope: RunnerExecutionEnvelope,
     pub runner: LabRefreshPlanRunnerHandoff,
+    pub homeboy_provenance: LabHomeboyProvenance,
     pub workspace: LabRefreshPlanWorkspaceHandoff,
     pub env_plan: LabRefreshPlanEnvPlan,
     pub secret_plan: SecretEnvPlan,
@@ -114,6 +116,41 @@ pub struct LabRefreshPlanExecutionEnvelopeRef {
 pub struct LabRefreshPlanRunnerHandoff {
     pub id: String,
     pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LabHomeboyProvenance {
+    pub controller_cli: LabHomeboyBinaryIdentity,
+    pub runner_configured_binary: LabHomeboyBinaryIdentity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_daemon: Option<LabHomeboyBinaryIdentity>,
+    pub controller_plans_lab_payload: bool,
+    pub runner_executes_lab_payload: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<LabHomeboyProvenanceDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LabHomeboyBinaryIdentity {
+    pub role: &'static str,
+    pub owner: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<bool>,
+    pub purpose: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LabHomeboyProvenanceDiagnostic {
+    pub severity: &'static str,
+    pub code: &'static str,
+    pub message: String,
+    pub action: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -227,7 +264,7 @@ fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOu
     }
 
     let mut checks = Vec::new();
-    add_runner_check(&mut checks, &args.runner)?;
+    let homeboy_provenance = add_runner_check(&mut checks, &args.runner)?;
     add_path_check(&mut checks, "workspace", &args.workspace)?;
     for source in &args.sources {
         add_path_check(&mut checks, "source", source)?;
@@ -242,13 +279,15 @@ fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPlanOu
         "docs/operators/artifact-loop-runner-matrix.md".to_string(),
         "docs/commands/lab.md".to_string(),
     ];
-    let execution_envelope = execution_envelope_plan(&args, &evidence_paths, &docs);
+    let execution_envelope =
+        execution_envelope_plan(&args, &evidence_paths, &docs, &homeboy_provenance);
     let handoff = handoff_plan(
         &args,
         &execution_envelope,
         &evidence_paths,
         &next_commands,
         &docs,
+        homeboy_provenance,
     );
 
     Ok(LabRefreshPlanOutput {
@@ -283,13 +322,34 @@ fn validate_sync_mode(sync_mode: &str) -> homeboy::core::Result<RunnerWorkspaceS
 fn add_runner_check(
     checks: &mut Vec<LabRefreshPlanCheck>,
     runner_id: &str,
-) -> homeboy::core::Result<()> {
+) -> homeboy::core::Result<LabHomeboyProvenance> {
     let runner = runners::load(runner_id)?;
     let configured_homeboy = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let workspace_root = runner
         .workspace_root
         .as_deref()
         .unwrap_or("runner has no default workspace_root");
+    let status = runners::status(runner_id);
+    let active_daemon_status_error = match &status {
+        Ok(status) if status.session.is_none() => {
+            Some("runner is not connected to an active daemon".to_string())
+        }
+        Err(error) => Some(error.to_string()),
+        Ok(_) => None,
+    };
+    let homeboy_provenance = lab_homeboy_provenance(
+        runner_id,
+        Some(configured_homeboy.to_string()),
+        status
+            .as_ref()
+            .ok()
+            .and_then(|status| status.session.as_ref()),
+        status
+            .as_ref()
+            .ok()
+            .and_then(|status| status.stale_daemon.as_ref()),
+        active_daemon_status_error,
+    );
 
     checks.push(LabRefreshPlanCheck {
         name: "runner".to_string(),
@@ -297,6 +357,21 @@ fn add_runner_check(
         detail: format!(
             "configured runner `{runner_id}` uses Homeboy `{configured_homeboy}` with workspace root `{workspace_root}`"
         ),
+    });
+    checks.push(LabRefreshPlanCheck {
+        name: "homeboy_provenance".to_string(),
+        status: if homeboy_provenance
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == "error")
+        {
+            "error"
+        } else if homeboy_provenance.diagnostics.is_empty() {
+            "ok"
+        } else {
+            "warn"
+        },
+        detail: lab_homeboy_provenance_detail(&homeboy_provenance),
     });
     checks.push(LabRefreshPlanCheck {
         name: "runner_homeboy_capability".to_string(),
@@ -314,7 +389,183 @@ fn add_runner_check(
         ),
     });
 
-    Ok(())
+    Ok(homeboy_provenance)
+}
+
+fn lab_homeboy_provenance(
+    runner_id: &str,
+    configured_binary_path: Option<String>,
+    active_daemon: Option<&RunnerSession>,
+    stale_daemon: Option<&RunnerStaleDaemonWarning>,
+    status_error: Option<String>,
+) -> LabHomeboyProvenance {
+    let controller_identity = homeboy::core::build_identity::current();
+    lab_homeboy_provenance_from_parts(
+        runner_id,
+        controller_identity,
+        std::env::current_exe()
+            .ok()
+            .map(|path| path.to_string_lossy().to_string()),
+        configured_binary_path,
+        active_daemon.map(active_daemon_identity),
+        stale_daemon,
+        status_error,
+    )
+}
+
+fn lab_homeboy_provenance_from_parts(
+    runner_id: &str,
+    controller_identity: BuildIdentity,
+    controller_path: Option<String>,
+    configured_binary_path: Option<String>,
+    active_daemon: Option<LabHomeboyBinaryIdentity>,
+    stale_daemon: Option<&RunnerStaleDaemonWarning>,
+    status_error: Option<String>,
+) -> LabHomeboyProvenance {
+    let controller_cli = LabHomeboyBinaryIdentity {
+        role: "controller_cli",
+        owner: "controller",
+        path: controller_path,
+        version: Some(controller_identity.version.clone()),
+        build_identity: Some(controller_identity.display.clone()),
+        dirty: controller_identity.git_dirty,
+        purpose: "plans Lab argv, workspace remapping, handoff metadata, and evidence paths before runner dispatch",
+    };
+    let runner_configured_binary = LabHomeboyBinaryIdentity {
+        role: "runner_configured_binary",
+        owner: "runner",
+        path: configured_binary_path,
+        version: None,
+        build_identity: None,
+        dirty: None,
+        purpose: "configured runner executable used for runner jobs and daemon refresh operations",
+    };
+
+    let mut diagnostics = Vec::new();
+    if controller_identity.git_dirty == Some(true) {
+        diagnostics.push(LabHomeboyProvenanceDiagnostic {
+            severity: "warn",
+            code: "controller_dirty",
+            message: format!(
+                "controller CLI is {}; this binary prepares the Lab argv/remap payload before runner dispatch",
+                controller_identity.display
+            ),
+            action: "rebuild or select a clean controller Homeboy binary before treating runner refresh results as proof".to_string(),
+        });
+    }
+
+    if let Some(active_daemon) = active_daemon.as_ref() {
+        if active_daemon.version != Some(controller_identity.version.clone()) {
+            diagnostics.push(LabHomeboyProvenanceDiagnostic {
+                severity: "warn",
+                code: "controller_daemon_version_drift",
+                message: format!(
+                    "controller CLI {} prepares the Lab payload, while runner `{runner_id}` active daemon is {} and executes the runner job",
+                    controller_identity.display,
+                    active_daemon
+                        .build_identity
+                        .as_deref()
+                        .or(active_daemon.version.as_deref())
+                        .unwrap_or("unknown")
+                ),
+                action: "rebuild the controller binary or refresh/reconnect the runner so both phases report the intended Homeboy identity".to_string(),
+            });
+        } else if active_daemon
+            .build_identity
+            .as_ref()
+            .is_some_and(|identity| identity != &controller_identity.display)
+        {
+            diagnostics.push(LabHomeboyProvenanceDiagnostic {
+                severity: "warn",
+                code: "controller_daemon_build_drift",
+                message: format!(
+                    "controller CLI {} and runner `{runner_id}` active daemon {} report the same version but different build identities",
+                    controller_identity.display,
+                    active_daemon
+                        .build_identity
+                        .as_deref()
+                        .unwrap_or("unknown")
+                ),
+                action: "rebuild the controller binary or refresh/reconnect the runner before relying on commit-specific Lab behavior".to_string(),
+            });
+        }
+    } else if let Some(error) = status_error {
+        diagnostics.push(LabHomeboyProvenanceDiagnostic {
+            severity: "warn",
+            code: "active_daemon_unknown",
+            message: format!(
+                "runner `{runner_id}` active daemon identity could not be read: {error}"
+            ),
+            action: format!(
+                "run `{}` to verify or reconnect the runner daemon",
+                shell_join(&[
+                    "homeboy",
+                    "runner",
+                    "doctor",
+                    runner_id,
+                    "--scope",
+                    "lab-offload"
+                ])
+            ),
+        });
+    }
+
+    if let Some(stale_daemon) = stale_daemon {
+        diagnostics.push(LabHomeboyProvenanceDiagnostic {
+            severity: stale_daemon.severity,
+            code: "runner_stale_daemon",
+            message: stale_daemon.message.clone(),
+            action: stale_daemon.refresh_command.clone(),
+        });
+    }
+
+    LabHomeboyProvenance {
+        controller_cli,
+        runner_configured_binary,
+        active_daemon,
+        controller_plans_lab_payload: true,
+        runner_executes_lab_payload: true,
+        diagnostics,
+    }
+}
+
+fn active_daemon_identity(session: &RunnerSession) -> LabHomeboyBinaryIdentity {
+    LabHomeboyBinaryIdentity {
+        role: "active_daemon",
+        owner: "runner",
+        path: session.remote_daemon_address.clone().or(session.local_url.clone()),
+        version: Some(session.homeboy_version.clone()),
+        build_identity: session.homeboy_build_identity.clone(),
+        dirty: None,
+        purpose: "active daemon control plane that accepts runner jobs and reports runner-side execution state",
+    }
+}
+
+fn lab_homeboy_provenance_detail(provenance: &LabHomeboyProvenance) -> String {
+    let daemon = provenance
+        .active_daemon
+        .as_ref()
+        .and_then(|identity| {
+            identity
+                .build_identity
+                .as_deref()
+                .or(identity.version.as_deref())
+        })
+        .unwrap_or("active daemon unknown");
+    let configured = provenance
+        .runner_configured_binary
+        .path
+        .as_deref()
+        .unwrap_or("homeboy");
+    let diagnostic_count = provenance.diagnostics.len();
+    format!(
+        "controller `{}` plans Lab payload; runner configured binary `{configured}` and active daemon `{daemon}` execute runner phase; diagnostics={diagnostic_count}",
+        provenance
+            .controller_cli
+            .build_identity
+            .as_deref()
+            .unwrap_or("unknown")
+    )
 }
 
 fn add_path_check(
@@ -363,6 +614,7 @@ fn handoff_plan(
     evidence_paths: &[LabRefreshPlanEvidencePath],
     next_commands: &[LabRefreshPlanCommand],
     docs: &[String],
+    homeboy_provenance: LabHomeboyProvenance,
 ) -> LabRefreshPlanHandoff {
     let artifact_paths = evidence_paths
         .iter()
@@ -391,6 +643,7 @@ fn handoff_plan(
             id: args.runner.clone(),
             mode: None,
         },
+        homeboy_provenance,
         workspace: LabRefreshPlanWorkspaceHandoff {
             controller_path: args.workspace.clone(),
             runner_cwd: args.runner_cwd.clone(),
@@ -461,6 +714,7 @@ fn execution_envelope_plan(
     args: &RefreshPlanArgs,
     evidence_paths: &[LabRefreshPlanEvidencePath],
     docs: &[String],
+    homeboy_provenance: &LabHomeboyProvenance,
 ) -> RunnerExecutionEnvelope {
     let handoff_id = format!("lab-refresh:{}:{}", args.runner, args.run_id);
     let mapping = workspace_mapping(args);
@@ -496,6 +750,7 @@ fn execution_envelope_plan(
             "runtime": {
                 "command": args.command,
             },
+            "homeboy_provenance": homeboy_provenance,
             "docs": docs,
         }))
 }
@@ -655,6 +910,35 @@ mod tests {
     use super::*;
     use homeboy::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA;
 
+    fn clean_controller_identity() -> BuildIdentity {
+        BuildIdentity {
+            version: "0.265.0".to_string(),
+            git_commit: Some("controller123".to_string()),
+            git_dirty: Some(false),
+            display: "homeboy 0.265.0+controller123".to_string(),
+        }
+    }
+
+    fn test_provenance() -> LabHomeboyProvenance {
+        lab_homeboy_provenance_from_parts(
+            "lab-runner",
+            clean_controller_identity(),
+            Some("/controller/homeboy".to_string()),
+            Some("/runner/homeboy".to_string()),
+            Some(LabHomeboyBinaryIdentity {
+                role: "active_daemon",
+                owner: "runner",
+                path: Some("http://127.0.0.1:1234".to_string()),
+                version: Some("0.265.0".to_string()),
+                build_identity: Some("homeboy 0.265.0+controller123".to_string()),
+                dirty: None,
+                purpose: "test daemon",
+            }),
+            None,
+            None,
+        )
+    }
+
     #[test]
     fn plan_commands_include_existing_runner_artifact_primitives() {
         let args = RefreshPlanArgs {
@@ -713,9 +997,10 @@ mod tests {
         let evidence = evidence_paths(&args);
         let commands = next_commands(&args, &evidence);
         let docs = vec!["docs/commands/lab.md".to_string()];
-        let envelope = execution_envelope_plan(&args, &evidence, &docs);
+        let provenance = test_provenance();
+        let envelope = execution_envelope_plan(&args, &evidence, &docs, &provenance);
 
-        let handoff = handoff_plan(&args, &envelope, &evidence, &commands, &docs);
+        let handoff = handoff_plan(&args, &envelope, &evidence, &commands, &docs, provenance);
 
         assert_eq!(handoff.schema, "homeboy/lab-refresh-handoff/v1");
         assert_eq!(handoff.run_id, "matrix-refresh-1");
@@ -746,6 +1031,27 @@ mod tests {
         );
         assert_eq!(handoff.runner.id, "lab-runner");
         assert_eq!(handoff.runner.mode, None);
+        assert_eq!(
+            handoff.homeboy_provenance.controller_cli.role,
+            "controller_cli"
+        );
+        assert_eq!(
+            handoff
+                .homeboy_provenance
+                .runner_configured_binary
+                .path
+                .as_deref(),
+            Some("/runner/homeboy")
+        );
+        assert_eq!(
+            handoff
+                .homeboy_provenance
+                .active_daemon
+                .as_ref()
+                .and_then(|identity| identity.build_identity.as_deref()),
+            Some("homeboy 0.265.0+controller123")
+        );
+        assert!(handoff.homeboy_provenance.diagnostics.is_empty());
         assert_eq!(handoff.workspace.controller_path, "/workspace/source");
         assert_eq!(handoff.workspace.runner_cwd, "/runner/source");
         assert_eq!(handoff.workspace.sync_mode, "snapshot-git");
@@ -785,8 +1091,9 @@ mod tests {
         };
         let evidence = evidence_paths(&args);
         let docs = vec!["docs/commands/lab.md".to_string()];
+        let provenance = test_provenance();
 
-        let envelope = execution_envelope_plan(&args, &evidence, &docs);
+        let envelope = execution_envelope_plan(&args, &evidence, &docs, &provenance);
 
         assert_eq!(envelope.schema, RUNNER_EXECUTION_ENVELOPE_SCHEMA);
         assert_eq!(
@@ -846,6 +1153,86 @@ mod tests {
             envelope.metadata["runtime"]["command"],
             serde_json::json!(["cargo", "test"])
         );
+        assert_eq!(
+            envelope.metadata["homeboy_provenance"]["controller_cli"]["role"],
+            "controller_cli"
+        );
+        assert_eq!(
+            envelope.metadata["homeboy_provenance"]["active_daemon"]["build_identity"],
+            "homeboy 0.265.0+controller123"
+        );
+    }
+
+    #[test]
+    fn homeboy_provenance_warns_for_dirty_controller_and_daemon_drift() {
+        let controller_identity = BuildIdentity {
+            version: "0.265.0".to_string(),
+            git_commit: Some("controller123".to_string()),
+            git_dirty: Some(true),
+            display: "homeboy 0.265.0+controller123-dirty".to_string(),
+        };
+
+        let provenance = lab_homeboy_provenance_from_parts(
+            "lab-runner",
+            controller_identity,
+            Some("/controller/homeboy".to_string()),
+            Some("/runner/homeboy".to_string()),
+            Some(LabHomeboyBinaryIdentity {
+                role: "active_daemon",
+                owner: "runner",
+                path: None,
+                version: Some("0.264.1".to_string()),
+                build_identity: Some("homeboy 0.264.1+runner456".to_string()),
+                dirty: None,
+                purpose: "test daemon",
+            }),
+            None,
+            None,
+        );
+
+        let codes = provenance
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            vec!["controller_dirty", "controller_daemon_version_drift"]
+        );
+        assert!(provenance.diagnostics[0]
+            .message
+            .contains("prepares the Lab argv/remap payload"));
+        assert!(provenance.diagnostics[1]
+            .message
+            .contains("prepares the Lab payload"));
+        assert!(provenance.diagnostics[1]
+            .message
+            .contains("executes the runner job"));
+        assert!(provenance.diagnostics[1]
+            .action
+            .contains("refresh/reconnect the runner"));
+    }
+
+    #[test]
+    fn homeboy_provenance_reports_unknown_active_daemon_with_action() {
+        let provenance = lab_homeboy_provenance_from_parts(
+            "lab-runner",
+            clean_controller_identity(),
+            Some("/controller/homeboy".to_string()),
+            Some("/runner/homeboy".to_string()),
+            None,
+            None,
+            Some("connection refused".to_string()),
+        );
+
+        assert_eq!(provenance.diagnostics.len(), 1);
+        assert_eq!(provenance.diagnostics[0].code, "active_daemon_unknown");
+        assert!(provenance.diagnostics[0]
+            .message
+            .contains("connection refused"));
+        assert!(provenance.diagnostics[0]
+            .action
+            .contains("homeboy runner doctor lab-runner --scope lab-offload"));
     }
 
     #[test]
