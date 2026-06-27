@@ -7,28 +7,15 @@
     },
     "command_status_contracts": {
       "required_commands": [
-        "audit",
         "deploy",
-        "lint",
         "release",
-        "review",
         "runs",
-        "stack",
-        "test"
+        "stack"
       ],
       "required_output_error_commands": [
         "status"
       ],
       "scenarios": [
-        {
-          "command": "audit",
-          "expected_fields": {
-            "/data/command": "audit.summary",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/audit-summary.json",
-          "id": "audit-summary-golden"
-        },
         {
           "command": "deploy",
           "expected_fields": {
@@ -39,30 +26,12 @@
           "id": "deploy-golden-contract"
         },
         {
-          "command": "lint",
-          "expected_fields": {
-            "/data/phase/phase": "lint",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/lint-findings.json",
-          "id": "lint-findings-golden"
-        },
-        {
           "command": "release",
           "expected_fields": {
             "/scenarios/0/payload/success": true
           },
           "file": "tests/fixtures/golden_json_contracts/release_contract.json",
           "id": "release-golden-contract"
-        },
-        {
-          "command": "review",
-          "expected_fields": {
-            "/data/command": "review",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/review-artifact.json",
-          "id": "review-artifact-golden"
         },
         {
           "command": "runs",
@@ -93,15 +62,6 @@
           "id": "status-runner-validation-error-output",
           "outcome": "validation_error",
           "output_file": true
-        },
-        {
-          "command": "test",
-          "expected_fields": {
-            "/data/phase/phase": "test",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/test-summary.json",
-          "id": "test-summary-golden"
         },
         {
           "command": "refactor transform",

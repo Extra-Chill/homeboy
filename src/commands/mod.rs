@@ -252,9 +252,6 @@ pub mod version;
 pub mod worktree;
 
 #[cfg(test)]
-mod golden_contract_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;

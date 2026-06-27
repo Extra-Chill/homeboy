@@ -64,23 +64,8 @@ pub use bench::{bench_compare, BenchCompareOutput, RunsBenchCompareArgs};
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
 
-// Test-only re-exports consumed by sibling test modules (golden contract tests,
-// the `runs` test submodules) via `super::runs::*` / `super::*`.
+// Test-only helpers consumed by sibling test modules via `super::runs::*` / `super::*`.
 #[cfg(test)]
 use bundle::{export_runs, import_runs, RunsExportArgs, RunsImportArgs};
 #[cfg(test)]
 use common::dead_owned_run;
-#[cfg(test)]
-pub(crate) use common::SkippedArtifactRow;
-#[cfg(test)]
-pub(crate) use drift::{DriftValue, RunsDriftFilters, RunsDriftOutput};
-#[cfg(test)]
-pub(crate) use query::{
-    QueryGroup, QueryRow, RunsQueryFilters, RunsQueryOutput as TestRunsQueryOutput,
-};
-#[cfg(test)]
-pub(crate) use refs::{
-    ArtifactRef as RunsRefsArtifactRef, RunRef as RunsRefsRunRef, RunsRefsFilters, RunsRefsOutput,
-};
-#[cfg(test)]
-pub(crate) use types::{RunDetail, RunsArtifactsOutput, RunsShowOutput};

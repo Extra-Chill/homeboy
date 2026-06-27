@@ -163,16 +163,12 @@ Note: `0` means success and `3` means a release completed with post-release warn
 
 On success, `data` is the command-specific output struct (varies by command).
 
-## Golden Output Fixtures
+## Output Contract Coverage
 
-Automation-facing JSON surfaces should have golden output fixtures that serialize
-typed command payloads through the same `CliResponse` envelope used by stdout and
-`--output`.
-
-Quality command fixtures live under `tests/fixtures/output_contracts/quality/`
-and are enforced by `tests/output_contracts_test.rs`. The first required quality
-set covers `audit`, `lint`, `test`, and `review`; adding or changing stable fields
-in those payloads should update the matching fixture deliberately.
+Automation-facing JSON surfaces should keep behavior-level coverage for routing,
+envelope semantics, and public variant discrimination. Prefer command execution or
+focused contract assertions over golden fixtures that only serialize hand-built
+payload structs and compare them with checked-in JSON produced from the same code.
 
 ## Observation-backed payloads
 
