@@ -125,97 +125,64 @@ pub(crate) fn load(extension_id: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    struct HomeGuard {
-        prior_home: Option<String>,
-        prior_xdg: Option<String>,
-        _dir: tempfile::TempDir,
-    }
-
-    impl HomeGuard {
-        fn set() -> Self {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let prior_home = std::env::var("HOME").ok();
-            let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
-            std::env::set_var("HOME", dir.path());
-            std::env::remove_var("XDG_DATA_HOME");
-            Self {
-                prior_home,
-                prior_xdg,
-                _dir: dir,
-            }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.prior_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.prior_xdg {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
+    use crate::test_support::with_isolated_home;
 
     #[test]
     fn persist_then_load_round_trips_sorted_env() {
-        let _lock = ENV_TEST_LOCK.lock().expect("lock");
-        let _home = HomeGuard::set();
+        // Route HOME/XDG isolation through the shared `home_lock()` so this
+        // test is globally serialized against every other env-mutating test,
+        // rather than racing under a private lock (#6804).
+        with_isolated_home(|_| {
+            persist(
+                "wordpress",
+                &[
+                    (
+                        "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
+                        "/runner/sample-runtime/core.mjs".to_string(),
+                    ),
+                    ("ANOTHER".to_string(), "value".to_string()),
+                ],
+            )
+            .expect("persist");
 
-        persist(
-            "wordpress",
-            &[
-                (
-                    "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
-                    "/runner/sample-runtime/core.mjs".to_string(),
-                ),
-                ("ANOTHER".to_string(), "value".to_string()),
-            ],
-        )
-        .expect("persist");
-
-        let loaded = load("wordpress");
-        assert_eq!(
-            loaded,
-            vec![
-                ("ANOTHER".to_string(), "value".to_string()),
-                (
-                    "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
-                    "/runner/sample-runtime/core.mjs".to_string()
-                ),
-            ]
-        );
+            let loaded = load("wordpress");
+            assert_eq!(
+                loaded,
+                vec![
+                    ("ANOTHER".to_string(), "value".to_string()),
+                    (
+                        "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
+                        "/runner/sample-runtime/core.mjs".to_string()
+                    ),
+                ]
+            );
+        });
     }
 
     #[test]
     fn load_returns_empty_when_nothing_persisted() {
-        let _lock = ENV_TEST_LOCK.lock().expect("lock");
-        let _home = HomeGuard::set();
-
-        assert!(load("never-persisted").is_empty());
+        with_isolated_home(|_| {
+            assert!(load("never-persisted").is_empty());
+        });
     }
 
     #[test]
     fn persist_empty_clears_previous_document() {
-        let _lock = ENV_TEST_LOCK.lock().expect("lock");
-        let _home = HomeGuard::set();
+        with_isolated_home(|_| {
+            persist("wordpress", &[("KEY".to_string(), "value".to_string())]).expect("persist");
+            assert!(!load("wordpress").is_empty());
 
-        persist("wordpress", &[("KEY".to_string(), "value".to_string())]).expect("persist");
-        assert!(!load("wordpress").is_empty());
-
-        persist("wordpress", &[]).expect("clear");
-        assert!(load("wordpress").is_empty());
+            persist("wordpress", &[]).expect("clear");
+            assert!(load("wordpress").is_empty());
+        });
     }
 
     #[test]
     fn sanitizes_extension_id_for_filesystem_safety() {
-        assert_eq!(sanitize_extension_id("wp/sandbox"), "selected_runtime");
+        // The sanitizer maps every filesystem-unsafe character (here `/`) to
+        // `_`; `wp/sandbox` therefore becomes `wp_sandbox`. (#6705's mechanical
+        // term rename left a stale expected literal here.)
+        assert_eq!(sanitize_extension_id("wp/sandbox"), "wp_sandbox");
         assert_eq!(sanitize_extension_id("wordpress"), "wordpress");
     }
 }

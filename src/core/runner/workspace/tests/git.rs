@@ -164,7 +164,14 @@ fn git_materialization_ignores_generated_homeboy_output_but_refuses_source_dirty
         let (output, exit_code) = sync().expect("generated .homeboy output is ignored");
         assert_eq!(exit_code, 0);
         let remote = Path::new(&output.remote_path);
-        assert!(!remote.join(".homeboy").exists());
+        // Re-sync resets generated `.homeboy` *output* (experiments, scratch)
+        // via `git clean -ffdqx`, so the experiment artifact written above is
+        // gone. The sync then legitimately re-writes its own workspace metadata
+        // marker under `.homeboy/runner-workspace.json` (used by orphaned-lab-
+        // workspace pruning, #6678/376bfde56), so `.homeboy` itself persists
+        // with only that metadata.
+        assert!(!remote.join(".homeboy/experiments").exists());
+        assert!(remote.join(".homeboy/runner-workspace.json").is_file());
 
         fs::write(remote.join("dirty-source.txt"), "dirty\n").expect("write dirty source file");
         let err = sync().expect_err("real dirty runner workspace is refused");
