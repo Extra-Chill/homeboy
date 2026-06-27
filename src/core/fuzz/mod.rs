@@ -4,6 +4,7 @@
 //! runners can attach their own details through `metadata` or flattened extras.
 
 mod artifact_envelope;
+mod cohorts;
 mod contract;
 mod coverage;
 mod defaults;
@@ -22,6 +23,10 @@ mod tests;
 pub use artifact_envelope::{
     inspect_fuzz_result_envelope_artifact, FuzzResultEnvelopeArtifactInspection,
     FuzzResultEnvelopeArtifactSummary,
+};
+pub use cohorts::{
+    compare_fuzz_hotspot_cohorts, FuzzHotspotCohortComparison, FuzzHotspotCohortDelta,
+    FuzzHotspotCohortItem,
 };
 pub use contract::{
     canonical_operation_family, fuzz_core_contract, FuzzContractSchemas, FuzzCoreContract,

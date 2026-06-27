@@ -8,7 +8,10 @@ use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::fuzz::parse_fuzz_hotspot_set_value;
+use homeboy::core::fuzz::{
+    compare_fuzz_hotspot_cohorts, parse_fuzz_hotspot_set_value, parse_fuzz_observation_set_value,
+    rank_fuzz_observation_set_hotspots, FuzzHotspotCohortComparison, FuzzHotspotCohortItem,
+};
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use homeboy::core::Error;
@@ -19,8 +22,16 @@ use super::{CmdResult, RunsOutput};
 #[derive(Args, Clone, Debug)]
 pub struct RunsHotspotsArgs {
     /// One or more persisted Homeboy run ids to inspect.
-    #[arg(value_name = "RUN_ID", required = true)]
+    #[arg(value_name = "RUN_ID")]
     pub run_ids: Vec<String>,
+
+    /// Baseline run id for threshold-free cohort comparison.
+    #[arg(long = "baseline-run", value_name = "RUN_ID")]
+    pub baseline_runs: Vec<String>,
+
+    /// Candidate run id for threshold-free cohort comparison.
+    #[arg(long = "candidate-run", value_name = "RUN_ID")]
+    pub candidate_runs: Vec<String>,
 
     /// Maximum ranked hotspots to return.
     #[arg(long, default_value_t = 20)]
@@ -37,6 +48,8 @@ pub struct RunsHotspotsOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped_artifacts: Vec<SkippedArtifactRow>,
     pub hotspots: Vec<HotspotRanking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cohort_comparison: Option<FuzzHotspotCohortComparison>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -78,22 +91,109 @@ struct HotspotAccumulator {
 
 pub fn runs_hotspots(args: RunsHotspotsArgs) -> CmdResult<RunsOutput> {
     let limit = args.limit.clamp(1, 500);
+    validate_hotspot_args(&args)?;
     let store = ObservationStore::open_initialized()?;
-    let loaded = load_fuzz_artifacts_for_runs(&store, &args.run_ids)?;
+    let ranking_run_ids = if args.run_ids.is_empty() {
+        combined_run_ids(&args.baseline_runs, &args.candidate_runs)
+    } else {
+        args.run_ids.clone()
+    };
+    let loaded = load_fuzz_artifacts_for_runs(&store, &ranking_run_ids)?;
     let hotspots = rank_hotspots(&loaded.artifacts, limit);
+    let cohort_comparison = cohort_comparison(&store, &args.baseline_runs, &args.candidate_runs)?;
 
     Ok((
         RunsOutput::Hotspots(RunsHotspotsOutput {
             command: "runs.hotspots",
-            run_ids: args.run_ids,
+            run_ids: ranking_run_ids,
             inspected_artifact_count: loaded.inspected_artifact_count,
             matched_artifact_count: loaded.artifacts.len(),
             skipped_artifact_count: loaded.skipped.len(),
             skipped_artifacts: loaded.skipped,
             hotspots,
+            cohort_comparison,
         }),
         0,
     ))
+}
+
+fn validate_hotspot_args(args: &RunsHotspotsArgs) -> homeboy::core::Result<()> {
+    if args.run_ids.is_empty() && args.baseline_runs.is_empty() && args.candidate_runs.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "provide at least one run id or a baseline/candidate cohort".to_string(),
+            None,
+            Some(vec![
+                "Use `homeboy runs hotspots <run-id> ...` for aggregate ranking.".to_string(),
+                "Use `homeboy runs hotspots --baseline-run <run-id> --candidate-run <run-id>` for threshold-free cohort comparison.".to_string(),
+            ]),
+        ));
+    }
+    if args.baseline_runs.is_empty() != args.candidate_runs.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "baseline-run",
+            "baseline and candidate cohorts must both be provided".to_string(),
+            None,
+            Some(vec![
+                "Add one or more `--baseline-run` values and one or more `--candidate-run` values."
+                    .to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
+fn combined_run_ids(baseline_runs: &[String], candidate_runs: &[String]) -> Vec<String> {
+    baseline_runs
+        .iter()
+        .chain(candidate_runs.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn cohort_comparison(
+    store: &ObservationStore,
+    baseline_runs: &[String],
+    candidate_runs: &[String],
+) -> homeboy::core::Result<Option<FuzzHotspotCohortComparison>> {
+    if baseline_runs.is_empty() && candidate_runs.is_empty() {
+        return Ok(None);
+    }
+
+    let baseline = load_fuzz_artifacts_for_runs(store, baseline_runs)?;
+    let candidate = load_fuzz_artifacts_for_runs(store, candidate_runs)?;
+    let baseline_hotspots = rank_hotspots(&baseline.artifacts, usize::MAX);
+    let candidate_hotspots = rank_hotspots(&candidate.artifacts, usize::MAX);
+
+    Ok(Some(compare_fuzz_hotspot_cohorts(
+        cohort_id("baseline", baseline_runs),
+        cohort_id("candidate", candidate_runs),
+        &cohort_items(&baseline_hotspots),
+        &cohort_items(&candidate_hotspots),
+    )))
+}
+
+fn cohort_id(prefix: &str, run_ids: &[String]) -> String {
+    if run_ids.len() == 1 {
+        return run_ids[0].clone();
+    }
+    format!("{prefix}:{}", run_ids.join(","))
+}
+
+fn cohort_items(hotspots: &[HotspotRanking]) -> Vec<FuzzHotspotCohortItem> {
+    hotspots
+        .iter()
+        .map(|hotspot| FuzzHotspotCohortItem {
+            key: hotspot.key.clone(),
+            label: hotspot.label.clone(),
+            score: hotspot.score,
+            occurrences: hotspot.occurrences,
+            run_count: hotspot.run_count,
+            rank: hotspot.rank,
+        })
+        .collect()
 }
 
 pub(crate) fn fuzz_hotspot_lines(run: &Value) -> Vec<String> {
@@ -339,6 +439,17 @@ fn collect_typed_hotspots(json: &Value, points: &mut Vec<HotspotPoint>) {
             label: item.label,
             score: item.relative_score.unwrap_or(item.value),
             source: format!("typed:{}", set.id),
+        }));
+        return;
+    }
+
+    if let Some(observation_set) = parse_fuzz_observation_set_value(json) {
+        let hotspot_set = rank_fuzz_observation_set_hotspots(&observation_set);
+        points.extend(hotspot_set.items.into_iter().map(|item| HotspotPoint {
+            key: item.id,
+            label: item.label,
+            score: item.relative_score.unwrap_or(item.value),
+            source: format!("typed:{}", hotspot_set.id),
         }));
         return;
     }
@@ -675,11 +786,100 @@ mod tests {
     }
 
     #[test]
+    fn typed_observation_sets_are_ranked_as_hotspot_points() {
+        let points = extract_hotspot_points(&json!({
+            "schema": "homeboy/fuzz-observation-set/v1",
+            "version": 1,
+            "id": "observations-1",
+            "observations": [
+                {
+                    "id": "obs-1",
+                    "family": "timing",
+                    "subject": "search route",
+                    "metric": "duration",
+                    "value": 120.0,
+                    "unit": "ms",
+                    "fingerprint": "route:search"
+                }
+            ]
+        }));
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].key, "route:search");
+        assert_eq!(points[0].label.as_deref(), Some("search route"));
+        assert_eq!(points[0].score, 1.0);
+        assert_eq!(points[0].source, "typed:observations-1-hotspots");
+    }
+
+    #[test]
+    fn cohort_comparison_accepts_typed_observation_artifact_inputs() {
+        let baseline = rank_hotspots(
+            &[artifact(
+                "baseline-run",
+                json!({
+                    "schema": "homeboy/fuzz-observation-set/v1",
+                    "version": 1,
+                    "id": "baseline-observations",
+                    "observations": [
+                        {
+                            "id": "baseline-slow-query",
+                            "family": "query",
+                            "subject": "query-a",
+                            "metric": "duration",
+                            "value": 20.0,
+                            "unit": "ms",
+                            "fingerprint": "query-a:duration"
+                        }
+                    ]
+                }),
+            )],
+            usize::MAX,
+        );
+        let candidate = rank_hotspots(
+            &[artifact(
+                "candidate-run",
+                json!({
+                    "schema": "homeboy/fuzz-observation-set/v1",
+                    "version": 1,
+                    "id": "candidate-observations",
+                    "observations": [
+                        {
+                            "id": "candidate-slow-query",
+                            "family": "query",
+                            "subject": "query-a",
+                            "metric": "duration",
+                            "value": 40.0,
+                            "unit": "ms",
+                            "fingerprint": "query-a:duration"
+                        }
+                    ]
+                }),
+            )],
+            usize::MAX,
+        );
+
+        let comparison = compare_fuzz_hotspot_cohorts(
+            "baseline-run",
+            "candidate-run",
+            &cohort_items(&baseline),
+            &cohort_items(&candidate),
+        );
+
+        assert_eq!(comparison.item_count, 1);
+        assert_eq!(comparison.items[0].key, "query-a:duration");
+        assert_eq!(comparison.items[0].change_kind, "unchanged");
+        assert!(serde_json::to_value(&comparison)
+            .expect("serialize comparison")
+            .get("status")
+            .is_none());
+    }
+
+    #[test]
     fn standardized_hotspots_extract_nested_observation_payloads() {
         let points = extract_hotspot_points(&json!({
             "schema": "homeboy/fuzz-campaign/v1",
             "metadata": {
-                "wordpress_fuzz_result": {
+                "runner_fuzz_result": {
                     "cases": [
                         {
                             "metadata": {

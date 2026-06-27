@@ -72,6 +72,21 @@ validates local refs that point inside it when possible. Homeboy core owns the
 path contract; extensions own artifact meaning and any runner/offload upload
 implementation beyond the persisted fuzz result envelope.
 
+When a runner or extension promotes an artifact directory through `runner exec
+--artifact-dir`, Homeboy records each direct file or directory child as a generic
+run artifact. A child JSON file with a Homeboy fuzz schema is recognized as typed
+evidence: `homeboy/fuzz-result-envelope/v1` becomes `fuzz_result_envelope`,
+`homeboy/fuzz-observation-set/v1` becomes `fuzz_observation_set`, and
+`homeboy/fuzz-hotspot-set/v1` becomes `fuzz_hotspot_set`. Result envelopes with
+an embedded observation set also derive persisted observation and hotspot
+artifacts for `runs hotspots` and `runs fuzz-compare`.
+
+Runner-specific schemas such as mutation-isolation or delete-boundary reports are
+not Homeboy core schemas. Store them as generic artifacts, or wrap their neutral
+measurements in `homeboy/fuzz-observation-set/v1` / `homeboy/fuzz-hotspot-set/v1`
+when downstream agents need portable hotspot comparison. The producer owns the
+schema meaning; Homeboy core stores the bytes, metadata, and typed fuzz contracts.
+
 Runners that collect action, query, resource, timing, or counter measurements can
 emit a `homeboy/fuzz-observation-set/v1` artifact. Each observation includes a
 generic `family`, optional `case_id` / `target_id` / `operation_id`, `phase`,
@@ -294,6 +309,17 @@ hotspots. Individual `deltas.hotspot_deltas[]` entries include
 `classification` values such as `advisory_regression`, `blocking_regression`,
 `measured_regression`, `advisory_improvement`, `blocking_improvement`,
 `measured_improvement`, and `unchanged`.
+
+Persisted run artifacts can be compared without local artifact paths:
+
+```bash
+homeboy runs fuzz-compare --from-run fuzz-baseline --to-run fuzz-candidate \
+  --hotspot-policy advisory
+homeboy runs hotspots --baseline-run fuzz-baseline --candidate-run fuzz-candidate
+```
+
+`runs hotspots` consumes persisted typed fuzz observation and hotspot artifacts
+and returns a cohort comparison without threshold or gate semantics.
 
 Fuzz workloads do not have a benchmark fallback. If `homeboy fuzz run` cannot
 execute the selected workload, fix the fuzz runner, rig declaration, or Lab

@@ -4,6 +4,10 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 use homeboy::core::engine::shell;
+use homeboy::core::fuzz::{
+    parse_fuzz_observation_set_value, rank_fuzz_observation_set_hotspots, FUZZ_HOTSPOT_SET_SCHEMA,
+    FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
+};
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
 use homeboy::core::runners::{
     self as runner, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
@@ -412,7 +416,7 @@ pub(super) fn promote_runner_exec_artifact_dirs(
                 artifact_metadata["source"] = serde_json::json!("runner_path_attach");
                 artifact_metadata["runner_id"] = serde_json::json!(runner.id.clone());
             }
-            records.push(record_runner_exec_output(
+            records.extend(record_runner_exec_output(
                 &store,
                 run_id,
                 &runner_exec_artifact_kind(&name),
@@ -495,10 +499,10 @@ fn promote_runner_exec_outputs(
             } else {
                 runner_path.clone()
             };
-            let record = record_runner_exec_output(&store, run_id, &kind, &record_path, metadata)?;
-            Ok(record)
+            record_runner_exec_output(&store, run_id, &kind, &record_path, metadata)
         })
-        .collect()
+        .collect::<homeboy::core::Result<Vec<_>>>()
+        .map(|records| records.into_iter().flatten().collect())
 }
 
 fn record_runner_exec_output(
@@ -507,12 +511,125 @@ fn record_runner_exec_output(
     kind: &str,
     record_path: &Path,
     metadata: serde_json::Value,
-) -> homeboy::core::Result<ArtifactRecord> {
+) -> homeboy::core::Result<Vec<ArtifactRecord>> {
     if record_path.is_dir() {
-        store.record_directory_artifact_with_metadata(run_id, kind, record_path, metadata)
-    } else {
-        store.record_artifact_with_metadata(run_id, kind, record_path, metadata)
+        return store
+            .record_directory_artifact_with_metadata(run_id, kind, record_path, metadata)
+            .map(|record| vec![record]);
     }
+
+    let (kind, metadata) = fuzz_typed_artifact_metadata(kind, record_path, metadata);
+    let record = store.record_artifact_with_metadata(run_id, &kind, record_path, metadata)?;
+    let mut records = vec![record.clone()];
+    records.extend(persist_derived_fuzz_artifacts(store, run_id, &record)?);
+    Ok(records)
+}
+
+fn fuzz_typed_artifact_metadata(
+    kind: &str,
+    record_path: &Path,
+    mut metadata: serde_json::Value,
+) -> (String, serde_json::Value) {
+    let Some(json) = read_json_file(record_path) else {
+        return (kind.to_string(), metadata);
+    };
+    let Some(schema) = json.get("schema").and_then(serde_json::Value::as_str) else {
+        return (kind.to_string(), metadata);
+    };
+
+    let canonical_kind = match schema {
+        FUZZ_RESULT_ENVELOPE_SCHEMA => Some("fuzz_result_envelope"),
+        FUZZ_OBSERVATION_SET_SCHEMA => Some("fuzz_observation_set"),
+        FUZZ_HOTSPOT_SET_SCHEMA => Some("fuzz_hotspot_set"),
+        _ => None,
+    };
+    let Some(canonical_kind) = canonical_kind else {
+        return (kind.to_string(), metadata);
+    };
+
+    metadata["schema"] = serde_json::json!(schema);
+    metadata["typed_artifact_kind"] = serde_json::json!(canonical_kind);
+    metadata["promoted_kind"] = serde_json::json!(kind);
+    (canonical_kind.to_string(), metadata)
+}
+
+fn persist_derived_fuzz_artifacts(
+    store: &ObservationStore,
+    run_id: &str,
+    source_record: &ArtifactRecord,
+) -> homeboy::core::Result<Vec<ArtifactRecord>> {
+    if source_record.artifact_type != "file" || source_record.kind != "fuzz_result_envelope" {
+        return Ok(Vec::new());
+    }
+
+    let Some(json) = read_json_file(Path::new(&source_record.path)) else {
+        return Ok(Vec::new());
+    };
+    let Some(observation_set) = parse_fuzz_observation_set_value(&json) else {
+        return Ok(Vec::new());
+    };
+
+    let mut records = Vec::new();
+    let observation_record = persist_json_artifact(
+        store,
+        run_id,
+        "fuzz_observation_set",
+        &observation_set,
+        serde_json::json!({
+            "schema": FUZZ_OBSERVATION_SET_SCHEMA,
+            "typed_artifact_kind": "fuzz_observation_set",
+            "derived_from_artifact_id": source_record.id,
+            "derived_from_artifact_kind": source_record.kind,
+        }),
+    )?;
+    records.push(observation_record);
+
+    let hotspot_set = rank_fuzz_observation_set_hotspots(&observation_set);
+    let hotspot_record = persist_json_artifact(
+        store,
+        run_id,
+        "fuzz_hotspot_set",
+        &hotspot_set,
+        serde_json::json!({
+            "schema": FUZZ_HOTSPOT_SET_SCHEMA,
+            "typed_artifact_kind": "fuzz_hotspot_set",
+            "derived_from_artifact_id": source_record.id,
+            "derived_from_artifact_kind": source_record.kind,
+            "derived_from_observation_set_id": observation_set.id,
+        }),
+    )?;
+    records.push(hotspot_record);
+    Ok(records)
+}
+
+fn persist_json_artifact(
+    store: &ObservationStore,
+    run_id: &str,
+    kind: &str,
+    value: &impl serde::Serialize,
+    metadata: serde_json::Value,
+) -> homeboy::core::Result<ArtifactRecord> {
+    let file = tempfile::NamedTempFile::new().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("create derived {kind} artifact")),
+        )
+    })?;
+    serde_json::to_writer_pretty(&file, value).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("write derived {kind} artifact")),
+        )
+    })?;
+    store.record_artifact_with_metadata(run_id, kind, file.path(), metadata)
+}
+
+fn read_json_file(path: &Path) -> Option<serde_json::Value> {
+    if !path.is_file() {
+        return None;
+    }
+    let file = fs::File::open(path).ok()?;
+    serde_json::from_reader(file).ok()
 }
 
 fn promoted_output(

@@ -116,11 +116,17 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 }
 
 pub fn parse_fuzz_observation_set_value(value: &Value) -> Option<FuzzObservationSet> {
-    let candidate = value
-        .get("observation_set")
-        .or_else(|| value.get("observations"))
-        .filter(|candidate| {
-            candidate.get("schema").and_then(Value::as_str) == Some(FUZZ_OBSERVATION_SET_SCHEMA)
-        })?;
+    let candidate = if value.get("schema").and_then(Value::as_str)
+        == Some(FUZZ_OBSERVATION_SET_SCHEMA)
+    {
+        Some(value)
+    } else {
+        value
+            .get("observation_set")
+            .or_else(|| value.get("observations"))
+            .filter(|candidate| {
+                candidate.get("schema").and_then(Value::as_str) == Some(FUZZ_OBSERVATION_SET_SCHEMA)
+            })
+    }?;
     FuzzObservationSet::from_value(candidate.clone()).ok()
 }

@@ -39,17 +39,16 @@ use crate::commands::fuzz::FuzzCompareOutput;
 
 pub(super) const DEFAULT_LIMIT: i64 = 20;
 
-/// Command-layer artifact viewer for WordPress Playground blueprint artifacts.
+/// Command-layer artifact viewer for hosted blueprint artifacts.
 ///
 /// The viewer is an ecosystem-specific presentation concern, so it lives in the
 /// command layer (which composes ecosystem integrations) rather than in core,
 /// which stays agnostic and only owns the generic [`ArtifactViewerDescriptor`].
-pub const WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER: ArtifactViewerDescriptor =
-    ArtifactViewerDescriptor::new(
-        "wordpress-playground-blueprint",
-        "https://playground.wordpress.net/",
-        "blueprint-url",
-    );
+pub const HOSTED_BLUEPRINT_VIEWER: ArtifactViewerDescriptor = ArtifactViewerDescriptor::new(
+    "hosted-blueprint",
+    "https://playground.wordpress.net/",
+    "blueprint-url",
+);
 
 #[derive(Args, Clone)]
 pub struct RunsArgs {

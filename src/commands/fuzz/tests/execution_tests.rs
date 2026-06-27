@@ -395,7 +395,7 @@ fn fuzz_run_outcome_fails_when_successful_command_reports_failed_lifecycle_phase
 fn fuzz_run_outcome_fails_when_workload_reports_invariant_failure_count() {
     let mut campaign = empty_fuzz_campaign();
     campaign.metadata = serde_json::json!({
-        "wordpress_fuzz_result": {
+        "runner_fuzz_result": {
             "status": "passed",
             "success": true,
             "cases": [
@@ -523,7 +523,7 @@ fn fuzz_run_outcome_reports_skipped_lifecycle_as_non_proof() {
 fn fuzz_run_outcome_reports_unsupported_metadata_as_non_proof() {
     let mut campaign = empty_fuzz_campaign();
     campaign.metadata = serde_json::json!({
-        "wordpress_fuzz_result": {
+        "runner_fuzz_result": {
             "status": "unsupported",
             "success": true
         }

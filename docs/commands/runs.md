@@ -11,6 +11,8 @@ homeboy runs latest-run [--kind bench|rig|trace] [--component <id>] [--rig <id>]
 homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--metric <name>] [--limit 20] [--format table|json]
 homeboy runs bench-compare --from-run <run-id> --to-run <run-id> [--metric <name>]
 homeboy runs fuzz-compare --from-run <run-id> --to-run <run-id> [--hotspot-policy <advisory|blocking|off>]
+homeboy runs hotspots <run-id>... [--limit <count>]
+homeboy runs hotspots --baseline-run <run-id> --candidate-run <run-id> [--limit <count>]
 homeboy runs show <run-id> [--json]
 homeboy runs dossier <run-id> [--json]
 homeboy runs resume-plan <run-id>
@@ -119,6 +121,22 @@ Metric lookup supports top-level run metadata such as `results.total_elapsed_ms`
 `homeboy runs bench-compare --from-run <baseline-run-id> --to-run <candidate-run-id>` compares numeric metrics recorded in two exact benchmark runs. It captures both run IDs, component state, shared benchmark context, selected metric deltas, and a Markdown table under `reports.markdown` in the JSON payload.
 
 `homeboy runs fuzz-compare --from-run <baseline-run-id> --to-run <candidate-run-id>` compares persisted fuzz result envelope artifacts for two exact runs. It resolves `fuzz_result_envelope` artifacts from the observation store, folds in related persisted fuzz hotspot/observation artifacts for hotspot analysis, and returns the same `homeboy/fuzz-compare/v1` payload as `homeboy fuzz compare` without requiring local file paths.
+
+`homeboy runs hotspots <run-id>...` ranks generic fuzz hotspots from persisted fuzz artifacts. It reads typed `homeboy/fuzz-hotspot-set/v1` artifacts directly, ranks typed `homeboy/fuzz-observation-set/v1` artifacts into hotspot points, and falls back to generic finding or coverage-gap signals only when typed hotspot data is absent:
+
+```bash
+homeboy runs hotspots fuzz-run-1 fuzz-run-2 --limit 10
+```
+
+For threshold-free cohort comparison, pass one or more baseline and candidate runs. The comparison reports new, resolved, increased, decreased, and unchanged hotspot movement without adding gate, pass/fail, or product-specific threshold semantics:
+
+```bash
+homeboy runs hotspots \
+  --baseline-run fuzz-baseline-1 \
+  --baseline-run fuzz-baseline-2 \
+  --candidate-run fuzz-candidate-1 \
+  --limit 20
+```
 
 ## Related Readers
 
