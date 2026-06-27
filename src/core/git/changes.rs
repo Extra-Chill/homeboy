@@ -265,7 +265,8 @@ fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
     eprintln!("Shallow clone detected — deepening to resolve merge base for {git_ref}");
 
     // Fetch the ref itself if it's not already present.
-    let _ = execute_git(path, &["fetch", "origin", git_ref, "--depth=50"]);
+    let remote = super::resolve_default_remote(Path::new(path));
+    let _ = execute_git(path, &["fetch", &remote, git_ref, "--depth=50"]);
 
     // Progressive deepening: try increasingly generous depths.
     for depth in &["50", "200"] {

@@ -289,6 +289,26 @@ mod tests {
     }
 
     #[test]
+    fn for_repo_targets_parsed_enterprise_host_not_github_com() {
+        // Regression guard: GitHub primitives must target the host parsed from
+        // the component's remote_url, not silently default to github.com.
+        let repo = crate::core::deploy::release_download::GitHubRepo {
+            host: "github.a8c.com".to_string(),
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+        };
+
+        let client = GhClient::for_repo(&repo);
+
+        assert_eq!(client.host(), "github.a8c.com");
+        assert_eq!(client.repo(), Some("acme/widgets"));
+        // The enterprise host must be exported as GH_HOST for the `gh` process.
+        assert!(client
+            .env
+            .contains(&("GH_HOST".to_string(), "github.a8c.com".to_string())));
+    }
+
+    #[test]
     fn github_cli_env_sets_enterprise_host_and_configured_proxy() {
         let mut hosts = HashMap::new();
         hosts.insert(

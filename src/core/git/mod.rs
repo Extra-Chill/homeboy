@@ -77,9 +77,10 @@ pub use pr_refresh::{
     pr_refresh, PrRefreshCheck, PrRefreshOptions, PrRefreshOutput, PrRefreshStrategy,
 };
 pub use primitives::{
-    clone_repo, clone_repo_at_ref, commit_staged_with_author, get_component_path_prefix,
-    get_git_root, git_probe_path, has_staged_changes, is_workdir_clean_or_not_git, pull_repo,
-    run_git, run_git_output, stage_all, update_to_remote_default_branch,
+    clone_repo, clone_repo_at_ref, commit_staged_with_author, default_branch_name,
+    default_remote_branch, get_component_path_prefix, get_git_root, git_probe_path,
+    has_staged_changes, is_workdir_clean_or_not_git, pull_repo, resolve_default_remote, run_git,
+    run_git_output, stage_all, update_to_remote_default_branch,
 };
 pub(crate) use primitives::{is_git_repo, is_tracked_path, list_tracked_markdown_files};
 pub use primitives_query::{

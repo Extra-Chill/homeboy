@@ -472,10 +472,12 @@ fn is_mutable_dependency_spec(spec: &str) -> bool {
 
 /// Auto-detect the git remote URL from a local repository.
 ///
-/// Runs `git remote get-url origin` in the given directory.
+/// Resolves the repository's remote (preferring `origin`, falling back to a sole
+/// configured remote) and runs `git remote get-url <remote>` in the directory.
 pub fn detect_remote_url(repo_path: &Path) -> Option<String> {
+    let remote = crate::core::git::resolve_default_remote(repo_path);
     let output = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
+        .args(["remote", "get-url", &remote])
         .current_dir(repo_path)
         .output()
         .ok()?;

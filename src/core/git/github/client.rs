@@ -12,16 +12,22 @@ use crate::core::error::{Error, Result};
 use super::super::gh_client::GhClient;
 use super::super::resolve_target;
 
-/// Resolve a component ID to its GitHub owner/repo via `remote_url` (or git fallback).
+/// Resolve a component ID to its GitHub owner/repo via `remote_url` (or git fallback),
+/// returning a [`GhClient`] pre-configured for the repository's host.
 ///
 /// `path_override` lets callers point at an unregistered checkout (e.g. a CI
 /// runner workspace with a portable `homeboy.json` but no global component
 /// registry entry). When set, the component is discovered from the portable
 /// config at that path instead of the global registry.
+///
+/// The returned client carries the host parsed from `remote_url` plus the
+/// component's per-host GitHub config (proxy/env), so `gh` operations target the
+/// component's actual host — including GitHub Enterprise — instead of silently
+/// defaulting to `github.com`.
 pub(in crate::core::git) fn resolve_component_github(
     component_id: Option<&str>,
     path_override: Option<&str>,
-) -> Result<(String, GitHubRepo)> {
+) -> Result<(String, GitHubRepo, GhClient)> {
     let (id, path) = resolve_target(component_id, path_override)?;
     let comp = component::resolve_effective(Some(&id), path_override, None)?;
 
@@ -33,7 +39,7 @@ pub(in crate::core::git) fn resolve_component_github(
             Error::validation_invalid_argument(
                 "remote_url",
                 format!(
-                    "Component '{}' has no GitHub remote (remote_url not set and `git remote get-url origin` failed)",
+                    "Component '{}' has no GitHub remote (remote_url not set and `git remote get-url` failed)",
                     id
                 ),
                 None,
@@ -49,17 +55,19 @@ pub(in crate::core::git) fn resolve_component_github(
         Error::validation_invalid_argument(
             "remote_url",
             format!(
-                "Remote URL '{}' is not a GitHub URL (only github.com is supported)",
+                "Remote URL '{}' is not a GitHub URL (github.com and GitHub Enterprise hosts are supported)",
                 remote_url
             ),
             None,
             Some(vec![
                 "Use an HTTPS (https://github.com/owner/repo) or SSH (git@github.com:owner/repo) URL".to_string(),
+                "GitHub Enterprise equivalents such as git@github.example.com:owner/repo are also supported".to_string(),
             ]),
         )
     })?;
 
-    Ok((id, repo))
+    let client = GhClient::for_repo_with_config(&repo, &comp.github);
+    Ok((id, repo, client))
 }
 
 /// Run `gh <args>` swallowing stdout/stderr, return whether it exited successfully.
@@ -112,27 +120,15 @@ fn gh_auth_token() -> Option<String> {
     non_empty_token(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Error out if `gh` is missing or unauthenticated. Unlike `run_github_release`
-/// (which soft-fails because the tag is already pushed), primitive operations
-/// have no already-committed side effect to preserve — fail loudly.
-pub(in crate::core::git) fn ensure_gh_ready() -> Result<()> {
-    let host = std::env::var("GH_HOST")
+/// Resolve the GitHub host for a repo-less `gh` probe, honoring `GH_HOST` and
+/// defaulting to `github.com`. Used by the few flows that run `gh` without a
+/// resolved component (e.g. commit-indexed PR search).
+pub(in crate::core::git) fn default_gh_host() -> String {
+    std::env::var("GH_HOST")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "github.com".to_string());
-    GhClient::for_host(host).ensure_ready()
-}
-
-/// Run `gh <args>` and return stdout on success, or a structured error on
-/// failure (with stderr captured in the error message).
-pub(in crate::core::git) fn run_gh(args: &[String]) -> Result<String> {
-    let host = std::env::var("GH_HOST")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "github.com".to_string());
-    GhClient::for_host(host).run(args)
+        .unwrap_or_else(|| "github.com".to_string())
 }
 
 pub(super) fn parse_issue_number_from_url(url: &str) -> Option<u64> {

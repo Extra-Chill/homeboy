@@ -160,31 +160,89 @@ pub fn commit_staged_with_author(git_root: &Path, message: &str, author: &str) -
     Ok(())
 }
 
-fn default_remote_branch(git_root: &Path) -> Option<String> {
-    run_git(
-        git_root,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
+/// Resolve the git remote name to use for release/deploy operations on a repo.
+///
+/// Homeboy core is framework-agnostic and must operate on repositories whose
+/// remote is not named `origin` (forks, renamed remotes, Enterprise mirrors).
+/// Resolution prefers `origin` when it exists (the overwhelmingly common case),
+/// then falls back to the repository's sole configured remote, and finally to
+/// the literal `"origin"` when nothing can be determined.
+pub fn resolve_default_remote(path: &Path) -> String {
+    let remotes: Vec<String> = run_git(path, &["remote"], "git remote")
+        .ok()
+        .map(|out| {
+            out.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if remotes.iter().any(|remote| remote == "origin") {
+        return "origin".to_string();
+    }
+    if let [only] = remotes.as_slice() {
+        return only.clone();
+    }
+    "origin".to_string()
+}
+
+/// Resolve the remote-qualified default branch ref of a repository, e.g.
+/// `"origin/main"` or `"upstream/trunk"`.
+///
+/// Reads the resolved remote's `HEAD` symref first; when that is unset (common
+/// on fresh clones that never ran `git remote set-head`), probes the well-known
+/// default branch names against the resolved remote.
+pub fn default_remote_branch(path: &Path) -> Option<String> {
+    let remote = resolve_default_remote(path);
+    let head_ref = format!("refs/remotes/{remote}/HEAD");
+
+    if let Some(value) = run_git(
+        path,
+        &["symbolic-ref", "--quiet", "--short", &head_ref],
         "git default remote branch",
     )
     .ok()
     .map(|value| value.trim().to_string())
     .filter(|value| !value.is_empty())
+    {
+        return Some(value);
+    }
+
+    ["main", "trunk", "master"].iter().find_map(|branch| {
+        let candidate = format!("{remote}/{branch}");
+        run_git(
+            path,
+            &["rev-parse", "--verify", "--quiet", &candidate],
+            "git rev-parse",
+        )
+        .is_ok()
+        .then_some(candidate)
+    })
+}
+
+/// Resolve the bare default branch name of a repository, e.g. `"main"`,
+/// stripping the remote prefix from [`default_remote_branch`].
+pub fn default_branch_name(path: &Path) -> Option<String> {
+    default_remote_branch(path).map(|reference| {
+        reference
+            .split_once('/')
+            .map(|(_, branch)| branch.to_string())
+            .unwrap_or(reference)
+    })
 }
 
 /// Update a clean linked repo to the latest remote default-branch revision.
 pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
+    let remote = resolve_default_remote(git_root);
     let old_branch = current_branch(git_root);
-    run_git(git_root, &["fetch", "origin"], "git fetch origin")?;
+    run_git(git_root, &["fetch", &remote], &format!("git fetch {remote}"))?;
     let mut detached_default_branch: Option<String> = None;
 
     if let Some(remote_branch) = default_remote_branch(git_root) {
         let local_branch = remote_branch
-            .strip_prefix("origin/")
+            .strip_prefix(&format!("{remote}/"))
             .unwrap_or(&remote_branch)
             .to_string();
 
@@ -208,7 +266,7 @@ pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
     if let Some(branch) = detached_default_branch {
         run_git(
             git_root,
-            &["pull", "--ff-only", "origin", &branch],
+            &["pull", "--ff-only", &remote, &branch],
             "git pull detached default branch --ff-only",
         )?;
     } else {
@@ -357,5 +415,68 @@ mod tests {
         assert!(err.details["io_error"].as_str().is_some());
         assert_eq!(err.details["stdout"], "");
         assert_eq!(err.details["stderr"], "");
+    }
+
+    #[test]
+    fn resolve_default_remote_prefers_origin_then_sole_remote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        git(path, &["init", "-q"]);
+
+        // No remotes configured — fall back to the conventional "origin".
+        assert_eq!(resolve_default_remote(path), "origin");
+
+        // A single non-origin remote resolves to that remote.
+        git(
+            path,
+            &["remote", "add", "upstream", "https://example.test/x.git"],
+        );
+        assert_eq!(resolve_default_remote(path), "upstream");
+
+        // Once origin exists it is preferred even alongside other remotes.
+        git(
+            path,
+            &["remote", "add", "origin", "https://example.test/y.git"],
+        );
+        assert_eq!(resolve_default_remote(path), "origin");
+    }
+
+    #[test]
+    fn default_branch_resolves_through_a_non_origin_remote() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let remote = tmp.path().join("remote.git");
+        let seed = tmp.path().join("seed");
+        let clone = tmp.path().join("clone");
+
+        git(
+            tmp.path(),
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        git(
+            tmp.path(),
+            &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()],
+        );
+        git(&seed, &["config", "user.email", "t@x.test"]);
+        git(&seed, &["config", "user.name", "T"]);
+        git(&seed, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(seed.join("f.txt"), "x").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "init"]);
+        git(&seed, &["push", "-q", "origin", "main"]);
+
+        // Fresh clone records refs/remotes/origin/HEAD; rename it so the remote
+        // is deliberately NOT named origin.
+        git(
+            tmp.path(),
+            &["clone", "-q", remote.to_str().unwrap(), clone.to_str().unwrap()],
+        );
+        git(&clone, &["remote", "rename", "origin", "upstream"]);
+
+        assert_eq!(resolve_default_remote(&clone), "upstream");
+        assert_eq!(
+            default_remote_branch(&clone).as_deref(),
+            Some("upstream/main")
+        );
+        assert_eq!(default_branch_name(&clone).as_deref(), Some("main"));
     }
 }

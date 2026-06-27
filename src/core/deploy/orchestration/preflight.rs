@@ -9,8 +9,8 @@ use super::super::types::DeployConfig;
 /// Warn when `--head` would deploy from a non-default branch.
 ///
 /// Detects the current branch for each component and compares it against the
-/// default branch (via `git symbolic-ref refs/remotes/origin/HEAD`, falling
-/// back to "main"). If a component is on a feature branch, this is likely
+/// default branch (via [`git::default_branch_name`], falling back to "main").
+/// If a component is on a feature branch, this is likely
 /// unintentional — the user probably meant to deploy the default branch.
 ///
 /// With `--force`, this emits a log warning but proceeds. Without `--force`,
@@ -36,17 +36,9 @@ pub(super) fn warn_non_default_branch(
             _ => continue,                              // detached or error — skip
         };
 
-        // Detect default branch from remote HEAD symref, fallback to "main"
-        let default_branch = crate::core::engine::command::run_in_optional(
-            path,
-            "git",
-            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-        )
-        .map(|s| {
-            // Output is like "origin/main" — strip the remote prefix
-            s.strip_prefix("origin/").unwrap_or(&s).to_string()
-        })
-        .unwrap_or_else(|| "main".to_string());
+        // Detect default branch from the resolved remote HEAD symref, fallback to "main"
+        let default_branch = git::default_branch_name(std::path::Path::new(path))
+            .unwrap_or_else(|| "main".to_string());
 
         if current_branch != default_branch {
             let message = format!(

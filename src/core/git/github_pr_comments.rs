@@ -3,9 +3,8 @@
 use crate::core::deploy::release_download::GitHubRepo;
 use crate::core::error::{Error, Result};
 
-use super::github::{
-    ensure_gh_ready, push_markdown_body_file_arg, resolve_component_github, run_gh, GithubPrOutput,
-};
+use super::gh_client::GhClient;
+use super::github::{push_markdown_body_file_arg, resolve_component_github, GithubPrOutput};
 use super::github_comment_sections::{
     comment_matches_key, extract_footer, extract_header, merge_section, parse_comment_sections,
     render_comment,
@@ -86,13 +85,13 @@ pub enum PrCommentMode {
 ///   invocation's section under `section_key` into the shared comment tagged
 ///   `<!-- homeboy:comment-key=<comment_key> -->`.
 pub fn pr_comment(component_id: Option<&str>, options: PrCommentOptions) -> Result<GithubPrOutput> {
-    let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
-    ensure_gh_ready()?;
+    let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    gh.ensure_ready()?;
 
     match options.mode.clone() {
-        PrCommentMode::Fresh => pr_comment_fresh(id, repo, options),
+        PrCommentMode::Fresh => pr_comment_fresh(id, repo, &gh, options),
         PrCommentMode::StickyWholeBody { key } => {
-            pr_comment_sticky_whole(id, repo, options.number, options.body, key)
+            pr_comment_sticky_whole(id, repo, &gh, options.number, options.body, key)
         }
         PrCommentMode::Sectioned {
             comment_key,
@@ -103,6 +102,7 @@ pub fn pr_comment(component_id: Option<&str>, options: PrCommentOptions) -> Resu
         } => pr_comment_sectioned(
             id,
             repo,
+            &gh,
             options.number,
             options.body,
             comment_key,
@@ -119,6 +119,7 @@ pub fn pr_comment(component_id: Option<&str>, options: PrCommentOptions) -> Resu
 fn pr_comment_fresh(
     id: String,
     repo: GitHubRepo,
+    gh: &GhClient,
     options: PrCommentOptions,
 ) -> Result<GithubPrOutput> {
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
@@ -131,7 +132,7 @@ fn pr_comment_fresh(
     ];
     let mut body_files = Vec::new();
     push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &options.body)?;
-    let output = run_gh(&args)?;
+    let output = gh.run(&args)?;
     Ok(GithubPrOutput {
         component_id: id,
         owner: repo.owner,
@@ -148,13 +149,14 @@ fn pr_comment_fresh(
 fn pr_comment_sticky_whole(
     id: String,
     repo: GitHubRepo,
+    gh: &GhClient,
     pr_number: u64,
     body: String,
     key: String,
 ) -> Result<GithubPrOutput> {
     let full_body = format!("{}\n{}", marker_for_key(&key), body);
 
-    if let Some(existing_id) = find_sticky_comment_id(&repo, pr_number, &key)? {
+    if let Some(existing_id) = find_sticky_comment_id(gh, &repo, pr_number, &key)? {
         let args: Vec<String> = vec![
             "api".into(),
             format!(
@@ -166,7 +168,7 @@ fn pr_comment_sticky_whole(
             "-f".into(),
             format!("body={}", full_body),
         ];
-        run_gh(&args)?;
+        gh.run(&args)?;
         return Ok(GithubPrOutput {
             component_id: id,
             owner: repo.owner,
@@ -189,7 +191,7 @@ fn pr_comment_sticky_whole(
     ];
     let mut body_files = Vec::new();
     push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &full_body)?;
-    let output = run_gh(&args)?;
+    let output = gh.run(&args)?;
     Ok(GithubPrOutput {
         component_id: id,
         owner: repo.owner,
@@ -219,6 +221,7 @@ fn pr_comment_sticky_whole(
 fn pr_comment_sectioned(
     id: String,
     repo: GitHubRepo,
+    gh: &GhClient,
     pr_number: u64,
     section_body: String,
     comment_key: String,
@@ -227,7 +230,7 @@ fn pr_comment_sectioned(
     footer: Option<String>,
     section_order: Option<Vec<String>>,
 ) -> Result<GithubPrOutput> {
-    let matches = list_matching_comments(&repo, pr_number, &comment_key)?;
+    let matches = list_matching_comments(gh, &repo, pr_number, &comment_key)?;
 
     if matches.is_empty() {
         let sections: Vec<(String, String)> = vec![(section_key.clone(), section_body.clone())];
@@ -248,7 +251,7 @@ fn pr_comment_sectioned(
         ];
         let mut body_files = Vec::new();
         push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &rendered)?;
-        let output = run_gh(&args)?;
+        let output = gh.run(&args)?;
         return Ok(GithubPrOutput {
             component_id: id,
             owner: repo.owner,
@@ -306,7 +309,7 @@ fn pr_comment_sectioned(
             "-f".into(),
             format!("body={}", rendered),
         ];
-        run_gh(&args)?;
+        gh.run(&args)?;
     }
 
     for comment in matches.iter().skip(1) {
@@ -319,7 +322,7 @@ fn pr_comment_sectioned(
             "--method".into(),
             "DELETE".into(),
         ];
-        if run_gh(&args).is_err() {
+        if gh.run(&args).is_err() {
             warnings.push(format!(
                 "failed to delete duplicate comment id={} — next invocation will retry",
                 comment.id
@@ -351,7 +354,12 @@ fn marker_for_key(key: &str) -> String {
 }
 
 /// Search a PR's issue-comments for one carrying our sticky marker.
-fn find_sticky_comment_id(repo: &GitHubRepo, pr_number: u64, key: &str) -> Result<Option<u64>> {
+fn find_sticky_comment_id(
+    gh: &GhClient,
+    repo: &GitHubRepo,
+    pr_number: u64,
+    key: &str,
+) -> Result<Option<u64>> {
     let marker = marker_for_key(key);
     let args: Vec<String> = vec![
         "api".into(),
@@ -363,7 +371,7 @@ fn find_sticky_comment_id(repo: &GitHubRepo, pr_number: u64, key: &str) -> Resul
         "--jq".into(),
         format!(".[] | select(.body | contains(\"{}\")) | .id", marker),
     ];
-    let raw = run_gh(&args)?;
+    let raw = gh.run(&args)?;
     Ok(raw.lines().next().and_then(|l| l.trim().parse().ok()))
 }
 
@@ -376,6 +384,7 @@ struct FetchedComment {
 /// List all PR issue-comments that carry the given comment-key marker. Returns
 /// `(id, body)` pairs so the merge step can parse each body.
 fn list_matching_comments(
+    gh: &GhClient,
     repo: &GitHubRepo,
     pr_number: u64,
     comment_key: &str,
@@ -388,7 +397,7 @@ fn list_matching_comments(
         ),
         "--paginate".into(),
     ];
-    let raw = run_gh(&args)?;
+    let raw = gh.run(&args)?;
     parse_comments_list_json(&raw, comment_key)
 }
 
