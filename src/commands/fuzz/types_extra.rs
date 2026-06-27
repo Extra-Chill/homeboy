@@ -2,8 +2,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 use homeboy::core::fuzz::{
-    FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzReplayMetadata, FuzzRequiredArtifact,
-    FuzzResultEnvelope, FuzzTargetInventory,
+    FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzHotspotSet, FuzzReplayMetadata,
+    FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory,
 };
 use homeboy::core::performance_hotspots::PerformanceHotspotSummary;
 
@@ -202,6 +202,8 @@ pub struct FuzzValidateOutput {
     pub artifacts: usize,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
     pub performance_hotspots: PerformanceHotspotSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_hotspots: Option<FuzzHotspotSet>,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 
@@ -214,6 +216,8 @@ pub struct FuzzReportOutput {
     pub envelope: FuzzResultEnvelope,
     pub coverage_completeness: FuzzCoverageCompletenessOutput,
     pub performance_hotspots: PerformanceHotspotSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_hotspots: Option<FuzzHotspotSet>,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 
