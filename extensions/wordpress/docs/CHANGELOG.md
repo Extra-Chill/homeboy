@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.7] - 2026-06-27
+
+### Changed
+- Bind REST fuzz fixtures into plans
+
 ## [3.19.6] - 2026-06-27
 
 ### Changed
