@@ -13,7 +13,8 @@ use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
 use super::report::{
-    evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status,
+    evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
+    fuzz_result_envelope_from_campaign, gate_status, persist_fuzz_run_result_envelope,
 };
 use super::types::{
     FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzExecutionOutput, FuzzRunArgs,
@@ -841,6 +842,12 @@ pub(super) fn persist_fuzz_run_evidence(
     store.upsert_imported_run(&run)?;
     if input.results_path.is_file() {
         store.record_artifact(&run_id, "fuzz_results", input.results_path)?;
+    }
+    if let Some(campaign) = input.results {
+        let mut envelope =
+            fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
+        envelope.status = gate_status(&evaluate_fuzz_gates(campaign));
+        persist_fuzz_run_result_envelope(Some(&run_id), &envelope)?;
     }
     if input.artifacts_dir.is_dir() {
         store.record_directory_artifact_with_metadata(
