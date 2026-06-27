@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use super::output::{compare_trace_aggregates, TraceAggregateInput, TraceAggregateSpanInput};
+use super::output::{
+    compare_trace_aggregates, TraceAggregateIdentity, TraceAggregateInput, TraceAggregateSpanInput,
+};
 
 #[test]
 fn trace_compare_reports_median_and_average_deltas() {
@@ -14,8 +16,10 @@ fn trace_compare_reports_median_and_average_deltas() {
         runs: Vec::new(),
         spans: vec![
             TraceAggregateSpanInput {
-                id: "boot_to_ready".to_string(),
-                n: 5,
+                identity: TraceAggregateIdentity {
+                    id: "boot_to_ready".to_string(),
+                    n: 5,
+                },
                 median_ms: Some(100),
                 avg_ms: Some(110.0),
                 max_ms: None,
@@ -25,8 +29,10 @@ fn trace_compare_reports_median_and_average_deltas() {
                 metadata: None,
             },
             TraceAggregateSpanInput {
-                id: "large_improvement".to_string(),
-                n: 5,
+                identity: TraceAggregateIdentity {
+                    id: "large_improvement".to_string(),
+                    n: 5,
+                },
                 median_ms: Some(300),
                 avg_ms: Some(300.0),
                 max_ms: None,
@@ -36,8 +42,10 @@ fn trace_compare_reports_median_and_average_deltas() {
                 metadata: None,
             },
             TraceAggregateSpanInput {
-                id: "large_regression".to_string(),
-                n: 5,
+                identity: TraceAggregateIdentity {
+                    id: "large_regression".to_string(),
+                    n: 5,
+                },
                 median_ms: Some(80),
                 avg_ms: Some(80.0),
                 max_ms: None,
@@ -47,8 +55,10 @@ fn trace_compare_reports_median_and_average_deltas() {
                 metadata: None,
             },
             TraceAggregateSpanInput {
-                id: "before_only".to_string(),
-                n: 5,
+                identity: TraceAggregateIdentity {
+                    id: "before_only".to_string(),
+                    n: 5,
+                },
                 median_ms: Some(25),
                 avg_ms: Some(25.0),
                 max_ms: None,
@@ -72,8 +82,10 @@ fn trace_compare_reports_median_and_average_deltas() {
         runs: Vec::new(),
         spans: vec![
             TraceAggregateSpanInput {
-                id: "boot_to_ready".to_string(),
-                n: 5,
+                identity: TraceAggregateIdentity {
+                    id: "boot_to_ready".to_string(),
+                    n: 5,
+                },
                 median_ms: Some(125),
                 avg_ms: Some(121.0),
                 max_ms: None,
@@ -83,8 +95,10 @@ fn trace_compare_reports_median_and_average_deltas() {
                 metadata: None,
             },
             TraceAggregateSpanInput {
-                id: "large_improvement".to_string(),
-                n: 5,
+                identity: TraceAggregateIdentity {
+                    id: "large_improvement".to_string(),
+                    n: 5,
+                },
                 median_ms: Some(100),
                 avg_ms: Some(100.0),
                 max_ms: None,
@@ -94,8 +108,10 @@ fn trace_compare_reports_median_and_average_deltas() {
                 metadata: None,
             },
             TraceAggregateSpanInput {
-                id: "large_regression".to_string(),
-                n: 5,
+                identity: TraceAggregateIdentity {
+                    id: "large_regression".to_string(),
+                    n: 5,
+                },
                 median_ms: Some(200),
                 avg_ms: Some(200.0),
                 max_ms: None,
@@ -105,8 +121,10 @@ fn trace_compare_reports_median_and_average_deltas() {
                 metadata: None,
             },
             TraceAggregateSpanInput {
-                id: "after_only".to_string(),
-                n: 3,
+                identity: TraceAggregateIdentity {
+                    id: "after_only".to_string(),
+                    n: 3,
+                },
                 median_ms: Some(75),
                 avg_ms: Some(80.0),
                 max_ms: None,

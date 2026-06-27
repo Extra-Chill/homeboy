@@ -71,7 +71,7 @@ pub use operations_tags::{
 pub use pr_land::{land_prs, PrLandOptions, PrLandOutput, PrLandRefreshHelper};
 pub use pr_policy::{
     evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
-    PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules,
+    PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules, PrPolicyTargetRefs,
 };
 pub use pr_refresh::{
     pr_refresh, PrRefreshCheck, PrRefreshOptions, PrRefreshOutput, PrRefreshStrategy,

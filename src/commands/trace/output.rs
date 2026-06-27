@@ -50,10 +50,19 @@ struct TraceAggregateEnvelopeInput {
     data: TraceAggregateInput,
 }
 
-#[derive(Deserialize)]
-pub(super) struct TraceAggregateSpanInput {
+/// Shared identity fields (`id`, `n`) carried by trace aggregate span and
+/// metric inputs. Flattened into parents so the on-wire JSON keeps the `id`
+/// and `n` keys inline.
+#[derive(Deserialize, Clone)]
+pub(super) struct TraceAggregateIdentity {
     pub(super) id: String,
     pub(super) n: usize,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TraceAggregateSpanInput {
+    #[serde(flatten)]
+    pub(super) identity: TraceAggregateIdentity,
     pub(super) median_ms: Option<u64>,
     pub(super) avg_ms: Option<f64>,
     #[serde(default)]
@@ -69,8 +78,8 @@ pub(super) struct TraceAggregateSpanInput {
 
 #[derive(Deserialize, Clone)]
 pub(super) struct TraceAggregateMetricInput {
-    pub(super) id: String,
-    pub(super) n: usize,
+    #[serde(flatten)]
+    pub(super) identity: TraceAggregateIdentity,
     #[serde(default)]
     pub(super) min: Option<f64>,
     #[serde(default)]
@@ -244,12 +253,12 @@ pub(super) fn compare_trace_aggregates_with_focus(
     let before_spans = before
         .spans
         .into_iter()
-        .map(|span| (span.id.clone(), span))
+        .map(|span| (span.identity.id.clone(), span))
         .collect::<BTreeMap<_, _>>();
     let after_spans = after
         .spans
         .into_iter()
-        .map(|span| (span.id.clone(), span))
+        .map(|span| (span.identity.id.clone(), span))
         .collect::<BTreeMap<_, _>>();
     let span_ids = before_spans
         .keys()
@@ -269,8 +278,8 @@ pub(super) fn compare_trace_aggregates_with_focus(
 
             extension_trace::TraceCompareSpanOutput {
                 id,
-                before_n: before_span.map(|span| span.n),
-                after_n: after_span.map(|span| span.n),
+                before_n: before_span.map(|span| span.identity.n),
+                after_n: after_span.map(|span| span.identity.n),
                 before_median_ms: before_median,
                 after_median_ms: after_median,
                 median_delta_ms: option_delta_i64(before_median, after_median),
@@ -292,12 +301,12 @@ pub(super) fn compare_trace_aggregates_with_focus(
     let before_metrics = before
         .metrics
         .into_iter()
-        .map(|metric| (metric.id.clone(), metric))
+        .map(|metric| (metric.identity.id.clone(), metric))
         .collect::<BTreeMap<_, _>>();
     let after_metrics = after
         .metrics
         .into_iter()
-        .map(|metric| (metric.id.clone(), metric))
+        .map(|metric| (metric.identity.id.clone(), metric))
         .collect::<BTreeMap<_, _>>();
     let metrics = compare_metrics(&before_metrics, &after_metrics);
     let metric_guardrails = metric_guardrail_specs
@@ -473,8 +482,8 @@ fn compare_metrics(
             let after_median = after.and_then(|metric| metric.median);
             extension_trace::TraceCompareMetricOutput {
                 id,
-                before_n: before.map(|metric| metric.n),
-                after_n: after.map(|metric| metric.n),
+                before_n: before.map(|metric| metric.identity.n),
+                after_n: after.map(|metric| metric.identity.n),
                 before_min: before.and_then(|metric| metric.min),
                 after_min: after.and_then(|metric| metric.min),
                 before_median,

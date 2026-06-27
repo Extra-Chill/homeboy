@@ -11,8 +11,9 @@ use super::aggregate::{
     aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,
 };
 use super::output::{
-    classification_summaries, compare_trace_aggregates_with_focus, TraceAggregateInput,
-    TraceAggregateMetricInput, TraceAggregateRunInput, TraceAggregateSpanInput, TraceOverlayInput,
+    classification_summaries, compare_trace_aggregates_with_focus, TraceAggregateIdentity,
+    TraceAggregateInput, TraceAggregateMetricInput, TraceAggregateRunInput,
+    TraceAggregateSpanInput, TraceOverlayInput,
 };
 use super::repeat::{focus_aggregate_spans, run_repeat};
 use super::{
@@ -411,8 +412,10 @@ fn aggregate_to_compare_input(
             .spans
             .iter()
             .map(|span| TraceAggregateSpanInput {
-                id: span.id.clone(),
-                n: span.n,
+                identity: TraceAggregateIdentity {
+                    id: span.id.clone(),
+                    n: span.n,
+                },
                 median_ms: span.median_ms,
                 avg_ms: span.avg_ms,
                 max_ms: span.max_ms,
@@ -426,8 +429,10 @@ fn aggregate_to_compare_input(
             .metrics
             .iter()
             .map(|metric| TraceAggregateMetricInput {
-                id: metric.id.clone(),
-                n: metric.n,
+                identity: TraceAggregateIdentity {
+                    id: metric.id.clone(),
+                    n: metric.n,
+                },
                 min: metric.min,
                 median: metric.median,
                 max: metric.max,

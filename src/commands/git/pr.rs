@@ -1,7 +1,8 @@
 use homeboy::core::git::{
     self, PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions,
     PrFleetOptions, PrLandOptions, PrLandRefreshHelper, PrMergeabilityReconcileOptions,
-    PrPolicyMergeOptions, PrPolicyOpenOptions, PrRefreshOptions, PrRefreshStrategy,
+    PrPolicyMergeOptions, PrPolicyOpenOptions, PrPolicyTargetRefs, PrRefreshOptions,
+    PrRefreshStrategy,
 };
 
 use super::args::{PrArgs, PrCommand, PrPolicyArgs, PrPolicyCommand};
@@ -275,10 +276,12 @@ fn run_pr_policy(args: PrPolicyArgs) -> CmdResult<GitCommandOutput> {
                 path,
                 policy_path: policy,
                 source,
-                base,
-                head,
-                head_repository,
-                repository,
+                refs: PrPolicyTargetRefs {
+                    base,
+                    head,
+                    head_repository,
+                    repository,
+                },
                 files,
                 files_from_git,
             })?;
@@ -304,10 +307,12 @@ fn run_pr_policy(args: PrPolicyArgs) -> CmdResult<GitCommandOutput> {
                 policy_path: policy,
                 number,
                 author,
-                base,
-                head,
-                head_repository,
-                repository,
+                refs: PrPolicyTargetRefs {
+                    base,
+                    head,
+                    head_repository,
+                    repository,
+                },
                 merge,
                 merge_method: Some(merge_method),
             })?;

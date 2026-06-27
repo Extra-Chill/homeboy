@@ -8,7 +8,8 @@ use super::output::{
     compare_trace_aggregates, compare_trace_aggregates_with_focus, parse_trace_aggregate_input,
     render_compare_markdown, render_trace_aggregate_evidence_markdown,
     render_trace_compare_evidence_markdown, render_trace_run_evidence_markdown, run_compare,
-    TraceAggregateInput, TraceAggregateMetricInput, TraceAggregateSpanInput,
+    TraceAggregateIdentity, TraceAggregateInput, TraceAggregateMetricInput,
+    TraceAggregateSpanInput,
 };
 use super::*;
 
@@ -488,7 +489,7 @@ fn trace_compare_accepts_json_summary_envelope_outputs() {
     assert_eq!(input.component.as_deref(), Some("studio"));
     assert_eq!(input.scenario_id.as_deref(), Some("create-site"));
     assert_eq!(input.spans.len(), 1);
-    assert_eq!(input.spans[0].id, "submit_to_running");
+    assert_eq!(input.spans[0].identity.id, "submit_to_running");
     assert_eq!(input.spans[0].median_ms, Some(6059));
 }
 
@@ -960,8 +961,10 @@ fn span_input(
     failures: usize,
 ) -> TraceAggregateSpanInput {
     TraceAggregateSpanInput {
-        id: id.to_string(),
-        n,
+        identity: TraceAggregateIdentity {
+            id: id.to_string(),
+            n,
+        },
         median_ms,
         avg_ms,
         max_ms: None,
@@ -986,8 +989,10 @@ fn metric_input(id: &str, values: &[f64]) -> TraceAggregateMetricInput {
         }
     };
     TraceAggregateMetricInput {
-        id: id.to_string(),
-        n: values.len(),
+        identity: TraceAggregateIdentity {
+            id: id.to_string(),
+            n: values.len(),
+        },
         min: sorted.first().copied(),
         median,
         max: sorted.last().copied(),

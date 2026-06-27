@@ -364,7 +364,7 @@ fn push_failures_and_outliers(out: &mut String, label: &str, input: &TraceAggreg
         if span.failures > 0 || span.max_artifact_path.is_some() {
             lines.push(format!(
                 "- `{}`: failures={} max={} run={} artifact=`{}`",
-                span.id,
+                span.identity.id,
                 span.failures,
                 fmt_ms(span.max_ms),
                 span.max_run_index
