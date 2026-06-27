@@ -24,6 +24,7 @@ fn extension_capability_owns_labels_and_scripts() {
         "bench": { "extension_script": "bench.sh" },
         "fuzz": {
             "extension_script": "fuzz.sh",
+            "env": ["HOMEBOY_SETTINGS_JSON", "WP_CODEBOX_BIN"],
             "workloads": [{ "id": "parser", "label": "Parser fuzz" }]
         },
         "trace": { "extension_script": "trace.sh" },
@@ -80,6 +81,13 @@ fn extension_capability_owns_labels_and_scripts() {
     }
 
     assert_eq!(manifest.fuzz_workloads()[0].id, "parser");
+    assert_eq!(
+        manifest.fuzz.as_ref().map(|fuzz| fuzz.env.clone()),
+        Some(vec![
+            "HOMEBOY_SETTINGS_JSON".to_string(),
+            "WP_CODEBOX_BIN".to_string()
+        ])
+    );
 }
 
 #[test]

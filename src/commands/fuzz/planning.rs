@@ -6,7 +6,7 @@ use homeboy::core::fuzz::{
     FuzzSafetyClass, FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
 };
 
-use super::execution::default_runner_contract;
+use super::execution::fuzz_runner_contract;
 use super::types::{FuzzPlanArgs, FuzzPlanOutput, FuzzPlanStrategy};
 use super::workloads::{
     build_target_inventory, fuzz_workloads, load_rig, resolve_component_id, resolve_fuzz_context,
@@ -28,6 +28,11 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         ExtensionCapability::Fuzz,
         rig_context.as_ref(),
     )?;
+    let fuzz_config = ctx
+        .extension_id
+        .as_deref()
+        .and_then(|extension_id| homeboy::core::extension::load_extension(extension_id).ok())
+        .and_then(|manifest| manifest.fuzz);
     let workloads = fuzz_workloads(
         &ctx.component,
         rig_context.as_ref(),
@@ -75,7 +80,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
             metadata: planning_metadata,
             extra: std::collections::BTreeMap::new(),
         },
-        runner_contract: default_runner_contract(),
+        runner_contract: fuzz_runner_contract(fuzz_config.as_ref()),
     })
 }
 pub(super) fn plan_inventory_selection(

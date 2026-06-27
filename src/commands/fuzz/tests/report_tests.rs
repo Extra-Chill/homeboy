@@ -56,7 +56,7 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
         runner_contract: FuzzRunnerContract {
             capability: "fuzz".to_string(),
             extension_script_required: true,
-            env: vec!["HOMEBOY_FUZZ_RESULTS_FILE"],
+            env: vec!["HOMEBOY_FUZZ_RESULTS_FILE".to_string()],
         },
         evidence_refs: Vec::new(),
         evidence_followups: Vec::new(),
@@ -92,6 +92,7 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
 fn fuzz_campaign_contract_surfaces_extension_metadata() {
     let config = FuzzConfig {
         extension_script: Some("fuzz.sh".to_string()),
+        env: Vec::new(),
         workloads: Vec::new(),
         case_artifact: Some("failing-case".to_string()),
         corpus_artifacts: vec!["corpus".to_string()],

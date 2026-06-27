@@ -168,9 +168,54 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         "measurement".to_string()
     )));
     let contract = default_runner_contract();
-    assert!(contract.env.contains(&"HOMEBOY_FUZZ_WORKLOAD_ROOT"));
-    assert!(contract.env.contains(&"HOMEBOY_FUZZ_ARTIFACTS_DIR"));
-    assert!(contract.env.contains(&"HOMEBOY_FUZZ_GATE_PROFILE"));
+    assert!(contract
+        .env
+        .contains(&"HOMEBOY_FUZZ_WORKLOAD_ROOT".to_string()));
+    assert!(contract
+        .env
+        .contains(&"HOMEBOY_FUZZ_ARTIFACTS_DIR".to_string()));
+    assert!(contract
+        .env
+        .contains(&"HOMEBOY_FUZZ_GATE_PROFILE".to_string()));
+}
+
+#[test]
+fn fuzz_runner_contract_includes_extension_declared_env_settings() {
+    let config = FuzzConfig {
+        extension_script: Some("fuzz.sh".to_string()),
+        env: vec![
+            "HOMEBOY_SETTINGS_JSON".to_string(),
+            "HOMEBOY_SETTINGS_WP_CODEBOX_BIN".to_string(),
+            "HOMEBOY_WP_CODEBOX_BIN".to_string(),
+            "WP_CODEBOX_BIN".to_string(),
+            "HOMEBOY_FUZZ_WORKLOAD_ID".to_string(),
+        ],
+        ..FuzzConfig::default()
+    };
+
+    let contract = serde_json::to_value(fuzz_runner_contract(Some(&config)))
+        .expect("serialize runner contract");
+    let env = contract["env"].as_array().expect("runner contract env");
+
+    for key in [
+        "HOMEBOY_FUZZ_RESULTS_FILE",
+        "HOMEBOY_FUZZ_WORKLOAD_ID",
+        "HOMEBOY_SETTINGS_JSON",
+        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN",
+        "HOMEBOY_WP_CODEBOX_BIN",
+        "WP_CODEBOX_BIN",
+    ] {
+        assert!(
+            env.iter().any(|value| value == key),
+            "runner contract env should include {key}"
+        );
+    }
+    assert_eq!(
+        env.iter()
+            .filter(|value| **value == "HOMEBOY_FUZZ_WORKLOAD_ID")
+            .count(),
+        1
+    );
 }
 
 #[test]

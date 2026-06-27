@@ -309,6 +309,8 @@ pub struct FuzzConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension_script: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workloads: Vec<FuzzWorkloadConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case_artifact: Option<String>,

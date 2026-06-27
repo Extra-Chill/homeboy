@@ -193,7 +193,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             postprocess,
             results,
             campaign_contract,
-            runner_contract: default_runner_contract(),
+            runner_contract: fuzz_runner_contract(fuzz_config.as_ref()),
             evidence_refs: persisted_evidence.evidence_refs,
             evidence_followups,
         },
@@ -978,28 +978,46 @@ pub(super) fn fuzz_evidence_followups(
 }
 
 pub(super) fn default_runner_contract() -> FuzzRunnerContract {
+    fuzz_runner_contract(None)
+}
+
+pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerContract {
+    let mut env: Vec<String> = [
+        "HOMEBOY_FUZZ_RESULTS_FILE",
+        "HOMEBOY_FUZZ_ARTIFACTS_DIR",
+        "HOMEBOY_FUZZ_WORKLOAD_ID",
+        "HOMEBOY_FUZZ_WORKLOAD_PATH",
+        "HOMEBOY_FUZZ_WORKLOAD_ROOT",
+        "HOMEBOY_FUZZ_RUN_ID",
+        "HOMEBOY_FUZZ_SEED",
+        "HOMEBOY_FUZZ_INVENTORY_FILE",
+        "HOMEBOY_FUZZ_MAX_DURATION",
+        "HOMEBOY_FUZZ_GATE_PROFILE",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_ID",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_HELPER",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_ACTION",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_INPUT",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT",
+        "HOMEBOY_ARTIFACT_POSTPROCESS_PARAMETERS",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect();
+
+    if let Some(config) = config {
+        for key in &config.env {
+            let key = key.trim();
+            if !key.is_empty() && !env.iter().any(|existing| existing == key) {
+                env.push(key.to_string());
+            }
+        }
+    }
+
     FuzzRunnerContract {
         capability: "fuzz".to_string(),
         extension_script_required: true,
-        env: vec![
-            "HOMEBOY_FUZZ_RESULTS_FILE",
-            "HOMEBOY_FUZZ_ARTIFACTS_DIR",
-            "HOMEBOY_FUZZ_WORKLOAD_ID",
-            "HOMEBOY_FUZZ_WORKLOAD_PATH",
-            "HOMEBOY_FUZZ_WORKLOAD_ROOT",
-            "HOMEBOY_FUZZ_RUN_ID",
-            "HOMEBOY_FUZZ_SEED",
-            "HOMEBOY_FUZZ_INVENTORY_FILE",
-            "HOMEBOY_FUZZ_MAX_DURATION",
-            "HOMEBOY_FUZZ_GATE_PROFILE",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_ID",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_HELPER",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_ACTION",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_INPUT",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT",
-            "HOMEBOY_ARTIFACT_POSTPROCESS_PARAMETERS",
-        ],
+        env,
     }
 }
 
