@@ -350,43 +350,21 @@ pub(crate) fn runner_exec_secret_env_plan(
     SecretEnvPlan::from_secret_env_names(names)
 }
 
+/// Runtime/extension-declared secret env names for a hosted agent run.
+///
+/// The provider runtime (or extension) is the only authority on which secret
+/// env names its agent process needs, so it declares them explicitly via the
+/// generic `HOMEBOY_AGENT_RUNTIME_SECRET_ENV` allowlist (a comma-separated list
+/// of variable names). Homeboy core stays provider-agnostic and carries no
+/// literal provider token names: a `codex`/`claude-code`/`openai` runtime keeps
+/// working by exporting the same allowlist it already owns, and any new provider
+/// is supported without a core change (generic-core rule, #6676).
 fn declared_runtime_provider_secret_env(env: &HashMap<String, String>) -> Vec<String> {
-    let explicit = env
-        .get("HOMEBOY_AGENT_RUNTIME_SECRET_ENV")
+    env.get("HOMEBOY_AGENT_RUNTIME_SECRET_ENV")
         .into_iter()
         .flat_map(|value| value.split(','))
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .collect::<Vec<_>>();
-    if !explicit.is_empty() {
-        return explicit;
-    }
-
-    match env
-        .get("HOMEBOY_AGENT_RUNTIME_PROVIDER")
-        .map(String::as_str)
-        .map(str::trim)
-    {
-        Some("codex") => [
-            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
-            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
-            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
-            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
-            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-        Some("openai") => vec!["OPENAI_API_KEY".to_string()],
-        Some("claude-code") => [
-            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
-            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
-            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-        _ => Vec::new(),
-    }
+        .collect()
 }

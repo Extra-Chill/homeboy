@@ -348,7 +348,7 @@ impl SecretEnvPlan {
         let mut env = self
             .public_env
             .iter()
-            .map(|(name, value)| (name.clone(), redact_env_value(&policy, value)))
+            .map(|(name, value)| (name.clone(), policy.redact_env_value(value)))
             .collect::<BTreeMap<_, _>>();
         for name in self.secret_env_names() {
             env.insert(name, self.redaction.replacement.clone());
@@ -362,7 +362,7 @@ impl SecretEnvPlan {
         redacted.public_env = self
             .public_env
             .iter()
-            .map(|(name, value)| (name.clone(), redact_env_value(&policy, value)))
+            .map(|(name, value)| (name.clone(), policy.redact_env_value(value)))
             .collect();
         redacted
     }
@@ -451,14 +451,6 @@ fn secret_env_status(name: String, configured: bool, source: impl Into<String>) 
         name,
         configured,
         source: source.into(),
-    }
-}
-
-fn redact_env_value(policy: &RedactionPolicy, value: &str) -> String {
-    if value.contains("://") || value.starts_with('/') && value.contains('?') {
-        policy.redact_url(value)
-    } else {
-        policy.redact_string(value)
     }
 }
 

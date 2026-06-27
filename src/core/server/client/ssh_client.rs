@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::core::engine::shell;
@@ -9,8 +11,90 @@ use super::super::{
     ManagedSshSession, ManagedSshSessionOutput, Server, ServerAuthMode, ServerSessionConfig,
 };
 use super::host::{is_local_host, is_transient_ssh_error};
-use super::local_exec::{execute_local_command, execute_local_command_interactive};
+use super::local_exec::{
+    execute_local_command, execute_local_command_interactive, execute_local_command_with_stdin,
+};
 use super::{CommandOutput, SshClient};
+
+/// Sentinel terminating the secret-env block streamed over the SSH channel's
+/// stdin. Chosen to never collide with an env var name or a `NAME=VALUE` line.
+pub(crate) const SECRET_ENV_STDIN_SENTINEL: &str = "__HOMEBOY_SECRET_ENV_END__";
+
+/// Where a command's stdin bytes come from when it is dispatched over SSH (or
+/// the localhost fast path).
+#[derive(Clone, Copy)]
+enum SshStdin<'a> {
+    /// No stdin payload — the remote command inherits an empty stdin.
+    None,
+    /// Stream a local file as the command's stdin (used by `upload_file`).
+    File(&'a str),
+    /// Stream in-memory bytes as the command's stdin (used to deliver the
+    /// secret-env block without placing secrets in the command argv).
+    Inline(&'a [u8]),
+}
+
+/// POSIX-sh prologue that imports a secret-env block streamed over stdin.
+///
+/// Each line before the sentinel is a literal `NAME=VALUE` pair. Names and
+/// values arrive on the SSH channel's stdin, so neither the controller-local
+/// `ssh` argv nor the remote login-shell argv (both visible in `ps`) ever carry
+/// the secret. Values are applied with the `export` builtin — not `eval` — so
+/// shell metacharacters in a value are inert (no command injection). A value
+/// containing a literal newline is the one unsupported shape; OAuth/API tokens
+/// never contain one.
+fn secret_env_stdin_read_loop() -> String {
+    format!(
+        "while IFS= read -r __homeboy_env_line; do \
+[ \"$__homeboy_env_line\" = \"{sentinel}\" ] && break; \
+__homeboy_env_key=${{__homeboy_env_line%%=*}}; \
+export \"$__homeboy_env_key=${{__homeboy_env_line#*=}}\"; \
+done",
+        sentinel = SECRET_ENV_STDIN_SENTINEL,
+    )
+}
+
+/// Prepend the secret-env read loop to an already-composed command line so the
+/// secrets are imported before the command runs.
+pub(crate) fn wrap_command_with_secret_env_read_loop(command_line: &str) -> String {
+    format!("{} && {}", secret_env_stdin_read_loop(), command_line)
+}
+
+/// Serialize the secret env map into the stdin block consumed by
+/// [`secret_env_stdin_read_loop`]. Sorted for deterministic output.
+pub(crate) fn build_secret_env_stdin_block(secret_env: &BTreeMap<String, String>) -> Vec<u8> {
+    let mut block = String::new();
+    for (key, value) in secret_env {
+        block.push_str(key);
+        block.push('=');
+        block.push_str(value);
+        block.push('\n');
+    }
+    block.push_str(SECRET_ENV_STDIN_SENTINEL);
+    block.push('\n');
+    block.into_bytes()
+}
+
+/// Map a finished `ssh` invocation's captured output into a [`CommandOutput`].
+fn map_ssh_output(output: std::io::Result<std::process::Output>) -> CommandOutput {
+    match output {
+        Ok(out) => CommandOutput {
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            success: out.status.success(),
+            exit_code: out.status.code().unwrap_or(-1),
+            timed_out: false,
+            child_resource: None,
+        },
+        Err(err) => CommandOutput {
+            stdout: String::new(),
+            stderr: format!("SSH error: {}", err),
+            success: false,
+            exit_code: -1,
+            timed_out: false,
+            child_resource: None,
+        },
+    }
+}
 
 impl SshClient {
     pub fn from_server(server: &Server, server_id: &str) -> Result<Self> {
@@ -274,7 +358,31 @@ impl SshClient {
 
     pub fn execute(&self, command: &str) -> CommandOutput {
         let effective = self.prepend_env(command);
-        self.execute_with_stdin(&effective, None)
+        self.execute_with_stdin(&effective, SshStdin::None)
+    }
+
+    /// Execute `command` with secret env vars delivered over stdin instead of
+    /// interpolated into the SSH command argv.
+    ///
+    /// Non-secret env (PATH and other public config) is still exported inline by
+    /// [`prepend_env`], preserving `$PATH`-style shell expansion. The secret
+    /// values are streamed as a `NAME=VALUE` block (terminated by a sentinel)
+    /// over the SSH channel's stdin and imported by a read loop, so OAuth/API
+    /// tokens never appear in the controller-local `ssh` argv or the remote
+    /// login-shell argv (both visible in `ps`). When `secret_env` is empty this
+    /// is identical to [`execute`].
+    pub fn execute_with_secret_env(
+        &self,
+        command: &str,
+        secret_env: &BTreeMap<String, String>,
+    ) -> CommandOutput {
+        let effective = self.prepend_env(command);
+        if secret_env.is_empty() {
+            return self.execute_with_stdin(&effective, SshStdin::None);
+        }
+        let wrapped = wrap_command_with_secret_env_read_loop(&effective);
+        let block = build_secret_env_stdin_block(secret_env);
+        self.execute_with_stdin(&wrapped, SshStdin::Inline(&block))
     }
 
     /// Build an env preamble that normalizes runner command lookup and sets
@@ -292,7 +400,7 @@ impl SshClient {
 
     pub fn upload_file(&self, local_path: &str, remote_path: &str) -> CommandOutput {
         let remote_command = format!("cat > {}", shell::quote_path(remote_path));
-        self.execute_with_stdin(&remote_command, Some(local_path))
+        self.execute_with_stdin(&remote_command, SshStdin::File(local_path))
     }
 
     pub fn download_file(&self, remote_path: &str, local_path: &str) -> CommandOutput {
@@ -360,20 +468,20 @@ impl SshClient {
         }
     }
 
-    fn execute_with_stdin(&self, command: &str, stdin_file: Option<&str>) -> CommandOutput {
-        self.execute_with_retry(command, stdin_file, 3)
+    fn execute_with_stdin(&self, command: &str, stdin: SshStdin<'_>) -> CommandOutput {
+        self.execute_with_retry(command, stdin, 3)
     }
 
     fn execute_with_retry(
         &self,
         command: &str,
-        stdin_file: Option<&str>,
+        stdin: SshStdin<'_>,
         max_attempts: u32,
     ) -> CommandOutput {
         let backoff_secs = [0, 2, 5]; // delays before retry 1, 2, 3
 
         for attempt in 0..max_attempts {
-            let result = self.execute_once(command, stdin_file);
+            let result = self.execute_once(command, stdin);
 
             // Only retry on transient connection errors, not command failures
             if result.success || attempt + 1 >= max_attempts || !is_transient_ssh_error(&result) {
@@ -402,15 +510,19 @@ impl SshClient {
         }
     }
 
-    fn execute_once(&self, command: &str, stdin_file: Option<&str>) -> CommandOutput {
+    fn execute_once(&self, command: &str, stdin: SshStdin<'_>) -> CommandOutput {
         // Local execution: run command directly instead of over SSH
         if self.is_local {
-            if let Some(stdin_file_path) = stdin_file {
-                // For stdin piping (used by upload_file), use shell redirection
-                let local_cmd = format!("cat {} | {}", shell::quote_path(stdin_file_path), command);
-                return execute_local_command(&local_cmd);
-            }
-            return execute_local_command(command);
+            return match stdin {
+                SshStdin::File(stdin_file_path) => {
+                    // For stdin piping (used by upload_file), use shell redirection
+                    let local_cmd =
+                        format!("cat {} | {}", shell::quote_path(stdin_file_path), command);
+                    execute_local_command(&local_cmd)
+                }
+                SshStdin::Inline(bytes) => execute_local_command_with_stdin(command, bytes),
+                SshStdin::None => execute_local_command(command),
+            };
         }
 
         let args = self.build_ssh_args(Some(command), false);
@@ -418,44 +530,54 @@ impl SshClient {
         let mut cmd = Command::new("ssh");
         cmd.args(&args);
 
-        if let Some(stdin_file_path) = stdin_file {
-            match std::fs::File::open(stdin_file_path) {
+        match stdin {
+            SshStdin::File(stdin_file_path) => match std::fs::File::open(stdin_file_path) {
                 Ok(file) => {
                     cmd.stdin(file);
+                    map_ssh_output(cmd.output())
                 }
-                Err(err) => {
-                    return CommandOutput {
-                        stdout: String::new(),
-                        stderr: format!("Failed to open stdin file: {}", err),
-                        success: false,
-                        exit_code: -1,
-                        timed_out: false,
-                        child_resource: None,
-                    };
-                }
+                Err(err) => CommandOutput {
+                    stdout: String::new(),
+                    stderr: format!("Failed to open stdin file: {}", err),
+                    success: false,
+                    exit_code: -1,
+                    timed_out: false,
+                    child_resource: None,
+                },
+            },
+            SshStdin::Inline(bytes) => self.run_ssh_with_inline_stdin(cmd, bytes),
+            SshStdin::None => map_ssh_output(cmd.output()),
+        }
+    }
+
+    /// Spawn `ssh`, stream `stdin` bytes to the channel, and collect output.
+    ///
+    /// Used for the secret-env block: the bytes carry `NAME=VALUE` secret pairs
+    /// the remote read loop imports, so they stay off the `ssh` argv. The block
+    /// is small (a handful of tokens) and fits the OS pipe buffer, so writing it
+    /// before `wait_with_output` never deadlocks against captured stdout/stderr.
+    fn run_ssh_with_inline_stdin(&self, mut cmd: Command, stdin: &[u8]) -> CommandOutput {
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                return CommandOutput {
+                    stdout: String::new(),
+                    stderr: format!("SSH error: {}", err),
+                    success: false,
+                    exit_code: -1,
+                    timed_out: false,
+                    child_resource: None,
+                };
             }
+        };
+        if let Some(mut pipe) = child.stdin.take() {
+            let _ = pipe.write_all(stdin);
+            // Drop closes stdin (EOF) so the remote read loop terminates.
         }
-
-        let output = cmd.output();
-
-        match output {
-            Ok(out) => CommandOutput {
-                stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-                success: out.status.success(),
-                exit_code: out.status.code().unwrap_or(-1),
-                timed_out: false,
-                child_resource: None,
-            },
-            Err(e) => CommandOutput {
-                stdout: String::new(),
-                stderr: format!("SSH error: {}", e),
-                success: false,
-                exit_code: -1,
-                timed_out: false,
-                child_resource: None,
-            },
-        }
+        map_ssh_output(child.wait_with_output())
     }
 
     pub fn execute_interactive(&self, command: Option<&str>) -> i32 {

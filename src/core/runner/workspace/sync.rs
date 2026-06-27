@@ -7,7 +7,9 @@ use base64::Engine;
 use crate::core::engine::temp;
 use crate::core::error::{Error, Result};
 
-use super::super::validation_dependencies::sync_validation_dependency_workspaces;
+use super::super::validation_dependencies::{
+    sync_validation_dependency_workspaces, RunnerValidationDependencySyncOutput,
+};
 use super::super::{
     load, source_materialization, RunnerKind, RunnerLifecycleOwner, RunnerWorkspaceLease,
 };
@@ -90,7 +92,7 @@ pub fn sync_workspace(
                 materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
                 None
             };
-            write_workspace_metadata(
+            let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
                 workspace_metadata(
                     &runner.id,
@@ -100,13 +102,16 @@ pub fn sync_workspace(
                     &snapshot,
                     options.run_isolation_token.as_deref(),
                 ),
-            )?;
-            let validation_dependencies = sync_validation_dependency_workspaces(
-                &runner,
                 &local_path,
                 &remote_path,
                 &excludes,
-            )?;
+            ) {
+                Ok(dependencies) => dependencies,
+                Err(err) => {
+                    rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                    return Err(err);
+                }
+            };
             let current_workspace = current_workspace_summary(
                 &local_path,
                 &remote_path,
@@ -185,7 +190,7 @@ pub fn sync_workspace(
                     options.allow_dirty_lab_workspace,
                 )?;
             }
-            write_workspace_metadata(
+            let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
                 workspace_metadata(
                     &runner.id,
@@ -195,13 +200,16 @@ pub fn sync_workspace(
                     &git.head,
                     options.run_isolation_token.as_deref(),
                 ),
-            )?;
-            let validation_dependencies = sync_validation_dependency_workspaces(
-                &runner,
                 &local_path,
                 &remote_path,
                 &excludes,
-            )?;
+            ) {
+                Ok(dependencies) => dependencies,
+                Err(err) => {
+                    rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                    return Err(err);
+                }
+            };
             let current_workspace = current_workspace_summary(
                 &local_path,
                 &remote_path,
@@ -665,6 +673,48 @@ fn workspace_repo_from_path(path: &str) -> String {
         .next()
         .unwrap_or(path)
         .to_string()
+}
+
+/// Write the run checkout's tracking metadata, then materialize its
+/// validation-dependency siblings.
+///
+/// These are the two sync steps that run *after* the remote checkout directory
+/// already exists on the runner. Grouping them lets [`sync_workspace`] roll the
+/// materialized checkout back as a unit if either fails, so a partially-synced
+/// run never leaves an orphaned remote directory behind (#6752).
+fn write_metadata_and_sync_validation_dependencies(
+    runner: &super::super::Runner,
+    metadata: RunnerWorkspaceMetadata,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+) -> Result<Vec<RunnerValidationDependencySyncOutput>> {
+    write_workspace_metadata(runner, metadata)?;
+    sync_validation_dependency_workspaces(runner, local_path, remote_path, excludes)
+}
+
+/// Remove a just-materialized run checkout after a later sync step fails.
+///
+/// Materialization creates the remote `_lab_workspaces/<checkout>` directory
+/// before metadata is written and before validation-dependency siblings sync.
+/// If one of those later steps fails, [`sync_workspace`] returns an error and
+/// never hands the caller a `remote_path` to wrap in the run-owned
+/// [`MaterializedWorkspace`](super::materialized::MaterializedWorkspace) RAII
+/// handle — so without this rollback the checkout is orphaned: invisible to the
+/// reap handle and untracked by inventory until a bulk orphan prune eventually
+/// notices the missing source path (#6752).
+///
+/// This is best-effort cleanup: the original sync error is the actionable
+/// failure, so a removal error here is swallowed rather than masking it. The
+/// containment guard in [`remove_workspace`] still refuses to remove anything
+/// outside `_lab_workspaces`.
+fn rollback_materialized_workspace(
+    runner: &super::super::Runner,
+    workspace_root: &str,
+    remote_path: &str,
+) {
+    let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    let _ = remove_workspace(runner, &lab_workspaces_root, remote_path);
 }
 
 fn write_workspace_metadata(

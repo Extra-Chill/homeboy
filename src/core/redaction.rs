@@ -132,6 +132,21 @@ impl RedactionPolicy {
         redact_argv_with_policy(argv, self)
     }
 
+    /// Redact a single environment-variable (or inline argument) value.
+    ///
+    /// URL-shaped values get query-aware redaction so non-sensitive path and
+    /// query parts survive; everything else goes through inline-assignment
+    /// redaction. This is the canonical env-value heuristic shared by the
+    /// secret-env plan and argv redaction so the URL-vs-string dispatch lives in
+    /// exactly one place.
+    pub fn redact_env_value(&self, value: &str) -> String {
+        if looks_like_url(value) {
+            self.redact_url(value)
+        } else {
+            self.redact_string(value)
+        }
+    }
+
     fn redact_json_with_key(&self, key: Option<&str>, value: &Value) -> Value {
         if key.is_some_and(|key| self.is_sensitive_key(key) || self.is_sensitive_header(key)) {
             return Value::String(self.replacement.clone());
@@ -277,11 +292,7 @@ fn redact_key_value_arg(value: &str, policy: &RedactionPolicy) -> String {
 }
 
 fn redact_sensitive_inline_arg(value: &str, policy: &RedactionPolicy) -> String {
-    if looks_like_url(value) {
-        policy.redact_url(value)
-    } else {
-        policy.redact_string(value)
-    }
+    policy.redact_env_value(value)
 }
 
 fn normalize_key(key: &str) -> String {

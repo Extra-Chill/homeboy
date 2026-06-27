@@ -234,7 +234,11 @@ fn runner_exec_secret_env_names_include_tunnel_preview_client_token() {
 }
 
 #[test]
-fn runner_exec_secret_env_names_include_runtime_provider_defaults() {
+fn runner_exec_secret_env_names_carry_no_hardcoded_provider_literals() {
+    // Generic core must not embed provider-specific token names. A bare
+    // provider hint without an explicit allowlist contributes no secret env
+    // names; the runtime/extension is the authority and declares them itself
+    // (generic-core rule, #6676).
     let names = runner_exec_secret_env_names(
         &["node".to_string(), "run-headless-loop.cjs".to_string()],
         None,
@@ -245,13 +249,37 @@ fn runner_exec_secret_env_names_include_runtime_provider_defaults() {
         )]),
     );
 
+    assert!(
+        names.is_empty(),
+        "provider hint alone must not imply provider token names: {names:?}"
+    );
+}
+
+#[test]
+fn runner_exec_secret_env_names_use_runtime_declared_allowlist() {
+    // A codex-style runtime keeps working by declaring the exact names it owns
+    // through the generic allowlist — no core change per provider.
+    let names = runner_exec_secret_env_names(
+        &["node".to_string(), "run-headless-loop.cjs".to_string()],
+        None,
+        &[],
+        &HashMap::from([
+            (
+                "HOMEBOY_AGENT_RUNTIME_PROVIDER".to_string(),
+                "codex".to_string(),
+            ),
+            (
+                "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
+                "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN,AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"
+                    .to_string(),
+            ),
+        ]),
+    );
+
     assert_eq!(
         names,
         vec![
             "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
-            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID".to_string(),
-            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
-            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP".to_string(),
             "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
         ]
     );

@@ -17,6 +17,16 @@ pub fn execute_local_command(command: &str) -> CommandOutput {
     execute_local_command_in_dir(command, None, None)
 }
 
+/// Run a local command, streaming `stdin` bytes to the child's standard input.
+///
+/// Used by the SSH transport's localhost fast path to feed a secret-env block
+/// to the command over stdin instead of interpolating secret values into the
+/// `sh -c` argv (where they would be visible in `ps`). The bytes are written on
+/// a dedicated thread and stdin is closed (EOF) once they are flushed.
+pub(crate) fn execute_local_command_with_stdin(command: &str, stdin: &[u8]) -> CommandOutput {
+    execute_local_command_in_dir_impl(command, None, None, None, Some(stdin.to_vec()))
+}
+
 /// Run a local command, capturing stdout/stderr.
 ///
 /// All locally-spawned commands run in their own process group with guaranteed
@@ -27,7 +37,7 @@ pub fn execute_local_command_in_dir(
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
 ) -> CommandOutput {
-    execute_local_command_in_dir_impl(command, current_dir, env, None)
+    execute_local_command_in_dir_impl(command, current_dir, env, None, None)
 }
 
 pub(crate) fn execute_local_command_in_dir_with_timeout(
@@ -36,7 +46,7 @@ pub(crate) fn execute_local_command_in_dir_with_timeout(
     env: Option<&[(&str, &str)]>,
     timeout: Duration,
 ) -> CommandOutput {
-    execute_local_command_in_dir_impl(command, current_dir, env, Some(timeout))
+    execute_local_command_in_dir_impl(command, current_dir, env, Some(timeout), None)
 }
 
 fn execute_local_command_in_dir_impl(
@@ -44,8 +54,9 @@ fn execute_local_command_in_dir_impl(
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
     timeout: Option<Duration>,
+    stdin: Option<Vec<u8>>,
 ) -> CommandOutput {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::thread;
 
     #[cfg(windows)]
@@ -72,6 +83,9 @@ fn execute_local_command_in_dir_impl(
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
     configure_process_group_cleanup(&mut cmd);
 
     let mut child = match cmd.spawn() {
@@ -109,6 +123,17 @@ fn execute_local_command_in_dir_impl(
         String::from_utf8_lossy(&captured).to_string()
     }
 
+    // Stream the provided stdin bytes on a dedicated thread, then close the pipe
+    // (EOF). The command's own stdin is empty for this path, so the buffer is
+    // small and never deadlocks against the captured stdout/stderr pipes.
+    let stdin_handle = stdin.and_then(|bytes| {
+        child.stdin.take().map(|mut pipe| {
+            thread::spawn(move || {
+                let _ = pipe.write_all(&bytes);
+            })
+        })
+    });
+
     let stdout_handle = child
         .stdout
         .take()
@@ -122,6 +147,9 @@ fn execute_local_command_in_dir_impl(
         wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
     let interrupted_signal = active_cleanup_signal();
 
+    if let Some(handle) = stdin_handle {
+        let _ = handle.join();
+    }
     let stdout = stdout_handle
         .and_then(|h| h.join().ok())
         .unwrap_or_default();

@@ -509,6 +509,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             cwd,
             options.command,
             request_env,
+            &secret_env_names,
             options.require_paths,
         );
     }
@@ -575,6 +576,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             cwd,
             options.command,
             request_env,
+            &secret_env_names,
             options.require_paths,
         ),
         RunnerTransport::Unavailable => Err(Error::validation_invalid_argument(
