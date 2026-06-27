@@ -79,6 +79,7 @@ pub fn run_bench_list_workflow(
             rig_id: None,
             shared_state: None,
             extra_workloads: args.extra_workloads,
+            env_provider_extensions: args.env_provider_extensions,
             rig_package: args.rig_package.clone(),
             invocation_requirements: InvocationRequirements::default(),
         },

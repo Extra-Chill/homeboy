@@ -158,6 +158,7 @@ mod tests {
                 rig_id: None,
                 shared_state: None,
                 extra_workloads: Vec::new(),
+                env_provider_extensions: Vec::new(),
                 rig_package: None,
                 invocation_requirements: InvocationRequirements::default(),
             },
@@ -254,6 +255,7 @@ mod tests {
             rig_id: None,
             shared_state: None,
             extra_workloads: Vec::new(),
+            env_provider_extensions: Vec::new(),
             rig_package: None,
             invocation_requirements: InvocationRequirements::default(),
         }
@@ -273,6 +275,7 @@ mod tests {
             passthrough_args: Vec::new(),
             scenario_ids: Vec::new(),
             extra_workloads: Vec::new(),
+            env_provider_extensions: Vec::new(),
             rig_package: None,
         })
         .expect("component-script list env");
@@ -610,6 +613,7 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
                     rig_id: None,
                     shared_state: None,
                     extra_workloads: Vec::new(),
+                    env_provider_extensions: Vec::new(),
                     rig_package: None,
                     invocation_requirements: InvocationRequirements::default(),
                 },
@@ -854,6 +858,7 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
                 rig_id: None,
                 shared_state: None,
                 extra_workloads: Vec::new(),
+                env_provider_extensions: Vec::new(),
                 rig_package: None,
                 invocation_requirements: InvocationRequirements::default(),
             },

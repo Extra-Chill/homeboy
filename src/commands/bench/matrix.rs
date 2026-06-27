@@ -614,7 +614,7 @@ fn run_component_with_rig_context(
         effective_id
     )));
 
-    let (extra_workloads, invocation_requirements) =
+    let (extra_workloads, env_provider_extensions, invocation_requirements) =
         rig_workload_runtime_inputs(rig_context, rig_spec, ctx.extension_id.as_deref());
 
     let selected_scenarios = selected_scenario_ids(args, rig_spec)?;
@@ -658,6 +658,7 @@ fn run_component_with_rig_context(
             rig_id: rig_id.clone(),
             shared_state: shared_state_override.or_else(|| args.shared_state.clone()),
             extra_workloads,
+            env_provider_extensions,
             rig_package: rig_id
                 .as_deref()
                 .and_then(homeboy::core::rig::package_evidence),
@@ -729,12 +730,12 @@ fn rig_workload_runtime_inputs(
     rig_context: Option<&RigBenchContext>,
     rig_spec: Option<&RigSpec>,
     extension_id: Option<&str>,
-) -> (Vec<PathBuf>, InvocationRequirements) {
+) -> (Vec<PathBuf>, Vec<String>, InvocationRequirements) {
     let Some(spec) = rig_spec else {
-        return (Vec::new(), InvocationRequirements::default());
+        return (Vec::new(), Vec::new(), InvocationRequirements::default());
     };
     let Some(extension_id) = extension_id else {
-        return (Vec::new(), InvocationRequirements::default());
+        return (Vec::new(), Vec::new(), InvocationRequirements::default());
     };
 
     let package_root = rig_context.and_then(|context| context.package_root());
@@ -743,6 +744,11 @@ fn rig_workload_runtime_inputs(
             spec,
             rig::RigWorkloadKind::Bench,
             package_root,
+            extension_id,
+        ),
+        rig::env_provider_extensions_for_extension_workloads(
+            spec,
+            rig::RigWorkloadKind::Bench,
             extension_id,
         ),
         rig::invocation_requirements_for_extension_workloads(

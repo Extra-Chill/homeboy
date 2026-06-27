@@ -488,6 +488,9 @@ pub struct WorkloadSpec {
     pub path: String,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_provider_extensions: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_postprocess: Vec<ArtifactPostprocessSpec>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -714,6 +717,7 @@ mod tests {
     fn test_trace_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -887,6 +891,7 @@ mod tests {
     fn test_trace_default_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -916,6 +921,7 @@ mod tests {
     fn test_port_range_size() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -945,6 +951,7 @@ mod tests {
     fn test_named_leases() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,

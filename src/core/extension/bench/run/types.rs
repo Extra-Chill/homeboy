@@ -62,6 +62,9 @@ pub struct BenchRunWorkflowArgs {
     /// Rig-declared out-of-tree workloads to run alongside in-tree discovery.
     /// Exported to dispatchers as `HOMEBOY_BENCH_EXTRA_WORKLOADS`.
     pub extra_workloads: Vec<PathBuf>,
+    /// Additional installed extensions whose generic env providers should be
+    /// merged into the bench runner env before caller overrides.
+    pub env_provider_extensions: Vec<String>,
     pub rig_package: Option<RigPackageEvidence>,
     /// Generic Homeboy isolation requirements for each child workload
     /// invocation. Rigs can use this for browser/server/wasm benchmarks without
@@ -126,6 +129,7 @@ pub struct BenchListWorkflowArgs {
     pub passthrough_args: Vec<String>,
     pub scenario_ids: Vec<String>,
     pub extra_workloads: Vec<PathBuf>,
+    pub env_provider_extensions: Vec<String>,
     pub rig_package: Option<RigPackageEvidence>,
 }
 
