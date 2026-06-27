@@ -173,7 +173,7 @@
         "exclude_path_contains": [
           "src/core/execution_contract.rs",
           "src/core/product_identity.rs",
-          "src/core/code_audit/conventions.rs",
+          "src/core/code_audit/conventions/",
           "src/core/code_audit/comment_blocks.rs",
           "src/core/code_audit/comment_hygiene.rs",
           "src/core/code_audit/core_fingerprint.rs",
@@ -698,7 +698,6 @@
         "parallel-implementation::src/core/agent_task_prompts.rs::ParallelImplementation",
         "parallel-implementation::src/core/extension/trace/attach.rs::ParallelImplementation",
         "structural::src/commands::DirectorySprawl",
-        "structural::src/core/code_audit/conventions.rs::GodFile",
         "structural::src/core/code_audit/core_fingerprint.rs::GodFile",
         "structural::src/core/code_audit/detectors/field_patterns.rs::GodFile",
         "structural::src/core::DirectorySprawl",
