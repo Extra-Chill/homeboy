@@ -59,9 +59,9 @@ function codeboxRuntimeProfilePayload({
     componentContracts,
   });
   const normalizedProviderPlugins = uniqueObjectsByRuntimeIdentity([
+    ...providerPluginPaths.map((pluginPath) => ({ path: pluginPath })),
     ...providerPluginEntries(normalizedProfile.provider_plugins),
     ...providerPluginEntries(normalizedRuntimeRequirements.provider_plugins),
-    ...providerPluginPaths.map((pluginPath) => ({ path: pluginPath })),
   ]);
   const payload = withoutEmptyObjectValues({
     ...normalizedProfile,

@@ -418,8 +418,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     provider,
     model,
     provider_plugin_paths: firstNonEmptyArray(
-      config.provider_plugin_paths,
       runtimeOptions.providerPluginPaths,
+      config.provider_plugin_paths,
       defaults.providerPluginPaths,
       []
     ),
@@ -602,34 +602,36 @@ function codeboxTaskArtifactDeclarations(artifactDeclarations = []) {
 }
 
 function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
+  const requestRuntimeOptions = firstObject(config.runtime_options, config.runtimeOptions) || {};
+  const mergedOptions = { ...options, ...requestRuntimeOptions };
   const directComponentPathDefaults = firstObject(config.component_path_defaults, config.componentPathDefaults);
-  const runtimeProfile = runtimeProfileFromExecutorConfig(config, options);
+  const runtimeProfile = runtimeProfileFromExecutorConfig(config, mergedOptions);
   const runtimeRequirements = firstObject(config.runtime_requirements, config.runtimeRequirements) || {};
-  const componentPathDefaults = directComponentPathDefaults || firstObject(options.componentPathDefaults, options.component_path_defaults, runtimeRequirements.component_path_defaults, runtimeRequirements.componentPathDefaults, runtimeProfile.component_path_defaults, runtimeProfile.componentPathDefaults);
+  const componentPathDefaults = directComponentPathDefaults || firstObject(mergedOptions.componentPathDefaults, mergedOptions.component_path_defaults, runtimeRequirements.component_path_defaults, runtimeRequirements.componentPathDefaults, runtimeProfile.component_path_defaults, runtimeProfile.componentPathDefaults);
   return {
-    ...options,
+    ...mergedOptions,
     runtimeProfile,
-    workspaceTools: firstObject(options.workspaceTools, options.workspace_tools, config.workspace_tools, config.workspaceTools, runtimeRequirements.workspace_tools, runtimeRequirements.workspaceTools, runtimeProfile.workspace_tools, runtimeProfile.workspaceTools),
+    workspaceTools: firstObject(mergedOptions.workspaceTools, mergedOptions.workspace_tools, config.workspace_tools, config.workspaceTools, runtimeRequirements.workspace_tools, runtimeRequirements.workspaceTools, runtimeProfile.workspace_tools, runtimeProfile.workspaceTools),
     componentPathDefaults,
-    componentPathAliases: firstObject(options.componentPathAliases, options.component_path_aliases, config.component_path_aliases, config.componentPathAliases, componentPathDefaults?.path_aliases, runtimeRequirements.component_path_aliases, runtimeRequirements.componentPathAliases),
-    componentContractSlugMap: firstObject(options.componentContractSlugMap, options.component_contract_slug_map, config.component_contract_slug_map, config.componentContractSlugMap, componentPathDefaults?.contract_slug_map, runtimeRequirements.component_contract_slug_map, runtimeRequirements.componentContractSlugMap),
-    componentDiscovery: firstObject(options.componentDiscovery, options.component_discovery, config.component_discovery, config.componentDiscovery, componentPathDefaults?.discovery, runtimeRequirements.component_discovery, runtimeRequirements.componentDiscovery),
+    componentPathAliases: firstObject(mergedOptions.componentPathAliases, mergedOptions.component_path_aliases, config.component_path_aliases, config.componentPathAliases, componentPathDefaults?.path_aliases, runtimeRequirements.component_path_aliases, runtimeRequirements.componentPathAliases),
+    componentContractSlugMap: firstObject(mergedOptions.componentContractSlugMap, mergedOptions.component_contract_slug_map, config.component_contract_slug_map, config.componentContractSlugMap, componentPathDefaults?.contract_slug_map, runtimeRequirements.component_contract_slug_map, runtimeRequirements.componentContractSlugMap),
+    componentDiscovery: firstObject(mergedOptions.componentDiscovery, mergedOptions.component_discovery, config.component_discovery, config.componentDiscovery, componentPathDefaults?.discovery, runtimeRequirements.component_discovery, runtimeRequirements.componentDiscovery),
     abilityRequirements: uniqueStrings([
-      ...normalizeArray(options.abilityRequirements),
-      ...normalizeArray(options.ability_requirements),
+      ...normalizeArray(mergedOptions.abilityRequirements),
+      ...normalizeArray(mergedOptions.ability_requirements),
       ...normalizeArray(runtimeRequirements.ability_requirements),
       ...normalizeArray(runtimeRequirements.abilityRequirements),
       ...normalizeArray(runtimeProfile.ability_requirements),
       ...normalizeArray(runtimeProfile.abilityRequirements),
     ]),
-    providerPluginPaths: providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, options),
-    runtimeOverlays: firstDefined(runtimeRequirements.runtime_overlays, runtimeProfile.runtime_overlays, options.runtimeOverlays),
-    runtimeEnv: firstNonEmptyObject(runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, options.runtimeEnv, options.runtime_env),
-    runtimeEnvAliases: firstObject(runtimeRequirements.runtime_env_aliases, runtimeRequirements.runtimeEnvAliases, runtimeProfile.runtime_env_aliases, runtimeProfile.runtimeEnvAliases, options.runtimeEnvAliases, options.runtime_env_aliases),
-    runtimeStateMounts: firstDefined(runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, options.runtimeStateMounts, options.runtime_state_mounts),
-    runtimeConfigMounts: firstDefined(runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, options.runtime_config_mounts),
-    mounts: firstDefined(runtimeRequirements.runtime_mounts, runtimeRequirements.mounts, runtimeProfile.runtime_mounts, runtimeProfile.mounts, options.mounts),
-    callbackData: firstDefined(runtimeRequirements.callback_data, runtimeRequirements.callbackData, runtimeProfile.callback_data, runtimeProfile.callbackData, options.callbackData, options.callback_data),
+    providerPluginPaths: providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, mergedOptions),
+    runtimeOverlays: firstDefined(runtimeRequirements.runtime_overlays, runtimeProfile.runtime_overlays, mergedOptions.runtimeOverlays),
+    runtimeEnv: firstNonEmptyObject(runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, mergedOptions.runtimeEnv, mergedOptions.runtime_env),
+    runtimeEnvAliases: firstObject(runtimeRequirements.runtime_env_aliases, runtimeRequirements.runtimeEnvAliases, runtimeProfile.runtime_env_aliases, runtimeProfile.runtimeEnvAliases, mergedOptions.runtimeEnvAliases, mergedOptions.runtime_env_aliases),
+    runtimeStateMounts: firstDefined(runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, mergedOptions.runtimeStateMounts, mergedOptions.runtime_state_mounts),
+    runtimeConfigMounts: firstDefined(runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, mergedOptions.runtimeConfigMounts, mergedOptions.runtime_config_mounts),
+    mounts: firstDefined(runtimeRequirements.runtime_mounts, runtimeRequirements.mounts, runtimeProfile.runtime_mounts, runtimeProfile.mounts, mergedOptions.mounts),
+    callbackData: firstDefined(runtimeRequirements.callback_data, runtimeRequirements.callbackData, runtimeProfile.callback_data, runtimeProfile.callbackData, mergedOptions.callbackData, mergedOptions.callback_data),
   };
 }
 
@@ -839,8 +841,8 @@ function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, de
   const runtimeRequirements = mergeRuntimeRequirements(defaults.runtimeRequirements, firstObject(config.runtime_requirements, config.runtimeRequirements) || {});
   const runtimeEnv = firstNonEmptyObject(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, options.runtimeEnv, defaults.runtimeEnv) || {};
   const providerPluginPaths = firstNonEmptyArray(
-    config.provider_plugin_paths,
     providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, options),
+    config.provider_plugin_paths,
     defaults.providerPluginPaths,
     []
   );
@@ -896,10 +898,10 @@ function uniqueRuntimeRequirementObjects(entries) {
 
 function providerPluginPathsFromRuntimeProfile(runtimeRequirements = {}, runtimeProfile = {}, options = {}) {
   return uniquePaths([
-    ...providerPluginPathEntries(runtimeRequirements.provider_plugins),
-    ...providerPluginPathEntries(runtimeProfile.provider_plugins),
     ...normalizeArray(options.providerPluginPaths),
     ...normalizeArray(options.provider_plugin_paths),
+    ...providerPluginPathEntries(runtimeRequirements.provider_plugins),
+    ...providerPluginPathEntries(runtimeProfile.provider_plugins),
   ]);
 }
 
@@ -1510,8 +1512,8 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
 
 function defaultProviderPluginPaths(provider, config, options, settings, providerConfig, fallbackProviderPluginPath) {
   return uniquePaths(firstProviderPathArray(
-    config.provider_plugin_paths,
     options.providerPluginPaths,
+    config.provider_plugin_paths,
     providerPathsFor(settings.wp_codebox_provider_plugin_paths, provider),
     providerPathsFor(settings.provider_plugin_paths, provider),
     providerConfig.provider_plugin_paths,
