@@ -12,8 +12,9 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_run_followups_for_legacy, declared_runtime_diagnostics,
-    declared_runtime_source_diagnostics, declared_tool_diagnostics, lab_runner_homeboy_output,
-    runner_artifact_feature_diagnostics, runner_status_operator_commands,
+    declared_runtime_diagnostics_for_legacy, declared_runtime_source_diagnostics,
+    declared_tool_diagnostics, lab_runner_homeboy_output, runner_artifact_feature_diagnostics,
+    runner_status_operator_commands,
 };
 
 #[test]
@@ -174,7 +175,7 @@ fn wp_codebox_diagnostics_distinguish_configured_managed_and_effective() {
 }
 
 #[test]
-fn wp_codebox_runtime_reports_package_paths_probe_and_mixed_source_warnings() {
+fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warnings() {
     let declaration = wp_codebox_runtime_declaration();
     let runtime = declared_runtime_diagnostics(
         &declaration,
@@ -195,26 +196,51 @@ fn wp_codebox_runtime_reports_package_paths_probe_and_mixed_source_warnings() {
         ]),
     );
 
-    assert_eq!(runtime.tool, "wp-codebox");
+    assert_eq!(runtime.runtime, "wp-codebox");
+    assert_eq!(runtime.legacy_output.as_deref(), Some("wp_codebox_runtime"));
     assert_eq!(
         runtime.managed_cache_source,
         "/home/chubes/.cache/homeboy/wp-codebox/source"
     );
+    let playground_package = runtime
+        .packages
+        .iter()
+        .find(|package| package.field == "playground_package")
+        .expect("playground package diagnostics");
     assert_eq!(
-        runtime.playground_package.package,
+        playground_package.package,
         "@automattic/wp-codebox-playground"
     );
     assert_eq!(
-        runtime.playground_package.expected_path,
+        playground_package.expected_path,
         "/home/chubes/.cache/homeboy/wp-codebox/source/packages/playground"
     );
-    assert_eq!(runtime.core_package.package, "@automattic/wp-codebox-core");
+    let core_package = runtime
+        .packages
+        .iter()
+        .find(|package| package.field == "core_package")
+        .expect("core package diagnostics");
+    assert_eq!(core_package.package, "@automattic/wp-codebox-core");
     assert_eq!(
-        runtime.core_package.expected_path,
+        core_package.expected_path,
         "/other/wp-codebox/packages/core/dist/index.js"
     );
-    assert_eq!(runtime.source_git_sha.source, "runtime_probe_command");
-    assert_eq!(runtime.dist_build_freshness.source, "runtime_probe_command");
+    assert_eq!(
+        runtime
+            .probes
+            .get("source_git_sha")
+            .expect("source git sha probe")
+            .source,
+        "runtime_probe_command"
+    );
+    assert_eq!(
+        runtime
+            .probes
+            .get("dist_build_freshness")
+            .expect("dist freshness probe")
+            .source,
+        "runtime_probe_command"
+    );
     assert!(runtime
         .runtime_probe_command
         .contains("@automattic/wp-codebox-playground"));
@@ -229,6 +255,40 @@ fn wp_codebox_runtime_reports_package_paths_probe_and_mixed_source_warnings() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.id == "wp_codebox.mixed_core_source"));
+}
+
+#[test]
+fn declared_runtime_legacy_projection_preserves_wp_codebox_status_shape() {
+    let runtime = declared_runtime_diagnostics_for_legacy(
+        "wp_codebox_runtime",
+        Some("homeboy-lab"),
+        &BTreeMap::from([(
+            "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
+            "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+        )]),
+    );
+
+    let runtime = runtime.expect("catalog declares legacy wp_codebox_runtime projection");
+    assert_eq!(runtime.tool, "wp-codebox");
+    assert_eq!(
+        runtime.playground_package.package,
+        "@automattic/wp-codebox-playground"
+    );
+    assert_eq!(runtime.source_git_sha.source, "runtime_probe_command");
+
+    let generic = declared_runtime_diagnostics(
+        &wp_codebox_runtime_declaration(),
+        Some("homeboy-lab"),
+        &BTreeMap::from([(
+            "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
+            "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+        )]),
+    );
+    let serialized = serde_json::to_string(&generic).expect("serialize generic diagnostics");
+
+    assert!(serialized.contains("\"runtime\":\"wp-codebox\""));
+    assert!(serialized.contains("\"packages\""));
+    assert!(!serialized.contains("\"playground_package\":{"));
 }
 
 #[test]
