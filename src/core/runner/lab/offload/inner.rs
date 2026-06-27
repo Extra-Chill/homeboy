@@ -465,6 +465,36 @@ pub(crate) fn run_lab_offload_inner(
     } = workspace_stage;
     plan = next_plan;
 
+    // Run-scoped RAII ownership of the materialized remote workspace (#6678).
+    // Historically every offloaded run left its `_lab_workspaces/<snapshot>`
+    // checkout and sibling artifact directory on the lab; the only teardown was
+    // the operator-driven `runner workspace prune`. This handle reaps the run's
+    // workspace on the success path while the default `PreserveOnFailure` policy
+    // keeps it on failure so post-mortem evidence survives. Paths that hand the
+    // workspace off to a still-running remote job (detach, in-flight daemon
+    // disconnect) call `preserve()` so the live job keeps its checkout. The
+    // artifact sibling is only created when the run requested `--output`, so it
+    // is only tracked for reaping in that case.
+    //
+    // Durable agent-task runs are inspected post-hoc (`agent-task
+    // status/logs/artifacts`) and an operator may need to exec back into the
+    // run's checkout, so those preserve the workspace regardless of outcome and
+    // rely on the operator-driven prune; ephemeral cooks/bench/lint runs reap on
+    // success and preserve on failure.
+    let cleanup_policy = if agent_task_run_id.is_some() {
+        WorkspaceCleanupPolicy::PreserveAlways
+    } else {
+        WorkspaceCleanupPolicy::PreserveOnFailure
+    };
+    let mut materialized_workspace = MaterializedWorkspace::new(
+        runner_id.to_string(),
+        remote_cwd.clone(),
+        remote_output_file
+            .as_deref()
+            .map(|_| remote_lab_artifact_dir(&remote_cwd)),
+        cleanup_policy,
+    );
+
     // The structured-output file lives in a Homeboy-owned artifact directory
     // that is a sibling of the synced checkout (#6219), so it is never created
     // by workspace sync. Create it explicitly before dispatch so the remote
@@ -713,6 +743,10 @@ pub(crate) fn run_lab_offload_inner(
     let (exec_output, exit_code) = match exec_result {
         Ok(output) => output,
         Err(err) => {
+            // The remote exec failed: preserve the materialized workspace for
+            // post-mortem evidence, and — when the daemon disconnected with a
+            // job still in flight — so the live remote job keeps its checkout.
+            materialized_workspace.preserve();
             if let Some(health) = runner_daemon_health_failure(&err) {
                 let reason = health.reason.clone();
                 plan = with_step(
@@ -794,6 +828,10 @@ pub(crate) fn run_lab_offload_inner(
         plan = add_success_step(plan, "lab.mirror_evidence");
     }
     if request.detach_after_handoff {
+        // The remote run continues detached and still owns its workspace; hand
+        // ownership off so the RAII handle never reaps it out from under the
+        // live job.
+        materialized_workspace.preserve();
         let mut stderr = String::new();
         for message in messages {
             stderr.push_str(&message);
@@ -932,6 +970,10 @@ pub(crate) fn run_lab_offload_inner(
         }
     }
 
+    // Synchronous offload complete: reap the run-scoped workspace on success
+    // (exit 0); a non-zero remote exit preserves it for post-mortem evidence
+    // under the default `PreserveOnFailure` cleanup policy.
+    materialized_workspace.set_success(exit_code == 0);
     Ok(LabOffloadOutcome::Offloaded {
         plan,
         stdout: exec_output.stdout,
@@ -1019,19 +1061,112 @@ pub(crate) fn lab_offload_structured_result_available(
 }
 
 pub(crate) fn download_lab_output_file(runner_id: &str, remote_path: &str) -> Result<String> {
-    let temp = local_lab_output_temp_path(runner_id, remote_path);
-    let temp_text = temp.display().to_string();
-    lab_runner_file_transfer(runner_id)?
-        .download_file(remote_path, &temp_text)
-        .map_err(|err| lab_output_download_error(runner_id, remote_path, err))?;
-    let content = std::fs::read_to_string(&temp).map_err(|err| {
+    let transfer = lab_runner_file_transfer(runner_id)?;
+    read_downloaded_output_via_temp_file(|local_path| {
+        transfer
+            .download_file(remote_path, local_path)
+            .map_err(|err| lab_output_download_error(runner_id, remote_path, err))
+    })
+}
+
+/// Download a remote file into a unique, Drop-cleaned local temp file via
+/// `download`, then read and return its contents as a string.
+///
+/// The temp file is a [`tempfile::NamedTempFile`]: it has a unique name (no
+/// cross-run collision) and is removed when this function returns through ANY
+/// path — including the `?`-error path on `download` and the `?`-error path on
+/// `read_to_string`. The previous implementation built a DETERMINISTIC temp
+/// path under `std::env::temp_dir()` and relied on a best-effort `remove_file`
+/// placed AFTER the fallible read, so a read error (`?`) leaked the file and a
+/// concurrent run at the same name could collide (#6678).
+fn read_downloaded_output_via_temp_file<F>(download: F) -> Result<String>
+where
+    F: FnOnce(&str) -> Result<()>,
+{
+    let temp = tempfile::Builder::new()
+        .prefix("homeboy-lab-output-")
+        .suffix(".json")
+        .tempfile()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("create Lab output temp file".to_string()),
+            )
+        })?;
+    let temp_text = temp.path().display().to_string();
+    download(&temp_text)?;
+    std::fs::read_to_string(temp.path()).map_err(|err| {
         Error::internal_io(
             err.to_string(),
-            Some(format!("read downloaded Lab output {}", temp.display())),
+            Some(format!(
+                "read downloaded Lab output {}",
+                temp.path().display()
+            )),
         )
-    })?;
-    let _ = std::fs::remove_file(&temp);
-    Ok(content)
+    })
+    // `temp` (NamedTempFile) is dropped here, removing the unique file on every
+    // return path above, including the `download(...)?` and `read_to_string`
+    // error paths.
+}
+
+#[cfg(test)]
+mod read_downloaded_output_tests {
+    use super::*;
+
+    #[test]
+    fn returns_downloaded_contents_and_removes_temp_on_success() {
+        let mut temp_path = String::new();
+        let content = read_downloaded_output_via_temp_file(|local_path| {
+            temp_path = local_path.to_string();
+            std::fs::write(local_path, "structured-output\n")
+                .map_err(|err| Error::internal_io(err.to_string(), None))
+        })
+        .expect("download + read succeeds");
+
+        assert_eq!(content, "structured-output\n");
+        assert!(!temp_path.is_empty());
+        assert!(
+            !Path::new(&temp_path).exists(),
+            "temp file leaked after success: {temp_path}"
+        );
+    }
+
+    #[test]
+    fn removes_temp_when_download_errors() {
+        let mut temp_path = String::new();
+        let result = read_downloaded_output_via_temp_file(|local_path| {
+            temp_path = local_path.to_string();
+            Err(Error::internal_unexpected("download failed"))
+        });
+
+        assert!(result.is_err(), "download error should propagate");
+        assert!(!temp_path.is_empty());
+        assert!(
+            !Path::new(&temp_path).exists(),
+            "temp file leaked after download error: {temp_path}"
+        );
+    }
+
+    #[test]
+    fn removes_temp_when_read_errors() {
+        // Reproduce the leak the fix targets: the download succeeds, but the
+        // subsequent read fails (invalid UTF-8), so `read_to_string` `?`-returns
+        // before any manual cleanup could run. The unique NamedTempFile must
+        // still be removed on this error path.
+        let mut temp_path = String::new();
+        let result = read_downloaded_output_via_temp_file(|local_path| {
+            temp_path = local_path.to_string();
+            std::fs::write(local_path, [0xff, 0xfe, 0x00])
+                .map_err(|err| Error::internal_io(err.to_string(), None))
+        });
+
+        assert!(result.is_err(), "invalid UTF-8 must fail the read");
+        assert!(!temp_path.is_empty());
+        assert!(
+            !Path::new(&temp_path).exists(),
+            "temp file leaked after read error: {temp_path}"
+        );
+    }
 }
 
 pub(crate) fn lab_output_download_error(runner_id: &str, remote_path: &str, err: Error) -> Error {
@@ -1046,20 +1181,4 @@ pub(crate) fn lab_output_download_error(runner_id: &str, remote_path: &str, err:
     error.retryable = err.retryable;
     error.hints = err.hints;
     error.with_hint("The remote command was invoked with --output, but the runner-side file was not readable after execution.".to_string())
-}
-
-pub(crate) fn local_lab_output_temp_path(runner_id: &str, remote_path: &str) -> PathBuf {
-    let sanitized_runner = runner_id
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect::<String>();
-    let sanitized_remote = remote_path
-        .chars()
-        .rev()
-        .take(48)
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect::<String>();
-    std::env::temp_dir().join(format!(
-        "homeboy-lab-output-{sanitized_runner}-{sanitized_remote}"
-    ))
 }

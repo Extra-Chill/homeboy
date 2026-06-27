@@ -100,9 +100,10 @@ use super::super::{
     lab_offload_metadata, lab_offload_metadata_with_workspace_mapping, load,
     plan_managed_runner_source_syncs, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
-    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    status, sync_workspace, LabRunnerGateDecision, MaterializedWorkspace, RunnerCapabilityPreflight,
+    RunnerExecOptions, RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    WorkspaceCleanupPolicy,
 };
 
 use super::super::workload::{build_runner_workload, RunnerWorkloadBuildInput};

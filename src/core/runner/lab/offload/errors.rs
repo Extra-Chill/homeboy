@@ -101,27 +101,28 @@ pub(crate) fn write_local_output_file_atomically(
 ) -> std::io::Result<()> {
     use std::io::Write;
     let target = std::path::Path::new(path);
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("output");
-    let temp_name = format!(".{file_name}.{}.tmp", std::process::id());
-    let temp = target.with_file_name(temp_name);
-    {
-        let mut file = std::fs::File::create(&temp)?;
-        file.write_all(contents.as_bytes())?;
-        if !contents.ends_with('\n') {
-            file.write_all(b"\n")?;
-        }
-        file.sync_all()?;
+    // Stage the write in a unique, Drop-cleaned temp file in the SAME directory
+    // as the target so the final `persist` is an atomic same-filesystem rename.
+    // `NamedTempFile` removes the staging file on every early-return path — the
+    // `write_all` / `sync_all` `?` errors below and a failed `persist` — closing
+    // the leak where the previous deterministic `.{name}.{pid}.tmp` staging file
+    // was left behind whenever an intermediate write errored (#6678).
+    let dir = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut temp = tempfile::Builder::new()
+        .prefix(".homeboy-output-")
+        .suffix(".tmp")
+        .tempfile_in(&dir)?;
+    temp.write_all(contents.as_bytes())?;
+    if !contents.ends_with('\n') {
+        temp.write_all(b"\n")?;
     }
-    match std::fs::rename(&temp, target) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(err)
-        }
-    }
+    temp.as_file().sync_all()?;
+    temp.persist(target).map_err(|err| err.error)?;
+    Ok(())
 }
 
 pub(crate) fn in_flight_daemon_disconnect_error(

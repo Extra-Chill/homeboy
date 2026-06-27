@@ -298,6 +298,50 @@ pub fn prune_workspaces(
     ))
 }
 
+/// Reap a single run-scoped materialized workspace (and its sibling Homeboy
+/// artifact directory) created during an offloaded run.
+///
+/// This is the success-path teardown invoked by the run-owned
+/// [`MaterializedWorkspace`](super::materialized::MaterializedWorkspace) RAII
+/// handle. Historically the only teardown for `_lab_workspaces/<snapshot>`
+/// checkouts was the operator-driven [`prune_workspaces`] CLI, so every
+/// offloaded run left scraps on the lab (#6678).
+///
+/// Safety mirrors [`prune_workspaces`]: the target must live under
+/// `<workspace_root>/_lab_workspaces`, and removal is delegated to
+/// [`remove_workspace`], which refuses to delete the root itself or anything
+/// outside it. The controller owns the run lifecycle
+/// (`RunnerLifecycleOwner::Controller`, surfaced via the workspace lease built
+/// by [`workspace_lease`]), so reaping the exact path this run materialized is
+/// safe without the source-path-missing heuristic the bulk orphan prune applies.
+pub(crate) fn reap_run_workspace(
+    runner_id: &str,
+    remote_path: &str,
+    artifact_dir: Option<&str>,
+) -> Result<()> {
+    let runner = load(runner_id)?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner workspace reap requires workspace_root",
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    validate_absolute_path("workspace_root", workspace_root)?;
+    let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    remove_workspace(&runner, &lab_workspaces_root, remote_path)?;
+    // The sibling Homeboy artifact directory (`<checkout>-homeboy-artifacts`)
+    // also lives under `_lab_workspaces`, so it passes the same containment
+    // guard. It only exists when the run requested `--output`, so a
+    // missing-directory removal error here is expected and non-fatal: the
+    // run-scoped checkout is already reaped above.
+    if let Some(artifact_dir) = artifact_dir {
+        let _ = remove_workspace(&runner, &lab_workspaces_root, artifact_dir);
+    }
+    Ok(())
+}
+
 pub fn list_workspaces(runner_id: &str, limit: usize) -> Result<(RunnerWorkspaceListOutput, i32)> {
     let runner = load(runner_id)?;
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
