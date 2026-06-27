@@ -306,7 +306,7 @@ impl ComposerDependencyProvider {
         _component: &Component,
         path: &Path,
     ) -> Result<Option<DependencyCommandResult>> {
-        let args = vec!["install".to_string(), "--no-interaction".to_string()];
+        let args = composer_install_command_args();
         let output = Command::new("composer")
             .args(&args)
             .current_dir(path)
@@ -347,6 +347,14 @@ impl ComposerDependencyProvider {
             stderr,
         }))
     }
+}
+
+pub fn composer_install_command_args() -> Vec<String> {
+    vec![
+        "install".to_string(),
+        "--no-interaction".to_string(),
+        "--no-progress".to_string(),
+    ]
 }
 
 pub(crate) struct ComponentScriptDependencyProvider;

@@ -42,6 +42,7 @@ pub(super) fn run_generic_trace_runner(
             success: true,
             stdout,
             stderr: String::new(),
+            timed_out: false,
             child_resource: None,
             extension_phase_timings: Vec::new(),
         });
@@ -56,6 +57,7 @@ pub(super) fn run_generic_trace_runner(
             success: false,
             stdout: String::new(),
             stderr: format!("unknown trace scenario {}", args.scenario_id),
+            timed_out: false,
             child_resource: None,
             extension_phase_timings: Vec::new(),
         });
@@ -87,6 +89,7 @@ pub(super) fn run_generic_trace_runner(
         success: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        timed_out: false,
         child_resource: None,
         extension_phase_timings: super::super::runner::read_extension_phase_timings(
             run_dir.path(),

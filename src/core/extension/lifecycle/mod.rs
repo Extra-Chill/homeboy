@@ -357,6 +357,19 @@ mod tests {
             "module.exports = { schema: 'fixture' };\n",
         )
         .expect("runtime agent ci helper");
+
+        let agent_task_contract = root.join("agent-task-contracts/agent-task-provider-contract.js");
+        fs::create_dir_all(
+            agent_task_contract
+                .parent()
+                .expect("agent task contract parent"),
+        )
+        .expect("agent task contract dir");
+        fs::write(
+            &agent_task_contract,
+            "module.exports = { contract: 'fixture' };\n",
+        )
+        .expect("agent task contract");
     }
 
     fn run_git(dir: &Path, args: &[&str]) -> bool {
@@ -785,6 +798,9 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
                 .exists());
+            assert!(home
+                .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
+                .exists());
         });
     }
 
@@ -817,6 +833,9 @@ exec '{}' "$@"
                 .exists());
             assert!(home
                 .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
                 .exists());
         });
     }
@@ -873,6 +892,9 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
+            assert!(home
+                .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
+                .exists());
         });
     }
 
@@ -893,6 +915,9 @@ exec '{}' "$@"
                 .exists());
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
                 .exists());
         });
     }

@@ -61,6 +61,20 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             )?;
             Ok((command_json_value(report)?, 0))
         }
+        AgentTaskControllerCommand::Diagnose(status_args) => {
+            let report = homeboy::core::agent_tasks::loop_controller::controller_status_report(
+                &status_args.loop_id,
+            )?;
+            Ok((
+                command_json_value(serde_json::json!({
+                    "schema": "homeboy/agent-task-loop-controller-diagnose-result/v1",
+                    "loop_id": status_args.loop_id,
+                    "failed_child_actions": report.diagnostics.failed_child_actions,
+                    "next_command": format!("homeboy agent-task controller status {}", status_args.loop_id),
+                }))?,
+                0,
+            ))
+        }
         AgentTaskControllerCommand::List => {
             let report = agent_task_controller_service::list()?;
             Ok((command_json_value(report)?, 0))
@@ -1322,17 +1336,6 @@ where
     let result =
         agent_task_controller_service::run_action(&loop_id, &action_id, executor, &dispatch)?;
     Ok((command_json_value(result.value)?, result.exit_code))
-}
-
-fn controller_resume_with_executor<E>(
-    loop_id: String,
-    executor: E,
-    defaults: ControllerDispatchDefaults,
-) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter + Clone,
-{
-    controller_resume_with_executor_and_defaults(loop_id, executor, defaults)
 }
 
 fn controller_resume_with_executor_and_defaults<E>(

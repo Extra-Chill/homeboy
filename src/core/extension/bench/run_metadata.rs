@@ -42,6 +42,7 @@ pub(crate) fn stamp_run_metadata(
                 .to_string(),
             source_revision: source_revision_at(&execution_context.extension_path),
         }),
+        rig_package: args.rig_package.clone(),
         lifecycle: None,
         diagnostics: Vec::new(),
     });
@@ -219,6 +220,8 @@ mod tests {
             rig_id: Some("studio".to_string()),
             shared_state: Some(component_dir.path().join("shared")),
             extra_workloads: Vec::new(),
+            env_provider_extensions: Vec::new(),
+            rig_package: None,
             invocation_requirements: InvocationRequirements::default(),
         };
         let mut results = BenchResults {

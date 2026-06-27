@@ -1,6 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
+use homeboy::core::artifact_ref::EvidenceRef;
+use homeboy::core::artifacts::{
+    record_artifact_postprocess_outputs, run_artifact_postprocess_steps, ArtifactPostprocessContext,
+};
 use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
@@ -11,7 +15,11 @@ use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
-use super::report::{evaluate_fuzz_gates, fuzz_coverage_completeness};
+use super::report::{
+    evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
+    fuzz_result_envelope_evidence_ref, fuzz_result_envelope_from_campaign, gate_status,
+    persist_fuzz_run_result_envelope,
+};
 use super::types::{
     FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzExecutionOutput, FuzzRunArgs,
     FuzzRunOutput, FuzzRunnerContract, FuzzWorkloadOutput,
@@ -103,14 +111,19 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let artifact_ref_validation = fuzz_artifact_ref_validation(results.as_ref(), &artifacts_dir);
     let artifact_validation_error = fuzz_run_artifact_validation_error(&args, results.as_ref());
     let postprocess_error = fuzz_postprocess_error(&postprocess);
+    let expected_metric_gates =
+        evaluate_expected_metric_gates(results.as_ref(), &args.expect_metric);
+    let expected_metric_error = fuzz_expected_metric_error(&expected_metric_gates);
     let combined_results_error = results_error
         .as_deref()
         .or(postprocess_error.as_deref())
         .or(artifact_validation_error.as_deref())
+        .or(expected_metric_error.as_deref())
         .or(artifact_ref_validation.error.as_deref());
     let outcome = fuzz_run_outcome(
         runner_output.exit_code,
         runner_output.success,
+        runner_output.timed_out,
         results.as_ref(),
         combined_results_error,
     );
@@ -122,7 +135,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         .map(|workload| workload.id.clone())
         .or_else(|| args.workload_id.clone());
     let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
-    persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+    let persisted_evidence = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
         run_id: args.run_id.as_deref(),
         component_id: &ctx.component_id,
         rig_id: rig_id.as_deref(),
@@ -135,8 +148,10 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         results_path: &results_path,
         artifacts_dir: &artifacts_dir,
         results: results.as_ref(),
+        expected_metric_gates: &expected_metric_gates,
         results_error: combined_results_error,
         missing_artifact_refs: &artifact_ref_validation.missing_refs,
+        postprocess: &postprocess,
     })?;
     let evidence_followups = fuzz_evidence_followups(
         args.run_id.as_deref(),
@@ -154,13 +169,16 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             status,
             workload_id,
             workload_path,
-            run_id: args.run_id,
-            seed: args.seed,
+            run_id: args.run_id.clone(),
+            seed: args.seed.clone(),
             inventory_file: args
                 .inventory
+                .clone()
                 .map(|path| path.to_string_lossy().to_string()),
-            max_duration: args.max_duration,
-            passthrough_args: args.args,
+            max_duration: args.max_duration.clone(),
+            passthrough_args: args.args.clone(),
+            requested_settings: fuzz_requested_settings(&args),
+            gates: fuzz_run_gates(results.as_ref(), &expected_metric_gates),
             target_inventory: Some(target_inventory),
             execution: Some(FuzzExecutionOutput {
                 kind: "fuzz".to_string(),
@@ -176,6 +194,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             results,
             campaign_contract,
             runner_contract: default_runner_contract(),
+            evidence_refs: persisted_evidence.evidence_refs,
             evidence_followups,
         },
         exit_code,
@@ -226,6 +245,41 @@ pub(super) fn fuzz_run_artifact_validation_error(
             "strict fuzz artifact validation failed; missing required artifact(s): {}",
             missing.join(", ")
         )
+    })
+}
+
+pub(super) fn fuzz_expected_metric_error(
+    gates: &[super::types::FuzzGateEvaluation],
+) -> Option<String> {
+    let failed = gates
+        .iter()
+        .filter(|gate| gate.status != "passed")
+        .map(|gate| {
+            format!(
+                "{} expected {} observed {}",
+                gate.metric, gate.expected, gate.observed
+            )
+        })
+        .collect::<Vec<_>>();
+
+    (!failed.is_empty())
+        .then(|| format!("fuzz expected metric gate(s) failed: {}", failed.join("; ")))
+}
+
+fn fuzz_run_gates(
+    results: Option<&FuzzCampaign>,
+    expected_metric_gates: &[super::types::FuzzGateEvaluation],
+) -> Vec<super::types::FuzzGateEvaluation> {
+    let mut gates = results.map(evaluate_fuzz_gates).unwrap_or_default();
+    gates.extend(expected_metric_gates.iter().cloned());
+    gates
+}
+
+fn fuzz_requested_settings(args: &FuzzRunArgs) -> serde_json::Value {
+    serde_json::json!({
+        "setting": args.setting_args.setting,
+        "setting_json": args.setting_args.setting_json,
+        "expect_metric": args.expect_metric,
     })
 }
 
@@ -291,24 +345,20 @@ pub(super) fn run_fuzz_artifact_postprocess(
     if steps.is_empty() {
         return Ok(Vec::new());
     }
-    std::fs::create_dir_all(artifacts_dir).map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some(artifacts_dir.display().to_string()),
-        )
-    })?;
-
-    let mut outputs = Vec::new();
-    for (index, step) in steps.iter().enumerate() {
-        outputs.push(run_fuzz_artifact_postprocess_step(
-            index,
-            step,
-            rig_context,
-            results_path,
-            artifacts_dir,
-        )?);
-    }
-    Ok(outputs)
+    let expand =
+        |value: &str| expand_postprocess_path(value, rig_context, results_path, artifacts_dir);
+    let outputs = run_artifact_postprocess_steps(
+        &steps,
+        &ArtifactPostprocessContext {
+            artifact_root: artifacts_dir,
+            input_root: Some(results_path),
+            path_expander: Some(&expand),
+        },
+    )?;
+    Ok(outputs
+        .into_iter()
+        .map(FuzzArtifactPostprocessOutput::from)
+        .collect())
 }
 
 fn fuzz_artifact_postprocess_steps(
@@ -345,129 +395,6 @@ fn fuzz_artifact_postprocess_steps(
         .unwrap_or_default()
 }
 
-fn run_fuzz_artifact_postprocess_step(
-    index: usize,
-    step: &homeboy::core::rig::ArtifactPostprocessSpec,
-    rig_context: Option<&FuzzRigContext>,
-    results_path: &Path,
-    artifacts_dir: &Path,
-) -> homeboy::core::Result<FuzzArtifactPostprocessOutput> {
-    let id = step
-        .id
-        .clone()
-        .unwrap_or_else(|| format!("artifact-postprocess-{}", index + 1));
-    let output_path = resolve_postprocess_output_path(&step.output, artifacts_dir)?;
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            homeboy::core::Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-        })?;
-    }
-    let input = step
-        .input
-        .as_ref()
-        .map(|input| expand_postprocess_path(input, rig_context, results_path, artifacts_dir));
-    let parameters_json = serde_json::to_string(&step.parameters).map_err(|error| {
-        homeboy::core::Error::internal_unexpected(format!(
-            "failed to serialize artifact postprocess parameters: {error}"
-        ))
-    })?;
-
-    let mut command = Command::new(&step.helper);
-    command.arg(&step.action);
-    if let Some(args) = step
-        .parameters
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-    {
-        for arg in args.iter().filter_map(serde_json::Value::as_str) {
-            command.arg(arg);
-        }
-    }
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_ID", &id);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_HELPER", &step.helper);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_ACTION", &step.action);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT", &output_path);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT", artifacts_dir);
-    command.env("HOMEBOY_ARTIFACT_POSTPROCESS_PARAMETERS", parameters_json);
-    if let Some(input) = input.as_ref() {
-        command.env("HOMEBOY_ARTIFACT_POSTPROCESS_INPUT", input);
-    }
-    for (key, value) in &step.parameters {
-        if let Some(value) = postprocess_parameter_env_value(value) {
-            command.env(postprocess_parameter_env_key(key), value);
-        }
-    }
-
-    let output = command.output().map_err(|error| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "failed to run artifact postprocess `{}` via helper `{}`: {error}",
-                id, step.helper
-            ),
-            Some("fuzz.artifact_postprocess".to_string()),
-        )
-    })?;
-    let exit_code = output.status.code();
-    let mut success = output.status.success();
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let mut error = (!success).then(|| {
-        format!(
-            "artifact postprocess `{id}` failed with exit code {}",
-            exit_code
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        )
-    });
-    if success && !output_path.exists() {
-        success = false;
-        error = Some(format!(
-            "artifact postprocess `{id}` did not create required output {}",
-            output_path.display()
-        ));
-    }
-
-    Ok(FuzzArtifactPostprocessOutput {
-        id,
-        helper: step.helper.clone(),
-        action: step.action.clone(),
-        input: input.map(|path| path.to_string_lossy().to_string()),
-        output: output_path.to_string_lossy().to_string(),
-        required: step.required,
-        exit_code,
-        success,
-        stdout,
-        stderr,
-        error,
-    })
-}
-
-fn resolve_postprocess_output_path(
-    output: &str,
-    artifacts_dir: &Path,
-) -> homeboy::core::Result<PathBuf> {
-    let trimmed = output.trim();
-    let path = Path::new(trimmed);
-    if trimmed.is_empty() || path.is_absolute() || trimmed.starts_with("..") {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "artifact_postprocess.output",
-            "artifact postprocess output must be a non-empty path relative to HOMEBOY_FUZZ_ARTIFACTS_DIR",
-            Some(output.to_string()),
-            None,
-        ));
-    }
-    let resolved = artifacts_dir.join(path);
-    if !resolved.starts_with(artifacts_dir) {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "artifact_postprocess.output",
-            "artifact postprocess output must stay within HOMEBOY_FUZZ_ARTIFACTS_DIR",
-            Some(output.to_string()),
-            None,
-        ));
-    }
-    Ok(resolved)
-}
-
 fn expand_postprocess_path(
     value: &str,
     rig_context: Option<&FuzzRigContext>,
@@ -483,27 +410,23 @@ fn expand_postprocess_path(
     })
 }
 
-fn postprocess_parameter_env_value(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(value) => Some(value.clone()),
-        serde_json::Value::Bool(value) => Some(value.to_string()),
-        serde_json::Value::Number(value) => Some(value.to_string()),
-        _ => None,
+impl From<homeboy::core::artifacts::ArtifactPostprocessOutput> for FuzzArtifactPostprocessOutput {
+    fn from(output: homeboy::core::artifacts::ArtifactPostprocessOutput) -> Self {
+        Self {
+            id: output.id,
+            helper: output.helper,
+            action: output.action,
+            input: output.input,
+            output: output.output,
+            required: output.required,
+            exit_code: output.exit_code,
+            success: output.success,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            error: output.error,
+            artifacts: output.artifacts,
+        }
     }
-}
-
-fn postprocess_parameter_env_key(key: &str) -> String {
-    let suffix = key
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("HOMEBOY_ARTIFACT_POSTPROCESS_PARAMETER_{suffix}")
 }
 
 pub(super) fn fuzz_postprocess_error(outputs: &[FuzzArtifactPostprocessOutput]) -> Option<String> {
@@ -532,9 +455,30 @@ pub(super) struct FuzzRunOutcome {
 pub(super) fn fuzz_run_outcome(
     runner_exit_code: i32,
     runner_success: bool,
+    runner_timed_out: bool,
     results: Option<&FuzzCampaign>,
     results_error: Option<&str>,
 ) -> FuzzRunOutcome {
+    if runner_timed_out {
+        return FuzzRunOutcome {
+            status: "timeout",
+            success: false,
+            exit_code: 124,
+        };
+    }
+
+    if let Some(non_proof_status) = results.and_then(fuzz_campaign_non_proof_status) {
+        return FuzzRunOutcome {
+            status: non_proof_status,
+            success: false,
+            exit_code: if runner_exit_code == 0 {
+                1
+            } else {
+                runner_exit_code
+            },
+        };
+    }
+
     let campaign_failed = results.is_some_and(fuzz_campaign_reports_failure);
     let success = runner_success && !campaign_failed && results_error.is_none();
     FuzzRunOutcome {
@@ -547,6 +491,46 @@ pub(super) fn fuzz_run_outcome(
         } else {
             runner_exit_code
         },
+    }
+}
+
+fn fuzz_campaign_non_proof_status(campaign: &FuzzCampaign) -> Option<&'static str> {
+    if let Some(status) = fuzz_metadata_non_proof_status(&campaign.metadata) {
+        return Some(status);
+    }
+
+    if campaign.lifecycle.as_ref().is_some_and(|lifecycle| {
+        lifecycle
+            .phases
+            .iter()
+            .any(|phase| phase.status == LifecyclePhaseStatus::Skipped)
+    }) {
+        return Some("skipped");
+    }
+
+    None
+}
+
+fn fuzz_metadata_non_proof_status(value: &serde_json::Value) -> Option<&'static str> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(status) = object.get("status").and_then(|status| status.as_str()) {
+                let normalized = status.trim().to_ascii_lowercase();
+                if matches!(
+                    normalized.as_str(),
+                    "skipped" | "skip" | "unsupported" | "not_executed" | "not-executed"
+                ) {
+                    return Some(match normalized.as_str() {
+                        "unsupported" => "unsupported",
+                        "not_executed" | "not-executed" => "not_executed",
+                        _ => "skipped",
+                    });
+                }
+            }
+            object.values().find_map(fuzz_metadata_non_proof_status)
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(fuzz_metadata_non_proof_status),
+        _ => None,
     }
 }
 
@@ -672,13 +656,21 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) results_path: &'a Path,
     pub(super) artifacts_dir: &'a Path,
     pub(super) results: Option<&'a FuzzCampaign>,
+    pub(super) expected_metric_gates: &'a [super::types::FuzzGateEvaluation],
     pub(super) results_error: Option<&'a str>,
     pub(super) missing_artifact_refs: &'a [String],
+    pub(super) postprocess: &'a [FuzzArtifactPostprocessOutput],
+}
+
+pub(super) struct FuzzRunPersistedEvidence {
+    #[allow(dead_code)]
+    pub(super) run: Option<RunRecord>,
+    pub(super) evidence_refs: Vec<EvidenceRef>,
 }
 
 pub(super) fn persist_fuzz_run_evidence(
     input: FuzzRunEvidenceInput<'_>,
-) -> homeboy::core::Result<Option<RunRecord>> {
+) -> homeboy::core::Result<FuzzRunPersistedEvidence> {
     let run_id = input
         .run_id
         .filter(|run_id| !run_id.trim().is_empty())
@@ -693,14 +685,17 @@ pub(super) fn persist_fuzz_run_evidence(
         "seed": input.args.seed.clone(),
         "max_duration": input.args.max_duration.clone(),
         "passthrough_args": input.args.args.clone(),
+        "tracker_refs": input.args.tracker_refs,
         "exit_code": input.exit_code,
         "success": input.success,
         "status": input.status,
+        "requested_settings": fuzz_requested_settings(input.args),
         "campaign_id": input.results.map(|campaign| campaign.id.as_str()),
         "results_error": input.results_error,
         "missing_artifact_refs": input.missing_artifact_refs,
         "coverage_completeness": input.results.map(fuzz_coverage_completeness),
-        "gates": input.results.map(evaluate_fuzz_gates),
+        "gates": fuzz_run_gates(input.results, input.expected_metric_gates),
+        "gate_status": gate_status(&fuzz_run_gates(input.results, input.expected_metric_gates)),
     });
     let run = RunRecord {
         id: run_id.clone(),
@@ -728,8 +723,17 @@ pub(super) fn persist_fuzz_run_evidence(
         metadata_json: metadata,
     };
     store.upsert_imported_run(&run)?;
+    let mut evidence_refs = Vec::new();
     if input.results_path.is_file() {
         store.record_artifact(&run_id, "fuzz_results", input.results_path)?;
+    }
+    if let Some(campaign) = input.results {
+        let mut envelope =
+            fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
+        envelope.status = gate_status(&evaluate_fuzz_gates(campaign));
+        if let Some(artifact) = persist_fuzz_run_result_envelope(Some(&run_id), &envelope)? {
+            evidence_refs.push(fuzz_result_envelope_evidence_ref(&artifact));
+        }
     }
     if input.artifacts_dir.is_dir() {
         store.record_directory_artifact_with_metadata(
@@ -742,7 +746,31 @@ pub(super) fn persist_fuzz_run_evidence(
             }),
         )?;
     }
-    Ok(Some(run))
+    let generic_postprocess_outputs = input
+        .postprocess
+        .iter()
+        .map(
+            |output| homeboy::core::artifacts::ArtifactPostprocessOutput {
+                id: output.id.clone(),
+                helper: output.helper.clone(),
+                action: output.action.clone(),
+                input: output.input.clone(),
+                output: output.output.clone(),
+                required: output.required,
+                exit_code: output.exit_code,
+                success: output.success,
+                stdout: output.stdout.clone(),
+                stderr: output.stderr.clone(),
+                error: output.error.clone(),
+                artifacts: output.artifacts.clone(),
+            },
+        )
+        .collect::<Vec<_>>();
+    record_artifact_postprocess_outputs(&store, &run_id, &generic_postprocess_outputs)?;
+    Ok(FuzzRunPersistedEvidence {
+        run: Some(run),
+        evidence_refs,
+    })
 }
 
 #[derive(Default)]
@@ -888,6 +916,12 @@ fn fuzz_run_command(
     if let Some(run_id) = args.run_id.as_ref() {
         parts.extend(["--run-id".to_string(), run_id.clone()]);
     }
+    for tracker_ref in &args.tracker_refs {
+        parts.extend([
+            "--tracker-ref".to_string(),
+            format!("{}:{}", tracker_ref.kind, tracker_ref.id),
+        ]);
+    }
     if let Some(seed) = args.seed.as_ref() {
         parts.extend(["--seed".to_string(), seed.clone()]);
     }
@@ -902,6 +936,12 @@ fn fuzz_run_command(
     }
     if args.require_result_envelope {
         parts.push("--require-result-envelope".to_string());
+    }
+    for (metric, expected) in &args.expect_metric {
+        parts.extend([
+            "--expect-metric".to_string(),
+            format!("{metric}={expected}"),
+        ]);
     }
     if !args.args.is_empty() {
         parts.push("--".to_string());
@@ -994,6 +1034,7 @@ fn run_fuzz_extension_script(
         .path_override(args.comp.path.clone())
         .with_run_dir(run_dir)
         .invocation_requirements(invocation_requirements)
+        .timeout(fuzz_max_duration(args.max_duration.as_deref())?)
         .script_args(&args.args);
 
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
@@ -1003,6 +1044,53 @@ fn run_fuzz_extension_script(
     }
 
     runner.run()
+}
+
+pub(super) fn fuzz_max_duration(raw: Option<&str>) -> homeboy::core::Result<Option<Duration>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    let (amount, multiplier) = if let Some(amount) = raw.strip_suffix("ms") {
+        (amount, 0)
+    } else if let Some(amount) = raw.strip_suffix('s') {
+        (amount, 1)
+    } else if let Some(amount) = raw.strip_suffix('m') {
+        (amount, 60)
+    } else if let Some(amount) = raw.strip_suffix('h') {
+        (amount, 60 * 60)
+    } else {
+        (raw, 1)
+    };
+
+    let amount = amount.parse::<u64>().map_err(|_| {
+        homeboy::core::Error::validation_invalid_argument(
+            "max_duration",
+            format!(
+                "Invalid fuzz max duration '{raw}'. Use a positive duration such as 60s or 5m."
+            ),
+            Some(raw.to_string()),
+            None,
+        )
+    })?;
+    if amount == 0 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "max_duration",
+            "Fuzz max duration must be greater than zero.",
+            Some(raw.to_string()),
+            None,
+        ));
+    }
+
+    Ok(Some(if multiplier == 0 {
+        Duration::from_millis(amount)
+    } else {
+        Duration::from_secs(amount.saturating_mul(multiplier))
+    }))
 }
 
 pub(super) fn fuzz_runner_env(
@@ -1211,6 +1299,9 @@ fn expanded_fuzz_component_path(
         if !trimmed.is_empty() {
             return shellexpand::tilde(trimmed).to_string();
         }
+    }
+    if let Ok(path) = crate::core::rig::resolve_component_path(&rig_context.spec, component_id) {
+        return path;
     }
     expand_fuzz_rig_string(rig_context, fallback)
 }

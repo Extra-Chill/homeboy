@@ -85,6 +85,10 @@ homeboy stack apply <stack-id>
 
 Fetches the base, recreates the local target branch from the base, then cherry-picks every PR head in order. `apply` stops on the first conflict, aborts the in-progress pick, and prints a manual-resolution hint. It does not push.
 
+Safety manifest metadata marks `apply` and `rebase` as explicit branch-mutation
+actions. Use `status` for read-only inspection and `sync --dry-run` for the
+available planning path before mutating a stack branch.
+
 ### `status`
 
 ```sh
@@ -113,6 +117,9 @@ Spec-less inspection of the current branch as a stack of commits over a base ref
 ## GitHub dependency
 
 `apply`, `status`, `sync`, and `inspect` PR lookup paths call the GitHub CLI (`gh`). Authenticate `gh` for private repositories before relying on stack reports.
+
+`push` is classified as an explicit remote publication action in the safety
+manifest. It does not currently expose a dry-run contract.
 
 ## Related
 

@@ -3,11 +3,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use crate::command_contract::{lab_runner_unsupported_hint, lab_runner_unsupported_message};
-use crate::core::{Error, Result};
+use crate::core::{Error, ErrorCode, Result};
 
 use super::{
-    load, status, LabOffloadCommand, LabRunnerGateMode, RunnerConnectReport, RunnerStatusReport,
-    RunnerTunnelMode,
+    default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode,
+    RunnerAvailability, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +63,107 @@ pub(super) fn prepare_lab_runner_for_offload(
     prepare_lab_runner_for_offload_with(selection, status, |runner_id| {
         connect_runner_for_offload(runner_id, selection.source)
     })
+}
+
+pub(super) fn preflight_lab_runner_availability(
+    command: &LabOffloadCommand,
+    selection: &LabRunnerSelection,
+) -> Result<()> {
+    let availability = preflight_lab_runner_availability_with(selection, status)?;
+    if availability.accepts_jobs {
+        return Ok(());
+    }
+
+    let eligible = if matches!(selection.source, LabRunnerSelectionSource::Default) {
+        default_lab_runner_availability().unwrap_or_else(|_| vec![availability.clone()])
+    } else {
+        vec![availability.clone()]
+    };
+    Err(lab_runner_availability_error(
+        command.hot_label,
+        Some(&availability),
+        eligible,
+    ))
+}
+
+fn preflight_lab_runner_availability_with(
+    selection: &LabRunnerSelection,
+    status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
+) -> Result<RunnerAvailability> {
+    let status = status_fn(&selection.runner_id)?;
+    Ok(RunnerAvailability::from_status_parts(
+        selection.runner_id.clone(),
+        status.connected,
+        status.stale_daemon.is_some(),
+        status.active_jobs.len(),
+        &status.active_job_state,
+        load(&selection.runner_id)?.settings.concurrency_limit,
+    ))
+}
+
+pub(super) fn fail_if_no_default_runner_accepts_jobs(command: &LabOffloadCommand) -> Result<()> {
+    if !command.portable || !command.routing_policy.default_lab_offload {
+        return Ok(());
+    }
+    let eligible = default_lab_runner_availability()?;
+    if eligible.is_empty()
+        || eligible
+            .iter()
+            .any(|availability| availability.accepts_jobs)
+    {
+        return Ok(());
+    }
+
+    Err(lab_runner_availability_error(
+        command.hot_label,
+        None,
+        eligible,
+    ))
+}
+
+pub(super) fn lab_runner_availability_error(
+    command_label: &str,
+    selected: Option<&RunnerAvailability>,
+    eligible: Vec<RunnerAvailability>,
+) -> Error {
+    let selected_runner_id = selected.map(|availability| availability.runner_id.clone());
+    let reasons: Vec<String> = selected
+        .map(|availability| availability.reasons.clone())
+        .unwrap_or_else(|| {
+            eligible
+                .iter()
+                .flat_map(|availability| availability.reasons.iter().cloned())
+                .collect()
+        });
+    let message = if let Some(runner_id) = selected_runner_id.as_deref() {
+        format!(
+            "Lab offload selected runner `{runner_id}` for `{command_label}`, but that runner cannot accept jobs"
+        )
+    } else {
+        format!(
+            "Lab offload found eligible runners for `{command_label}`, but none can accept jobs"
+        )
+    };
+
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!("Invalid argument 'runner': {message}"),
+        serde_json::json!({
+            "field": "runner",
+            "problem": message,
+            "id": selected_runner_id,
+            "runner_availability": {
+                "selected": selected,
+                "eligible": eligible,
+                "reasons": reasons,
+            },
+            "tried": [
+                "Wait for an active Lab runner job to finish, then retry.",
+                "Choose another available runner with --runner <runner-id>.",
+                "Inspect availability with `homeboy runner status <runner-id> --json`.",
+            ],
+        }),
+    )
 }
 
 fn connect_runner_for_offload(
@@ -193,7 +294,10 @@ pub(super) fn prepare_lab_runner_for_offload_with(
     let status = status_fn(&selection.runner_id)?;
     if status.connected {
         if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
-            if status.stale_daemon.is_some()
+            if status
+                .stale_daemon
+                .as_ref()
+                .is_some_and(|warning| !stale_daemon_runtime_paths_changed(warning))
                 && status_tunnel_mode(&status) == RunnerTunnelMode::DirectSsh
             {
                 eprintln!(
@@ -312,6 +416,11 @@ fn connected_runner_not_ready_reason(
 ) -> Option<String> {
     if let Some(warning) = status.stale_daemon.as_ref() {
         let restart = stale_daemon_repair_command(runner_id, status);
+        if !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty() {
+            return Some(format!(
+                "connected runner `{runner_id}` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `{restart}`"
+            ));
+        }
         return Some(format!(
             "connected runner `{runner_id}` daemon is stale (severity={}): active daemon control plane reports {}, but the job command binary reports {}; stale runner runtimes can return malformed or misleading provider output; refresh with `{restart}`",
             warning.severity,
@@ -334,6 +443,10 @@ fn connected_runner_not_ready_reason(
         }
         _ => None,
     }
+}
+
+fn stale_daemon_runtime_paths_changed(warning: &super::RunnerStaleDaemonWarning) -> bool {
+    !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty()
 }
 
 fn stale_daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String {

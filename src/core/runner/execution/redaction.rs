@@ -155,6 +155,7 @@ pub(super) fn runner_exec_diagnostics(
         source_snapshot_remote_path: source_snapshot
             .and_then(|snapshot| snapshot.remote_path.clone()),
         required_paths: required_paths.to_vec(),
+        homeboy_binaries: None,
         hints,
     })
 }

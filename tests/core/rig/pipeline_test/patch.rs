@@ -13,12 +13,15 @@ fn rig_with_patch(component_path: &str, step: PipelineStep) -> RigSpec {
         "c".to_string(),
         ComponentSpec {
             path: component_path.to_string(),
+            component_id: None,
+            path_setting: None,
             checkout_root: None,
             remote_url: None,
             triage_remote_url: None,
             stack: None,
             branch: None,
             r#ref: None,
+            default_ref: None,
             extensions: None,
         },
     );

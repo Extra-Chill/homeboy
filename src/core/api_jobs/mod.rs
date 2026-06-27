@@ -8,6 +8,7 @@ mod types;
 
 pub use remote_runner::{
     JobArtifactMetadata, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
+    RunnerJobLifecycleMetadata,
 };
 pub use store::{JobHandle, JobRunner, JobStore};
 pub use summary::active_runner_job_run_summary;
@@ -840,6 +841,93 @@ mod tests {
     }
 
     #[test]
+    fn active_runner_job_summary_prefers_typed_lifecycle_metadata() {
+        let store = JobStore::default();
+        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        request.lifecycle = Some(RunnerJobLifecycleMetadata {
+            source: Some("reverse-broker".to_string()),
+            kind: Some("lab_agent_task".to_string()),
+            durable_run_id: Some("agent-task-run-123".to_string()),
+            active_child_count: Some(2),
+            active_cell_count: Some(7),
+        });
+        request.metadata = Some(json!({
+            "source": "legacy-source",
+            "kind": "legacy-kind",
+            "durable_run_id": "legacy-run",
+            "active_child_count": 99,
+            "active_cell_count": 100,
+        }));
+        let job = store
+            .submit_remote_runner_job(request)
+            .expect("remote runner job queues");
+
+        let summary = store
+            .active_runner_jobs()
+            .into_iter()
+            .find(|summary| summary.job_id == job.id.to_string())
+            .expect("active job summary");
+
+        assert_eq!(summary.source, "reverse-broker");
+        assert_eq!(summary.kind, "lab_agent_task");
+        assert_eq!(
+            summary.durable_run_id.as_deref(),
+            Some("agent-task-run-123")
+        );
+        assert_eq!(summary.active_child_count, Some(2));
+        assert_eq!(summary.active_cell_count, Some(7));
+        assert_eq!(
+            summary
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.durable_run_id.as_deref()),
+            Some("agent-task-run-123")
+        );
+
+        let runner_job = crate::core::runner::RunnerJob::from(&summary);
+        assert_eq!(runner_job.source, "reverse-broker");
+        assert_eq!(
+            runner_job
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.durable_run_id.as_deref()),
+            Some("agent-task-run-123")
+        );
+    }
+
+    #[test]
+    fn active_runner_job_summary_falls_back_to_legacy_metadata() {
+        let store = JobStore::default();
+        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        request.metadata = Some(json!({
+            "source": "reverse-broker",
+            "kind": "lab_agent_task",
+            "record_run_id": "agent-task-run-456",
+            "active_child_count": 3,
+            "active_cell_count": 5,
+        }));
+        let job = store
+            .submit_remote_runner_job(request)
+            .expect("remote runner job queues");
+
+        let summary = store
+            .active_runner_jobs()
+            .into_iter()
+            .find(|summary| summary.job_id == job.id.to_string())
+            .expect("active job summary");
+
+        assert!(summary.lifecycle.is_none());
+        assert_eq!(summary.source, "reverse-broker");
+        assert_eq!(summary.kind, "lab_agent_task");
+        assert_eq!(
+            summary.durable_run_id.as_deref(),
+            Some("agent-task-run-456")
+        );
+        assert_eq!(summary.active_child_count, Some(3));
+        assert_eq!(summary.active_cell_count, Some(5));
+    }
+
+    #[test]
     fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("jobs.json");
@@ -1292,6 +1380,7 @@ mod tests {
             )),
             require_paths: Vec::new(),
             runner_workload: None,
+            lifecycle: None,
             metadata: Some(json!({ "submitted_by": "controller" })),
         }
     }

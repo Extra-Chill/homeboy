@@ -7,7 +7,6 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use super::expand::expand_vars;
 use super::spec::RigSpec;
 use crate::core::error::{ErrorCode, Result};
 use crate::core::plan::HomeboyPlan;
@@ -211,7 +210,7 @@ pub(crate) fn validate_component_stack_path(
     component_id: &str,
     stack_spec: &StackSpec,
 ) -> Result<()> {
-    let component = rig.components.get(component_id).ok_or_else(|| {
+    rig.components.get(component_id).ok_or_else(|| {
         crate::core::Error::rig_pipeline_failed(
             &rig.id,
             "stack",
@@ -222,7 +221,7 @@ pub(crate) fn validate_component_stack_path(
         )
     })?;
 
-    let rig_path = expand_vars(rig, &component.path);
+    let rig_path = super::resolve_component_path(rig, component_id)?;
     let stack_path = stack::expand_path(&stack_spec.component_path);
     if comparable_path(&rig_path) == comparable_path(&stack_path) {
         return Ok(());

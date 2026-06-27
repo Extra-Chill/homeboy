@@ -12,12 +12,13 @@ homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario 
 homeboy runs bench-compare --from-run <run-id> --to-run <run-id> [--metric <name>]
 homeboy runs fuzz-compare --from-run <run-id> --to-run <run-id> [--hotspot-policy <advisory|blocking|off>]
 homeboy runs show <run-id> [--json]
+homeboy runs dossier <run-id> [--json]
 homeboy runs resume-plan <run-id>
 homeboy runs evidence <run-id>
-homeboy runs artifacts <run-id>
+homeboy runs artifacts <run-id> [--runner <runner-id>]
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
 homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>
-homeboy runs artifact get <run-id> <artifact-id> [--output <path>]
+homeboy runs artifact get <run-id> <artifact-id> [--runner <runner-id>] [--output <path>]
 homeboy runs artifact cleanup-downloads [--runner <runner-id>] [--run-id <run-id>] [--apply]
 homeboy runs artifact cleanup-persisted [--older-than-days <days>] [--run-id <run-id>] [--apply]
 homeboy runs findings <run-id> [--tool <tool>] [--file <path>] [--fingerprint <fingerprint>] [--limit 100]
@@ -43,6 +44,8 @@ The JSON output includes stable run fields: run id, kind, status, timestamps, co
 
 `homeboy runs show <run-id>` prints a compact human summary by default: run identity, status, component/rig/SHA, timestamps, bench hotspots, generic coverage summaries when present, key case artifacts, and each recorded artifact's locator with a concise `homeboy runs artifact get <run-id> <artifact-id>` command to inspect it. This makes bench artifacts, scenario outputs, slow/hot metric families, and fuzzer coverage gaps/case artifacts easy to find without spelunking temp directories. Coverage rendering is schema-blind and only uses generic metadata fields such as `coverage_summary`, `coverage_gaps`, `surface_count`, `operation_count`, `exercised_count`, `skipped_count`, `failed_count`, `declared_count`, `executable_count`, `proven_count`, `skipped_reason_counts`, and `skipped_reasons`; key case artifact detection uses generic artifact id/kind/name markers such as `key_case`, `fuzz_case`, `failing_case`, `case_artifact`, and `repro_case`. Pass `--json` for the full structured payload on stdout; it is also always written to `--output <file>`.
 
+`homeboy runs dossier <run-id>` aggregates the existing read-only run inspection surfaces into one actionable report. It includes status and stale/failure category, failure/gate data when recorded, run/job/handoff/result refs when present in generic metadata, redacted environment provenance counts, artifact/evidence refs with reviewer-visible versus operator-local hints, inspection commands, and repair/next commands only when existing data supports them. The command reads the observation store and artifact registry; it does not mutate runs, artifacts, or external systems. Pass `--json` for the full structured payload.
+
 For full-coverage claims, prefer persisted evidence that distinguishes declared, executable, and proven states. A declared surface/workload is inventory, an executable surface/workload has a runnable command or manifest path, and a proven surface/workload has a persisted run plus reviewer-visible coverage/case artifacts or fetch commands. `runs show`, `runs artifacts`, and `runs evidence` surface those cues generically; missing proven counts or missing artifacts should be treated as incomplete proof.
 
 `homeboy runs refs` emits a compact machine-readable ref index for matching runs. It is intended for matrix orchestration scripts and agents that need stable run refs and aggregate artifact refs without scraping human stdout. The output includes `homeboy://run/<id>` refs, `homeboy://run/<id>/artifact/<artifact-id>` refs, evidence/artifact follow-up commands, and detected aggregate artifact refs. Aggregate detection is schema-blind by default (`aggregate` in artifact id/kind/path); pass `--aggregate-artifact-kind <kind>` to mark additional artifact kinds as aggregate outputs.
@@ -62,6 +65,8 @@ then promote or attach artifacts through the command-specific surface when it is
 available. See
 [Artifact loop for runner and matrix workflows](../operators/artifact-loop-runner-matrix.md)
 for generic runner, static HTML, and matrix examples.
+
+`homeboy runs artifacts <run-id> --runner <runner-id>` queries a connected runner daemon for the run's artifact records from the controller machine. `homeboy runs artifact get <run-id> <artifact-id> --runner <runner-id>` pulls selected runner-side artifact bytes through that connection into the local artifact cache, or into `--output` when provided, and reports the runner id plus source content path in JSON output. Use these commands when a controller-side agent has a run id and artifact id but should not SSH into the runner or know runner filesystem paths.
 
 `homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>` copies an existing runner-side file into the local persisted artifact store and records it against an existing run. The runner path must be absolute and under the runner's configured `workspace_root`, `policy.workspace_roots`, or `HOMEBOY_ARTIFACT_ROOT` output root. Use this for post-run evidence files that already exist on the runner; it does not promote runner exec output or infer changed files.
 
@@ -118,13 +123,12 @@ Metric lookup supports top-level run metadata such as `results.total_elapsed_ms`
 ## Related Readers
 
 ```bash
-homeboy bench history <component> [--scenario <id>] [--rig <id>] [--limit 20]
-homeboy bench distribution <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
-homeboy bench compare --from-run <run-id> --to-run <run-id>
+homeboy runs list --kind bench --component <component> [--scenario <id>] [--rig <id>] [--limit 20]
+homeboy runs dossier <run-id>
+homeboy runs distribution --kind bench --component <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
+homeboy runs bench-compare --from-run <run-id> --to-run <run-id>
 homeboy rig runs <id> [--limit 20]
 ```
-
-These commands are thin read-only compatibility wrappers over the same observation-store records. Prefer `runs` readers for new automation: `bench history` returns the `runs.list` payload, `bench distribution` returns `runs.distribution`, and `bench compare` returns `runs.bench-compare`.
 
 ## Portable Bundles
 
@@ -157,7 +161,7 @@ The structured output includes stable Homeboy run/artifact IDs and persisted loc
 Most `homeboy runs` subcommands are readers. These subcommands write files,
 delete files, or update the local observation store:
 
-- `artifact get`: copies a recorded file artifact to a local destination.
+- `artifact get`: copies a recorded or selected runner-side file artifact to a local destination.
 - `artifact attach`: copies an existing runner-side file into the persisted local artifact store and inserts an artifact record.
 - `artifact cleanup-downloads --apply`: deletes locally cached runner artifact downloads.
 - `artifact cleanup-persisted --apply`: deletes persisted local artifact files/directories and their database records.

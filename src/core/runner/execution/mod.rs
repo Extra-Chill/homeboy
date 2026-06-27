@@ -19,7 +19,7 @@ use crate::core::source_snapshot::SourceSnapshot;
 use super::resource_metrics::RunnerResourceMetrics;
 use super::{
     connect, select_runner_transport, status, Runner, RunnerCapabilityPreflight, RunnerHandoff,
-    RunnerJob, RunnerKind, RunnerMutationArtifacts, RunnerResult, RunnerTransport,
+    RunnerJob, RunnerKind, RunnerMutationArtifacts, RunnerResult, RunnerSession, RunnerTransport,
 };
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
@@ -137,6 +137,10 @@ pub struct RunnerExecOutput {
     pub mutation_artifacts: Option<RunnerMutationArtifacts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<JobArtifactMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub promoted_outputs: Vec<RunnerExecPromotedOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structured_summaries: Vec<RunnerExecStructuredSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<RunnerResourceMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,6 +151,30 @@ pub struct RunnerExecOutput {
     pub handoff: Option<RunnerHandoff>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerExecDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RunnerExecPromotedOutput {
+    pub role: String,
+    pub run_id: String,
+    pub runner_id: String,
+    pub command: Vec<String>,
+    pub declared_path: String,
+    pub runner_path: String,
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    pub artifact_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RunnerExecStructuredSummary {
+    pub run_id: String,
+    pub runner_id: String,
+    pub command: Vec<String>,
+    pub declared_path: String,
+    pub artifact_id: String,
+    pub artifact_path: String,
+    pub summary: Value,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -189,8 +217,29 @@ pub struct RunnerExecDiagnostics {
     pub source_snapshot_remote_path: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub required_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homeboy_binaries: Option<RunnerExecHomeboyBinaries>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerExecHomeboyBinaries {
+    pub controller_cli: RunnerExecHomeboyBinary,
+    pub active_daemon: RunnerExecHomeboyBinary,
+    pub job_command_binary: RunnerExecHomeboyBinary,
+    pub guidance: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerExecHomeboyBinary {
+    pub owner: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<String>,
 }
 
 const RUNNER_EXEC_RUN_ID_ENV_NAMES: &[&str] = &[
@@ -262,6 +311,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         &options.command,
         options.capability_preflight.as_ref(),
         &options.secret_env_names,
+        &options.env,
     );
     let mut plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
@@ -390,7 +440,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         RunnerTransport::Unavailable => Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` or pass `--ssh` for explicit SSH diagnostics",
-            Some(runner.id),
+            Some(runner.id.clone()),
             Some(vec![
                 "Daemon-backed execution preserves job metadata and artifact discovery.".to_string(),
                 "SSH execution is intended for MVP diagnostics and must be explicit.".to_string(),
@@ -398,6 +448,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         )),
     };
     result.map(|(mut output, exit_code)| {
+        append_runner_exec_binary_diagnostics(&mut output, &runner, connected.session.as_ref());
         append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
         (output, exit_code)
     })
@@ -433,6 +484,17 @@ fn apply_explicit_runner_exec_run_id_env(
     })
 }
 
+fn runner_exec_request_metadata(run_id: Option<&str>, transport: &str) -> Value {
+    let mut metadata = serde_json::json!({
+        "transport": transport,
+    });
+    if let Some(run_id) = run_id.filter(|id| !id.trim().is_empty()) {
+        metadata["durable_run_id"] = serde_json::json!(run_id);
+        metadata["run_id"] = serde_json::json!(run_id);
+    }
+    metadata
+}
+
 fn ambient_env_is_present(name: &str) -> bool {
     std::env::var_os(name).is_some()
 }
@@ -447,9 +509,62 @@ fn append_runner_exec_diagnostic_hint(output: &mut RunnerExecOutput, hint: Optio
             runner_workspace_root: None,
             source_snapshot_remote_path: None,
             required_paths: Vec::new(),
+            homeboy_binaries: None,
             hints: Vec::new(),
         });
     diagnostics.hints.push(hint);
+}
+
+fn append_runner_exec_binary_diagnostics(
+    output: &mut RunnerExecOutput,
+    runner: &Runner,
+    session: Option<&RunnerSession>,
+) {
+    let diagnostics = output
+        .diagnostics
+        .get_or_insert_with(|| RunnerExecDiagnostics {
+            runner_workspace_root: runner.workspace_root.clone(),
+            source_snapshot_remote_path: None,
+            required_paths: Vec::new(),
+            homeboy_binaries: None,
+            hints: Vec::new(),
+        });
+    diagnostics.homeboy_binaries = Some(runner_exec_homeboy_binaries(runner, session));
+}
+
+fn runner_exec_homeboy_binaries(
+    runner: &Runner,
+    session: Option<&RunnerSession>,
+) -> RunnerExecHomeboyBinaries {
+    let controller_identity = crate::core::build_identity::current();
+    let configured_executable = runner
+        .settings
+        .homeboy_path
+        .clone()
+        .unwrap_or_else(|| "homeboy".to_string());
+    RunnerExecHomeboyBinaries {
+        controller_cli: RunnerExecHomeboyBinary {
+            owner: "operator_command",
+            path: std::env::current_exe()
+                .ok()
+                .map(|path| path.display().to_string()),
+            version: Some(controller_identity.version),
+            build_identity: Some(controller_identity.display),
+        },
+        active_daemon: RunnerExecHomeboyBinary {
+            owner: "runner_session",
+            path: session.and_then(|session| session.remote_daemon_address.clone()),
+            version: session.map(|session| session.homeboy_version.clone()),
+            build_identity: session.and_then(|session| session.homeboy_build_identity.clone()),
+        },
+        job_command_binary: RunnerExecHomeboyBinary {
+            owner: "runner_config.settings.homeboy_path",
+            path: Some(configured_executable),
+            version: None,
+            build_identity: None,
+        },
+        guidance: "For Homeboy subcommands executed inside runner jobs, verify job_command_binary on the runner, not only this controller CLI. If active_daemon differs after refreshing homeboy_path, reconnect the runner daemon.".to_string(),
+    }
 }
 
 fn should_force_diagnostic_ssh(runner: &Runner, options: &RunnerExecOptions) -> bool {

@@ -295,6 +295,9 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
     let previous_revision = git::short_head_revision(&source_root);
     git::pull_repo(&source_root)?;
     let source_revision = git::short_head_revision(&source_root);
+    let source_ref = git::current_branch(&source_root).filter(|branch| !branch.is_empty());
+    let source_dirty =
+        git::status_porcelain_bytes(&source_root).is_some_and(|status| !status.is_empty());
 
     let mut updated = Vec::new();
     let mut updated_stacks = Vec::new();
@@ -337,6 +340,8 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
             linked: false,
             materialized,
             source_revision: source_revision.clone(),
+            source_ref: source_ref.clone(),
+            source_dirty,
         };
         write_source_metadata(&rig.id, &metadata)?;
 

@@ -22,6 +22,7 @@ pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskS
         AgentTaskCommand::Review(_) => Some(AgentTaskSummaryKind::Review),
         AgentTaskCommand::Controller(controller_args) => match &controller_args.command {
             AgentTaskControllerCommand::Status(_)
+            | AgentTaskControllerCommand::Diagnose(_)
             | AgentTaskControllerCommand::RunNext(_)
             | AgentTaskControllerCommand::Run(_)
             | AgentTaskControllerCommand::Resume(_) => Some(AgentTaskSummaryKind::Controller),
@@ -987,6 +988,45 @@ mod tests {
         assert!(summary
             .contains("Next: homeboy agent-task controller run loop-123 --action-id action-2\n"));
         assert!(!summary.contains("schema"));
+    }
+
+    #[test]
+    fn controller_status_summary_prefers_failed_child_root_cause() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-loop-controller-status/v1",
+            "controller": {
+                "loop_id": "loop-123",
+                "phase": "triage",
+                "state": "running",
+                "entities": {},
+                "task_lineage": [],
+                "next_actions": [{
+                    "action_id": "action-1",
+                    "action": { "action": "spawn_task" },
+                    "status": "failed",
+                    "diagnostics": [{ "message": "child run failed" }]
+                }]
+            },
+            "diagnostics": {
+                "failed_child_actions": [{
+                    "action_id": "action-1",
+                    "child_run_id": "agent-task-child-1",
+                    "child_run_status": "failed",
+                    "top_diagnostic": "Agent runtime did not produce required typed artifacts: concept_packet, design_packet.",
+                    "hydrated_root_cause": "Provider runtime import failed: module not found",
+                    "owner_surface": "agent_runtime",
+                    "next_command": "homeboy agent-task status agent-task-child-1 --full"
+                }]
+            }
+        });
+
+        let summary =
+            render_agent_task_summary(AgentTaskSummaryKind::Controller, &payload).unwrap();
+
+        assert!(summary.contains(
+            "Last failure: action-1 (agent-task-child-1): Provider runtime import failed: module not found\n"
+        ));
+        assert!(summary.contains("Next: homeboy agent-task status agent-task-child-1 --full\n"));
     }
 
     #[test]

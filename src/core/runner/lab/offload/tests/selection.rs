@@ -58,6 +58,74 @@ fn lab_runner_selection_uses_default_for_supported_commands() {
 }
 
 #[test]
+fn lab_runner_availability_error_reports_busy_selected_runner() {
+    let selected = RunnerAvailability {
+        runner_id: "lab-busy".to_string(),
+        connected: true,
+        accepts_jobs: false,
+        active_job_count: 2,
+        capacity: Some(2),
+        reasons: vec!["capacity_reached".to_string()],
+    };
+
+    let err = lab_runner_availability_error("bench", Some(&selected), vec![selected.clone()]);
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("lab-busy"));
+    assert_eq!(err.details["field"], "runner");
+    assert_eq!(err.details["id"], "lab-busy");
+    assert_eq!(
+        err.details["runner_availability"]["selected"],
+        serde_json::json!(selected)
+    );
+    assert_eq!(
+        err.details["runner_availability"]["reasons"],
+        serde_json::json!(["capacity_reached"])
+    );
+    assert!(err.details["tried"].as_array().is_some_and(|tried| tried
+        .iter()
+        .any(|hint| hint.as_str().is_some_and(|hint| hint.contains("--runner")))));
+}
+
+#[test]
+fn lab_runner_availability_error_reports_no_available_runner_json_shape() {
+    let eligible = vec![
+        RunnerAvailability {
+            runner_id: "lab-a".to_string(),
+            connected: true,
+            accepts_jobs: false,
+            active_job_count: 1,
+            capacity: Some(1),
+            reasons: vec!["capacity_reached".to_string()],
+        },
+        RunnerAvailability {
+            runner_id: "lab-b".to_string(),
+            connected: true,
+            accepts_jobs: false,
+            active_job_count: 1,
+            capacity: None,
+            reasons: vec!["capacity_unknown".to_string()],
+        },
+    ];
+
+    let err = lab_runner_availability_error("test", None, eligible.clone());
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("none can accept jobs"));
+    assert_eq!(err.details["field"], "runner");
+    assert!(err.details["id"].is_null());
+    assert!(err.details["runner_availability"]["selected"].is_null());
+    assert_eq!(
+        err.details["runner_availability"]["eligible"],
+        serde_json::json!(eligible)
+    );
+    assert_eq!(
+        err.details["runner_availability"]["reasons"],
+        serde_json::json!(["capacity_reached", "capacity_unknown"])
+    );
+}
+
+#[test]
 fn lab_runner_selection_ignores_default_when_auto_offload_is_disabled() {
     let mut command = portable_lab_command("extension update");
     command.routing_policy.default_lab_offload = false;

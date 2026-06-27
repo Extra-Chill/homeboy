@@ -104,7 +104,7 @@ pub(super) fn run_settings_matrix(
         ));
     }
 
-    let axes = parse_setting_matrix_axes(raw_axes)?;
+    let axes = resolve_setting_matrix_axes(run_args, raw_axes)?;
     let cells = expand_setting_matrix_cells(&axes);
     let passthrough_args = filter_homeboy_flags(&run_args.args);
     let mut outputs = Vec::with_capacity(cells.len());
@@ -317,7 +317,7 @@ fn settings_matrix_parent_metadata(
                 .collect::<Vec<_>>(),
             "compare_children": if child_run_ids.len() >= 2 {
                 Some(format!(
-                    "homeboy bench compare --from-run {} --to-run {}",
+                    "homeboy runs bench-compare --from-run {} --to-run {}",
                     child_run_ids[0], child_run_ids[1]
                 ))
             } else {
@@ -330,12 +330,6 @@ fn settings_matrix_parent_metadata(
 fn parse_setting_matrix_axes(
     raw_axes: &[String],
 ) -> homeboy::core::Result<Vec<BenchSettingsMatrixAxisOutput>> {
-    if raw_axes.is_empty() {
-        return Err(homeboy::core::Error::validation_missing_argument(vec![
-            "--setting-matrix NAME=value,value".to_string(),
-        ]));
-    }
-
     raw_axes
         .iter()
         .map(|raw| {
@@ -366,6 +360,35 @@ fn parse_setting_matrix_axes(
             })
         })
         .collect()
+}
+
+fn resolve_setting_matrix_axes(
+    run_args: &BenchRunArgs,
+    raw_axes: &[String],
+) -> homeboy::core::Result<Vec<BenchSettingsMatrixAxisOutput>> {
+    if !raw_axes.is_empty() {
+        return parse_setting_matrix_axes(raw_axes);
+    }
+
+    if run_args.rig.len() == 1 && run_args.profile.is_some() {
+        return Ok(Vec::new());
+    }
+
+    let single_cell_command = match (run_args.rig.first(), run_args.profile.as_deref()) {
+        (Some(rig), Some(profile)) => format!("homeboy bench --rig {rig} --profile {profile}"),
+        (Some(rig), None) => format!("homeboy bench --rig {rig} --profile <profile>"),
+        (None, Some(profile)) => format!("homeboy bench --rig <id> --profile {profile}"),
+        (None, None) => "homeboy bench --rig <id> --profile <profile>".to_string(),
+    };
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "setting-matrix",
+        format!(
+            "provide --setting-matrix NAME=value,value for multi-cell matrix runs, or use `{single_cell_command}` for single-cell runs"
+        ),
+        None,
+        None,
+    ))
 }
 
 fn expand_setting_matrix_cells(
@@ -469,6 +492,46 @@ mod tests {
             "3",
         ])
         .expect("bench matrix CLI should parse");
+    }
+
+    #[test]
+    fn resolves_single_cell_matrix_without_setting_axes_for_rig_profile() {
+        let args = MatrixCli::parse_from([
+            "homeboy",
+            "--rig",
+            "studio",
+            "--profile",
+            "agentic",
+            "--iterations",
+            "1",
+        ])
+        .bench
+        .run
+        .clone();
+
+        let axes = resolve_setting_matrix_axes(&args, &[]).expect("single-cell matrix is valid");
+        let cells = expand_setting_matrix_cells(&axes);
+
+        assert!(axes.is_empty());
+        assert_eq!(cells, vec![BTreeMap::new()]);
+    }
+
+    #[test]
+    fn missing_setting_axes_points_single_cell_users_to_plain_bench() {
+        let args = MatrixCli::parse_from(["homeboy", "--rig", "studio", "--iterations", "1"])
+            .bench
+            .run
+            .clone();
+
+        let err = resolve_setting_matrix_axes(&args, &[])
+            .expect_err("matrix without axes and profile should explain remediation");
+        let message = err.to_string();
+
+        assert!(message.contains("--setting-matrix"), "got: {message}");
+        assert!(
+            message.contains("homeboy bench --rig studio --profile <profile>"),
+            "got: {message}"
+        );
     }
 
     #[test]
@@ -598,7 +661,7 @@ mod tests {
         );
         assert_eq!(
             metadata["inspect"]["compare_children"],
-            "homeboy bench compare --from-run run-a --to-run run-b"
+            "homeboy runs bench-compare --from-run run-a --to-run run-b"
         );
     }
 

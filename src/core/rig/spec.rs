@@ -37,9 +37,9 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
 
-    /// Components the rig composes (by ID). Component paths live under
-    /// `ComponentSpec`, not in homeboy's `component` registry — a rig is
-    /// self-contained and doesn't require components to be registered.
+    /// Components the rig composes (by ID). Rigs can stay self-contained with
+    /// explicit paths, or opt into the machine-local component registry with a
+    /// `component_id` fallback.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub components: HashMap<String, ComponentSpec>,
 
@@ -412,6 +412,12 @@ pub struct BenchSpec {
     /// scenario ids; values map metric names to pass/fail conditions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_gates: BTreeMap<String, BTreeMap<String, BenchMetricGateCondition>>,
+
+    /// Result-level metric gates declared by the rig. Matrix/fanout runners
+    /// evaluate these against generic numeric metrics in each cell outcome,
+    /// preserving executor success while failing the declared result gate.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub result_gates: BTreeMap<String, BenchMetricGateCondition>,
 }
 
 /// Fuzz composition for a rig. Pins which component `homeboy fuzz --rig <id>`
@@ -486,6 +492,9 @@ pub struct TraceConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadSpec {
     pub path: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_provider_extensions: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_postprocess: Vec<ArtifactPostprocessSpec>,
@@ -714,6 +723,7 @@ mod tests {
     fn test_trace_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -887,6 +897,7 @@ mod tests {
     fn test_trace_default_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -916,6 +927,7 @@ mod tests {
     fn test_port_range_size() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -945,6 +957,7 @@ mod tests {
     fn test_named_leases() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
             trace_phase_template: None,
             public_preview: None,
@@ -1023,13 +1036,27 @@ mod tests {
     }
 }
 
-/// Component reference inside a rig spec. Decoupled from the global component
-/// registry because rigs should work even when a component isn't registered.
+/// Component reference inside a rig spec.
+///
+/// Rigs remain portable when they declare `path`, and can opt into the local
+/// component registry by declaring `component_id` when a path is not available.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentSpec {
     /// Local filesystem path to the component checkout. Supports `~` and
-    /// `${env.VAR}` expansion at use time.
+    /// `${env.VAR}` expansion at use time. Empty after expansion falls through
+    /// to `component_id` / `path_setting` resolution.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
+
+    /// Component registry ID to resolve when `path` is omitted or expands to an
+    /// empty value. Defaults to the component map key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
+
+    /// Optional environment variable name whose value supplies the component
+    /// path when explicit `path` and registry lookup are unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_setting: Option<String>,
 
     /// Optional checkout root used when `path` points at a subdirectory inside
     /// the repository. Lab runner materialization uses this root while rig
@@ -1063,6 +1090,11 @@ pub struct ComponentSpec {
     /// to prove latest-branch freshness for detached or non-upstream checkouts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r#ref: Option<String>,
+
+    /// Declarative default ref for registry-backed rig components. Used as the
+    /// Lab dependency pin when `ref` is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_ref: Option<String>,
 
     /// Optional extension config for rig-owned bench dispatch.
     ///

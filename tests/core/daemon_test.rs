@@ -364,9 +364,9 @@ fn routes_remote_runner_job_broker_lifecycle() {
         "/runner/jobs",
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
-            "project_id": "extrachill",
-            "command": ["homeboy", "test", "sample-plugin"],
-            "cwd": "/home/user/Developer/sample-plugin"
+            "project_id": "sample-project",
+            "command": ["homeboy", "test", "sample-component"],
+            "cwd": "/runner/workspaces/sample-component"
         })),
         &store,
     );
@@ -384,7 +384,7 @@ fn routes_remote_runner_job_broker_lifecycle() {
         "/runner/jobs/claim",
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
-            "project_id": "extrachill",
+            "project_id": "sample-project",
             "lease_ms": 30000
         })),
         &store,
@@ -402,7 +402,7 @@ fn routes_remote_runner_job_broker_lifecycle() {
         .expect("claim expiry");
     assert_eq!(
         claim.body["body"]["claim"]["request"]["command"],
-        serde_json::json!(["homeboy", "test", "sample-plugin"])
+        serde_json::json!(["homeboy", "test", "sample-component"])
     );
 
     let heartbeat = route_with_job_store_and_body(
@@ -471,9 +471,9 @@ fn remote_runner_broker_redacts_secret_env_from_public_surfaces() {
         "/runner/jobs",
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
-            "project_id": "extrachill",
-            "command": ["homeboy", "test", "sample-plugin"],
-            "cwd": "/home/user/Developer/sample-plugin",
+            "project_id": "sample-project",
+            "command": ["homeboy", "test", "sample-component"],
+            "cwd": "/runner/workspaces/sample-component",
             "env": {
                 "PUBLIC_FLAG": "1",
                 "RUNNER_SECRET_TOKEN": sentinel
@@ -511,7 +511,7 @@ fn remote_runner_broker_redacts_secret_env_from_public_surfaces() {
         "/runner/jobs/claim",
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
-            "project_id": "extrachill",
+            "project_id": "sample-project",
             "lease_ms": 30000
         })),
         &store,
@@ -531,7 +531,7 @@ fn routes_remote_runner_job_updates_require_live_matching_claim_id() {
         "/runner/jobs",
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
-            "command": ["homeboy", "test", "sample-plugin"]
+            "command": ["homeboy", "test", "sample-component"]
         })),
         &store,
     );
@@ -577,7 +577,7 @@ fn routes_remote_runner_job_updates_require_live_matching_claim_id() {
         "/runner/jobs",
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
-            "command": ["homeboy", "test", "sample-plugin"]
+            "command": ["homeboy", "test", "sample-component"]
         })),
         &store,
     );
@@ -631,7 +631,7 @@ fn broker_reconcile_route_owns_expired_reverse_runner_claims() {
         "/runner/jobs",
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
-            "command": ["homeboy", "test", "sample-plugin"]
+            "command": ["homeboy", "test", "sample-component"]
         })),
         &store,
     );
@@ -711,7 +711,7 @@ fn daemon_http_error_envelope_includes_error_payload() {
 fn routes_remote_runner_session_registration() {
     let _home = HomeGuard::new();
     crate::core::runner::create(
-        r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/home/user/Developer"}"#,
+        r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/runner/workspaces"}"#,
         false,
     )
     .expect("create runner");

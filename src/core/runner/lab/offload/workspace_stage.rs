@@ -118,6 +118,10 @@ fn prepare_lab_offload_workspace_stage_inner(
         &offload_args,
         source_path,
     )?);
+    extra_workspaces.extend(agent_task_fanout_extra_workspaces(
+        &offload_args,
+        source_path,
+    )?);
     extra_workspaces.extend(agent_task_provider_runtime_component_extra_workspaces(
         &offload_args,
         source_path,

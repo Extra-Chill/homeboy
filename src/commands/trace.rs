@@ -1,4 +1,4 @@
-use clap::Args;
+use clap::{Args, ValueEnum};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -925,6 +925,13 @@ fn resolve_trace_profile_args(args: &mut TraceArgs) -> homeboy::core::Result<()>
     if args.comp.component.is_none() {
         args.comp.component = resolved.profile.component.clone();
     }
+
+    validate_trace_profile_required_env(profile_id, &resolved.profile.required_env)?;
+
+    if args.comp.component.as_deref() == Some("compare-bundle") {
+        apply_trace_profile_compare_bundle_args(args, &resolved.profile)?;
+    }
+
     if args.scenario.is_none() && args.scenario_arg.is_none() {
         args.scenario = resolved.profile.scenario.clone();
     }
@@ -959,6 +966,76 @@ fn resolve_trace_profile_args(args: &mut TraceArgs) -> homeboy::core::Result<()>
     let mut variants = resolved.profile.variants.clone();
     variants.extend(args.variants.clone());
     args.variants = variants;
+    Ok(())
+}
+
+fn validate_trace_profile_required_env(
+    profile_id: &str,
+    required_env: &[String],
+) -> homeboy::core::Result<()> {
+    let missing = required_env
+        .iter()
+        .filter(|name| {
+            std::env::var(name.as_str())
+                .map(|value| value.is_empty())
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "--profile",
+        format!(
+            "trace profile '{}' requires environment variable{} {}",
+            profile_id,
+            if missing.len() == 1 { "" } else { "s" },
+            missing.join(", ")
+        ),
+        Some("export the required environment before running this trace profile".to_string()),
+        Some(missing),
+    ))
+}
+
+fn apply_trace_profile_compare_bundle_args(
+    args: &mut TraceArgs,
+    profile: &rig::TraceProfileSpec,
+) -> homeboy::core::Result<()> {
+    let Some(compare_bundle) = profile.compare_bundle.as_ref() else {
+        return Ok(());
+    };
+
+    if args.scenario.is_none() {
+        args.scenario = Some(compare_bundle.component.clone());
+    }
+    if args.scenario_arg.is_none()
+        && args.compare_after.is_none()
+        && !compare_bundle.scenarios.is_empty()
+    {
+        args.scenario_arg = Some(compare_bundle.scenarios.join(","));
+    }
+    if args.repeat == 1 {
+        if let Some(repeat) = compare_bundle.repeat {
+            args.repeat = repeat;
+        }
+    }
+    if args.schedule == TraceSchedule::Grouped {
+        if let Some(schedule) = compare_bundle.schedule.as_deref() {
+            args.schedule = TraceSchedule::from_str(schedule, true).map_err(|_| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "trace_profiles.compare_bundle.schedule",
+                    format!("unsupported trace compare-bundle schedule '{}'", schedule),
+                    Some("use grouped or interleaved".to_string()),
+                    None,
+                )
+            })?;
+        }
+    }
+    if compare_bundle.canonical {
+        args.canonical = true;
+    }
     Ok(())
 }
 
@@ -1374,11 +1451,7 @@ fn resolve_component_id(
 }
 
 fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<String> {
-    let component = spec.components.get(component_id)?;
-    Some(homeboy::core::rig::expand::expand_vars(
-        spec,
-        &component.path,
-    ))
+    homeboy::core::rig::resolve_component_path(spec, component_id).ok()
 }
 
 fn rig_component_for_trace(spec: &RigSpec, component_id: &str) -> Option<Component> {
@@ -1389,19 +1462,18 @@ fn rig_component_for_trace(spec: &RigSpec, component_id: &str) -> Option<Compone
             .entry(extension_id)
             .or_insert_with(ScopedExtensionConfig::default);
     }
-    Some(Component {
-        id: component_id.to_string(),
-        local_path: rig_component_path(spec, component_id)
-            .unwrap_or_else(|| component.path.clone()),
-        remote_url: component.remote_url.clone(),
-        triage_remote_url: component.triage_remote_url.clone(),
-        extensions: if extensions.is_empty() {
-            None
-        } else {
-            Some(extensions)
-        },
-        ..Default::default()
-    })
+    let mut resolved = homeboy::core::rig::resolve_component(spec, component_id).ok()?;
+    resolved.remote_url = component.remote_url.clone().or(resolved.remote_url);
+    resolved.triage_remote_url = component
+        .triage_remote_url
+        .clone()
+        .or(resolved.triage_remote_url);
+    resolved.extensions = if extensions.is_empty() {
+        None
+    } else {
+        Some(extensions)
+    };
+    Some(resolved)
 }
 
 /// Re-exported from core so existing CLI call sites keep using the

@@ -3,6 +3,7 @@
 //! These types define Homeboy-owned envelope shapes only. Product-specific
 //! runners can attach their own details through `metadata` or flattened extras.
 
+mod artifact_envelope;
 mod contract;
 mod coverage;
 mod defaults;
@@ -18,6 +19,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use artifact_envelope::{
+    inspect_fuzz_result_envelope_artifact, FuzzResultEnvelopeArtifactInspection,
+    FuzzResultEnvelopeArtifactSummary,
+};
 pub use contract::{
     canonical_operation_family, fuzz_core_contract, FuzzContractSchemas, FuzzCoreContract,
     FuzzFindingStatus, FuzzOperationFamily, FuzzSafetyClass,
@@ -34,7 +39,9 @@ pub use defaults::{
 pub use envelope::{
     FuzzExecutionRequest, FuzzGate, FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory,
 };
-pub use hotspots::{parse_fuzz_hotspot_set_value, FuzzHotspot, FuzzHotspotSet};
+pub use hotspots::{
+    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot, FuzzHotspotSet,
+};
 pub use observations::{
     parse_fuzz_observation_set_value, FuzzObservation, FuzzObservationFamily, FuzzObservationSet,
 };

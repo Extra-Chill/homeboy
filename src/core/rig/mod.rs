@@ -21,6 +21,7 @@ pub mod app;
 pub mod artifact_index;
 pub mod capabilities;
 pub mod check;
+pub mod component_resolution;
 mod discovery;
 pub mod expand;
 pub mod install;
@@ -44,6 +45,7 @@ pub use artifact_index::{
     RigRunArtifactRef, RigRunFailedStepRef,
 };
 pub use capabilities::{evaluate_requirements, plan_requirement_checks, RigRequirementCheckPlan};
+pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
 pub use install::{
     discover_rigs, discover_stacks, install, read_source_metadata, read_stack_source_metadata,
     DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata,
@@ -84,14 +86,16 @@ pub use state::{
     ComponentSnapshot, MaterializedRigState, RigState, RigStateSnapshot, ServiceState,
 };
 pub use workloads::{
-    check_groups_for_extension_workloads, extension_ids_for_workloads, extension_workload_inputs,
+    check_groups_for_extension_workloads, env_provider_extensions_for_extension_workloads,
+    extension_ids_for_workloads, extension_workload_inputs,
     invocation_requirements_for_extension_workloads, runner_capabilities_for_extension,
     trace_dependencies_for_extension, workload_path_expansions_for_extension,
     workloads_for_extension, RigExtensionWorkloadInputs, RigWorkloadKind, RigWorkloadPathExpansion,
 };
 
 use crate::core::error::{Error, Result};
-use crate::core::paths;
+use crate::core::extension::bench::parsing::{RigPackageEvidence, RigPackageFreshness};
+use crate::core::{git, paths};
 use discovery::discover_rigs_for_install;
 use std::collections::HashMap;
 use std::fs;
@@ -119,6 +123,122 @@ pub(crate) fn local_package_root(id: &str) -> Option<PathBuf> {
     LOCAL_PACKAGE_ROOTS
         .get()
         .and_then(|roots| roots.lock().ok()?.get(id).cloned())
+}
+
+pub fn package_evidence(id: &str) -> Option<RigPackageEvidence> {
+    if let Some(package_root) = local_package_root(id) {
+        return Some(local_package_evidence(id, package_root));
+    }
+    let metadata = read_source_metadata(id)?;
+    Some(package_evidence_from_metadata(id, metadata))
+}
+
+fn local_package_evidence(id: &str, package_root: PathBuf) -> RigPackageEvidence {
+    let source = package_root.to_string_lossy().to_string();
+    let current_source_revision = git::short_head_revision_at(&package_root);
+    let source_ref = git::current_branch(&package_root).filter(|branch| !branch.is_empty());
+    let source_dirty =
+        git::status_porcelain_bytes(&package_root).is_some_and(|status| !status.is_empty());
+    RigPackageEvidence {
+        rig_id: id.to_string(),
+        package_root: source.clone(),
+        source: source.clone(),
+        source_root: Some(source),
+        rig_path: Some(
+            package_root
+                .join("rigs")
+                .join(id)
+                .join("rig.json")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        discovery_path: Some(package_root.to_string_lossy().to_string()),
+        installed_source_revision: current_source_revision.clone(),
+        current_source_revision,
+        source_ref,
+        source_dirty,
+        linked: true,
+        materialized: false,
+        freshness: RigPackageFreshness::Verified,
+        freshness_verified: true,
+        freshness_message: None,
+        refresh_command: None,
+    }
+}
+
+fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigPackageEvidence {
+    let package_root = metadata.package_path.clone();
+    let source_root = metadata
+        .source_root
+        .clone()
+        .unwrap_or_else(|| metadata.package_path.clone());
+    let current_source_revision = git::short_head_revision_at(Path::new(&source_root));
+    let root_present = Path::new(&source_root).is_dir();
+    let (freshness, freshness_message) = if !root_present {
+        (
+            RigPackageFreshness::Missing,
+            Some("installed rig package source path is missing".to_string()),
+        )
+    } else if let (Some(installed), Some(current)) = (
+        metadata.source_revision.as_deref(),
+        current_source_revision.as_deref(),
+    ) {
+        if installed == current {
+            (RigPackageFreshness::Verified, None)
+        } else {
+            (
+                RigPackageFreshness::Stale,
+                Some(format!(
+                    "installed source revision {installed} differs from current source revision {current}"
+                )),
+            )
+        }
+    } else {
+        (
+            RigPackageFreshness::Unknown,
+            Some(
+                "source freshness could not be verified because a git revision was unavailable"
+                    .to_string(),
+            ),
+        )
+    };
+    let freshness_verified = freshness == RigPackageFreshness::Verified;
+    let refresh_command = (!freshness_verified).then(|| {
+        format!(
+            "homeboy rig install {} --id {} --reinstall",
+            shell_arg(&metadata.source),
+            shell_arg(id)
+        )
+    });
+
+    RigPackageEvidence {
+        rig_id: id.to_string(),
+        package_root,
+        source: metadata.source,
+        source_root: Some(source_root),
+        rig_path: Some(metadata.rig_path),
+        discovery_path: metadata.discovery_path,
+        installed_source_revision: metadata.source_revision,
+        current_source_revision,
+        source_ref: metadata.source_ref,
+        source_dirty: metadata.source_dirty,
+        linked: metadata.linked,
+        materialized: metadata.materialized,
+        freshness,
+        freshness_verified,
+        freshness_message,
+        refresh_command,
+    }
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Byte-compare the contents of two files.
@@ -376,8 +496,10 @@ impl RigSourceContext {
     /// Build a source context from an already-loaded spec, resolving the
     /// package root from the rig's recorded source metadata.
     pub fn from_spec(spec: RigSpec) -> Self {
-        let package_root = read_source_metadata(&spec.id)
-            .map(|metadata| std::path::PathBuf::from(metadata.package_path));
+        let package_root = local_package_root(&spec.id).or_else(|| {
+            read_source_metadata(&spec.id)
+                .map(|metadata| std::path::PathBuf::from(metadata.package_path))
+        });
         Self { spec, package_root }
     }
 
@@ -385,6 +507,36 @@ impl RigSourceContext {
     pub fn load(id: &str) -> Result<Self> {
         Ok(Self::from_spec(load(id)?))
     }
+
+    /// Load a rig for a command invocation, preferring an enclosing local rig
+    /// package checkout that contains the requested rig ID over the globally
+    /// installed rig registry.
+    pub fn load_for_invocation(id: &str) -> Result<Self> {
+        if let Some(package_root) = enclosing_local_package_for_rig(id)? {
+            return Ok(Self::from_spec(load_local_source(
+                package_root.to_string_lossy().as_ref(),
+                Some(id),
+            )?));
+        }
+        Self::load(id)
+    }
+}
+
+fn enclosing_local_package_for_rig(id: &str) -> Result<Option<PathBuf>> {
+    let current_dir = std::env::current_dir()
+        .map_err(|e| Error::internal_io(e.to_string(), Some("get current dir".into())))?;
+    for candidate in current_dir.ancestors() {
+        if candidate.join("rigs").join(id).join("rig.json").is_file() {
+            return Ok(Some(candidate.to_path_buf()));
+        }
+        if candidate.join("rig.json").is_file() {
+            let rigs = discover_rigs_for_install(candidate, Some(id), false)?;
+            if !rigs.is_empty() {
+                return Ok(Some(candidate.to_path_buf()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Return the JSON-declared rig ID when it differs from the installed ID.

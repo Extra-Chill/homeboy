@@ -11,6 +11,8 @@ use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
 
 pub const AGENT_TASK_FANOUT_PLAN_SCHEMA: &str = "homeboy/agent-task-fanout-plan/v1";
 pub const AGENT_TASK_FANOUT_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-fanout-aggregate/v1";
+pub const AGENT_TASK_FANOUT_CANONICAL_PATH: &str = "homeboy-durable-scheduler-to-runtime-executor";
+pub const AGENT_TASK_FANOUT_RUNTIME_BOUNDARY: &str = "manifest_declared_runtime_executor";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskFanoutPlan {
@@ -119,6 +121,19 @@ impl AgentTaskFanoutPlan {
             "plane".to_string(),
             serde_json::to_value(self.plane).expect("fanout plane serializes"),
         );
+        plan.inputs.insert(
+            "canonical_path".to_string(),
+            Value::String(AGENT_TASK_FANOUT_CANONICAL_PATH.to_string()),
+        );
+        plan.inputs.insert(
+            "runtime_boundary".to_string(),
+            serde_json::json!({
+                "boundary": AGENT_TASK_FANOUT_RUNTIME_BOUNDARY,
+                "durable_scheduler": "homeboy",
+                "executor": "declared_by_task_executor",
+                "runtime": "declared_by_task_runtime"
+            }),
+        );
         if let Some(group_key) = &self.group_key {
             plan.inputs
                 .insert("group_key".to_string(), Value::String(group_key.clone()));
@@ -138,6 +153,11 @@ impl AgentTaskFanoutPlan {
                 let mut builder =
                     PlanStep::ready(request.task_id.clone(), "agent_task.fanout.task")
                         .label(request.task_id.clone())
+                        .input_value(
+                            "canonical_path",
+                            Value::String(AGENT_TASK_FANOUT_CANONICAL_PATH.to_string()),
+                        )
+                        .input_value("owner", Value::String("homeboy".to_string()))
                         .input_value(
                             "request",
                             serde_json::to_value(request).expect("agent task request serializes"),
@@ -416,6 +436,23 @@ mod tests {
         assert_eq!(homeboy_plan.kind, PlanKind::AgentTaskFanout);
         assert_eq!(homeboy_plan.steps.len(), 2);
         assert_eq!(homeboy_plan.steps[1].needs, vec!["generate".to_string()]);
+        assert_eq!(
+            homeboy_plan.inputs["canonical_path"],
+            json!(AGENT_TASK_FANOUT_CANONICAL_PATH)
+        );
+        assert_eq!(
+            homeboy_plan.inputs["runtime_boundary"]["durable_scheduler"],
+            json!("homeboy")
+        );
+        assert_eq!(
+            homeboy_plan.inputs["runtime_boundary"]["runtime"],
+            json!("declared_by_task_runtime")
+        );
+        assert!(!homeboy_plan.inputs.contains_key("ownership"));
+        assert!(homeboy_plan.steps.iter().all(|step| {
+            step.inputs["canonical_path"] == json!(AGENT_TASK_FANOUT_CANONICAL_PATH)
+                && step.inputs["owner"] == json!("homeboy")
+        }));
 
         let schedule = projected.to_schedule_plan();
         assert_eq!(schedule.plan_id, "fanout/site-workflow");

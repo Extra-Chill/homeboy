@@ -127,7 +127,7 @@ pub fn inspect(root: PathBuf, input: &str) -> ArtifactOriginInspect {
     }
 }
 
-fn handle_stream(mut stream: TcpStream, root: &Path) -> Result<()> {
+pub(crate) fn handle_stream(mut stream: TcpStream, root: &Path) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone().map_err(|err| {
         Error::internal_io(
             err.to_string(),

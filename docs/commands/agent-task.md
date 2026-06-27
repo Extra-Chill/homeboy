@@ -66,12 +66,51 @@ ordering and output bindings belong in the existing single-run `fanout submit` /
 | Subcommand | Purpose |
 |---|---|
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |
+| `fanout cook-batch <issue-url>... --repo <repo>` | One-command multi-issue cook setup: derive prompts, create/reuse DMC worktrees, generate PR metadata, and return status/resume commands. |
 | `fanout plan\|submit\|run-plan` | Normalize, inspect, or run a batch of independent cooks, each with its own worktree/branch/PR. |
 | `fanout submit-batch\|status\|artifacts` | Submit and inspect durable batches of independent `AgentTaskPlan` tasks. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
 | `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
+
+#### Multi-Issue Cook Batch
+
+Use `agent-task fanout cook-batch` when an operator has a set of GitHub issues
+that should each get an isolated branch, worktree, cook run, deterministic gates,
+and PR finalization defaults. The command accepts issue URLs directly, derives
+the batch-cook plan, queues DMC worktree creation from `origin/main`, and returns
+one structured status envelope with the generated plan plus resume commands.
+
+```bash
+homeboy agent-task fanout cook-batch \
+  --repo homeboy \
+  --verify 'cargo test --lib' \
+  --backend codebox \
+  --selector wordpress.codebox-agent-task-executor \
+  https://github.com/Extra-Chill/homeboy/issues/6453 \
+  https://github.com/Extra-Chill/homeboy/issues/6454
+```
+
+Add `--dry-run` to inspect the derived branch/worktree names and batch-cook spec
+without creating worktrees. Add `--run-plan` after reviewing provider readiness
+to execute the generated batch immediately. When DMC worktree creation is blocked
+by an active lock or another queue issue, the output reports `status: blocked`,
+lists the exact worktree rows and retry commands, and exits non-zero before any
+provider process starts.
+
+The generated plan uses the existing
+`homeboy/agent-task-batch-cook-fanout-plan/v1` contract. That means operators can
+save the returned `plan` object and resume with:
+
+```bash
+homeboy agent-task fanout run-plan --input @batch-cook-plan.json
+```
+
+Prompt templates can be customized with `--prompt-template`; placeholders are
+`{issue_url}`, `{issue_ref}`, `{repo}`, `{branch}`, and `{worktree}`. PR titles,
+commit messages, source refs, and AI disclosure defaults are derived per issue
+unless the generated plan is edited before `fanout run-plan`.
 
 ## Lab Guardrails
 
@@ -147,6 +186,13 @@ accepted as an alias for `--max-actions` for loop-oriented callers. Execution
 remains provider-neutral: controller actions use their declared generic request
 shape, and `--dispatch-backend`, `--dispatch-selector`, `--dispatch-model`, and
 `--dispatch-provider-config` only provide defaults when an action omits them.
+
+Controller spec materialization commands are portable Lab commands:
+`controller from-spec --resume`, `controller run-from-spec`, and
+`controller materialize` auto-select the configured default Lab runner when
+global `--runner` is omitted. Use `--runner <id>` to choose a specific runner, or
+`--force-hot --allow-local-hot` only when controller-machine execution is
+intentional.
 
 ## Internal Bridge
 

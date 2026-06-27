@@ -1,4 +1,6 @@
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 use homeboy::core::agent_tasks::scheduler::{
     AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduleOptions, AgentTaskScheduler,
@@ -8,6 +10,8 @@ use homeboy::core::agent_tasks::{
     AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
     AGENT_TASK_REQUEST_SCHEMA,
 };
+use homeboy::core::extension::bench::{BenchGate, BenchGateResult};
+use homeboy::core::rig::RigSpec;
 
 use super::{matrix, BenchReportFormat, BenchRunArgs};
 
@@ -33,6 +37,10 @@ pub struct BenchMatrixFanoutReport {
     pub failed: usize,
     pub cancelled_cells: usize,
     pub timed_out_cells: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub result_gate_results: Vec<BenchGateResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub result_gate_failures: Vec<String>,
 }
 
 pub(super) fn run_matrix_fanout(
@@ -87,6 +95,9 @@ pub(super) fn run_matrix_fanout(
     let scheduler_aggregate = scheduler.run(schedule);
     let matrix_aggregate =
         AgentTaskMatrixAggregate::from_outcomes(&matrix_plan, &scheduler_aggregate.outcomes);
+    let result_gates = declared_result_gates(run_args)?;
+    let (matrix_aggregate, result_gate_results, result_gate_failures) =
+        apply_result_gates(matrix_aggregate, &result_gates);
     let no_op_cells = scheduler_aggregate
         .outcomes
         .iter()
@@ -114,6 +125,8 @@ pub(super) fn run_matrix_fanout(
         failed: scheduler_aggregate.totals.failed,
         cancelled_cells: scheduler_aggregate.totals.cancelled,
         timed_out_cells: scheduler_aggregate.totals.timed_out,
+        result_gate_results,
+        result_gate_failures,
     };
 
     Ok(BenchMatrixFanoutOutput {
@@ -125,6 +138,93 @@ pub(super) fn run_matrix_fanout(
         matrix: matrix_aggregate,
         report,
     })
+}
+
+fn declared_result_gates(run_args: &BenchRunArgs) -> homeboy::core::Result<Vec<BenchGate>> {
+    let mut gates = Vec::new();
+    for rig_id in &run_args.rig {
+        let spec = homeboy::core::rig::load(rig_id)?;
+        gates.extend(result_gates_for_rig(&spec));
+    }
+    Ok(gates)
+}
+
+fn result_gates_for_rig(spec: &RigSpec) -> Vec<BenchGate> {
+    spec.bench
+        .as_ref()
+        .map(|bench| {
+            bench
+                .result_gates
+                .iter()
+                .flat_map(|(metric, condition)| condition.to_gates(metric))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn apply_result_gates(
+    mut matrix: AgentTaskMatrixAggregate,
+    gates: &[BenchGate],
+) -> (AgentTaskMatrixAggregate, Vec<BenchGateResult>, Vec<String>) {
+    if gates.is_empty() {
+        return (matrix, Vec::new(), Vec::new());
+    }
+
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    for cell in &mut matrix.cells {
+        let metrics = numeric_metrics_for_cell(&cell.metadata);
+        for gate in gates {
+            let result = gate.evaluate_actual(
+                &format!("matrix cell `{}` result", cell.cell_id),
+                metrics.get(&gate.metric).copied(),
+            );
+            if !result.passed {
+                matrix.passed = false;
+                cell.execution_state =
+                    homeboy::core::agent_tasks::AgentTaskMatrixExecutionState::ExecutedWithFindings;
+                failures.push(result.reason.clone().unwrap_or_else(|| {
+                    format!(
+                        "matrix cell `{}` result gate failed: {} {} {}",
+                        cell.cell_id,
+                        result.metric,
+                        result.op.as_str(),
+                        result.expected
+                    )
+                }));
+            }
+            results.push(result);
+        }
+    }
+
+    if !failures.is_empty() {
+        matrix.execution_state =
+            homeboy::core::agent_tasks::AgentTaskMatrixExecutionState::ExecutedWithFindings;
+        failures.sort();
+        failures.dedup();
+    }
+
+    (matrix, results, failures)
+}
+
+fn numeric_metrics_for_cell(metadata: &Value) -> BTreeMap<String, f64> {
+    let mut metrics = BTreeMap::new();
+    collect_numeric_metrics(metadata.get("metrics").unwrap_or(metadata), &mut metrics);
+    if let Some(outputs) = metadata.get("outputs") {
+        collect_numeric_metrics(outputs.get("metrics").unwrap_or(outputs), &mut metrics);
+    }
+    metrics
+}
+
+fn collect_numeric_metrics(value: &Value, metrics: &mut BTreeMap<String, f64>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (key, value) in object {
+        if let Some(number) = value.as_f64() {
+            metrics.insert(key.clone(), number);
+        }
+    }
 }
 
 fn effective_matrix_component(run_args: &BenchRunArgs) -> homeboy::core::Result<String> {
@@ -265,6 +365,8 @@ mod tests {
         BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
     };
     use clap::Parser;
+    use homeboy::core::agent_tasks::{AgentTaskMatrixAggregateCell, AgentTaskMatrixExecutionState};
+    use homeboy::core::extension::bench::BenchGateOp;
 
     #[derive(Parser)]
     struct TestCli {
@@ -375,5 +477,72 @@ mod tests {
         assert_eq!(request.artifact_declarations.len(), 1);
         assert_eq!(request.artifact_declarations[0].name, "bench-results");
         assert!(request.artifact_declarations[0].required);
+    }
+
+    #[test]
+    fn result_gate_fails_matrix_when_metric_exceeds_declared_limit() {
+        let aggregate = matrix_aggregate_with_metric("failed_fixture_count", 1.0);
+        let gates = vec![BenchGate {
+            metric: "failed_fixture_count".to_string(),
+            op: BenchGateOp::Lte,
+            value: 0.0,
+        }];
+
+        let (aggregate, results, failures) = apply_result_gates(aggregate, &gates);
+
+        assert!(!aggregate.passed);
+        assert_eq!(
+            aggregate.execution_state,
+            AgentTaskMatrixExecutionState::ExecutedWithFindings
+        );
+        assert_eq!(
+            aggregate.cells[0].execution_state,
+            AgentTaskMatrixExecutionState::ExecutedWithFindings
+        );
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+        assert_eq!(results[0].actual, Some(1.0));
+        assert!(failures[0].contains("failed_fixture_count lte 0"));
+    }
+
+    #[test]
+    fn result_gate_preserves_matrix_pass_when_metric_satisfies_declared_limit() {
+        let aggregate = matrix_aggregate_with_metric("failed_fixture_count", 0.0);
+        let gates = vec![BenchGate {
+            metric: "failed_fixture_count".to_string(),
+            op: BenchGateOp::Lte,
+            value: 0.0,
+        }];
+
+        let (aggregate, results, failures) = apply_result_gates(aggregate, &gates);
+
+        assert!(aggregate.passed);
+        assert_eq!(
+            aggregate.execution_state,
+            AgentTaskMatrixExecutionState::ExecutedClean
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].passed);
+        assert!(failures.is_empty());
+    }
+
+    fn matrix_aggregate_with_metric(metric: &str, value: f64) -> AgentTaskMatrixAggregate {
+        AgentTaskMatrixAggregate {
+            schema: homeboy::core::agent_tasks::AGENT_TASK_MATRIX_AGGREGATE_SCHEMA.to_string(),
+            plan_id: "bench/example".to_string(),
+            passed: true,
+            execution_state: AgentTaskMatrixExecutionState::ExecutedClean,
+            cells: vec![AgentTaskMatrixAggregateCell {
+                cell_id: "bench/example/model.gpt-5.5".to_string(),
+                task_id: "bench/example/model.gpt-5.5".to_string(),
+                axes: BTreeMap::new(),
+                status: Some(AgentTaskOutcomeStatus::Succeeded),
+                execution_state: AgentTaskMatrixExecutionState::ExecutedClean,
+                artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                metadata: serde_json::json!({ "metrics": { metric: value } }),
+            }],
+        }
     }
 }

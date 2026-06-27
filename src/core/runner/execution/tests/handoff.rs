@@ -36,7 +36,7 @@ fn timeout_mirrors_remote_job_without_cancelling() {
             "runner daemon job",
             true,
         );
-        let run_id = format!("runner-exec-lab-{job_id}");
+        let run_id = format!("runner-exec-bench-lab-{job_id}");
 
         assert!(err.message.contains("runner daemon job"));
         assert!(err.message.contains(job_id.to_string().as_str()));
@@ -236,6 +236,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
         });
         let broker_url = format!("http://{addr}");
 
+        let stable_run_id = "agent-task-run-123";
         let (output, exit_code) = exec_via_reverse_broker(
             &ssh_runner(),
             &broker_url,
@@ -248,7 +249,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
             None,
             Vec::new(),
             None,
-            None,
+            Some(stable_run_id.to_string()),
             true,
         )
         .expect("reverse broker detached exec");
@@ -257,7 +258,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
         assert_eq!(output.mode, RunnerExecMode::ReverseBroker);
         let job_id = output.job_id.as_deref().expect("job id");
         let mirror_run_id = output.mirror_run_id.as_deref().expect("mirror run id");
-        assert_eq!(mirror_run_id, format!("runner-exec-test-lab-{job_id}"));
+        assert_eq!(mirror_run_id, stable_run_id);
         assert_eq!(
             output
                 .runner_result
@@ -279,6 +280,20 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
         assert_eq!(stdout["mirror_run_id"].as_str(), Some(mirror_run_id));
         assert_eq!(stdout["job_id"].as_str(), Some(job_id));
 
+        let jobs: Value = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("client")
+            .get(format!("{broker_url}/jobs"))
+            .send()
+            .expect("jobs response")
+            .json()
+            .expect("jobs json");
+        assert_eq!(
+            jobs["data"]["body"]["active_runner_jobs"][0]["durable_run_id"].as_str(),
+            Some(stable_run_id)
+        );
+
         let store = crate::core::observation::ObservationStore::open_initialized()
             .expect("observation store");
         let run = store
@@ -290,6 +305,132 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
             Some(job_id)
         );
     });
+}
+
+#[test]
+fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
+    crate::test_support::with_isolated_home(|_| {
+        let runner = ssh_runner();
+        let job = running_job();
+        let job_id = job.id.to_string();
+
+        let (output, exit_code) = detached_handoff_output(
+            &runner,
+            RunnerExecMode::Daemon,
+            "/srv/homeboy/project".to_string(),
+            vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ],
+            SourceSnapshot::existing_remote("lab", "/srv/homeboy/project", Some("/srv/homeboy")),
+            job,
+            Vec::new(),
+            Some("agent-task-run-6454".to_string()),
+        );
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.job_id.as_deref(), Some(job_id.as_str()));
+        assert_eq!(output.mirror_run_id.as_deref(), Some("agent-task-run-6454"));
+        let json: Value = serde_json::from_str(&output.stdout).expect("handoff JSON");
+        let envelope: crate::command_contract::RunnerHandoffEnvelope =
+            serde_json::from_value(json.clone()).expect("typed handoff envelope");
+        assert_eq!(
+            envelope.schema,
+            crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
+        );
+        assert_eq!(envelope.status, "handoff_complete");
+        assert_eq!(envelope.execution_location, "runner:lab");
+        assert_eq!(envelope.identity.runner_id, "lab");
+        assert_eq!(envelope.identity.runner_job_id, job_id);
+        assert_eq!(
+            envelope.identity.persisted_run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
+        assert_eq!(
+            envelope.identity.run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
+        assert_eq!(
+            envelope.identity.handoff_id.as_deref(),
+            Some(format!("runner:lab:job:{job_id}").as_str())
+        );
+        assert_eq!(envelope.runner_id, "lab");
+        assert_eq!(envelope.job_id, job_id);
+        assert_eq!(envelope.remote_cwd, "/srv/homeboy/project");
+        assert_eq!(
+            envelope.durable_run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
+        assert_eq!(
+            envelope.persisted_run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
+        assert_eq!(
+            envelope.mirror_run_id.as_deref(),
+            Some("agent-task-run-6454")
+        );
+        assert_eq!(json["status"], "handoff_complete");
+        assert_eq!(json["identity"]["runner_id"], "lab");
+        assert_eq!(json["identity"]["runner_job_id"], job_id);
+        assert_eq!(json["identity"]["persisted_run_id"], "agent-task-run-6454");
+        assert_eq!(json["identity"]["run_id"], "agent-task-run-6454");
+        assert_eq!(
+            json["identity"]["handoff_id"],
+            format!("runner:lab:job:{job_id}")
+        );
+        assert_eq!(json["job_id"], job_id);
+        assert_eq!(json["durable_run_id"], "agent-task-run-6454");
+        assert_eq!(
+            json["follow_commands"]["status"],
+            "homeboy agent-task status agent-task-run-6454"
+        );
+        assert_eq!(
+            json["follow_commands"]["logs"],
+            "homeboy agent-task logs agent-task-run-6454"
+        );
+        assert_eq!(
+            json["follow_commands"]["job_logs"],
+            format!("homeboy runner job logs lab {job_id} --follow")
+        );
+    });
+}
+
+#[test]
+fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
+    let envelope = crate::command_contract::RunnerHandoffEnvelope::detached_lab_offload(
+        "lab",
+        "job-123",
+        "/srv/homeboy/project".to_string(),
+        None,
+    );
+    let json = serde_json::to_value(&envelope).expect("serialize handoff envelope");
+
+    assert_eq!(
+        json["schema"],
+        crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
+    );
+    assert_eq!(json["status"], "handoff_complete");
+    assert_eq!(json["execution_location"], "runner:lab");
+    assert_eq!(json["identity"]["runner_id"], "lab");
+    assert_eq!(json["identity"]["runner_job_id"], "job-123");
+    assert_eq!(json["identity"]["handoff_id"], "runner:lab:job:job-123");
+    assert!(json["identity"].get("persisted_run_id").is_none());
+    assert!(json["identity"].get("run_id").is_none());
+    assert_eq!(json["durable_run_id"], Value::Null);
+    assert_eq!(json["persisted_run_id"], Value::Null);
+    assert_eq!(json["mirror_run_id"], Value::Null);
+    assert_eq!(
+        json["follow_commands"]["job_logs"],
+        "homeboy runner job logs lab job-123 --follow"
+    );
+    assert_eq!(
+        json["follow_commands"]["job_cancel"],
+        "homeboy runner job cancel lab job-123"
+    );
+    assert!(json["follow_commands"].get("status").is_none());
+    assert!(json["follow_commands"].get("logs").is_none());
+    assert!(json["follow_commands"].get("artifacts").is_none());
 }
 
 #[test]
@@ -667,4 +808,26 @@ fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
         .hints
         .iter()
         .any(|hint| hint.message.contains("homeboy runner connect")));
+}
+
+fn running_job() -> Job {
+    Job {
+        id: uuid::Uuid::new_v4(),
+        operation: "runner.exec".to_string(),
+        status: JobStatus::Running,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: None,
+        event_count: 0,
+        source_snapshot: None,
+        stale_reason: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+    }
 }

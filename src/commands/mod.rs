@@ -215,6 +215,7 @@ pub mod git;
 pub mod http;
 pub mod issues;
 pub mod json_output;
+pub mod lab;
 pub mod lint;
 pub mod logs;
 pub mod manifest;
@@ -232,6 +233,7 @@ pub mod rig;
 pub mod route;
 pub mod runner;
 pub mod runs;
+pub(crate) mod runs_dossier_summary;
 pub(crate) mod runs_summary;
 pub mod runtime;
 pub mod self_cmd;
@@ -250,9 +252,6 @@ pub mod upgrade;
 pub mod utils;
 pub mod version;
 pub mod worktree;
-
-#[cfg(test)]
-mod golden_contract_tests;
 
 #[cfg(test)]
 mod tests {

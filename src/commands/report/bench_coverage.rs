@@ -143,6 +143,8 @@ fn component_report(
             passthrough_args: Vec::new(),
             scenario_ids: Vec::new(),
             extra_workloads: Vec::new(),
+            env_provider_extensions: Vec::new(),
+            rig_package: None,
         },
         &run_dir,
     );

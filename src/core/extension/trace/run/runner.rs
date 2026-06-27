@@ -66,6 +66,7 @@ pub(crate) fn build_trace_runner(
             &args.runner_inputs.workload_paths,
             "trace_workloads",
         )),
+        env_provider_extensions: &[],
         invocation_requirements: args.runner_inputs.invocation_requirements.clone(),
     })?;
 

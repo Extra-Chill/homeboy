@@ -916,6 +916,7 @@ pub(super) fn compile_loop_spec_workflow(
     workflow: &AgentTaskRepoLoopSpecWorkflow,
 ) -> Result<AgentTaskLoopPolicyAction> {
     let dedupe_key = format!("workflow:{}", workflow.workflow_id);
+    validate_workflow_runtime_execution(workflow)?;
     if workflow
         .runtime_execution
         .get("kind")
@@ -925,7 +926,7 @@ pub(super) fn compile_loop_spec_workflow(
         return Ok(AgentTaskLoopPolicyAction::RunCommand {
             dedupe_key,
             entity_id: None,
-            request: workflow_command_request(workflow),
+            request: workflow_command_request(spec, workflow),
         });
     }
 
@@ -953,13 +954,51 @@ pub(super) fn compile_loop_spec_workflow(
     }
 }
 
-fn workflow_command_request(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
+fn validate_workflow_runtime_execution(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Result<()> {
+    let Some(execution) = workflow.runtime_execution.as_object() else {
+        return Ok(());
+    };
+    if execution
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|command| !command.trim().is_empty())
+        && execution.get("kind").and_then(Value::as_str) != Some("command")
+    {
+        return Err(Error::validation_invalid_argument(
+            "workflows[].runtime_execution.kind",
+            "workflow runtime_execution declares a command but is missing `kind: command`; deterministic command workflows must opt into command execution instead of falling through to agent dispatch",
+            Some(workflow.workflow_id.clone()),
+            Some(vec!["command".to_string()]),
+        ));
+    }
+    Ok(())
+}
+
+fn workflow_command_request(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Value {
+    let mut execution = workflow.runtime_execution.clone();
+    if execution.get("cwd").and_then(Value::as_str).is_none() {
+        if let Some(cwd) = spec
+            .metadata
+            .get("dispatch_defaults")
+            .and_then(Value::as_object)
+            .and_then(|defaults| defaults.get("cwd"))
+            .and_then(Value::as_str)
+            .filter(|cwd| !cwd.is_empty())
+        {
+            if let Value::Object(execution) = &mut execution {
+                execution.insert("cwd".to_string(), Value::String(cwd.to_string()));
+            }
+        }
+    }
     serde_json::json!({
         "mode": "command",
         "workflow_id": workflow.workflow_id,
         "consumes": workflow.inputs.get("consumes").cloned().unwrap_or(Value::Null),
         "artifacts": workflow.artifacts,
-        "execution": workflow.runtime_execution,
+        "execution": execution,
         "runtime_execution": workflow.runtime_execution,
         "inputs": workflow.inputs,
     })

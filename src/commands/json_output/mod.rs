@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::cli_surface::Commands;
-use crate::command_contract::{registered_command_dispatch_family, CommandDispatchFamily};
+use crate::command_contract::{registered_command, CommandDispatchFamily};
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::output_runtime::{CommandPresentation, JsonCommandRun};
@@ -91,17 +91,38 @@ pub fn run_command_output(
                 },
             )
         }
-        Commands::Runs(args) => {
-            let summarize = runs_show_summary_eligible(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
+        Commands::Cleanup(args) => {
+            let summarize = cleanup_summary_eligible(&args);
+            let (stdout_result, exit_code) = dispatch(Commands::Cleanup(args), global);
             let summary_stdout = summarize
                 .then(|| {
                     stdout_result
                         .as_ref()
                         .ok()
-                        .and_then(super::runs_summary::render_runs_show_summary)
+                        .and_then(super::cleanup::render_artifact_cleanup_summary)
                 })
                 .flatten();
+
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                CommandPresentation {
+                    stdout: summary_stdout,
+                    stderr: None,
+                },
+            )
+        }
+        Commands::Runs(args) => {
+            let summarize_show = runs_show_summary_eligible(&args);
+            let summarize_dossier = runs_dossier_summary_eligible(&args);
+            let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
+            let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
+                if summarize_show {
+                    super::runs_summary::render_runs_show_summary(payload)
+                } else if summarize_dossier {
+                    super::runs_dossier_summary::render_runs_dossier_summary(payload)
+                } else {
+                    None
+                }
+            });
 
             JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
                 CommandPresentation {
@@ -231,6 +252,10 @@ fn runs_show_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
     args.show_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
+fn runs_dossier_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
+    args.dossier_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
+}
+
 fn ci_triage_summary_eligible(args: &crate::commands::ci::CiArgs) -> bool {
     matches!(&args.command, crate::commands::ci::CiCommand::Triage(_))
         && !homeboy::core::lab_routing::is_lab_offload_subprocess()
@@ -251,6 +276,13 @@ fn bench_summary_eligible(args: &crate::commands::bench::BenchArgs) -> bool {
     args.is_run_invocation()
         && !args.wants_full_json()
         && !homeboy::core::lab_routing::is_lab_offload_subprocess()
+}
+
+fn cleanup_summary_eligible(args: &crate::commands::cleanup::CleanupArgs) -> bool {
+    matches!(
+        args.command,
+        crate::commands::cleanup::CleanupCommand::Artifacts(_)
+    ) && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
 fn agent_task_summary_kind_for_output(
@@ -293,7 +325,8 @@ fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Va
 }
 
 fn dispatch_family(command: &Commands) -> CommandDispatchFamily {
-    registered_command_dispatch_family(command.top_level_name())
+    registered_command(command.top_level_name())
+        .map(|spec| spec.dispatch_family())
         .expect("top-level command should be registered")
 }
 
@@ -341,6 +374,23 @@ mod tests {
 
         assert!(agent_task_summary_kind_for_output_mode(&args, false).is_some());
         assert!(agent_task_summary_kind_for_output_mode(&args, true).is_none());
+    }
+
+    #[test]
+    fn cleanup_artifacts_summary_is_eligible_for_operator_stdout() {
+        let args = crate::commands::cleanup::CleanupArgs {
+            command: crate::commands::cleanup::CleanupCommand::Artifacts(
+                crate::commands::cleanup::CleanupArtifactsArgs {
+                    apply: false,
+                    self_artifacts: false,
+                    path: None,
+                    temp_root: Vec::new(),
+                    merged_only: false,
+                },
+            ),
+        };
+
+        assert!(cleanup_summary_eligible(&args));
     }
 
     #[test]

@@ -1,6 +1,9 @@
 use serde_json::json;
 
-use crate::core::fuzz::{parse_fuzz_hotspot_set_value, FUZZ_HOTSPOT_SET_SCHEMA};
+use crate::core::fuzz::{
+    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzObservationSet,
+    FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,
+};
 
 #[test]
 fn parses_typed_hotspot_set_from_result_envelope_metadata() {
@@ -80,4 +83,57 @@ fn rejects_unsupported_hotspot_set_versions() {
     });
 
     assert!(parse_fuzz_hotspot_set_value(&invalid).is_none());
+}
+
+#[test]
+fn ranks_observation_set_hotspots_deterministically() {
+    let observations = FuzzObservationSet::from_value(json!({
+        "schema": FUZZ_OBSERVATION_SET_SCHEMA,
+        "version": 1,
+        "id": "candidate-observations",
+        "observations": [
+            {
+                "id": "slow-query",
+                "family": "query",
+                "subject": "query-a",
+                "metric": "duration",
+                "value": 25.0,
+                "unit": "ms",
+                "fingerprint": "query-a:duration"
+            },
+            {
+                "id": "counter-spike",
+                "family": "counter",
+                "subject": "counter-a",
+                "metric": "count",
+                "value": -50.0,
+                "unit": "count"
+            },
+            {
+                "id": "same-score-action",
+                "family": "action",
+                "subject": "action-a",
+                "metric": "duration",
+                "value": 25.0,
+                "unit": "ms"
+            }
+        ]
+    }))
+    .expect("observation set");
+
+    let hotspots = rank_fuzz_observation_set_hotspots(&observations);
+
+    assert_eq!(hotspots.schema, FUZZ_HOTSPOT_SET_SCHEMA);
+    assert_eq!(hotspots.id, "candidate-observations-hotspots");
+    assert_eq!(hotspots.items.len(), 3);
+    assert_eq!(hotspots.items[0].id, "counter:counter-a:count");
+    assert_eq!(hotspots.items[0].rank, Some(1));
+    assert_eq!(hotspots.items[0].relative_score, Some(1.0));
+    assert_eq!(hotspots.items[1].id, "action:action-a:duration");
+    assert_eq!(hotspots.items[1].rank, Some(2));
+    assert_eq!(hotspots.items[1].relative_score, Some(0.5));
+    assert_eq!(hotspots.items[2].id, "query-a:duration");
+    assert_eq!(hotspots.items[2].rank, Some(3));
+    assert_eq!(hotspots.items[2].relative_score, Some(0.5));
+    assert_eq!(hotspots.items[2].evidence_refs, vec!["slow-query"]);
 }
