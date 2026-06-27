@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.266.0] - 2026-06-27
+
+### Added
+- sync runner exec workspace snapshots
+
+### Changed
+- clear field_patterns (batch 5)
+- Preserve bench child command failures
+- Support adopted workspace refs
+- extract shared serde fields via flatten (field_patterns batch 4)
+- Add generic fuzz sampling contract
+
+### Fixed
+- label runner artifact path scope
+
 ## [0.265.2] - 2026-06-27
 
 ### Changed
