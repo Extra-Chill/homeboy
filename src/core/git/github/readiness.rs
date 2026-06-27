@@ -12,6 +12,7 @@ use super::super::github_types::{
 };
 use super::super::{resolve_target, run_git, run_git_output};
 use super::pulls::pr_view;
+use super::{classify_check, CheckClass};
 
 /// Explain whether a PR is ready to merge without attempting a merge.
 pub fn pr_readiness(
@@ -175,16 +176,6 @@ pub(super) fn classify_pr_ci(
     for check in checks {
         let name = check_name(check);
         let workflow = string_field(check, &["workflowName", "workflow_name"]);
-        let status = check
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty());
-        let conclusion = check
-            .get("conclusion")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty());
         if let Some(is_required) = bool_field(check, &["isRequired", "required"]) {
             if is_required {
                 required += 1;
@@ -193,39 +184,35 @@ pub(super) fn classify_pr_ci(
             }
         }
 
-        match (status, conclusion) {
-            (_, Some("FAILURE" | "ACTION_REQUIRED")) => {
+        match classify_check(check) {
+            CheckClass::Failed => {
                 failed += 1;
                 failed_details.push(check_detail(check, &name));
             }
-            (_, Some("CANCELLED" | "TIMED_OUT" | "STARTUP_FAILURE")) => {
+            CheckClass::Rerunnable => {
                 failed += 1;
                 rerunnable += 1;
                 failed_details.push(check_detail(check, &name));
             }
-            (Some("COMPLETED"), Some("SUCCESS" | "NEUTRAL")) => {
+            CheckClass::Passed => {
                 passed += 1;
             }
-            (Some("COMPLETED"), Some("SKIPPED")) => {
+            CheckClass::Skipped => {
                 skipped += 1;
             }
-            (Some("COMPLETED"), Some(_)) => {
+            CheckClass::Unknown => {
                 unknown += 1;
                 failed_details.push(check_detail(check, &name));
             }
-            (Some("COMPLETED"), None) => {
-                unknown += 1;
-                failed_details.push(check_detail(check, &name));
-            }
-            (Some("QUEUED" | "REQUESTED" | "WAITING"), _) => {
+            CheckClass::Queued => {
                 queued += 1;
                 pending_details.push(check_pending_detail(check, &name, workflow.as_deref()));
             }
-            (Some("IN_PROGRESS"), _) => {
+            CheckClass::Running => {
                 running += 1;
                 pending_details.push(check_pending_detail(check, &name, workflow.as_deref()));
             }
-            _ => {
+            CheckClass::Pending => {
                 pending += 1;
                 pending_details.push(check_pending_detail(check, &name, workflow.as_deref()));
             }

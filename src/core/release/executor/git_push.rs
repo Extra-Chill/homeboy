@@ -7,98 +7,11 @@
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
 
+use super::super::advanced_remote::{
+    push_release_branch, rebase_onto_advanced_remote_and_push, AdvancedRemoteRecovery,
+};
 use super::super::types::ReleaseStepResult;
 use super::{step_failed, step_success};
-
-/// Outcome of recovering a release push from an advanced remote branch.
-///
-/// Carries the final push output plus the newly-included commit range that
-/// landed on the remote during the release window. The range is surfaced both as
-/// a prominent operator warning and in structured step output so downstream
-/// summaries can state exactly what changed since the dry-run plan (issue #6141).
-struct AdvancedRemoteRecovery {
-    push: crate::core::git::GitOutput,
-    advance: ConcurrentAdvance,
-}
-
-impl AdvancedRemoteRecovery {
-    /// Recovery that did not actually rebase over an advance (already reconciled
-    /// or a spurious rejection): there is no newly-included range to report.
-    fn without_advance(push: crate::core::git::GitOutput) -> Self {
-        Self {
-            push,
-            advance: ConcurrentAdvance::default(),
-        }
-    }
-}
-
-/// Describes the commits that landed on the remote branch between the reviewed
-/// dry-run/preflight plan and the final tag/notes creation (issue #6141).
-#[derive(Default)]
-struct ConcurrentAdvance {
-    /// The pre-rebase release HEAD — the tip the dry-run plan was built against.
-    base: String,
-    /// The advanced remote head the release commit was rebased onto.
-    remote_head: String,
-    /// Commits newly included by the advance (`base..remote_head`), newest first.
-    commits: Vec<crate::core::git::CommitInfo>,
-}
-
-impl ConcurrentAdvance {
-    fn short(rev: &str) -> &str {
-        &rev[..rev.len().min(8)]
-    }
-
-    /// True when no actual advance was recorded (e.g. an already-reconciled retry
-    /// or a spurious non-fast-forward rejection) — nothing new was auto-included.
-    fn is_noop(&self) -> bool {
-        self.base.is_empty() && self.remote_head.is_empty()
-    }
-
-    /// Structured representation for the step `data` payload so downstream
-    /// summaries can report exactly which commits/PRs were auto-included.
-    fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "base": self.base,
-            "remote_head": self.remote_head,
-            "range": format!("{}..{}", Self::short(&self.base), Self::short(&self.remote_head)),
-            "count": self.commits.len(),
-            "commits": self.commits
-                .iter()
-                .map(|c| serde_json::json!({ "hash": c.hash, "subject": c.subject }))
-                .collect::<Vec<_>>(),
-        })
-    }
-
-    /// Emit a prominent warning listing the newly-included commits so an operator
-    /// reviewing the release sees that the published contents differ from the
-    /// reviewed dry-run plan (issue #6141).
-    fn warn(&self, branch: &str) {
-        log_status!(
-            "release",
-            "⚠ CONCURRENT MAIN ADVANCE: remote '{}' advanced during the release. \
-             The final published release content CHANGED since the dry-run/preflight plan.",
-            branch
-        );
-        log_status!(
-            "release",
-            "⚠ Auto-included {} commit(s) ({}..{}) not present in the reviewed dry-run plan:",
-            self.commits.len(),
-            Self::short(&self.base),
-            Self::short(&self.remote_head)
-        );
-        if self.commits.is_empty() {
-            log_status!(
-                "release",
-                "⚠   (remote advanced but no new commits were resolved in the recovered range)"
-            );
-        } else {
-            for commit in &self.commits {
-                log_status!("release", "⚠   {} {}", commit.hash, commit.subject);
-            }
-        }
-    }
-}
 
 pub(crate) fn run_git_push(
     component: &Component,
@@ -116,7 +29,7 @@ pub(crate) fn run_git_push(
                 ]),
             )
         })?;
-    let output = git_push_release_branch(component, component_id, &branch)?;
+    let output = push_release_branch(component, component_id, &branch)?;
     let data = serde_json::to_value(&output)
         .map_err(|e| Error::internal_json(e.to_string(), Some("git push output".to_string())))?;
 
@@ -191,46 +104,20 @@ pub(crate) fn run_git_push(
     ))
 }
 
-/// Push the release branch (and tags) to `origin`.
-fn git_push_release_branch(
-    component: &Component,
-    component_id: &str,
-    branch: &str,
-) -> Result<crate::core::git::GitOutput> {
-    crate::core::git::push_at(
-        Some(component_id),
-        crate::core::git::PushOptions {
-            tags: true,
-            force_with_lease: false,
-            refspec: Some(format!("HEAD:refs/heads/{branch}")),
-            ..Default::default()
-        },
-        Some(&component.local_path),
-    )
-}
-
 /// Recover from a non-fast-forward branch rejection caused by the remote
-/// advancing after the release commit/tag were created (issue #3611, #5502).
+/// advancing after the release commit/tag were created (issues #3611, #5502).
 ///
-/// Fetches `origin`, confirms the local branch is strictly ahead of a common
-/// ancestor (so a rebase is the right reconciliation, not a force-push over
-/// divergent history), rebases HEAD onto the advanced remote head, and re-pushes
-/// the branch.
-///
-/// Rebasing replays the release commit onto the new remote head, producing a
-/// *new* release commit object. The annotated release tag was created in the
-/// earlier `git.tag` step pointing at the original (pre-rebase) release commit,
-/// which is now orphaned off the branch line. If left untouched, the tag points
-/// at a commit that is NOT an ancestor of the pushed branch, and the next
-/// release sees a stranded duplicate-version commit (issue #5502). So after a
-/// successful rebase this re-creates the tag at the new HEAD and force-pushes
-/// it, keeping exactly one release commit on the branch and the tag always an
-/// ancestor of the pushed branch.
+/// Fetches `origin`, then classifies the local/remote relationship: an
+/// already-reconciled or spurious rejection (remote head equal to or contained
+/// in HEAD) is re-pushed directly; a genuine divergence is reconciled by
+/// [`rebase_onto_advanced_remote_and_push`], which rebases HEAD onto the advanced
+/// remote head, moves the release tag onto the rebased commit (issue #5502), and
+/// re-pushes the branch.
 ///
 /// Returns:
-/// - `Ok(Some(push_output))` when the rebase + re-push succeeded,
-/// - `Ok(None)` when automatic recovery is unsafe (e.g. rebase conflict, or the
-///   remote branch is unexpectedly gone) — the caller emits manual guidance,
+/// - `Ok(Some(recovery))` when the re-push (with or without a rebase) was issued,
+/// - `Ok(None)` when automatic recovery is unsafe (rebase conflict, or the remote
+///   branch is unexpectedly gone) — the caller emits manual guidance,
 /// - `Err(_)` on an unexpected git failure.
 fn recover_advanced_remote_push(
     component: &Component,
@@ -248,167 +135,33 @@ fn recover_advanced_remote_push(
     };
     let head_commit = crate::core::git::get_head_commit(path)?;
 
-    // Already reconciled (e.g. a retry after a manual fix): nothing to do.
-    if remote_commit == head_commit {
-        return git_push_release_branch(component, component_id, branch)
+    // Already reconciled (a retry after a manual fix), or the remote head is
+    // already contained in HEAD (spurious rejection): re-push directly without a
+    // rebase. Confirming an ancestor relationship also guards against replaying
+    // onto unrelated history in the divergent branch below.
+    if remote_commit == head_commit
+        || crate::core::git::is_ancestor(path, &remote_commit, &head_commit)?
+    {
+        return push_release_branch(component, component_id, branch)
             .map(|push| Some(AdvancedRemoteRecovery::without_advance(push)));
     }
 
-    // Only rebase when the remote head is NOT already contained in HEAD — if it
-    // were, the push would have fast-forwarded. Confirm the histories share an
-    // ancestor before rebasing so we never replay onto unrelated history.
-    if crate::core::git::is_ancestor(path, &remote_commit, &head_commit)? {
-        // Remote head is an ancestor of HEAD; the rejection was spurious or
-        // already resolved. Re-push directly.
-        return git_push_release_branch(component, component_id, branch)
-            .map(|push| Some(AdvancedRemoteRecovery::without_advance(push)));
-    }
-
-    // Capture the commits that landed on the remote between the pre-rebase
-    // release HEAD (what the dry-run plan was reviewed against) and the advanced
-    // remote head. These are auto-included in the final release after the rebase,
-    // so surface them prominently and in structured output (issue #6141).
-    let advance = resolve_concurrent_advance(path, &head_commit, &remote_commit);
-
+    // Histories diverged: the remote advanced after the release commit. Rebase
+    // the release commit onto the advanced remote head and re-push (never force).
     log_status!(
         "release",
         "Rebasing release commit onto advanced remote {} ({})...",
         branch,
         &remote_commit[..remote_commit.len().min(8)]
     );
-    let rebase = crate::core::git::rebase_at(
-        Some(component_id),
-        crate::core::git::RebaseOptions {
-            onto: Some(remote_commit.clone()),
-            ..Default::default()
-        },
-        Some(path),
-    )?;
-    if !rebase.success {
-        // Conflicting rebase — abort to leave the tree clean and defer to the
-        // operator. Recovery is not safe to automate here.
-        let _ = crate::core::git::rebase_at(
-            Some(component_id),
-            crate::core::git::RebaseOptions {
-                abort: true,
-                ..Default::default()
-            },
-            Some(path),
-        );
-        return Ok(None);
-    }
-
-    // The rebase moved the release commit to a new SHA on the branch line. Move
-    // the release tag onto the rebased release commit so it stays an ancestor of
-    // the pushed branch (issue #5502). Do this BEFORE pushing the branch so a
-    // successful branch push is never left with a stranded, off-branch tag.
-    if let Some(tag_name) = release_tag {
-        retag_rebased_release(component, component_id, branch, tag_name)?;
-    }
-
-    git_push_release_branch(component, component_id, branch)
-        .map(|push| Some(AdvancedRemoteRecovery { push, advance }))
-}
-
-/// Resolve the commits that landed on the remote between the pre-rebase release
-/// HEAD and the advanced remote head (`base..remote_head`).
-///
-/// Best-effort: a git failure listing the range must never block the recovery —
-/// the advance still gets reported (with an empty commit list) so the operator
-/// at least sees the base/head SHAs that changed (issue #6141).
-fn resolve_concurrent_advance(path: &str, base: &str, remote_head: &str) -> ConcurrentAdvance {
-    let commits =
-        crate::core::git::get_commits_in_range(path, base, remote_head).unwrap_or_default();
-    ConcurrentAdvance {
-        base: base.to_string(),
-        remote_head: remote_head.to_string(),
-        commits,
-    }
-}
-
-/// Re-point the release tag at the post-rebase HEAD (the release commit that is
-/// now on the branch line) and force-push the tag.
-///
-/// After [`recover_advanced_remote_push`] rebases the release commit onto the
-/// advanced remote head, the original tagged commit is orphaned off-branch. This
-/// deletes the stale local tag, recreates the annotated tag at HEAD, and
-/// force-pushes only the tag ref — guaranteeing the tag is an ancestor of the
-/// pushed branch and that no second release commit with the same version is left
-/// stranded (issue #5502). The branch itself is never force-pushed.
-fn retag_rebased_release(
-    component: &Component,
-    component_id: &str,
-    branch: &str,
-    tag_name: &str,
-) -> Result<()> {
-    let path = &component.local_path;
-    let head_commit = crate::core::git::get_head_commit(path)?;
-
-    // If the tag already points at the rebased HEAD there is nothing to move.
-    if crate::core::git::tag_exists_locally(path, tag_name).unwrap_or(false) {
-        let current = crate::core::git::get_tag_commit(path, tag_name)?;
-        if current == head_commit {
-            return Ok(());
-        }
-        crate::core::git::delete_local_tag(path, tag_name)?;
-    }
-
-    log_status!(
-        "release",
-        "Moving release tag {} onto the rebased release commit on {} ({})...",
-        tag_name,
+    rebase_onto_advanced_remote_and_push(
+        component,
+        component_id,
         branch,
-        &head_commit[..head_commit.len().min(8)]
-    );
-
-    let message = format!("Release {}", tag_name);
-    let tag_output = crate::core::git::tag_at(
-        Some(component_id),
-        Some(tag_name),
-        Some(&message),
-        Some(path),
-    )?;
-    if !tag_output.success {
-        return Err(Error::git_command_failed(format!(
-            "Failed to recreate release tag {} at the rebased HEAD: {}",
-            tag_name,
-            tag_output.stderr.trim()
-        )));
-    }
-
-    // Re-publish the tag ref only (never the branch). If the orphaned tag was
-    // already pushed (the initial `--follow-tags` push lands the tag even when
-    // the branch is rejected), delete it on the remote first so the fresh tag
-    // publishes as a clean, non-forced update. Tags are deliberately moved here:
-    // the rebased commit supersedes the orphaned one within the same release.
-    if crate::core::git::tag_exists_on_remote(path, tag_name).unwrap_or(false) {
-        let delete = crate::core::git::delete_remote_tag(path, tag_name)?;
-        if !delete.success {
-            return Err(Error::git_command_failed(format!(
-                "Failed to delete the orphaned remote release tag {} before retagging: {}",
-                tag_name,
-                delete.stderr.trim()
-            )));
-        }
-    }
-
-    let push = crate::core::git::push_at(
-        Some(component_id),
-        crate::core::git::PushOptions {
-            refspec: Some(format!("refs/tags/{tag_name}:refs/tags/{tag_name}")),
-            ..Default::default()
-        },
-        Some(path),
-    )?;
-    if !push.success {
-        return Err(Error::git_command_failed(format!(
-            "Failed to push the moved release tag {}: {}",
-            tag_name,
-            push.stderr.trim()
-        )));
-    }
-
-    Ok(())
+        &head_commit,
+        &remote_commit,
+        release_tag,
+    )
 }
 
 /// True when git's stderr indicates a non-fast-forward / stale-remote branch
