@@ -1490,6 +1490,58 @@ mod lab_args_rewrite_tests {
     }
 
     #[test]
+    fn lab_args_rewrite_ssi_fixture_matrix_path_settings_to_runner_paths() {
+        let controller = "/Users/user/Developer/blocks-engine@matrix-latest";
+        let fixture_root = format!("{controller}/fixtures/websites");
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--rig".to_string(),
+            "static-site-importer-fixture-matrix".to_string(),
+            "--setting".to_string(),
+            format!("bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT={fixture_root}"),
+            format!(
+                "--setting=bench_env.SSI_FIXTURE_MATRIX_BLOCKS_ENGINE_PHP_TRANSFORMER_PATH={controller}"
+            ),
+        ];
+        let mappings = vec![
+            LabPathRemap {
+                local: fixture_root.clone(),
+                remote: "/home/user/_lab_workspaces/fixtures-websites".to_string(),
+            },
+            LabPathRemap {
+                local: controller.to_string(),
+                remote: "/home/user/_lab_workspaces/blocks-engine".to_string(),
+            },
+        ];
+
+        let path_settings_remapped = remap_path_settings_in_args(&args, &mappings);
+        let final_remote_args = rewrite_lab_offload_args(
+            &path_settings_remapped,
+            "/home/user/_lab_workspaces/primary",
+            &mappings,
+            None,
+        );
+
+        assert_eq!(
+            final_remote_args,
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "--rig".to_string(),
+                "static-site-importer-fixture-matrix".to_string(),
+                "--setting".to_string(),
+                "bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT=/home/user/_lab_workspaces/fixtures-websites".to_string(),
+                "--setting=bench_env.SSI_FIXTURE_MATRIX_BLOCKS_ENGINE_PHP_TRANSFORMER_PATH=/home/user/_lab_workspaces/blocks-engine".to_string(),
+            ]
+        );
+        assert!(!final_remote_args
+            .iter()
+            .any(|arg| arg.contains("/Users/user/Developer")));
+    }
+
+    #[test]
     fn lab_args_rewrite_remaps_absolute_at_file_args() {
         let args = vec![
             "homeboy".to_string(),
