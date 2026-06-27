@@ -123,6 +123,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::ValidationMissingArgument
         | ErrorCode::ValidationInvalidArgument
         | ErrorCode::ValidationInvalidJson
+        | ErrorCode::RigSchemaUnsupported
         | ErrorCode::ValidationMultipleErrors => 2,
 
         ErrorCode::ProjectNotFound

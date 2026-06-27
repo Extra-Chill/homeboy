@@ -38,6 +38,7 @@ pub enum ErrorCode {
     RigPipelineFailed,
     RigServiceFailed,
     RigResourceConflict,
+    RigSchemaUnsupported,
     RunnerLabTransportFailure,
     StackNotFound,
     StackApplyConflict,
@@ -92,6 +93,7 @@ impl ErrorCode {
             ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
             ErrorCode::RigServiceFailed => "rig.service_failed",
             ErrorCode::RigResourceConflict => "rig.resource_conflict",
+            ErrorCode::RigSchemaUnsupported => "rig.schema_unsupported",
             ErrorCode::RunnerLabTransportFailure => "runner.lab_transport_failure",
             ErrorCode::StackNotFound => "stack.not_found",
             ErrorCode::StackApplyConflict => "stack.apply_conflict",
@@ -354,6 +356,46 @@ impl Error {
         }
 
         Self::new(ErrorCode::ValidationInvalidJson, "Invalid JSON", details)
+    }
+
+    /// A rig spec parsed as valid JSON but its shape doesn't match this
+    /// binary's `RigSpec` schema — almost always a binary/spec version
+    /// mismatch (e.g. a rig declaring the `component_id`/`path_setting`
+    /// component schema against an older homeboy that only understood
+    /// top-level `path`). This is deliberately *not* `validation.invalid_json`:
+    /// the file isn't malformed, the running binary is just behind.
+    pub fn rig_schema_unsupported(
+        serde_error: impl Into<String>,
+        context: impl Into<String>,
+        component: Option<String>,
+    ) -> Self {
+        let active = env!("CARGO_PKG_VERSION");
+        let serde_error = serde_error.into();
+        let message = match &component {
+            Some(name) => format!(
+                "Rig component '{}' uses an unrecognized schema (expected `path` or `component_id`); \
+                 this rig may require a newer homeboy — active version is {}.",
+                name, active
+            ),
+            None => format!(
+                "Rig spec uses a schema this homeboy build does not recognize ({}); \
+                 this rig may require a newer homeboy — active version is {}.",
+                serde_error, active
+            ),
+        };
+        let mut details = serde_json::json!({
+            "error": serde_error,
+            "context": context.into(),
+            "active_version": active,
+        });
+        if let Some(name) = component {
+            details["component"] = serde_json::json!(name);
+        }
+        Self::new(ErrorCode::RigSchemaUnsupported, message, details).with_hint(
+            "Run 'homeboy upgrade' to get a build that understands this rig schema, then retry. \
+             If the binary is already current, the rig spec may genuinely be malformed — check the \
+             named field against the current rig schema.",
+        )
     }
 
     pub fn validation_multiple_errors(errors: Vec<ValidationErrorItem>) -> Self {
