@@ -91,6 +91,25 @@ pub fn run_command_output(
                 },
             )
         }
+        Commands::Cleanup(args) => {
+            let summarize = cleanup_summary_eligible(&args);
+            let (stdout_result, exit_code) = dispatch(Commands::Cleanup(args), global);
+            let summary_stdout = summarize
+                .then(|| {
+                    stdout_result
+                        .as_ref()
+                        .ok()
+                        .and_then(super::cleanup::render_artifact_cleanup_summary)
+                })
+                .flatten();
+
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                CommandPresentation {
+                    stdout: summary_stdout,
+                    stderr: None,
+                },
+            )
+        }
         Commands::Runs(args) => {
             let summarize = runs_show_summary_eligible(&args);
             let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
@@ -253,6 +272,13 @@ fn bench_summary_eligible(args: &crate::commands::bench::BenchArgs) -> bool {
         && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
+fn cleanup_summary_eligible(args: &crate::commands::cleanup::CleanupArgs) -> bool {
+    matches!(
+        args.command,
+        crate::commands::cleanup::CleanupCommand::Artifacts(_)
+    ) && !homeboy::core::lab_routing::is_lab_offload_subprocess()
+}
+
 fn agent_task_summary_kind_for_output(
     args: &crate::commands::agent_task::AgentTaskArgs,
 ) -> Option<super::agent_task_summary::AgentTaskSummaryKind> {
@@ -342,6 +368,23 @@ mod tests {
 
         assert!(agent_task_summary_kind_for_output_mode(&args, false).is_some());
         assert!(agent_task_summary_kind_for_output_mode(&args, true).is_none());
+    }
+
+    #[test]
+    fn cleanup_artifacts_summary_is_eligible_for_operator_stdout() {
+        let args = crate::commands::cleanup::CleanupArgs {
+            command: crate::commands::cleanup::CleanupCommand::Artifacts(
+                crate::commands::cleanup::CleanupArtifactsArgs {
+                    apply: false,
+                    self_artifacts: false,
+                    path: None,
+                    temp_root: Vec::new(),
+                    merged_only: false,
+                },
+            ),
+        };
+
+        assert!(cleanup_summary_eligible(&args));
     }
 
     #[test]
