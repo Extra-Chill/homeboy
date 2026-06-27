@@ -11,6 +11,10 @@ const {
 	isWordPressSurfaceType,
 	normalizeWordPressSurfaceType,
 } = require('./wordpress-surface-types');
+const {
+	normalizeWordPressFuzzMutationLifecycleContract,
+	wordpressFuzzMutationLifecycleDiagnosticsForCase,
+} = require('./wordpress-fuzz-mutation-lifecycle');
 
 const CASE_STATUSES = new Set(['passed', 'failed', 'errored', 'skipped']);
 const RESULT_STATUSES = new Set(['passed', 'failed', 'errored', 'partial', 'skipped']);
@@ -219,13 +223,15 @@ function normalizeFuzzCaseResult(result, index) {
 	const budget = normalizePerformanceBudget(result.budget || result.budgets || result.performance_budget || result.performanceBudget || result.metadata?.budget || result.metadata?.budgets);
 	const metrics = normalizeCasePerformanceMetrics(result);
 	const budgetFindings = normalizeBudgetFindings({ budget, metrics, subject: result.id || `case-${index + 1}` });
-	const status = normalizeCaseStatus(result.status, budgetFindings);
+	const lifecycleContract = normalizeWordPressFuzzMutationLifecycleContract(result.metadata?.mutation_lifecycle || result.metadata?.mutationLifecycle || result.mutation_lifecycle || result.mutationLifecycle);
+	const lifecycleDiagnostics = wordpressFuzzMutationLifecycleDiagnosticsForCase({ ...result, metadata: { ...(result.metadata || {}), mutation_lifecycle: lifecycleContract } }, result.artifacts || result.artifactRefs || result.artifact_refs);
+	const status = normalizeCaseStatus(result.status, [...budgetFindings, ...lifecycleDiagnostics]);
 	const dbQuery = result.db_query || result.dbQuery || nestedExecutionDbQuerySummary(result) || null;
 	if (!CASE_STATUSES.has(status)) {
 		throw new Error(`Unsupported WordPress fuzz case status: ${status}`);
 	}
 	const findings = [...asOptionalArray(result.findings, `cases[${index}].findings`), ...budgetFindings];
-	const diagnostics = [...asOptionalArray(result.diagnostics, `cases[${index}].diagnostics`), ...budgetFindings.map(findingToDiagnostic)];
+	const diagnostics = [...asOptionalArray(result.diagnostics, `cases[${index}].diagnostics`), ...budgetFindings.map(findingToDiagnostic), ...lifecycleDiagnostics];
 
 	return {
 		...result,
@@ -249,7 +255,7 @@ function normalizeFuzzCaseResult(result, index) {
 		performance_summaries: normalizeCasePerformanceSummaries(result),
 		findings,
 		diagnostics,
-		metadata: { ...(result.metadata || {}) },
+		metadata: { ...(result.metadata || {}), ...(lifecycleContract ? { mutation_lifecycle: lifecycleContract } : {}) },
 	};
 }
 

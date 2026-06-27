@@ -77,12 +77,20 @@ assert.deepEqual(targetTypes['database-table'].cases[1].required_capabilities, [
 assert.deepEqual(targetTypes['database-table'].cases[1].skip_reasons, ['missing-runtime-fuzz-capabilities']);
 assert.deepEqual(targetTypes['database-table'].cases[1].metadata.missing_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
 assert.deepEqual(targetTypes['database-table'].cases[1].destructive_reasons, ['db-mutation']);
+assert.equal(targetTypes['database-table'].cases[1].metadata.mutation_lifecycle.schema, 'homeboy/wordpress-fuzz-mutation-lifecycle/v1');
+assert.deepEqual(targetTypes['database-table'].cases[1].metadata.mutation_lifecycle.required_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
+assert(targetTypes['database-table'].cases[1].metadata.mutation_lifecycle.required_evidence.some((entry) => entry.kind === 'transaction'));
 assert.equal(targetTypes['db-query'].cases[1].intent, 'mutate-database-query');
 assert.equal(targetTypes['db-query'].cases[1].operation.statement, 'UPDATE wp_posts SET post_title = ? WHERE ID = ?');
 assert.equal(targetTypes['external-http'].cases[0].intent, 'exercise-external-http-guardrail');
 assert.equal(targetTypes['db-query'].cases[0].operation.query, 'SELECT ID FROM wp_posts WHERE post_type = ?');
 assert.equal(targetTypes['external-http'].cases[0].operation.url, 'https://api.example.test/v1/');
 assert(targetTypes.role.operation_id.includes('check-role-boundary'));
+assert.equal(targetTypes['rest-route'].cases[0].runtime_operation.command, 'wordpress.request-rest-route');
+assert.equal(targetTypes['admin-page'].cases[0].runtime_operation.command, 'wordpress.load-admin-page');
+assert.equal(targetTypes['frontend-url'].cases[0].runtime_operation.command, 'wordpress.load-frontend-page');
+assert.equal(targetTypes.block.cases[0].runtime_operation.command, 'wordpress.exercise-block');
+assert.equal(targetTypes['db-query'].cases[0].runtime_operation.command, 'wordpress.profile-database');
 assert.equal(targetTypes.block.cases[0].operation.block_name, 'core/paragraph');
 assert.deepEqual(targetTypes.block.cases.map((testCase) => testCase.intent), ['render-block', 'serialize-parse-block', 'insert-block-in-editor']);
 assert.equal(targetTypes.block.cases[0].metadata.safety.mutation, 'read_only');
@@ -196,6 +204,9 @@ for (const method of ['POST', 'DELETE']) {
 	assert(testCase.destructive_reasons.includes('rest_method_mutates_state'));
 	assert.deepEqual(testCase.required_capabilities, ['checkpoint', 'rest', 'rest-rollback']);
 	assert.deepEqual(testCase.metadata.required_any_capabilities, [['reset', 'restore']]);
+	assert.equal(testCase.metadata.mutation_lifecycle.schema, 'homeboy/wordpress-fuzz-mutation-lifecycle/v1');
+	assert.deepEqual(testCase.metadata.mutation_lifecycle.required_capabilities, ['checkpoint', 'rest', 'rest-rollback']);
+	assert.equal(testCase.metadata.mutation_lifecycle.delete_boundary_required, method === 'DELETE');
 	assert.equal(testCase.metadata.rollback_contract.schema, 'homeboy/wordpress-rest-mutation-rollback-contract/v1');
 	assert.equal(testCase.metadata.rollback_contract.delete_boundary_artifacts, method === 'DELETE');
 	assert.equal(testCase.metadata.planned, true);
@@ -217,6 +228,7 @@ assert.equal(resourcePlan.targets[0].cases[2].operation.capability_context.requi
 assert.deepEqual(resourcePlan.targets[0].cases[2].skip_reasons, ['requires-isolated-mutation-runtime']);
 assert.equal(resourcePlan.targets[0].cases[2].executable, false);
 assert.deepEqual(resourcePlan.targets[0].cases[2].required_capabilities, ['checkpoint', 'crud', 'rest', 'rest-rollback']);
+assert.deepEqual(resourcePlan.targets[0].cases[2].metadata.mutation_lifecycle.required_capabilities, ['checkpoint', 'crud', 'rest', 'rest-rollback']);
 assert.equal(resourcePlan.targets[0].cases[2].metadata.rollback_contract.schema, 'homeboy/wordpress-rest-mutation-rollback-contract/v1');
 assert.equal(resourcePlan.targets[0].cases[2].execution_tier, 'plan_only');
 assert.equal(resourcePlan.targets[1].cases.length, 1);
@@ -262,6 +274,16 @@ assert.deepEqual(fixtureBoundCases.find((testCase) => testCase.intent === 'updat
 assert.deepEqual(fixtureBoundCases.find((testCase) => testCase.intent === 'delete-item').operation.input.request_body, { force: true });
 assert.equal(fixtureBoundCases.find((testCase) => testCase.intent === 'read-item').operation.input.request_body, undefined);
 
+const unsupportedRuntimeOperationPlan = buildWordPressFuzzPlanFromSurfaces({
+	blocks: [{ id: 'block:unsupported-runtime', block_name: 'example/runtime' }],
+}, { runtimeCapabilities: { capabilities: [] } });
+const unsupportedBlockCase = unsupportedRuntimeOperationPlan.targets[0].cases[0];
+assert.equal(unsupportedBlockCase.executable, false);
+assert.equal(unsupportedBlockCase.execution_tier, 'plan_only');
+assert.equal(unsupportedBlockCase.runtime_operation.status, 'skipped');
+assert.deepEqual(unsupportedBlockCase.runtime_operation.missing_capabilities, ['block']);
+assert(unsupportedBlockCase.skip_reasons.includes('missing-runtime-workload-capability'));
+
 const adminInteractionPlan = buildWordPressFuzzPlanFromSurfaces({
 	admin: [{
 		id: 'admin:bulk-posts',
@@ -288,6 +310,8 @@ assert.equal(adminCases[1].metadata.executable, false);
 assert.equal(adminCases[1].metadata.gated, true);
 assert.equal(adminCases[1].execution_tier, 'plan_only');
 assert.deepEqual(adminCases[1].required_capabilities, ['admin', 'reset', 'restore', 'snapshot']);
+assert.equal(adminCases[1].metadata.mutation_lifecycle.kind, 'admin');
+assert(adminCases[1].metadata.mutation_lifecycle.required_evidence.some((entry) => entry.kind === 'restore'));
 assert(adminCases[1].skip_reasons.includes('missing-runtime-fuzz-capabilities'));
 assert.deepEqual(adminCases[1].metadata.capability_context, { required: ['edit_posts'] });
 assert.deepEqual(adminCases[1].metadata.nonce_context, { required: true, action: 'bulk-posts', field: '_wpnonce' });
@@ -321,6 +345,7 @@ for (const testCase of capableCases.filter((entry) => entry.required_capabilitie
 const capableCrudMutation = capableCases.find((entry) => entry.intent === 'create-post');
 assert.equal(capableCrudMutation.executable, false);
 assert.deepEqual(capableCrudMutation.required_capabilities, ['crud', 'reset', 'restore', 'snapshot']);
+assert.equal(capableCrudMutation.metadata.mutation_lifecycle.kind, 'crud');
 assert.deepEqual(capableCrudMutation.skip_reasons, ['requires-isolated-mutation-runtime']);
 assert.equal(capableCrudMutation.execution_tier, 'plan_only');
 const capableRestMutation = capableCases.find((entry) => entry.intent === 'request-rest-route');
@@ -354,8 +379,10 @@ for (const intent of ['create-post', 'request-rest-route', 'plan-admin-page-muta
 	assert.equal(testCase.metadata.runtime_capability_gated, false);
 }
 const isolatedRestMutation = isolatedCases.find((entry) => entry.intent === 'request-rest-route');
+const isolatedCrudDelete = isolatedCases.find((entry) => entry.intent === 'delete-post');
 assert.equal(isolatedRestMutation.metadata.rollback_contract.schema, 'homeboy/wordpress-rest-mutation-rollback-contract/v1');
 assert.deepEqual(isolatedRestMutation.metadata.required_any_capabilities, [['reset', 'restore']]);
+assert(isolatedCrudDelete.metadata.mutation_lifecycle.required_evidence.some((entry) => entry.kind === 'delete-boundary'));
 
 const readOnlyMutationPlan = buildWordPressFuzzPlanFromSurfaces({
 	post_types: [{ id: 'post:read-only', post_type: 'post', allowCrudMutations: true }],
