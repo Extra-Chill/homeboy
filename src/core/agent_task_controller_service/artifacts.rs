@@ -263,6 +263,7 @@ mod hydration {
         let mut hydrated = request.clone();
         merge_request_input_artifacts(&mut hydrated, &artifacts);
         merge_runtime_execution_input_artifacts(&mut hydrated, &artifacts);
+        merge_runtime_task_input_artifacts(&mut hydrated, &artifacts);
         merge_dispatch_context_artifacts(&mut hydrated, &artifacts);
         hydrated
     }
@@ -270,11 +271,18 @@ mod hydration {
     pub fn consumed_artifact_ids(request: &Value) -> Vec<String> {
         let mut ids = Vec::new();
         append_string_array(&mut ids, request.get("consumes"));
+        append_artifact_dependency_ids(&mut ids, request.get("artifact_dependencies"));
         append_string_array(
             &mut ids,
             request
                 .get("inputs")
                 .and_then(|inputs| inputs.get("consumes")),
+        );
+        append_artifact_dependency_ids(
+            &mut ids,
+            request
+                .get("inputs")
+                .and_then(|inputs| inputs.get("artifact_dependencies")),
         );
         if let Some(context) = request
             .get("dispatch")
@@ -283,16 +291,36 @@ mod hydration {
             .and_then(|context| serde_json::from_str::<Value>(context).ok())
         {
             append_string_array(&mut ids, context.get("consumes"));
+            append_artifact_dependency_ids(&mut ids, context.get("artifact_dependencies"));
             append_string_array(
                 &mut ids,
                 context
                     .get("inputs")
                     .and_then(|inputs| inputs.get("consumes")),
             );
+            append_artifact_dependency_ids(
+                &mut ids,
+                context
+                    .get("inputs")
+                    .and_then(|inputs| inputs.get("artifact_dependencies")),
+            );
         }
         ids.sort();
         ids.dedup();
         ids
+    }
+
+    pub fn append_artifact_dependency_ids(ids: &mut Vec<String>, value: Option<&Value>) {
+        let Some(values) = value.and_then(Value::as_array) else {
+            return;
+        };
+        ids.extend(values.iter().filter_map(|value| {
+            value
+                .get("artifact_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        }));
     }
 
     pub fn append_string_array(ids: &mut Vec<String>, value: Option<&Value>) {
@@ -415,6 +443,33 @@ mod hydration {
         insert_artifact_aliases(runtime_input, artifacts);
     }
 
+    pub fn merge_runtime_task_input_artifacts(
+        request: &mut Value,
+        artifacts: &serde_json::Map<String, Value>,
+    ) {
+        let Some(runtime_input) = request
+            .get_mut("inputs")
+            .and_then(|inputs| inputs.get_mut("runtime_task"))
+            .and_then(|runtime_task| runtime_task.get_mut("input"))
+            .and_then(|input| input.get_mut("input"))
+        else {
+            return;
+        };
+        let Some(runtime_input) = runtime_input.as_object_mut() else {
+            return;
+        };
+        let artifact_inputs = runtime_input
+            .entry("artifacts".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let Some(artifact_inputs) = artifact_inputs.as_object_mut() else {
+            return;
+        };
+        for (artifact_id, artifact) in artifacts {
+            artifact_inputs.insert(artifact_id.clone(), artifact.clone());
+        }
+        insert_artifact_aliases(runtime_input, artifacts);
+    }
+
     pub fn merge_dispatch_context_artifacts(
         request: &mut Value,
         artifacts: &serde_json::Map<String, Value>,
@@ -433,6 +488,7 @@ mod hydration {
         };
         merge_request_input_artifacts(&mut context, artifacts);
         merge_runtime_execution_input_artifacts(&mut context, artifacts);
+        merge_runtime_task_input_artifacts(&mut context, artifacts);
         *context_value = Value::String(context.to_string());
     }
 
@@ -1221,3 +1277,60 @@ mod runtime_evidence {
     }
 }
 pub(super) use runtime_evidence::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consumed_artifact_ids_include_artifact_dependencies() {
+        let mut request = serde_json::json!({
+            "artifact_dependencies": [{ "artifact_id": "concept_packet" }],
+            "inputs": {
+                "artifact_dependencies": [{ "artifact_id": "design_packet" }],
+                "runtime_task": {
+                    "input": {
+                        "input": {
+                            "site_kind": "store"
+                        }
+                    }
+                }
+            },
+            "dispatch": {
+                "client_context": serde_json::json!({
+                    "artifact_dependencies": [{ "artifact_id": "static_site_candidate" }],
+                    "inputs": {
+                        "artifact_dependencies": [{ "artifact_id": "finding_group" }]
+                    }
+                }).to_string()
+            }
+        });
+
+        assert_eq!(
+            consumed_artifact_ids(&request),
+            vec![
+                "concept_packet".to_string(),
+                "design_packet".to_string(),
+                "finding_group".to_string(),
+                "static_site_candidate".to_string(),
+            ]
+        );
+
+        let mut artifacts = serde_json::Map::new();
+        artifacts.insert(
+            "concept_packet".to_string(),
+            serde_json::json!({ "payload": { "title": "Kiln Shelf Supply" } }),
+        );
+        merge_runtime_task_input_artifacts(&mut request, &artifacts);
+
+        assert_eq!(
+            request["inputs"]["runtime_task"]["input"]["input"]["concept_packet"]["title"],
+            "Kiln Shelf Supply"
+        );
+        assert_eq!(
+            request["inputs"]["runtime_task"]["input"]["input"]["artifacts"]["concept_packet"]
+                ["payload"]["title"],
+            "Kiln Shelf Supply"
+        );
+    }
+}

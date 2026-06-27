@@ -167,23 +167,35 @@ pub(super) fn infer_terminal_outcome(
     exit_code: i32,
 ) -> Option<(AgentTaskLoopTerminalStatus, String, Value)> {
     match &action.action {
-        AgentTaskLoopPolicyAction::FanOut { entity_ids, .. } if entity_ids.is_empty() => Some((
-            AgentTaskLoopTerminalStatus::NoActionableFindings,
-            "fan-out completed with zero target entities".to_string(),
-            serde_json::json!({ "mode": "fan_out", "item_count": 0 }),
-        )),
+        AgentTaskLoopPolicyAction::FanOut { entity_ids, .. }
+            if entity_ids.is_empty()
+                && execution
+                    .get("item_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    == 0 =>
+        {
+            Some((
+                AgentTaskLoopTerminalStatus::NoActionableFindings,
+                "fan-out completed with zero target entities".to_string(),
+                serde_json::json!({ "mode": "fan_out", "item_count": 0 }),
+            ))
+        }
         AgentTaskLoopPolicyAction::FanOut { entity_ids, .. } if exit_code == 0 => Some((
             AgentTaskLoopTerminalStatus::Passed,
-            format!("fan-out completed for {} target entities", entity_ids.len()),
-            serde_json::json!({ "mode": "fan_out", "item_count": entity_ids.len(), "execution": execution }),
+            format!(
+                "fan-out completed for {} target entities",
+                fan_out_item_count(entity_ids, execution)
+            ),
+            serde_json::json!({ "mode": "fan_out", "item_count": fan_out_item_count(entity_ids, execution), "execution": execution }),
         )),
         AgentTaskLoopPolicyAction::FanOut { entity_ids, .. } => Some((
             AgentTaskLoopTerminalStatus::Failed,
             format!(
                 "fan-out failed for one or more of {} target entities",
-                entity_ids.len()
+                fan_out_item_count(entity_ids, execution)
             ),
-            serde_json::json!({ "mode": "fan_out", "item_count": entity_ids.len(), "execution": execution }),
+            serde_json::json!({ "mode": "fan_out", "item_count": fan_out_item_count(entity_ids, execution), "execution": execution }),
         )),
         AgentTaskLoopPolicyAction::RunGates { .. } => {
             let result = execution.get("result")?;
@@ -208,6 +220,14 @@ pub(super) fn infer_terminal_outcome(
         )),
         _ => None,
     }
+}
+
+fn fan_out_item_count(entity_ids: &[String], execution: &Value) -> usize {
+    execution
+        .get("item_count")
+        .and_then(Value::as_u64)
+        .map(|count| count as usize)
+        .unwrap_or(entity_ids.len())
 }
 
 pub(super) fn gate_terminal_status(result: &Value, exit_code: i32) -> AgentTaskLoopTerminalStatus {

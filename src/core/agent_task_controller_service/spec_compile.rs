@@ -931,8 +931,8 @@ pub(super) fn compile_loop_spec_workflow(
     }
 
     let request = workflow_dispatch_request(spec, workflow)?;
-    let fan_out_entity_ids = workflow_fan_out_entity_ids(workflow)?;
-    if fan_out_entity_ids.is_empty() {
+    let fan_out_config = workflow_fan_out_config(workflow)?;
+    if fan_out_config.entity_ids.is_empty() && fan_out_config.dynamic_artifact.is_none() {
         Ok(AgentTaskLoopPolicyAction::SpawnTask {
             dedupe_key,
             entity_id: None,
@@ -942,7 +942,10 @@ pub(super) fn compile_loop_spec_workflow(
         let fan_out = workflow.fan_out.as_ref();
         Ok(AgentTaskLoopPolicyAction::FanOut {
             dedupe_key,
-            entity_ids: fan_out_entity_ids,
+            entity_ids: fan_out_config.entity_ids,
+            dynamic_artifact: fan_out_config.dynamic_artifact,
+            group_by: fan_out_config.group_by,
+            requires_non_empty: fan_out_config.requires_non_empty,
             max_items: fan_out
                 .and_then(|fan_out| fan_out.max_items)
                 .unwrap_or(crate::core::agent_task_loop_controller::DEFAULT_FAN_OUT_MAX_ITEMS),
@@ -952,6 +955,13 @@ pub(super) fn compile_loop_spec_workflow(
             request_template: request,
         })
     }
+}
+
+struct WorkflowFanOutConfig {
+    entity_ids: Vec<String>,
+    dynamic_artifact: Option<String>,
+    group_by: Vec<String>,
+    requires_non_empty: bool,
 }
 
 fn validate_workflow_runtime_execution(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Result<()> {
@@ -996,7 +1006,7 @@ fn workflow_command_request(
     serde_json::json!({
         "mode": "command",
         "workflow_id": workflow.workflow_id,
-        "consumes": workflow.inputs.get("consumes").cloned().unwrap_or(Value::Null),
+        "consumes": workflow.consumes,
         "artifacts": workflow.artifacts,
         "execution": execution,
         "runtime_execution": workflow.runtime_execution,
@@ -1005,15 +1015,51 @@ fn workflow_command_request(
 }
 
 fn workflow_fan_out_entity_ids(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Result<Vec<String>> {
+    Ok(workflow_fan_out_config(workflow)?.entity_ids)
+}
+
+fn workflow_fan_out_config(
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Result<WorkflowFanOutConfig> {
     if !workflow.entity_ids.is_empty() {
-        return Ok(workflow.entity_ids.clone());
+        return Ok(WorkflowFanOutConfig {
+            entity_ids: workflow.entity_ids.clone(),
+            dynamic_artifact: None,
+            group_by: Vec::new(),
+            requires_non_empty: false,
+        });
     }
 
     let Some(fan_out) = &workflow.fan_out else {
-        return Ok(Vec::new());
+        return Ok(WorkflowFanOutConfig {
+            entity_ids: Vec::new(),
+            dynamic_artifact: None,
+            group_by: Vec::new(),
+            requires_non_empty: false,
+        });
     };
     if !fan_out.entity_ids.is_empty() {
-        return Ok(fan_out.entity_ids.clone());
+        return Ok(WorkflowFanOutConfig {
+            entity_ids: fan_out.entity_ids.clone(),
+            dynamic_artifact: None,
+            group_by: Vec::new(),
+            requires_non_empty: false,
+        });
+    }
+
+    if fan_out.mode.as_deref() == Some("per_artifact") {
+        if let Some(artifact) = fan_out
+            .artifact
+            .as_ref()
+            .filter(|artifact| !artifact.is_empty())
+        {
+            return Ok(WorkflowFanOutConfig {
+                entity_ids: Vec::new(),
+                dynamic_artifact: Some(artifact.clone()),
+                group_by: fan_out.group_by.clone(),
+                requires_non_empty: fan_out.requires_non_empty,
+            });
+        }
     }
 
     Err(Error::validation_invalid_argument(
