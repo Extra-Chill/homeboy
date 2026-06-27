@@ -248,6 +248,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         cwd: Option<String>,
 
+        /// Snapshot a local worktree to the runner first and execute from the materialized remote path.
+        #[arg(long = "sync-workspace")]
+        sync_workspace: Option<String>,
+
         /// Project ID used for runner trust policy checks
         #[arg(long)]
         project: Option<String>,

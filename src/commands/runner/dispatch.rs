@@ -154,6 +154,7 @@ pub fn run(
         RunnerCommand::Exec {
             id,
             cwd,
+            sync_workspace,
             project,
             ssh,
             capture_patch,
@@ -170,6 +171,7 @@ pub fn run(
         } => map_execution(exec(
             &id,
             cwd,
+            sync_workspace,
             project,
             ssh,
             capture_patch,
@@ -230,6 +232,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
         RunnerCommand::Exec {
             id,
             cwd,
+            sync_workspace,
             project,
             ssh,
             capture_patch,
@@ -246,6 +249,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
         } => run_raw_exec(
             id,
             cwd,
+            sync_workspace,
             project,
             ssh,
             capture_patch,
@@ -274,6 +278,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
 fn run_raw_exec(
     id: String,
     cwd: Option<String>,
+    sync_workspace: Option<String>,
     project: Option<String>,
     ssh: bool,
     capture_patch: bool,
@@ -290,6 +295,7 @@ fn run_raw_exec(
     match exec(
         &id,
         cwd,
+        sync_workspace,
         project,
         ssh,
         capture_patch,

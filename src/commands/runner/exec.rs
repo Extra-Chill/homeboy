@@ -9,6 +9,7 @@ use homeboy::core::runners::{
     self as runner, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
     RunnerKind,
 };
+use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::{server, Error};
 
@@ -19,6 +20,7 @@ use super::types::RUNNER_EXEC_SCRIPT_ENV;
 pub(super) fn exec(
     runner_id: &str,
     cwd: Option<String>,
+    sync_workspace: Option<String>,
     project_id: Option<String>,
     allow_diagnostic_ssh: bool,
     capture_patch: bool,
@@ -53,6 +55,7 @@ pub(super) fn exec(
     }
 
     if dry_run {
+        let (cwd, _) = exec_workspace_context(runner_id, cwd, sync_workspace, true)?;
         return runner_exec_dry_run(
             runner_id,
             cwd,
@@ -64,6 +67,7 @@ pub(super) fn exec(
     }
 
     let validated_run_id = validate_runner_exec_run_id(run_id)?;
+    let (cwd, source_snapshot) = exec_workspace_context(runner_id, cwd, sync_workspace, false)?;
 
     let (mut output, exit_code) = runner::exec(
         runner_id,
@@ -80,7 +84,7 @@ pub(super) fn exec(
                 .collect(),
             capture_patch,
             raw_exec: true,
-            source_snapshot: None,
+            source_snapshot,
             capability_preflight: Some(runner::RunnerCapabilityPreflight {
                 command: "runner.exec".to_string(),
                 required_commands,
@@ -122,6 +126,55 @@ pub(super) fn exec(
         output.promoted_outputs.extend(promoted_summaries);
     }
     Ok((output, exit_code))
+}
+
+pub(super) fn exec_workspace_context(
+    runner_id: &str,
+    cwd: Option<String>,
+    sync_workspace: Option<String>,
+    dry_run: bool,
+) -> homeboy::core::Result<(Option<String>, Option<SourceSnapshot>)> {
+    let Some(local_path) = sync_workspace else {
+        return Ok((cwd, None));
+    };
+
+    if cwd.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "cwd",
+            "--cwd and --sync-workspace are mutually exclusive; --sync-workspace executes from the materialized runner path",
+            None,
+            Some(vec![
+                "Use --sync-workspace <local-worktree> when the command should run from that worktree snapshot.".to_string(),
+                "Use --cwd <runner-path> when the runner-side path already exists.".to_string(),
+            ]),
+        ));
+    }
+
+    if dry_run {
+        return Ok((None, None));
+    }
+
+    let (synced, _) = runner::sync_workspace(
+        runner_id,
+        runner::RunnerWorkspaceSyncOptions {
+            path: local_path,
+            mode: runner::RunnerWorkspaceSyncMode::Snapshot,
+            controller_routed_git: false,
+            changed_since_base: None,
+            git_fetch_refs: Vec::new(),
+            snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: false,
+            run_isolation_token: None,
+        },
+    )?;
+    let source_snapshot = SourceSnapshot::collect_local(
+        runner_id,
+        Path::new(&synced.local_path),
+        Some(&synced.remote_path),
+        synced.sync_mode.label(),
+    );
+
+    Ok((Some(synced.remote_path), Some(source_snapshot)))
 }
 
 fn validate_runner_exec_run_id(run_id: Option<String>) -> homeboy::core::Result<Option<String>> {
