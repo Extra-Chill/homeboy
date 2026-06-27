@@ -13,6 +13,26 @@ struct ExtensionProvidedDefaults {
     version_candidates: Vec<VersionCandidateConfig>,
     test_drift: TestDriftConfig,
     direct_test_file_suffixes: Vec<String>,
+    /// Ecosystem-specific code-audit detector defaults (version-guard constants
+    /// and regexes, tracker-reference URL shapes). Core ships none of these as
+    /// Rust literals; the framework set lives here in the extension-provided
+    /// defaults asset and is merged in when a component opts into builtin
+    /// profile defaults, keeping core source framework-agnostic (#2240).
+    #[serde(default)]
+    detector_profile: DetectorProfileDefaults,
+}
+
+/// Extension-provided code-audit detector defaults. Empty by default so a
+/// truly generic core (or an external defaults file that omits the section)
+/// carries no framework-specific detection literals.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct DetectorProfileDefaults {
+    #[serde(default)]
+    pub version_guard_constants: Vec<String>,
+    #[serde(default)]
+    pub version_guard_regexes: Vec<String>,
+    #[serde(default)]
+    pub tracker_reference_regexes: Vec<String>,
 }
 
 fn extension_provided_defaults() -> &'static ExtensionProvidedDefaults {
@@ -77,6 +97,10 @@ pub(crate) fn extension_provided_direct_test_file_suffixes() -> Vec<String> {
         .clone()
 }
 
+pub(crate) fn extension_provided_detector_profile() -> DetectorProfileDefaults {
+    extension_provided_defaults().detector_profile.clone()
+}
+
 pub(super) fn default_deploy() -> DeployConfig {
     DeployConfig {
         scp_flags: default_scp_flags(),
@@ -139,35 +163,59 @@ mod tests {
     }
 
     #[test]
-    fn extension_provided_defaults_preserve_existing_version_candidates() {
+    fn core_version_candidate_defaults_are_framework_agnostic() {
+        // Core's built-in version-candidate fallback ships only generic dev-tool
+        // manifests. Framework-specific candidates (e.g. a PHP `composer.json`
+        // or a WordPress theme `style.css`) belong to the extension that owns
+        // them, supplied via the external defaults override (#2240).
         let files = default_version_candidates()
             .into_iter()
             .map(|candidate| candidate.file)
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            files,
-            ["Cargo.toml", "package.json", "composer.json", "style.css"]
-        );
+        assert_eq!(files, ["Cargo.toml", "package.json"]);
     }
 
     #[test]
-    fn extension_provided_defaults_preserve_existing_test_drift_fallback() {
+    fn core_test_drift_fallback_is_framework_agnostic() {
         let config = extension_provided_test_drift_config();
 
-        assert_eq!(config.source_dirs, ["src", "inc", "lib"]);
+        // Generic source layout only — no PHP/WordPress `inc`/`lib` conventions
+        // and no presupposed file extension.
+        assert_eq!(config.source_dirs, ["src"]);
         assert_eq!(config.test_dirs, ["tests"]);
-        assert_eq!(config.file_extensions, [["p", "hp"].concat()]);
+        assert!(config.file_extensions.is_empty());
         assert!(!config.inline_tests);
     }
 
     #[test]
-    fn extension_provided_defaults_preserve_existing_direct_test_suffixes() {
+    fn core_direct_test_suffix_fallback_is_framework_agnostic() {
         let suffixes = extension_provided_direct_test_file_suffixes();
 
-        assert!(suffixes.contains(&["Test.", "p", "hp"].concat()));
+        // No PHP `Test.php` convention baked into core; generic JS/TS/Rust
+        // suffixes remain.
+        assert!(!suffixes.contains(&["Test.", "p", "hp"].concat()));
         assert!(suffixes.contains(&".test.js".to_string()));
         assert!(suffixes.contains(&".spec.tsx".to_string()));
+        assert!(suffixes.contains(&"_test.rs".to_string()));
+    }
+
+    #[test]
+    fn detector_profile_defaults_supply_framework_version_guards() {
+        // The framework-specific detector defaults live in the extension-provided
+        // asset, not core Rust literals — but they are still wired one-repo so WP
+        // detection behavior is preserved (#2240).
+        let profile = extension_provided_detector_profile();
+
+        assert!(profile
+            .version_guard_constants
+            .iter()
+            .any(|c| c == "JETPACK__VERSION"));
+        assert!(!profile.version_guard_regexes.is_empty());
+        assert!(profile
+            .tracker_reference_regexes
+            .iter()
+            .any(|r| r.contains("wordpress")));
     }
 
     #[test]

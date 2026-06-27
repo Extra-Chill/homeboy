@@ -490,4 +490,85 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
         assert_eq!(findings[0].file, "src/commands/new_feature.rs");
         assert!(findings[0].description.contains("direct process execution"));
     }
+
+    // ------------------------------------------------------------------------
+    // Core-boundary-leak preset: the former `core_boundary_leak` detector is now
+    // a `CoreBoundaryLeakConfig::to_source_policy_rules()` preset over this
+    // generic engine. These tests pin the preset's behavior end to end.
+    // ------------------------------------------------------------------------
+
+    fn core_boundary_config() -> crate::core::component::CoreBoundaryLeakConfig {
+        crate::core::component::CoreBoundaryLeakConfig {
+            terms: vec!["florpstack".to_string(), "florp-run".to_string()],
+            scan_path_contains: vec!["src/core/".to_string()],
+            allow_path_contains: vec!["src/core/fixtures/allowed".to_string()],
+            allow_line_contains: vec!["homeboy-audit: allow-core-boundary-example".to_string()],
+            example_path_contains: vec!["/fixtures/".to_string(), "/examples/".to_string()],
+        }
+    }
+
+    fn run_core_boundary(
+        fingerprints: &[&FileFingerprint],
+        config: &crate::core::component::CoreBoundaryLeakConfig,
+    ) -> Vec<Finding> {
+        run(fingerprints, &config.to_source_policy_rules())
+    }
+
+    #[test]
+    fn core_boundary_default_config_emits_nothing() {
+        let fp = rust_fp("src/core/engine.rs", "fn dispatch() {}");
+
+        assert!(
+            run_core_boundary(&[&fp], &crate::core::component::CoreBoundaryLeakConfig::default())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn core_boundary_reports_configured_terms_in_core_source() {
+        let fp = rust_fp(
+            "src/core/engine.rs",
+            r#"fn dispatch() {
+    run_tool("florp-run");
+}
+"#,
+        );
+
+        let findings = run_core_boundary(&[&fp], &core_boundary_config());
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, AuditFinding::CoreBoundaryLeak);
+        assert!(findings[0].description.contains("florp-run"));
+        assert!(findings[0].description.contains("behavioral"));
+        assert!(findings[0].description.contains("dispatch"));
+    }
+
+    #[test]
+    fn core_boundary_reports_unallowlisted_fixtures_as_example_only() {
+        let fp = rust_fp(
+            "src/core/fixtures/leaky.rs",
+            r#"const SAMPLE: &str = "florpstack";"#,
+        );
+
+        let findings = run_core_boundary(&[&fp], &core_boundary_config());
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("example-only"));
+    }
+
+    #[test]
+    fn core_boundary_skips_explicit_path_and_line_allowlists() {
+        let path_allowed = rust_fp(
+            "src/core/fixtures/allowed/sample.rs",
+            r#"const SAMPLE: &str = "florpstack";"#,
+        );
+        let line_allowed = rust_fp(
+            "src/core/sample.rs",
+            r#"// homeboy-audit: allow-core-boundary-example florpstack"#,
+        );
+
+        let findings = run_core_boundary(&[&path_allowed, &line_allowed], &core_boundary_config());
+
+        assert!(findings.is_empty());
+    }
 }

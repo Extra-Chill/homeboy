@@ -173,7 +173,15 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
     },
     DetectorDescriptor {
         id: "comment_hygiene",
-        findings: &[AuditFinding::TodoMarker, AuditFinding::LegacyComment],
+        findings: &[
+            AuditFinding::TodoMarker,
+            AuditFinding::LegacyComment,
+            // The comment_hygiene runner also delegates to upstream_workaround,
+            // which emits UpstreamWorkaround. It must be declared here so
+            // `--only upstream_workaround` keeps this family enabled instead of
+            // silently disabling the detector.
+            AuditFinding::UpstreamWorkaround,
+        ],
         access: DetectorAccess::Discovery,
         runtime: DetectorRuntime::Manual,
         timing_id: "detector.comment_hygiene",
@@ -722,5 +730,31 @@ mod tests {
         assert!(!plan.run_structural());
         assert!(!plan.run_duplication());
         assert!(!plan.requires_discovery());
+    }
+
+    #[test]
+    fn only_upstream_workaround_keeps_comment_hygiene_enabled() {
+        // The comment_hygiene runner delegates to upstream_workaround, so an
+        // `--only upstream_workaround` filter must keep the family enabled.
+        // Regression: the descriptor previously omitted UpstreamWorkaround,
+        // which silently disabled the detector under this filter.
+        let plan = AuditExecutionPlan::from_filters(&[AuditFinding::UpstreamWorkaround], &[]);
+
+        assert!(plan.run_comment_hygiene());
+        assert!(!plan.run_dead_code());
+    }
+
+    #[test]
+    fn excluding_all_comment_hygiene_findings_disables_the_family() {
+        let plan = AuditExecutionPlan::from_filters(
+            &[],
+            &[
+                AuditFinding::TodoMarker,
+                AuditFinding::LegacyComment,
+                AuditFinding::UpstreamWorkaround,
+            ],
+        );
+
+        assert!(!plan.run_comment_hygiene());
     }
 }

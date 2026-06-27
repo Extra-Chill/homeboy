@@ -78,31 +78,21 @@ const DEFAULT_MARKER_REGEXES: &[&str] = &[
 
 // Tracker-reference regex shapes. Bare `#NNN` is intentionally NOT included —
 // Tier A requires a marker AND a concrete URL/ticket, never a bare reference.
-// The concrete ecosystem URL literals live in the agnostic conventions home
-// (`Language`-adjacent `builtin_tracker_reference_regexes`), not inline here,
-// so this detector stays free of hardcoded ecosystem literals.
+// Generic code-host URL shapes live in the agnostic conventions home
+// (`builtin_tracker_reference_regexes`); framework-specific tracker hosts come
+// from the extension-provided defaults asset, not inline here, so this detector
+// stays free of hardcoded ecosystem literals (#2240).
 
 // ============================================================================
 // Tier B — version-compare guard catalogue
 // ============================================================================
 
-/// Recognized version-constant names. Easy to grow as new ecosystems land.
-const VERSION_CONSTANTS: &[&str] = &[
-    "PHP_VERSION",
-    "$wp_version",
-    "JETPACK__VERSION",
-    "WC_VERSION",
-    "GUTENBERG_VERSION",
-    "AKISMET_VERSION",
-];
-
-const DEFAULT_VERSION_GUARD_REGEXES: &[&str] = &[
-    r#"version_compare\s*\(\s*([A-Z_][A-Z0-9_]*|\$wp_version|PHP_VERSION)\s*,\s*['"]([^'"]+)['"]\s*,\s*['"]<=?['"]\s*\)"#,
-];
-
-// Version-guard language defaults live in the agnostic conventions home
-// (`builtin_version_guard_tokens`), not inline here — version-compare syntax is
-// ecosystem-specific, so the concrete token set stays out of this detector.
+// Recognized version-constant names and the `version_compare(...)` guard regex
+// are ecosystem-specific (constant naming + comparison syntax), so core ships
+// none of them as Rust literals. The framework set is supplied by the
+// extension-provided defaults asset and merged in when a component opts into
+// builtin profile defaults (#2240). Version-guard language gating likewise
+// lives in the agnostic conventions home (`builtin_version_guard_tokens`).
 const DEFAULT_VENDORED_PATH_MARKERS: &[&str] =
     &["/vendor/", "vendor/", "/node_modules/", "node_modules/"];
 
@@ -264,15 +254,19 @@ impl EffectiveDetectorProfile {
         };
 
         if config.use_builtin_defaults {
-            profile.extend_literals(MARKER_LITERALS, LEADING_MARKERS, VERSION_CONSTANTS);
+            // Generic, framework-agnostic core defaults.
+            profile.extend_strings(
+                MARKER_LITERALS,
+                DetectorProfileField::WorkaroundMarkerLiteral,
+            );
+            profile.extend_strings(
+                LEADING_MARKERS,
+                DetectorProfileField::WorkaroundLeadingMarker,
+            );
             profile.extend_regexes(DEFAULT_MARKER_REGEXES, DetectorRegexKind::Marker);
             profile.extend_regexes(
                 builtin_tracker_reference_regexes(),
                 DetectorRegexKind::TrackerReference,
-            );
-            profile.extend_regexes(
-                DEFAULT_VERSION_GUARD_REGEXES,
-                DetectorRegexKind::VersionGuard,
             );
             profile.extend_strings(
                 Language::builtin_version_guard_tokens(),
@@ -281,6 +275,20 @@ impl EffectiveDetectorProfile {
             profile.extend_strings(
                 DEFAULT_VENDORED_PATH_MARKERS,
                 DetectorProfileField::VendoredPathMarker,
+            );
+
+            // Framework-specific version-guard and tracker defaults ship in the
+            // extension-provided defaults asset, not core Rust literals, so core
+            // stays generic while WP detection behavior is preserved (#2240).
+            let ext = crate::core::defaults::extension_provided_detector_profile();
+            profile.extend_owned_strings(
+                &ext.version_guard_constants,
+                DetectorProfileField::VersionGuardConstant,
+            );
+            profile.extend_owned_regexes(&ext.version_guard_regexes, DetectorRegexKind::VersionGuard);
+            profile.extend_owned_regexes(
+                &ext.tracker_reference_regexes,
+                DetectorRegexKind::TrackerReference,
             );
         }
 
@@ -333,12 +341,6 @@ impl EffectiveDetectorProfile {
         self.version_guard_languages
             .iter()
             .any(|configured| language_matches(configured, language))
-    }
-
-    fn extend_literals(&mut self, markers: &[&str], leading: &[&str], constants: &[&str]) {
-        self.extend_strings(markers, DetectorProfileField::WorkaroundMarkerLiteral);
-        self.extend_strings(leading, DetectorProfileField::WorkaroundLeadingMarker);
-        self.extend_strings(constants, DetectorProfileField::VersionGuardConstant);
     }
 
     fn extend_regexes(&mut self, patterns: &[&str], kind: DetectorRegexKind) {
@@ -573,6 +575,52 @@ mod tests {
 
         let findings = run(&[&fp], &config);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn core_builtin_detector_literals_carry_no_framework_constants() {
+        // #2240: core source must stay framework-agnostic. The WP/Automattic
+        // version constants and tracker hosts live in the extension-provided
+        // defaults asset, never as Rust literals compiled into core.
+        const FRAMEWORK_TOKENS: &[&str] = &[
+            "JETPACK__VERSION",
+            "WC_VERSION",
+            "GUTENBERG_VERSION",
+            "AKISMET_VERSION",
+            "wp_version",
+            "trac.wordpress.org",
+        ];
+
+        let mut core_literals: Vec<&str> = Vec::new();
+        core_literals.extend(MARKER_LITERALS);
+        core_literals.extend(LEADING_MARKERS);
+        core_literals.extend(DEFAULT_MARKER_REGEXES);
+        core_literals.extend(DEFAULT_VENDORED_PATH_MARKERS);
+        core_literals.extend(builtin_tracker_reference_regexes());
+
+        for literal in &core_literals {
+            for token in FRAMEWORK_TOKENS {
+                assert!(
+                    !literal.contains(token),
+                    "core builtin literal `{literal}` must not contain framework token `{token}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_profile_pulls_framework_version_guards_from_extension_asset() {
+        // Behavior preservation: with builtin defaults the framework version
+        // constants + guard regexes are wired in from the extension-provided
+        // defaults asset, so WP-style detection still fires (#2240).
+        let profile = EffectiveDetectorProfile::from_config(&default_config());
+
+        assert!(profile
+            .version_guard_constants
+            .iter()
+            .any(|c| c == "JETPACK__VERSION"));
+        assert!(!profile.version_guard_regexes.is_empty());
+        assert!(!profile.tracker_reference_regexes.is_empty());
     }
 
     #[test]
