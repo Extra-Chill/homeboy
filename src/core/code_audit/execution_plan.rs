@@ -78,7 +78,15 @@ impl DetectorAccess {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DetectorRuntime {
+    /// Detectors the engine still sequences by hand because they have a
+    /// non-uniform shape: the convention pipeline (`conventions`), the
+    /// multi-pass `duplication` family (five timing spans plus the
+    /// `duplicate_groups` side output), and `artifact_portability` (logs scan
+    /// statistics even when it finds nothing). Everything else is data-driven.
     Manual,
+    /// Single-closure detectors driven entirely by the descriptor table via
+    /// [`super::descriptor_runtime::run_descriptor_detectors`].
+    Generic(GenericDetectorRunner),
     Fingerprint(FingerprintDetectorRunner),
     Root(RootDetectorRunner),
 }
@@ -96,6 +104,38 @@ pub(crate) enum FingerprintDetectorRunner {
 pub(crate) enum RootDetectorRunner {
     TestTopology,
     TestWiring,
+}
+
+/// Identifies which single-closure detector a [`DetectorRuntime::Generic`]
+/// descriptor dispatches to. The descriptor table is the single registration
+/// site; [`super::descriptor_runtime`] owns the one-line invocation per variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GenericDetectorRunner {
+    Structural,
+    DeadCode,
+    CommentHygiene,
+    TestCoverage,
+    LayerOwnership,
+    Docs,
+    CompilerWarnings,
+    WrapperInference,
+    FieldPatterns,
+    DeprecationAge,
+    DeadGuard,
+    RequestedDetectors,
+    ConfigKeyUsage,
+    OutputCapture,
+    CoreBoundaryLeaks,
+    SourcePolicy,
+    MutatingResourceAccess,
+    RedirectValidation,
+    GlobalEnvGuard,
+    ParallelRunnerSetup,
+    RemoteExecutionPreflight,
+    EnumDispatchContracts,
+    PublicRegistryExposure,
+    CommandStatusContracts,
+    ThinCommandAdapter,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -137,7 +177,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
             AuditFinding::DirectorySprawl,
         ],
         access: DetectorAccess::RootOnly,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::Structural),
         timing_id: "detector.structural",
         log_label: "Structural",
         log_summary: "god files, high item counts",
@@ -166,7 +206,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
             AuditFinding::OrphanedInternal,
         ],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::DeadCode),
         timing_id: "detector.dead_code",
         log_label: "Dead code",
         log_summary: "unused params, unreferenced exports, orphaned internals",
@@ -183,7 +223,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
             AuditFinding::UpstreamWorkaround,
         ],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::CommentHygiene),
         timing_id: "detector.comment_hygiene",
         log_label: "Comment hygiene",
         log_summary: "TODO/FIXME/HACK markers, stale phrasing",
@@ -197,7 +237,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
             AuditFinding::VacuousTest,
         ],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::TestCoverage),
         timing_id: "detector.test_coverage",
         log_label: "Test coverage",
         log_summary: "missing test files, uncovered methods, orphaned tests",
@@ -206,7 +246,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "layer_ownership",
         findings: &[AuditFinding::LayerOwnershipViolation],
         access: DetectorAccess::RootOnly,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::LayerOwnership),
         timing_id: "detector.layer_ownership",
         log_label: "Layer ownership",
         log_summary: "architecture ownership violations",
@@ -241,7 +281,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
             AuditFinding::StaleDocReference,
         ],
         access: DetectorAccess::RootOnly,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::Docs),
         timing_id: "detector.docs",
         log_label: "Docs",
         log_summary: "broken references, stale paths",
@@ -250,7 +290,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "compiler_warnings",
         findings: &[AuditFinding::CompilerWarning],
         access: DetectorAccess::RootOnly,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::CompilerWarnings),
         timing_id: "detector.compiler_warnings",
         log_label: "Compiler warnings",
         log_summary: "dead code, unused imports, unused variables",
@@ -259,7 +299,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "wrapper_inference",
         findings: &[AuditFinding::MissingWrapperDeclaration],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::WrapperInference),
         timing_id: "detector.wrapper_inference",
         log_label: "Wrapper inference",
         log_summary: "missing wrapper declarations",
@@ -277,7 +317,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "field_patterns",
         findings: &[AuditFinding::RepeatedFieldPattern],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::FieldPatterns),
         timing_id: "detector.field_patterns",
         log_label: "Field patterns",
         log_summary: "repeated struct fields",
@@ -304,7 +344,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "deprecation_age",
         findings: &[AuditFinding::DeprecationAge],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::DeprecationAge),
         timing_id: "detector.deprecation_age",
         log_label: "Deprecation age",
         log_summary: "stale @deprecated tags",
@@ -313,7 +353,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "dead_guard",
         findings: &[AuditFinding::DeadGuard],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::DeadGuard),
         timing_id: "detector.dead_guard",
         log_label: "Dead guards",
         log_summary: "guards on guaranteed-available symbols",
@@ -328,7 +368,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
             AuditFinding::ConfigRoundtripAsymmetry,
         ],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::RequestedDetectors),
         timing_id: "detector.requested_detectors",
         log_label: "Requested detectors",
         log_summary: "extension rule packs",
@@ -337,7 +377,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "core_boundary_leaks",
         findings: &[AuditFinding::CoreBoundaryLeak],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::CoreBoundaryLeaks),
         timing_id: "detector.core_boundary_leaks",
         log_label: "Core boundary leaks",
         log_summary: "configured ecosystem terms in core source",
@@ -346,7 +386,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "source_policy",
         findings: &[AuditFinding::SourcePolicyViolation],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::SourcePolicy),
         timing_id: "detector.source_policy",
         log_label: "Source policy",
         log_summary: "configured source policy rules",
@@ -355,7 +395,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "mutating_resource_access",
         findings: &[AuditFinding::MutatingResourceAccess],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::MutatingResourceAccess),
         timing_id: "detector.mutating_resource_access",
         log_label: "Mutating resource access",
         log_summary: "resource mutations without configured access checks",
@@ -364,7 +404,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "redirect_validation",
         findings: &[AuditFinding::RedirectValidation],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::RedirectValidation),
         timing_id: "detector.redirect_validation",
         log_label: "Redirect validation",
         log_summary: "request-derived redirects without dominating validation",
@@ -373,7 +413,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "global_env_guard",
         findings: &[AuditFinding::GlobalEnvMutationGuard],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::GlobalEnvGuard),
         timing_id: "detector.global_env_guard",
         log_label: "Global env guards",
         log_summary: "test env mutation without shared guard",
@@ -391,7 +431,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "parallel_runner_setup",
         findings: &[AuditFinding::ParallelRunnerSetup],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::ParallelRunnerSetup),
         timing_id: "detector.parallel_runner_setup",
         log_label: "Parallel runner setup",
         log_summary: "duplicated execution contract setup",
@@ -400,7 +440,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "remote_execution_preflight",
         findings: &[AuditFinding::RemoteExecutionPreflight],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::RemoteExecutionPreflight),
         timing_id: "detector.remote_execution_preflight",
         log_label: "Remote execution preflight",
         log_summary: "remote execution path/artifact parity gaps",
@@ -409,7 +449,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "enum_dispatch_contracts",
         findings: &[AuditFinding::RepeatedEnumDispatchContract],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::EnumDispatchContracts),
         timing_id: "detector.enum_dispatch_contracts",
         log_label: "Enum dispatch contracts",
         log_summary: "repeated exhaustive enum matches",
@@ -427,7 +467,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "public_registry_exposure",
         findings: &[AuditFinding::PublicRegistryExposure],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::PublicRegistryExposure),
         timing_id: "detector.public_registry_exposure",
         log_label: "Public registry exposure",
         log_summary: "public metadata routes bypassing resolvers",
@@ -436,7 +476,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "config_key_usage",
         findings: &[AuditFinding::WriteOnlyConfigKey],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::ConfigKeyUsage),
         timing_id: "detector.config_key_usage",
         log_label: "Config key usage",
         log_summary: "write/accessor evidence without production reads",
@@ -454,7 +494,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "output_capture",
         findings: &[AuditFinding::UnboundedOutputCapture],
         access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::OutputCapture),
         timing_id: "detector.output_capture",
         log_label: "Output capture",
         log_summary: "unbounded stdout/stderr capture",
@@ -463,7 +503,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "command_status_contracts",
         findings: &[AuditFinding::CommandStatusContractViolation],
         access: DetectorAccess::RootOnly,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::CommandStatusContracts),
         timing_id: "detector.command_status_contracts",
         log_label: "Command status contracts",
         log_summary: "inconsistent no-op/dry-run status fields",
@@ -472,7 +512,7 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         id: "thin_command_adapter",
         findings: &[AuditFinding::ThinCommandAdapterViolation],
         access: DetectorAccess::RootOnly,
-        runtime: DetectorRuntime::Manual,
+        runtime: DetectorRuntime::Generic(GenericDetectorRunner::ThinCommandAdapter),
         timing_id: "detector.thin_command_adapter",
         log_label: "Thin command adapters",
         log_summary: "command modules accumulating orchestration logic",
@@ -527,114 +567,6 @@ impl AuditExecutionPlan {
             .iter()
             .find(|step| step.id == step_id)
             .is_some_and(|step| step.status == PlanStepStatus::Ready)
-    }
-
-    pub(crate) fn run_structural(&self) -> bool {
-        self.detector_enabled("structural")
-    }
-
-    pub(crate) fn run_duplication(&self) -> bool {
-        self.detector_enabled("duplication")
-    }
-
-    pub(crate) fn run_dead_code(&self) -> bool {
-        self.detector_enabled("dead_code")
-    }
-
-    pub(crate) fn run_comment_hygiene(&self) -> bool {
-        self.detector_enabled("comment_hygiene")
-    }
-
-    pub(crate) fn run_test_coverage(&self) -> bool {
-        self.detector_enabled("test_coverage")
-    }
-
-    pub(crate) fn run_layer_ownership(&self) -> bool {
-        self.detector_enabled("layer_ownership")
-    }
-
-    pub(crate) fn run_docs(&self) -> bool {
-        self.detector_enabled("docs")
-    }
-
-    pub(crate) fn run_compiler_warnings(&self) -> bool {
-        self.detector_enabled("compiler_warnings")
-    }
-
-    pub(crate) fn run_wrapper_inference(&self) -> bool {
-        self.detector_enabled("wrapper_inference")
-    }
-
-    pub(crate) fn run_field_patterns(&self) -> bool {
-        self.detector_enabled("field_patterns")
-    }
-
-    pub(crate) fn run_deprecation_age(&self) -> bool {
-        self.detector_enabled("deprecation_age")
-    }
-
-    pub(crate) fn run_dead_guard(&self) -> bool {
-        self.detector_enabled("dead_guard")
-    }
-
-    pub(crate) fn run_requested_detectors(&self) -> bool {
-        self.detector_enabled("requested_detectors")
-    }
-
-    pub(crate) fn run_core_boundary_leaks(&self) -> bool {
-        self.detector_enabled("core_boundary_leaks")
-    }
-
-    pub(crate) fn run_source_policy(&self) -> bool {
-        self.detector_enabled("source_policy")
-    }
-
-    pub(crate) fn run_mutating_resource_access(&self) -> bool {
-        self.detector_enabled("mutating_resource_access")
-    }
-
-    pub(crate) fn run_redirect_validation(&self) -> bool {
-        self.detector_enabled("redirect_validation")
-    }
-
-    pub(crate) fn run_global_env_guard(&self) -> bool {
-        self.detector_enabled("global_env_guard")
-    }
-
-    pub(crate) fn run_parallel_runner_setup(&self) -> bool {
-        self.detector_enabled("parallel_runner_setup")
-    }
-
-    pub(crate) fn run_remote_execution_preflight(&self) -> bool {
-        self.detector_enabled("remote_execution_preflight")
-    }
-
-    pub(crate) fn run_enum_dispatch_contracts(&self) -> bool {
-        self.detector_enabled("enum_dispatch_contracts")
-    }
-
-    pub(crate) fn run_public_registry_exposure(&self) -> bool {
-        self.detector_enabled("public_registry_exposure")
-    }
-
-    pub(crate) fn run_config_key_usage(&self) -> bool {
-        self.detector_enabled("config_key_usage")
-    }
-
-    pub(crate) fn run_artifact_portability(&self) -> bool {
-        self.detector_enabled("artifact_portability")
-    }
-
-    pub(crate) fn run_output_capture(&self) -> bool {
-        self.detector_enabled("output_capture")
-    }
-
-    pub(crate) fn run_command_status_contracts(&self) -> bool {
-        self.detector_enabled("command_status_contracts")
-    }
-
-    pub(crate) fn run_thin_command_adapter(&self) -> bool {
-        self.detector_enabled("thin_command_adapter")
     }
 
     pub(crate) fn requires_discovery(&self) -> bool {
@@ -709,14 +641,14 @@ mod tests {
         let plan = AuditExecutionPlan::from_profile_and_filters(AuditProfile::Pr, &[], &[]);
 
         assert!(!plan.requires_discovery());
-        assert!(plan.run_structural());
+        assert!(plan.detector_enabled("structural"));
         assert!(plan.detector_enabled("test_topology"));
         assert!(plan.detector_enabled("command_status_contracts"));
-        assert!(plan.run_thin_command_adapter());
-        assert!(!plan.run_duplication());
-        assert!(!plan.run_dead_code());
-        assert!(!plan.run_source_policy());
-        assert!(!plan.run_compiler_warnings());
+        assert!(plan.detector_enabled("thin_command_adapter"));
+        assert!(!plan.detector_enabled("duplication"));
+        assert!(!plan.detector_enabled("dead_code"));
+        assert!(!plan.detector_enabled("source_policy"));
+        assert!(!plan.detector_enabled("compiler_warnings"));
     }
 
     #[test]
@@ -727,8 +659,8 @@ mod tests {
             &[],
         );
 
-        assert!(!plan.run_structural());
-        assert!(!plan.run_duplication());
+        assert!(!plan.detector_enabled("structural"));
+        assert!(!plan.detector_enabled("duplication"));
         assert!(!plan.requires_discovery());
     }
 
@@ -740,8 +672,8 @@ mod tests {
         // which silently disabled the detector under this filter.
         let plan = AuditExecutionPlan::from_filters(&[AuditFinding::UpstreamWorkaround], &[]);
 
-        assert!(plan.run_comment_hygiene());
-        assert!(!plan.run_dead_code());
+        assert!(plan.detector_enabled("comment_hygiene"));
+        assert!(!plan.detector_enabled("dead_code"));
     }
 
     #[test]
@@ -755,6 +687,6 @@ mod tests {
             ],
         );
 
-        assert!(!plan.run_comment_hygiene());
+        assert!(!plan.detector_enabled("comment_hygiene"));
     }
 }

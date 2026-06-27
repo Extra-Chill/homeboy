@@ -71,7 +71,7 @@ pub use duplication::DuplicateGroup;
 pub use execution_plan::AuditProfile;
 pub(crate) use execution_plan::{
     AuditExecutionPlan, DetectorDescriptor, DetectorRuntime, FingerprintDetectorRunner,
-    RootDetectorRunner,
+    GenericDetectorRunner, RootDetectorRunner,
 };
 pub use findings::{homeboy_finding_from_audit, Finding, FindingConfidence, Severity};
 pub use fingerprint::FileFingerprint;
@@ -125,7 +125,7 @@ mod tests {
         let plan = AuditExecutionPlan::from_filters(&[AuditFinding::VacuousTest], &[]);
 
         assert!(
-            plan.run_test_coverage(),
+            plan.detector_enabled("test_coverage"),
             "coverage detector also emits vacuous_test for mapped tests"
         );
         assert!(

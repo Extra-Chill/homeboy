@@ -526,10 +526,10 @@ fn execution_plan_filters_to_requested_detector_family() {
     {
         let plan = AuditExecutionPlan::from_filters(&[finding], &[]);
 
-        assert_eq!(plan.run_structural(), structural_enabled);
-        assert_eq!(plan.run_duplication(), duplication_enabled);
-        assert!(!plan.run_dead_code());
-        assert!(!plan.run_compiler_warnings());
+        assert_eq!(plan.detector_enabled("structural"), structural_enabled);
+        assert_eq!(plan.detector_enabled("duplication"), duplication_enabled);
+        assert!(!plan.detector_enabled("dead_code"));
+        assert!(!plan.detector_enabled("compiler_warnings"));
         assert_eq!(
             detector_step_status(&plan, "conventions"),
             &PlanStepStatus::Disabled
@@ -614,7 +614,7 @@ fn execution_plan_for_excluded_structural_detector_disables_plan_step() {
         ],
     );
 
-    assert!(!plan.run_structural());
+    assert!(!plan.detector_enabled("structural"));
     assert_eq!(
         detector_step_status(&plan, "structural"),
         &PlanStepStatus::Disabled
