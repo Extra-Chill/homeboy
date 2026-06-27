@@ -222,6 +222,46 @@ assert.equal(resourcePlan.targets[0].cases[2].execution_tier, 'plan_only');
 assert.equal(resourcePlan.targets[1].cases.length, 1);
 assert.equal(resourcePlan.targets[1].cases[0].intent, 'exercise-wordpress-surface');
 
+const fixtureBoundCrudPlan = buildWordPressFuzzPlanFromSurfaces({
+	surfaces: [{
+		id: 'rest:items-id',
+		type: 'rest-route',
+		resource_type: 'item',
+		route: '/example/v1/items/(?P<id>[\\d]+)',
+		allowCrudMutations: true,
+		fixture_bindings: {
+			fixture_id: 'fixture:item:primary',
+			artifact_ref: { id: 'artifact:item-manifest', path: 'fixtures/items.json' },
+			route_params: {
+				id: { value: 42, artifact_ref: { id: 'artifact:item-id', path: 'fixtures/items.json', pointer: '/primary/id' } },
+			},
+			request_bodies: {
+				create: { title: 'Created fixture item' },
+				update: { title: 'Updated fixture item' },
+				delete: { force: true },
+			},
+		},
+	}],
+}, {
+	mutation_mode: 'isolated',
+	runtimeCapabilities: {
+		capabilities: ['crud', 'snapshot', 'restore', 'reset'],
+	},
+});
+const fixtureBoundCases = fixtureBoundCrudPlan.targets[0].cases;
+assert.deepEqual(fixtureBoundCases.map((testCase) => testCase.intent), ['list-items', 'read-item', 'create-item', 'update-item', 'delete-item']);
+for (const testCase of fixtureBoundCases) {
+	assert.equal(testCase.operation.transport.route, '/example/v1/items/42');
+	assert.equal(testCase.operation.transport.metadata.route_template, '/example/v1/items/(?P<id>[\\d]+)');
+	assert.deepEqual(testCase.operation.input.route_params, { id: 42 });
+	assert.equal(testCase.metadata.fixture_binding.fixture_id, 'fixture:item:primary');
+	assert.deepEqual(testCase.metadata.fixture_binding.route_params.id.artifact_ref, { id: 'artifact:item-id', path: 'fixtures/items.json', pointer: '/primary/id' });
+}
+assert.deepEqual(fixtureBoundCases.find((testCase) => testCase.intent === 'create-item').operation.input.request_body, { title: 'Created fixture item' });
+assert.deepEqual(fixtureBoundCases.find((testCase) => testCase.intent === 'update-item').operation.input.request_body, { title: 'Updated fixture item' });
+assert.deepEqual(fixtureBoundCases.find((testCase) => testCase.intent === 'delete-item').operation.input.request_body, { force: true });
+assert.equal(fixtureBoundCases.find((testCase) => testCase.intent === 'read-item').operation.input.request_body, undefined);
+
 const adminInteractionPlan = buildWordPressFuzzPlanFromSurfaces({
 	admin: [{
 		id: 'admin:bulk-posts',
