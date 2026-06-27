@@ -38,7 +38,7 @@ pub(super) fn exec_worker_local_with_process_output(
     let mut runner = load(runner_id)?;
     runner.kind = RunnerKind::Local;
     runner.server_id = None;
-    let plan = prepare_daemon_local_process(RunnerProcessRequest {
+    let mut plan = prepare_daemon_local_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
         runner: Some(runner),
         cwd: options.cwd.clone(),
@@ -52,6 +52,8 @@ pub(super) fn exec_worker_local_with_process_output(
         require_paths: options.require_paths.clone(),
         validate_require_paths_on_host: true,
     })?;
+    let run_id_hint =
+        apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref());
     super::super::workload::validate_runner_workload_dispatch(
         options.runner_workload.as_ref(),
         runner_id,
@@ -84,7 +86,7 @@ pub(super) fn exec_worker_local_with_process_output(
     )?;
     preflight_worker_local_capability_plan(&plan.runner, capability_preflight.as_ref(), &plan.env)?;
     let output = execute(&plan)?;
-    Ok(exec_output(
+    let (mut output, exit_code) = exec_output(
         &plan.runner,
         RunnerExecMode::Local,
         plan.cwd,
@@ -94,7 +96,9 @@ pub(super) fn exec_worker_local_with_process_output(
         plan.require_paths,
         &plan.env,
         &[],
-    ))
+    );
+    append_runner_exec_diagnostic_hint(&mut output, run_id_hint);
+    Ok((output, exit_code))
 }
 
 pub(super) fn preflight_worker_local_capability_plan(
