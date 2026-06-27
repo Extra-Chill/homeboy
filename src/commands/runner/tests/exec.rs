@@ -1,8 +1,8 @@
 use super::super::dispatch::raw_exec_command_run;
 use super::super::exec::{
-    exec, prepare_runner_exec_command, prepare_runner_exec_env, promote_runner_exec_artifact_dirs,
-    promote_runner_exec_artifacts, read_bounded, read_runner_exec_script,
-    RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
+    exec, exec_workspace_context, prepare_runner_exec_command, prepare_runner_exec_env,
+    promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts, read_bounded,
+    read_runner_exec_script, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
 use super::super::types::RUNNER_EXEC_SCRIPT_ENV;
 
@@ -54,6 +54,21 @@ fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
     assert_eq!(value["stdout"], "hello\n");
     assert_eq!(value["stderr"], "warn\n");
     assert_eq!(value["job_id"], "job-123");
+}
+
+#[test]
+fn sync_workspace_exec_rejects_explicit_cwd() {
+    let err = exec_workspace_context(
+        "lab",
+        Some("/runner/workspace/project".to_string()),
+        Some("/local/project".to_string()),
+        false,
+    )
+    .expect_err("cwd and sync-workspace must conflict");
+
+    assert!(err
+        .to_string()
+        .contains("--cwd and --sync-workspace are mutually exclusive"));
 }
 
 #[test]
@@ -151,6 +166,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
+            None,
             false,
             false,
             Vec::new(),
@@ -223,6 +239,7 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
         let (output, exit_code) = exec(
             "lab-local",
             Some(workspace.path().display().to_string()),
+            None,
             None,
             false,
             false,
@@ -299,6 +316,7 @@ fn runner_exec_structured_summary_is_independent_of_large_stdout() {
         let (output, exit_code) = exec(
             "lab-local",
             Some(workspace.path().display().to_string()),
+            None,
             None,
             false,
             false,
@@ -502,6 +520,7 @@ fn runner_exec_rejects_artifacts_without_run_id() {
         "lab-local",
         None,
         None,
+        None,
         false,
         false,
         Vec::new(),
@@ -555,6 +574,7 @@ fn runner_exec_output(runner_id: &str, mode: RunnerExecMode, remote_cwd: &str) -
 fn runner_exec_rejects_summaries_without_run_id() {
     let err = exec(
         "lab-local",
+        None,
         None,
         None,
         false,
