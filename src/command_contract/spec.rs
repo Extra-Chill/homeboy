@@ -496,6 +496,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         RIG_LAB_SUPPORT,
     ),
     command_spec("runner", CommandJsonFamily::Workspace),
+    command_spec_with_output_notes(
+        "lab",
+        CommandJsonFamily::Workspace,
+        "Lab planning commands compose existing runner/workspace/run artifact primitives without executing workloads",
+    ),
     command_spec("runtime", CommandJsonFamily::Workspace),
     command_spec("worktree", CommandJsonFamily::Workspace),
     lab_command_spec_with_summary(
