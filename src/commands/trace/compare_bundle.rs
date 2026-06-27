@@ -30,16 +30,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
                 chrono::Utc::now().format("%Y%m%d%H%M%S")
             ))
     });
-    std::fs::create_dir_all(&output_dir).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to create trace compare bundle output dir {}: {}",
-                output_dir.display(),
-                err
-            ),
-            Some("trace.compare_bundle.output_dir".to_string()),
-        )
-    })?;
+    homeboy::core::trace_compare::prepare_compare_bundle_dir(&output_dir)?;
 
     let mut cells = Vec::new();
     let mut scenario_entries = Vec::new();
@@ -47,16 +38,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
     for (index, scenario) in scenarios.iter().enumerate() {
         let scenario_slug = sanitize_path_component(scenario);
         let scenario_dir = output_dir.join(format!("{:03}-{}", index + 1, scenario_slug));
-        std::fs::create_dir_all(&scenario_dir).map_err(|err| {
-            homeboy::core::Error::internal_io(
-                format!(
-                    "Failed to create trace compare bundle scenario dir {}: {}",
-                    scenario_dir.display(),
-                    err
-                ),
-                Some("trace.compare_bundle.scenario_dir".to_string()),
-            )
-        })?;
+        homeboy::core::trace_compare::prepare_compare_bundle_dir(&scenario_dir)?;
 
         let mut compare_args = args.clone();
         compare_args.comp.component = Some("compare".to_string());
@@ -65,7 +47,7 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         compare_args.output_dir = Some(scenario_dir.clone());
 
         let command = compare_command(&compare_args, &component, scenario, &scenario_dir);
-        write_scenario_log(
+        homeboy::core::trace_compare::write_compare_bundle_scenario_log(
             &scenario_dir.join("scenario.log"),
             &command,
             "running",
@@ -74,20 +56,10 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         let (passed, status, exit_code, failure) = match run_compare_targets(compare_args) {
             Ok((TraceCommandOutput::Compare(compare), exit_code)) => {
                 write_json_artifact(&scenario_dir.join("scenario.compare.json"), &compare)?;
-                std::fs::write(
-                    scenario_dir.join("scenario.compare.md"),
-                    super::output::render_trace_compare_evidence_markdown(&compare),
-                )
-                .map_err(|err| {
-                    homeboy::core::Error::internal_io(
-                        format!(
-                            "Failed to write trace compare bundle scenario markdown {}: {}",
-                            scenario_dir.join("scenario.compare.md").display(),
-                            err
-                        ),
-                        Some("trace.compare_bundle.scenario_markdown".to_string()),
-                    )
-                })?;
+                homeboy::core::trace_compare::write_compare_bundle_text(
+                    &scenario_dir.join("scenario.compare.md"),
+                    &super::output::render_trace_compare_evidence_markdown(&compare),
+                )?;
                 let failed = exit_code != 0;
                 (
                     !failed,
@@ -98,16 +70,26 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
             }
             Ok((_, exit_code)) => {
                 let failure = "trace compare-bundle expected compare output".to_string();
-                write_error_scenario_artifacts(&scenario_dir, &component, scenario, &failure)?;
+                homeboy::core::trace_compare::write_compare_bundle_error_scenario(
+                    &scenario_dir,
+                    &component,
+                    scenario,
+                    &failure,
+                )?;
                 (false, "error".to_string(), exit_code, Some(failure))
             }
             Err(err) => {
                 let failure = err.to_string();
-                write_error_scenario_artifacts(&scenario_dir, &component, scenario, &failure)?;
+                homeboy::core::trace_compare::write_compare_bundle_error_scenario(
+                    &scenario_dir,
+                    &component,
+                    scenario,
+                    &failure,
+                )?;
                 (false, "error".to_string(), 1, Some(failure))
             }
         };
-        write_scenario_log(
+        homeboy::core::trace_compare::write_compare_bundle_scenario_log(
             &scenario_dir.join("scenario.log"),
             &command,
             &status,
@@ -175,16 +157,10 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         scenarios: scenario_entries,
     };
     write_json_artifact(&manifest_path, &manifest)?;
-    std::fs::write(&readme_path, render_compare_bundle_readme(&manifest)).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to write trace compare bundle README {}: {}",
-                readme_path.display(),
-                err
-            ),
-            Some("trace.compare_bundle.readme".to_string()),
-        )
-    })?;
+    homeboy::core::trace_compare::write_compare_bundle_text(
+        &readme_path,
+        &render_compare_bundle_readme(&manifest),
+    )?;
 
     let output = extension_trace::TraceScenarioMatrixOutput {
         command: "trace.compare-bundle",
@@ -205,20 +181,10 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         cells,
     };
     write_json_artifact(&bundle_json_path, &output)?;
-    std::fs::write(
+    homeboy::core::trace_compare::write_compare_bundle_text(
         &summary_path,
-        super::output::render_scenario_matrix_markdown(&output),
-    )
-    .map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to write trace compare bundle summary {}: {}",
-                summary_path.display(),
-                err
-            ),
-            Some("trace.compare_bundle.summary".to_string()),
-        )
-    })?;
+        &super::output::render_scenario_matrix_markdown(&output),
+    )?;
 
     Ok((TraceCommandOutput::ScenarioMatrix(output), exit_code))
 }
@@ -317,63 +283,6 @@ fn compare_command(
         parts.push("--canonical".to_string());
     }
     parts.join(" ")
-}
-
-fn write_scenario_log(
-    path: &Path,
-    command: &str,
-    status: &str,
-    failure: Option<&str>,
-) -> homeboy::core::Result<()> {
-    let mut log = format!("command: {}\nstatus: {}\n", command, status);
-    if let Some(failure) = failure {
-        log.push_str(&format!("failure: {}\n", failure));
-    }
-    std::fs::write(path, log).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to write trace compare bundle log {}: {}",
-                path.display(),
-                err
-            ),
-            Some("trace.compare_bundle.log".to_string()),
-        )
-    })
-}
-
-fn write_error_scenario_artifacts(
-    scenario_dir: &Path,
-    component: &str,
-    scenario: &str,
-    failure: &str,
-) -> homeboy::core::Result<()> {
-    let value = serde_json::json!({
-        "command": "trace.compare-bundle.scenario",
-        "passed": false,
-        "status": "error",
-        "exit_code": 1,
-        "component": component,
-        "scenario_id": scenario,
-        "failure": failure,
-    });
-    write_json_artifact(&scenario_dir.join("scenario.compare.json"), &value)?;
-    std::fs::write(
-        scenario_dir.join("scenario.compare.md"),
-        format!(
-            "# Trace Compare Scenario Error\n\n- **Component:** `{}`\n- **Scenario:** `{}`\n- **Status:** `error`\n- **Failure:** {}\n",
-            component, scenario, failure
-        ),
-    )
-    .map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to write trace compare bundle scenario error markdown {}: {}",
-                scenario_dir.join("scenario.compare.md").display(),
-                err
-            ),
-            Some("trace.compare_bundle.scenario_error_markdown".to_string()),
-        )
-    })
 }
 
 fn render_compare_bundle_readme(manifest: &TraceCompareBundleManifest) -> String {

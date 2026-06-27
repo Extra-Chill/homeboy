@@ -196,6 +196,83 @@ pub fn persist_compare_pair_artifact(
     write_json_artifact(path, pair)
 }
 
+/// Create the output directory for a compare-bundle run (and its scenario
+/// subdirectories), mirroring `mkdir -p`. Bundle runs accumulate many
+/// directories, so the create-dir orchestration lives here, keeping the command
+/// a thin adapter that only computes which directories it needs.
+pub fn prepare_compare_bundle_dir(dir: &Path) -> crate::core::Result<()> {
+    std::fs::create_dir_all(dir).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!(
+                "Failed to create trace compare bundle dir {}: {}",
+                dir.display(),
+                err
+            ),
+            Some("trace.compare_bundle.dir".to_string()),
+        )
+    })
+}
+
+/// Write a pre-rendered text artifact for a compare-bundle run. The command
+/// layer renders the content; this owns the filesystem write so persistence
+/// orchestration never accumulates in the command.
+pub fn write_compare_bundle_text(path: &Path, content: &str) -> crate::core::Result<()> {
+    std::fs::write(path, content).map_err(|err| {
+        crate::core::Error::internal_io(
+            format!(
+                "Failed to write trace compare bundle artifact {}: {}",
+                path.display(),
+                err
+            ),
+            Some("trace.compare_bundle.write".to_string()),
+        )
+    })
+}
+
+/// Render and persist a scenario log for a compare-bundle run. Owns both the
+/// log formatting and the filesystem write so the command layer just supplies
+/// the command line, status, and optional failure detail.
+pub fn write_compare_bundle_scenario_log(
+    path: &Path,
+    command: &str,
+    status: &str,
+    failure: Option<&str>,
+) -> crate::core::Result<()> {
+    let mut log = format!("command: {}\nstatus: {}\n", command, status);
+    if let Some(failure) = failure {
+        log.push_str(&format!("failure: {}\n", failure));
+    }
+    write_compare_bundle_text(path, &log)
+}
+
+/// Render and persist the error-scenario artifacts (JSON + markdown) for a
+/// compare-bundle scenario that failed before producing a comparison. Owns the
+/// filesystem writes so the command layer only supplies the failure detail.
+pub fn write_compare_bundle_error_scenario(
+    scenario_dir: &Path,
+    component: &str,
+    scenario: &str,
+    failure: &str,
+) -> crate::core::Result<()> {
+    let value = serde_json::json!({
+        "command": "trace.compare-bundle.scenario",
+        "passed": false,
+        "status": "error",
+        "exit_code": 1,
+        "component": component,
+        "scenario_id": scenario,
+        "failure": failure,
+    });
+    write_json_artifact(&scenario_dir.join("scenario.compare.json"), &value)?;
+    write_compare_bundle_text(
+        &scenario_dir.join("scenario.compare.md"),
+        &format!(
+            "# Trace Compare Scenario Error\n\n- **Component:** `{}`\n- **Scenario:** `{}`\n- **Status:** `error`\n- **Failure:** {}\n",
+            component, scenario, failure
+        ),
+    )
+}
+
 /// An active observation run bracketing a trace-compare invocation. Owns the
 /// `ObservationStore` interactions (run start, artifact recording, run finish)
 /// so the command layer never touches run-artifact persistence directly.
