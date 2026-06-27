@@ -7,7 +7,6 @@
     ".": "./index.js",
     "./controller-loop-proof-validator": "./lib/controller-loop-proof-validator.js",
     "./agent-task-outcome-normalizer": "./lib/agent-task-outcome-normalizer.js",
-    "./batch-production-loop-runner": "./lib/batch-production-loop-runner.js",
     "./bounded-production-loop-runner": "./lib/bounded-production-loop-runner.js",
     "./deterministic-loop-runner": "./lib/deterministic-loop-runner.js",
     "./fanout-reconcile-runner": "./lib/fanout-reconcile-runner.js",
