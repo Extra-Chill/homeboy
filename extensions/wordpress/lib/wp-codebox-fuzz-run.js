@@ -38,6 +38,7 @@ const {
 const {
 	WP_CODEBOX_FUZZ_PUBLIC_ABILITIES,
 	WP_CODEBOX_FUZZ_PUBLIC_COMMANDS,
+	WP_CODEBOX_FUZZ_PUBLIC_RUNNER_MODES,
 	buildWordPressFuzzCommandManifest,
 	requiredWpCodeboxContractsForFuzzPlan,
 } = require('./wordpress-fuzz-command-manifest');
@@ -849,7 +850,8 @@ async function runWpCodeboxPublicFuzzOperation(options = {}) {
 		return unsupportedWpCodeboxPublicFuzzResult({ request, capabilities, preflight });
 	}
 
-	const cliResult = await runWpCodeboxPublicCli(command, wpCodeboxPublicCliInput(request, options), options);
+	const runnerMode = publicFuzzCliRunnerModeForRequest(request, { ...options, requiredPlanContracts: preflight.required });
+	const cliResult = await runWpCodeboxPublicCli(command, wpCodeboxPublicCliInput(request, options), { ...options, runnerMode });
 	if (cliResult.status !== 0) {
 		return {
 			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
@@ -1038,6 +1040,7 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 			commands: requiredCommands,
 			abilities: requiredAbilities,
 			capabilities: requiredPlanContracts.capabilities,
+			runner_modes: requiredPlanContracts.runner_modes,
 		},
 		command_manifest: commandManifest,
 		missing_contracts: missingContracts,
@@ -1057,13 +1060,40 @@ function requiredPublicCommandsForRequest(request = {}, requiredPlanContracts = 
 	}
 	if (ability === DEFAULT_FUZZ_SUITE_ABILITY) {
 		const input = wpCodeboxFuzzRequestInput(request);
+		const runnerMode = publicFuzzCliRunnerModeForRequest(request, { requiredPlanContracts });
 		return unique([
 			'run-fuzz-suite',
-			...normalizeArray(requiredPlanContracts.commands),
-			...(suiteInputRequiresWorkloadCommand(input) ? ['run-wordpress-workload'] : []),
+			...normalizeArray(requiredPlanContracts.commands).filter((command) => runnerMode === 'runtime-backed' ? command !== 'run-wordpress-workload' : true),
+			...(runnerMode === 'runtime-backed' || !suiteInputRequiresWorkloadCommand(input) ? [] : ['run-wordpress-workload']),
 		]);
 	}
 	return requiredPlanContracts.commands?.length > 0 ? unique(requiredPlanContracts.commands) : [...WP_CODEBOX_PUBLIC_CLI_COMMANDS];
+}
+
+function publicFuzzCliRunnerModeForRequest(request = {}, options = {}) {
+	const explicit = nonEmptyString(options.runnerMode || options.runner_mode || request.runner_mode || request.runnerMode || request.input?.runner_mode || request.input?.runnerMode || request.input?.metadata?.runner_mode || request.input?.metadata?.runnerMode);
+	if (explicit) {
+		return explicit;
+	}
+	const requiredPlanContracts = options.requiredPlanContracts || options.required_plan_contracts || {};
+	if (normalizeArray(requiredPlanContracts.runner_modes || requiredPlanContracts.runnerModes).includes('runtime-backed')) {
+		return 'runtime-backed';
+	}
+	const input = wpCodeboxFuzzRequestInput(request, options);
+	if (suiteInputRequiresWorkloadCommand(input) || suiteInputRequiresRuntimeBackedRunner(input)) {
+		return 'runtime-backed';
+	}
+	return undefined;
+}
+
+function suiteInputRequiresRuntimeBackedRunner(input = {}) {
+	return normalizeArray(input.cases).some((testCase) => {
+		const commands = normalizeArray(testCase.phases?.action).map((step) => step?.command).filter(Boolean);
+		const entrypoint = testCase.target?.entrypoint || testCase.target?.id;
+		return String(entrypoint || '').startsWith('wordpress.')
+			|| commands.some((command) => String(command || '').startsWith('wordpress.'))
+			|| normalizeArray(testCase.inputs?.observation_surfaces || testCase.inputs?.observationSurfaces).some((surface) => ['browser', 'editor', 'page', 'admin'].some((keyword) => String(surface).includes(keyword)));
+	});
 }
 
 function suiteInputRequiresWorkloadCommand(input = {}) {
@@ -1085,6 +1115,7 @@ function normalizeWpCodeboxPublicFuzzCapabilities(input = {}) {
 	return {
 		schema: 'homeboy/wp-codebox-public-fuzz-capabilities/v1',
 		commands: Object.fromEntries(WP_CODEBOX_PUBLIC_CLI_COMMANDS.map((command) => [command, commands[command] === true])),
+		runner_modes: Object.fromEntries(WP_CODEBOX_FUZZ_PUBLIC_RUNNER_MODES.map((runnerMode) => [runnerMode, input.runner_modes?.[runnerMode] !== false && input.runnerModes?.[runnerMode] !== false])),
 	};
 }
 
@@ -1142,10 +1173,18 @@ async function runWpCodeboxPublicCli(command, input, options = {}) {
 	const inputFile = path.join(tempDir, 'input.json');
 	try {
 		fs.writeFileSync(inputFile, `${JSON.stringify(input)}\n`, 'utf8');
-		return runWpCodeboxPublicCliCommand([command, '--input-file', inputFile, '--format=json'], options);
+		return runWpCodeboxPublicCliCommand(wpCodeboxPublicCliArgs(command, inputFile, options), options);
 	} finally {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	}
+}
+
+function wpCodeboxPublicCliArgs(command, inputFile, options = {}) {
+	const runnerMode = nonEmptyString(options.runnerMode || options.runner_mode);
+	if (command === 'run-fuzz-suite' && runnerMode) {
+		return [command, `--runner-mode=${runnerMode}`, '--input-file', inputFile, '--json'];
+	}
+	return [command, '--input-file', inputFile, '--format=json'];
 }
 
 function runWpCodeboxPublicCliCommand(args, options = {}) {
@@ -2217,6 +2256,10 @@ function requiredString(value, name) {
 	return value;
 }
 
+function nonEmptyString(value) {
+	return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
 function stripUndefined(value) {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
 		return value;
@@ -2254,6 +2297,7 @@ module.exports = {
 	wordpressFuzzPostprocessExpectedArtifacts,
 	detectWpCodeboxPublicFuzzCapabilities,
 	preflightWpCodeboxFuzzCapabilityContract,
+	publicFuzzCliRunnerModeForRequest,
 	runWpCodeboxFuzzSuite,
 	runWpCodeboxPublicFuzzOperation,
 	wpCodeboxFuzzExecutionRequest,

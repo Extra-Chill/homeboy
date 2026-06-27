@@ -28,6 +28,7 @@ const {
 	normalizeWpCodeboxFuzzSuiteResult,
 	detectWpCodeboxPublicFuzzCapabilities,
 	preflightWpCodeboxFuzzCapabilityContract,
+	publicFuzzCliRunnerModeForRequest,
 	runWpCodeboxPublicFuzzOperation,
 	runWpCodeboxFuzzSuite,
 	wordpressFuzzPostprocessBinding,
@@ -180,10 +181,12 @@ assert.deepEqual(preflightMissingCommand.missing_contracts.map((contract) => con
 assert.equal(preflightMissingCommand.diagnostics[0].code, 'wp_codebox_fuzz_missing_public_cli_command');
 assert.equal(preflightMissingCommand.command_manifest.schema, 'homeboy/wordpress-fuzz-command-manifest/v1');
 assert.deepEqual(preflightMissingCommand.command_manifest.case_intents['request-rest-route'].commands, ['run-wordpress-workload']);
+assert.deepEqual(preflightMissingCommand.command_manifest.case_intents['request-rest-route'].runner_modes, ['runtime-backed']);
 
 const commandManifest = buildWordPressFuzzCommandManifest();
 assert.deepEqual(commandManifest.wp_codebox.public_commands, ['run-fuzz-suite', 'run-wordpress-workload']);
 assert.equal(commandManifest.wp_codebox.abilities.runWorkload, DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY);
+assert.deepEqual(commandManifest.wp_codebox.runner_modes, ['runtime-backed']);
 
 const preflightMissingAbility = preflightWpCodeboxFuzzCapabilityContract({
 	request: taskRequest,
@@ -484,8 +487,9 @@ const genericPlanPreflight = preflightWpCodeboxFuzzCapabilityContract({
 	runtimeContractManifest: manifest,
 	publicCliCapabilities: { commands: { 'run-fuzz-suite': true } },
 });
-assert.equal(genericPlanPreflight.ok, false);
-assert.equal(genericPlanPreflight.missing_contracts.some((contract) => contract.command === 'run-wordpress-workload'), true);
+assert.equal(genericPlanPreflight.ok, true);
+assert.deepEqual(genericPlanPreflight.required.commands, ['run-fuzz-suite']);
+assert.equal(publicFuzzCliRunnerModeForRequest(genericPlanTaskRequest), 'runtime-backed');
 
 let invoked = false;
 runWpCodeboxFuzzSuite({
@@ -1019,7 +1023,8 @@ runWpCodeboxFuzzSuite({
 		env: { resultsFile: path.join(stagedArtifactRoot, 'fuzz-results.json') },
 		runPublicCli: ({ args }) => {
 			if (args.includes('--help')) return { status: 0, stdout: 'usage' };
-			const publicCliInput = JSON.parse(fs.readFileSync(args[2], 'utf8'));
+			assert.deepEqual([args[0], args[1], args[2], args[4]], ['run-fuzz-suite', '--runner-mode=runtime-backed', '--input-file', '--json']);
+			const publicCliInput = JSON.parse(fs.readFileSync(args[3], 'utf8'));
 			const workload = publicCliInput.cases[0].input;
 			const stagedFiles = publicCliInput.cases[0].input.staged_files;
 			assert.equal(workload.steps[0].helperPath, 'tools/artifact-helper.mjs');
