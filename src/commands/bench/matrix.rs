@@ -587,7 +587,14 @@ fn run_component_with_rig_context(
         super::effective_extension_overrides(&args.extension_override.extensions, rig_spec);
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
-    super::warn_unknown_setting_keys(&ctx, &args.setting_args);
+    super::warn_unknown_setting_keys(
+        &ctx,
+        &args.setting_args,
+        rig_spec
+            .and_then(|spec| spec.bench.as_ref())
+            .map(|bench| bench.accepted_settings.as_slice())
+            .unwrap_or(&[]),
+    );
     homeboy::core::hygiene::require_dependency_hygiene_for_source_with_settings(
         &ctx.source_path,
         ctx.extension_path.as_deref(),

@@ -400,6 +400,13 @@ pub struct BenchSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warmup_iterations: Option<u64>,
 
+    /// Setting keys accepted by rig-owned bench orchestration, such as
+    /// `bench_prepare` pipelines or out-of-tree workloads. These keys are
+    /// validated alongside extension manifest settings so rig inputs do not
+    /// warn as extension-ignored typos.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_settings: Vec<String>,
+
     /// Optional matrix axes for cross-rig bench comparison reporting.
     ///
     /// Example: `{ "runtime": "sdk", "substrate": "bfb" }`. When
