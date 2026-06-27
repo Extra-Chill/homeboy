@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.5] - 2026-06-27
+
+### Changed
+- Generalize WordPress query request profiling
+
 ## [3.19.4] - 2026-06-27
 
 ### Changed
