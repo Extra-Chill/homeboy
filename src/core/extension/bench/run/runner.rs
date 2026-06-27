@@ -168,6 +168,7 @@ pub(crate) fn build_runner(
             &args.extra_workloads,
             "bench_workloads",
         )),
+        env_provider_extensions: &args.env_provider_extensions,
         invocation_requirements: args.invocation_requirements.clone(),
     })?
     .env("HOMEBOY_BENCH_ITERATIONS", &args.iterations.to_string())

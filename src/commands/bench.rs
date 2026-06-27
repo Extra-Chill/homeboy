@@ -796,6 +796,18 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
             passthrough_args,
             scenario_ids: args.scenario_ids.clone(),
             extra_workloads,
+            env_provider_extensions: rig_spec
+                .as_ref()
+                .and_then(|spec| {
+                    ctx.extension_id.as_deref().map(|id| {
+                        rig::env_provider_extensions_for_extension_workloads(
+                            spec,
+                            rig::RigWorkloadKind::Bench,
+                            id,
+                        )
+                    })
+                })
+                .unwrap_or_default(),
             rig_package: rig_context
                 .as_ref()
                 .and_then(|context| rig::package_evidence(&context.spec.id)),

@@ -302,6 +302,7 @@ fn fuzz_rig_workload_inputs(
     let Some((context, extension_id)) = rig_context.zip(extension_id) else {
         return rig::RigExtensionWorkloadInputs {
             workload_paths: Vec::new(),
+            env_provider_extensions: Vec::new(),
             invocation_requirements: InvocationRequirements::default(),
         };
     };

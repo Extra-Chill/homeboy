@@ -40,6 +40,7 @@ pub struct ExtensionRunner {
     /// conflict — strictly more expressive). See SettingArgs docstring.
     settings_json_overrides: Vec<(String, serde_json::Value)>,
     env_vars: Vec<(String, String)>,
+    env_provider_extensions: Vec<String>,
     script_args: Vec<String>,
     path_override: Option<String>,
     pre_loaded_component: Option<Component>,
@@ -78,6 +79,7 @@ impl ExtensionRunner {
             settings_overrides: Vec::new(),
             settings_json_overrides: Vec::new(),
             env_vars: Vec::new(),
+            env_provider_extensions: Vec::new(),
             script_args: Vec::new(),
             path_override: None,
             pre_loaded_component: None,
@@ -118,6 +120,14 @@ impl ExtensionRunner {
     /// Add an environment variable.
     pub fn env(mut self, key: &str, value: &str) -> Self {
         self.env_vars.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    pub fn env_provider_extensions(mut self, extension_ids: &[String]) -> Self {
+        self.env_provider_extensions
+            .extend(extension_ids.iter().filter(|id| !id.is_empty()).cloned());
+        self.env_provider_extensions.sort();
+        self.env_provider_extensions.dedup();
         self
     }
 
@@ -310,14 +320,29 @@ impl ExtensionRunner {
         extension_name: &str,
         extra_env_vars: &[(String, String)],
     ) -> Result<Vec<(String, String)>> {
-        super::execution::build_capability_env(
+        let additional_env_provider_paths = self.additional_env_provider_paths()?;
+        super::execution::build_capability_env_with_additional_providers(
             extension_name,
             &self.execution_context.component.id,
             extension_path,
             project_path,
             settings_json,
+            &additional_env_provider_paths,
             extra_env_vars,
         )
+    }
+
+    fn additional_env_provider_paths(&self) -> Result<Vec<(String, PathBuf)>> {
+        self.env_provider_extensions
+            .iter()
+            .filter(|extension_id| extension_id.as_str() != self.execution_context.extension_id)
+            .map(|extension_id| {
+                Ok((
+                    extension_id.clone(),
+                    super::registry::extension_path(extension_id),
+                ))
+            })
+            .collect()
     }
 
     fn execute_script(

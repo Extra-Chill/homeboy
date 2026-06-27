@@ -336,6 +336,26 @@ pub(crate) fn build_capability_env(
     settings_json: &str,
     extra_env: &[(String, String)],
 ) -> Result<Vec<(String, String)>> {
+    build_capability_env_with_additional_providers(
+        extension_name,
+        component_id,
+        extension_path,
+        component_path,
+        settings_json,
+        &[],
+        extra_env,
+    )
+}
+
+pub(crate) fn build_capability_env_with_additional_providers(
+    extension_name: &str,
+    component_id: &str,
+    extension_path: &Path,
+    component_path: &Path,
+    settings_json: &str,
+    additional_env_provider_paths: &[(String, std::path::PathBuf)],
+    extra_env: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
     let component_path_value = component_path.to_string_lossy();
     let mut env = build_exec_env(
         extension_name,
@@ -364,6 +384,15 @@ pub(crate) fn build_capability_env(
             component_path,
             &provider_env,
         )?);
+    }
+    for (_extension_id, provider_path) in additional_env_provider_paths {
+        if let Ok(extension) = env_provider::load_manifest_from_dir(provider_path) {
+            env.extend(env_provider::env_vars(
+                &extension,
+                component_path,
+                &provider_env,
+            )?);
+        }
     }
     env.extend(extra_env.iter().cloned());
     Ok(env)
