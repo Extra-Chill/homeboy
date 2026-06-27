@@ -3246,6 +3246,63 @@ mod failure_summary_tests {
     }
 
     #[test]
+    fn run_failure_summary_prefers_nested_actionable_diagnostic_over_generic_artifact_blocker() {
+        let results = vec![serde_json::json!({
+            "schema": ACTION_RESULT_SCHEMA,
+            "status": "failed",
+            "action_id": "generate-site",
+            "failure_summary": {
+                "action_id": "generate-site",
+                "provider": "runtime-provider",
+                "failure_phase": "runtime_execution",
+                "run_id": "run-99",
+                "diagnostic": "Missing required typed artifact: static_site_pull_request",
+            },
+            "execution": {
+                "diagnostics": [{
+                    "class": "required_typed_artifacts_missing",
+                    "message": "Missing required typed artifact: static_site_pull_request"
+                }],
+                "provider_result": {
+                    "runtime": {
+                        "diagnostics": [{
+                            "class": "provider_runtime_fatal",
+                            "message": "Fatal error: ProviderMetadata::getDescription() must be compatible with RuntimeMetadata::getDescription()"
+                        }],
+                        "selected_provider_plugin_path": "/workspace/plugins/provider/current",
+                        "prepared_plugin_source": {
+                            "uri": "git+https://example.invalid/provider.git#abc123",
+                            "label": "prepared provider plugin"
+                        },
+                        "runtime_overlay_ref": "git+https://example.invalid/runtime.git#def456"
+                    }
+                }
+            }
+        })];
+        let status = serde_json::json!({ "controller": { "phase": "generate" } });
+
+        let summary = build_run_failure_summary("loop-99", "action_failed", &results, &status);
+
+        assert_eq!(
+            summary.root_blocker,
+            "Fatal error: ProviderMetadata::getDescription() must be compatible with RuntimeMetadata::getDescription()"
+        );
+        assert_eq!(summary.owner_surface, "wordpress_runtime");
+        assert!(summary.evidence_refs.iter().any(|reference| {
+            reference.kind == "provider_source"
+                && reference.uri == "/workspace/plugins/provider/current"
+        }));
+        assert!(summary.evidence_refs.iter().any(|reference| {
+            reference.kind == "prepared_source"
+                && reference.uri == "git+https://example.invalid/provider.git#abc123"
+        }));
+        assert!(summary.evidence_refs.iter().any(|reference| {
+            reference.kind == "runtime_overlay_source"
+                && reference.uri == "git+https://example.invalid/runtime.git#def456"
+        }));
+    }
+
+    #[test]
     fn run_failure_summary_handles_runner_block_without_diagnostic_message() {
         let results = vec![serde_json::json!({
             "schema": ACTION_RESULT_SCHEMA,
