@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.15] - 2026-06-27
+
+### Changed
+- Add WordPress Codebox client boundary
+
 ## [3.19.14] - 2026-06-27
 
 ### Changed
