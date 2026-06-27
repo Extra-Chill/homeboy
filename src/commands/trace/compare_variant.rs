@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde::Serialize;
-
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::TraceCommandOutput;
 use homeboy::core::rig;
+use homeboy::core::trace_compare;
 
 use super::aggregate::{
     aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,
@@ -75,16 +74,16 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
 
     let (baseline, variant, run_order) = run_compare_variant_pair(args)?;
 
-    create_trace_compare_variant_output_dir(&output_dir)?;
+    trace_compare::prepare_compare_variant_dir(&output_dir)?;
     let baseline_path = output_dir.join(TRACE_COMPARE_VARIANT_BASELINE_FILE);
     let variant_path = output_dir.join(TRACE_COMPARE_VARIANT_VARIANT_FILE);
     let compare_path = output_dir.join(TRACE_COMPARE_VARIANT_COMPARE_FILE);
     let run_order_path = output_dir.join(TRACE_COMPARE_VARIANT_RUN_ORDER_FILE);
     let summary_path = output_dir.join(TRACE_COMPARE_VARIANT_SUMMARY_FILE);
 
-    write_trace_compare_variant_json(&baseline_path, &baseline)?;
-    write_trace_compare_variant_json(&variant_path, &variant)?;
-    write_trace_compare_variant_json(&run_order_path, &run_order)?;
+    trace_compare::write_compare_variant_json(&baseline_path, &baseline)?;
+    trace_compare::write_compare_variant_json(&variant_path, &variant)?;
+    trace_compare::write_compare_variant_json(&run_order_path, &run_order)?;
 
     let compare = compare_trace_aggregates_with_focus(
         &baseline_path,
@@ -96,7 +95,7 @@ pub(super) fn run_compare_variant(mut args: TraceArgs) -> CmdResult<TraceCommand
         regression_min_delta_ms,
         &metric_guardrails,
     );
-    write_trace_compare_variant_json(&compare_path, &compare)?;
+    trace_compare::write_compare_variant_json(&compare_path, &compare)?;
     write_trace_compare_variant_summary(
         &summary_path,
         &output_dir,
@@ -344,37 +343,6 @@ fn run_repeat_output(
     }
 }
 
-fn create_trace_compare_variant_output_dir(output_dir: &Path) -> homeboy::core::Result<()> {
-    std::fs::create_dir_all(output_dir).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to create trace compare-variant output directory {}: {}",
-                output_dir.display(),
-                err
-            ),
-            Some("trace.compare_variant.output_dir".to_string()),
-        )
-    })
-}
-
-fn write_trace_compare_variant_json<T: Serialize>(
-    path: &Path,
-    value: &T,
-) -> homeboy::core::Result<()> {
-    let json = serde_json::to_string_pretty(value).map_err(|err| {
-        homeboy::core::Error::internal_json(
-            err.to_string(),
-            Some(format!("serialize {}", path.display())),
-        )
-    })?;
-    std::fs::write(path, format!("{}\n", json)).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!("Failed to write {}: {}", path.display(), err),
-            Some("trace.compare_variant.write".to_string()),
-        )
-    })
-}
-
 fn aggregate_to_compare_input(
     aggregate: &extension_trace::TraceAggregateOutput,
 ) -> TraceAggregateInput {
@@ -489,12 +457,7 @@ fn write_trace_compare_variant_summary(
     push_focus_span_summary(&mut out, baseline, variant, compare);
     push_compare_variant_span_summary(&mut out, compare);
 
-    std::fs::write(path, out).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!("Failed to write {}: {}", path.display(), err),
-            Some("trace.compare_variant.summary".to_string()),
-        )
-    })
+    trace_compare::write_compare_variant_summary(path, &out)
 }
 
 fn push_run_order_summary(
