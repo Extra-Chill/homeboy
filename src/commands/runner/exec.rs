@@ -721,6 +721,7 @@ fn runner_exec_dry_run(
                 runner_workspace_root: runner.workspace_root,
                 source_snapshot_remote_path: None,
                 required_paths: require_paths,
+                homeboy_binaries: None,
                 hints: vec!["dry run only; no runner command was executed".to_string()],
             }),
         },

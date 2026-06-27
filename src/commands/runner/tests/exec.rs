@@ -146,7 +146,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             )
             .expect("run");
 
-        let (_output, exit_code) = exec(
+        let (output, exit_code) = exec(
             "lab-local",
             Some(workspace.path().display().to_string()),
             None,
@@ -169,6 +169,19 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
         .expect("runner exec");
 
         assert_eq!(exit_code, 0);
+        let binaries = output
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.homeboy_binaries.as_ref())
+            .expect("runner exec reports Homeboy binary role diagnostics");
+        assert_eq!(binaries.controller_cli.owner, "operator_command");
+        assert_eq!(
+            binaries.job_command_binary.owner,
+            "runner_config.settings.homeboy_path"
+        );
+        assert!(binaries
+            .guidance
+            .contains("verify job_command_binary on the runner"));
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
         assert_eq!(artifacts.len(), 2);
         assert_eq!(artifacts[0].kind, "out_txt");
