@@ -33,6 +33,12 @@ const { normalizeRuntimeAgentBundleResult } = require('../../lib/runtime-agent-b
 const {
   codeboxRunAgentTaskInvocation,
 } = require('../../lib/codebox-run-agent-task-contract');
+const {
+  wpCodeboxBinaryDiagnostic,
+  wpCodeboxProviderPluginPathsFromEnv,
+  wpCodeboxResolveCommand,
+  wpCodeboxSupportsRunAgentTaskCommand,
+} = require('../../lib/wp-codebox-adapter-descriptor');
 
 
 function argValue(name) {
@@ -50,21 +56,6 @@ function argValues(name) {
   return values;
 }
 
-function envPathList(value) {
-  if (!value) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) {
-      return parsed.filter(Boolean);
-    }
-  } catch {
-    // Fall through to PATH-style lists for simple environment configuration.
-  }
-  return String(value).split(path.delimiter).map((entry) => entry.trim()).filter(Boolean);
-}
-
 function firstNonEmptyArray(...values) {
   for (const value of values) {
     const normalized = Array.isArray(value) ? value.filter(Boolean) : (value ? [value] : []);
@@ -73,17 +64,6 @@ function firstNonEmptyArray(...values) {
     }
   }
   return [];
-}
-
-function providerPluginPathsFromEnv(env = process.env) {
-  return firstNonEmptyArray(
-    envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATHS),
-    envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATH),
-    envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
-    envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
-    envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH),
-    envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATH),
-  );
 }
 
 function hasFlag(name) {
@@ -288,44 +268,6 @@ function requestTimeoutMs(request) {
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
 }
 
-function executable(filePath) {
-  try {
-    fs.accessSync(filePath, fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function configuredBinaryDiagnostic(filePath) {
-  if (!filePath) {
-    return {
-      class: 'wp-codebox.config.missing_binary',
-      message: 'WP Codebox binary is not configured. Set wp_codebox_bin or let Homeboy inject HOMEBOY_WP_CODEBOX_BIN from the provider runner_readiness executable contract.',
-      data: { phase: 'codebox.config', wp_codebox_bin: '', reason: 'missing' },
-    };
-  }
-  if (!path.isAbsolute(filePath)) {
-    return null;
-  }
-  if (!fs.existsSync(filePath)) {
-    return {
-      class: 'wp-codebox.config.invalid_binary',
-      message: `Configured WP Codebox binary does not exist: ${filePath}`,
-      data: { phase: 'codebox.config', wp_codebox_bin: filePath, reason: 'missing' },
-    };
-  }
-  const extension = path.extname(filePath);
-  if (['.js', '.cjs', '.mjs'].includes(extension) || executable(filePath)) {
-    return null;
-  }
-  return {
-    class: 'wp-codebox.config.invalid_binary',
-    message: `Configured WP Codebox binary is not executable: ${filePath}`,
-    data: { phase: 'codebox.config', wp_codebox_bin: filePath, reason: 'not_executable' },
-  };
-}
-
 function configuredBinaryFailurePayload(input, artifacts, diagnostic) {
   return {
     success: false,
@@ -342,13 +284,6 @@ function configuredBinaryFailurePayload(input, artifacts, diagnostic) {
       reason: diagnostic.data.reason,
     },
   };
-}
-
-function resolveCommand(command, args) {
-  if ((path.extname(command) === '.js' || path.extname(command) === '.cjs' || path.extname(command) === '.mjs') && !executable(command)) {
-    return { command: process.execPath, args: [command, ...args] };
-  }
-  return { command, args };
 }
 
 function writeJsonFile(prefix, value) {
@@ -1095,7 +1030,7 @@ function runnerInput(request, artifacts) {
     provider: argValue('--provider') || request.provider || '',
     model: argValue('--model') || request.model || '',
     provider_plugin_paths: uniqueStrings(firstNonEmptyArray(
-      providerPluginPathsFromEnv(),
+      wpCodeboxProviderPluginPathsFromEnv(),
       argValues('--provider-plugin-path'),
       request.provider_plugin_paths,
     )),
@@ -2187,25 +2122,6 @@ function emptyStdoutPayloadFailure(result, artifacts) {
   );
 }
 
-function supportsRunAgentTaskCommand(wpCodeboxBin) {
-  const mode = process.env.HOMEBOY_WP_CODEBOX_RUN_AGENT_TASK || '';
-  if (/^(1|true|stable)$/i.test(mode)) {
-    return true;
-  }
-  if (/^(0|false|legacy)$/i.test(mode)) {
-    return false;
-  }
-
-  const resolved = resolveCommand(wpCodeboxBin, ['run-agent-task', '--help']);
-  const result = spawnSync(resolved.command, resolved.args, {
-    encoding: 'utf8',
-    env: process.env,
-    maxBuffer: 1024 * 1024,
-    timeout: 5000,
-  });
-  return !result.error && result.status === 0;
-}
-
 function runWpCodeboxParentTask(request, envOverrides = {}) {
   const explicitArtifacts = argValue('--artifacts') || request.artifacts_path || '';
   const artifacts = explicitArtifacts || fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-artifacts-'));
@@ -2218,7 +2134,7 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
 
   const input = runnerInput(request, artifacts);
   const wpCodeboxBin = input.wp_codebox_bin || process.env.HOMEBOY_WP_CODEBOX_BIN || '';
-  const binaryDiagnostic = configuredBinaryDiagnostic(wpCodeboxBin);
+  const binaryDiagnostic = wpCodeboxBinaryDiagnostic(wpCodeboxBin);
   if (binaryDiagnostic) {
     process.stdout.write(`${JSON.stringify(configuredBinaryFailurePayload(input, artifacts, binaryDiagnostic), null, 2)}\n`);
     return 1;
@@ -2241,7 +2157,7 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
       ...(bridgeServer ? { HOMEBOY_AGENT_TOOL_BRIDGE_URL: bridgeServer.url } : {}),
     },
   }, artifacts);
-  const useStableRunAgentTask = supportsRunAgentTaskCommand(wpCodeboxBin);
+  const useStableRunAgentTask = wpCodeboxSupportsRunAgentTaskCommand({ bin: wpCodeboxBin });
   const invocation = codeboxRunAgentTaskInvocation({
     taskInput: preparedInput.input,
     artifactsPath: artifacts,
@@ -2255,7 +2171,7 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
   );
   const args = invocation.args.map((arg) => arg === '--input-file={{input_file}}' ? `--input-file=${inputPath}` : arg);
 
-  const resolved = resolveCommand(wpCodeboxBin, args);
+  const resolved = wpCodeboxResolveCommand(wpCodeboxBin, args);
   const timeoutMs = requestTimeoutMs(request);
   const evidencePath = writePreflightEvidence(artifacts, {
     schema: 'homeboy/wp-codebox-task-runner-preflight/v1',

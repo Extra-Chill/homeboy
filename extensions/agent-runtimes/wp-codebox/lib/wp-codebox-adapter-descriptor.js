@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const {
   WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
@@ -101,10 +102,75 @@ function isExecutableFile(filePath) {
 }
 
 function wpCodeboxCommand(bin = wpCodeboxBin()) {
-  if (/\.(?:js|cjs|mjs)$/.test(bin)) {
-    return { command: process.execPath, args: [bin] };
-  }
-  return { command: bin, args: [] };
+	if (/\.(?:js|cjs|mjs)$/.test(bin)) {
+		return { command: process.execPath, args: [bin] };
+	}
+	return { command: bin, args: [] };
+}
+
+function wpCodeboxResolveCommand(bin = wpCodeboxBin(), args = []) {
+	const command = wpCodeboxCommand(bin);
+	return { command: command.command, args: [...command.args, ...args] };
+}
+
+function wpCodeboxBinaryDiagnostic(bin = wpCodeboxBin()) {
+	if (!bin) {
+		return {
+			class: 'wp-codebox.config.missing_binary',
+			message: 'WP Codebox binary is not configured. Set wp_codebox_bin or provide a wp-codebox executable through the public CLI descriptor.',
+			data: { phase: 'codebox.config', wp_codebox_bin: '', reason: 'missing' },
+		};
+	}
+	if (!path.isAbsolute(bin)) {
+		return null;
+	}
+	if (!fs.existsSync(bin)) {
+		return {
+			class: 'wp-codebox.config.invalid_binary',
+			message: `Configured WP Codebox binary does not exist: ${bin}`,
+			data: { phase: 'codebox.config', wp_codebox_bin: bin, reason: 'missing' },
+		};
+	}
+	if (/\.(?:js|cjs|mjs)$/.test(bin) || isExecutableFile(bin)) {
+		return null;
+	}
+	return {
+		class: 'wp-codebox.config.invalid_binary',
+		message: `Configured WP Codebox binary is not executable: ${bin}`,
+		data: { phase: 'codebox.config', wp_codebox_bin: bin, reason: 'not_executable' },
+	};
+}
+
+function wpCodeboxSupportsRunAgentTaskCommand(options = {}) {
+	const env = options.env || process.env;
+	const mode = env.HOMEBOY_WP_CODEBOX_RUN_AGENT_TASK || '';
+	if (/^(1|true|stable)$/i.test(mode)) {
+		return true;
+	}
+	if (/^(0|false|legacy)$/i.test(mode)) {
+		return false;
+	}
+
+	const bin = firstValue(options.bin, options.wpCodeboxBin, options.wp_codebox_bin, wpCodeboxBin({ ...options, env }));
+	const resolved = wpCodeboxResolveCommand(bin, [WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND, '--help']);
+	const result = spawnSync(resolved.command, resolved.args, {
+		encoding: 'utf8',
+		env,
+		maxBuffer: 1024 * 1024,
+		timeout: options.timeoutMs || options.timeout_ms || 5000,
+	});
+	return !result.error && result.status === 0;
+}
+
+function wpCodeboxProviderPluginPathsFromEnv(env = process.env) {
+	return firstNonEmptyArray(
+		envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATHS),
+		envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATH),
+		envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
+		envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
+		envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH),
+		envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATH),
+	);
 }
 
 function homeboySettings(env = process.env) {
@@ -120,7 +186,32 @@ function homeboySettings(env = process.env) {
 }
 
 function arrayOrDefault(value, fallback) {
-  return Array.isArray(value) ? value : [...fallback];
+	return Array.isArray(value) ? value : [...fallback];
+}
+
+function envPathList(value) {
+	if (!value) {
+		return [];
+	}
+	try {
+		const parsed = JSON.parse(value);
+		if (Array.isArray(parsed)) {
+			return parsed.filter(Boolean);
+		}
+	} catch {
+		// Fall through to PATH-style lists for simple environment configuration.
+	}
+	return String(value).split(path.delimiter).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function firstNonEmptyArray(...values) {
+	for (const value of values) {
+		const normalized = Array.isArray(value) ? value.filter(Boolean) : (value ? [value] : []);
+		if (normalized.length > 0) {
+			return normalized;
+		}
+	}
+	return [];
 }
 
 function firstValue(...values) {
@@ -130,10 +221,14 @@ function firstValue(...values) {
 module.exports = {
   DEFAULT_WP_CODEBOX_CLI_DESCRIPTOR,
   WP_CODEBOX_CLI_DESCRIPTOR_SCHEMA,
-  homeboySettings,
-  managedWpCodeboxBin,
-  wpCodeboxBin,
-  wpCodeboxBinFromRuntimeComponent,
-  wpCodeboxCliDescriptor,
-  wpCodeboxCommand,
+	homeboySettings,
+	managedWpCodeboxBin,
+	wpCodeboxBinaryDiagnostic,
+	wpCodeboxBin,
+	wpCodeboxBinFromRuntimeComponent,
+	wpCodeboxCliDescriptor,
+	wpCodeboxCommand,
+	wpCodeboxProviderPluginPathsFromEnv,
+	wpCodeboxResolveCommand,
+	wpCodeboxSupportsRunAgentTaskCommand,
 };

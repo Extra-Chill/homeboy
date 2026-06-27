@@ -66,6 +66,7 @@ const {
   WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
 } = require('./codebox-run-agent-task-contract');
 const {
+  wpCodeboxProviderPluginPathsFromEnv,
   wpCodeboxBin,
 } = require('./wp-codebox-adapter-descriptor');
 const {
@@ -936,14 +937,7 @@ function explicitProviderPluginPathsFromConfig(config = {}, options = {}) {
 }
 
 function providerPluginPathsFromEnv(env = process.env) {
-  return firstNonEmptyArray(
-    envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATHS),
-    envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATH),
-    envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
-    envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
-    envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH),
-    envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATH),
-  );
+  return wpCodeboxProviderPluginPathsFromEnv(env);
 }
 
 function withoutProviderPlugins(value = {}) {
