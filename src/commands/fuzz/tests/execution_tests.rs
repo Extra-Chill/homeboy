@@ -319,6 +319,46 @@ fn fuzz_run_outcome_measurement_profile_records_open_findings_without_failing() 
 }
 
 #[test]
+fn fuzz_run_outcome_prefers_passed_campaign_over_transport_exit_code() {
+    let mut campaign = empty_fuzz_campaign();
+    campaign.metadata = serde_json::json!({
+        "status": "passed",
+        "success": true,
+    });
+
+    let outcome = fuzz_run_outcome(
+        1,
+        false,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Evidence,
+    );
+
+    assert_eq!(outcome.status, "passed");
+    assert!(outcome.success);
+    assert_eq!(outcome.exit_code, 0);
+}
+
+#[test]
+fn fuzz_run_outcome_keeps_transport_failure_without_passed_campaign() {
+    let campaign = empty_fuzz_campaign();
+
+    let outcome = fuzz_run_outcome(
+        1,
+        false,
+        false,
+        Some(&campaign),
+        None,
+        homeboy::core::fuzz::FuzzGateProfile::Evidence,
+    );
+
+    assert_eq!(outcome.status, "failed");
+    assert!(!outcome.success);
+    assert_eq!(outcome.exit_code, 1);
+}
+
+#[test]
 fn fuzz_run_expected_metric_gate_fails_when_observed_metric_differs() {
     let mut campaign = empty_fuzz_campaign();
     campaign.metadata = serde_json::json!({
@@ -608,6 +648,24 @@ fn strict_fuzz_run_artifact_validation_passes_with_required_artifacts() {
         artifact: None,
         metadata: serde_json::Value::Null,
         extra: std::collections::BTreeMap::new(),
+    });
+
+    assert!(fuzz_run_artifact_validation_error(&args, Some(&campaign)).is_none());
+}
+
+#[test]
+fn strict_fuzz_run_artifact_validation_accepts_metadata_artifact_refs() {
+    let mut args = fuzz_run_args_with_run_id("strict-proof");
+    args.require_case_log = true;
+    args.require_coverage_summary = true;
+    args.require_result_envelope = true;
+    let mut campaign = empty_fuzz_campaign();
+    campaign.metadata = serde_json::json!({
+        "artifact_refs": [
+            { "name": "case-log", "role": "case_log", "path": "files/case-log.jsonl" },
+            { "name": "coverage-summary", "role": "coverage_summary", "path": "files/coverage-summary.json" },
+            { "name": "result-envelope", "role": "result_envelope", "path": "files/result-envelope.json" }
+        ]
     });
 
     assert!(fuzz_run_artifact_validation_error(&args, Some(&campaign)).is_none());

@@ -298,12 +298,35 @@ fn campaign_has_artifact(campaign: &FuzzCampaign, aliases: &[&str]) -> bool {
         .artifacts
         .iter()
         .any(|artifact| fuzz_artifact_matches(artifact, aliases))
+        || campaign_metadata_has_artifact_ref(&campaign.metadata, aliases)
 }
 
 fn fuzz_artifact_matches(artifact: &FuzzArtifact, aliases: &[&str]) -> bool {
     aliases
         .iter()
         .any(|alias| artifact.id == *alias || artifact.kind == *alias)
+}
+
+fn campaign_metadata_has_artifact_ref(metadata: &serde_json::Value, aliases: &[&str]) -> bool {
+    metadata
+        .get("artifact_refs")
+        .and_then(|refs| refs.as_array())
+        .is_some_and(|refs| {
+            refs.iter()
+                .any(|artifact_ref| artifact_ref_matches_alias(artifact_ref, aliases))
+        })
+}
+
+fn artifact_ref_matches_alias(artifact_ref: &serde_json::Value, aliases: &[&str]) -> bool {
+    let fields = ["id", "kind", "name", "role", "semantic_key"];
+    aliases.iter().any(|alias| {
+        fields.iter().any(|field| {
+            artifact_ref
+                .get(field)
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value == *alias)
+        })
+    })
 }
 
 fn fuzz_prepare_settings(args: &FuzzRunArgs) -> Vec<(String, String)> {
@@ -492,17 +515,36 @@ pub(super) fn fuzz_run_outcome(
 
     let campaign_failed = gate_profile != FuzzGateProfile::Measurement
         && results.is_some_and(fuzz_campaign_reports_failure);
-    let success = runner_success && !campaign_failed && results_error.is_none();
+    let campaign_passed = results.is_some_and(fuzz_campaign_reports_success);
+    let success =
+        (runner_success || campaign_passed) && !campaign_failed && results_error.is_none();
     FuzzRunOutcome {
         status: if success { "passed" } else { "failed" },
         success,
         exit_code: if success {
-            runner_exit_code
+            0
         } else if runner_exit_code == 0 {
             1
         } else {
             runner_exit_code
         },
+    }
+}
+
+fn fuzz_campaign_reports_success(campaign: &FuzzCampaign) -> bool {
+    fuzz_metadata_reports_success(&campaign.metadata)
+}
+
+fn fuzz_metadata_reports_success(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.get("success").and_then(|success| success.as_bool()) == Some(true)
+                || object
+                    .get("status")
+                    .and_then(|status| status.as_str())
+                    .is_some_and(|status| matches!(status, "pass" | "passed" | "success"))
+        }
+        _ => false,
     }
 }
 
