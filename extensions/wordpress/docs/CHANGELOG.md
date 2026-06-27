@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.25] - 2026-06-27
+
+### Fixed
+- probe wp-codebox with `commands` instead of unsupported --version
+
 ## [3.19.24] - 2026-06-27
 
 ### Changed
