@@ -18,8 +18,9 @@ use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
     RunDetail, RunsArtifactArgs, RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactGetOutput,
-    RunsArtifactsOutput, RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
-    RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsShowOutput,
+    RunsArtifactsArgs, RunsArtifactsOutput, RunsEnvKeyOutput, RunsEnvOutput,
+    RunsEnvSourceLayerOutput, RunsEnvSummary, RunsListArgs, RunsListOutput, RunsOutput,
+    RunsResumePlanOutput, RunsShowOutput,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -147,22 +148,34 @@ fn validation_progress_ledger_for_run(run: &RunRecord) -> Option<ValidationProgr
     })
 }
 
+#[cfg(test)]
 pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
+    artifacts_from_args(RunsArtifactsArgs {
+        run_id: run_id.to_string(),
+        runner: None,
+    })
+}
+
+pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
+    if let Some(runner_id) = args.runner.as_deref() {
+        return remote::runner_artifacts(runner_id, &args.run_id);
+    }
+
     let store = ObservationStore::open_initialized()?;
-    let artifacts = runs_service::list_artifacts_for_run(&store, run_id)?;
+    let artifacts = runs_service::list_artifacts_for_run(&store, &args.run_id)?;
     let preview_entrypoints = artifacts
         .iter()
         .flat_map(homeboy::core::artifacts::html_preview_entrypoints)
         .collect();
     let findings = store.list_findings(FindingListFilter {
-        run_id: Some(run_id.to_string()),
+        run_id: Some(args.run_id.to_string()),
         tool: None,
         file: None,
         fingerprint: None,
         limit: Some(10_000),
     })?;
     let matrix_summary =
-        homeboy::core::artifacts::summarize_matrix_artifacts(run_id, &artifacts, &findings);
+        homeboy::core::artifacts::summarize_matrix_artifacts(&args.run_id, &artifacts, &findings);
     let fuzz_result_envelopes = artifacts
         .iter()
         .filter_map(homeboy::core::fuzz::inspect_fuzz_result_envelope_artifact)
@@ -170,7 +183,8 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
-            run_id: run_id.to_string(),
+            run_id: args.run_id,
+            runner_id: None,
             artifacts,
             preview_entrypoints,
             matrix_summary,
@@ -341,6 +355,10 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
 }
 
 pub(crate) fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
+    if let Some(runner_id) = args.runner.clone() {
+        return remote::runner_artifact_get(&runner_id, args);
+    }
+
     let store = ObservationStore::open_initialized()?;
     let artifact = runs_service::resolve_artifact_for_run(&store, &args.run_id, &args.artifact_id)?;
 
@@ -352,6 +370,8 @@ pub(crate) fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
                     command: "runs.artifact.get",
                     run_id: outcome.run_id,
                     artifact_id: outcome.artifact_id,
+                    runner_id: None,
+                    source_content_url: None,
                     output_path: outcome.output_path.display().to_string(),
                     content_type: outcome.content_type,
                     size_bytes: outcome.size_bytes,

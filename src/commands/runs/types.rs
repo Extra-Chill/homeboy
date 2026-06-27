@@ -91,7 +91,7 @@ pub(super) enum RunsCommand {
     /// Explain redacted Lab environment provenance for one run
     Env { run_id: String },
     /// List artifacts recorded for one run
-    Artifacts { run_id: String },
+    Artifacts(RunsArtifactsArgs),
     /// Retrieve or sync recorded run artifacts
     Artifact(RunsArtifactArgs),
     /// List findings recorded for one run
@@ -193,6 +193,8 @@ pub struct RunsShowOutput {
 pub struct RunsArtifactsOutput {
     pub command: &'static str,
     pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
     pub artifacts: Vec<ArtifactRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview_entrypoints: Vec<ArtifactPreviewEntrypoint>,
@@ -200,6 +202,15 @@ pub struct RunsArtifactsOutput {
     pub matrix_summary: Option<MatrixArtifactSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fuzz_result_envelopes: Vec<FuzzResultEnvelopeArtifactInspection>,
+}
+
+#[derive(Args, Clone)]
+pub struct RunsArtifactsArgs {
+    /// Observation run id that owns the artifacts
+    pub run_id: String,
+    /// Query artifacts from a connected execution runner daemon
+    #[arg(long)]
+    pub runner: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -305,6 +316,9 @@ pub struct RunsArtifactGetArgs {
     pub run_id: String,
     /// Artifact id/path token from `homeboy runs artifacts <run-id>`
     pub artifact_id: String,
+    /// Pull the artifact from a connected execution runner daemon
+    #[arg(long)]
+    pub runner: Option<String>,
     /// Destination file path. Defaults to the recorded artifact filename.
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
@@ -315,6 +329,10 @@ pub struct RunsArtifactGetOutput {
     pub command: &'static str,
     pub run_id: String,
     pub artifact_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_content_url: Option<String>,
     pub output_path: String,
     pub content_type: Option<String>,
     pub size_bytes: Option<i64>,
