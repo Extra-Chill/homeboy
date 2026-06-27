@@ -130,6 +130,59 @@ fn test_serve_writes_state_and_routes_health_requests() {
 }
 
 #[test]
+fn daemon_reads_full_content_length_body_before_json_parse() {
+    let _home = HomeGuard::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+
+    std::thread::spawn(move || {
+        let _ = serve_listener(listener);
+    });
+
+    let mut stream = None;
+    for _ in 0..100 {
+        match std::net::TcpStream::connect(addr) {
+            Ok(candidate) => {
+                stream = Some(candidate);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    let mut stream = stream.expect("daemon connection");
+    let body = serde_json::json!({
+        "payload": "x".repeat(96 * 1024),
+    })
+    .to_string();
+    let headers = format!(
+        "POST /health HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let split = 16 * 1024;
+    stream.write_all(headers.as_bytes()).expect("write headers");
+    stream
+        .write_all(&body.as_bytes()[..split])
+        .expect("write partial body");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    stream
+        .write_all(&body.as_bytes()[split..])
+        .expect("write remaining body");
+
+    let mut response_bytes = Vec::new();
+    stream
+        .take(DAEMON_TEST_RESPONSE_LIMIT_BYTES + 1)
+        .read_to_end(&mut response_bytes)
+        .expect("read response");
+    let response = String::from_utf8_lossy(&response_bytes);
+
+    assert!(response.contains("405 Method Not Allowed"));
+    assert!(
+        !response.contains("invalid JSON request body"),
+        "daemon parsed a partial JSON body: {response}"
+    );
+}
+
+#[test]
 fn routes_health_version_and_config_paths() {
     let _home = HomeGuard::new();
 

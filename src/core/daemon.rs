@@ -799,9 +799,8 @@ fn handle_connection<R>(
 where
     R: AnalysisJobRunner,
 {
-    let mut buffer = [0; 64 * 1024];
-    let bytes = stream.read(&mut buffer)?;
-    let request = String::from_utf8_lossy(&buffer[..bytes]);
+    let request_bytes = read_http_request(&mut stream)?;
+    let request = String::from_utf8_lossy(&request_bytes);
     let mut headers_and_body = request.splitn(2, "\r\n\r\n");
     let headers = headers_and_body.next().unwrap_or_default();
     let body = headers_and_body.next().unwrap_or_default();
@@ -846,6 +845,47 @@ where
         broker_auth,
     );
     write_http_response(stream, response)
+}
+
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut request = Vec::new();
+    let mut buffer = [0; 8 * 1024];
+    let headers_end = loop {
+        let bytes = stream.read(&mut buffer)?;
+        if bytes == 0 {
+            return Ok(request);
+        }
+        request.extend_from_slice(&buffer[..bytes]);
+        if let Some(index) = find_header_end(&request) {
+            break index;
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&request[..headers_end]);
+    let content_length = http_content_length(&headers).unwrap_or(0);
+    let body_start = headers_end + 4;
+    let body_bytes = request.len().saturating_sub(body_start);
+    let remaining = content_length.saturating_sub(body_bytes);
+    if remaining > 0 {
+        let mut tail = vec![0; remaining];
+        stream.read_exact(&mut tail)?;
+        request.extend_from_slice(&tail);
+    }
+
+    Ok(request)
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn http_content_length(headers: &str) -> Option<usize> {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    })
 }
 
 fn write_http_response(mut stream: TcpStream, response: HttpResponse) -> std::io::Result<()> {
