@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.264.2] - 2026-06-27
+
+### Changed
+- Add runs dossier command
+- Decouple runtime diagnostics from WP Codebox status
+- Add typed lab refresh handoff plan
+- Add runner workspace snapshot discovery
+- Add Lab refresh planning command
+- Add runner workspace pull recovery
+- Clarify runner workflow binary status
+- Add runner exec artifact dir promotion
+
 ## [0.264.1] - 2026-06-27
 
 ### Changed
