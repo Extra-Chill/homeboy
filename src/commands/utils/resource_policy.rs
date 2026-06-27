@@ -6,7 +6,7 @@ use crate::cli_surface::Commands;
 use crate::command_contract::LabCommandPortability;
 use crate::commands::agent_task;
 
-use crate::commands::doctor::resources::{DoctorOutput, ResourceRecommendation};
+use crate::commands::resources::{DoctorOutput, ResourceRecommendation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HotCommand {
@@ -257,7 +257,7 @@ pub fn non_interactive_preflight_error(
     let mut error = crate::core::Error::validation_invalid_argument(
         "resource-policy",
         format!(
-            "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Use a safe Lab/offload path once this command supports it, or rerun later when `homeboy doctor resources` reports ok.",
+            "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Use a safe Lab/offload path once this command supports it, or rerun later when `homeboy self doctor` reports ok.",
             warning.command,
             severity_str(warning.recommendation),
             primary_action(warning, default_runner),
@@ -389,20 +389,20 @@ fn primary_reason(resources: &DoctorOutput) -> String {
         );
     }
 
-    "Run `homeboy doctor resources` for details.".to_string()
+    "Run `homeboy self doctor` for details.".to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli_surface::Cli;
-    use crate::commands::doctor::resources::{
+    use crate::commands::resources::{
         LoadSummary, MemorySummary, ProcessSummary, RigLeaseSummary,
     };
     use clap::Parser;
     fn resources(recommendation: ResourceRecommendation) -> DoctorOutput {
         DoctorOutput {
-            command: "doctor.resources",
+            command: "self.resources",
             recommendation,
             load: LoadSummary {
                 one: Some(9.0),

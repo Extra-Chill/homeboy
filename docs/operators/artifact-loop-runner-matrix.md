@@ -36,7 +36,7 @@ or public links.
 For ad hoc runner work, create a known output directory inside the runner
 workspace and pass a stable run id:
 
-Use `homeboy lab refresh-plan` first when you want a read-only preflight that
+Use `homeboy runner refresh-plan` first when you want a read-only preflight that
 checks the runner/workspace/source inputs and prints the next `runner doctor`,
 `runner workspace sync`, `runner exec`, and `runs evidence` commands. Its
 `execution_envelope` field is the canonical runner handoff contract for the

@@ -10,7 +10,7 @@ use homeboy::core::observation::ObservationStore;
 
 use super::*;
 use crate::commands::bench::{BenchRigOrder, BenchRunArgs};
-use crate::commands::doctor::resources::{
+use crate::commands::resources::{
     DoctorOutput, LoadSummary, ProcessSummary, ResourceRecommendation, RigLeaseSummary,
 };
 use crate::commands::utils::args::{
@@ -889,7 +889,7 @@ fn history_hints_include_rig_filter_when_present() {
 
 fn synthetic_resources(recommendation: ResourceRecommendation) -> DoctorOutput {
     DoctorOutput {
-        command: "doctor.resources",
+        command: "self.resources",
         recommendation,
         load: LoadSummary {
             one: Some(18.2),

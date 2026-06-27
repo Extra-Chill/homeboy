@@ -522,7 +522,7 @@ fn is_builtin_subcommand(name: &str) -> bool {
 
 fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
-        if let Ok((resources, _)) = crate::commands::doctor::resources::run_preflight() {
+        if let Ok((resources, _)) = crate::commands::resources::run_preflight() {
             let default_lab_runner = if hot_command.lab_offload_supported {
                 crate::core::runner::resolve_default_lab_runner()
                     .ok()

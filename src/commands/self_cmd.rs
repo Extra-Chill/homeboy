@@ -6,7 +6,7 @@ use homeboy::core::runners::{self as runner, Runner, RunnerKind, RunnerStatusRep
 use homeboy::core::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde_json::Value;
 
-use crate::commands::{CmdResult, GlobalArgs};
+use crate::commands::{resources, CmdResult, GlobalArgs};
 
 #[derive(Args)]
 pub struct SelfArgs {
@@ -21,7 +21,9 @@ pub enum SelfCommand {
     /// Report the active binary build identity without external probes
     Identity(SelfIdentityArgs),
     /// Report one authoritative binary/runtime view across the controller and
-    /// every configured runner, including version drift signals
+    /// every configured runner, including version drift signals and host
+    /// resource pressure (machine load, hot Homeboy-adjacent processes, rig
+    /// leases)
     Doctor(SelfDoctorArgs),
     /// Plan or delete orphaned Homeboy runtime temp entries
     CleanupRuntimeTmp(SelfCleanupRuntimeTmpArgs),
@@ -71,6 +73,10 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
                 collect_runner_inputs(),
             );
             let command_surface = current_command_surface_doctor_report();
+            // Host resource pressure is diagnostic context, not a drift signal,
+            // so it is reported alongside the runtime/command-surface view
+            // without affecting the agreement exit code.
+            let (host_resources, _) = resources::run(resources::ResourcesArgs {})?;
             let exit_code = if view.agrees && command_surface.agrees {
                 0
             } else {
@@ -92,6 +98,11 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
                 object.insert(
                     "command_surface".to_string(),
                     serde_json::to_value(command_surface)
+                        .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
+                );
+                object.insert(
+                    "resources".to_string(),
+                    serde_json::to_value(host_resources)
                         .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
                 );
             }

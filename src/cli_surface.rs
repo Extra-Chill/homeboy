@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
-    component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, fuzz, git, http,
-    issues, lab, lint, logs, manifest, observe, project, refactor, refs, release, report, review,
-    rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel,
-    undo, upgrade, version, worktree,
+    component, config, daemon, db, deploy, deps, extension, file, fleet, fuzz, git, http, issues,
+    lint, logs, manifest, observe, project, refactor, refs, release, report, review, rig, runner,
+    runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
+    upgrade, version, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -106,8 +106,6 @@ pub enum Commands {
     Deps(deps::DepsArgs),
     /// Inspect CI reproduction profiles and discovered CI surfaces
     Ci(ci::CiArgs),
-    /// Read-only local diagnostics for Homeboy-adjacent work
-    Doctor(doctor::DoctorArgs),
     /// Remote file operations
     File(file::FileArgs),
     /// Manage fleets (groups of projects)
@@ -165,8 +163,6 @@ pub enum Commands {
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
     Runner(runner::RunnerArgs),
-    /// Discover Lab routing and runner refresh planning commands
-    Lab(lab::LabArgs),
     /// Inspect core-owned runtime helper assets
     Runtime(runtime::RuntimeArgs),
     /// Manage component-backed task worktrees
@@ -403,7 +399,6 @@ mod entry_command_impls {
                 Commands::Db(_) => "db",
                 Commands::Deps(_) => "deps",
                 Commands::Ci(_) => "ci",
-                Commands::Doctor(_) => "doctor",
                 Commands::File(_) => "file",
                 Commands::Fleet(_) => "fleet",
                 Commands::Logs(_) => "logs",
@@ -432,7 +427,6 @@ mod entry_command_impls {
                 Commands::Refs(_) => "refs",
                 Commands::Rig(_) => "rig",
                 Commands::Runner(_) => "runner",
-                Commands::Lab(_) => "lab",
                 Commands::Runtime(_) => "runtime",
                 Commands::Worktree(_) => "worktree",
                 Commands::Tunnel(_) => "tunnel",
@@ -743,7 +737,7 @@ mod tests {
 
         assert!(surface.contains_path(&["self"]));
         assert!(surface.contains_path(&["self", "status"]));
-        assert!(surface.contains_path(&["doctor", "resources"]));
+        assert!(surface.contains_path(&["self", "doctor"]));
         assert!(surface.contains_path(&["ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
         assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
@@ -756,7 +750,7 @@ mod tests {
 
         assert!(surface.contains_path(&["self"]));
         assert!(surface.contains_path(&["self", "status"]));
-        assert!(surface.contains_path(&["doctor", "resources"]));
+        assert!(surface.contains_path(&["self", "doctor"]));
         assert!(surface.contains_path(&["ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
         assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));

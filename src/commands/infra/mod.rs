@@ -1,13 +1,16 @@
-//! CLI-infrastructure / plumbing modules.
+//! Command-runtime infrastructure.
 //!
-//! These modules are command-runtime infrastructure (routing, adapters,
-//! response/output handling, summary helpers, manifests) rather than
-//! individual user-facing commands. They were grouped here to keep the
-//! `src/commands/` directory under the structural file-count threshold.
+//! This module is the command-dispatch runtime layer: routing, adapters,
+//! response/output handling, summary helpers, and manifests that turn a parsed
+//! `Commands` value into a dispatched, serialized result. It is a deliberate
+//! architectural boundary, distinct from the per-command modules in
+//! `crate::commands`, each of which owns exactly one user-facing command.
+//! Shared dispatch/runtime plumbing belongs here by design; new user-facing
+//! commands do not.
 //!
-//! All items remain reachable at their original `crate::commands::*` paths
-//! via re-exports in `crate::commands` (see `src/commands/mod.rs`), so this
-//! is a pure relocation with zero API change.
+//! All items remain reachable at their original `crate::commands::*` paths via
+//! re-exports in `crate::commands` (see `src/commands/mod.rs`), so callers
+//! import them unchanged.
 
 pub(crate) mod adapter;
 pub mod cli;
