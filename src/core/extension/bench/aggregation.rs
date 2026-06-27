@@ -68,6 +68,10 @@ pub fn aggregate_runs(runs: &[BenchResults]) -> Result<BenchResults> {
             .iter()
             .flat_map(|result| result.diagnostics.clone())
             .collect(),
+        child_command_failures: runs
+            .iter()
+            .flat_map(|result| result.child_command_failures.clone())
+            .collect(),
         phase_events: runs
             .iter()
             .flat_map(|result| result.phase_events.clone())

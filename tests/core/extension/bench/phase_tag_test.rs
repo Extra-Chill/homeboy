@@ -62,6 +62,7 @@ fn results_with(
         timeline: Vec::new(),
         span_definitions: BTreeMap::new(),
         diagnostics: Vec::new(),
+        child_command_failures: Vec::new(),
         phase_events: Vec::new(),
         phase_summaries: Vec::new(),
         failure_classification: None,

@@ -12,9 +12,9 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_executable_requirement_diagnostics, declared_run_followups_for_legacy,
-    declared_runtime_diagnostics,
-    declared_runtime_source_diagnostics, declared_tool_diagnostics, lab_runner_homeboy_output,
-    runner_artifact_feature_diagnostics, runner_status_operator_commands,
+    declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
+    lab_runner_homeboy_output, runner_artifact_feature_diagnostics,
+    runner_status_operator_commands,
 };
 
 #[test]
@@ -256,7 +256,6 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
         .iter()
         .any(|diagnostic| diagnostic.id == "selected_runtime.mixed_core_source"));
 }
-
 
 #[test]
 fn sample_runtime_diagnostics_accept_single_managed_checkout() {

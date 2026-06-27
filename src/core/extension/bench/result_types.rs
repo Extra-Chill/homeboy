@@ -53,6 +53,8 @@ pub struct BenchResults {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_command_failures: Vec<BenchChildCommandFailure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phase_events: Vec<BenchPhaseEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phase_summaries: Vec<BenchPhaseSummary>,
@@ -262,6 +264,30 @@ pub struct BenchRunSnapshot {
     pub artifacts: BTreeMap<String, BenchArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchChildCommandFailure {
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_status: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_tail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_tail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

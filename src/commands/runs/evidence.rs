@@ -146,6 +146,18 @@ mod tests {
                         "error": "boom",
                         "gate_failures": ["p95_ms exceeded"],
                         "hints": ["inspect artifacts"],
+                        "child_command_failures": [{
+                            "argv": ["generic-child", "run", "--json"],
+                            "exit_status": 9,
+                            "stdout_tail": "child stdout tail",
+                            "stderr_tail": "child stderr tail",
+                            "scenario_id": "cold",
+                            "iteration": "5/10",
+                            "artifact_refs": [{
+                                "kind": "log",
+                                "ref": "runner-artifact://run/child-log"
+                            }]
+                        }],
                         "tracker_refs": [{
                             "kind": "linear",
                             "id": "HB-42"
@@ -290,6 +302,22 @@ mod tests {
             assert_eq!(output.failure.exit_code, Some(1));
             assert_eq!(output.failure.gate_failures, vec!["p95_ms exceeded"]);
             assert_eq!(output.failure.hints, vec!["inspect artifacts"]);
+            assert_eq!(
+                output.failure.child_command_failures[0]["argv"][0],
+                "generic-child"
+            );
+            assert_eq!(
+                output.failure.child_command_failures[0]["stdout_tail"],
+                "child stdout tail"
+            );
+            assert_eq!(
+                output.failure.child_command_failures[0]["stderr_tail"],
+                "child stderr tail"
+            );
+            assert_eq!(
+                output.failure.child_command_failures[0]["artifact_refs"][0]["ref"],
+                "runner-artifact://run/child-log"
+            );
             let manifest = output.evidence_manifest.expect("evidence manifest");
             assert_eq!(manifest.schema, "homeboy/evidence-manifest/v1");
             assert_eq!(manifest.tracker_refs[0].id, "Extra-Chill/homeboy#123");

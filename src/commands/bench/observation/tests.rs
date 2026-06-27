@@ -210,6 +210,24 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
                 ..BenchArtifact::default()
             },
         );
+        let child_command_failures = vec![
+            homeboy::core::extension::bench::parsing::BenchChildCommandFailure {
+                argv: vec!["generic-child".to_string(), "run".to_string()],
+                command: None,
+                exit_status: Some(9),
+                signal: None,
+                stdout_tail: Some("child stdout tail".to_string()),
+                stderr_tail: Some("child stderr tail".to_string()),
+                scenario_id: Some("cold".to_string()),
+                iteration: Some("5/10".to_string()),
+                batch: None,
+                artifact_refs: vec![serde_json::json!({
+                    "kind": "log",
+                    "ref": "runner-artifact://run/child-log"
+                })],
+            },
+        ];
+        results.child_command_failures = child_command_failures.clone();
         let mut workflow = BenchRunWorkflowResult {
             status: "passed".to_string(),
             component: "homeboy".to_string(),
@@ -267,6 +285,22 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
         assert_eq!(
             run.metadata_json["scenario_metrics"][0]["metrics"]["p95_ms"],
             42.0
+        );
+        assert_eq!(
+            run.metadata_json["child_command_failures"][0]["argv"][0],
+            "generic-child"
+        );
+        assert_eq!(
+            run.metadata_json["child_command_failures"][0]["stdout_tail"],
+            "child stdout tail"
+        );
+        assert_eq!(
+            run.metadata_json["child_command_failures"][0]["stderr_tail"],
+            "child stderr tail"
+        );
+        assert_eq!(
+            run.metadata_json["child_command_failures"][0]["artifact_refs"][0]["ref"],
+            "runner-artifact://run/child-log"
         );
 
         let artifacts = store.list_artifacts(&run_id).expect("artifacts");

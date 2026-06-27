@@ -80,10 +80,10 @@ use normalize::{
 use validate::{evaluate_spans, validate_unique_scenario_ids, validate_variance_policies};
 
 pub use super::result_types::{
-    BenchMemory, BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchMetrics,
-    BenchProvenance, BenchProvenanceLink, BenchResults, BenchRunExecution, BenchRunMetadata,
-    BenchRunSnapshot, BenchRunnerMetadata, BenchScenario, BenchWorkloadMetadata, RegressionTest,
-    RigPackageEvidence, RigPackageFreshness,
+    BenchChildCommandFailure, BenchMemory, BenchMetricDirection, BenchMetricPhase,
+    BenchMetricPolicy, BenchMetrics, BenchProvenance, BenchProvenanceLink, BenchResults,
+    BenchRunExecution, BenchRunMetadata, BenchRunSnapshot, BenchRunnerMetadata, BenchScenario,
+    BenchWorkloadMetadata, RegressionTest, RigPackageEvidence, RigPackageFreshness,
 };
 
 /// Read and parse a `$HOMEBOY_BENCH_RESULTS_FILE` written by an extension.
@@ -482,6 +482,49 @@ mod tests {
         assert!(serialized.contains("\"artifacts\""));
         assert!(serialized.contains("artifacts/agent-loop/transcript.json"));
         assert!(serialized.contains("https://example.test/"));
+    }
+
+    #[test]
+    fn parses_generic_child_command_failure_envelopes() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 1,
+            "child_command_failures": [
+                {
+                    "argv": ["generic-runner", "recipe", "--json"],
+                    "exit_status": 2,
+                    "stdout_tail": "stdout detail",
+                    "stderr_tail": "child exploded",
+                    "iteration": "5/10",
+                    "batch": "batch-a",
+                    "artifact_refs": [
+                        { "kind": "log", "ref": "runner-artifact://run/log" }
+                    ]
+                }
+            ],
+            "scenarios": [
+                {
+                    "id": "site-build",
+                    "iterations": 1,
+                    "metrics": { "success_rate": 0.0 },
+                    "metadata": { "nested_failure_count": 1 }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+
+        assert_eq!(parsed.child_command_failures[0].argv[0], "generic-runner");
+        assert_eq!(parsed.child_command_failures[0].exit_status, Some(2));
+        assert_eq!(
+            parsed.child_command_failures[0].stderr_tail.as_deref(),
+            Some("child exploded")
+        );
+        assert_eq!(
+            parsed.child_command_failures[0].artifact_refs[0]["ref"],
+            "runner-artifact://run/log"
+        );
+        assert_eq!(parsed.child_command_failures[0].scenario_id, None);
     }
 
     #[test]

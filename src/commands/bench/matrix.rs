@@ -405,6 +405,16 @@ fn merge_matrix_results(
                 .flat_map(|output| output.results.as_ref().map(|r| r.diagnostics.clone()))
                 .flatten()
                 .collect(),
+            child_command_failures: outputs
+                .iter()
+                .flat_map(|output| {
+                    output
+                        .results
+                        .as_ref()
+                        .map(|r| r.child_command_failures.clone())
+                })
+                .flatten()
+                .collect(),
             phase_events: outputs
                 .iter()
                 .flat_map(|output| output.results.as_ref().map(|r| r.phase_events.clone()))

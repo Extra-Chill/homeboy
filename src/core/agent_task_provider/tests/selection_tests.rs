@@ -80,7 +80,8 @@ fn required_extension_ids_follow_selected_agent_task_providers() {
 fn lab_runtime_component_ids_follow_selected_agent_task_providers() {
     let (request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
     provider_a.id = "provider-a".to_string();
-    provider_a.lab_runtime_components = vec!["agents-api".to_string(), "sample-component".to_string()];
+    provider_a.lab_runtime_components =
+        vec!["agents-api".to_string(), "sample-component".to_string()];
     let (mut request_b, mut provider_b) = request("task-b", "node provider-b.js".to_string());
     request_b.executor.selector = Some("provider-b".to_string());
     provider_b.id = "provider-b".to_string();
