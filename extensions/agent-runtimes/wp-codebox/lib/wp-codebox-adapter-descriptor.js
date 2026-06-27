@@ -151,15 +151,107 @@ function wpCodeboxSupportsRunAgentTaskCommand(options = {}) {
 		return false;
 	}
 
+	const descriptor = firstObject(options.runtimeDescriptor, options.runtime_descriptor)
+		|| wpCodeboxRuntimeDescriptor(options);
+	if (!descriptor) {
+		return false;
+	}
+	return runtimeDescriptorSupportsCommand(descriptor, WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND);
+}
+
+function wpCodeboxRuntimeDescriptor(options = {}) {
+	const env = options.env || process.env;
 	const bin = firstValue(options.bin, options.wpCodeboxBin, options.wp_codebox_bin, wpCodeboxBin({ ...options, env }));
-	const resolved = wpCodeboxResolveCommand(bin, [WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND, '--help']);
-	const result = spawnSync(resolved.command, resolved.args, {
+	if (!bin) {
+		return null;
+	}
+	const resolved = wpCodeboxResolveCommand(bin, ['runtime', 'descriptor', '--json']);
+	const spawn = options.spawnSync || spawnSync;
+	const result = spawn(resolved.command, resolved.args, {
 		encoding: 'utf8',
 		env,
 		maxBuffer: 1024 * 1024,
 		timeout: options.timeoutMs || options.timeout_ms || 5000,
 	});
-	return !result.error && result.status === 0;
+	if (result.error || result.status !== 0) {
+		return null;
+	}
+	return parseRuntimeDescriptorJson(result.stdout);
+}
+
+function parseRuntimeDescriptorJson(stdout) {
+	try {
+		const parsed = JSON.parse(stdout);
+		return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+function runtimeDescriptorSupportsCommand(descriptor, command) {
+	const commands = new Set(runtimeDescriptorCommandNames(descriptor));
+	if (commands.has(command)) {
+		return true;
+	}
+	const capabilities = new Set(runtimeDescriptorCapabilityNames(descriptor));
+	return capabilities.has(command)
+		|| capabilities.has(command.replace(/-/g, '_'))
+		|| capabilities.has(`wp-codebox/${command}`);
+}
+
+function runtimeDescriptorCommandNames(descriptor = {}) {
+	return uniqueStrings([
+		...commandNamesFromValue(descriptor.commands),
+		...commandNamesFromValue(descriptor.cli_commands),
+		...commandNamesFromValue(descriptor.cliCommands),
+		...commandNamesFromValue(descriptor.tasks),
+		...commandNamesFromValue(descriptor.abilities),
+		...commandNamesFromValue(descriptor.runtime?.commands),
+		...commandNamesFromValue(descriptor.runtime?.tasks),
+		...commandNamesFromValue(descriptor.runtime?.abilities),
+		...commandNamesFromValue(descriptor.agent_task?.commands),
+		...commandNamesFromValue(descriptor.agentTask?.commands),
+	]);
+}
+
+function runtimeDescriptorCapabilityNames(descriptor = {}) {
+	return uniqueStrings([
+		...commandNamesFromValue(descriptor.capabilities),
+		...commandNamesFromValue(descriptor.runtime_capabilities),
+		...commandNamesFromValue(descriptor.runtimeCapabilities),
+		...commandNamesFromValue(descriptor.runtime?.capabilities),
+	]);
+}
+
+function commandNamesFromValue(value) {
+	if (!value) {
+		return [];
+	}
+	if (typeof value === 'string') {
+		return [value];
+	}
+	if (Array.isArray(value)) {
+		return value.flatMap((entry) => commandNamesFromValue(entry));
+	}
+	if (typeof value !== 'object') {
+		return [];
+	}
+	return Object.entries(value).flatMap(([key, entry]) => {
+		if (entry === true) {
+			return [key];
+		}
+		if (typeof entry === 'string') {
+			return [key, entry];
+		}
+		if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+			return [key, entry.name, entry.command, entry.id, entry.capability].filter(Boolean);
+		}
+		return [key];
+	});
+}
+
+function uniqueStrings(values) {
+	return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
 }
 
 function wpCodeboxProviderPluginPathsFromEnv(env = process.env) {
@@ -218,9 +310,16 @@ function firstValue(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
 }
 
+function firstObject(...values) {
+	return values.find((value) => value && typeof value === 'object' && !Array.isArray(value));
+}
+
 module.exports = {
   DEFAULT_WP_CODEBOX_CLI_DESCRIPTOR,
   WP_CODEBOX_CLI_DESCRIPTOR_SCHEMA,
+	parseRuntimeDescriptorJson,
+	runtimeDescriptorCommandNames,
+	runtimeDescriptorSupportsCommand,
 	homeboySettings,
 	managedWpCodeboxBin,
 	wpCodeboxBinaryDiagnostic,
@@ -230,5 +329,6 @@ module.exports = {
 	wpCodeboxCommand,
 	wpCodeboxProviderPluginPathsFromEnv,
 	wpCodeboxResolveCommand,
+	wpCodeboxRuntimeDescriptor,
 	wpCodeboxSupportsRunAgentTaskCommand,
 };
