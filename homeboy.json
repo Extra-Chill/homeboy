@@ -677,7 +677,6 @@
         "thin_command_adapter::src/commands/review/mod.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/runs/gh_actions.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/runs/loop_sync.rs::ThinCommandAdapterViolation",
-        "thin_command_adapter::src/commands/trace/test_fixture.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/utils/observed_workflow.rs::ThinCommandAdapterViolation"
       ],
       "metadata": {
