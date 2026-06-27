@@ -170,9 +170,8 @@ pub struct RunnerSpec {
     pub workspace_root: Option<String>,
     pub settings: RunnerSettings,
     pub env: HashMap<String, String>,
-    pub secret_env: HashMap<String, RunnerSecretEnvRef>,
     pub resources: HashMap<String, Value>,
-    pub policy: RunnerPolicy,
+    pub security: server::RunnerSecurityConfig,
 }
 
 impl RunnerSpec {
@@ -181,9 +180,11 @@ impl RunnerSpec {
             workspace_root: runner.workspace_root.clone(),
             settings: runner.settings.clone(),
             env: runner.env.clone(),
-            secret_env: runner.secret_env.clone(),
             resources: runner.resources.clone(),
-            policy: runner.policy.clone(),
+            security: server::RunnerSecurityConfig {
+                secret_env: runner.secret_env.clone(),
+                policy: runner.policy.clone(),
+            },
         }
     }
 
@@ -195,9 +196,9 @@ impl RunnerSpec {
             workspace_root: self.workspace_root,
             settings: self.settings,
             env: self.env,
-            secret_env: self.secret_env,
+            secret_env: self.security.secret_env,
             resources: self.resources,
-            policy: self.policy,
+            policy: self.security.policy,
         }
     }
 
@@ -206,9 +207,8 @@ impl RunnerSpec {
             workspace_root: self.workspace_root,
             settings: self.settings,
             env: self.env,
-            secret_env: self.secret_env,
             resources: self.resources,
-            policy: self.policy,
+            security: self.security,
         }
     }
 
@@ -225,9 +225,8 @@ impl From<ServerRunner> for RunnerSpec {
             workspace_root: runner.workspace_root,
             settings: runner.settings,
             env: runner.env,
-            secret_env: runner.secret_env,
             resources: runner.resources,
-            policy: runner.policy,
+            security: runner.security,
         }
     }
 }
@@ -958,18 +957,20 @@ mod tests {
                 ("PATH".to_string(), "/runner/bin".to_string()),
                 ("RUST_LOG".to_string(), "info".to_string()),
             ]),
-            secret_env: HashMap::from([(
-                "TOKEN".to_string(),
-                RunnerSecretEnvRef {
-                    env: Some("TOKEN".to_string()),
-                    file: None,
-                    secret: None,
-                },
-            )]),
             resources: HashMap::from([("cpu".to_string(), Value::from(4))]),
-            policy: RunnerPolicy {
-                allowed_commands: vec!["test".to_string()],
-                ..Default::default()
+            security: server::RunnerSecurityConfig {
+                secret_env: HashMap::from([(
+                    "TOKEN".to_string(),
+                    RunnerSecretEnvRef {
+                        env: Some("TOKEN".to_string()),
+                        file: None,
+                        secret: None,
+                    },
+                )]),
+                policy: RunnerPolicy {
+                    allowed_commands: vec!["test".to_string()],
+                    ..Default::default()
+                },
             },
         };
 

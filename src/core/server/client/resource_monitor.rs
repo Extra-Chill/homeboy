@@ -65,8 +65,10 @@ impl ChildResourceMonitor {
             started_at: self.started_at,
             finished_at: Utc::now().to_rfc3339(),
             duration_ms: self.started_instant.elapsed().as_millis(),
-            sampled_peak_rss_bytes: state.peak_rss_bytes,
-            sampled_peak_cpu_percent: state.peak_cpu_percent,
+            peak: crate::core::engine::resource::ChildResourcePeakSample {
+                sampled_peak_rss_bytes: state.peak_rss_bytes,
+                sampled_peak_cpu_percent: state.peak_cpu_percent,
+            },
             sampled_peak_at_ms: state.peak_at_ms,
             sampled_peak_child_count: state.peak_child_count,
             samples: state.samples,

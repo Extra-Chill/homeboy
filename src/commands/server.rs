@@ -568,14 +568,17 @@ mod tests {
                         "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL".to_string(),
                         "https://artifacts.example.test".to_string(),
                     )]),
-                    secret_env: HashMap::from([(
-                        "OPENAI_API_KEY".to_string(),
-                        RunnerSecretEnvRef {
-                            env: Some("OPENAI_API_KEY".to_string()),
-                            file: None,
-                            secret: None,
-                        },
-                    )]),
+                    security: homeboy::core::server::RunnerSecurityConfig {
+                        secret_env: HashMap::from([(
+                            "OPENAI_API_KEY".to_string(),
+                            RunnerSecretEnvRef {
+                                env: Some("OPENAI_API_KEY".to_string()),
+                                file: None,
+                                secret: None,
+                            },
+                        )]),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 }),
             }),

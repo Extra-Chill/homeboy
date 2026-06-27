@@ -29,6 +29,7 @@ use super::{
     RunListFilter, RunRecord,
 };
 use crate::core::artifact_links::{cached_validated_viewer_links, public_artifact_url};
+use crate::core::engine::temp::CleanupSizeTotals;
 use crate::core::execution_contract::EXECUTION_CONTRACT;
 use crate::core::runners::RunnerArtifactRef;
 use crate::core::Error;
@@ -91,15 +92,14 @@ pub struct PersistedArtifactCleanupOutcome {
     pub dry_run: bool,
     pub artifact_root: PathBuf,
     pub older_than_days: i64,
-    pub inspected_count: usize,
+    #[serde(flatten)]
+    pub totals: CleanupSizeTotals,
     pub planned_record_count: usize,
     pub planned_file_count: usize,
     pub planned_directory_count: usize,
-    pub planned_size_bytes: u64,
     pub removed_record_count: usize,
     pub removed_file_count: usize,
     pub removed_directory_count: usize,
-    pub removed_size_bytes: u64,
     pub skipped_count: usize,
     pub rows: Vec<PersistedArtifactCleanupRow>,
 }
@@ -532,15 +532,17 @@ mod persisted_cleanup {
             dry_run: !options.apply,
             artifact_root,
             older_than_days: options.older_than_days,
-            inspected_count: candidates.len(),
+            totals: CleanupSizeTotals {
+                inspected_count: candidates.len(),
+                planned_size_bytes,
+                removed_size_bytes,
+            },
             planned_record_count,
             planned_file_count,
             planned_directory_count,
-            planned_size_bytes,
             removed_record_count,
             removed_file_count,
             removed_directory_count,
-            removed_size_bytes,
             skipped_count,
             rows,
         })

@@ -82,6 +82,8 @@ pub(super) struct WorkspaceRefResolution {
     pub(super) raw_ref: String,
     pub(super) handle: String,
     pub(super) subpath: Option<String>,
+    pub(super) source_kind: String,
+    pub(super) source_provenance: Option<serde_json::Value>,
     pub(super) workspace_path: PathBuf,
     pub(super) resolved_path: PathBuf,
 }
@@ -853,6 +855,8 @@ fn add_candidate_workspace_ref_extra_workspace(
             "ref": resolution.raw_ref,
             "handle": resolution.handle,
             "subpath": resolution.subpath,
+            "workspace_source": resolution.source_kind,
+            "workspace_provenance": resolution.source_provenance,
             "workspace_path": resolution.workspace_path.display().to_string(),
             "resolved_path": resolution.resolved_path.display().to_string(),
         })),
@@ -1284,28 +1288,31 @@ fn maybe_resolve_workspace_ref(
     let Some((handle, subpath)) = parse_workspace_ref(value) else {
         return Ok(None);
     };
-    let record = worktree::resolve(&handle).map_err(|_| {
+    let record = worktree::resolve_workspace_ref(&handle).map_err(|_| {
         Error::validation_invalid_argument(
             "workspace_ref",
-            format!("Lab offload workspace ref `{value}` does not match a known Homeboy worktree"),
+            format!("Lab offload workspace ref `{value}` does not match a known workspace handle"),
             Some(value.to_string()),
             Some(vec![
-                "Create or list Homeboy task worktrees with `homeboy worktree create` and `homeboy worktree list`.".to_string(),
+                "Create a Homeboy task worktree or adopt an existing path with `homeboy worktree adopt <handle> <path>`.".to_string(),
             ]),
         )
     })?;
-    if record.state != TaskWorktreeState::Active {
+    if record.state() != &TaskWorktreeState::Active {
         return Err(Error::validation_invalid_argument(
             "workspace_ref",
-            format!("Lab offload workspace ref `{value}` points at a stale Homeboy worktree"),
-            Some(record.id),
+            format!(
+                "Lab offload workspace ref `{value}` points at a stale {}",
+                record.source_kind()
+            ),
+            Some(record.handle().to_string()),
             Some(vec![
-                "Use an active worktree handle or create a fresh worktree before Lab offload."
+                "Use an active workspace handle or adopt an existing path before Lab offload."
                     .to_string(),
             ]),
         ));
     }
-    let workspace_path = PathBuf::from(&record.worktree_path);
+    let workspace_path = PathBuf::from(record.path());
     let mut resolved = workspace_path.clone();
     if let Some(subpath) = subpath.as_deref() {
         resolved.push(subpath);
@@ -1325,6 +1332,8 @@ fn maybe_resolve_workspace_ref(
         raw_ref: value.to_string(),
         handle,
         subpath,
+        source_kind: record.source_kind().to_string(),
+        source_provenance: record.provenance().cloned(),
         workspace_path,
         resolved_path: resolved.clone(),
     });
@@ -1368,6 +1377,7 @@ mod provider_config_candidate_paths_tests {
     use crate::core::runner::{
         ByteFileCounts, RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode,
     };
+    use crate::core::worktree;
 
     fn git(path: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -1958,6 +1968,98 @@ mod provider_config_candidate_paths_tests {
     }
 
     #[test]
+    fn path_setting_workspace_ref_resolves_adopted_workspace() {
+        crate::test_support::with_isolated_home(|home| {
+            let source = home.path().join("primary");
+            let workspace = home.path().join("external-workspace");
+            let nested = workspace.join("fixtures/input.json");
+            std::fs::create_dir_all(&source).expect("source dir");
+            std::fs::create_dir_all(nested.parent().unwrap()).expect("nested dir");
+            std::fs::write(&nested, "{}\n").expect("nested file");
+            worktree::adopt(worktree::WorktreeAdoptOptions {
+                handle: "external".to_string(),
+                path: workspace.display().to_string(),
+                kind: Some("local_checkout".to_string()),
+                provenance: Some(serde_json::json!({
+                    "source": "test-harness",
+                    "note": "opaque caller metadata"
+                })),
+            })
+            .expect("adopt workspace");
+            let args = vec![
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "--setting".to_string(),
+                "fixture=@workspace:external/fixtures/input.json".to_string(),
+            ];
+
+            let (rewritten, resolutions) =
+                resolve_path_setting_workspace_refs_in_args(&args).expect("resolve refs");
+            let expected = format!(
+                "fixture={}",
+                workspace
+                    .canonicalize()
+                    .unwrap()
+                    .join("fixtures/input.json")
+                    .display()
+            );
+
+            assert_eq!(rewritten[3], expected);
+            assert_eq!(resolutions.len(), 1);
+            assert_eq!(resolutions[0].handle, "external");
+            assert_eq!(resolutions[0].source_kind, "adopted_workspace");
+            assert_eq!(
+                resolutions[0].source_provenance.as_ref().unwrap()["source"],
+                "test-harness"
+            );
+            assert_eq!(
+                resolutions[0].subpath.as_deref(),
+                Some("fixtures/input.json")
+            );
+
+            let workspaces =
+                workspace_ref_extra_workspaces(&resolutions, &source).expect("extra workspaces");
+            assert_eq!(workspaces.len(), 1);
+            assert_eq!(workspaces[0].path, workspace.canonicalize().unwrap());
+            let provenance = workspaces[0].source_provenance.as_ref().unwrap();
+            assert_eq!(provenance["workspace_source"], "adopted_workspace");
+            assert_eq!(
+                provenance["workspace_provenance"]["note"],
+                "opaque caller metadata"
+            );
+        });
+    }
+
+    #[test]
+    fn path_setting_workspace_ref_missing_adopted_path_fails_locally() {
+        crate::test_support::with_isolated_home(|home| {
+            let workspace = home.path().join("external-workspace");
+            std::fs::create_dir_all(&workspace).expect("workspace dir");
+            worktree::adopt(worktree::WorktreeAdoptOptions {
+                handle: "external".to_string(),
+                path: workspace.display().to_string(),
+                kind: None,
+                provenance: None,
+            })
+            .expect("adopt workspace");
+            std::fs::remove_dir_all(&workspace).expect("remove adopted workspace");
+            let args = vec![
+                "homeboy".to_string(),
+                "trace".to_string(),
+                "--setting=fixture=@workspace:external".to_string(),
+            ];
+
+            let err = resolve_path_setting_workspace_refs_in_args(&args)
+                .expect_err("missing adopted workspace path should fail");
+
+            assert_eq!(err.details["field"], "workspace_ref");
+            assert!(err
+                .message
+                .contains("resolved to a missing controller path"));
+        });
+    }
+
+    #[test]
     fn path_setting_workspace_ref_missing_handle_fails_locally() {
         crate::test_support::with_isolated_home(|_| {
             let args = vec![
@@ -1972,7 +2074,7 @@ mod provider_config_candidate_paths_tests {
             assert_eq!(err.details["field"], "workspace_ref");
             assert!(err
                 .message
-                .contains("does not match a known Homeboy worktree"));
+                .contains("does not match a known workspace handle"));
         });
     }
 
@@ -2012,7 +2114,7 @@ mod provider_config_candidate_paths_tests {
                 .expect_err("removed workspace ref should fail");
 
             assert_eq!(err.details["field"], "workspace_ref");
-            assert!(err.message.contains("stale Homeboy worktree"));
+            assert!(err.message.contains("stale task_worktree"));
         });
     }
 

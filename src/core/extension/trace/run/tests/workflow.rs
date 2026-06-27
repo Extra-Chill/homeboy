@@ -105,8 +105,10 @@ fn trace_failure_records_child_cleanup_context() {
                 started_at: "2026-06-06T00:00:00Z".to_string(),
                 finished_at: "2026-06-06T00:00:01Z".to_string(),
                 duration_ms: 1000,
-                sampled_peak_rss_bytes: None,
-                sampled_peak_cpu_percent: None,
+                peak: crate::core::engine::resource::ChildResourcePeakSample {
+                    sampled_peak_rss_bytes: None,
+                    sampled_peak_cpu_percent: None,
+                },
                 sampled_peak_at_ms: None,
                 sampled_peak_child_count: None,
                 samples: Vec::new(),

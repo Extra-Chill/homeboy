@@ -107,6 +107,17 @@ pub struct RunnerPolicy {
     pub supported_extensions: Vec<String>,
 }
 
+/// Secret-env + policy security configuration shared by runner-shaped structs.
+/// Flattened so the on-wire JSON (`secret_env`, `policy`, each with its
+/// `skip_serializing_if`) is identical to the previously inlined fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerSecurityConfig {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub secret_env: HashMap<String, RunnerSecretEnvRef>,
+    #[serde(default, skip_serializing_if = "RunnerPolicy::is_empty")]
+    pub policy: RunnerPolicy,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerRunner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,11 +127,9 @@ pub struct ServerRunner {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub secret_env: HashMap<String, RunnerSecretEnvRef>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub resources: HashMap<String, serde_json::Value>,
-    #[serde(default, skip_serializing_if = "RunnerPolicy::is_empty")]
-    pub policy: RunnerPolicy,
+    #[serde(flatten)]
+    pub security: RunnerSecurityConfig,
 }
 
 impl RunnerPolicy {
