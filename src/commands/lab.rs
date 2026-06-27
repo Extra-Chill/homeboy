@@ -463,6 +463,7 @@ fn execution_envelope_plan(
     docs: &[String],
 ) -> RunnerExecutionEnvelope {
     let handoff_id = format!("lab-refresh:{}:{}", args.runner, args.run_id);
+    let mapping = workspace_mapping(args);
 
     RunnerExecutionEnvelope::planned(&handoff_id, "lab_refresh_plan")
         .with_source_ref(&args.run_id)
@@ -490,7 +491,7 @@ fn execution_envelope_plan(
                 "controller_path": args.workspace,
                 "runner_cwd": args.runner_cwd,
                 "sync_mode": args.sync_mode,
-                "mapping": handoff.workspace.mapping,
+                "mapping": mapping,
             },
             "runtime": {
                 "command": args.command,
