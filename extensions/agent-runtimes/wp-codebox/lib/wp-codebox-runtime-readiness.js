@@ -102,6 +102,16 @@ function runtimeOverlayDiagnostics(overlay, index) {
   if (!fs.existsSync(path.join(resolvedSource, 'vendor', 'autoload.php'))) {
     return [runtimeOverlayDiagnostic(index, overlay, `Runtime overlay Composer dependencies are not installed: ${source}/vendor/autoload.php is missing.`, resolvedSource)];
   }
+  if (library === 'php-ai-client') {
+    const providerMetadataPath = path.join(resolvedSource, 'src', 'Providers', 'DTO', 'ProviderMetadata.php');
+    if (!fs.existsSync(providerMetadataPath)) {
+      return [runtimeOverlayDiagnostic(index, overlay, `PHP AI Client runtime overlay is missing ProviderMetadata.php: ${providerMetadataPath}.`, resolvedSource)];
+    }
+    const providerMetadata = fs.readFileSync(providerMetadataPath, 'utf8');
+    if (!/function\s+getDescription\s*\(/.test(providerMetadata)) {
+      return [runtimeOverlayDiagnostic(index, overlay, `PHP AI Client runtime overlay does not expose ProviderMetadata::getDescription(): ${providerMetadataPath}.`, resolvedSource)];
+    }
+  }
   return [];
 }
 

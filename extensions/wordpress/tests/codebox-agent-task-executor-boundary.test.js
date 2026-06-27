@@ -437,7 +437,7 @@ assert.deepEqual(
   controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.ability_normalization.deprecated_compatibility_alias,
   legacyRuntimePackageAbilityAlias('runtime-package/run')
 );
-assert.equal(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.input.runtime_package, 'website-idea-agent');
+assert.equal(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.input.runtime_package, 'bundles/website-idea-agent');
 assert.equal(controllerRuntimeTaskFanoutRequest.workers[0].runtime_task.input.agent, 'website-idea-agent');
 assert.deepEqual(controllerRuntimeTaskFanoutRequest.workers[0].ability_requirements, ['wp-codebox/run-runtime-package']);
 
@@ -478,7 +478,7 @@ const controllerAbilityRequestFanoutRequest = codeboxFanoutRequestFromAgentTaskR
 assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.ability, 'wp-codebox/run-runtime-package');
 assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.ability_normalization.requested_ability, 'homeboy/run-runtime-package');
 assert.equal(Object.hasOwn(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.ability_normalization, 'deprecated_compatibility_alias'), false);
-assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.input.runtime_package, 'design-agent');
+assert.equal(controllerAbilityRequestFanoutRequest.workers[0].runtime_task.input.runtime_package, 'bundles/design-agent');
 assert.deepEqual(controllerAbilityRequestFanoutRequest.workers[0].ability_requirements, ['wp-codebox/run-runtime-package', 'wordpress/site-health']);
 const stableCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput });
 assert.equal(stableCodeboxInvocation.contract, runtimeContractSchemas().agentTask.runRequest);
@@ -853,7 +853,7 @@ assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.ability_
   deprecated_compatibility_alias: legacyRuntimePackageAbilityAlias('agents/run-runtime-package'),
 });
 assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task_ability_normalization, controllerClientContextArtifactsTaskInput.runtime_task.ability_normalization);
-assert.equal(controllerClientContextArtifactsTaskInput.runtime_task.input.runtime_package, 'website-idea-agent');
+assert.equal(controllerClientContextArtifactsTaskInput.runtime_task.input.runtime_package, 'bundles/website-idea-agent');
 assert.equal(controllerClientContextArtifactsTaskInput.runtime_task.input.agent, 'website-idea-agent');
 assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.metadata.runtime_package_descriptor, { slug: 'website-idea-agent', source: 'bundles/website-idea-agent' });
 assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_task.input, 'package'), false);
@@ -905,7 +905,7 @@ assert.deepEqual(
   legacyRuntimePackageTaskInput.runtime_task.ability_normalization.deprecated_compatibility_alias,
   legacyRuntimePackageAbilityAlias('runtime-package/run')
 );
-assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.runtime_package, 'example-agent');
+assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.runtime_package, 'bundles/example-agent');
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.agent, 'example-agent');
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.provider, 'codex');
 assert.equal(legacyRuntimePackageTaskInput.runtime_task.input.model, 'gpt-5.5');
@@ -928,7 +928,7 @@ assert.equal(neutralRuntimePackageTaskInput.runtime_task.ability, 'wp-codebox/ru
 assert.equal(neutralRuntimePackageTaskInput.runtime_task.ability_normalization.requested_ability, 'homeboy/run-runtime-package');
 assert.equal(neutralRuntimePackageTaskInput.runtime_task.ability_normalization.normalized_codebox_ability, 'wp-codebox/run-runtime-package');
 assert.equal(Object.hasOwn(neutralRuntimePackageTaskInput.runtime_task.ability_normalization, 'deprecated_compatibility_alias'), false);
-assert.equal(neutralRuntimePackageTaskInput.runtime_task.input.runtime_package, 'example-agent');
+assert.equal(neutralRuntimePackageTaskInput.runtime_task.input.runtime_package, 'bundles/example-agent');
 assert.equal(neutralRuntimePackageTaskInput.runtime_task.input.agent, 'example-agent');
 
 const neutralProfileRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
@@ -1570,5 +1570,105 @@ try {
 assert.deepEqual(explicitCodexTaskInput.provider_plugin_paths, [explicitProviderPath]);
 assert.equal(explicitCodexTaskInput.runtime_requirements.provider_plugins[0].path, explicitProviderPath);
 assert.equal(JSON.stringify(explicitCodexTaskInput.runtime_requirements.provider_plugins).includes('/missing/stale-openai-provider'), false);
+
+const explicitProviderPathFromConfig = path.join(providerRoot, 'explicit-provider-plugin-from-config');
+fs.mkdirSync(explicitProviderPathFromConfig, { recursive: true });
+const staleProviderPathFromRuntimeRequirements = '/missing/stale-runtime-requirements-provider';
+const explicitCodexTaskInputFromConfig = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'explicit-codex-provider-path-config-codebox-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'codex',
+      provider_plugin_paths: [explicitProviderPathFromConfig],
+      runtime_requirements: {
+        provider_plugins: [{ path: staleProviderPathFromRuntimeRequirements }],
+      },
+    },
+  },
+  instructions: 'Run a Codex-backed Codebox task with an explicit provider checkout from request config.',
+  inputs: {},
+});
+assert.deepEqual(explicitCodexTaskInputFromConfig.provider_plugin_paths, [explicitProviderPathFromConfig]);
+assert.deepEqual(explicitCodexTaskInputFromConfig.runtime_requirements.provider_plugins, [{ path: explicitProviderPathFromConfig }]);
+assert.equal(JSON.stringify(explicitCodexTaskInputFromConfig.runtime_requirements).includes(staleProviderPathFromRuntimeRequirements), false);
+
+const explicitProviderPathFromRuntimeOptions = path.join(providerRoot, 'explicit-provider-plugin-from-runtime-options');
+fs.mkdirSync(explicitProviderPathFromRuntimeOptions, { recursive: true });
+const staleProviderPathFromRequestConfig = '/missing/stale-request-config-provider';
+const explicitCodexTaskInputFromRuntimeOptions = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'explicit-codex-provider-path-runtime-options-codebox-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'codex',
+      provider_plugin_paths: [staleProviderPathFromRequestConfig],
+    },
+  },
+  instructions: 'Run a Codex-backed Codebox task with an explicit provider checkout from runtime options.',
+  inputs: {},
+}, { providerPluginPaths: [explicitProviderPathFromRuntimeOptions] });
+assert.deepEqual(explicitCodexTaskInputFromRuntimeOptions.provider_plugin_paths, [explicitProviderPathFromRuntimeOptions]);
+assert.deepEqual(explicitCodexTaskInputFromRuntimeOptions.runtime_requirements.provider_plugins, [{ path: explicitProviderPathFromRuntimeOptions }]);
+assert.equal(JSON.stringify(explicitCodexTaskInputFromRuntimeOptions.runtime_requirements).includes(staleProviderPathFromRequestConfig), false);
+
+const runtimePackageWorkspaceRoot = path.join(workspaceRoot, 'example-runtime@proof-loop');
+fs.mkdirSync(runtimePackageWorkspaceRoot, { recursive: true });
+const runtimePackageTypedArtifactRequest = {
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'runtime-package-typed-artifact-codebox-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'codex',
+      runtime_task: {
+        ability: 'runtime-package/run',
+        input: {
+          package: { slug: 'store-idea-agent', source: 'bundles/store-idea-agent' },
+          workflow: { id: 'store-idea-artifact-flow' },
+        },
+      },
+    },
+  },
+  instructions: 'Produce a typed concept packet.',
+  artifact_declarations: [{
+    name: 'concept_packet',
+    artifact_schema: 'example/ConceptPacket/v1',
+    required: true,
+  }],
+  inputs: { target: { root: runtimePackageWorkspaceRoot } },
+};
+const runtimePackageTypedArtifactTaskInput = codeboxTaskRequestFromAgentTaskRequest(runtimePackageTypedArtifactRequest);
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.runtime_package, '/workspace/example-runtime/bundles/store-idea-agent');
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.agent, 'store-idea-agent');
+assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.metadata.runtime_package_descriptor, { slug: 'store-idea-agent', source: '/workspace/example-runtime/bundles/store-idea-agent' });
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.metadata.runtime_package_descriptor.source === 'bundles/store-idea-agent', false);
+assert.equal(JSON.stringify(runtimePackageTypedArtifactTaskInput.runtime_task).includes('"source":"bundles/store-idea-agent"'), false);
+assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.engine_data_outputs.concept_packet, 'outputs.typed_artifacts.concept_packet.payload');
+
+const runtimePackageTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult(runtimePackageTypedArtifactRequest, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  task_input: runtimePackageTypedArtifactTaskInput,
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {
+        typed_artifacts: {
+          concept_packet: {
+            payload: { title: 'Fixture concept' },
+          },
+        },
+      },
+    },
+  },
+});
+assert.equal(runtimePackageTypedArtifactOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
+assert.deepEqual(runtimePackageTypedArtifactOutcome.outputs.typed_artifacts.concept_packet.payload, { title: 'Fixture concept' });
 
 console.log('Codebox agent-task executor boundary contract passed');

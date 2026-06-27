@@ -50,6 +50,42 @@ function argValues(name) {
   return values;
 }
 
+function envPathList(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      return parsed.filter(Boolean);
+    }
+  } catch {
+    // Fall through to PATH-style lists for simple environment configuration.
+  }
+  return String(value).split(path.delimiter).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function firstNonEmptyArray(...values) {
+  for (const value of values) {
+    const normalized = Array.isArray(value) ? value.filter(Boolean) : (value ? [value] : []);
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+  return [];
+}
+
+function providerPluginPathsFromEnv(env = process.env) {
+  return firstNonEmptyArray(
+    envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATHS),
+    envPathList(env.HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATH),
+    envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
+    envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATHS),
+    envPathList(env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH),
+    envPathList(env.WP_CODEBOX_PROVIDER_PLUGIN_PATH),
+  );
+}
+
 function hasFlag(name) {
   return process.argv.includes(name);
 }
@@ -1058,7 +1094,11 @@ function runnerInput(request, artifacts) {
     mode: argValue('--mode') || request.mode || 'sandbox',
     provider: argValue('--provider') || request.provider || '',
     model: argValue('--model') || request.model || '',
-    provider_plugin_paths: [...(request.provider_plugin_paths || []), ...argValues('--provider-plugin-path')],
+    provider_plugin_paths: uniqueStrings(firstNonEmptyArray(
+      providerPluginPathsFromEnv(),
+      argValues('--provider-plugin-path'),
+      request.provider_plugin_paths,
+    )),
     runtime_overlay_profiles: request.runtime_overlay_profiles || request.runtimeOverlayProfiles || [],
     ...providerCredentialRequestFields({ secret_env: secretEnvNames(request) }),
     mounts,
@@ -1107,12 +1147,53 @@ function pluginSlugFromPath(pluginPath) {
   return path.basename(source).split('@')[0].replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
 }
 
+function phpPluginHeaderFile(filePath) {
+  try {
+    const contents = fs.readFileSync(filePath, 'utf8').slice(0, 8192);
+    return /Plugin\s+Name\s*:/i.test(contents);
+  } catch {
+    return false;
+  }
+}
+
+function providerPluginSource(entry) {
+  return typeof entry === 'string' ? entry : entry?.source || entry?.path || '';
+}
+
+function providerPluginExplicitFile(entry) {
+  if (!entry || typeof entry === 'string' || typeof entry !== 'object' || Array.isArray(entry)) {
+    return '';
+  }
+  return entry.pluginFile || entry.plugin_file || entry.file || '';
+}
+
+function providerPluginEntryFile(source, slug, explicitFile = '') {
+  if (explicitFile) {
+    return explicitFile.includes('/') || explicitFile.includes('\\') ? explicitFile : `${slug}/${explicitFile}`;
+  }
+  if (!source || !fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
+    return '';
+  }
+
+  const rootFiles = fs.readdirSync(source)
+    .filter((entry) => entry.toLowerCase().endsWith('.php'))
+    .sort();
+  const headerFile = rootFiles.find((entry) => phpPluginHeaderFile(path.join(source, entry)));
+  const selected = headerFile
+    || (rootFiles.includes('plugin.php') ? 'plugin.php' : '')
+    || (rootFiles.includes(`${slug}.php`) ? `${slug}.php` : '');
+  return selected ? `${slug}/${selected}` : '';
+}
+
 function providerPluginEntries(input) {
-  return (input.provider_plugin_paths || []).flatMap((source) => {
+  return (input.provider_plugin_paths || []).flatMap((entry) => {
+    const source = providerPluginSource(entry);
     const slug = pluginSlugFromPath(source);
+    const pluginFile = providerPluginEntryFile(source, slug, providerPluginExplicitFile(entry));
     return source && slug ? [{
       source,
       slug,
+      ...(pluginFile ? { pluginFile } : {}),
       loadAs: 'plugin',
       activate: true,
       metadata: { kind: 'provider-plugin-path', provider: input.provider || '' },
