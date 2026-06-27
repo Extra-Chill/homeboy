@@ -12,7 +12,7 @@ const path = require('node:path');
 /**
  * Internal dependencies
  */
-const { loadWpCodeboxCoreFunction } = require('./wp-codebox-core-loader');
+const { createCodeboxClient } = require('./codebox-client');
 const {
   DEFAULT_TASK_TIMEOUT_SECONDS,
   executeAuditFanoutRuntimeTask,
@@ -33,14 +33,6 @@ const WP_CODEBOX_STRUCTURED_OUTCOME_KINDS = new Set([
   'max_turns_exceeded',
 ]);
 const SECRET_KEY_PATTERN = /(secret|token|password|passwd|authorization|cookie|nonce|api[_-]?key|access[_-]?key|private[_-]?key|bearer)/i;
-const WP_CODEBOX_ARTIFACTS_MODULE_OPTIONS = {
-  packageCandidates: [
-    '@automattic/wp-codebox-core/artifacts',
-    'wp-codebox-workspace/artifacts',
-  ],
-  packageDistEntries: ['artifacts.js'],
-};
-
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
@@ -247,8 +239,7 @@ function discoverTaskArtifacts(args, taskRequest, startedAt, finishedAt) {
 }
 
 async function discoverTaskArtifactsAsync(args, taskRequest, startedAt, finishedAt, options = {}) {
-  const discoverPartialRunArtifacts = await loadWpCodeboxCoreFunction('discoverPartialRunArtifacts', {
-    ...WP_CODEBOX_ARTIFACTS_MODULE_OPTIONS,
+  const discoverPartialRunArtifacts = await createCodeboxClient(options).loadArtifactCompatibilityFunction('discoverPartialRunArtifacts', {
     wpCodeboxCoreModule: options.wpCodeboxCoreModule || options.env?.WP_CODEBOX_CORE_MODULE,
   });
   const root = artifactsRootFromArgs(args);

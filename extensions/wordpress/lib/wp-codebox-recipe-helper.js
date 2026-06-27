@@ -18,12 +18,12 @@ const DEFAULT_EVENT_PREFIX = 'recipe';
  */
 const {
   homeboySettings,
-  resolveWpCodeboxIdentity,
   wpCodeboxCommand,
 } = require('./wp-codebox-resolver');
+const { createCodeboxClient } = require('./codebox-client');
 
 function wpCodeboxBin(options = {}) {
-  return resolveWpCodeboxIdentity(options).bin;
+  return createCodeboxClient(options).identity().bin;
 }
 
 function recipeEventName(name, options = {}) {
@@ -208,7 +208,7 @@ async function runWpCodeboxRecipe({
   }
 
   const eventOptions = { eventSource, eventPrefix };
-  const identity = resolveWpCodeboxIdentity({ wpCodeboxBin: explicitWpCodeboxBin, bin, env });
+  const identity = createCodeboxClient({ wpCodeboxBin: explicitWpCodeboxBin, bin, env }).identity();
   const { command, args } = identity.invocation;
   const commandArgs = [
     ...args,

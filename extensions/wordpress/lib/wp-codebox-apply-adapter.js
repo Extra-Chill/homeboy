@@ -11,19 +11,12 @@ const { spawnSync } = require('node:child_process');
 /**
  * Internal dependencies
  */
-const { loadWpCodeboxCoreFunction } = require('./wp-codebox-core-loader');
+const { createCodeboxClient } = require('./codebox-client');
 
 const ADAPTER_ID = 'homeboy/wp-codebox-apply-adapter/v1';
 const APPLY_RESULT_SCHEMA = 'homeboy/apply-result/v1';
 const WP_CODEBOX_PREFLIGHT_SCHEMA = 'wp-codebox/artifact-apply-preflight/v1';
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'trunk', 'develop']);
-const WP_CODEBOX_ARTIFACTS_MODULE_OPTIONS = {
-  packageCandidates: [
-    '@automattic/wp-codebox-core/artifacts',
-    'wp-codebox-workspace/artifacts',
-  ],
-  packageDistEntries: ['artifacts.js'],
-};
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -194,19 +187,15 @@ function runWpCodeboxApplyPreflight(options) {
     throw new Error('approvedFiles is required for WP Codebox apply preflight');
   }
 
-  const wpCommand = options.wpCommand || options.wpCli || process.env.HOMEBOY_WP_CLI || 'wp';
-  const args = [
-    'codebox',
-    'artifacts',
-    'preflight-apply',
+  return createCodeboxClient(options).runArtifactApplyPreflight({
     artifactId,
-    `--artifacts-path=${artifactsPath}`,
-    `--approved-files=${JSON.stringify(approvedFiles)}`,
-    '--format=json',
-  ];
-
-  const output = run(wpCommand, args, { cwd: options.cwd, env: options.env });
-  return JSON.parse(output);
+    artifactsPath,
+    approvedFiles,
+    cwd: options.cwd,
+    env: options.env,
+    wpCommand: options.wpCommand,
+    wpCli: options.wpCli,
+  });
 }
 
 function normalizeWpCodeboxPreflight(input) {
@@ -258,8 +247,7 @@ function normalizeWpCodeboxPreflight(input) {
 }
 
 async function normalizeWpCodeboxPreflightAsync(input) {
-  const normalizeArtifactApplyPreflight = await loadWpCodeboxCoreFunction('normalizeArtifactApplyPreflight', {
-    ...WP_CODEBOX_ARTIFACTS_MODULE_OPTIONS,
+  const normalizeArtifactApplyPreflight = await createCodeboxClient(input).loadArtifactCompatibilityFunction('normalizeArtifactApplyPreflight', {
     ...input,
   });
   if (!normalizeArtifactApplyPreflight) {
@@ -274,8 +262,7 @@ async function normalizeWpCodeboxPreflightAsync(input) {
 }
 
 async function wpCodeboxApplyRequestFromBundleAsync(options) {
-  const createArtifactApplyRequest = await loadWpCodeboxCoreFunction('createArtifactApplyRequest', {
-    ...WP_CODEBOX_ARTIFACTS_MODULE_OPTIONS,
+  const createArtifactApplyRequest = await createCodeboxClient(options).loadArtifactCompatibilityFunction('createArtifactApplyRequest', {
     ...options,
   });
   if (!createArtifactApplyRequest) {
