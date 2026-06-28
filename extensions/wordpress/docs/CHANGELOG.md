@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.19.30] - 2026-06-28
+
+### Changed
+- Harden WP Codebox runtime mount contracts
+
 ## [3.19.29] - 2026-06-27
 
 ### Fixed
