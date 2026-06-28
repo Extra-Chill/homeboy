@@ -217,6 +217,71 @@ Promise.all([
 		assert.equal(summary.failures[0].code, 'wp_codebox_fuzz_mutation_lifecycle_evidence_missing');
 		assert(summary.failures[0].missing_evidence.some((entry) => entry.kind === 'delete-boundary'));
 	}),
+
+	runWpCodeboxFuzzSuite({
+		taskId: 'aggressive-runtime-artifacts',
+		input: {
+			id: 'aggressive-runtime-artifacts',
+			metadata: { mode: 'aggressive' },
+			cases: [{ id: 'delete-post-case', destructive: true }],
+		},
+		runFuzzSuite: async () => ({
+			json: {
+				schema: 'wp-codebox/fuzz-suite-result/v1',
+				request_id: 'aggressive-runtime-artifacts',
+				status: 'succeeded',
+				cases: [{ id: 'delete-post-case', status: 'passed' }],
+				runtime_command_results: [{
+					command: 'wordpress.rest-request',
+					artifacts: {
+						'rollback-lifecycle': { path: '/Users/chubes/tmp/rollback.json', semantic_key: 'fuzz.rollback.lifecycle', status: 'restored' },
+						'external-http-guardrail': { url: 'http://localhost:8881/wp-content/homeboy-external-http.jsonl', semantic_key: 'fuzz.external_http.guardrail', ref: 'artifact:fuzz.external_http.guardrail' },
+						'runtime-access': { path: 'artifacts/runtime-access.json', semantic_key: 'fuzz.runtime.access' },
+					},
+				}],
+				coverage: { exercised: [{ id: 'rest:/wp/v2/posts/1', type: 'rest_route' }] },
+				coverage_gaps: [{ id: 'external-http:blocked-request', type: 'external_http', status: 'skipped' }],
+				hotspot_summary: {
+					items: [{ surface_key: 'rest:/wp/v2/posts/1', operation_key: 'DELETE /wp/v2/posts/1', metric: 'duration_ms', value: 91 }],
+				},
+			},
+		}),
+	}).then((summary) => {
+		assert.equal(summary.status, 'succeeded');
+		const rollbackArtifact = summary.artifacts.find((artifact) => artifact.semantic_key === 'fuzz.rollback.lifecycle');
+		const httpArtifact = summary.artifacts.find((artifact) => artifact.semantic_key === 'fuzz.external_http.guardrail');
+		const runtimeAccessArtifact = summary.artifacts.find((artifact) => artifact.semantic_key === 'fuzz.runtime.access');
+		assert.equal(rollbackArtifact.path, undefined);
+		assert.equal(rollbackArtifact.artifact_ref, 'artifact:fuzz.rollback.lifecycle');
+		assert.equal(rollbackArtifact.metadata.local_path_redacted, true);
+		assert.equal(httpArtifact.url, undefined);
+		assert.equal(httpArtifact.artifact_ref, 'artifact:fuzz.external_http.guardrail');
+		assert.equal(httpArtifact.metadata.local_url_redacted, true);
+		assert.equal(runtimeAccessArtifact.path, 'artifacts/runtime-access.json');
+		assert.equal(summary.coverage_gaps[0].id, 'external-http:blocked-request');
+		assert.equal(summary.hotspot_summary.items[0].metadata.operation_key, 'DELETE /wp/v2/posts/1');
+		assert.equal(summary.runtime_task_result.artifacts.some((artifact) => artifact.role === 'rollback_lifecycle'), true);
+	}),
+
+	runWpCodeboxFuzzSuite({
+		taskId: 'aggressive-runtime-missing-rollback',
+		input: {
+			id: 'aggressive-runtime-missing-rollback',
+			metadata: { mode: 'aggressive' },
+			cases: [{ id: 'delete-post-case', destructive: true }],
+		},
+		runFuzzSuite: async () => ({
+			json: {
+				schema: 'wp-codebox/fuzz-suite-result/v1',
+				request_id: 'aggressive-runtime-missing-rollback',
+				status: 'succeeded',
+				cases: [{ id: 'delete-post-case', status: 'passed' }],
+			},
+		}),
+	}).then((summary) => {
+		assert.equal(summary.status, 'failed');
+		assert(summary.failures.some((failure) => failure.code === 'wp_codebox_fuzz_rollback_lifecycle_artifacts_missing'));
+	}),
 ]).then(() => {
 	console.log('WordPress fuzz runtime task contract tests passed.');
 });

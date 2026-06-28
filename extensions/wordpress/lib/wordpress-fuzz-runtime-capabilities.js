@@ -21,6 +21,9 @@ const WORDPRESS_FUZZ_RUNTIME_CAPABILITIES = Object.freeze([
 	'block-editor',
 	'query-observation',
 	'sequence',
+	'runtime-isolation',
+	'external-http-guardrail',
+	'artifact-export',
 ]);
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_ALIASES = new Map([
@@ -74,6 +77,24 @@ const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_ALIASES = new Map([
 	['stateful_sequence', 'sequence'],
 	['sequence-execution', 'sequence'],
 	['sequence_execution', 'sequence'],
+	['runtime-backed-isolation', 'runtime-isolation'],
+	['runtime_backed_isolation', 'runtime-isolation'],
+	['isolated-runtime', 'runtime-isolation'],
+	['isolated_runtime', 'runtime-isolation'],
+	['sandbox-isolation', 'runtime-isolation'],
+	['sandbox_isolation', 'runtime-isolation'],
+	['http-guardrail', 'external-http-guardrail'],
+	['http_guardrail', 'external-http-guardrail'],
+	['external-http-block', 'external-http-guardrail'],
+	['external_http_block', 'external-http-guardrail'],
+	['external-network-guardrail', 'external-http-guardrail'],
+	['external_network_guardrail', 'external-http-guardrail'],
+	['artifacts-export', 'artifact-export'],
+	['artifacts_export', 'artifact-export'],
+	['export-artifacts', 'artifact-export'],
+	['export_artifacts', 'artifact-export'],
+	['artifact-collection', 'artifact-export'],
+	['artifact_collection', 'artifact-export'],
 ]);
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SET = new Set(WORDPRESS_FUZZ_RUNTIME_CAPABILITIES);

@@ -198,12 +198,26 @@ assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name 
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'wordpress-hotspots').schema, WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA);
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'wp-codebox-fuzz-suite-result').role, 'codebox_result');
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'case-log').role, 'case_log');
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'rollback-lifecycle').required, false);
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'external-http-guardrail').semantic_key, 'fuzz.external_http.guardrail');
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'runtime-access').semantic_key, 'fuzz.runtime.access');
 assert.deepEqual(
 	taskRequest.artifact_declarations.filter((artifact) => artifact.required === true).map((artifact) => artifact.name),
 	taskRequest.expected_artifacts
 );
 assert(!JSON.stringify(taskRequest).includes('woocommerce'), 'fuzz suite helper must stay product-agnostic');
 assert.equal(wpCodeboxFuzzSuiteTaskRequest({ taskId: 'suite-task' }).executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+
+const destructiveTaskRequest = wpCodeboxFuzzSuiteTaskRequest({
+	taskId: 'destructive-suite-task',
+	input: {
+		id: 'destructive-suite-task',
+		metadata: { mode: 'aggressive' },
+		cases: [{ id: 'delete-post-case', destructive: true }],
+	},
+});
+assert.equal(destructiveTaskRequest.artifact_declarations.find((artifact) => artifact.name === 'rollback-lifecycle').required, true);
+assert(destructiveTaskRequest.expected_artifacts.includes('rollback-lifecycle'));
 
 const executionRequest = wpCodeboxFuzzExecutionRequest({ taskId: 'direct-suite-task', input, wpCodeboxBin: '/custom/wp-codebox' });
 assert.equal(executionRequest.schema, WP_CODEBOX_FUZZ_EXECUTION_SCHEMA);

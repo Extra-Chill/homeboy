@@ -36,7 +36,6 @@ const {
 	wordpressFuzzMutationLifecycleDiagnosticsForCase,
 } = require('./wordpress-fuzz-mutation-lifecycle');
 const {
-	resolveWpCodeboxIdentity,
 	wpCodeboxIdentityMismatchDiagnostics,
 } = require('./wp-codebox-resolver');
 const {
@@ -161,6 +160,34 @@ const DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS = [
 		content_type: 'application/json',
 		required: false,
 	},
+	{
+		role: 'rollback_lifecycle',
+		name: 'rollback-lifecycle',
+		semantic_key: 'fuzz.rollback.lifecycle',
+		content_type: 'application/json',
+		required: false,
+	},
+	{
+		role: 'external_http_guardrail',
+		name: 'external-http-guardrail',
+		semantic_key: 'fuzz.external_http.guardrail',
+		content_type: 'application/jsonl',
+		required: false,
+	},
+	{
+		role: 'runtime_access',
+		name: 'runtime-access',
+		semantic_key: 'fuzz.runtime.access',
+		content_type: 'application/json',
+		required: false,
+	},
+];
+const WP_CODEBOX_DESTRUCTIVE_READINESS_REQUIREMENTS = [
+	{ key: 'runtime_isolation', label: 'runtime-backed isolation' },
+	{ key: 'rollback_checkpoint', label: 'snapshot/checkpoint rollback primitive' },
+	{ key: 'rollback_restore', label: 'restore/reset rollback primitive' },
+	{ key: 'external_http_guardrail', label: 'external HTTP guardrail' },
+	{ key: 'artifact_export', label: 'artifact export' },
 ];
 const WORDPRESS_FUZZ_POSTPROCESS_BINDING_SCHEMA = 'homeboy/wordpress-fuzz-postprocess-binding/v1';
 const WORDPRESS_FUZZ_POSTPROCESS_OUTPUTS = [
@@ -193,6 +220,9 @@ const FUZZ_ARTIFACT_SEMANTIC_KEYS = {
 	observation_set: 'fuzz.observation_set',
 	hotspot_summary: 'fuzz.hotspot.summary',
 	rollback_boundary: 'fuzz.rollback.delete_boundary',
+	rollback_lifecycle: 'fuzz.rollback.lifecycle',
+	external_http_guardrail: 'fuzz.external_http.guardrail',
+	runtime_access: 'fuzz.runtime.access',
 	result_envelope: 'fuzz.result.envelope',
 	normalized_fuzz_result: 'fuzz.result.normalized',
 	coverage: 'fuzz.coverage',
@@ -356,7 +386,12 @@ function normalizeRestMutationOptInEntry(entry = {}) {
 }
 
 function normalizeManifestRefs(value) {
-	const refs = Array.isArray(value) ? value : (value === undefined || value === null ? [] : [value]);
+	let refs = [];
+	if (Array.isArray(value)) {
+		refs = value;
+	} else if (value !== undefined && value !== null) {
+		refs = [value];
+	}
 	return refs.map((entry) => {
 		if (typeof entry === 'string') {
 			return { ref: entry };
@@ -430,7 +465,6 @@ function homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry = {}, manifest = {}, i
 	const caseId = entry.case_id || entry.caseId || entry.id || `${manifest.id || 'fuzz-workload'}:${index}`;
 	const artifacts = normalizeHomeboyFuzzCaseArtifacts(entry, manifest);
 	const target = homeboyFuzzPlanCaseTarget(entry);
-	const command = homeboyFuzzPlanCaseRuntimeCommand(entry);
 	const input = homeboyFuzzPlanCaseRuntimeInput(entry, manifest, caseId);
 	const restMutationOptIn = objectOrUndefined(entry.metadata?.rest_mutation_opt_in || entry.metadata?.restMutationOptIn || entry.rest_mutation_opt_in || entry.restMutationOptIn);
 	return stripUndefined({
@@ -829,11 +863,34 @@ function wpCodeboxFuzzSuiteTaskRequest(options = {}) {
 		taskId: requiredString(options.taskId || options.task_id, 'taskId'),
 		ability: options.ability || wpCodeboxFuzzSuiteAbility(options),
 		abilityInput: input,
-		artifactDeclarations: options.artifactDeclarations || options.artifact_declarations || DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS,
-		expectedArtifacts: options.expectedArtifacts || options.expected_artifacts || DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS,
+		artifactDeclarations: options.artifactDeclarations || options.artifact_declarations || wpCodeboxFuzzArtifactDeclarationsForInput(input),
+		expectedArtifacts: options.expectedArtifacts || options.expected_artifacts || wpCodeboxFuzzExpectedArtifactsForInput(input),
 		goal: options.goal || options.instructions || 'Delegate WordPress fuzz execution to WP Codebox and return the declared fuzz artifacts.',
 		instructions: options.instructions || 'Delegate WordPress fuzz execution to WP Codebox and return the declared fuzz artifacts.',
 	});
+}
+
+function wpCodeboxFuzzArtifactDeclarationsForInput(input = {}) {
+	if (!suiteInputRequiresRollbackLifecycleArtifact(input)) {
+		return DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS;
+	}
+	return DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS.map((artifact) => (
+		artifact.name === 'rollback-lifecycle' ? { ...artifact, required: true } : artifact
+	));
+}
+
+function wpCodeboxFuzzExpectedArtifactsForInput(input = {}) {
+	if (!suiteInputRequiresRollbackLifecycleArtifact(input)) {
+		return DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS;
+	}
+	return [...new Set([...DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS, 'rollback-lifecycle'])];
+}
+
+function suiteInputRequiresRollbackLifecycleArtifact(input = {}) {
+	const metadata = objectOrUndefined(input.metadata) || {};
+	return metadata.aggressive === true
+		|| String(metadata.mode || metadata.fuzz_mode || metadata.fuzzMode || '').toLowerCase() === 'aggressive'
+		|| normalizeArray(input.cases).some((testCase) => fuzzCaseRequiresRollbackLifecycle(testCase, testCase));
 }
 
 function wpCodeboxFuzzRuntimeTaskRequest(options = {}) {
@@ -1228,6 +1285,7 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 	const suiteInput = wpCodeboxFuzzRequestInput(request, options);
 	const plan = suiteInput.homeboy_fuzz_workload?.plan || suiteInput.homeboyFuzzWorkload?.plan || suiteInput.metadata?.workload?.plan || request?.input?.plan || options.plan || {};
 	const requiredPlanContracts = requiredWpCodeboxContractsForFuzzPlan(plan);
+	const destructiveReadiness = normalizeWpCodeboxDestructiveReadiness(capabilities.readiness, { request, suiteInput, plan });
 	const requiredAbilities = { ...WP_CODEBOX_FUZZ_PUBLIC_ABILITIES };
 	const requiredCommands = requiredPublicCommandsForRequest(request, requiredPlanContracts);
 	const missingContracts = [];
@@ -1256,6 +1314,15 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 			type: 'identity_mismatch',
 			message: diagnostic.message,
 			diagnostic,
+		});
+	}
+	if (destructiveReadiness.required && !destructiveReadiness.ok) {
+		missingContracts.push({
+			type: 'destructive_readiness',
+			missing_primitives: destructiveReadiness.missing_primitives,
+			message: `Aggressive/destructive WordPress fuzzing requires WP Codebox runtime-backed readiness proof for: ${destructiveReadiness.missing_primitives.map((primitive) => primitive.label).join(', ')}.`,
+			readiness: capabilities.readiness,
+			policy: destructiveReadiness.policy,
 		});
 	}
 
@@ -1316,7 +1383,9 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 			abilities: requiredAbilities,
 			capabilities: requiredPlanContracts.capabilities,
 			runner_modes: requiredPlanContracts.runner_modes,
+			destructive_readiness: destructiveReadiness.required ? WP_CODEBOX_DESTRUCTIVE_READINESS_REQUIREMENTS : undefined,
 		},
+		destructive_readiness: destructiveReadiness.required ? destructiveReadiness : undefined,
 		command_manifest: commandManifest,
 		missing_contracts: missingContracts,
 		diagnostics: missingContracts.map((contract) => ({
@@ -1385,6 +1454,170 @@ function unique(values) {
 	return [...new Set(normalizeArray(values).filter(Boolean))].sort();
 }
 
+function normalizeWpCodeboxDestructiveReadiness(readiness = {}, { request = {}, suiteInput = {}, plan = {} } = {}) {
+	const required = wpCodeboxRequestRequiresDestructiveReadiness({ request, suiteInput, plan });
+	const source = objectOrUndefined(readiness) || {};
+	const capabilities = new Set(wordpressRuntimeCapabilitiesFromFuzzReadiness(source));
+	const facts = {
+		runtime_isolation: wpCodeboxReadinessRuntimeIsolation(source, capabilities),
+		rollback_checkpoint: wpCodeboxReadinessHasAny(source, capabilities, ['snapshot', 'checkpoint', 'transaction'], ['snapshot', 'checkpoint', 'transaction']),
+		rollback_restore: wpCodeboxReadinessHasAny(source, capabilities, ['restore', 'reset', 'rest-rollback'], ['restore', 'reset', 'rollback', 'rest_rollback', 'rest-rollback']),
+		external_http_guardrail: wpCodeboxReadinessHasAny(source, capabilities, ['external-http-guardrail'], ['external_http_guardrail', 'externalHttpGuardrail', 'external_http', 'externalHttp', 'http_guardrail', 'httpGuardrail']),
+		artifact_export: wpCodeboxReadinessHasAny(source, capabilities, ['artifact-export'], ['artifact_export', 'artifactExport', 'artifacts_export', 'artifactsExport', 'export_artifacts', 'exportArtifacts']),
+	};
+	const missingPrimitives = required
+		? WP_CODEBOX_DESTRUCTIVE_READINESS_REQUIREMENTS.filter((requirement) => facts[requirement.key] !== true)
+		: [];
+	return stripUndefined({
+		schema: 'homeboy/wp-codebox-destructive-fuzz-readiness/v1',
+		required,
+		ok: !required || missingPrimitives.length === 0,
+		provider: 'wp-codebox',
+		status: source.status,
+		mode: source.mode,
+		facts,
+		missing_primitives: missingPrimitives.length > 0 ? missingPrimitives : undefined,
+		policy: required ? {
+			mutation_mode: destructiveMutationModeFromRequest({ request, suiteInput, plan }),
+			safety_class: strongestCodeboxReadinessSafetyClass({ request, suiteInput, plan }),
+			requirements: WP_CODEBOX_DESTRUCTIVE_READINESS_REQUIREMENTS,
+		} : undefined,
+	});
+}
+
+function wpCodeboxRequestRequiresDestructiveReadiness({ request = {}, suiteInput = {}, plan = {} } = {}) {
+	return destructiveMutationModeFromRequest({ request, suiteInput, plan }) === 'aggressive-isolated'
+		|| ['isolated_mutation', 'destructive'].includes(strongestCodeboxReadinessSafetyClass({ request, suiteInput, plan }))
+		|| wpCodeboxContainsDestructiveCase(suiteInput)
+		|| wpCodeboxContainsDestructiveCase(plan);
+}
+
+function destructiveMutationModeFromRequest({ request = {}, suiteInput = {}, plan = {} } = {}) {
+	for (const value of [
+		request.mutation_mode,
+		request.mutationMode,
+		request.input?.mutation_mode,
+		request.input?.mutationMode,
+		request.input?.metadata?.mutation_mode,
+		request.input?.metadata?.mutationMode,
+		suiteInput.mutation_mode,
+		suiteInput.mutationMode,
+		suiteInput.metadata?.mutation_mode,
+		suiteInput.metadata?.mutationMode,
+		plan.mutation_mode,
+		plan.mutationMode,
+		plan.metadata?.mutation_mode,
+		plan.metadata?.mutationMode,
+	]) {
+		const normalized = normalizeMutationMode(value);
+		if (normalized) {
+			return normalized;
+		}
+	}
+	return undefined;
+}
+
+function strongestCodeboxReadinessSafetyClass({ request = {}, suiteInput = {}, plan = {} } = {}) {
+	const candidates = [
+		codeboxReadinessSafetyClass(request),
+		codeboxReadinessSafetyClass(request.input),
+		codeboxReadinessSafetyClass(request.input?.metadata),
+		codeboxReadinessSafetyClass(suiteInput),
+		codeboxReadinessSafetyClass(suiteInput.metadata),
+		codeboxReadinessSafetyClass(plan),
+		codeboxReadinessSafetyClass(plan.metadata),
+		...normalizeArray(suiteInput.cases).flatMap((testCase) => [codeboxReadinessSafetyClass(testCase), codeboxReadinessSafetyClass(testCase.metadata), codeboxReadinessSafetyClass(testCase.input)]),
+		...normalizeArray(plan.targets).flatMap((target) => [
+			codeboxReadinessSafetyClass(target),
+			codeboxReadinessSafetyClass(target.metadata),
+			...normalizeArray(target.cases).flatMap((testCase) => [codeboxReadinessSafetyClass(testCase), codeboxReadinessSafetyClass(testCase.metadata), codeboxReadinessSafetyClass(testCase.input)]),
+		]),
+	].filter(Boolean);
+	return strongestReadinessSafetyClass(candidates);
+}
+
+function codeboxReadinessSafetyClass(source = {}) {
+	if (!source || typeof source !== 'object') {
+		return undefined;
+	}
+	const safety = objectOrUndefined(source.safety) || {};
+	const explicit = source.safety_class || source.safetyClass || safety.safety_class || safety.safetyClass || safety.class || safety.level || safety.mutation || source.mutation;
+	const explicitClass = normalizeReadinessSafetyClass(explicit);
+	if (explicitClass) {
+		return explicitClass;
+	}
+	if (source.destructive === true || safety.destructive === true) {
+		return 'destructive';
+	}
+	if (source.mutates === true || safety.mutates === true || normalizeArray(source.destructive_reasons || source.destructiveReasons || source.destructive_reason || source.destructiveReason).length > 0) {
+		return 'isolated_mutation';
+	}
+	const method = String(source.method || source.operation?.method || source.input?.method || '').toUpperCase();
+	if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+		return method === 'DELETE' ? 'destructive' : 'isolated_mutation';
+	}
+	return undefined;
+}
+
+function wpCodeboxContainsDestructiveCase(source = {}) {
+	return normalizeArray(source.cases).some((testCase) => codeboxReadinessSafetyClass(testCase) || codeboxReadinessSafetyClass(testCase.metadata) || codeboxReadinessSafetyClass(testCase.input))
+		|| normalizeArray(source.targets).some((target) => codeboxReadinessSafetyClass(target) || codeboxReadinessSafetyClass(target.metadata) || wpCodeboxContainsDestructiveCase(target));
+}
+
+function normalizeReadinessSafetyClass(value) {
+	const label = String(value || '').trim().toLowerCase().replace(/[\s.-]+/g, '_');
+	if (!label) {
+		return undefined;
+	}
+	if (['read_only', 'readonly', 'safe', 'non_mutating', 'none'].includes(label)) {
+		return 'read_only';
+	}
+	if (['idempotent', 'repeatable'].includes(label)) {
+		return 'idempotent';
+	}
+	if (['isolated_mutation', 'isolated', 'mutation', 'mutating', 'write', 'requires_isolated_editor_draft', 'requires_explicit_opt_in'].includes(label)) {
+		return 'isolated_mutation';
+	}
+	if (['destructive', 'delete', 'dangerous', 'aggressive'].includes(label)) {
+		return 'destructive';
+	}
+	return undefined;
+}
+
+function strongestReadinessSafetyClass(candidates = []) {
+	const rank = { read_only: 0, idempotent: 1, isolated_mutation: 2, destructive: 3 };
+	return candidates.reduce((strongest, candidate) => (rank[candidate] > rank[strongest] ? candidate : strongest), 'read_only');
+}
+
+function normalizeMutationMode(value) {
+	const label = String(value || '').trim().toLowerCase().replace(/_/g, '-');
+	if (label === 'destructive-isolated') {
+		return 'aggressive-isolated';
+	}
+	return ['isolated', 'aggressive-isolated', 'read-only', 'destructive-deny'].includes(label) ? label : undefined;
+}
+
+function wpCodeboxReadinessRuntimeIsolation(readiness = {}, capabilities = new Set()) {
+	return readiness.status === 'ready'
+		&& readiness.mode === 'runtime-backed'
+		&& (capabilities.has('runtime-isolation')
+			|| booleanAtAnyPath(readiness, ['isolation.runtime_backed', 'isolation.runtimeBacked', 'isolation.sandboxed', 'runtime_isolation', 'runtimeIsolation', 'sandbox.isolated']));
+}
+
+function wpCodeboxReadinessHasAny(readiness = {}, capabilities = new Set(), capabilityNames = [], paths = []) {
+	if (capabilityNames.some((capability) => capabilities.has(capability))) {
+		return true;
+	}
+	return paths.some((pathName) => booleanAtAnyPath(readiness, [pathName, `rollback.${pathName}`, `isolation.${pathName}`, `guardrails.${pathName}`, `artifacts.${pathName}`]));
+}
+
+function booleanAtAnyPath(source = {}, paths = []) {
+	return paths.some((pathName) => {
+		const value = valueAtPath(source, pathName);
+		return value === true || value === 'true' || value === 'supported' || value === 'enabled' || value === 'available' || value === 'ready';
+	});
+}
+
 function normalizeWpCodeboxPublicFuzzCapabilities(input = {}) {
 	const commands = objectOrUndefined(input.commands) || input;
 	const runtimeCapabilities = normalizeWordPressFuzzRuntimeCapabilities(input.capabilities || input.runtime_capabilities || input.runtimeCapabilities || input.supports || []);
@@ -1420,13 +1653,23 @@ function wordpressRuntimeCapabilitiesFromFuzzReadiness(readiness = {}) {
 	const capabilities = objectOrUndefined(readiness.capabilities) || {};
 	const runtimeActions = new Set(normalizeArray(capabilities.runtimeActionTypes || capabilities.runtime_action_types));
 	const commands = new Set(normalizeArray(capabilities.commands));
+	const declaredCapabilities = normalizeWordPressFuzzRuntimeCapabilities([
+		...normalizeArray(readiness.capabilities?.capabilities),
+		...normalizeArray(readiness.capabilities?.supports),
+		...normalizeArray(readiness.capabilities?.runtime_capabilities || readiness.capabilities?.runtimeCapabilities),
+		...normalizeArray(readiness.runtime_capabilities || readiness.runtimeCapabilities || readiness.supports),
+	]).capabilities;
 	return unique([
+		...declaredCapabilities,
 		...(runtimeActions.has('crud_operation') || commands.has('wordpress.crud-operation') ? ['crud'] : []),
 		...(runtimeActions.has('rest_request') || commands.has('wordpress.rest-request') ? ['rest'] : []),
 		...(runtimeActions.has('admin_page') || commands.has('wordpress.admin-page-load') ? ['admin'] : []),
 		...(runtimeActions.has('browser') || runtimeActions.has('browser_probe') || runtimeActions.has('page') || commands.has('wordpress.browser-actions') || commands.has('wordpress.browser-probe') || commands.has('wordpress.frontend-page-load') ? ['browser'] : []),
 		...(runtimeActions.has('editor_open') ? ['block-editor'] : []),
 		...(runtimeActions.has('php') || runtimeActions.has('wp_cli') || commands.has('wordpress.run-php') || commands.has('wordpress.wp-cli') ? ['database', 'query-observation', 'sequence'] : []),
+		...(readiness.mode === 'runtime-backed' && booleanAtAnyPath(readiness, ['isolation.runtime_backed', 'isolation.runtimeBacked', 'isolation.sandboxed', 'runtime_isolation', 'runtimeIsolation', 'sandbox.isolated']) ? ['runtime-isolation'] : []),
+		...(wpCodeboxReadinessHasAny(readiness, new Set(declaredCapabilities), [], ['external_http_guardrail', 'externalHttpGuardrail', 'external_http', 'externalHttp', 'http_guardrail', 'httpGuardrail']) ? ['external-http-guardrail'] : []),
+		...(wpCodeboxReadinessHasAny(readiness, new Set(declaredCapabilities), [], ['artifact_export', 'artifactExport', 'artifacts_export', 'artifactsExport', 'export_artifacts', 'exportArtifacts']) ? ['artifact-export'] : []),
 	]);
 }
 
@@ -1487,14 +1730,6 @@ async function runWpCodeboxPublicCli(command, input, options = {}) {
 	return createCodeboxClient(options).runPublicJsonCommand(command, input, options);
 }
 
-function wpCodeboxPublicCliArgs(command, inputFile, options = {}) {
-	const runnerMode = nonEmptyString(options.runnerMode || options.runner_mode);
-	if (command === 'run-fuzz-suite' && runnerMode) {
-		return [command, `--runner-mode=${runnerMode}`, '--input-file', inputFile, '--json'];
-	}
-	return [command, '--input-file', inputFile, '--format=json'];
-}
-
 function runWpCodeboxPublicCliCommand(args, options = {}) {
 	if (typeof options.runPublicCli === 'function') {
 		return normalizeCliResult(options.runPublicCli({ command: wpCodeboxPublicCliBin(options), args, stdin: options.stdin }, options));
@@ -1522,10 +1757,6 @@ function wpCodeboxPublicCliBin(options = {}) {
 		return env.wpCliBin || env.wp_cli_bin || env.HOMEBOY_WP_CLI_BIN || env.WP_CLI_BIN;
 	}
 	return createCodeboxClient(options).publicCliBin(options);
-}
-
-function wpCodeboxPublicCliInvocation(options = {}) {
-	return createCodeboxClient(options).publicCliInvocation(options);
 }
 
 function parseWpCodeboxPublicCliJson(stdout, { request = {}, command } = {}) {
@@ -1710,9 +1941,58 @@ function wpCodeboxFuzzContractFailures({ source = {}, result = {}, context = {},
 	const requiredOutputFailures = requiredFuzzOutputFailures({ source, context, artifacts, normalizedResult, hotspotSummary });
 	failures.push(...requiredOutputFailures);
 	failures.push(...mutationLifecycleContractFailures({ source, context, artifacts, normalizedResult }));
+	failures.push(...destructiveRollbackLifecycleFailures({ source, context, artifacts, normalizedResult }));
 	failures.push(...validateWordPressFuzzPostprocessOutputs({ source, context, artifacts, derivedArtifacts, hotspotSummary, normalizedResult }));
 
 	return failures;
+}
+
+function destructiveRollbackLifecycleFailures({ source = {}, context = {}, artifacts = [], normalizedResult } = {}) {
+	const planCases = requestPlanCases(context.request || context.taskRequest || {});
+	const resultCases = new Map(normalizeArray(normalizedResult?.cases || source.cases || source.fuzz_cases || source.fuzzCases).map((testCase) => [testCase.id || testCase.case_id || testCase.caseId, testCase]));
+	const destructiveCases = planCases.filter((planCase) => fuzzCaseRequiresRollbackLifecycle(planCase, resultCases.get(planCase.id || planCase.case_id || planCase.caseId)));
+	if (destructiveCases.length === 0 || hasSuccessfulRollbackLifecycleArtifact(artifacts)) {
+		return [];
+	}
+	return [{
+		severity: 'error',
+		code: 'wp_codebox_fuzz_rollback_lifecycle_artifacts_missing',
+		message: 'Aggressive/destructive WP Codebox fuzz success is missing required rollback lifecycle artifacts.',
+		missing_artifact_keys: ['fuzz.rollback.lifecycle'],
+		case_ids: destructiveCases.map((testCase) => testCase.id || testCase.case_id || testCase.caseId).filter(Boolean),
+	}];
+}
+
+function fuzzCaseRequiresRollbackLifecycle(planCase = {}, resultCase = {}) {
+	const status = String(resultCase?.status || '').toLowerCase();
+	if (['skipped', 'skip', 'planned', 'plan_only'].includes(status)) {
+		return false;
+	}
+	const metadata = objectOrUndefined(planCase.metadata) || {};
+	const safety = objectOrUndefined(planCase.safety || metadata.safety) || {};
+	const lifecycle = normalizeWordPressFuzzMutationLifecycleContract(metadata.mutation_lifecycle || metadata.mutationLifecycle || planCase.mutation_lifecycle || planCase.mutationLifecycle);
+	return Boolean(
+		lifecycle?.delete_boundary_required
+		|| lifecycle?.required_evidence?.some((entry) => entry.semantic_key === 'fuzz.rollback.delete_boundary' || entry.kind === 'delete-boundary')
+		|| planCase.destructive === true
+		|| metadata.destructive === true
+		|| safety.destructive === true
+		|| safety.level === 'destructive'
+		|| metadata.aggressive === true
+		|| String(metadata.mode || metadata.fuzz_mode || metadata.fuzzMode || '').toLowerCase() === 'aggressive'
+		|| normalizeArray(planCase.destructive_reasons || planCase.destructiveReasons || metadata.destructive_reasons || metadata.destructiveReasons).length > 0
+	);
+}
+
+function hasSuccessfulRollbackLifecycleArtifact(artifacts = []) {
+	return normalizeArray(artifacts).some((artifact) => {
+		const role = artifact.role || normalizeFuzzArtifactRole(artifact.name || artifact.semantic_key || artifact.semanticKey || artifact.path);
+		const semanticKey = artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey;
+		const status = String(artifact.status || artifact.metadata?.status || '').toLowerCase();
+		return ['rollback_lifecycle', 'rollback_boundary'].includes(role)
+			&& ['failed', 'errored', 'error', 'missing'].includes(status) === false
+			&& (semanticKey === 'fuzz.rollback.lifecycle' || semanticKey === 'fuzz.rollback.delete_boundary' || role === 'rollback_lifecycle');
+	});
 }
 
 function mutationLifecycleContractFailures({ source = {}, context = {}, artifacts = [], normalizedResult } = {}) {
@@ -2094,6 +2374,7 @@ function findWpCodeboxFuzzSuiteResult(source, seen = new Set()) {
 function normalizeWpCodeboxFuzzArtifacts(source = {}, result = {}) {
 	const artifacts = [];
 	appendFuzzArtifactRefs(artifacts, fuzzArtifactRefsFromSource(source, result));
+	appendFuzzArtifactRefs(artifacts, fuzzArtifactRefsFromRuntimeCommands(source, result));
 	appendFuzzArtifactRefs(artifacts, fuzzArtifactRefsFromEmbeddedWordPressResult(source));
 	appendCaseArtifacts(artifacts, source?.cases || source?.fuzz_cases || source?.fuzzCases, 'fuzz_case');
 	appendCaseArtifacts(artifacts, source?.wordpress_fuzz_result?.cases || source?.wordpressFuzzResult?.cases, 'fuzz_case');
@@ -2179,6 +2460,36 @@ function fuzzArtifactRefsFromSource(source = {}, result = {}) {
 		{ normalized_fuzz_result: source?.wordpress_fuzz_result_artifact || source?.wordpressFuzzResultArtifact || source?.normalized_fuzz_result || source?.normalizedFuzzResult },
 		{ hotspot_summary: source?.hotspot_summary_artifact || source?.hotspotSummaryArtifact || source?.hotspot_summary || source?.hotspotSummary },
 		{ rollback_boundary: source?.delete_boundary_rollback_artifacts || source?.deleteBoundaryRollbackArtifacts || source?.rollback_artifacts || source?.rollbackArtifacts },
+		{ rollback_lifecycle: source?.rollback_lifecycle_artifacts || source?.rollbackLifecycleArtifacts || source?.rollback_lifecycle || source?.rollbackLifecycle },
+		{ external_http_guardrail: source?.external_http_guardrail || source?.externalHttpGuardrail || source?.http_guardrail || source?.httpGuardrail },
+		{ runtime_access: source?.runtime_access || source?.runtimeAccess || source?.runtime_access_artifact || source?.runtimeAccessArtifact },
+	];
+}
+
+function fuzzArtifactRefsFromRuntimeCommands(...sources) {
+	return sources.flatMap((source) => runtimeCommandArtifactSources(source));
+}
+
+function runtimeCommandArtifactSources(source, seen = new Set()) {
+	if (!objectOrUndefined(source) || seen.has(source)) {
+		return [];
+	}
+	seen.add(source);
+	const commands = [
+		...normalizeArray(source.runtime_commands || source.runtimeCommands),
+		...normalizeArray(source.runtime_command_results || source.runtimeCommandResults),
+		...normalizeArray(source.commands),
+		...normalizeArray(source.steps),
+	];
+	return [
+		source.runtime_command_artifacts,
+		source.runtimeCommandArtifacts,
+		source.runtime_artifacts,
+		source.runtimeArtifacts,
+		source.outputs?.artifacts,
+		source.output?.artifacts,
+		...commands.flatMap((command) => [command?.artifacts, command?.artifact_refs || command?.artifactRefs, command?.result?.artifacts, command?.outputs?.artifacts]),
+		...commands.flatMap((command) => runtimeCommandArtifactSources(command, seen)),
 	];
 }
 
@@ -2249,9 +2560,13 @@ function normalizeFuzzArtifact(artifact) {
 	if (!role) {
 		return null;
 	}
-	const pathValue = artifact.path || artifact.file || artifact.artifact || artifact.uri;
+	const rawPath = artifact.path || artifact.file || artifact.artifact || artifact.uri;
+	const rawUrl = artifact.url;
+	const pathValue = reviewerSafeArtifactPath(rawPath);
+	const urlValue = reviewerSafeArtifactUrl(rawUrl);
 	const sha256 = artifact.sha256 || artifact.digest?.value;
-	if (!hasConcreteArtifactReference({ ...artifact, path: pathValue, sha256 })) {
+	const artifactRef = artifact.ref || artifact.artifact_ref || artifact.artifactRef || artifact.semantic_ref || artifact.semanticRef || (artifact.semantic_key || artifact.semanticKey ? `artifact:${artifact.semantic_key || artifact.semanticKey}` : undefined);
+	if (!hasConcreteArtifactReference({ ...artifact, path: pathValue, url: urlValue, ref: artifactRef, artifact_ref: artifactRef, sha256 })) {
 		return null;
 	}
 	return stripUndefined({
@@ -2259,7 +2574,8 @@ function normalizeFuzzArtifact(artifact) {
 		semantic_key: artifact.semantic_key || artifact.semanticKey || FUZZ_ARTIFACT_SEMANTIC_KEYS[role],
 		name,
 		path: pathValue,
-		url: artifact.url,
+		url: urlValue,
+		artifact_ref: artifactRef,
 		content_type: artifact.content_type || artifact.contentType || artifact.mime,
 		sha256,
 		size_bytes: numberOrUndefined(artifact.size_bytes ?? artifact.sizeBytes ?? artifact.bytes),
@@ -2271,8 +2587,28 @@ function normalizeFuzzArtifact(artifact) {
 		metadata: stripUndefined({
 			...(objectOrUndefined(artifact.metadata) || {}),
 			schema: artifact.schema || artifact.artifact_schema || artifact.artifactSchema || artifact.metadata?.schema,
+			local_path_redacted: pathValue === undefined && isReviewerUnsafeArtifactPath(rawPath) ? true : undefined,
+			local_url_redacted: urlValue === undefined && isReviewerUnsafeArtifactUrl(rawUrl) ? true : undefined,
 		}),
 	});
+}
+
+function reviewerSafeArtifactPath(value) {
+	return isReviewerUnsafeArtifactPath(value) ? undefined : nonEmptyString(value);
+}
+
+function isReviewerUnsafeArtifactPath(value) {
+	const text = nonEmptyString(value);
+	return Boolean(text && (path.isAbsolute(text) || text.startsWith('file://') || /(^|\/)(Users|var\/folders)\//.test(text)));
+}
+
+function reviewerSafeArtifactUrl(value) {
+	return isReviewerUnsafeArtifactUrl(value) ? undefined : nonEmptyString(value);
+}
+
+function isReviewerUnsafeArtifactUrl(value) {
+	const text = nonEmptyString(value);
+	return Boolean(text && /^(https?:\/\/)?(localhost|127\.0\.0\.1)([:/]|$)/i.test(text));
 }
 
 function normalizeDerivedFuzzArtifacts(source = {}, artifacts = []) {
@@ -2405,10 +2741,11 @@ function normalizeCoverageGapReportPayload(payload, artifact = {}) {
 function fuzzArtifactIdentity(artifact = {}) {
 	const explicitRole = artifact.role || artifact.artifact_role || artifact.artifactRole;
 	const explicitKind = artifact.kind || artifact.type;
-	const name = artifact.name || artifact.id || artifact.key || explicitRole || explicitKind;
+	const semanticKey = artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey;
+	const name = artifact.name || artifact.id || artifact.key || explicitRole || explicitKind || semanticKey;
 	return {
 		name,
-		role: normalizeFuzzArtifactRole(explicitRole || explicitKind || name || artifact.path || artifact.url || artifact.file),
+		role: normalizeFuzzArtifactRole(explicitRole || explicitKind || name || semanticKey || artifact.path || artifact.url || artifact.file),
 	};
 }
 
@@ -2416,6 +2753,9 @@ function hasConcreteArtifactReference(artifact) {
 	return Boolean(
 		artifact.path
 		|| artifact.url
+		|| artifact.ref
+		|| artifact.artifact_ref
+		|| artifact.artifactRef
 		|| artifact.sha256
 		|| artifact.content
 		|| artifact.value
@@ -2449,8 +2789,17 @@ function normalizeFuzzArtifactRole(value) {
 	if (['hotspot_summary', 'fuzz_hotspot_summary', 'hotspots', 'performance_hotspots'].includes(label)) {
 		return 'hotspot_summary';
 	}
+	if (['rollback_lifecycle', 'rollback_lifecycle_artifact', 'rollback_lifecycle_artifacts', 'sandbox_rollback_lifecycle'].includes(label)) {
+		return 'rollback_lifecycle';
+	}
 	if (['rollback_boundary', 'delete_boundary_rollback', 'delete_boundary_rollback_artifact', 'rollback_artifact', 'rollback_artifacts'].includes(label)) {
 		return 'rollback_boundary';
+	}
+	if (['external_http_guardrail', 'http_guardrail', 'homeboy_external_http', 'network_guardrail'].includes(label)) {
+		return 'external_http_guardrail';
+	}
+	if (['runtime_access', 'runtime_access_artifact', 'runtime_profile_access', 'runtime_readiness'].includes(label)) {
+		return 'runtime_access';
 	}
 	if (['observation_set', 'observations', 'measurements', 'fuzz_observation_set'].includes(label)) {
 		return 'observation_set';
@@ -2496,6 +2845,15 @@ function normalizeFuzzArtifactRole(value) {
 	}
 	if (/hotspot/.test(label)) {
 		return 'hotspot_summary';
+	}
+	if (/external.*http|http.*guardrail|network.*guardrail/.test(label)) {
+		return 'external_http_guardrail';
+	}
+	if (/runtime.*access|access.*runtime|runtime.*readiness/.test(label)) {
+		return 'runtime_access';
+	}
+	if (/rollback.*lifecycle|lifecycle.*rollback/.test(label)) {
+		return 'rollback_lifecycle';
 	}
 	if (/rollback/.test(label) || /delete.*boundary|boundary.*delete/.test(label)) {
 		return 'rollback_boundary';
@@ -2634,6 +2992,7 @@ module.exports = {
 	buildWordPressFuzzCommandManifest,
 	buildWordPressFuzzObservation,
 	normalizeWpCodeboxFuzzArtifacts,
+	normalizeWpCodeboxDestructiveReadiness,
 	normalizeWpCodeboxFuzzSuiteResult,
 	normalizeWordPressFuzzRuntimeTaskResult,
 	wordpressFuzzPostprocessArtifactDeclarations,
