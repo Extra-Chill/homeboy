@@ -194,11 +194,11 @@ pub struct FuzzRunArgs {
     #[arg(long = "gate-profile", value_enum, default_value_t = FuzzGateProfileArg::Measurement)]
     pub(crate) gate_profile: FuzzGateProfileArg,
 
-    /// Permit destructive fuzz operations when the run also declares isolated execution.
+    /// Permit destructive fuzz operations when verified generic isolation proof is present.
     #[arg(long = "allow-destructive")]
     pub(crate) allow_destructive: bool,
 
-    /// Generic runner isolation contract for the fuzz run.
+    /// Requested generic runner isolation contract for the fuzz run. This flag is advisory; destructive fuzz also requires verified isolation proof from the run context.
     #[arg(long = "isolation", value_enum, default_value_t = FuzzIsolationArg::Shared)]
     pub(crate) isolation: FuzzIsolationArg,
 
@@ -295,7 +295,7 @@ impl FuzzIsolationArg {
         }
     }
 
-    pub(crate) fn allows_destructive(self) -> bool {
+    pub(crate) fn requests_isolation(self) -> bool {
         matches!(self, Self::Isolated)
     }
 }

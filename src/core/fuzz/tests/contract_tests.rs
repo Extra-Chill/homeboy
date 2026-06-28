@@ -24,6 +24,10 @@ fn core_contract_lists_product_neutral_schema_ids() {
         FUZZ_COVERAGE_SUMMARY_SCHEMA
     );
     assert_eq!(
+        contract.schemas.coverage_reconciliation,
+        FUZZ_COVERAGE_RECONCILIATION_SCHEMA
+    );
+    assert_eq!(
         contract.schemas.target_inventory,
         FUZZ_TARGET_INVENTORY_SCHEMA
     );
@@ -150,6 +154,10 @@ fn core_contract_deserializes_without_operation_families() {
     assert_eq!(
         contract.schemas.sampling_request,
         FUZZ_SAMPLING_REQUEST_SCHEMA
+    );
+    assert_eq!(
+        contract.schemas.coverage_reconciliation,
+        FUZZ_COVERAGE_RECONCILIATION_SCHEMA
     );
 }
 

@@ -40,6 +40,7 @@ use homeboy::core::rig::RigSpec;
 use homeboy::test_support::with_isolated_home;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 mod execution_tests;
 mod gate_tests;
@@ -190,6 +191,57 @@ fn write_inventory(path: &Path, inventory: &FuzzTargetInventory) {
         serde_json::to_string(inventory).expect("serialize inventory"),
     )
     .expect("write inventory");
+}
+
+struct TestIsolationEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous_test: Option<String>,
+    previous_lab: Option<String>,
+    previous_runner: Option<String>,
+}
+
+impl Drop for TestIsolationEnvGuard {
+    fn drop(&mut self) {
+        match self.previous_test.as_ref() {
+            Some(value) => {
+                std::env::set_var(super::planning::TEST_VERIFIED_FUZZ_ISOLATION_ENV, value)
+            }
+            None => std::env::remove_var(super::planning::TEST_VERIFIED_FUZZ_ISOLATION_ENV),
+        }
+        match self.previous_lab.as_ref() {
+            Some(value) => {
+                std::env::set_var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, value)
+            }
+            None => std::env::remove_var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV),
+        }
+        match self.previous_runner.as_ref() {
+            Some(value) => std::env::set_var(super::planning::RUNNER_HOSTED_EXEC_ENV, value),
+            None => std::env::remove_var(super::planning::RUNNER_HOSTED_EXEC_ENV),
+        }
+    }
+}
+
+fn test_isolation_env_guard(value: Option<&str>) -> TestIsolationEnvGuard {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let lock = LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("test isolation env lock");
+    let previous_test = std::env::var(super::planning::TEST_VERIFIED_FUZZ_ISOLATION_ENV).ok();
+    let previous_lab = std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).ok();
+    let previous_runner = std::env::var(super::planning::RUNNER_HOSTED_EXEC_ENV).ok();
+    match value {
+        Some(value) => std::env::set_var(super::planning::TEST_VERIFIED_FUZZ_ISOLATION_ENV, value),
+        None => std::env::remove_var(super::planning::TEST_VERIFIED_FUZZ_ISOLATION_ENV),
+    }
+    std::env::remove_var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+    std::env::remove_var(super::planning::RUNNER_HOSTED_EXEC_ENV);
+    TestIsolationEnvGuard {
+        _lock: lock,
+        previous_test,
+        previous_lab,
+        previous_runner,
+    }
 }
 
 fn empty_fuzz_campaign() -> FuzzCampaign {

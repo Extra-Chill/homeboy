@@ -10,11 +10,11 @@ use super::schema_defaults::{
 use super::schemas::{
     standardized_fuzz_skip_reason_codes, FUZZ_ARTIFACT_SCHEMA, FUZZ_CAMPAIGN_SCHEMA,
     FUZZ_CASE_LOG_SCHEMA, FUZZ_CASE_SCHEMA, FUZZ_CONTRACT_VERSION, FUZZ_CORE_CONTRACT_SCHEMA,
-    FUZZ_COVERAGE_SCHEMA, FUZZ_COVERAGE_SUMMARY_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA,
-    FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,
-    FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA,
-    FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEED_SCHEMA,
-    FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SURFACE_SCHEMA,
+    FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_COVERAGE_SCHEMA, FUZZ_COVERAGE_SUMMARY_SCHEMA,
+    FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA,
+    FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA,
+    FUZZ_REQUIRED_ARTIFACT_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA,
+    FUZZ_SEED_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SURFACE_SCHEMA,
     FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
 };
 
@@ -54,6 +54,8 @@ pub struct FuzzContractSchemas {
     pub provenance: String,
     pub replay: String,
     pub coverage_summary: String,
+    #[serde(default = "super::schema_defaults::fuzz_coverage_reconciliation_schema")]
+    pub coverage_reconciliation: String,
     pub target_inventory: String,
     pub execution_request: String,
     #[serde(default = "super::schema_defaults::fuzz_sampling_request_schema")]
@@ -201,6 +203,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             provenance: FUZZ_PROVENANCE_SCHEMA.to_string(),
             replay: FUZZ_REPLAY_SCHEMA.to_string(),
             coverage_summary: FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+            coverage_reconciliation: FUZZ_COVERAGE_RECONCILIATION_SCHEMA.to_string(),
             target_inventory: FUZZ_TARGET_INVENTORY_SCHEMA.to_string(),
             execution_request: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
             sampling_request: FUZZ_SAMPLING_REQUEST_SCHEMA.to_string(),

@@ -108,6 +108,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
 #[test]
 fn fuzz_execution_request_artifact_records_runner_intent() {
     with_isolated_home(|_| {
+        let _guard = test_isolation_env_guard(Some("1"));
         let run_dir = RunDir::create().expect("run dir");
         let mut args = fuzz_run_args_with_run_id("proof-destructive");
         args.allow_destructive = true;

@@ -389,7 +389,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ..lab_command_spec_with_summary(
             "fuzz",
             CommandJsonFamily::Quality,
-            "portable Lab offload is available for fuzz runs",
+            "fuzz is measurement-only by default; --allow-destructive is guarded by verified generic isolation proof from Lab/offloaded runner context",
             FUZZ_LAB_SUPPORT,
         )
     },
