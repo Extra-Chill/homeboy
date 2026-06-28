@@ -28,6 +28,11 @@ use super::{
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
 pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
+/// Opt-in: when set to a truthy value, a controller-side wait-timeout best-effort
+/// cancels the still-running remote runner job (freeing its rig lock) instead of
+/// only mirroring it. Off by default — the default contract leaves the remote job
+/// in flight and uncancelled (#6891).
+pub(crate) const RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT";
 pub(crate) const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
 pub(crate) const RUNNER_ID_ENV: &str = "HOMEBOY_RUNNER_ID";
 

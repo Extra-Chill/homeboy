@@ -93,6 +93,90 @@ pub(super) fn print_lab_offload_handoff(
     }
 }
 
+/// Outcome of the opt-in best-effort remote cancellation attempted when the
+/// controller's runner-exec wait budget expires. `Disabled` is the default
+/// (opt-in off) and preserves the historical contract: the remote job is left
+/// in flight and uncancelled (#6891).
+#[derive(Debug)]
+pub(super) enum WaitTimeoutCancelOutcome {
+    Disabled,
+    Cancelled,
+    Failed(String),
+}
+
+/// Whether the operator opted in to cancelling the remote job on wait-timeout
+/// via `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT`. Accepts the usual truthy
+/// spellings; anything else (including unset) keeps the default behavior.
+pub(super) fn cancel_on_wait_timeout_enabled() -> bool {
+    std::env::var(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Best-effort remote cancellation on wait-timeout. Returns `Disabled` when the
+/// opt-in is off so callers preserve the byte-identical default contract. When
+/// the opt-in is on, the existing `runner_job_cancel` primitive is invoked and
+/// any error is captured rather than propagated (the controller still needs to
+/// surface the timeout).
+pub(super) fn attempt_wait_timeout_cancel(runner_id: &str, job_id: &str) -> WaitTimeoutCancelOutcome {
+    if !cancel_on_wait_timeout_enabled() {
+        return WaitTimeoutCancelOutcome::Disabled;
+    }
+    match invoke_runner_job_cancel(runner_id, job_id) {
+        Ok(()) => WaitTimeoutCancelOutcome::Cancelled,
+        Err(err) => WaitTimeoutCancelOutcome::Failed(err.message),
+    }
+}
+
+/// Invoke the remote-cancel primitive. In production this hits the daemon/broker
+/// `/jobs/{id}/cancel` endpoint via `runner_job_cancel`; tests inject a hook so
+/// the opt-in path can be asserted without a live runner.
+fn invoke_runner_job_cancel(runner_id: &str, job_id: &str) -> Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(result) = test_cancel_hook::take_invoke(runner_id, job_id) {
+            return result;
+        }
+    }
+    runner_job_cancel(runner_id, job_id).map(|_| ())
+}
+
+#[cfg(test)]
+pub(super) mod test_cancel_hook {
+    use crate::core::error::Result;
+    use std::cell::RefCell;
+
+    type CancelHook = Box<dyn FnMut(&str, &str) -> Result<()>>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<CancelHook>> = const { RefCell::new(None) };
+    }
+
+    /// Install a thread-local cancel hook for the duration of `Guard`'s lifetime.
+    pub(in crate::core::runner::execution) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    pub(in crate::core::runner::execution) fn install(hook: CancelHook) -> Guard {
+        HOOK.with(|cell| *cell.borrow_mut() = Some(hook));
+        Guard
+    }
+
+    pub(super) fn take_invoke(runner_id: &str, job_id: &str) -> Option<Result<()>> {
+        HOOK.with(|cell| cell.borrow_mut().as_mut().map(|hook| hook(runner_id, job_id)))
+    }
+}
+
 pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;

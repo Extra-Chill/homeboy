@@ -570,14 +570,37 @@ pub(super) fn daemon_job_wait_timeout(
     let timeout_hint = format!(
         "Set controller-side `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}` before invoking homeboy to change this wait budget, e.g. `{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400 homeboy ...`; workload settings are applied inside the remote job and cannot extend the controller wait."
     );
+    // Opt-in (#6891): when the operator set `HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT`,
+    // best-effort cancel the still-running remote job so it stops holding its rig
+    // lock. Off by default — the historical contract is preserved exactly.
+    let cancel_outcome = attempt_wait_timeout_cancel(&runner.id, &job_id);
+    let message_tail = match &cancel_outcome {
+        WaitTimeoutCancelOutcome::Disabled => {
+            "the remote job is still in flight and was not cancelled".to_string()
+        }
+        WaitTimeoutCancelOutcome::Cancelled => format!(
+            "remote cancellation was requested on the runner job (opt-in `{RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV}`)"
+        ),
+        WaitTimeoutCancelOutcome::Failed(reason) => format!(
+            "remote cancellation was requested (opt-in `{RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV}`) but failed: {reason}; the remote job may still be in flight"
+        ),
+    };
     let mut error = Error::internal_unexpected(format!(
-        "{label} {job_id} on runner {} did not finish before timeout; the remote job is still in flight and was not cancelled",
+        "{label} {job_id} on runner {} did not finish before timeout; {message_tail}",
         runner.id
     ));
     error.details["runner_id"] = Value::String(runner.id.clone());
     error.details["job_id"] = Value::String(job_id.clone());
     error.details["remote_cwd"] = Value::String(cwd.to_string());
     error.details["command"] = json!(redact_argv(command));
+    error.details["cancel_on_wait_timeout"] = Value::String(
+        match &cancel_outcome {
+            WaitTimeoutCancelOutcome::Disabled => "disabled",
+            WaitTimeoutCancelOutcome::Cancelled => "requested",
+            WaitTimeoutCancelOutcome::Failed(_) => "failed",
+        }
+        .to_string(),
+    );
     match mirrored {
         Ok(run) => {
             error.details["active_run_id"] = Value::String(run.id.clone());
@@ -607,6 +630,21 @@ pub(super) fn daemon_job_wait_timeout(
         supports_cancellation,
     ) {
         error = error.with_hint(hint);
+    }
+    match &cancel_outcome {
+        WaitTimeoutCancelOutcome::Disabled => {}
+        WaitTimeoutCancelOutcome::Cancelled => {
+            error = error.with_hint(format!(
+                "Opt-in `{RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV}` is set: requested remote cancellation of job `{job_id}` to release its rig lock. Confirm with `homeboy runner job logs {} {job_id}`.",
+                runner.id
+            ));
+        }
+        WaitTimeoutCancelOutcome::Failed(reason) => {
+            error = error.with_hint(format!(
+                "Opt-in `{RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV}` is set but remote cancellation failed: {reason}. Cancel manually with `homeboy runner job cancel {} {job_id}`.",
+                runner.id
+            ));
+        }
     }
     error.with_hint(timeout_hint)
 }

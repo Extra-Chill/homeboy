@@ -102,6 +102,12 @@ impl EnvVarGuard {
         std::env::set_var(name, value);
         Self { name, prior }
     }
+
+    fn unset(name: &'static str) -> Self {
+        let prior = std::env::var(name).ok();
+        std::env::remove_var(name);
+        Self { name, prior }
+    }
 }
 
 impl Drop for EnvVarGuard {
