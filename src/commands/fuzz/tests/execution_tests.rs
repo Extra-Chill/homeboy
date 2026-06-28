@@ -30,6 +30,8 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             require_result_envelope: false,
             max_duration: None,
             gate_profile: FuzzGateProfileArg::Measurement,
+            allow_destructive: false,
+            isolation: FuzzIsolationArg::Shared,
             expect_metric: vec![],
             args: vec![],
         };
@@ -48,6 +50,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             exit_code: 0,
             success: true,
             args: &args,
+            execution_request_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
@@ -103,6 +106,231 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
 }
 
 #[test]
+fn fuzz_execution_request_artifact_records_runner_intent() {
+    with_isolated_home(|_| {
+        let run_dir = RunDir::create().expect("run dir");
+        let mut args = fuzz_run_args_with_run_id("proof-destructive");
+        args.allow_destructive = true;
+        args.isolation = FuzzIsolationArg::Isolated;
+        args.max_duration = Some("90s".to_string());
+        args.args = vec!["--runner-flag".to_string()];
+        let inventory = destructive_inventory();
+
+        let request = build_fuzz_execution_request(
+            &args,
+            "component-a",
+            args.rig.as_deref(),
+            args.workload_id.clone(),
+            &inventory,
+        )
+        .expect("execution request");
+        let request_path =
+            persist_fuzz_execution_request(&run_dir, &request).expect("persist request");
+        let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+        let artifacts_dir =
+            run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
+        let env = fuzz_runner_env(
+            &args,
+            None,
+            None,
+            &results_path,
+            &run_dir,
+            Some(&request_path),
+        )
+        .expect("runner env");
+
+        assert!(request_path.is_file());
+        assert!(env.contains(&(
+            "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE".to_string(),
+            request_path.to_string_lossy().to_string()
+        )));
+
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&request_path).expect("read request artifact"),
+        )
+        .expect("request json");
+        assert_eq!(persisted["schema"], "homeboy/fuzz-execution-request/v1");
+        assert_eq!(persisted["id"], "proof-destructive");
+        assert_eq!(persisted["component"], "component-a");
+        assert_eq!(persisted["rig_id"], "package-fuzz");
+        assert_eq!(persisted["workload_id"], "parser");
+        assert_eq!(persisted["seed"], "1234");
+        assert_eq!(persisted["max_duration"], "90s");
+        assert_eq!(persisted["args"][0], "--runner-flag");
+        assert_eq!(persisted["metadata"]["planner"]["allow_destructive"], true);
+        assert_eq!(persisted["metadata"]["planner"]["isolation"], "isolated");
+        assert_eq!(
+            persisted["metadata"]["planner"]["destructive_allowed"],
+            true
+        );
+        assert_eq!(persisted["metadata"]["isolation"]["mode"], "isolated");
+        assert_eq!(
+            persisted["metadata"]["target_inventory"]["id"],
+            "component-a-inventory"
+        );
+
+        std::fs::write(&results_path, "{}").expect("results file");
+        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
+        persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+            run_id: args.run_id.as_deref(),
+            component_id: "component-a",
+            rig_id: args.rig.as_deref(),
+            workload_id: args.workload_id.as_deref(),
+            workload_path: Some("/tmp/fuzz/parser.json"),
+            status: "passed",
+            exit_code: 0,
+            success: true,
+            args: &args,
+            execution_request_path: Some(&request_path),
+            results_path: &results_path,
+            artifacts_dir: &artifacts_dir,
+            results: None,
+            expected_metric_gates: &[],
+            results_error: None,
+            missing_artifact_refs: &[],
+            postprocess: &[],
+        })
+        .expect("persist fuzz run");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("proof-destructive")
+            .expect("get run")
+            .expect("run record");
+        assert_eq!(
+            run.metadata_json["execution_request_file"],
+            request_path.to_string_lossy().to_string()
+        );
+        let artifacts = store
+            .list_artifacts("proof-destructive")
+            .expect("artifacts");
+        let request_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "fuzz_execution_request")
+            .expect("execution request artifact");
+        assert_eq!(request_artifact.artifact_type, "file");
+        assert_eq!(
+            request_artifact.metadata_json["source"],
+            "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE"
+        );
+    });
+}
+
+#[test]
+fn fuzz_run_persists_coverage_reconciliation_artifact() {
+    with_isolated_home(|_| {
+        let run_dir = RunDir::create().expect("run dir");
+        let args = fuzz_run_args_with_run_id("proof-coverage");
+        let request: FuzzExecutionRequest = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/fuzz-execution-request/v1",
+            "version": 1,
+            "id": "proof-coverage",
+            "component": "component-a",
+            "case_ids": ["case-a", "case-b", "case-c"],
+            "sampling": {
+                "schema": "homeboy/fuzz-sampling-request/v1",
+                "operation_strata": [
+                    {
+                        "id": "selected-operations",
+                        "kind": "operation",
+                        "values": ["op-a", "op-b", "op-c"]
+                    }
+                ]
+            }
+        }))
+        .expect("request");
+        let request_path =
+            persist_fuzz_execution_request(&run_dir, &request).expect("request file");
+        let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+        let artifacts_dir =
+            run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
+        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
+        let mut campaign = empty_fuzz_campaign();
+        campaign.cases = vec![
+            fuzz_case("case-a", "op-a", serde_json::json!({ "status": "passed" })),
+            fuzz_case(
+                "case-b",
+                "op-b",
+                serde_json::json!({ "status": "skipped", "skip_reason": "unsupported" }),
+            ),
+        ];
+        let mut coverage_summary = zero_coverage_summary();
+        coverage_summary.skipped_operations = vec![FuzzCoverageSkip {
+            id: "op-b".to_string(),
+            reason: "unsupported".to_string(),
+            label: None,
+        }];
+        campaign.coverage_summary = Some(coverage_summary);
+        std::fs::write(
+            &results_path,
+            serde_json::to_string(&campaign).expect("campaign json"),
+        )
+        .expect("results file");
+
+        persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+            run_id: args.run_id.as_deref(),
+            component_id: "component-a",
+            rig_id: args.rig.as_deref(),
+            workload_id: args.workload_id.as_deref(),
+            workload_path: Some("/tmp/fuzz/parser.json"),
+            status: "passed",
+            exit_code: 0,
+            success: true,
+            args: &args,
+            execution_request_path: Some(&request_path),
+            results_path: &results_path,
+            artifacts_dir: &artifacts_dir,
+            results: Some(&campaign),
+            expected_metric_gates: &[],
+            results_error: None,
+            missing_artifact_refs: &[],
+            postprocess: &[],
+        })
+        .expect("persist fuzz run");
+
+        let store = ObservationStore::open_initialized().expect("store");
+        let artifacts = store.list_artifacts("proof-coverage").expect("artifacts");
+        let reconciliation_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "fuzz_coverage_reconciliation")
+            .expect("coverage reconciliation artifact");
+        assert_eq!(
+            reconciliation_artifact.metadata_json["schema"],
+            "homeboy/fuzz-coverage-reconciliation/v1"
+        );
+        let reconciliation: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&reconciliation_artifact.path).expect("reconciliation json"),
+        )
+        .expect("reconciliation");
+        assert_eq!(reconciliation["planned_operations"], 3);
+        assert_eq!(reconciliation["executed_operations"], 1);
+        assert_eq!(reconciliation["skipped_operations"], 1);
+        assert_eq!(reconciliation["untested_operations"], 1);
+        assert_eq!(reconciliation["planned_cases"], 3);
+        assert_eq!(reconciliation["executed_cases"], 1);
+        assert_eq!(reconciliation["skipped_cases"], 1);
+        assert_eq!(reconciliation["skipped_reason_counts"]["unsupported"], 2);
+        assert_eq!(reconciliation["untested_operation_ids"][0], "op-c");
+    });
+}
+
+fn fuzz_case(id: &str, operation_id: &str, metadata: serde_json::Value) -> FuzzCase {
+    FuzzCase {
+        schema: homeboy::core::fuzz::FUZZ_CASE_SCHEMA.to_string(),
+        id: id.to_string(),
+        target_id: Some("target-a".to_string()),
+        operation_id: Some(operation_id.to_string()),
+        workload_id: None,
+        seed_id: None,
+        replay_id: None,
+        input: serde_json::Value::Null,
+        expected: serde_json::Value::Null,
+        observed: serde_json::Value::Null,
+        metadata,
+        extra: std::collections::BTreeMap::new(),
+    }
+}
+
+#[test]
 fn fuzz_run_persistence_generates_run_id_when_omitted() {
     with_isolated_home(|home| {
         let mut args = fuzz_run_args_with_run_id("ignored");
@@ -122,6 +350,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             exit_code: 0,
             success: true,
             args: &args,
+            execution_request_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
@@ -171,6 +400,7 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
             exit_code: 0,
             success: true,
             args: &args,
+            execution_request_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: Some(&campaign),
@@ -695,6 +925,8 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             require_result_envelope: false,
             max_duration: None,
             gate_profile: FuzzGateProfileArg::Measurement,
+            allow_destructive: false,
+            isolation: FuzzIsolationArg::Shared,
             expect_metric: vec![],
             args: vec![],
         };
@@ -717,6 +949,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             exit_code: 1,
             success: false,
             args: &args,
+            execution_request_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,

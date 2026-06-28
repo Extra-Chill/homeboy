@@ -16,6 +16,7 @@ pub const FUZZ_THRESHOLD_SCHEMA: &str = "homeboy/fuzz-threshold/v1";
 pub const FUZZ_PROVENANCE_SCHEMA: &str = "homeboy/fuzz-provenance/v1";
 pub const FUZZ_REPLAY_SCHEMA: &str = "homeboy/fuzz-replay/v1";
 pub const FUZZ_COVERAGE_SUMMARY_SCHEMA: &str = "homeboy/fuzz-coverage-summary/v1";
+pub const FUZZ_COVERAGE_RECONCILIATION_SCHEMA: &str = "homeboy/fuzz-coverage-reconciliation/v1";
 pub const FUZZ_TARGET_INVENTORY_SCHEMA: &str = "homeboy/fuzz-target-inventory/v1";
 pub const FUZZ_EXECUTION_REQUEST_SCHEMA: &str = "homeboy/fuzz-execution-request/v1";
 pub const FUZZ_SAMPLING_REQUEST_SCHEMA: &str = "homeboy/fuzz-sampling-request/v1";

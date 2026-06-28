@@ -127,6 +127,7 @@ pub(super) fn plan_inventory_selection(
         .map(|workload| workload.operations.iter().cloned().collect::<BTreeSet<_>>())
         .unwrap_or_default();
     let surface_safety = inventory_surface_safety(inventory);
+    let destructive_allowed = args.run.allow_destructive && args.run.isolation.allows_destructive();
 
     let mut selected_target_ids = BTreeSet::new();
     let mut selected_families = BTreeSet::new();
@@ -177,6 +178,7 @@ pub(super) fn plan_inventory_selection(
                 family,
                 safety_class,
                 args.strategy,
+                destructive_allowed,
                 &filters,
                 &workload_operations,
             );
@@ -317,6 +319,9 @@ pub(super) fn plan_inventory_selection(
             "operation_filters": args.operations,
             "operation_family_filters": args.operation_families,
             "gate_profile": args.run.gate_profile.as_str(),
+            "allow_destructive": args.run.allow_destructive,
+            "isolation": args.run.isolation.as_str(),
+            "destructive_allowed": destructive_allowed,
         }),
         extra: BTreeMap::new(),
     };
@@ -327,6 +332,9 @@ pub(super) fn plan_inventory_selection(
             "operation_filters": args.operations,
             "operation_family_filters": args.operation_families,
             "gate_profile": args.run.gate_profile.as_str(),
+            "allow_destructive": args.run.allow_destructive,
+            "isolation": args.run.isolation.as_str(),
+            "destructive_allowed": destructive_allowed,
         },
         "selection": {
             "target_ids": target_ids,
@@ -343,6 +351,9 @@ pub(super) fn plan_inventory_selection(
         "sampling": sampling,
         "isolation": {
             "required": isolation_required,
+            "mode": args.run.isolation.as_str(),
+            "allow_destructive": args.run.allow_destructive,
+            "destructive_allowed": destructive_allowed,
             "requirements": if isolation_required { vec!["isolated_mutation"] } else { Vec::<&str>::new() },
         },
         "required_artifact_ids": profile_artifacts.into_iter().map(|artifact| artifact.id).collect::<Vec<_>>(),
@@ -384,10 +395,11 @@ fn operation_skip_reason(
     family: Option<FuzzOperationFamily>,
     safety_class: FuzzSafetyClass,
     strategy: FuzzPlanStrategy,
+    destructive_allowed: bool,
     filters: &BTreeSet<String>,
     workload_operations: &BTreeSet<String>,
 ) -> Option<&'static str> {
-    if matches!(safety_class, FuzzSafetyClass::Destructive) {
+    if matches!(safety_class, FuzzSafetyClass::Destructive) && !destructive_allowed {
         return Some("destructive");
     }
     if family.is_none() {

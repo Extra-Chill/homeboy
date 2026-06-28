@@ -123,6 +123,8 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         require_result_envelope: false,
         max_duration: Some("60s".to_string()),
         gate_profile: FuzzGateProfileArg::Measurement,
+        allow_destructive: false,
+        isolation: FuzzIsolationArg::Shared,
         expect_metric: vec![],
         args: vec![],
     };
@@ -136,13 +138,26 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
 
     let run_dir = RunDir::create().expect("run dir");
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+    let execution_request_path =
+        run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_EXECUTION_REQUEST);
 
-    let env = fuzz_runner_env(&args, None, Some(&workload), &results_path, &run_dir)
-        .expect("fuzz runner env");
+    let env = fuzz_runner_env(
+        &args,
+        None,
+        Some(&workload),
+        &results_path,
+        &run_dir,
+        Some(&execution_request_path),
+    )
+    .expect("fuzz runner env");
 
     assert!(env.contains(&(
         "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
         results_path.to_string_lossy().to_string()
+    )));
+    assert!(env.contains(&(
+        "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE".to_string(),
+        execution_request_path.to_string_lossy().to_string()
     )));
     let artifacts_dir =
         run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
@@ -167,6 +182,11 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         "HOMEBOY_FUZZ_GATE_PROFILE".to_string(),
         "measurement".to_string()
     )));
+    assert!(env.contains(&(
+        "HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE".to_string(),
+        "false".to_string()
+    )));
+    assert!(env.contains(&("HOMEBOY_FUZZ_ISOLATION".to_string(), "shared".to_string())));
     let contract = default_runner_contract();
     assert!(contract
         .env
@@ -176,7 +196,14 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         .contains(&"HOMEBOY_FUZZ_ARTIFACTS_DIR".to_string()));
     assert!(contract
         .env
+        .contains(&"HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE".to_string()));
+    assert!(contract
+        .env
         .contains(&"HOMEBOY_FUZZ_GATE_PROFILE".to_string()));
+    assert!(contract
+        .env
+        .contains(&"HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE".to_string()));
+    assert!(contract.env.contains(&"HOMEBOY_FUZZ_ISOLATION".to_string()));
 }
 
 #[test]
@@ -268,6 +295,8 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         require_result_envelope: false,
         max_duration: None,
         gate_profile: FuzzGateProfileArg::Measurement,
+        allow_destructive: false,
+        isolation: FuzzIsolationArg::Shared,
         expect_metric: vec![],
         args: vec![],
     };
@@ -293,6 +322,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         Some(&workload),
         &results_path,
         &run_dir,
+        None,
     )
     .expect("fuzz runner env");
     unsafe {

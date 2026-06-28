@@ -2,9 +2,10 @@
 
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use super::execution::{
-    default_runner_contract, fuzz_artifact_ref_validation, fuzz_campaign_contract,
-    fuzz_evidence_followups, fuzz_expected_metric_error, fuzz_max_duration, fuzz_postprocess_error,
-    fuzz_run_artifact_validation_error, fuzz_run_outcome, fuzz_runner_contract, fuzz_runner_env,
+    build_fuzz_execution_request, default_runner_contract, fuzz_artifact_ref_validation,
+    fuzz_campaign_contract, fuzz_evidence_followups, fuzz_expected_metric_error, fuzz_max_duration,
+    fuzz_postprocess_error, fuzz_run_artifact_validation_error, fuzz_run_outcome,
+    fuzz_runner_contract, fuzz_runner_env, persist_fuzz_execution_request,
     persist_fuzz_run_evidence, run_fuzz_artifact_postprocess, FuzzRunEvidenceInput,
 };
 use super::planning::plan_inventory_selection;
@@ -15,9 +16,9 @@ use super::report::{
     FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
 };
 use super::types::{
-    FuzzCommand, FuzzDiscoverArgs, FuzzExecutionOutput, FuzzGateProfileArg, FuzzListOutput,
-    FuzzOutput, FuzzPlanArgs, FuzzPlanStrategy, FuzzReplayArgs, FuzzReportArgs, FuzzRunArgs,
-    FuzzRunOutput, FuzzRunnerContract, FuzzValidateArgs, FuzzWorkloadOutput,
+    FuzzCommand, FuzzDiscoverArgs, FuzzExecutionOutput, FuzzGateProfileArg, FuzzIsolationArg,
+    FuzzListOutput, FuzzOutput, FuzzPlanArgs, FuzzPlanStrategy, FuzzReplayArgs, FuzzReportArgs,
+    FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzValidateArgs, FuzzWorkloadOutput,
 };
 use super::workloads::{
     fuzz_workloads, resolve_component_id, rig_component_for_fuzz, select_workload, FuzzRigContext,
@@ -27,7 +28,8 @@ use clap::Parser;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::FuzzConfig;
 use homeboy::core::fuzz::{
-    FuzzCampaign, FuzzCoverageSummary, FuzzFinding, FuzzFindingStatus, FuzzTargetInventory,
+    FuzzCampaign, FuzzCase, FuzzCoverageSkip, FuzzCoverageSummary, FuzzExecutionRequest,
+    FuzzFinding, FuzzFindingStatus, FuzzTargetInventory,
 };
 use homeboy::core::lifecycle::{
     LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus, LifecycleResultMetadata,
@@ -91,6 +93,8 @@ fn planner_args() -> FuzzPlanArgs {
             require_result_envelope: false,
             max_duration: None,
             gate_profile: FuzzGateProfileArg::Measurement,
+            allow_destructive: false,
+            isolation: FuzzIsolationArg::Shared,
             expect_metric: vec![],
             args: Vec::new(),
         },
@@ -141,6 +145,41 @@ fn planner_inventory() -> FuzzTargetInventory {
             "producer": "inventory-test",
             "run_id": "inventory-discovery"
         }
+    }))
+    .expect("inventory parses")
+}
+
+fn destructive_inventory() -> FuzzTargetInventory {
+    FuzzTargetInventory::from_value(serde_json::json!({
+        "schema": "homeboy/fuzz-target-inventory/v1",
+        "version": 1,
+        "id": "component-a-inventory",
+        "surfaces": [
+            {
+                "schema": "homeboy/fuzz-surface/v1",
+                "id": "api.users.surface",
+                "kind": "api",
+                "target": "api.users",
+                "safety_class": "destructive"
+            }
+        ],
+        "targets": [
+            {
+                "schema": "homeboy/fuzz-target/v1",
+                "id": "api.users",
+                "kind": "api",
+                "operations": [
+                    { "id": "api.users.delete", "kind": "DELETE", "family": "delete" }
+                ]
+            }
+        ],
+        "workloads": [
+            {
+                "schema": "homeboy/fuzz-workload/v1",
+                "id": "api-fuzz",
+                "safety_class": "destructive"
+            }
+        ]
     }))
     .expect("inventory parses")
 }
@@ -214,6 +253,8 @@ fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         require_result_envelope: false,
         max_duration: None,
         gate_profile: FuzzGateProfileArg::Measurement,
+        allow_destructive: false,
+        isolation: FuzzIsolationArg::Shared,
         expect_metric: vec![],
         args: vec![],
     }
