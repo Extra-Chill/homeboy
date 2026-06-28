@@ -4,7 +4,7 @@ Inspect Homeboy core-bundled runtime assets used by extension runners.
 
 ## Runtime Packages
 
-Homeboy discovers installable runtime packages from `~/.config/homeboy/agent-runtimes/<runtime-id>/<runtime-id>.json`. Extension repositories can ship shared runtime packages in `agent-runtimes/`; `homeboy extension install` copies that directory into the Homeboy config area.
+Homeboy discovers installable runtime packages from `~/.config/homeboy/agent-runtimes/<runtime-id>/<runtime-id>.json`. Extension repositories can ship shared runtime packages in their top-level `<extension-repo>/agent-runtimes/` directory; `homeboy extension install` copies that directory into the Homeboy config area.
 
 Runtime package manifests declare generic executor providers through `agent_task_executors`. Core consumes provider identity, backend, command, capabilities, readiness, role aliases, workspace materialization, and secret requirement/default declarations for selection, listing, interpolation, and redacted execution setup. Backend-specific orchestration remains inside the runtime package command.
 

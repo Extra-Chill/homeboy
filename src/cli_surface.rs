@@ -676,9 +676,7 @@ mod tests {
     }
 
     fn commands_index() -> String {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        std::fs::read_to_string(root.join("docs/commands/commands-index.md"))
-            .unwrap_or_else(|error| panic!("failed to read docs command index: {error}"))
+        command_doc("commands-index")
     }
 
     fn root_command(command: &str) -> clap::Command {
