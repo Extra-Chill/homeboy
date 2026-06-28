@@ -120,16 +120,6 @@ impl RunnerAvailability {
         if stale_daemon {
             reasons.push("stale_daemon".to_string());
         }
-        if *active_job_state != RunnerActiveJobState::Available {
-            reasons.push(
-                match active_job_state {
-                    RunnerActiveJobState::Unavailable => "active_jobs_unavailable",
-                    RunnerActiveJobState::NotQueried => "active_jobs_not_queried",
-                    RunnerActiveJobState::Available => unreachable!(),
-                }
-                .to_string(),
-            );
-        }
         match capacity {
             Some(capacity) if active_job_count >= capacity => {
                 reasons.push("capacity_reached".to_string());
@@ -138,6 +128,33 @@ impl RunnerAvailability {
                 reasons.push("capacity_unknown".to_string());
             }
             _ => {}
+        }
+        // `active_job_state` reflects a single live poll of the runner daemon's
+        // `/jobs` endpoint (see `connection::status`): `Available` means the
+        // poll succeeded, `Unavailable` means it failed, `NotQueried` means it
+        // was skipped. That poll is a soft, transient signal — a connected,
+        // under-capacity runner whose poll briefly failed (request timeout, or
+        // a race with a daemon refresh) is reported `Available` again on the
+        // very next poll, which is exactly why `runner status` and lab-offload
+        // preflight could disagree about the same runner. direct_daemon /
+        // direct_ssh runners also legitimately have no worker process to
+        // consult and answer `/jobs` straight from the daemon job store.
+        //
+        // So a failed/absent active-job poll is only treated as a blocking
+        // reason when the runner is already unusable for a hard reason
+        // (disconnected, stale daemon, or at capacity). For a connected,
+        // under-capacity runner it is intentionally non-blocking, keeping
+        // `accepts_jobs` aligned with the `active_job_state: available` verdict
+        // the status path derives from the daemon's own report.
+        if *active_job_state != RunnerActiveJobState::Available && !reasons.is_empty() {
+            reasons.push(
+                match active_job_state {
+                    RunnerActiveJobState::Unavailable => "active_jobs_unavailable",
+                    RunnerActiveJobState::NotQueried => "active_jobs_not_queried",
+                    RunnerActiveJobState::Available => unreachable!(),
+                }
+                .to_string(),
+            );
         }
         let accepts_jobs = reasons.is_empty();
         Self {
