@@ -199,8 +199,12 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                     continue;
                 }
 
-                let stored_path =
-                    persist_artifact_file(&homeboy_run_id, &artifact_id, &file_name, &json_bytes)?;
+                let stored_path = homeboy::core::gh_actions_cache::persist_artifact_file(
+                    &homeboy_run_id,
+                    &artifact_id,
+                    &file_name,
+                    &json_bytes,
+                )?;
                 let sha = format!("{:x}", Sha256::digest(&json_bytes));
                 let size = i64::try_from(json_bytes.len()).ok();
                 let artifact_record = homeboy::core::observation::ArtifactRecord {
@@ -460,13 +464,12 @@ fn list_workflow_runs(
     let (etag, body) = split_headers_and_body(&raw);
 
     // Persist body and ETag for the next invocation.
-    if let Some(parent) = body_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(&body_path, body.as_bytes());
-    if let Some(value) = etag {
-        let _ = fs::write(&etag_path, value);
-    }
+    homeboy::core::gh_actions_cache::write_runs_cache(
+        &body_path,
+        &etag_path,
+        body.as_bytes(),
+        etag.as_deref(),
+    );
 
     let runs = parse_runs_payload(body.as_bytes())?;
     let runs = filter_runs_by_since(runs, since)?;
@@ -697,40 +700,8 @@ fn unpack_json_files_from_zip(zip_bytes: &[u8]) -> homeboy::core::Result<Vec<(St
     Ok(out)
 }
 
-// ── Local persistence ───────────────────────────────────────────────────────
-
-fn persist_artifact_file(
-    homeboy_run_id: &str,
-    artifact_id: &str,
-    file_name: &str,
-    bytes: &[u8],
-) -> homeboy::core::Result<PathBuf> {
-    let safe_name = sanitize_file_name(file_name);
-    let target_dir = crate::core::paths::homeboy_data()?
-        .join("artifacts")
-        .join(homeboy_run_id);
-    fs::create_dir_all(&target_dir).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("create artifact dir {}", target_dir.display())),
-        )
-    })?;
-    let target = target_dir.join(format!("{artifact_id}-{safe_name}"));
-    fs::write(&target, bytes).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("write artifact file {}", target.display())),
-        )
-    })?;
-    Ok(target)
-}
-
 mod helpers {
     use super::*;
-
-    pub fn sanitize_file_name(raw: &str) -> String {
-        raw.replace(['/', '\\', '\0'], "_")
-    }
 
     pub fn list_runs_cache_key(repo: &str, workflow: &str) -> String {
         let composite = format!("{repo}::{workflow}");
@@ -739,16 +710,7 @@ mod helpers {
     }
 
     pub fn list_runs_cache_path(key: &str, ext: &str) -> homeboy::core::Result<PathBuf> {
-        let base = crate::core::paths::homeboy()?
-            .join("cache")
-            .join("gh-actions-runs");
-        fs::create_dir_all(&base).map_err(|e| {
-            Error::internal_io(
-                e.to_string(),
-                Some(format!("create cache dir {}", base.display())),
-            )
-        })?;
-        Ok(base.join(format!("{key}.{ext}")))
+        homeboy::core::gh_actions_cache::list_runs_cache_path(key, ext)
     }
 
     // ── Glob compilation ────────────────────────────────────────────────────
