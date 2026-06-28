@@ -186,6 +186,7 @@ fn materialization_proof_records_hashes_source_and_runner_identity() {
         git_sha: Some("abc123".to_string()),
         dirty: false,
         sync_mode: "lab_offload".to_string(),
+        workspace_snapshot_identity: Some("snapshot:workspace".to_string()),
         snapshot_hash: "sha256:source".to_string(),
         synced_at: "2026-06-21T00:00:00Z".to_string(),
         sync_excludes: vec!["target/".to_string()],
