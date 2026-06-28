@@ -4,6 +4,8 @@ pub(super) const COMMAND_CAPTURE_SH: &str = include_str!("../runtime/command-cap
 pub(super) const BASH_PREFLIGHT_SH: &str = include_str!("../runtime/bash-preflight.sh");
 pub(super) const FAILURE_TRAP_SH: &str = include_str!("../runtime/failure-trap.sh");
 pub(super) const WRITE_TEST_RESULTS_SH: &str = include_str!("../runtime/write-test-results.sh");
+pub(super) const EMIT_LINT_FINDING_SH: &str = include_str!("../runtime/emit-lint-finding.sh");
+pub(super) const EMIT_TEST_FAILURE_SH: &str = include_str!("../runtime/emit-test-failure.sh");
 pub(super) const SIDECAR_WRITER_SH: &str = include_str!("../runtime/sidecar-writer.sh");
 pub(super) const RESOLVE_CONTEXT_SH: &str = include_str!("../runtime/resolve-context.sh");
 pub(super) const BENCH_HELPER_SH: &str = include_str!("../runtime/bench-helper.sh");
@@ -28,6 +30,8 @@ mod tests {
             BASH_PREFLIGHT_SH,
             FAILURE_TRAP_SH,
             WRITE_TEST_RESULTS_SH,
+            EMIT_LINT_FINDING_SH,
+            EMIT_TEST_FAILURE_SH,
             SIDECAR_WRITER_SH,
             RESOLVE_CONTEXT_SH,
             BENCH_HELPER_SH,

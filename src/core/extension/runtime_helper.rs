@@ -13,6 +13,8 @@ pub const COMMAND_CAPTURE_ENV: &str = "HOMEBOY_RUNTIME_COMMAND_CAPTURE";
 pub const BASH_PREFLIGHT_ENV: &str = "HOMEBOY_RUNTIME_BASH_PREFLIGHT";
 pub const FAILURE_TRAP_ENV: &str = "HOMEBOY_RUNTIME_FAILURE_TRAP";
 pub const WRITE_TEST_RESULTS_ENV: &str = "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS";
+pub const EMIT_LINT_FINDING_ENV: &str = "HOMEBOY_RUNTIME_EMIT_LINT_FINDING";
+pub const EMIT_TEST_FAILURE_ENV: &str = "HOMEBOY_RUNTIME_EMIT_TEST_FAILURE";
 pub const SIDECAR_WRITER_ENV: &str = "HOMEBOY_RUNTIME_SIDECAR_WRITER";
 pub const RESOLVE_CONTEXT_ENV: &str = "HOMEBOY_RUNTIME_RESOLVE_CONTEXT";
 pub const BENCH_HELPER_SH_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_SH";
@@ -61,6 +63,18 @@ const HELPERS: &[RuntimeHelper] = &[
         filename: "write-test-results.sh",
         content: assets::WRITE_TEST_RESULTS_SH,
         env_var: WRITE_TEST_RESULTS_ENV,
+        legacy_fallback: false,
+    },
+    RuntimeHelper {
+        filename: "emit-lint-finding.sh",
+        content: assets::EMIT_LINT_FINDING_SH,
+        env_var: EMIT_LINT_FINDING_ENV,
+        legacy_fallback: false,
+    },
+    RuntimeHelper {
+        filename: "emit-test-failure.sh",
+        content: assets::EMIT_TEST_FAILURE_SH,
+        env_var: EMIT_TEST_FAILURE_ENV,
         legacy_fallback: false,
     },
     RuntimeHelper {
