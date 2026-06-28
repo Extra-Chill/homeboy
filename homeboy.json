@@ -486,12 +486,18 @@
         },
         {
           "label": "run artifact persistence",
+          "exempt_when_line_matches": [
+            "[A-Za-z_][A-Za-z0-9_]*::(dispatch|execute|persist)[A-Za-z0-9_]*\\s*\\("
+          ],
           "patterns": [
             "\\b(RunDir::create|write_to_run_dir|ObservationBuilder|finish_run|persist_[A-Za-z0-9_]+)\\b"
           ]
         },
         {
           "label": "runner execution orchestration",
+          "exempt_when_line_matches": [
+            "[A-Za-z_][A-Za-z0-9_]*::(dispatch|execute|persist)[A-Za-z0-9_]*\\s*\\("
+          ],
           "patterns": [
             "\\b(runner::exec|execute_[A-Za-z0-9_]+|dispatch_[A-Za-z0-9_]+)\\s*\\("
           ]

@@ -37,6 +37,9 @@ struct CompiledMarkerGroup {
     label: String,
     weight: u32,
     patterns: Vec<Regex>,
+    /// When non-empty, a line matching `patterns` is still suppressed for this
+    /// group if it also matches one of these (module-qualified delegation).
+    exempt: Vec<Regex>,
 }
 
 /// A single orchestration hit contributing to a module's weight.
@@ -107,10 +110,16 @@ fn compile_marker_groups(config: &ThinCommandAdapterConfig) -> Vec<CompiledMarke
             if patterns.is_empty() {
                 return None;
             }
+            let exempt: Vec<Regex> = group
+                .exempt_when_line_matches
+                .iter()
+                .filter_map(|pattern| Regex::new(pattern).ok())
+                .collect();
             Some(CompiledMarkerGroup {
                 label: group.label.clone(),
                 weight: group.weight.max(1),
                 patterns,
+                exempt,
             })
         })
         .collect()
@@ -209,6 +218,12 @@ fn scan_orchestration(
                 .iter()
                 .any(|pattern| pattern.is_match(raw_line))
             {
+                // Suppress this group's hit when it declares exemptions and the
+                // line matches one (module-qualified delegation is correct
+                // thin-adapter behavior, not a leak).
+                if !group.exempt.is_empty() && group.exempt.iter().any(|re| re.is_match(raw_line)) {
+                    continue;
+                }
                 hits.push(OrchestrationHit {
                     label: group.label.clone(),
                     weight: group.weight,

@@ -22,11 +22,13 @@ fn config() -> ThinCommandAdapterConfig {
                 label: "process execution".to_string(),
                 patterns: vec![r"Command::new\s*\(".to_string()],
                 weight: 1,
+                exempt_when_line_matches: Vec::new(),
             },
             ThinCommandAdapterMarkerGroup {
                 label: "filesystem mutation".to_string(),
                 patterns: vec![r"std::fs::(write|remove_file)\s*\(".to_string()],
                 weight: 1,
+                exempt_when_line_matches: Vec::new(),
             },
         ],
         max_orchestration_weight: 2,
@@ -134,6 +136,7 @@ fn name_shaped_config() -> ThinCommandAdapterConfig {
             label: "dispatch".to_string(),
             patterns: vec![r"dispatch_[A-Za-z0-9_]+\s*\(".to_string()],
             weight: 1,
+            exempt_when_line_matches: Vec::new(),
         }],
         max_orchestration_weight: 1,
         ..Default::default()
@@ -203,4 +206,97 @@ fn weighted_group_reaches_threshold_alone() {
     let findings = super::run(dir.path(), &config);
     assert_eq!(findings.len(), 1);
     assert!(findings[0].description.contains("process execution"));
+}
+
+fn delegation_exempt_config() -> ThinCommandAdapterConfig {
+    ThinCommandAdapterConfig {
+        include_path_contains: vec!["src/commands/".to_string()],
+        file_extensions: vec!["rs".to_string()],
+        orchestration_markers: vec![ThinCommandAdapterMarkerGroup {
+            label: "dispatch".to_string(),
+            patterns: vec![r"dispatch_[A-Za-z0-9_]+\s*\(".to_string()],
+            weight: 1,
+            exempt_when_line_matches: vec![
+                r"[A-Za-z_][A-Za-z0-9_]*::(dispatch|execute|persist)_".to_string()
+            ],
+        }],
+        max_orchestration_weight: 1,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn exempt_when_line_matches_skips_module_qualified_delegation() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/delegation.rs",
+        "pub fn run() {\n    foo::dispatch_thing();\n}\n",
+    );
+    let findings = super::run(dir.path(), &delegation_exempt_config());
+    assert!(
+        findings.is_empty(),
+        "module-qualified delegation foo::dispatch_thing() must be exempt, not flagged"
+    );
+}
+
+#[test]
+fn exempt_when_line_matches_still_flags_local_call() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/local_call.rs",
+        "pub fn run() {\n    dispatch_thing();\n}\n",
+    );
+    let findings = super::run(dir.path(), &delegation_exempt_config());
+    assert_eq!(
+        findings.len(),
+        1,
+        "a bare local dispatch_thing() call must still be flagged"
+    );
+    assert!(findings[0].description.contains("dispatch"));
+}
+
+#[test]
+fn concrete_group_with_empty_exempt_always_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    // A concrete marker line that also contains '::' must still count even
+    // though the line is module-qualified — empty exempt means no suppression.
+    write(
+        dir.path(),
+        "src/commands/concrete.rs",
+        "pub fn run() {\n    std::fs::write(\"a\", \"b\").unwrap();\n}\n",
+    );
+    let config = ThinCommandAdapterConfig {
+        include_path_contains: vec!["src/commands/".to_string()],
+        file_extensions: vec!["rs".to_string()],
+        orchestration_markers: vec![ThinCommandAdapterMarkerGroup {
+            label: "filesystem mutation".to_string(),
+            patterns: vec![r"std::fs::(write|remove_file)\s*\(".to_string()],
+            weight: 1,
+            exempt_when_line_matches: Vec::new(),
+        }],
+        max_orchestration_weight: 1,
+        ..Default::default()
+    };
+    let findings = super::run(dir.path(), &config);
+    assert_eq!(
+        findings.len(),
+        1,
+        "concrete marker std::fs::write must count despite containing '::'"
+    );
+    assert!(findings[0].description.contains("filesystem mutation"));
+}
+
+#[test]
+fn empty_exempt_when_line_matches_preserves_existing_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/legacy.rs",
+        "pub fn run() {\n    foo::dispatch_thing();\n}\n",
+    );
+    // With no exempt configured, the legacy behavior flags the delegation line.
+    let findings = super::run(dir.path(), &name_shaped_config());
+    assert_eq!(findings.len(), 1);
 }
