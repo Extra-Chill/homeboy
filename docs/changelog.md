@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.269.1] - 2026-06-28
+
+### Changed
+- harness audits via run_main_audit_workflow (CI entry point) to close fidelity gap
+- enrich harness fixture for test-path skip + agnostic detector coverage
+
+### Fixed
+- bind canonical typed artifacts
+- fetch tags before reachability guard; fix batch rollup
+
 ## [0.269.0] - 2026-06-28
 
 ### Added
