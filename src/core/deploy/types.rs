@@ -108,6 +108,71 @@ pub enum DeployArtifactSource {
     LocalBuild,
 }
 
+/// Where the payload that was deployed actually came from.
+///
+/// Unlike [`DeployArtifactSource`] (which only distinguishes a downloaded release
+/// asset from a local build for artifact strategies), this covers every deploy
+/// strategy so the deploy result is explicit and consistent about build provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildSource {
+    /// A fresh build ran locally against the checked-out source tree.
+    FreshBuild,
+    /// An existing local build artifact was reused without rebuilding (`--skip-build`).
+    ReusedArtifact,
+    /// A prebuilt release asset was downloaded instead of building locally.
+    DownloadedRelease,
+    /// Committed source was pushed directly via the `git` deploy strategy.
+    GitPush,
+    /// Source files were copied directly via the `file` deploy strategy.
+    FileCopy,
+}
+
+/// Content identity of a deployed artifact file, so stale artifacts are detectable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactIdentity {
+    /// Path to the artifact that was deployed.
+    pub path: String,
+    /// Size of the artifact in bytes (absent for directory artifacts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// SHA-256 of the artifact contents (best-effort; absent for directories).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Last-modified time of the artifact, in seconds since the Unix epoch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_unix: Option<i64>,
+}
+
+/// Explicit, strategy-complete build provenance for a single component deploy.
+///
+/// Answers, for every deploy and regardless of strategy: which source/ref produced
+/// the payload, whether a fresh build actually ran, whether the built source tree
+/// was dirty, and the identity of the artifact that shipped. This makes the
+/// otherwise-implicit "working tree vs. committed ref vs. reused artifact" choice
+/// explicit so stale artifacts cannot ship unnoticed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuildProvenance {
+    /// Where the deployed payload came from.
+    pub source: BuildSource,
+    /// Whether a fresh build ran for this deploy (vs. a reused or downloaded
+    /// artifact, or a strategy that ships source directly).
+    pub build_ran: bool,
+    /// The git ref the payload was built/deployed from (tag, or `"<branch> (HEAD)"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub built_from_ref: Option<String>,
+    /// The commit (HEAD) of the source tree the payload was built/deployed from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub built_from_commit: Option<String>,
+    /// Whether the built source tree had uncommitted changes (excluding generated
+    /// build artifacts). `None` when not applicable (e.g. a downloaded release).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_tree_dirty: Option<bool>,
+    /// Identity of the deployed artifact, when the strategy produces an artifact file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_identity: Option<ArtifactIdentity>,
+}
+
 /// Reason why a component was selected for deployment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -251,6 +316,10 @@ pub struct ComponentDeployResult {
     /// The git ref (tag or branch) that was built and deployed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployed_ref: Option<String>,
+    /// Explicit build provenance: source/ref, whether a fresh build ran, and the
+    /// identity of the artifact that shipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_provenance: Option<BuildProvenance>,
 }
 
 impl ComponentDeployResult {
@@ -279,6 +348,7 @@ impl ComponentDeployResult {
             deploy_exit_code: None,
             release_state: None,
             deployed_ref: None,
+            build_provenance: None,
         }
     }
 
@@ -364,6 +434,11 @@ impl ComponentDeployResult {
 
     pub(super) fn with_deployed_ref(mut self, git_ref: String) -> Self {
         self.deployed_ref = Some(git_ref);
+        self
+    }
+
+    pub(super) fn with_build_provenance(mut self, provenance: BuildProvenance) -> Self {
+        self.build_provenance = Some(provenance);
         self
     }
 
