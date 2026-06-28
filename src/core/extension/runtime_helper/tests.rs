@@ -34,6 +34,14 @@ fn ensure_all_helpers_writes_all_files() {
             "write test results helper should be in pairs"
         );
         assert!(
+            pairs.iter().any(|(k, _)| k == EMIT_LINT_FINDING_ENV),
+            "emit lint finding helper should be in pairs"
+        );
+        assert!(
+            pairs.iter().any(|(k, _)| k == EMIT_TEST_FAILURE_ENV),
+            "emit test failure helper should be in pairs"
+        );
+        assert!(
             pairs.iter().any(|(k, _)| k == SIDECAR_WRITER_ENV),
             "sidecar writer helper should be in pairs"
         );
@@ -170,6 +178,247 @@ fn sidecar_writer_appends_and_merges_json_arrays() {
         r#"[{"tool":"lint","message":"one","fingerprint":"first"},{"tool":"lint","message":"two","fingerprint":"second"},{"tool":"lint","message":"three","fingerprint":"third"}]
 "#
     );
+}
+
+fn shasum_hex(algo: &str, identity: &str) -> String {
+    use std::io::Write;
+    let mut child = std::process::Command::new("shasum")
+        .arg("-a")
+        .arg(algo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn shasum");
+    child
+        .stdin
+        .take()
+        .expect("shasum stdin")
+        .write_all(identity.as_bytes())
+        .expect("write identity");
+    let output = child.wait_with_output().expect("shasum output");
+    assert!(output.status.success(), "shasum should succeed");
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .expect("hash field")
+        .to_string()
+}
+
+#[test]
+fn emit_lint_finding_shim_emits_normalized_record() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("emit-lint-finding.sh");
+    std::fs::write(&helper_path, assets::EMIT_LINT_FINDING_SH).expect("write helper");
+
+    // Line 1 is long enough to prove the 240-char excerpt truncation; line 2 is a
+    // normal short line.
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let long_line = "a".repeat(300);
+    std::fs::write(src_dir.join("lib.rs"), format!("{long_line}\nlet x = 1;\n"))
+        .expect("write source");
+
+    let identity = "rust:clippy:src/lib.rs:1:5:unused:unused variable";
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_emit_lint_finding --root {} --id '{}' --file src/lib.rs --line 1 --column 5 --severity warning --source clippy --code unused --category correctness --message 'unused variable' --fixable false",
+            helper_path.display(),
+            dir.path().display(),
+            identity
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let record: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("record is valid json");
+    assert_eq!(record["id"], identity);
+    assert_eq!(record["file"], "src/lib.rs");
+    assert_eq!(record["line"], 1);
+    assert_eq!(record["column"], 5);
+    assert_eq!(record["severity"], "warning");
+    assert_eq!(record["source"], "clippy");
+    assert_eq!(record["code"], "unused");
+    assert_eq!(record["category"], "correctness");
+    assert_eq!(record["message"], "unused variable");
+    assert_eq!(record["fixable"], false);
+
+    // Fingerprint matches the per-language builders byte-for-byte: sha1 of identity.
+    assert_eq!(
+        record["fingerprint"].as_str().expect("fingerprint string"),
+        shasum_hex("1", identity)
+    );
+
+    // Excerpt is the first 240 characters of the source line, like the reference builders.
+    let excerpt = record["excerpt"].as_str().expect("excerpt string");
+    assert_eq!(excerpt.chars().count(), 240);
+    assert_eq!(excerpt, "a".repeat(240));
+}
+
+#[test]
+fn emit_lint_finding_shim_null_excerpt_when_line_out_of_range() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("emit-lint-finding.sh");
+    std::fs::write(&helper_path, assets::EMIT_LINT_FINDING_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_emit_lint_finding --root {} --id 'go:gofmt:missing.go:1' --file missing.go --line 1 --source gofmt --code formatting --category format --message 'File is not gofmt-formatted' --fixable true",
+            helper_path.display(),
+            dir.path().display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let record: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("record is valid json");
+    assert!(record["excerpt"].is_null(), "excerpt should be null");
+    assert_eq!(record["fixable"], true);
+}
+
+#[test]
+fn emit_test_failure_shim_uses_identity_override_for_fingerprint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("emit-test-failure.sh");
+    std::fs::write(&helper_path, assets::EMIT_TEST_FAILURE_SH).expect("write helper");
+
+    // Identity override reproduces the per-language fingerprint (e.g. rust's
+    // sha256("rust:test:<name>")) byte-for-byte.
+    let identity = "rust:test:mymod::tests::it_works";
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_emit_test_failure --test-id 'mymod::tests::it_works' --message 'Rust test failed: mymod::tests::it_works' --identity '{}' --stdout-excerpt 'tail'",
+            helper_path.display(),
+            identity
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let record: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("record is valid json");
+    assert_eq!(record["test_id"], "mymod::tests::it_works");
+    assert!(record["suite"].is_null(), "suite should be null when empty");
+    assert!(record["file"].is_null(), "file should be null when empty");
+    assert!(record["line"].is_null(), "line should be null when absent");
+    assert_eq!(record["failure_type"], "test_failure");
+    assert_eq!(record["stdout_excerpt"], "tail");
+    assert_eq!(record["stderr_excerpt"], "");
+    assert_eq!(
+        record["fingerprint"].as_str().expect("fingerprint string"),
+        shasum_hex("256", identity)
+    );
+}
+
+#[test]
+fn emit_test_failure_shim_derives_canonical_fingerprint_and_supports_infra_fallback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("emit-test-failure.sh");
+    std::fs::write(&helper_path, assets::EMIT_TEST_FAILURE_SH).expect("write helper");
+
+    // No --identity: the shim derives the canonical NUL-joined identity
+    // [test_id, file, line, failure_type, first_message_line], matching the
+    // WordPress make_failure_fingerprint contract.
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_emit_test_failure --test-id 'Foo::testBar' --suite phpunit --file src/Foo.php --line 42 --failure-type AssertionError --message 'Failed asserting that false is true.' --stdout-excerpt 'out'",
+            helper_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let record: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("record is valid json");
+    assert_eq!(record["test_id"], "Foo::testBar");
+    assert_eq!(record["suite"], "phpunit");
+    assert_eq!(record["file"], "src/Foo.php");
+    assert_eq!(record["line"], 42);
+    assert_eq!(record["failure_type"], "AssertionError");
+
+    let identity = ["Foo::testBar", "src/Foo.php", "42", "AssertionError", "Failed asserting that false is true."]
+        .join("\0");
+    assert_eq!(
+        record["fingerprint"].as_str().expect("fingerprint string"),
+        shasum_hex("256", &identity)
+    );
+
+    // Infra-fallback record: failure_type is "infrastructure".
+    let infra = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_emit_test_failure --test-id 'cargo test' --failure-type infrastructure --message 'cargo test failed before individual test failures could be parsed' --identity 'rust:cargo-test:failed'",
+            helper_path.display()
+        ))
+        .output()
+        .expect("run bash");
+
+    assert!(
+        infra.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&infra.stderr)
+    );
+    let infra_record: serde_json::Value =
+        serde_json::from_slice(&infra.stdout).expect("infra record is valid json");
+    assert_eq!(infra_record["failure_type"], "infrastructure");
+    assert_eq!(
+        infra_record["fingerprint"].as_str().expect("fingerprint string"),
+        shasum_hex("256", "rust:cargo-test:failed")
+    );
+}
+
+#[test]
+fn emit_test_failure_bound_excerpt_matches_canonical_bound() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("emit-test-failure.sh");
+    std::fs::write(&helper_path, assets::EMIT_TEST_FAILURE_SH).expect("write helper");
+
+    // 50 lines of 200 chars each: first 40 lines kept, then capped at 4000 chars.
+    let raw: String = (0..50)
+        .map(|i| format!("{}-{}", i, "x".repeat(196)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "source {}; homeboy_test_failure_bound_excerpt \"$RAW\"",
+            helper_path.display()
+        ))
+        .env("RAW", &raw)
+        .output()
+        .expect("run bash");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let excerpt = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(excerpt.chars().count(), 4000, "excerpt should cap at 4000 chars");
+    assert!(excerpt.ends_with("..."), "capped excerpt should end with ellipsis");
 }
 
 #[test]
