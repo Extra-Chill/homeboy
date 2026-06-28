@@ -41,6 +41,8 @@ function readWordPressFuzzRunnerEnv(env = process.env) {
 		wpCodeboxFuzzWorkloadRoot: env.WP_CODEBOX_FUZZ_WORKLOAD_ROOT,
 		wpCodeboxBin: env.HOMEBOY_WP_CODEBOX_BIN || env.WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN,
 		wpCliBin: env.HOMEBOY_WP_CLI_BIN || env.WP_CLI_BIN,
+		componentPathOverrides: componentPathOverridesFromEnv(env, 'HOMEBOY_RIG_COMPONENT_PATH__'),
+		componentCheckoutRootOverrides: componentPathOverridesFromEnv(env, 'HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__'),
 	});
 }
 
@@ -248,13 +250,14 @@ function buildWpCodeboxFuzzRuntimeRequirements({ workload = {}, env = {} } = {})
 		|| workload.metadata?.fixture?.component
 		|| workload.metadata?.fixture?.plugin
 		|| workload.target?.slug;
-	const component = componentId && components ? objectOrUndefined(components[componentId]) : undefined;
-	const source = component?.path || component?.source;
+	const component = componentId && components ? componentFromContext(components, componentId) : undefined;
+	const source = component?.path || component?.source || componentPathOverride(env.componentPathOverrides, componentId);
 	if ((!componentId || typeof source !== 'string' || source.trim() === '') && !workloadRoot) {
 		return undefined;
 	}
 	const activation = workload.metadata?.fixture?.activation || firstCasePluginActivation(workload);
-	const pluginRequirement = buildWpCodeboxFuzzPluginRequirement({ workload, componentId, source, activation, context });
+	const checkoutRoot = component?.checkout_root || component?.checkoutRoot || component?.extensions?.wordpress?.checkout_root || component?.extensions?.wordpress?.checkoutRoot || componentPathOverride(env.componentCheckoutRootOverrides, componentId);
+	const pluginRequirement = buildWpCodeboxFuzzPluginRequirement({ workload, componentId, source, activation, context, checkoutRoot });
 	return {
 		extra_plugins: pluginRequirement ? [pluginRequirement.extraPlugin] : undefined,
 		component_contracts: pluginRequirement ? [pluginRequirement.componentContract] : undefined,
@@ -267,15 +270,15 @@ function buildWpCodeboxFuzzRuntimeRequirements({ workload = {}, env = {} } = {})
 	};
 }
 
-function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, source, activation, context = {} } = {}) {
+function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, source, activation, context = {}, checkoutRoot } = {}) {
 	if (!componentId || typeof source !== 'string' || source.trim() === '') {
 		return undefined;
 	}
 	const slug = workload.target?.slug || componentId;
-	const component = objectOrUndefined(context.components?.[componentId]);
+	const component = componentFromContext(context.components, componentId);
 	const wordpressExtension = objectOrUndefined(component?.extensions?.wordpress);
 	const sourceSubpath = nonEmptyString(wordpressExtension?.wp_codebox_source_subpath || wordpressExtension?.wpCodeboxSourceSubpath);
-	const sourceLayout = wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension });
+	const sourceLayout = wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension, checkoutRoot });
 	return {
 		extraPlugin: stripUndefined({
 			slug,
@@ -302,12 +305,19 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 	};
 }
 
-function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension } = {}) {
+function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension, checkoutRoot } = {}) {
 	const normalizedSubpath = nonEmptyString(sourceSubpath);
 	if (normalizedSubpath && source.endsWith(`/${normalizedSubpath}`)) {
 		return {
 			sourceRoot: source.slice(0, -normalizedSubpath.length - 1),
 			sourceSubpath: normalizedSubpath,
+		};
+	}
+	const normalizedCheckoutRoot = nonEmptyString(checkoutRoot);
+	if (normalizedCheckoutRoot && source.startsWith(`${normalizedCheckoutRoot}/`)) {
+		return {
+			sourceRoot: normalizedCheckoutRoot,
+			sourceSubpath: source.slice(normalizedCheckoutRoot.length + 1),
 		};
 	}
 
@@ -324,6 +334,40 @@ function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension } = {
 	}
 
 	return {};
+}
+
+function componentPathOverridesFromEnv(env = {}, prefix = '') {
+	const overrides = {};
+	for (const [key, value] of Object.entries(env)) {
+		if (!key.startsWith(prefix) || typeof value !== 'string' || value.trim() === '') {
+			continue;
+		}
+		const suffix = key.slice(prefix.length);
+		const normalizedKey = normalizedComponentId(suffix);
+		if (!normalizedKey) {
+			continue;
+		}
+		overrides[normalizedKey] = value.trim();
+	}
+	return Object.keys(overrides).length > 0 ? overrides : undefined;
+}
+
+function componentFromContext(components = {}, componentId) {
+	const normalizedId = normalizedComponentId(componentId);
+	for (const [key, value] of Object.entries(objectOrUndefined(components) || {})) {
+		if (key === componentId || normalizedComponentId(key) === normalizedId) {
+			return objectOrUndefined(value);
+		}
+	}
+	return undefined;
+}
+
+function componentPathOverride(overrides = {}, componentId) {
+	return objectOrUndefined(overrides)?.[normalizedComponentId(componentId)];
+}
+
+function normalizedComponentId(value) {
+	return nonEmptyString(value)?.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 function nonEmptyString(value) {

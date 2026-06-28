@@ -32,8 +32,10 @@ const {
 	publicFuzzCliRunnerModeForRequest,
 	runWpCodeboxPublicFuzzOperation,
 	runWpCodeboxFuzzSuite,
+	validateWpCodeboxRuntimeRequirementMounts,
 	wordpressFuzzPostprocessBinding,
 	wpCodeboxFuzzExecutionRequest,
+	wpCodeboxPublicCliInput,
 	wpCodeboxFuzzSuiteInput,
 	wpCodeboxFuzzSuiteTaskRequest,
 	wpCodeboxRuntimeContractManifest,
@@ -210,6 +212,38 @@ assert.equal(executionRequest.command, 'run-fuzz-suite');
 assert.equal(executionRequest.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.equal(executionRequest.metadata.executor, 'wp-codebox-direct-fuzz');
 assert.equal(executionRequest.executor, undefined);
+
+const runtimeRequirementRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-runtime-requirements-'));
+const runtimePluginRoot = path.join(runtimeRequirementRoot, 'sample-checkout');
+const runtimePluginPath = path.join(runtimePluginRoot, 'plugins', 'sample-plugin');
+const runtimeWorkloadRoot = path.join(runtimeRequirementRoot, 'workloads');
+fs.mkdirSync(runtimePluginPath, { recursive: true });
+fs.mkdirSync(runtimeWorkloadRoot, { recursive: true });
+const runtimeRequirementRequest = wpCodeboxFuzzExecutionRequest({
+	taskId: 'runtime-requirement-suite-task',
+	input,
+	runtimeRequirements: {
+		extra_plugins: [{ slug: 'sample-plugin', source: runtimePluginPath, sourceRoot: runtimePluginRoot, sourceSubpath: 'plugins/sample-plugin' }],
+		component_contracts: [{ slug: 'sample-plugin', path: runtimePluginPath, sourceRoot: runtimePluginRoot, sourceSubpath: 'plugins/sample-plugin' }],
+		runtime_mounts: [{ source: runtimeWorkloadRoot, target: runtimeWorkloadRoot, mode: 'readonly' }],
+	},
+});
+const publicCliInput = wpCodeboxPublicCliInput(runtimeRequirementRequest);
+assert.equal(publicCliInput.metadata.runtime_requirements.extra_plugins[0].sourceRoot, runtimePluginRoot);
+assert.equal(publicCliInput.metadata.runtime_requirements.component_contracts[0].sourceSubpath, 'plugins/sample-plugin');
+assert.deepEqual(publicCliInput.metadata.runtime_requirements.runtime_mounts, [{ source: runtimeWorkloadRoot, target: runtimeWorkloadRoot, mode: 'readonly' }]);
+assert.throws(
+	() => validateWpCodeboxRuntimeRequirementMounts({ runtime_mounts: [{ source: path.join(runtimeRequirementRoot, 'missing-workloads'), target: '/tmp/missing-workloads' }] }),
+	/WP Codebox runtime requirement runtime_mounts\[0\] source does not exist/
+);
+assert.throws(
+	() => wpCodeboxPublicCliInput(wpCodeboxFuzzExecutionRequest({
+		taskId: 'missing-plugin-suite-task',
+		input,
+		runtimeRequirements: { extra_plugins: [{ slug: 'missing-plugin', source: path.join(runtimeRequirementRoot, 'missing-plugin') }] },
+	})),
+	/WP Codebox runtime requirement extra_plugins\[0\] source does not exist/
+);
 
 const preflightMissingCommand = preflightWpCodeboxFuzzCapabilityContract({
 	request: taskRequest,
@@ -1146,8 +1180,8 @@ runWpCodeboxFuzzSuite({
 		runtimeContractManifest: manifest,
 		wpCodeboxBin: '/custom/direct-wp-codebox',
 		runtimeRequirements: {
-			extra_plugins: [{ slug: 'sample-plugin', source: '/runner/components/sample-plugin', loadAs: 'plugin' }],
-			runtime_env: { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: '/runner/workloads' },
+			extra_plugins: [{ slug: 'sample-plugin', source: runtimePluginPath, loadAs: 'plugin' }],
+			runtime_env: { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: runtimeWorkloadRoot },
 		},
 		runPublicCli: ({ command, args, stdin }) => {
 			assert.equal(command, '/custom/direct-wp-codebox');
@@ -1166,8 +1200,8 @@ runWpCodeboxFuzzSuite({
 			assert.equal(stdin, undefined);
 			const publicCliInput = JSON.parse(fs.readFileSync(args[2], 'utf8'));
 			assert.equal(publicCliInput.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
-			assert.equal(publicCliInput.metadata.runtime_requirements.extra_plugins[0].source, '/runner/components/sample-plugin');
-			assert.equal(publicCliInput.metadata.runtime_requirements.runtime_env.WP_CODEBOX_FUZZ_WORKLOAD_ROOT, '/runner/workloads');
+			assert.equal(publicCliInput.metadata.runtime_requirements.extra_plugins[0].source, runtimePluginPath);
+			assert.equal(publicCliInput.metadata.runtime_requirements.runtime_env.WP_CODEBOX_FUZZ_WORKLOAD_ROOT, runtimeWorkloadRoot);
 			assert.equal(publicCliInput.metadata.homeboy_wp_codebox_fuzz_execution.schema, WP_CODEBOX_FUZZ_EXECUTION_SCHEMA);
 			assert.equal(publicCliInput.metadata.homeboy_wp_codebox_fuzz_execution.expected_artifacts.includes('case-log'), true);
 			assert.equal(publicCliInput.metadata.homeboy_agent_task_request, undefined);

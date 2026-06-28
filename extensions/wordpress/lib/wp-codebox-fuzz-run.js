@@ -992,6 +992,7 @@ async function runWpCodeboxPublicFuzzOperation(options = {}) {
 
 function wpCodeboxPublicCliInput(request = {}, options = {}) {
 	const runtimeRequirements = objectOrUndefined(wpCodeboxFuzzRequestRuntimeRequirements(request));
+	validateWpCodeboxRuntimeRequirementMounts(runtimeRequirements, options);
 	const input = stageArtifactPostprocessHelpers(wpCodeboxFuzzRequestInput(request, options), runtimeRequirements, options);
 	return {
 		...input,
@@ -1001,6 +1002,33 @@ function wpCodeboxPublicCliInput(request = {}, options = {}) {
 			homeboy_wp_codebox_fuzz_execution: request,
 		},
 	};
+}
+
+function validateWpCodeboxRuntimeRequirementMounts(runtimeRequirements = {}, options = {}) {
+	if (options.validateRuntimeMounts === false || options.validate_runtime_mounts === false) {
+		return;
+	}
+	for (const [collection, entries] of Object.entries({
+		runtime_mounts: runtimeRequirements.runtime_mounts,
+		extra_plugins: runtimeRequirements.extra_plugins,
+		component_contracts: runtimeRequirements.component_contracts,
+	})) {
+		for (const [index, entry] of normalizeArray(entries).entries()) {
+			const requirement = objectOrUndefined(entry);
+			if (!requirement) {
+				continue;
+			}
+			const source = requirement.sourceRoot || requirement.source || requirement.path;
+			if (!isLocalAbsolutePath(source) || fs.existsSync(source)) {
+				continue;
+			}
+			throw new Error(`WP Codebox runtime requirement ${collection}[${index}] source does not exist: ${source}`);
+		}
+	}
+}
+
+function isLocalAbsolutePath(value) {
+	return typeof value === 'string' && path.isAbsolute(value) && !value.includes('${') && !value.includes('{{');
 }
 
 function stageArtifactPostprocessHelpers(input = {}, runtimeRequirements = {}, options = {}) {
@@ -2551,7 +2579,9 @@ module.exports = {
 	publicFuzzCliRunnerModeForRequest,
 	runWpCodeboxFuzzSuite,
 	runWpCodeboxPublicFuzzOperation,
+	validateWpCodeboxRuntimeRequirementMounts,
 	wpCodeboxFuzzExecutionRequest,
+	wpCodeboxPublicCliInput,
 	wpCodeboxFuzzSuiteAbility,
 	wpCodeboxFuzzSuiteResultSchema,
 	wpCodeboxFuzzSuiteSchema,

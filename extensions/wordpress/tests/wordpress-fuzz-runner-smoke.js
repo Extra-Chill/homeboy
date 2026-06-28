@@ -31,6 +31,7 @@ const {
 	HOMEBOY_FUZZ_RESULT_ENVELOPE_SCHEMA,
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 	buildWordPressFuzzRunnerResult,
+	readWordPressFuzzRunnerEnv,
 	runWordPressFuzzRunnerResult,
 	writeHomeboyFuzzArtifactFiles,
 } = require('../lib/wordpress-fuzz-runner');
@@ -315,6 +316,37 @@ assert.equal(remappedPlugin.sourceSubpath, undefined);
 assert.equal(remappedPlugin.pluginFile, 'jetpack/jetpack.php');
 assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourceRoot, undefined);
 assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourceSubpath, undefined);
+
+const envMountedPluginRoot = path.join(os.tmpdir(), 'homeboy-wordpress-component-checkout');
+const envMountedPluginPath = path.join(envMountedPluginRoot, 'plugins', 'sample-plugin');
+const envMountedPluginResult = buildWordPressFuzzRunnerResult({
+	env: readWordPressFuzzRunnerEnv({
+		HOMEBOY_FUZZ_WORKLOAD_PATH: '/unused/in-unit-test.json',
+		HOMEBOY_FUZZ_WORKLOAD_ID: 'env-mounted-plugin',
+		HOMEBOY_FUZZ_RUN_ID: 'env-mounted-plugin-run',
+		HOMEBOY_RIG_COMPONENT_PATH__SAMPLE_PLUGIN: envMountedPluginPath,
+		HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__SAMPLE_PLUGIN: envMountedPluginRoot,
+	}),
+	workload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'env-mounted-plugin',
+		target: { type: 'wordpress-plugin', slug: 'sample-plugin', component: 'sample-plugin' },
+		metadata: { fixture: { component: 'sample-plugin', activation: 'sample-plugin/sample-plugin.php' } },
+		cases: [{ id: 'env-mounted-plugin:default', intent: { plugin: { activation: 'sample-plugin/sample-plugin.php' } } }],
+	},
+});
+assert.deepEqual(envMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0], {
+	slug: 'sample-plugin',
+	source: envMountedPluginPath,
+	sourceRoot: envMountedPluginRoot,
+	sourceSubpath: 'plugins/sample-plugin',
+	path: envMountedPluginPath,
+	pluginFile: 'sample-plugin/sample-plugin.php',
+	loadAs: 'plugin',
+	metadata: { component: 'sample-plugin', activation: 'fuzz-suite-setup-step' },
+});
+assert.equal(envMountedPluginResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceRoot, envMountedPluginRoot);
+assert.equal(envMountedPluginResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceSubpath, 'plugins/sample-plugin');
 
 const genericPrimitiveResult = buildWordPressFuzzRunnerResult({
 	env: {
