@@ -85,8 +85,10 @@ fn run_generic_descriptor(
     let config = context.audit_config;
     match runner {
         GenericDetectorRunner::Structural => match context.source_snapshot {
-            Some(snapshot) => structural::analyze_snapshot(context.root, snapshot),
-            None => structural::analyze_structure(context.root),
+            Some(snapshot) => {
+                structural::analyze_snapshot(context.root, snapshot, &config.language_grammars)
+            }
+            None => structural::analyze_structure(context.root, &config.language_grammars),
         },
         GenericDetectorRunner::DeadCode => run_dead_code(context),
         GenericDetectorRunner::CommentHygiene => {

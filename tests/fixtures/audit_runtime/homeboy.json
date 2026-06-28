@@ -2,6 +2,25 @@
   "id": "audit-runtime-fixture",
   "remote_path": "",
   "audit": {
+    "language_grammars": [
+      {
+        "file_extensions": ["rs"],
+        "item_declaration_prefixes": [
+          "fn ",
+          "struct ",
+          "enum ",
+          "const ",
+          "static ",
+          "type ",
+          "trait ",
+          "impl ",
+          "impl<"
+        ],
+        "visibility_prefixes": ["pub(crate) ", "pub(super) ", "pub "],
+        "modifier_prefixes": ["async ", "unsafe "],
+        "ignore_after_line_equals": ["#[cfg(test)]"]
+      }
+    ],
     "core_boundary_leaks": {
       "terms": ["florpstack"],
       "scan_path_contains": ["src/"],

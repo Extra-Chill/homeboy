@@ -125,6 +125,51 @@
       "src/core/code_audit/detectors/test_vacuity.rs",
       "src/core/code_audit/detectors/upstream_workaround.rs"
     ],
+    "language_grammars": [
+      {
+        "file_extensions": ["rs"],
+        "item_declaration_prefixes": [
+          "fn ",
+          "struct ",
+          "enum ",
+          "const ",
+          "static ",
+          "type ",
+          "trait ",
+          "impl ",
+          "impl<"
+        ],
+        "visibility_prefixes": ["pub(crate) ", "pub(super) ", "pub "],
+        "modifier_prefixes": ["async ", "unsafe "],
+        "ignore_after_line_equals": ["#[cfg(test)]"]
+      },
+      {
+        "file_extensions": ["php"],
+        "item_declaration_prefixes": [
+          "function ",
+          "class ",
+          "interface ",
+          "trait ",
+          "const "
+        ],
+        "visibility_prefixes": ["public ", "protected ", "private "],
+        "modifier_prefixes": ["static ", "abstract ", "final "]
+      },
+      {
+        "file_extensions": ["js", "jsx", "mjs", "ts", "tsx"],
+        "item_declaration_prefixes": [
+          "function ",
+          "class ",
+          "const ",
+          "let ",
+          "var ",
+          "interface ",
+          "type ",
+          "enum "
+        ],
+        "visibility_prefixes": ["export default ", "export "]
+      }
+    ],
     "remote_execution_safety": {
       "argument_forward_markers": [
         "normalized_args",

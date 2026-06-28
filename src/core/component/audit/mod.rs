@@ -5,6 +5,7 @@ mod config_key_usage;
 mod detector_profile;
 mod exposure;
 mod known_symbols;
+mod language_grammar;
 mod remote_execution;
 mod source_policy;
 mod test_wiring;
@@ -21,6 +22,7 @@ pub use known_symbols::{
     KnownSymbolKind, KnownSymbolManifestPackageProvider, KnownSymbolSourceScanConfig,
     KnownSymbolVersionedEntry, KnownSymbolsConfig,
 };
+pub use language_grammar::LanguageGrammar;
 pub use remote_execution::{ArtifactPortabilityConfig, RemoteExecutionSafetyConfig};
 pub use source_policy::{
     ConventionTagGlob, CoreBoundaryLeakConfig, MutatingResourceAccessConfig, RequestedDetectorRule,
@@ -122,6 +124,15 @@ pub struct AuditConfig {
     /// adapters over core services.
     #[serde(default, skip_serializing_if = "ThinCommandAdapterConfig::is_empty")]
     pub thin_command_adapter: ThinCommandAdapterConfig,
+    /// Component-owned, language-agnostic grammars for the structural detector's
+    /// top-level item counting. Core supplies only the counting algorithm; every
+    /// language keyword/extension literal lives here in component config.
+    ///
+    /// Intentionally excluded from [`AuditConfig::is_empty`]: item counting is a
+    /// presentation-only structural signal, so configuring grammars must not, on
+    /// its own, mark a component as having a non-default audit policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub language_grammars: Vec<LanguageGrammar>,
 }
 
 impl AuditConfig {
@@ -186,6 +197,7 @@ impl AuditConfig {
         self.artifact_portability.merge(&other.artifact_portability);
         self.detector_profile.merge(&other.detector_profile);
         self.thin_command_adapter.merge(&other.thin_command_adapter);
+        extend_unique(&mut self.language_grammars, &other.language_grammars);
         for rule in &other.source_policies {
             if !self
                 .source_policies

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::core::component::audit::LanguageGrammar;
 use crate::core::engine::codebase_scan::{CodebaseSnapshot, ExtensionFilter, ScanConfig};
 
 use super::conventions::AuditFinding;
@@ -40,14 +41,20 @@ pub(crate) fn build_snapshot(root: &Path) -> CodebaseSnapshot {
 
 /// Run structural analysis on all source files under a root directory.
 ///
-/// Returns findings for files that exceed structural thresholds.
-pub(crate) fn analyze_structure(root: &Path) -> Vec<Finding> {
+/// Returns findings for files that exceed structural thresholds. Item counting
+/// is driven entirely by the supplied component-owned [`LanguageGrammar`] list;
+/// files whose extension has no configured grammar receive no item-count signal.
+pub(crate) fn analyze_structure(root: &Path, grammars: &[LanguageGrammar]) -> Vec<Finding> {
     let snapshot = build_snapshot(root);
-    analyze_snapshot(root, &snapshot)
+    analyze_snapshot(root, &snapshot, grammars)
 }
 
 /// Run structural analysis from an already-loaded codebase snapshot.
-pub(crate) fn analyze_snapshot(root: &Path, snapshot: &CodebaseSnapshot) -> Vec<Finding> {
+pub(crate) fn analyze_snapshot(
+    root: &Path,
+    snapshot: &CodebaseSnapshot,
+    grammars: &[LanguageGrammar],
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut dir_source_counts: HashMap<String, usize> = HashMap::new();
 
@@ -70,8 +77,13 @@ pub(crate) fn analyze_snapshot(root: &Path, snapshot: &CodebaseSnapshot) -> Vec<
             .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
         // Count top-level items before line-count severity so god-file warnings
-        // require more than size alone.
-        let item_count = count_top_level_items(content, ext);
+        // require more than size alone. The grammar is component-owned; unknown
+        // extensions get no grammar and therefore no item-count signal.
+        let item_count = grammars
+            .iter()
+            .find(|grammar| grammar.matches_extension(ext))
+            .map(|grammar| grammar.count_items(content))
+            .unwrap_or(0);
 
         // Check line count
         let line_count = content.lines().count();
@@ -146,160 +158,6 @@ pub(crate) fn analyze_snapshot(root: &Path, snapshot: &CodebaseSnapshot) -> Vec<
     findings
 }
 
-/// Count top-level items in a source file.
-///
-/// Uses lightweight pattern matching rather than full parsing — we just need
-/// approximate counts for threshold detection, not exact ASTs.
-fn count_top_level_items(content: &str, ext: &str) -> usize {
-    match ext {
-        "rs" => count_rust_items(content),
-        "php" => count_php_items(content),
-        "js" | "jsx" | "mjs" | "ts" | "tsx" => count_js_items(content),
-        _ => 0, // Unknown languages get no item count findings
-    }
-}
-
-/// Count top-level items in Rust source.
-///
-/// Matches: fn, struct, enum, const, static, type, trait, impl at zero indentation.
-fn count_rust_items(content: &str) -> usize {
-    let mut count = 0;
-    let mut in_test_module = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // Skip items inside test modules (everything after #[cfg(test)])
-        if trimmed == "#[cfg(test)]" {
-            in_test_module = true;
-            continue;
-        }
-        if in_test_module {
-            continue;
-        }
-
-        // Only count items at top level (zero indentation)
-        let indent = line.len() - line.trim_start().len();
-        if indent > 0 {
-            continue;
-        }
-
-        if is_rust_item_declaration(trimmed) {
-            count += 1;
-        }
-    }
-
-    count
-}
-
-/// Check if a trimmed line starts a Rust item declaration.
-fn is_rust_item_declaration(trimmed: &str) -> bool {
-    // Strip visibility prefix
-    let rest = if let Some(r) = trimmed.strip_prefix("pub(crate) ") {
-        r
-    } else if let Some(r) = trimmed.strip_prefix("pub(super) ") {
-        r
-    } else if let Some(r) = trimmed.strip_prefix("pub ") {
-        r
-    } else {
-        trimmed
-    };
-
-    // Strip async/unsafe/const modifiers for functions
-    let rest = if let Some(r) = rest.strip_prefix("async ") {
-        r
-    } else {
-        rest
-    };
-    let rest = if let Some(r) = rest.strip_prefix("unsafe ") {
-        r
-    } else {
-        rest
-    };
-
-    rest.starts_with("fn ")
-        || rest.starts_with("struct ")
-        || rest.starts_with("enum ")
-        || rest.starts_with("const ")
-        || rest.starts_with("static ")
-        || rest.starts_with("type ")
-        || rest.starts_with("trait ")
-        || rest.starts_with("impl ")
-        || rest.starts_with("impl<")
-}
-
-/// Count top-level items in PHP source.
-///
-/// Matches: function, class, interface, trait, const at zero indentation.
-fn count_php_items(content: &str) -> usize {
-    let mut count = 0;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        let indent = line.len() - line.trim_start().len();
-        if indent > 0 {
-            continue;
-        }
-
-        // Strip visibility
-        let rest = trimmed
-            .strip_prefix("public ")
-            .or_else(|| trimmed.strip_prefix("protected "))
-            .or_else(|| trimmed.strip_prefix("private "))
-            .unwrap_or(trimmed);
-        let rest = rest
-            .strip_prefix("static ")
-            .or_else(|| rest.strip_prefix("abstract "))
-            .or_else(|| rest.strip_prefix("final "))
-            .unwrap_or(rest);
-
-        if rest.starts_with("function ")
-            || rest.starts_with("class ")
-            || rest.starts_with("interface ")
-            || rest.starts_with("trait ")
-            || rest.starts_with("const ")
-        {
-            count += 1;
-        }
-    }
-
-    count
-}
-
-/// Count top-level items in JavaScript/TypeScript source.
-///
-/// Matches: function, class, const, let, var, export at zero indentation.
-fn count_js_items(content: &str) -> usize {
-    let mut count = 0;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        let indent = line.len() - line.trim_start().len();
-        if indent > 0 {
-            continue;
-        }
-
-        let rest = trimmed
-            .strip_prefix("export default ")
-            .or_else(|| trimmed.strip_prefix("export "))
-            .unwrap_or(trimmed);
-
-        if rest.starts_with("function ")
-            || rest.starts_with("class ")
-            || rest.starts_with("const ")
-            || rest.starts_with("let ")
-            || rest.starts_with("var ")
-            || rest.starts_with("interface ")
-            || rest.starts_with("type ")
-            || rest.starts_with("enum ")
-        {
-            count += 1;
-        }
-    }
-
-    count
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -307,6 +165,80 @@ fn count_js_items(content: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rust grammar mirroring the structural detector's historical behavior.
+    fn rust_grammar() -> LanguageGrammar {
+        LanguageGrammar {
+            file_extensions: vec!["rs".to_string()],
+            item_declaration_prefixes: vec![
+                "fn ".to_string(),
+                "struct ".to_string(),
+                "enum ".to_string(),
+                "const ".to_string(),
+                "static ".to_string(),
+                "type ".to_string(),
+                "trait ".to_string(),
+                "impl ".to_string(),
+                "impl<".to_string(),
+            ],
+            visibility_prefixes: vec![
+                "pub(crate) ".to_string(),
+                "pub(super) ".to_string(),
+                "pub ".to_string(),
+            ],
+            modifier_prefixes: vec!["async ".to_string(), "unsafe ".to_string()],
+            ignore_after_line_equals: vec!["#[cfg(test)]".to_string()],
+        }
+    }
+
+    fn php_grammar() -> LanguageGrammar {
+        LanguageGrammar {
+            file_extensions: vec!["php".to_string()],
+            item_declaration_prefixes: vec![
+                "function ".to_string(),
+                "class ".to_string(),
+                "interface ".to_string(),
+                "trait ".to_string(),
+                "const ".to_string(),
+            ],
+            visibility_prefixes: vec![
+                "public ".to_string(),
+                "protected ".to_string(),
+                "private ".to_string(),
+            ],
+            modifier_prefixes: vec![
+                "static ".to_string(),
+                "abstract ".to_string(),
+                "final ".to_string(),
+            ],
+            ignore_after_line_equals: Vec::new(),
+        }
+    }
+
+    fn js_grammar() -> LanguageGrammar {
+        LanguageGrammar {
+            file_extensions: vec![
+                "js".to_string(),
+                "jsx".to_string(),
+                "mjs".to_string(),
+                "ts".to_string(),
+                "tsx".to_string(),
+            ],
+            item_declaration_prefixes: vec![
+                "function ".to_string(),
+                "class ".to_string(),
+                "const ".to_string(),
+                "let ".to_string(),
+                "var ".to_string(),
+                "interface ".to_string(),
+                "type ".to_string(),
+                "enum ".to_string(),
+            ],
+            visibility_prefixes: vec!["export default ".to_string(), "export ".to_string()],
+            modifier_prefixes: Vec::new(),
+            ignore_after_line_equals: Vec::new(),
+        }
+    }
 
     #[test]
     fn count_rust_items_basic() {
@@ -341,7 +273,7 @@ mod tests {
 "#;
         // Should count: struct Foo, fn helper, pub fn main_logic, impl Foo, const MAX = 5
         // Should NOT count: use, items inside #[cfg(test)]
-        let count = count_rust_items(content);
+        let count = rust_grammar().count_items(content);
         assert_eq!(count, 5, "Expected 5 top-level items");
     }
 
@@ -353,7 +285,7 @@ pub struct Public {}
 pub(super) const X: i32 = 1;
 pub async fn async_handler() {}
 "#;
-        assert_eq!(count_rust_items(content), 4);
+        assert_eq!(rust_grammar().count_items(content), 4);
     }
 
     #[test]
@@ -374,7 +306,7 @@ interface Cacheable {
 "#;
         // class User, function helper, interface Cacheable = 3
         // Methods inside class are indented, so not counted
-        assert_eq!(count_php_items(content), 3);
+        assert_eq!(php_grammar().count_items(content), 3);
     }
 
     #[test]
@@ -393,7 +325,7 @@ const CONFIG = {};
 export default function main() {}
 "#;
         // export function, export class, const CONFIG, export default function = 4
-        assert_eq!(count_js_items(content), 4);
+        assert_eq!(js_grammar().count_items(content), 4);
     }
 
     #[test]
@@ -411,7 +343,7 @@ export default function main() {}
         // Create a small file (under threshold)
         std::fs::write(dir.join("small.rs"), "fn tiny() {}\n").unwrap();
 
-        let findings = analyze_structure(&dir);
+        let findings = analyze_structure(&dir, &[rust_grammar()]);
         let god_findings: Vec<&Finding> = findings
             .iter()
             .filter(|f| f.kind == AuditFinding::GodFile)
@@ -442,12 +374,13 @@ export default function main() {}
         let broad_snapshot = CodebaseSnapshot::build(&dir, &ScanConfig::default());
         assert_eq!(snapshot.len(), 1);
         assert_eq!(
-            serde_json::to_value(analyze_snapshot(&dir, &snapshot)).unwrap(),
-            serde_json::to_value(analyze_structure(&dir)).unwrap()
+            serde_json::to_value(analyze_snapshot(&dir, &snapshot, &[rust_grammar()])).unwrap(),
+            serde_json::to_value(analyze_structure(&dir, &[rust_grammar()])).unwrap()
         );
         assert_eq!(
-            serde_json::to_value(analyze_snapshot(&dir, &broad_snapshot)).unwrap(),
-            serde_json::to_value(analyze_structure(&dir)).unwrap()
+            serde_json::to_value(analyze_snapshot(&dir, &broad_snapshot, &[rust_grammar()]))
+                .unwrap(),
+            serde_json::to_value(analyze_structure(&dir, &[rust_grammar()])).unwrap()
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -465,7 +398,7 @@ export default function main() {}
         content.push_str("}\n");
         std::fs::write(dir.join("large.rs"), content).unwrap();
 
-        let findings = analyze_structure(&dir);
+        let findings = analyze_structure(&dir, &[rust_grammar()]);
         let god_findings: Vec<&Finding> = findings
             .iter()
             .filter(|f| f.kind == AuditFinding::GodFile)
@@ -513,7 +446,7 @@ export default function main() {}
             std::fs::write(root.join(format!("module_{}.rs", i)), "pub fn run() {}\n").unwrap();
         }
 
-        let findings = analyze_structure(&dir);
+        let findings = analyze_structure(&dir, &[rust_grammar()]);
         assert!(
             findings.is_empty(),
             "Moderate count-only smells should stay below the audit finding threshold"
@@ -535,7 +468,7 @@ export default function main() {}
         std::fs::write(dir.join("data.csv"), &content).unwrap();
         std::fs::write(dir.join("readme.md"), &content).unwrap();
 
-        let findings = analyze_structure(&dir);
+        let findings = analyze_structure(&dir, &[rust_grammar()]);
         assert!(
             findings.is_empty(),
             "Non-source files should not produce findings"
@@ -556,7 +489,7 @@ export default function main() {}
         }
         std::fs::write(vendor.join("big.rs"), &content).unwrap();
 
-        let findings = analyze_structure(&dir);
+        let findings = analyze_structure(&dir, &[rust_grammar()]);
         assert!(findings.is_empty(), "Files in vendor/ should be skipped");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -579,7 +512,7 @@ export default function main() {}
         }
         std::fs::write(dir.join("clean.rs"), &content).unwrap();
 
-        let findings = analyze_structure(&dir);
+        let findings = analyze_structure(&dir, &[rust_grammar()]);
         assert!(
             findings.is_empty(),
             "Clean files should produce no findings"
