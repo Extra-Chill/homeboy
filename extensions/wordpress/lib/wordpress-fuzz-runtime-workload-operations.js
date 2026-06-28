@@ -14,13 +14,17 @@ const WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_SCHEMA = 'homeboy/wordpress-fuzz
 const WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_VALIDATION_SCHEMA = 'homeboy/wordpress-fuzz-runtime-workload-operation-validation/v1';
 
 const FAMILY_COMMANDS = Object.freeze({
-	crud: 'wordpress.crud',
-	rest: 'wordpress.request-rest-route',
-	admin_page: 'wordpress.load-admin-page',
-	frontend_page: 'wordpress.load-frontend-page',
-	block: 'wordpress.exercise-block',
-	database: 'wordpress.profile-database',
+	crud: 'wordpress.crud-operation',
+	rest: 'wordpress.rest-request',
+	admin_page: 'wordpress.admin-page-load',
+	frontend_page: 'wordpress.frontend-page-load',
+	block: 'wordpress.run-php',
+	database: 'wordpress.run-php',
+	sequence: 'wordpress.run-php',
 });
+
+const WP_CODEBOX_WORKLOAD_COMMAND = 'run-wordpress-workload';
+const WP_CODEBOX_WORKLOAD_ABILITY = 'wp-codebox/run-wordpress-workload';
 
 const FAMILY_REQUIRED_CAPABILITIES = Object.freeze({
 	crud: Object.freeze(['crud']),
@@ -29,9 +33,16 @@ const FAMILY_REQUIRED_CAPABILITIES = Object.freeze({
 	frontend_page: Object.freeze(['browser']),
 	block: Object.freeze(['block']),
 	database: Object.freeze(['database']),
+	sequence: Object.freeze(['sequence']),
 });
 
 function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, options = {}) {
+	if (testCase.target?.kind === 'runtime-action') {
+		return undefined;
+	}
+	if (testCase.input?.type === 'random_walk' || testCase.operation?.runtime_action === 'random_walk') {
+		return undefined;
+	}
 	const family = runtimeOperationFamily(testCase);
 	if (!family) {
 		return undefined;
@@ -56,7 +67,7 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 		})),
 		...(readinessBlocker ? [readinessBlocker] : []),
 	];
-	const status = validation.ok ? (readinessBlocker?.blocking ? 'blocked' : (missingCapabilities.length > 0 || readinessBlocker ? 'skipped' : 'ready')) : 'blocked';
+	const status = validation.ok ? (readinessBlocker?.status || (readinessBlocker?.blocking ? 'blocked' : (missingCapabilities.length > 0 || readinessBlocker ? 'planned' : 'ready'))) : 'blocked';
 
 	return stripUndefined({
 		schema: WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_SCHEMA,
@@ -64,6 +75,8 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 		case_id: testCase.case_id || testCase.caseId || testCase.id,
 		family,
 		command: FAMILY_COMMANDS[family],
+		wp_codebox_command: WP_CODEBOX_WORKLOAD_COMMAND,
+		wp_codebox_ability: WP_CODEBOX_WORKLOAD_ABILITY,
 		status,
 		required_capabilities: requiredCapabilities,
 		missing_capabilities: missingCapabilities.length > 0 ? missingCapabilities : undefined,
@@ -75,6 +88,8 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 		metadata: stripUndefined({
 			intent: testCase.intent,
 			operation_id: testCase.operation_id || testCase.operationId,
+			wp_codebox_command: WP_CODEBOX_WORKLOAD_COMMAND,
+			wp_codebox_ability: WP_CODEBOX_WORKLOAD_ABILITY,
 			mutation_lifecycle: mutationLifecycle,
 		}),
 	});
@@ -82,6 +97,7 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 
 function runtimeReadinessBlockerForOperation(family, testCase = {}, readiness) {
 	const source = objectOrUndefined(readiness);
+	const operationKind = readinessOperationKindForFamily(family, testCase);
 	if (!source) {
 		return undefined;
 	}
@@ -98,7 +114,16 @@ function runtimeReadinessBlockerForOperation(family, testCase = {}, readiness) {
 	if (operationKinds.length === 0) {
 		return undefined;
 	}
-	const operationKind = readinessOperationKindForFamily(family, testCase);
+	if (operationKind === 'mutation' && !hasLiveWordPressFuzzReadinessEvidence(source)) {
+		return {
+			code: 'wp-codebox-fuzz-live-readiness-required',
+			message: 'Mutating runtime workload operations require live WP Codebox readiness evidence before executable status can be claimed.',
+			operation_kind: operationKind,
+			skip_reason: 'wp-codebox-fuzz-live-readiness-required',
+			status: 'planned',
+			blocker: true,
+		};
+	}
 	if (!operationKinds.includes(operationKind)) {
 		return {
 			code: 'unsupported-runtime-workload-operation-kind',
@@ -140,6 +165,11 @@ function runtimeReadinessBlockerForOperation(family, testCase = {}, readiness) {
 	return undefined;
 }
 
+function hasLiveWordPressFuzzReadinessEvidence(readiness = {}) {
+	return readiness.schema === 'wp-codebox/fuzz-runner-readiness/v1'
+		&& ['ready', 'blocked', 'unsupported'].includes(String(readiness.status || ''));
+}
+
 function readinessSupportsMutationIsolation(readiness = {}) {
 	const capabilities = objectOrUndefined(readiness.capabilities) || {};
 	const mutation = objectOrUndefined(readiness.mutation) || objectOrUndefined(capabilities.mutation) || {};
@@ -175,10 +205,15 @@ function readinessSupportsDeleteBoundary(readiness = {}) {
 
 function readinessOperationKindForFamily(family, testCase = {}) {
 	if (family === 'crud') {
+		const action = String(testCase.operation?.action || testCase.metadata?.crud?.action || '').toLowerCase();
+		if (['create', 'update', 'delete'].includes(action)) {
+			return 'mutation';
+		}
 		return 'crud';
 	}
 	const mutationLifecycle = normalizeWordPressFuzzMutationLifecycleContract(testCase.metadata?.mutation_lifecycle || testCase.metadata?.mutationLifecycle || testCase.mutation_lifecycle || testCase.mutationLifecycle) || {};
-	if (mutationLifecycle.delete_boundary_required || mutationLifecycle.mutates || ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(testCase.operation?.method || '').toUpperCase())) {
+	const destructiveReasons = reasonList(testCase.destructive_reasons || testCase.destructiveReasons || testCase.destructive_reason || testCase.destructiveReason);
+	if (mutationLifecycle.delete_boundary_required || mutationLifecycle.required_capabilities?.length > 0 || destructiveReasons.length > 0 || String(testCase.intent || '').includes('mutate') || ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(testCase.operation?.method || '').toUpperCase())) {
 		return 'mutation';
 	}
 	return 'read';
@@ -276,7 +311,20 @@ function requiredInputFieldsForFamily(family, input = {}) {
 	if (family === 'database') {
 		return input.table || input.query || input.statement ? [] : ['query'];
 	}
+	if (family === 'sequence') {
+		return ['steps', ...missingSequenceOperationFields(input)];
+	}
 	return [];
+}
+
+function missingSequenceOperationFields(input = {}) {
+	const steps = Array.isArray(input.steps) ? input.steps : [];
+	if (steps.length === 0) {
+		return [];
+	}
+	return steps.some((step) => !objectOrUndefined(step.operation || step.runtime_operation || step.runtimeOperation))
+		? ['steps[].operation']
+		: [];
 }
 
 function validationDiagnostic(code, message, path) {
@@ -311,7 +359,8 @@ function summarizeWordPressFuzzRuntimeWorkloadOperations(plan = {}) {
 function requiredCapabilitiesForWordPressFuzzRuntimeOperation(testCase = {}, options = {}) {
 	const family = options.family || runtimeOperationFamily(testCase);
 	const base = FAMILY_REQUIRED_CAPABILITIES[family] || [];
-	return mergeCapabilities(base, extraCapabilitiesForCase(testCase, family));
+	const mutationLifecycle = normalizeWordPressFuzzMutationLifecycleContract(testCase.metadata?.mutation_lifecycle || testCase.metadata?.mutationLifecycle || testCase.mutation_lifecycle || testCase.mutationLifecycle) || {};
+	return mergeCapabilities(base, extraCapabilitiesForCase(testCase, family), mutationLifecycle.required_capabilities, testCase.required_capabilities || testCase.requiredCapabilities);
 }
 
 function runtimeOperationFamily(testCase = {}) {
@@ -338,6 +387,9 @@ function runtimeOperationFamily(testCase = {}) {
 	if (intent.includes('database') || intent.includes('db-query') || ['database-table', 'db-query'].includes(surfaceType) || operation.table || operation.query || operation.statement) {
 		return 'database';
 	}
+	if (intent === 'stateful-sequence' || operation.runtime_action === 'stateful_sequence' || testCase.input?.type === 'stateful_sequence') {
+		return 'sequence';
+	}
 	return undefined;
 }
 
@@ -358,16 +410,35 @@ function runtimeOperationInput(testCase = {}, { family } = {}) {
 		return operation;
 	}
 	if (family === 'rest') {
-		return stripUndefined({ method: operation.method || surface.method || 'GET', route: operation.route || operation.path || surface.route || surface.path || surface.metadata?.value, route_params: operation.route_params, request_body: operation.request_body });
+		return stripUndefined({ method: operation.method || surface.method || 'GET', route: operation.route || operation.path || surface.route || surface.path || surface.metadata?.value, route_params: operation.route_params, query_params: operation.query_params, request_body: operation.request_body });
 	}
-	if (family === 'admin_page' || family === 'frontend_page') {
+	if (family === 'admin_page') {
+		const metadata = objectOrUndefined(testCase.metadata) || {};
+		const interaction = objectOrUndefined(metadata.interaction) || {};
+		return stripUndefined({
+			path: operation.path || operation.url || surface.path || surface.url || surface.metadata?.value,
+			method: operation.method || interaction.method || surface.method || 'GET',
+			interaction_kind: operation.interaction_kind || interaction.kind,
+			interaction_id: operation.interaction_id || interaction.id || interaction.name || interaction.selector || interaction.action,
+			selector: operation.selector || interaction.selector,
+			action: operation.action || interaction.action,
+			fields: operation.fields || interaction.fields,
+			capability_context: objectOrUndefined(metadata.capability_context || metadata.capabilityContext),
+			nonce_context: objectOrUndefined(metadata.nonce_context || metadata.nonceContext),
+			safety: objectOrUndefined(metadata.safety),
+		});
+	}
+	if (family === 'frontend_page') {
 		return stripUndefined({ path: operation.path || operation.url || surface.path || surface.url || surface.metadata?.value, method: operation.method || surface.method || 'GET', interaction: operation.interaction });
 	}
 	if (family === 'block') {
 		return stripUndefined({ block_name: operation.block_name || operation.blockName || operation.name || surface.block_name || surface.blockName || surface.name, lifecycle: operation.lifecycle, attributes: operation.attributes_sample || operation.attributes || surface.attributes_sample || surface.attributes });
 	}
 	if (family === 'database') {
-		return stripUndefined({ table: operation.table || surface.table, query: operation.query || surface.query, statement: operation.statement || surface.statement, mutation: operation.mutation, observation: operation.observation || operation.profile });
+		return stripUndefined({ table: operation.table || surface.table, query: operation.query || surface.query, statement: operation.statement || surface.statement, mutation: operation.mutation, where: operation.where, values: operation.values, columns: operation.columns, limit: operation.limit, options: operation.options, observation: operation.observation || operation.profile });
+	}
+	if (family === 'sequence') {
+		return testCase.input || operation;
 	}
 	return operation;
 }

@@ -429,13 +429,14 @@ function homeboyFuzzWorkloadPlanCases(manifest = {}) {
 function homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry = {}, manifest = {}, index = 0) {
 	const caseId = entry.case_id || entry.caseId || entry.id || `${manifest.id || 'fuzz-workload'}:${index}`;
 	const artifacts = normalizeHomeboyFuzzCaseArtifacts(entry, manifest);
+	const target = homeboyFuzzPlanCaseTarget(entry);
 	const command = homeboyFuzzPlanCaseRuntimeCommand(entry);
 	const input = homeboyFuzzPlanCaseRuntimeInput(entry, manifest, caseId);
 	const restMutationOptIn = objectOrUndefined(entry.metadata?.rest_mutation_opt_in || entry.metadata?.restMutationOptIn || entry.rest_mutation_opt_in || entry.restMutationOptIn);
 	return stripUndefined({
 		id: caseId,
 		case_id: caseId,
-		target: { kind: 'runtime', id: command, entrypoint: command },
+		target,
 		description: entry.description || manifest.label,
 		input,
 		inputs: objectOrUndefined(entry.inputs),
@@ -458,6 +459,9 @@ function homeboyFuzzWorkloadPlanCasePhases(entry = {}, manifest = {}, artifacts 
 	if (objectOrUndefined(entry.phases)) {
 		return entry.phases;
 	}
+	if (homeboyFuzzPlanCaseTarget(entry).kind === 'runtime-action') {
+		return undefined;
+	}
 	const activation = manifest.metadata?.fixture?.activation || firstHomeboyFuzzWorkloadActivation(manifest);
 	const setup = typeof activation === 'string' && activation.trim() !== ''
 		? [wpCodeboxPluginActivationStep(activation)]
@@ -474,6 +478,24 @@ function homeboyFuzzWorkloadPlanCasePhases(entry = {}, manifest = {}, artifacts 
 	return stripUndefined({ setup, action, assert: assert.length > 0 ? assert : undefined });
 }
 
+function homeboyFuzzPlanCaseTarget(entry = {}) {
+	if (entry.target?.kind === 'runtime-action') {
+		return stripUndefined({
+			kind: 'runtime-action',
+			id: entry.target.id,
+			entrypoint: entry.target.entrypoint,
+			label: entry.target.label,
+			metadata: objectOrUndefined(entry.target.metadata),
+		});
+	}
+	const runtimeActionInput = homeboyFuzzPlanCaseRuntimeActionInput(entry);
+	if (runtimeActionInput?.type) {
+		return { kind: 'runtime-action', id: `runtime-action:${runtimeActionInput.type}`, entrypoint: runtimeActionInput.type };
+	}
+	const command = homeboyFuzzPlanCaseRuntimeCommand(entry);
+	return { kind: 'runtime', id: command, entrypoint: command };
+}
+
 function homeboyFuzzRuntimeCommandArgs(input) {
 	return Array.isArray(input?.args) ? input.args : homeboyFuzzCommandArgs(input);
 }
@@ -487,6 +509,13 @@ function homeboyFuzzPlanCaseRuntimeCommand(entry = {}) {
 }
 
 function homeboyFuzzPlanCaseRuntimeInput(entry = {}, manifest = {}, caseId) {
+	if (objectOrUndefined(entry.input) && typeof entry.input.type === 'string') {
+		return homeboyFuzzRuntimeCommandInput(entry.input);
+	}
+	const runtimeActionInput = homeboyFuzzPlanCaseRuntimeActionInput(entry);
+	if (runtimeActionInput) {
+		return runtimeActionInput;
+	}
 	if (objectOrUndefined(entry.input)) {
 		return homeboyFuzzRuntimeCommandInput(entry.input);
 	}
@@ -507,6 +536,42 @@ function homeboyFuzzPlanCaseRuntimeInput(entry = {}, manifest = {}, caseId) {
 		skip_reasons: nonEmptyArray(entry.skip_reasons || entry.skipReasons),
 		destructive_reasons: nonEmptyArray(entry.destructive_reasons || entry.destructiveReasons),
 	});
+}
+
+function homeboyFuzzPlanCaseRuntimeActionInput(entry = {}) {
+	const runtimeOperation = objectOrUndefined(entry.runtime_operation || entry.runtimeOperation || entry.metadata?.runtime_operation || entry.metadata?.runtimeOperation);
+	if (!runtimeOperation || runtimeOperation.status !== 'ready') {
+		return undefined;
+	}
+	const input = objectOrUndefined(runtimeOperation.input) || {};
+	if (runtimeOperation.family === 'rest') {
+		return stripUndefined({
+			type: 'rest_request',
+			method: input.method || entry.operation?.method,
+			path: input.route || input.path || entry.operation?.route || entry.operation?.path,
+			params: input.query_params || input.route_params,
+			body_json: input.request_body,
+		});
+	}
+	if (runtimeOperation.family === 'crud') {
+		return stripUndefined({ ...(objectOrUndefined(entry.operation) || input), type: 'crud_operation' });
+	}
+	if (runtimeOperation.family === 'admin_page') {
+		return stripUndefined({ type: 'admin_page', path: input.path || entry.operation?.path, wait_for: input.wait_for || input.waitFor });
+	}
+	if (runtimeOperation.family === 'frontend_page') {
+		return stripUndefined({ type: 'page', path: input.path || entry.operation?.path, wait_for: input.wait_for || input.waitFor });
+	}
+	if (runtimeOperation.family === 'database') {
+		return stripUndefined({
+			type: 'php',
+			code: entry.operation?.statement
+				? `$wpdb->query( ${JSON.stringify(String(entry.operation.statement))} );`
+				: `$wpdb->get_results( ${JSON.stringify(String(input.query || entry.operation?.query || 'SELECT 1'))} );`,
+			diagnostics: { capture: ['wpdb-queries'] },
+		});
+	}
+	return undefined;
 }
 
 function nonEmptyArray(value) {
@@ -1358,10 +1423,10 @@ function wordpressRuntimeCapabilitiesFromFuzzReadiness(readiness = {}) {
 	return unique([
 		...(runtimeActions.has('crud_operation') || commands.has('wordpress.crud-operation') ? ['crud'] : []),
 		...(runtimeActions.has('rest_request') || commands.has('wordpress.rest-request') ? ['rest'] : []),
-		...(runtimeActions.has('admin_page') || commands.has('wordpress.simulated-admin-page-load') ? ['admin'] : []),
-		...(runtimeActions.has('browser') || runtimeActions.has('page') || commands.has('wordpress.browser-page-load') || commands.has('wordpress.server-page-load') ? ['browser'] : []),
+		...(runtimeActions.has('admin_page') || commands.has('wordpress.admin-page-load') ? ['admin'] : []),
+		...(runtimeActions.has('browser') || runtimeActions.has('browser_probe') || runtimeActions.has('page') || commands.has('wordpress.browser-actions') || commands.has('wordpress.browser-probe') || commands.has('wordpress.frontend-page-load') ? ['browser'] : []),
 		...(runtimeActions.has('editor_open') ? ['block-editor'] : []),
-		...(runtimeActions.has('db_operation') || commands.has('wordpress.db-operation') ? ['database', 'query-observation'] : []),
+		...(runtimeActions.has('php') || runtimeActions.has('wp_cli') || commands.has('wordpress.run-php') || commands.has('wordpress.wp-cli') ? ['database', 'query-observation', 'sequence'] : []),
 	]);
 }
 

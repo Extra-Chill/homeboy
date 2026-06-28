@@ -2,7 +2,7 @@
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA = 'homeboy/wordpress-fuzz-runtime-capabilities/v1';
 const WORDPRESS_FUZZ_MUTATION_POLICY_SCHEMA = 'homeboy/wordpress-fuzz-mutation-policy/v1';
-const WORDPRESS_FUZZ_MUTATION_MODES = Object.freeze(['isolated', 'read_only', 'destructive-deny']);
+const WORDPRESS_FUZZ_MUTATION_MODES = Object.freeze(['isolated', 'aggressive-isolated', 'read_only', 'destructive-deny']);
 const WORDPRESS_FUZZ_EXECUTION_TIERS = Object.freeze(['discovered', 'plan_only', 'read_only_executable', 'isolated_mutating_executable']);
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITIES = Object.freeze([
@@ -20,6 +20,7 @@ const WORDPRESS_FUZZ_RUNTIME_CAPABILITIES = Object.freeze([
 	'block',
 	'block-editor',
 	'query-observation',
+	'sequence',
 ]);
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_ALIASES = new Map([
@@ -69,6 +70,10 @@ const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_ALIASES = new Map([
 	['database_query_observation', 'query-observation'],
 	['query-timing', 'query-observation'],
 	['query_timing', 'query-observation'],
+	['stateful-sequence', 'sequence'],
+	['stateful_sequence', 'sequence'],
+	['sequence-execution', 'sequence'],
+	['sequence_execution', 'sequence'],
 ]);
 
 const WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SET = new Set(WORDPRESS_FUZZ_RUNTIME_CAPABILITIES);
@@ -126,6 +131,7 @@ function normalizeExecutionContract(value = {}, capabilitySet = new Set()) {
 		block: capabilityFlag(capabilitySet, execution, 'block'),
 		block_editor: capabilityFlag(capabilitySet, execution, 'block-editor'),
 		query_observation: capabilityFlag(capabilitySet, execution, 'query-observation'),
+		sequence: capabilityFlag(capabilitySet, execution, 'sequence'),
 	};
 }
 
@@ -153,7 +159,7 @@ function gateWordPressFuzzCaseForRuntimeCapabilities(testCase, runtimeCapabiliti
 	if (missing.length === 0 && missingAny.length === 0) {
 		const mutates = fuzzCaseMutates(testCase, options);
 		const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
-		const mutationTierGated = mutates && mutationMode !== 'isolated';
+		const mutationTierGated = mutates && !wordpressFuzzMutationModeAllowsIsolatedExecution(mutationMode);
 		const gatedSkipReasons = mutationTierGated ? reasonList([...skipReasons, 'requires-isolated-mutation-runtime']) : skipReasons;
 		const executable = testCase.executable !== false && gatedSkipReasons.length === 0 && !mutationTierGated;
 		const executionTier = normalizeWordPressFuzzExecutionTier(
@@ -171,6 +177,7 @@ function gateWordPressFuzzCaseForRuntimeCapabilities(testCase, runtimeCapabiliti
 				executable,
 				execution_tier: executionTier,
 				gated: (metadata.gated === true || mutationTierGated) && !executable,
+				planned: executable ? false : metadata.planned,
 				runtime_capability_gated: false,
 				execution_tier_gated: mutationTierGated,
 				runtime_capability_contract: WORDPRESS_FUZZ_RUNTIME_CAPABILITY_SCHEMA,
@@ -308,10 +315,19 @@ function normalizeRequiredCapabilityGroups(value) {
 }
 
 function normalizeWordPressFuzzMutationMode(value) {
-	const mode = String(value || '').trim().toLowerCase().replace(/-/g, '_') === 'read_only'
+	const rawMode = String(value || '').trim().toLowerCase();
+	const normalizedMode = rawMode.replace(/_/g, '-');
+	if (normalizedMode === 'destructive-isolated') {
+		return 'aggressive-isolated';
+	}
+	const mode = rawMode.replace(/-/g, '_') === 'read_only'
 		? 'read_only'
-		: String(value || '').trim().toLowerCase().replace(/_/g, '-');
+		: normalizedMode;
 	return WORDPRESS_FUZZ_MUTATION_MODES.includes(mode) ? mode : '';
+}
+
+function wordpressFuzzMutationModeAllowsIsolatedExecution(mode) {
+	return ['isolated', 'aggressive-isolated'].includes(normalizeWordPressFuzzMutationMode(mode));
 }
 
 function reasonList(value) {
@@ -340,4 +356,5 @@ module.exports = {
 	normalizeWordPressFuzzRuntimeCapabilities,
 	normalizeWordPressFuzzRuntimeCapability,
 	requiredCapabilitiesForWordPressFuzzCase,
+	wordpressFuzzMutationModeAllowsIsolatedExecution,
 };
