@@ -340,6 +340,15 @@ struct ArtifactClass {
     is_finding_packet: bool,
 }
 
+/// Returns true when an artifact looks like a matrix result or finding-packet
+/// JSON artifact whose remote bytes are worth hydrating before summarizing.
+/// Used to scope remote-artifact hydration to the packets the matrix summary
+/// actually reads, instead of pulling unrelated runner binaries.
+pub fn is_matrix_summary_artifact(artifact: &ArtifactRecord) -> bool {
+    let class = classify_artifact(artifact);
+    class.is_matrix || class.is_result || class.is_finding_packet
+}
+
 fn classify_artifact(artifact: &ArtifactRecord) -> ArtifactClass {
     let mut tokens = vec![
         artifact.kind.as_str(),

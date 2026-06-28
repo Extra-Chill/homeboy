@@ -9,7 +9,7 @@ use homeboy::core::Error;
 
 #[derive(Args, Debug, Clone)]
 pub struct MatrixArtifactsArgs {
-    /// Observation run ID to summarize.
+    /// Observation run ID or the human `--run-id` launch label to summarize.
     pub run_id: String,
     /// Output format: json or markdown.
     #[arg(long, default_value = "markdown")]
@@ -26,29 +26,37 @@ pub fn matrix_artifacts_from_args(
     args: &MatrixArtifactsArgs,
 ) -> homeboy::core::Result<MatrixArtifactsReport> {
     let store = ObservationStore::open_initialized()?;
-    runs_service::require_run(&store, &args.run_id)?;
-    let artifacts = runs_service::list_artifacts_for_run(&store, &args.run_id)?;
+    // Accept either the observation UUID or the human `--run-id` launch label.
+    let run_id = runs_service::resolve_run_id_or_label(&store, &args.run_id)?;
+    let artifacts = runs_service::list_artifacts_for_run(&store, &run_id)?;
+    // Pull remote finding-packet / result packets to the operator-local
+    // artifact root so their real contents are summarized instead of 0.
+    let (artifacts, hydration_diagnostics) = runs_service::hydrate_remote_artifacts_via_runner(
+        artifacts,
+        homeboy::core::artifacts::is_matrix_summary_artifact,
+    );
     let findings = store.list_findings(FindingListFilter {
-        run_id: Some(args.run_id.clone()),
+        run_id: Some(run_id.clone()),
         tool: None,
         file: None,
         fingerprint: None,
         limit: Some(10_000),
     })?;
-    let summary = summarize_matrix_artifacts(&args.run_id, &artifacts, &findings).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            format!(
-                "run {} does not expose matrix-style artifact metadata or JSON packets",
-                args.run_id
-            ),
-            Some(args.run_id.clone()),
-            Some(vec![
-                "Run `homeboy runs artifacts <run-id>` to inspect the raw artifact list.".to_string(),
-                "Matrix summaries are derived from artifact roles, filenames, schemas, fixtures, findings, and group counts.".to_string(),
-            ]),
-        )
-    })?;
+    let mut summary =
+        summarize_matrix_artifacts(&run_id, &artifacts, &findings).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "run {run_id} does not expose matrix-style artifact metadata or JSON packets",
+                ),
+                Some(run_id.clone()),
+                Some(vec![
+                    "Run `homeboy runs artifacts <run-id>` to inspect the raw artifact list.".to_string(),
+                    "Matrix summaries are derived from artifact roles, filenames, schemas, fixtures, findings, and group counts.".to_string(),
+                ]),
+            )
+        })?;
+    summary.parse_diagnostics.extend(hydration_diagnostics);
     let markdown = render_matrix_artifact_summary_markdown(&summary);
     Ok(MatrixArtifactsReport { summary, markdown })
 }
