@@ -292,21 +292,92 @@ fn status_diagnostics_surface_failed_child_run_root_cause() {
         assert_eq!(failed.action_id, "action-1");
         assert_eq!(failed.dedupe_key.as_deref(), Some("finding:abc:repair"));
         assert_eq!(failed.child_run_id.as_deref(), Some("agent-task-child-1"));
+        assert_eq!(failed.child_task_id.as_deref(), Some("child-task"));
         assert_eq!(failed.child_run_status.as_deref(), Some("failed"));
         assert_eq!(
             failed.top_diagnostic,
             "Agent runtime did not produce required typed artifacts: concept_packet, design_packet."
         );
         assert_eq!(
+            failed.top_diagnostic_class.as_deref(),
+            Some("child_run_failed")
+        );
+        assert_eq!(
             failed.hydrated_root_cause.as_deref(),
             Some("Provider runtime import failed: module not found")
         );
+        assert!(failed
+            .artifact_dir
+            .as_deref()
+            .is_some_and(|path| path.contains("agent-task-child-1")));
         assert_eq!(failed.owner_surface, "agent_runtime");
+        assert!(failed.failure_signature.digest.starts_with("sha256:"));
+        assert_eq!(
+            failed.failure_signature.task_id.as_deref(),
+            Some("child-task")
+        );
+        assert_eq!(
+            failed.failure_signature.root_message,
+            "Provider runtime import failed: module not found"
+        );
         assert_eq!(
             failed.next_command,
             "homeboy agent-task status agent-task-child-1 --full"
         );
     });
+}
+
+#[test]
+fn status_diagnostics_fingerprints_repeated_failed_child_actions() {
+    let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+    for entity in ["finding:abc", "finding:def"] {
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: format!("{entity}:repair"),
+                entity_id: Some(entity.to_string()),
+                request: json!({}),
+            },
+            "finding emitted",
+        );
+    }
+    for action in &mut record.next_actions {
+        action.status = AgentTaskLoopActionStatus::Failed;
+        action.diagnostics.push(AgentTaskLoopActionDiagnostic {
+            code: "typed_artifacts_missing".to_string(),
+            message: "Agent runtime did not produce required typed artifacts: summary_packet."
+                .to_string(),
+            runner: None,
+            details: Value::Null,
+        });
+    }
+
+    let diagnostics = controller_status_diagnostics_with(
+        &record,
+        DateTime::parse_from_rfc3339("2026-06-11T00:05:00Z")
+            .expect("now")
+            .with_timezone(&Utc),
+        |_| Ok(true),
+    )
+    .expect("diagnostics");
+
+    assert_eq!(diagnostics.summary.failed_child_action_count, 2);
+    let first = &diagnostics.failed_child_actions[0];
+    let second = &diagnostics.failed_child_actions[1];
+    assert_eq!(
+        first.failure_signature.digest,
+        second.failure_signature.digest
+    );
+    assert_eq!(
+        first
+            .repeated_failure
+            .as_ref()
+            .map(|repeat| repeat.matching_failed_child_action_count),
+        Some(2)
+    );
+    assert!(first
+        .repeated_failure
+        .as_ref()
+        .is_some_and(|repeat| repeat.guidance.contains("provider boundary")));
 }
 
 #[test]
@@ -989,4 +1060,3 @@ fn verify_commands_are_reusable_gate_bundle_checks() {
     assert_eq!(bundle.checks[0].input["command"], json!("cargo test --lib"));
     assert!(bundle.checks[0].retryable);
 }
-
