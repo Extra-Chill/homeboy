@@ -27,19 +27,41 @@ function setupRuntime({ phase, workspace, env = process.env, run, installChecked
 }
 
 function exportRuntimeBin(workspace, env = process.env) {
-  // Already provided by the caller/env — don't override an explicit bin.
-  if (env.HOMEBOY_WP_CODEBOX_BIN || env.WP_CODEBOX_BIN) {
+  exportRuntimePath(
+    workspace,
+    env,
+    ['HOMEBOY_WP_CODEBOX_BIN', 'WP_CODEBOX_BIN'],
+    '.ci/wp-codebox/packages/cli/dist/index.js',
+    'HOMEBOY_WP_CODEBOX_BIN'
+  );
+  // The runtime contract source (wp-codebox-runtime-contract-source.js) requires
+  // @automattic/wp-codebox-core/contracts, which is the runtime-core workspace
+  // package — not resolvable from the homeboy-extensions checkout. Point at the
+  // built contracts module so "Build runner config" can load the canonical
+  // runtime contract manifest.
+  exportRuntimePath(
+    workspace,
+    env,
+    ['HOMEBOY_WP_CODEBOX_CORE_MODULE', 'WP_CODEBOX_CORE_MODULE'],
+    '.ci/wp-codebox/packages/runtime-core/dist/contracts.js',
+    'HOMEBOY_WP_CODEBOX_CORE_MODULE'
+  );
+}
+
+function exportRuntimePath(workspace, env, existingEnvNames, relativePath, exportName) {
+  // Already provided by the caller/env — don't override an explicit value.
+  if (existingEnvNames.some((name) => env[name])) {
     return;
   }
-  const binPath = path.join(workspace, '.ci/wp-codebox/packages/cli/dist/index.js');
-  if (!fs.existsSync(binPath)) {
-    // Build did not produce the CLI; let the downstream check surface a clear,
-    // accurate "Runtime CLI build missing" error rather than a wrong path.
+  const resolvedPath = path.join(workspace, relativePath);
+  if (!fs.existsSync(resolvedPath)) {
+    // Build did not produce the artifact; let the downstream check surface a
+    // clear, accurate error rather than a wrong path.
     return;
   }
   const githubEnv = env.GITHUB_ENV;
   if (githubEnv) {
-    fs.appendFileSync(githubEnv, `HOMEBOY_WP_CODEBOX_BIN=${binPath}\n`);
+    fs.appendFileSync(githubEnv, `${exportName}=${resolvedPath}\n`);
   }
 }
 
