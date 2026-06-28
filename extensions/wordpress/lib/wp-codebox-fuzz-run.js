@@ -824,7 +824,7 @@ function wpCodeboxFuzzSuiteTaskRequest(options = {}) {
 	const input = wpCodeboxFuzzSuiteInput(options.input || options.abilityInput || options.ability_input || options);
 	return wordpressRuntimeTaskRequest({
 		...options,
-		backend: options.backend || 'codebox',
+		backend: options.backend || 'wp-codebox',
 		runtime: options.runtime || options.runtimeId || options.runtime_id || 'wp-codebox',
 		taskId: requiredString(options.taskId || options.task_id, 'taskId'),
 		ability: options.ability || wpCodeboxFuzzSuiteAbility(options),

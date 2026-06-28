@@ -50,7 +50,7 @@ function matrixRequests() {
         group_key: 'codebox-matrix-smoke',
         parent_plan_id: 'codebox-matrix-smoke',
         executor: {
-          backend: 'codebox',
+          backend: 'wp-codebox',
           model,
           config: { provider: 'openai', max_turns: 1 },
         },

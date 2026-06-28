@@ -10,7 +10,7 @@ function main(argv = process.argv.slice(2), env = process.env) {
 	const input = args.input ? jsonValue('input', args.input, {}) : {};
 	const rendered = renderRuntimeWorkflowInputs({
 		...input,
-		runtime: firstDefined(args.runtime, env.RUNTIME, env.RUNTIME_PROVIDER, env.BACKEND, input.runtime),
+		runtime: firstDefined(args.runtime, env.RUNTIME, input.runtime),
 		runtime_profile: firstDefined(parseProfile(args.runtimeProfile), parseProfile(env.RUNTIME_PROFILE), parseProfile(env.PROFILE), input.runtime_profile),
 		runtime_profiles: firstDefined(jsonValue('runtime_profiles', args.runtimeProfiles, undefined), jsonValue('runtime_profiles', env.RUNTIME_PROFILES, undefined), input.runtime_profiles),
 		tool_profile: firstDefined(jsonValue('tool_profile', args.toolProfile, undefined), jsonValue('tool_profile', env.TOOL_PROFILE, undefined), jsonValue('tool_policy', env.TOOL_POLICY, undefined), input.tool_profile),

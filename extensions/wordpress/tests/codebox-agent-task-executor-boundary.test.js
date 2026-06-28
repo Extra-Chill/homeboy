@@ -65,7 +65,7 @@ function secretEnvRequirementForProvider(contract, provider) {
 const provider = providerContract();
 assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(provider.label, 'WP Codebox agent task executor');
-assert.equal(provider.backend, 'codebox');
+assert.equal(provider.backend, 'wp-codebox');
 assert.equal(provider.runtime_id, 'wp-codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
 assert.equal(provider.provider_credential_boundary.schema, 'wp-codebox/provider-credential-boundary/v1');
@@ -92,7 +92,7 @@ assert.throws(() => codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'raw-provider-credentials-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'openai',
       provider_credentials: { OPENAI_API_KEY: 'raw-value' },
@@ -145,7 +145,7 @@ assert.equal(normalizeCodeboxPublicResultEnvelope({ outputs: { artifact_result: 
 const privateRuntimeShapeRequest = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'private-runtime-shape-boundary',
-  executor: { backend: 'codebox', config: {} },
+  executor: { backend: 'wp-codebox', config: {} },
   instructions: 'Reject private Codebox runtime result shapes.',
   inputs: {},
 };
@@ -321,7 +321,7 @@ const genericAgentTaskRequest = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'generic-wordpress-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: { provider: 'openai' },
   },
   instructions: 'Run a generic WordPress ability with declared tools.',
@@ -343,7 +343,7 @@ const genericAgentTaskRequest = {
 const taskInput = codeboxTaskRequestFromAgentTaskRequest(genericAgentTaskRequest);
 
 assert.equal(taskInput.schema, 'wp-codebox/task-input/v1');
-assert.equal(taskInput.parent_request.executor.backend, 'codebox');
+assert.equal(taskInput.parent_request.executor.backend, 'wp-codebox');
 assert.equal(Object.hasOwn(taskInput, 'agent'), false);
 assert.deepEqual(taskInput.runtime_task, {
   ability: 'wordpress/site-health',
@@ -367,7 +367,7 @@ const fanoutAgentTaskRequest = {
   parent_plan_id: 'homeboy-plan-1',
   group_key: 'site-generation',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'gpt-5.5',
     secret_env: ['AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN'],
     config: {
@@ -541,7 +541,7 @@ process.env.HOMEBOY_AGENT_TOOL_POLICY_SCHEMA = 'homeboy/agent-tool-policy/v1';
 const homeboyToolPolicyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'homeboy-tool-policy-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Run with host-owned GitHub tools.',
   workspace: { root: workspaceRoot, mode: 'readwrite' },
   tools: ['workspace_read', 'github_issue_publish', 'github_pull_request_publish'],
@@ -564,7 +564,7 @@ const codeboxOwnedBridgeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'codebox-owned-parent-tool-bridge-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'openai',
       runtime_profile: {
@@ -587,7 +587,7 @@ const runtimeProfileDependencyTaskInput = codeboxTaskRequestFromAgentTaskRequest
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'runtime-profile-dependencies-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'openai',
       runtime_requirements: {
@@ -619,7 +619,7 @@ const customRuntimePolicyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'custom-runtime-policy-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'openai',
       component_contracts: [{ slug: 'example-runtime', path: '/components/example-runtime' }],
@@ -653,7 +653,7 @@ process.env.HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT = '/components/wp-codebox-runti
 const envRuntimeComponentTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'env-runtime-component-task-1',
-  executor: { backend: 'codebox', config: { provider: 'codex' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'codex' } },
   instructions: 'Run with a runtime component supplied by the selected runner environment.',
 });
 if (previousRuntimeComponentEnv === undefined) {
@@ -667,7 +667,7 @@ const runtimeInvocationTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'generic-provider-runtime-invocation-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'codex',
       provider_runtime_invocation: {
@@ -713,7 +713,7 @@ const capabilityBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'capability-bundle-provider-runtime-invocation-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: capabilityBundleExecutorConfig,
   },
   instructions: 'Run with generic capability bundles for worktree PR iteration.',
@@ -737,7 +737,7 @@ const customRuntimeProfileTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'custom-runtime-profile-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'openai',
       runtime_profile: 'example-runtime-profile',
@@ -773,7 +773,7 @@ assert.equal(customRuntimeProfileTaskInput.runtime_component_paths.agent_runtime
 const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-agent-bundle-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Run a repo-loop bundle workflow.',
   artifacts: {
     outputs: {
@@ -818,7 +818,7 @@ assert.deepEqual(repoLoopBundleTaskInput.artifact_declarations, [{
 const controllerClientContextArtifactsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'controller-client-context-artifacts-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Run a controller workflow with domain artifact declarations in client context.',
   dispatch: {
     client_context: JSON.stringify({
@@ -872,7 +872,7 @@ assert.equal(Object.hasOwn(controllerClientContextArtifactsTaskInput.runtime_tas
 const controllerClientContextRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'controller-client-context-runtime-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Run a controller workflow with hydrated runtime task input in client context.',
   dispatch: {
     client_context: JSON.stringify({
@@ -899,7 +899,7 @@ assert.equal(controllerClientContextRuntimeTaskInput.runtime_task.input.input.de
 const legacyRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'legacy-runtime-package-task-1',
-  executor: { backend: 'codebox', model: 'gpt-5.5', config: { provider: 'codex' } },
+  executor: { backend: 'wp-codebox', model: 'gpt-5.5', config: { provider: 'codex' } },
   instructions: 'Run a legacy runtime-package task through the public Codebox ability.',
   inputs: {
     ability_request: {
@@ -924,7 +924,7 @@ assert.equal(Object.hasOwn(legacyRuntimePackageTaskInput.runtime_task.input, 'me
 const neutralRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'neutral-runtime-package-task-1',
-  executor: { backend: 'codebox', model: 'gpt-5.5', config: { provider: 'codex' } },
+  executor: { backend: 'wp-codebox', model: 'gpt-5.5', config: { provider: 'codex' } },
   instructions: 'Run a neutral runtime-package task through the selected runtime adapter.',
   inputs: {
     ability_request: {
@@ -944,7 +944,7 @@ const neutralProfileRuntimePackageTaskInput = codeboxTaskRequestFromAgentTaskReq
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'neutral-profile-runtime-package-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'gpt-5.5',
     config: {
       provider: 'codex',
@@ -971,7 +971,7 @@ const explicitRuntimePackageComponentTaskInput = codeboxTaskRequestFromAgentTask
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'runtime-package-substrate-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'codex',
       component_contracts: [
@@ -1005,11 +1005,40 @@ assert.deepEqual(explicitRuntimePackageComponentTaskInput.component_contracts.ma
 assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.agents_api, '/components/agents-api');
 assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.agent_runtime, '/components/data-machine');
 assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.data_machine_code, '/components/data-machine-code');
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_env.WP_CODEBOX_AGENTS_API_PATH, '/components/agents-api');
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_env.WP_CODEBOX_DATA_MACHINE_PATH, '/components/data-machine');
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_env.WP_CODEBOX_DATA_MACHINE_CODE_PATH, '/components/data-machine-code');
+
+const previousStaleDataMachinePath = process.env.WP_CODEBOX_DATA_MACHINE_PATH;
+process.env.WP_CODEBOX_DATA_MACHINE_PATH = '/components/stale-data-machine';
+const explicitRuntimeComponentOverridesEnvTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'runtime-package-explicit-component-overrides-env-task-1',
+  executor: {
+    backend: 'wp-codebox',
+    config: {
+      provider: 'codex',
+      runtime_component_paths: {
+        agent_runtime: '/components/explicit-data-machine',
+      },
+    },
+  },
+  instructions: 'Run a runtime-package task with an explicit Data Machine component path.',
+  inputs: {
+    ability_request: {
+      name: 'runtime-package/run',
+      input: { package: { slug: 'example-agent' } },
+    },
+  },
+});
+restoreEnv('WP_CODEBOX_DATA_MACHINE_PATH', previousStaleDataMachinePath);
+assert.equal(explicitRuntimeComponentOverridesEnvTaskInput.runtime_component_paths.agent_runtime, '/components/explicit-data-machine');
+assert.equal(explicitRuntimeComponentOverridesEnvTaskInput.runtime_env.WP_CODEBOX_DATA_MACHINE_PATH, '/components/explicit-data-machine');
 
 const runtimePackageWithoutSubstrateTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'runtime-package-missing-substrate-task-1',
-  executor: { backend: 'codebox', config: { provider: 'codex' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'codex' } },
   instructions: 'Run a runtime-package task through the public Codebox ability without HBE substrate construction.',
   inputs: {
     ability_request: {
@@ -1030,7 +1059,7 @@ process.env.WP_CODEBOX_DATA_MACHINE_CODE_PATH = workspaceRoot;
 const runtimePackageEnvSubstrateTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'runtime-package-env-substrate-task-1',
-  executor: { backend: 'codebox', config: { provider: 'codex' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'codex' } },
   instructions: 'Run a runtime-package task with env-declared Codebox-owned substrate components.',
   inputs: {
     ability_request: {
@@ -1050,7 +1079,7 @@ assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.data_ma
 const explicitLegacyRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'explicit-legacy-runtime-task-1',
-  executor: { backend: 'codebox', model: 'gpt-5.5', config: { provider: 'codex' } },
+  executor: { backend: 'wp-codebox', model: 'gpt-5.5', config: { provider: 'codex' } },
   instructions: 'Run an explicit legacy runtime task through the public Codebox ability.',
   inputs: {
     runtime_task: {
@@ -1076,7 +1105,7 @@ assert.equal(Object.hasOwn(explicitLegacyRuntimeTaskInput.runtime_task.input, 'm
 const runtimeConfigOptionsRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'runtime-config-options-runtime-task-1',
-  executor: { backend: 'codebox', config: {} },
+  executor: { backend: 'wp-codebox', config: {} },
   instructions: 'Run an explicit legacy runtime task with controller runtime-config options.',
   inputs: {
     runtime_task: {
@@ -1097,7 +1126,7 @@ assert.deepEqual(runtimeConfigOptionsRuntimeTaskInput.runtime_task.input.options
 const providerAndControllerArtifactsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'provider-and-controller-artifacts-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Run a controller workflow with provider and domain artifact declarations.',
   artifact_declarations: [{
     name: 'patch',
@@ -1129,7 +1158,7 @@ assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.requ
 const placeholderArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'placeholder-artifact-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   artifact_declarations: [
     { name: 'patch', required: true },
     { name: 'agent_result', required: true },
@@ -1164,7 +1193,7 @@ const eventNormalizerRequest = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'codebox-events-task-1',
   group_key: 'codebox-events-group',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Normalize Codebox event artifacts.',
   inputs: {},
 };
@@ -1242,7 +1271,7 @@ assert.equal(eventOutcome.metadata.normalized_events.length, 2);
 const missingTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'missing-typed-artifact-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   artifact_declarations: [{
     name: 'concept_packet',
     artifact_schema: 'wp-site-generator/ConceptPacket/v1',
@@ -1267,7 +1296,7 @@ assert.deepEqual(
 const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-generic-ability-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Run a generic declared ability with workflow inputs.',
   client_context: {
     inputs: {
@@ -1301,7 +1330,7 @@ assert.deepEqual(genericRepoLoopTaskInput.runtime_task.input, {
 const noImplicitClientContextTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'generic-ability-no-ambient-client-context-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Run a generic declared ability without ambient client context merge.',
   client_context: {
     inputs: {
@@ -1321,7 +1350,7 @@ assert.deepEqual(noImplicitClientContextTaskInput.runtime_task.input, { explicit
 const legacyClientContextTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'generic-ability-legacy-client-context-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Run a queued legacy declared ability with explicit legacy context merge.',
   client_context: {
     inputs: {
@@ -1351,7 +1380,7 @@ const repoLoopWorkspaceTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   cwd: repoLoopWorkspaceRoot,
   repo: 'example-repo@example-loop-main-20260616',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'openai',
       workspace_required: true,
@@ -1390,7 +1419,7 @@ const genericRuntimeAliasTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'generic-runtime-alias-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'openai',
       runtime_components: {
@@ -1413,7 +1442,7 @@ assert.deepEqual(genericRuntimeAliasTaskInput.compatibility_diagnostics, undefin
 const repoLoopTypedOutputsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-typed-outputs-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Run a repo-loop step that declares typed outputs generically.',
   outputs: {
     typed_artifacts: [{
@@ -1438,7 +1467,7 @@ assert.deepEqual(repoLoopTypedOutputsTaskInput.artifact_declarations, [{
 const legacyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'legacy-codebox-task-1',
-  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  executor: { backend: 'wp-codebox', config: { provider: 'openai' } },
   instructions: 'Already queued legacy request.',
   inputs: {},
 });
@@ -1449,7 +1478,7 @@ const explicitAgentTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'explicit-agent-codebox-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: { provider: 'openai', agent: 'custom-sandbox-agent' },
   },
   instructions: 'Run with an explicitly selected sandbox agent.',
@@ -1467,7 +1496,7 @@ try {
   codexTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     schema: 'homeboy/agent-task-request/v1',
     task_id: 'codex-codebox-task-1',
-    executor: { backend: 'codebox', config: { provider: 'codex' } },
+    executor: { backend: 'wp-codebox', config: { provider: 'codex' } },
     instructions: 'Run a Codex-backed Codebox task.',
     inputs: {},
   });
@@ -1496,7 +1525,7 @@ try {
     schema: 'homeboy/agent-task-request/v1',
     task_id: 'planned-secret-env-codebox-task-1',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: { provider: 'codex', secret_env: ['EXPLICIT_CODEBOX_SECRET'] },
     },
     instructions: 'Run a Codex-backed Codebox task with Homeboy-planned secret env.',
@@ -1542,7 +1571,7 @@ try {
     schema: 'homeboy/agent-task-request/v1',
     task_id: 'full-plan-secret-env-codebox-task-1',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: { provider: 'codex' },
     },
     instructions: 'Run a Codex-backed Codebox task with a fully aggregated secret env plan.',
@@ -1574,7 +1603,7 @@ const claudeCodeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'claude-code-codebox-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'claude-code',
       model: 'opus-4.7',
@@ -1596,7 +1625,7 @@ try {
   configuredCodexTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     schema: 'homeboy/agent-task-request/v1',
     task_id: 'configured-codex-codebox-task-1',
-    executor: { backend: 'codebox', config: { provider: 'codex' } },
+    executor: { backend: 'wp-codebox', config: { provider: 'codex' } },
     instructions: 'Run a Codex-backed Codebox task with the configured provider checkout.',
     inputs: {},
   });
@@ -1620,7 +1649,7 @@ try {
     schema: 'homeboy/agent-task-request/v1',
     task_id: 'explicit-codex-provider-path-codebox-task-1',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: {
         provider: 'codex',
         runtime_options: { providerPluginPaths: [explicitProviderPath] },
@@ -1647,7 +1676,7 @@ const explicitCodexTaskInputFromConfig = codeboxTaskRequestFromAgentTaskRequest(
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'explicit-codex-provider-path-config-codebox-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'codex',
       provider_plugin_paths: [explicitProviderPathFromConfig],
@@ -1670,7 +1699,7 @@ const explicitCodexTaskInputFromRuntimeOptions = codeboxTaskRequestFromAgentTask
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'explicit-codex-provider-path-runtime-options-codebox-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'codex',
       provider_plugin_paths: [staleProviderPathFromRequestConfig],
@@ -1689,7 +1718,7 @@ const runtimePackageTypedArtifactRequest = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'runtime-package-typed-artifact-codebox-task-1',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'codex',
       runtime_task: {
@@ -1707,12 +1736,24 @@ const runtimePackageTypedArtifactRequest = {
     artifact_schema: 'example/ConceptPacket/v1',
     required: true,
   }],
-  inputs: { target: { root: runtimePackageWorkspaceRoot } },
+  inputs: {
+    target: { root: runtimePackageWorkspaceRoot },
+    agent_bundles: [{
+      source: 'bundles/store-idea-agent',
+      bundle: {
+        bundle_schema_version: 1,
+        bundle_slug: 'store-idea-agent',
+        agent: { agent_slug: 'store-idea-agent' },
+      },
+    }],
+  },
 };
 const runtimePackageTypedArtifactTaskInput = codeboxTaskRequestFromAgentTaskRequest(runtimePackageTypedArtifactRequest);
 assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
 assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.schema, 'wp-codebox/runtime-package-task/v1');
-assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.package, { slug: 'store-idea-agent', source: '/workspace/example-runtime/bundles/store-idea-agent' });
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.package.slug, 'store-idea-agent');
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.package.source, '/workspace/example-runtime/bundles/store-idea-agent');
+assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.package.bundle.bundle_slug, 'store-idea-agent');
 assert.deepEqual(runtimePackageTypedArtifactTaskInput.runtime_task.input.workflow, { id: 'store-idea-artifact-flow' });
 assert.equal(runtimePackageTypedArtifactTaskInput.runtime_task.input.package.source === 'bundles/store-idea-agent', false);
 assert.equal(JSON.stringify(runtimePackageTypedArtifactTaskInput.runtime_task).includes('"source":"bundles/store-idea-agent"'), false);

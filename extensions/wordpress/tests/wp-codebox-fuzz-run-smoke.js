@@ -179,7 +179,7 @@ const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
 	runtimeId: 'wp-codebox',
 });
 
-assert.equal(taskRequest.executor.backend, 'codebox');
+assert.equal(taskRequest.executor.backend, 'wp-codebox');
 assert.equal(taskRequest.executor.runtime, 'wp-codebox');
 assert.equal(taskRequest.executor.config.runtime_task.ability, DEFAULT_FUZZ_SUITE_ABILITY);
 assert.equal(taskRequest.executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);

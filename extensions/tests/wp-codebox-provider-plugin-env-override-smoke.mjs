@@ -55,7 +55,7 @@ try {
 		schema: 'homeboy/agent-task-request/v1',
 		task_id: 'provider-plugin-env-override',
 		executor: {
-			backend: 'codebox',
+			backend: 'wp-codebox',
 			model: 'gpt-5.5',
 			config: {
 				provider: 'codex',

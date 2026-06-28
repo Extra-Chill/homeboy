@@ -243,8 +243,8 @@ function isRuntimeManifest(manifest) {
 }
 
 function normalizeRuntimeId(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
-	const id = runtimeId || DEFAULT_RUNTIME_ID;
-	return runtimeAliasMap(options.registry || runtimeRegistry(options))[id]?.replacement || id;
+	void options;
+	return runtimeId || DEFAULT_RUNTIME_ID;
 }
 
 function runtimeIdFromOptions(options = {}, env = process.env) {
@@ -254,31 +254,14 @@ function runtimeIdFromOptions(options = {}, env = process.env) {
 		options.runtime,
 		env.RUNTIME_ID,
 		env.RUNTIME,
-		legacyRuntimeIdFromOptions(options, env),
 		DEFAULT_RUNTIME_ID
 	);
-}
-
-function legacyRuntimeIdFromOptions(options = {}, env = process.env) {
-	return firstString(
-		options.runtimeProvider,
-		options.runtime_provider,
-		options.backend,
-		env.RUNTIME_PROVIDER,
-		env.BACKEND
-	);
-}
-
-function runtimeIdAliasDeprecation(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
-	const id = runtimeId || DEFAULT_RUNTIME_ID;
-	return runtimeAliasMap(options.registry || runtimeRegistry(options))[id] || null;
 }
 
 function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 	const requestedId = runtimeId || DEFAULT_RUNTIME_ID;
 	const registry = options.registry || runtimeRegistry(options);
 	const id = normalizeRuntimeId(runtimeId, { ...options, registry });
-	const aliasDeprecation = runtimeIdAliasDeprecation(runtimeId, { ...options, registry });
 	const manifest = registry[id];
 	if (!manifest) {
 		throw new Error(`Unsupported agent_runtime: ${id}. Registered runtimes: ${Object.keys(registry).sort().join(', ') || '(none)'}.`);
@@ -303,7 +286,6 @@ function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 	return {
 		id,
 		requested_id: requestedId,
-		...(aliasDeprecation ? { deprecated_runtime_alias: aliasDeprecation } : {}),
 		source,
 		manifest,
 		checkout,
@@ -311,43 +293,6 @@ function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 		buildCommands: normalizeCommands(materialization.build_commands || []),
 		paths: resolvePaths(materialization.paths || {}, workspace, options.env || process.env),
 		executor: resolveExecutor(manifest, source, options),
-	};
-}
-
-function runtimeAliasMap(registry = {}) {
-	const aliases = {};
-	for (const manifest of Object.values(registry)) {
-		for (const alias of manifestRuntimeAliases(manifest)) {
-			aliases[alias.alias] = alias;
-		}
-	}
-	return aliases;
-}
-
-function manifestRuntimeAliases(manifest = {}) {
-	return normalizeAliasEntries(manifest.runtime_aliases || manifest.deprecated_runtime_aliases || manifest.aliases, manifest.id);
-}
-
-function normalizeAliasEntries(entries, replacement) {
-	if (!entries || typeof entries !== 'object') {
-		return [];
-	}
-	if (!Array.isArray(entries)) {
-		return Object.entries(entries).map(([alias, value]) => normalizeAliasEntry({ alias, ...(typeof value === 'object' && value ? value : { replacement: value }) }, replacement)).filter(Boolean);
-	}
-	return entries.map((entry) => normalizeAliasEntry(entry, replacement)).filter(Boolean);
-}
-
-function normalizeAliasEntry(entry, replacement) {
-	if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.alias !== 'string' || entry.alias.trim() === '') {
-		return null;
-	}
-	return {
-		schema: entry.schema || 'homeboy/deprecated-runtime-alias/v1',
-		alias: entry.alias.trim(),
-		replacement: firstString(entry.replacement, entry.runtime_id, replacement),
-		quarantine: entry.quarantine || 'legacy-runtime-id-alias',
-		status: entry.status || 'deprecated',
 	};
 }
 
@@ -447,6 +392,7 @@ function resolveExecutorInvocation(provider, runtimePath, options = {}) {
 		argv: argv.length > 0 ? argv.slice(1) : [],
 		cwd,
 		env: normalizeInvocationEnv(invocation.env || {}),
+		env_allowlist: normalizeStringArray(invocation.env_allowlist || invocation.envAllowlist),
 		stdin: invocation.stdin || 'request_json',
 		stdout: invocation.stdout || 'outcome_json',
 		stderr: invocation.stderr || 'inherit_on_failure',
@@ -474,6 +420,10 @@ function normalizeInvocationEnv(env) {
 		return {};
 	}
 	return Object.fromEntries(Object.entries(env).filter(([, value]) => typeof value === 'string'));
+}
+
+function normalizeStringArray(value) {
+	return Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry.trim() !== '') : [];
 }
 
 function replaceRuntimePath(value, runtimePath) {
@@ -632,10 +582,8 @@ function executorScriptArg(provider) {
 
 module.exports = {
 	DEFAULT_RUNTIME_ID,
-	manifestRuntimeAliases,
 	normalizeRuntimeId,
 	runtimeIdFromOptions,
-	runtimeIdAliasDeprecation,
 	resolveRuntimeProvider,
 	runtimeManifestPath,
 	runtimeRegistry,

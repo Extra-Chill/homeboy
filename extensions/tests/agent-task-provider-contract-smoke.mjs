@@ -156,7 +156,7 @@ assert.throws(
 );
 
 const runnerSpec = agentTaskRunnerSpec({
-	backend: 'codebox',
+	backend: 'wp-codebox',
 	runtime: 'wp-codebox',
 	config: { provider: 'codex' },
 	secretEnv: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
@@ -170,7 +170,7 @@ assert.throws(
 );
 assert.deepEqual(agentTaskRequestFromRunnerSpec({ runnerSpec }), {
 	executor: {
-		backend: 'codebox',
+		backend: 'wp-codebox',
 		runtime: 'wp-codebox',
 		secret_env: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
 		config: { provider: 'codex' },

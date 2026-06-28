@@ -280,7 +280,7 @@ const request = {
   task_id: 'task-123',
   group_key: 'visual-evidence',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'gpt-5.5',
     config: {
       provider: 'openai',
@@ -347,7 +347,7 @@ const codexSecretEnvSources = {
 };
 assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(provider.label, 'WP Codebox agent task executor');
-assert.equal(provider.backend, 'codebox');
+assert.equal(provider.backend, 'wp-codebox');
 assert.equal(provider.command, 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs');
 assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
@@ -528,7 +528,7 @@ const providerDefaultSecretRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'provider-default-secret-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'claude-code',
       model: 'opus-4.7',
@@ -541,7 +541,7 @@ const codexDefaultSecretRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'codex-default-secret-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'codex',
       model: 'gpt-5.5',
@@ -614,7 +614,7 @@ const executorSecretEnvRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'executor-secret-env-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'claude-sonnet-4-6',
     secret_env: [
       'AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN',
@@ -639,7 +639,7 @@ const claudeCodeDefaultSecretEnvRequest = codeboxTaskRequestFromAgentTaskRequest
   ...request,
   task_id: 'claude-code-default-secret-env-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'claude-sonnet-4-6',
     config: {
       provider: 'claude-code',
@@ -653,7 +653,7 @@ const runtimeTaskRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'runtime-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       sandbox_tool_policy: {
         schema: 'wp-codebox/sandbox-tool-policy/v1',
@@ -690,7 +690,7 @@ const runtimeTaskProviderDefaultRequest = codeboxTaskRequestFromAgentTaskRequest
   ...request,
   task_id: 'runtime-task-provider-defaults-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'openai/gpt-5.5',
     config: {
       provider: 'opencode',
@@ -711,7 +711,7 @@ const runtimeTaskExplicitProviderRequest = codeboxTaskRequestFromAgentTaskReques
   ...request,
   task_id: 'runtime-task-explicit-provider-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'openai/gpt-5.5',
     config: {
       provider: 'opencode',
@@ -732,7 +732,7 @@ const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'ability-bridge-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       execution_kind: 'wp_codebox_ability',
       ability: 'example/validate-artifact',
@@ -757,7 +757,7 @@ const topLevelComponentContractsRequest = codeboxTaskRequestFromAgentTaskRequest
   task_id: 'top-level-component-contracts-task-123',
   component_contracts: [{ slug: 'domain-component', path: '/workspace/domain-component', activate: true }],
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       component_contracts: [{ slug: 'config-component', path: '/workspace/config-component', activate: false }],
     },
@@ -790,7 +790,7 @@ const genericProviderRuntimeRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'generic-runtime-env-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'fixture-provider',
       runtime_env: genericRuntimeEnv,
@@ -833,7 +833,7 @@ const codeboxOwnedParentToolBridgeRequest = codeboxTaskRequestFromAgentTaskReque
   ...request,
   task_id: 'codebox-owned-parent-tool-bridge-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       runtime_profile: {
         schema: 'wp-codebox/runtime-profile/v1',
@@ -852,7 +852,7 @@ const optionsRuntimeRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'options-runtime-env-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: { provider: 'another-fixture-provider' },
   },
 }, {
@@ -877,7 +877,7 @@ try {
     ...request,
     task_id: 'settings-runtime-env-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: {},
     },
   });
@@ -899,7 +899,7 @@ const recipePackRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'recipe-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'gpt-5.5',
     config: {
       recipe_pack: 'example-codebox-recipes',
@@ -927,7 +927,7 @@ const roleMatrixRecipeRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'role-matrix-recipe-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'gpt-5.5',
     config: {
       recipe_pack: 'example-codebox-recipes',
@@ -964,7 +964,7 @@ const capabilityMatrixRecipeRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'capability-matrix-recipe-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'gpt-5.5',
     config: {
       recipe_pack: 'example-codebox-recipes',
@@ -997,7 +997,7 @@ const codexAgentRequest = {
   ...request,
   task_id: 'codex-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'gpt-5.5',
     config: exampleAgentCiCodeboxExecutorConfig({
       provider: 'codex',
@@ -1049,7 +1049,7 @@ const workflowStyleConfigRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'runtime-contract-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'gpt-5.5',
     config: exampleAgentCiCodeboxExecutorConfig({
       provider: 'codex',
@@ -1088,7 +1088,7 @@ const deprecatedWordPressRuntimeVersionRequest = codeboxTaskRequestFromAgentTask
   ...request,
   task_id: 'runtime-contract-task-deprecated-wordpress-version',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: exampleAgentCiCodeboxExecutorConfig({
       provider: 'codex',
       wp_codebox_wordpress_version: '6.9',
@@ -1116,7 +1116,7 @@ try {
     ...request,
     task_id: 'default-runtime-stack-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
     },
     inputs: {
@@ -1150,7 +1150,7 @@ try {
     ...request,
     task_id: 'bundled-agents-api-runtime-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
     },
     inputs: {
@@ -1168,7 +1168,7 @@ try {
     ...request,
     task_id: 'configured-chat-handler-runtime-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
     },
     inputs: {
@@ -1188,7 +1188,7 @@ try {
     ...request,
     task_id: 'configured-provider-default-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: {},
     },
     inputs: {
@@ -1216,7 +1216,7 @@ try {
     ...request,
     task_id: 'default-openai-provider-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       model: 'gpt-5.5',
       config: {},
     },
@@ -1234,7 +1234,7 @@ try {
     ...request,
     task_id: 'bare-default-openai-provider-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: {},
     },
     inputs: {
@@ -1275,7 +1275,7 @@ try {
     ...request,
     task_id: 'readonly-workspace-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: {},
     },
     inputs: {
@@ -1297,7 +1297,7 @@ try {
     ...request,
     task_id: 'settings-model-default-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: {},
     },
     inputs: {
@@ -1312,7 +1312,7 @@ try {
     ...request,
     task_id: 'explicit-empty-tools-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: {
         allowed_tools: [],
         sandbox_tool_policy: {
@@ -1338,7 +1338,7 @@ try {
     ...request,
     task_id: 'alternate-default-runtime-stack-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
     },
     inputs: {
@@ -1355,7 +1355,7 @@ try {
     ...request,
     task_id: 'explicit-provider-path-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: { provider: 'codex' },
     },
     inputs: {
@@ -1377,7 +1377,7 @@ try {
     ...request,
     task_id: 'configured-generic-stack-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: { provider: 'codex' },
     },
     inputs: {
@@ -1400,7 +1400,7 @@ try {
     ...request,
     task_id: 'configured-overlay-empty-profile-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: {
         provider: 'codex',
         runtime_requirements: { runtime_overlays: [] },
@@ -1425,7 +1425,7 @@ try {
     ...request,
     task_id: 'legacy-php-ai-client-runtime-stack-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: { provider: 'codex' },
     },
     inputs: {
@@ -1453,7 +1453,7 @@ try {
       ...request,
       task_id: 'lab-no-target-default-runtime-stack-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
       },
       inputs: {},
@@ -1470,7 +1470,7 @@ try {
     ...request,
     task_id: 'explicit-runtime-stack-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: exampleAgentCiCodeboxExecutorConfig({
         provider: 'codex',
         runtime_component_paths: {
@@ -1526,7 +1526,7 @@ const agentBundleRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'agent-bundle-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     model: 'gpt-5.5',
     config: exampleAgentCiCodeboxExecutorConfig({
       execution_kind: 'agent_bundle',
@@ -1577,7 +1577,7 @@ assert.deepEqual(agentBundleRequest.mounts, [{
 const agentBundleRequestWithExplicitMount = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       execution_kind: 'agent_bundle',
       mounts: [{
@@ -2095,7 +2095,7 @@ assert.equal(synthesizedArtifactRuntimeFailureOutcome.diagnostics[0].class, 'age
 const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'agent-bundle-task-123',
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2162,7 +2162,7 @@ const missingRequiredTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
     artifact_schema: 'example/required-report/v1',
     required: true,
   }],
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2193,7 +2193,7 @@ const inputBackfilledTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
     artifact_schema: 'example/required-report/v1',
     required: true,
   }],
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2223,7 +2223,7 @@ const missingGenericRepoLoopArtifactOutcome = agentTaskOutcomeFromCodeboxResult(
       },
     },
   },
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2245,7 +2245,7 @@ assert.equal(missingGenericRepoLoopArtifactOutcome.diagnostics[0].data.missing[0
 const canonicalTopLevelAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'canonical-top-level-agent-bundle-task-123',
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2291,7 +2291,7 @@ const projectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
     artifact_schema: 'example/review-artifact/v1',
     required: true,
   }],
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2339,7 +2339,7 @@ const engineDataTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
     artifact_schema: 'example/concept-packet/v1',
     required: true,
   }],
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2374,7 +2374,7 @@ const replyTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
     artifact_schema: 'example/concept-packet/v1',
     required: true,
   }],
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2400,7 +2400,7 @@ assert.equal(replyTypedArtifactBundleOutcome.typed_artifacts.find((artifact) => 
 const failedProjectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'failed-projected-typed-artifact-bundle-task-123',
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2434,7 +2434,7 @@ assert.equal(failedProjectedTypedArtifactBundleOutcome.metadata.typed_artifacts.
 const singleResultAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'single-result-agent-bundle-task-123',
-  executor: { backend: 'codebox' },
+  executor: { backend: 'wp-codebox' },
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
@@ -2534,7 +2534,7 @@ assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.role === 'tr
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-runtime-log'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-log'), true);
 assert.equal(canaryRunOutcome.evidence_refs.some((ref) => ref.uri === '/tmp/canary/runtime/files/patch.diff'), true);
-assert.equal(canaryRunOutcome.metadata.decision_evidence.selected_backend, 'codebox');
+assert.equal(canaryRunOutcome.metadata.decision_evidence.selected_backend, 'wp-codebox');
 assert.equal(canaryRunOutcome.metadata.decision_evidence.run_id, 'run-canary');
 assert.equal(canaryRunOutcome.metadata.decision_evidence.runtime_status, 'destroyed');
 assert.equal(canaryRunOutcome.metadata.decision_evidence.cleanup_observed, 'runtime_destroyed');
@@ -2636,7 +2636,7 @@ const codexProviderNotRegisteredOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'codex-provider-not-registered-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: {
       provider: 'codex',
       provider_plugin_paths: ['/components/ai-provider-for-openai'],
@@ -2664,7 +2664,7 @@ const codexMissingProviderPluginOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'codex-missing-provider-plugin-task-123',
   executor: {
-    backend: 'codebox',
+    backend: 'wp-codebox',
     config: { provider: 'codex' },
   },
 }, {
@@ -2731,7 +2731,7 @@ try {
       ...request,
       task_id: 'missing-model-cli-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         config: {
           provider: 'claude-code',
           provider_plugin_paths: ['/providers/claude-code'],
@@ -2843,7 +2843,7 @@ try {
       ...request,
       task_id: 'recipe-cli-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         config: {
           recipe_pack: 'example-codebox-recipes',
           recipe_ref: 'release/v1',
@@ -2919,7 +2919,7 @@ try {
       ...codexAgentRequest,
       task_id: 'codex-missing-provider-path-cli-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         model: 'gpt-5.5',
         config: {
           provider: 'codex',
@@ -2951,7 +2951,7 @@ try {
       ...request,
       task_id: 'defaulted-codex-missing-provider-path-cli-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         model: 'gpt-5.5',
         config: { secret_env: codexSecretEnv },
       },
@@ -2977,7 +2977,7 @@ try {
       ...codexAgentRequest,
       task_id: 'codex-wrong-provider-path-cli-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         model: 'gpt-5.5',
         config: {
           provider: 'codex',
@@ -3006,7 +3006,7 @@ try {
       ...codexAgentRequest,
       task_id: 'codex-released-openai-provider-path-cli-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         model: 'gpt-5.5',
         config: {
           provider: 'codex',
@@ -3035,7 +3035,7 @@ try {
       ...codexAgentRequest,
       task_id: 'codex-capable-provider-path-cli-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         model: 'gpt-5.5',
         config: {
           provider: 'codex',
@@ -3072,7 +3072,7 @@ try {
     ...request,
     task_id: 'agent-bundle-cli-task-123',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       model: 'gpt-5.5',
       config: {
         provider: 'openai',
@@ -3140,7 +3140,7 @@ try {
       ...request,
       task_id: 'recipe-wp-codebox-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         config: {
           runtime_bin: recipeFakeWpCodebox,
           recipe_pack: 'example-codebox-recipes',
@@ -3171,7 +3171,7 @@ try {
       ...request,
       task_id: 'failed-wp-codebox-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         config: {
           runtime_bin: failedFakeWpCodebox,
           homeboy_extensions: path.join(__dirname, '..'),
@@ -3203,7 +3203,7 @@ try {
       ...request,
       task_id: 'settings-wp-codebox-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         config: {
           homeboy_extensions: path.join(__dirname, '..'),
         },
@@ -3225,7 +3225,7 @@ try {
       ...request,
       task_id: 'missing-configured-wp-codebox-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         config: {
           homeboy_extensions: path.join(__dirname, '..'),
         },
@@ -3247,7 +3247,7 @@ try {
       ...request,
       task_id: 'empty-json-wp-codebox-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         config: {
           runtime_bin: writeEmptyJsonTaskRunner(root),
           homeboy_extensions: path.join(__dirname, '..'),
@@ -3271,7 +3271,7 @@ try {
       ...request,
       task_id: 'empty-stdout-wp-codebox-task-123',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         config: {
           runtime_bin: writeEmptyStdoutTaskRunner(root),
           homeboy_extensions: path.join(__dirname, '..'),
@@ -3428,7 +3428,7 @@ try {
     ...request,
     task_id: 'claude-code-preflight-task',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       model: 'claude-sonnet-4-6',
       config: {
         provider: 'claude-code',

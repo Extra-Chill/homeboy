@@ -354,6 +354,47 @@ process.stdout.write(JSON.stringify({
   });
   assert.equal(sharedArtifactsRun.outcome.metadata.runtime_invocation_result.stderr_artifact.path, path.join(sharedArtifactDir, 'shared-artifact-paths-runtime-stderr.txt'));
 
+  let capturedEnv = null;
+  genericLoopRunner.runGenericAgentLoop({
+    runtime: {
+      id: 'env-allowlist-runtime',
+      executor: {
+        backend: 'fixture',
+        invocation: {
+          command: 'node',
+          argv: ['fixture-runtime.js'],
+          env_allowlist: ['HOMEBOY_WP_CODEBOX_CORE_MODULE'],
+        },
+      },
+    },
+    request: {
+      schema: 'homeboy/agent-task-request/v1',
+      task_id: 'env-allowlist-runtime',
+      instructions: 'Exercise runtime env allowlist merge.',
+      executor: {
+        backend: 'fixture',
+        config: { env_allowlist: [] },
+      },
+    },
+    plan: { ...plan, workload_id: 'env-allowlist-runtime' },
+    validationPolicy: { success_completion_outcomes: ['done'] },
+    env: { HOMEBOY_WP_CODEBOX_CORE_MODULE: '/tmp/wp-codebox-core/contracts.js' },
+    spawnSync: (command, argv, options) => {
+      capturedEnv = options.env;
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          schema: 'homeboy/agent-task-outcome/v1',
+          task_id: 'env-allowlist-runtime',
+          status: 'succeeded',
+          metadata: { results: { scenarios: [{ id: 'env-allowlist-runtime', metadata: { completion_outcome: 'done', completion_outcome_satisfied: true } }] } },
+        }),
+        stderr: '',
+      };
+    },
+  });
+  assert.equal(capturedEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE, '/tmp/wp-codebox-core/contracts.js');
+
   const hugePayloadSentinel = 'WHOLESALE_RESULT_PAYLOAD_SENTINEL';
   const stdoutSummary = genericLoopRunner.genericAgentLoopStdoutSummary({
     outcome: {

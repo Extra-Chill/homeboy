@@ -32,7 +32,7 @@ try {
     task_id: 'runtime-overlay-defaults',
     instructions: 'Validate runtime overlay defaults.',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       config: {
         provider: 'codex',
         runtime_task: {
@@ -75,6 +75,28 @@ try {
   });
   assert.deepEqual(explicitOverlayRequest.runtime_overlays, [explicitOverlay]);
   assert(!JSON.stringify(explicitOverlayRequest.runtime_overlays).includes(legacyPhpAiClientPath));
+
+  const clearedRunnerDefaultsRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    executor: {
+      ...request.executor,
+      config: {
+        ...request.executor.config,
+        runtime_env: {},
+        runtime_overlays: [],
+      },
+    },
+  }, {
+    settings: {
+      runtime_env: {
+        WP_CODEBOX_PHP_AI_CLIENT_PATH: legacyPhpAiClientPath,
+      },
+      runtime_overlays: [explicitOverlay],
+    },
+  });
+  assert.deepEqual(clearedRunnerDefaultsRequest.runtime_overlays, []);
+  assert.equal(clearedRunnerDefaultsRequest.runtime_env.WP_CODEBOX_PHP_AI_CLIENT_PATH, undefined);
+  assert(!JSON.stringify(clearedRunnerDefaultsRequest).includes(legacyPhpAiClientPath));
 } finally {
   if (previousPhpAiClientPath === undefined) {
     delete process.env.HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH;

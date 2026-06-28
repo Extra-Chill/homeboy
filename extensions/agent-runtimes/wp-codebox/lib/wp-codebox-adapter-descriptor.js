@@ -65,9 +65,9 @@ function wpCodeboxBin(options = {}) {
   return firstValue(
     ...(options.preferPackagedRuntime ? packagedRuntimeCandidates : explicitBinCandidates),
     options.bin,
+    ...descriptor.env.map((key) => env[key]),
     ...descriptor.settings.map((key) => settings[key]),
     env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN,
-    ...descriptor.env.map((key) => env[key]),
     ...(options.preferPackagedRuntime ? explicitBinCandidates : packagedRuntimeCandidates),
     options.executable === undefined ? descriptor.executable : options.executable,
   );
