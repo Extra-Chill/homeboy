@@ -872,13 +872,7 @@ fn prune_candidates_ssh(
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
     let min_age = options.min_age_hours.saturating_mul(3600);
-    let command = format!(
-        "root={root}; meta_rel={meta}; now=$(date +%s); if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'meta_rel=$1; now=$2; min_age=$3; shift 3; for dir do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; bytes=$(du -sk \"$dir\" 2>/dev/null | awk '\''{{print $1 * 1024}}'\''); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done' sh {meta_arg} \"$now\" {min_age_arg} {{}} +; fi",
-        root = shell::quote_arg(root),
-        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
-        meta_arg = shell::quote_arg(WORKSPACE_METADATA_FILE),
-        min_age_arg = shell::quote_arg(&min_age.to_string()),
-    );
+    let command = prune_scan_command(root, min_age);
     let output = client.execute(&command);
     if !output.success {
         return Err(Error::internal_unexpected(format!(
@@ -936,6 +930,16 @@ fn prune_candidates_ssh(
             .then_with(|| b.age_seconds.cmp(&a.age_seconds))
     });
     Ok(candidates)
+}
+
+pub(crate) fn prune_scan_command(root: &str, min_age: u64) -> String {
+    format!(
+        "root={root}; meta_rel={meta}; now=$(date +%s); if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'meta_rel=$1; now=$2; min_age=$3; shift 3; for dir do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; blocks=$(du -sk \"$dir\" 2>/dev/null); blocks=${{blocks%%[!0-9]*}}; bytes=$((blocks * 1024)); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done' sh {meta_arg} \"$now\" {min_age_arg} {{}} +; fi",
+        root = shell::quote_arg(root),
+        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        meta_arg = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        min_age_arg = shell::quote_arg(&min_age.to_string()),
+    )
 }
 
 fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str) -> Result<()> {
