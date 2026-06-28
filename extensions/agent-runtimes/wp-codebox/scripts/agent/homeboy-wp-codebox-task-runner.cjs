@@ -1355,52 +1355,6 @@ function mergeTypedArtifactOutputs(outputs, ...candidates) {
   };
 }
 
-function isTranscriptArtifactDeclaration(declaration) {
-  const name = artifactDeclarationName(declaration);
-  const type = declaration?.type || declaration?.kind || declaration?.artifact_type || declaration?.artifactType || '';
-  const schema = declaration?.artifact_schema || declaration?.artifactSchema || declaration?.schema || '';
-  return /transcript|conversation|messages/i.test(`${name} ${type} ${schema}`);
-}
-
-function replyTextFromAgentResult(agentResult) {
-  const candidates = [
-    agentResult?.result?.reply,
-    agentResult?.reply,
-    agentResult?.metadata?.result?.reply,
-    agentResult?.outputs?.reply,
-    agentResult?.outputs?.text,
-    agentResult?.outputs?.content,
-  ];
-  return candidates.find((candidate) => typeof candidate === 'string' && candidate.trim() !== '') || '';
-}
-
-function replyTypedArtifactsFromAgentResult(input, agentResult, config = {}) {
-  const reply = replyTextFromAgentResult(agentResult);
-  if (!reply) {
-    return {};
-  }
-  return Object.fromEntries(requiredArtifactDeclarations(input, config)
-    .filter((declaration) => !isTranscriptArtifactDeclaration(declaration))
-    .map((declaration) => {
-      const name = artifactDeclarationName(declaration);
-      if (!name) {
-        return null;
-      }
-      return [name, normalizeTypedArtifactEntry(name, {
-        name,
-        type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType || name,
-        artifact_schema: declaration.artifact_schema || declaration.artifactSchema || declaration.schema,
-        payload: {
-          content: reply,
-          format: 'markdown',
-        },
-        provenance: { source: 'agent_reply' },
-      })];
-    })
-    .filter(Boolean)
-    .filter(([, artifact]) => artifact));
-}
-
 function sandboxToolPolicy(input, allowedTools) {
   const explicit = input.parent_request?.sandbox_tool_policy
     || input.parent_request?.sandboxToolPolicy
@@ -1570,10 +1524,7 @@ function normalizeAgentTaskRun(input, result) {
   if (plainObject(agentResult)) {
     agentResult = {
       ...agentResult,
-      outputs: mergeTypedArtifactOutputs(
-        plainObject(agentResult.outputs) ? agentResult.outputs : {},
-        replyTypedArtifactsFromAgentResult(input, agentResult, config),
-      ),
+      outputs: plainObject(agentResult.outputs) ? agentResult.outputs : {},
     };
   }
   const bundleValidation = isAgentBundle(input) ? validateAgentRuntimeWorkload(agentResult, config) : validateRuntimeTaskWorkload(agentResult, config);
@@ -1596,22 +1547,13 @@ function normalizeAgentTaskRun(input, result) {
           outputs: plainObject(agentResult.outputs) ? agentResult.outputs : result.outputs,
         },
       }
-    : {
-        schema: 'wp-codebox/artifact-result-envelope/v1',
-        status: success ? 'created' : 'failed',
-        success,
-        result: {
-          status: success ? 'succeeded' : 'failed',
-          success,
-          outputs: plainObject(agentResult.outputs) ? agentResult.outputs : (plainObject(result.outputs) ? result.outputs : {}),
-        },
-      };
+    : undefined;
 
   return {
     ...result,
     success,
     status: success ? 'completed' : result.status,
-    artifact_result: artifactResult,
+    ...(artifactResult ? { artifact_result: artifactResult } : {}),
     outputs: plainObject(agentResult.outputs) ? agentResult.outputs : result.outputs,
     summary: success ? 'WP Codebox agent task succeeded.' : (artifactValidation?.message || bundleValidation?.message || runtimeFailure?.message || result.summary || 'WP Codebox agent task failed.'),
     session: result.session ? {
@@ -2236,8 +2178,7 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
         secretNames: input.secret_env || [],
       }) : null);
       const callbackPayload = withCallbackDataEnvelope(normalizedPayload, readCallbackData(callbackInput.callback_data));
-      const compatibilityPayload = attachRunAgentTaskCompatibilityMetadata(callbackPayload, invocation);
-      const enrichedPayload = payloadEvidence ? attachFailureEvidence(compatibilityPayload, payloadEvidence) : compatibilityPayload;
+      const enrichedPayload = payloadEvidence ? attachFailureEvidence(callbackPayload, payloadEvidence) : callbackPayload;
       process.stdout.write(`${JSON.stringify(enrichedPayload, null, 2)}\n`);
       return callbackPayload.success === false ? 1 : 0;
     } catch {
@@ -2271,22 +2212,6 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
     return 1;
   }
   return result.status ?? 1;
-}
-
-function attachRunAgentTaskCompatibilityMetadata(payload, invocation) {
-  if (!payload || typeof payload !== 'object' || invocation.implementation !== 'legacy-agent-task-run-compat') {
-    return payload;
-  }
-  return {
-    ...payload,
-    metadata: {
-      ...(payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? payload.metadata : {}),
-      run_agent_task_compatibility: {
-        legacy_result_normalization: true,
-        implementation: invocation.implementation,
-      },
-    },
-  };
 }
 
 (async () => {

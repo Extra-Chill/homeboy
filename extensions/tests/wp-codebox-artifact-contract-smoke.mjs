@@ -179,6 +179,60 @@ assert.equal(
   normalizedOutcome.typed_artifacts.find((artifact) => artifact.name === 'runtime_access')?.artifact_schema,
   WP_CODEBOX_RUNTIME_ACCESS_SCHEMA
 );
+
+const conceptPacketRequest = {
+  schema: AGENT_TASK_REQUEST_SCHEMA,
+  task_id: 'task-concept-packet',
+  instructions: 'Generate a concept packet.',
+  executor: { backend: WP_CODEBOX_BACKEND },
+  inputs: {
+    concept_packet: { title: 'input fallback must not satisfy required artifacts' },
+  },
+  artifact_declarations: [{
+    name: 'concept_packet',
+    type: 'concept_packet',
+    artifact_schema: 'wp-site-generator/ConceptPacket/v1',
+    required: true,
+  }],
+};
+const conceptPacketOutcome = agentTaskOutcomeFromCodeboxResult(conceptPacketRequest, {
+  artifact_result: normalizeArtifactResultEnvelope({
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {
+        typed_artifacts: {
+          concept_packet: {
+            name: 'concept_packet',
+            type: 'concept_packet',
+            artifact_schema: 'wp-site-generator/ConceptPacket/v1',
+            payload: { title: 'Canonical typed packet' },
+          },
+        },
+      },
+    },
+  }),
+});
+assert.equal(conceptPacketOutcome.status, 'succeeded');
+assert.equal(conceptPacketOutcome.outputs.typed_artifacts.concept_packet.payload.title, 'Canonical typed packet');
+assert.equal(
+  conceptPacketOutcome.typed_artifacts.find((artifact) => artifact.name === 'concept_packet')?.artifact_schema,
+  'wp-site-generator/ConceptPacket/v1'
+);
+
+const missingConceptPacketOutcome = agentTaskOutcomeFromCodeboxResult(conceptPacketRequest, {
+  artifact_result: normalizeArtifactResultEnvelope({
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: { outputs: {} },
+  }),
+});
+assert.equal(missingConceptPacketOutcome.status, 'failed');
+assert.equal(missingConceptPacketOutcome.outputs.typed_artifacts?.concept_packet, undefined);
+assert.ok(missingConceptPacketOutcome.diagnostics.some((diagnostic) => (
+  diagnostic.class === 'codebox.required_typed_artifacts_missing'
+    && diagnostic.message.includes('concept_packet')
+)));
 assert.deepEqual(typedArtifactsFromCodeboxResult({
   metadata: {
     agent_runtime: {
