@@ -327,6 +327,7 @@ pub(super) fn run_lint_stage(
             options.sniff_filters.exclude_sniffs.as_deref(),
             options.category.as_deref(),
             None,
+            None,
             run_dir,
         )
     };

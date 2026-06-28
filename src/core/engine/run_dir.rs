@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 pub mod files {
     pub const LINT_FINDINGS: &str = "lint-findings.json";
     pub const LINT_PRODUCERS: &str = "lint-producers.json";
+    pub const LINT_CHANGED_FILES: &str = "lint-changed-files.txt";
     pub const TEST_RESULTS: &str = "test-results.json";
     pub const TEST_FAILURES: &str = "test-failures.json";
     pub const COVERAGE: &str = "coverage.json";

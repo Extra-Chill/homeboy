@@ -79,6 +79,7 @@ pub fn run_main_lint_workflow(
             args.sniff_filters.exclude_sniffs.as_deref(),
             args.category.as_deref(),
             None,
+            None,
             run_dir,
         )?;
         let runner = args
@@ -260,6 +261,7 @@ fn run_scoped_lint_runs(
             args.sniff_filters.exclude_sniffs.as_deref(),
             args.category.as_deref(),
             run.step.as_deref(),
+            Some(run.changed_files.as_slice()),
             active_run_dir,
         )?;
         let runner = args
