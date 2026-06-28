@@ -13,14 +13,15 @@ pub mod versioning;
 
 pub use artifacts::{cleanup_artifact_report, CleanupArtifactCandidate, CleanupArtifactReport};
 pub use audit::{
-    ArtifactPortabilityConfig, AuditConfig, CommandStatusContractConfig,
+    grammar_for_extension, ArtifactPortabilityConfig, AuditConfig, CommandStatusContractConfig,
     CommandStatusContractScenario, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
     ConventionTagGlob, CoreBoundaryLeakConfig, DetectorProfileConfig, DuplicationDetectorConfig,
     KnownSymbolEntry, KnownSymbolHeaderVersionProvider, KnownSymbolKind, KnownSymbolVersionedEntry,
-    MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
-    RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope, SourcePolicyMatchMode,
-    SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm, TestWiringConfig, TestWiringPolicy,
-    ThinCommandAdapterConfig, ThinCommandAdapterMarkerGroup, VersionSource,
+    LanguageGrammar, MutatingResourceAccessConfig, PublicRegistryExposureConfig,
+    RedirectValidationConfig, RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope,
+    SourcePolicyMatchMode, SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm,
+    TestWiringConfig, TestWiringPolicy, ThinCommandAdapterConfig, ThinCommandAdapterMarkerGroup,
+    VersionSource,
 };
 pub use config::{
     ArtifactInput, CleanupArtifactDeclaration, CommandScopeConfig, ComponentDeployConfig,

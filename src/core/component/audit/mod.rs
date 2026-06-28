@@ -5,6 +5,7 @@ mod config_key_usage;
 mod detector_profile;
 mod exposure;
 mod known_symbols;
+mod language_grammar;
 mod remote_execution;
 mod source_policy;
 mod test_wiring;
@@ -21,6 +22,7 @@ pub use known_symbols::{
     KnownSymbolKind, KnownSymbolManifestPackageProvider, KnownSymbolSourceScanConfig,
     KnownSymbolVersionedEntry, KnownSymbolsConfig,
 };
+pub use language_grammar::{grammar_for_extension, LanguageGrammar};
 pub use remote_execution::{ArtifactPortabilityConfig, RemoteExecutionSafetyConfig};
 pub use source_policy::{
     ConventionTagGlob, CoreBoundaryLeakConfig, MutatingResourceAccessConfig, RequestedDetectorRule,
@@ -122,6 +124,17 @@ pub struct AuditConfig {
     /// adapters over core services.
     #[serde(default, skip_serializing_if = "ThinCommandAdapterConfig::is_empty")]
     pub thin_command_adapter: ThinCommandAdapterConfig,
+    /// Component-owned per-language grammars describing how to count top-level
+    /// item declarations. Core applies them generically; the component owns all
+    /// language item keywords (e.g. `fn `, `struct `, `function `, `class `).
+    ///
+    /// NOTE: intentionally NOT part of [`AuditConfig::is_empty`]. Adding it
+    /// there flipped the empty-state semantics in PR #6896 and is a suspected
+    /// contributor to that PR's live-audit regression; item-counting grammars
+    /// are presentation/threshold tuning, not a signal that the audit config is
+    /// non-empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub language_grammars: Vec<LanguageGrammar>,
 }
 
 impl AuditConfig {
@@ -186,6 +199,10 @@ impl AuditConfig {
         self.artifact_portability.merge(&other.artifact_portability);
         self.detector_profile.merge(&other.detector_profile);
         self.thin_command_adapter.merge(&other.thin_command_adapter);
+        language_grammar::merge_language_grammars(
+            &mut self.language_grammars,
+            &other.language_grammars,
+        );
         for rule in &other.source_policies {
             if !self
                 .source_policies

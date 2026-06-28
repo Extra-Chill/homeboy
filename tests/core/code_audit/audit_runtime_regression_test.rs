@@ -67,6 +67,15 @@ const EXPECTED_FINDINGS: &[&str] = &[
     "high_item_count::src/god_file.rs",
     "source_policy_violation::src/policy_violation.rs",
     "thin_command_adapter_violation::src/commands/thick_adapter.rs",
+    // Cross-file symbol-graph resolution: `consumer.rs::wire_up` and
+    // `exports.rs::orphaned_helper` are exported and referenced by nobody, so
+    // they surface; `exports.rs::referenced_helper` is SUPPRESSED because
+    // `consumer.rs` calls it across files. These rows guard the symbol-graph /
+    // reference-resolution detectors that PR #6896 silently broke — a grammar
+    // or audit-config regression that drops the component config (and thus the
+    // suppressions) changes this set and fails the harness.
+    "unreferenced_export::src/consumer.rs",
+    "unreferenced_export::src/exports.rs",
     "unreferenced_export::src/god_file.rs",
     "unreferenced_export::src/policy_violation.rs",
 ];
