@@ -46,10 +46,17 @@ function buildConfig(env) {
     throw new Error(`Runtime CLI build missing at ${runtimeBin || 'runtime.paths.runtime_bin'}`);
   }
 
+  const githubTokenEnv = 'HOMEBOY_GITHUB_APP_TOKEN';
+  const githubRepositoryTokenEnv = 'GITHUB_TOKEN';
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || '', true);
   const validationDependencies = validationPaths(workspace, providerPlugin, env.PROVIDER || '');
   const providerSecretEnvMapping = providerPlugin.provider_secret_env || {};
   const providerBenchEnvNames = providerBenchEnvFromManifest(runtime, env.PROVIDER || '', env);
+  // Provider-canonical secret env names advertised by the runtime manifest (e.g.
+  // OPENAI_API_KEY for the openai provider). Captured before folding in the
+  // caller's generic credential source names so the two roles stay distinct.
+  const providerCanonicalSecretEnvNames = Array.from(providerBenchEnvNames);
+  const providerCredentialSourceEnvNames = [];
   for (const providerEnvName of Object.values(providerSecretEnvMapping)) {
     if (typeof providerEnvName !== 'string' || providerEnvName.length === 0) {
       continue;
@@ -58,7 +65,14 @@ function buildConfig(env) {
       throw new Error(`Invalid provider credential env name: ${providerEnvName}`);
     }
     providerBenchEnvNames.add(providerEnvName);
+    providerCredentialSourceEnvNames.push(providerEnvName);
   }
+  const secretEnvFallbacks = buildSecretEnvFallbacks({
+    githubTokenEnv,
+    githubRepositoryTokenEnv,
+    providerCanonicalSecretEnvNames,
+    providerCredentialSourceEnvNames,
+  });
 
   const runtimeTask = runtimeTaskFromEnv(env);
   const runtimeExecution = parseJsonInput('runtime_execution', env.RUNTIME_EXECUTION || '{}', 'object', {});
@@ -156,14 +170,20 @@ function buildConfig(env) {
     runtime_component_paths: runtimeComponents,
     provider_plugin_paths: providerPluginPaths,
     runtime_requirements: effectiveRuntimeProfile,
-    github_token_env: 'HOMEBOY_GITHUB_APP_TOKEN',
-    github_repository_token_env: 'GITHUB_TOKEN',
+    github_token_env: githubTokenEnv,
+    github_repository_token_env: githubRepositoryTokenEnv,
     secret_env: uniqueStrings([
       ...normalizeStringArray(runtimeConfig.secret_env),
-      'GITHUB_TOKEN',
-      'HOMEBOY_GITHUB_APP_TOKEN',
+      githubRepositoryTokenEnv,
+      githubTokenEnv,
       ...Array.from(providerBenchEnvNames),
     ]),
+    // Fill a target secret env from a fallback source before the sandbox
+    // preflight runs: the provider's canonical key (e.g. OPENAI_API_KEY) from
+    // the caller's generic credential secret (PROVIDER_SECRET_n), and the
+    // Homeboy app token from the repository GITHUB_TOKEN when no app token is
+    // available. The run step applies these against its own environment.
+    ...(Object.keys(secretEnvFallbacks).length > 0 ? { secret_env_fallbacks: secretEnvFallbacks } : {}),
     github_profile_id: env.GITHUB_PROFILE_ID || `${workloadId}-ci`,
     target_repo: targetRepo,
     context_repositories: normalizeContextRepositories(env.CONTEXT_REPOSITORIES || '[]'),
@@ -280,6 +300,37 @@ function normalizeStringArray(value) {
 
 function uniqueStrings(values) {
   return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.length > 0))).sort();
+}
+
+// Build the declarative secret-env fallback map consumed by the run step. Each
+// entry maps a target secret env name to an ordered list of source env names;
+// the run step sets target = first non-empty source when target is unset. This
+// keeps the translation generic (driven by the runtime manifest + caller
+// credential mapping) with no per-consumer or per-provider hardcoding.
+function buildSecretEnvFallbacks({
+  githubTokenEnv,
+  githubRepositoryTokenEnv,
+  providerCanonicalSecretEnvNames = [],
+  providerCredentialSourceEnvNames = [],
+} = {}) {
+  const fallbacks = {};
+  // The Homeboy app token falls back to the repository GITHUB_TOKEN for
+  // consumers that run with require_homeboy_app_token=false and no app creds.
+  if (githubTokenEnv && githubRepositoryTokenEnv && githubTokenEnv !== githubRepositoryTokenEnv) {
+    fallbacks[githubTokenEnv] = [githubRepositoryTokenEnv];
+  }
+  // When the caller maps provider credentials to generic secret env names, the
+  // provider plugin still reads the runtime's canonical name (e.g.
+  // OPENAI_API_KEY), so source the canonical name from the mapped secret.
+  if (providerCredentialSourceEnvNames.length > 0) {
+    for (const canonical of providerCanonicalSecretEnvNames) {
+      const sources = providerCredentialSourceEnvNames.filter((name) => name !== canonical);
+      if (sources.length > 0) {
+        fallbacks[canonical] = uniqueStrings([...(fallbacks[canonical] || []), ...sources]);
+      }
+    }
+  }
+  return fallbacks;
 }
 
 function runtimeWorkloadFromEnv(env, fallbackId) {
@@ -461,4 +512,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys };
+module.exports = { buildConfig, buildSecretEnvFallbacks, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys };

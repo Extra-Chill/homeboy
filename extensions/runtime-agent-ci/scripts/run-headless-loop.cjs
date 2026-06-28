@@ -21,7 +21,15 @@ try {
     throw new Error('Pass --spec <path>, --config <path>, or HOMEBOY_RUNTIME_AGENT_CONFIG_PATH.');
   }
   const repoRoot = path.resolve(__dirname, '..', '..');
-  const spec = materializeHeadlessProductionLoopSpec(JSON.parse(fs.readFileSync(specPath, 'utf8')), {
+  const rawSpec = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+  // Fill required secret env names from declared fallbacks before any preflight
+  // runs. The provider's canonical key (e.g. OPENAI_API_KEY) is sourced from the
+  // caller's generic credential secret, and the Homeboy app token falls back to
+  // the repository GITHUB_TOKEN when no app token is present. Forwarding still
+  // happens through the secret-env-names-only boundary; only this process's env
+  // is populated so the names resolve.
+  applySecretEnvFallbacks(rawSpec.secret_env_fallbacks);
+  const spec = materializeHeadlessProductionLoopSpec(rawSpec, {
     revolutions: args.revolutions || args.max_revolutions || process.env.HOMEBOY_HEADLESS_LOOP_REVOLUTIONS,
     runtime_id: args.runtime_id || process.env.HOMEBOY_AGENT_RUNTIME,
     runtime_profile: args.runtime_profile || process.env.HOMEBOY_AGENT_RUNTIME_PROFILE,
@@ -83,4 +91,26 @@ function parseArgs(argv) {
 
 function listArg(value) {
   return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function applySecretEnvFallbacks(fallbacks) {
+  if (!fallbacks || typeof fallbacks !== 'object' || Array.isArray(fallbacks)) {
+    return;
+  }
+  for (const [target, sources] of Object.entries(fallbacks)) {
+    if (typeof target !== 'string' || target === '') {
+      continue;
+    }
+    if (typeof process.env[target] === 'string' && process.env[target] !== '') {
+      continue;
+    }
+    const sourceList = Array.isArray(sources) ? sources : [sources];
+    for (const source of sourceList) {
+      const value = typeof source === 'string' ? process.env[source] : undefined;
+      if (typeof value === 'string' && value !== '') {
+        process.env[target] = value;
+        break;
+      }
+    }
+  }
 }

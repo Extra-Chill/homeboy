@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { dependencyEntries, resolvePlan } = require(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/materialize-dependencies.cjs'));
-const { buildConfig, providerBenchEnvFromManifest } = require(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/build-runner-config.cjs'));
+const { buildConfig, buildSecretEnvFallbacks, providerBenchEnvFromManifest } = require(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/build-runner-config.cjs'));
 const { normalizeProviderPlugin } = require(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/lib/common.cjs'));
 const { resolveRuntimeProvider } = require(path.join(repoRoot, 'runtime-agent-ci/lib/runtime-provider-resolver.cjs'));
 
@@ -126,5 +126,42 @@ const neutralConfig = buildConfig({
 assert.deepEqual(neutralConfig.provider_secret_env_mapping, {});
 assert.equal('OPENAI_API_KEY' in neutralConfig.bench_env, false);
 assert.deepEqual(neutralConfig.secret_env, ['GITHUB_TOKEN', 'HOMEBOY_GITHUB_APP_TOKEN']);
+
+// Secret env fallbacks: the provider's canonical key is sourced from the mapped
+// generic credential secret, and the Homeboy app token falls back to GITHUB_TOKEN.
+assert.deepEqual(
+  buildSecretEnvFallbacks({
+    githubTokenEnv: 'HOMEBOY_GITHUB_APP_TOKEN',
+    githubRepositoryTokenEnv: 'GITHUB_TOKEN',
+    providerCanonicalSecretEnvNames: ['OPENAI_API_KEY'],
+    providerCredentialSourceEnvNames: ['PROVIDER_SECRET_1'],
+  }),
+  {
+    HOMEBOY_GITHUB_APP_TOKEN: ['GITHUB_TOKEN'],
+    OPENAI_API_KEY: ['PROVIDER_SECRET_1'],
+  }
+);
+
+// Without a caller credential mapping, only the GitHub token fallback applies.
+assert.deepEqual(
+  buildSecretEnvFallbacks({
+    githubTokenEnv: 'HOMEBOY_GITHUB_APP_TOKEN',
+    githubRepositoryTokenEnv: 'GITHUB_TOKEN',
+    providerCanonicalSecretEnvNames: ['OPENAI_API_KEY'],
+    providerCredentialSourceEnvNames: [],
+  }),
+  { HOMEBOY_GITHUB_APP_TOKEN: ['GITHUB_TOKEN'] }
+);
+
+// A canonical name that equals its own mapped source is not aliased to itself.
+assert.deepEqual(
+  buildSecretEnvFallbacks({
+    githubTokenEnv: 'HOMEBOY_GITHUB_APP_TOKEN',
+    githubRepositoryTokenEnv: 'GITHUB_TOKEN',
+    providerCanonicalSecretEnvNames: ['OPENAI_API_KEY'],
+    providerCredentialSourceEnvNames: ['OPENAI_API_KEY'],
+  }),
+  { HOMEBOY_GITHUB_APP_TOKEN: ['GITHUB_TOKEN'] }
+);
 
 console.log('runtime agent full-run provider-neutral smoke passed');

@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   buildConfig,
+  buildSecretEnvFallbacks,
   loopPolicyFromEnv,
   projectRuntimeConfig,
   providerBenchEnvFromManifest,
@@ -29,4 +30,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired };
+module.exports = { buildConfig, buildSecretEnvFallbacks, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired };
