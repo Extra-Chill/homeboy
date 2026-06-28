@@ -20,11 +20,12 @@ use super::normalize::{
 };
 use super::schema_defaults::{
     fuzz_campaign_schema, fuzz_case_log_schema, fuzz_case_schema, fuzz_contract_version,
-    fuzz_seed_schema, fuzz_surface_schema, fuzz_target_schema, fuzz_workload_schema,
+    fuzz_seed_schema, fuzz_sequence_plan_schema, fuzz_sequence_result_schema, fuzz_surface_schema,
+    fuzz_target_schema, fuzz_workload_schema,
 };
 use super::schemas::{
-    FUZZ_CASE_LOG_SCHEMA, FUZZ_CONTRACT_VERSION, FUZZ_SEED_SCHEMA, FUZZ_SURFACE_SCHEMA,
-    FUZZ_TARGET_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
+    FUZZ_CASE_LOG_SCHEMA, FUZZ_CONTRACT_VERSION, FUZZ_SEED_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
+    FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -373,6 +374,147 @@ impl FuzzCaseLogArtifactRef {
         self.kind = required_trimmed("artifact_refs[].kind", &self.kind)?;
         self.path = normalize_optional_string(self.path.take());
         self.uri = normalize_optional_string(self.uri.take());
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzSequencePlan {
+    #[serde(default = "fuzz_sequence_plan_schema")]
+    pub schema: String,
+    #[serde(default = "fuzz_contract_version")]
+    pub version: u32,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cases: Vec<FuzzSequenceCase>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzSequencePlan {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let mut plan: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
+        plan.normalize()?;
+        Ok(plan)
+    }
+
+    pub(super) fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_SEQUENCE_PLAN_SCHEMA);
+        require_schema(
+            &self.schema,
+            FUZZ_SEQUENCE_PLAN_SCHEMA,
+            "fuzz sequence plan",
+        )?;
+        if self.version != FUZZ_CONTRACT_VERSION {
+            return Err(format!(
+                "fuzz sequence plan version must be {FUZZ_CONTRACT_VERSION}"
+            ));
+        }
+        self.id = required_trimmed("sequence_plan.id", &self.id)?;
+        for case in &mut self.cases {
+            case.normalize()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzSequenceResult {
+    #[serde(default = "fuzz_sequence_result_schema")]
+    pub schema: String,
+    #[serde(default = "fuzz_contract_version")]
+    pub version: u32,
+    pub id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cases: Vec<FuzzSequenceCase>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzSequenceResult {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let mut result: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
+        result.normalize()?;
+        Ok(result)
+    }
+
+    pub(super) fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_SEQUENCE_RESULT_SCHEMA);
+        require_schema(
+            &self.schema,
+            FUZZ_SEQUENCE_RESULT_SCHEMA,
+            "fuzz sequence result",
+        )?;
+        if self.version != FUZZ_CONTRACT_VERSION {
+            return Err(format!(
+                "fuzz sequence result version must be {FUZZ_CONTRACT_VERSION}"
+            ));
+        }
+        self.id = required_trimmed("sequence_result.id", &self.id)?;
+        self.status = required_trimmed("sequence_result.status", &self.status)?;
+        for case in &mut self.cases {
+            case.normalize()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzSequenceCase {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<FuzzSequenceStep>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzSequenceCase {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.id = required_trimmed("sequence_case.id", &self.id)?;
+        self.target_id = normalize_optional_string(self.target_id.take());
+        self.operation_id = normalize_optional_string(self.operation_id.take());
+        for step in &mut self.steps {
+            step.normalize()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzSequenceStep {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub input: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub observed: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzSequenceStep {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.id = required_trimmed("sequence_step.id", &self.id)?;
+        self.kind = required_trimmed("sequence_step.kind", &self.kind)?;
+        self.target_id = normalize_optional_string(self.target_id.take());
+        self.operation_id = normalize_optional_string(self.operation_id.take());
         Ok(())
     }
 }

@@ -14,8 +14,8 @@ use super::schemas::{
     FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,
     FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEED_SCHEMA,
-    FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA,
-    FUZZ_WORKLOAD_SCHEMA,
+    FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SURFACE_SCHEMA,
+    FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,6 +42,10 @@ pub struct FuzzContractSchemas {
     pub case: String,
     #[serde(default = "super::schema_defaults::fuzz_case_log_schema")]
     pub case_log: String,
+    #[serde(default = "super::schema_defaults::fuzz_sequence_plan_schema")]
+    pub sequence_plan: String,
+    #[serde(default = "super::schema_defaults::fuzz_sequence_result_schema")]
+    pub sequence_result: String,
     pub seed: String,
     pub coverage: String,
     pub finding: String,
@@ -187,6 +191,8 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             campaign: FUZZ_CAMPAIGN_SCHEMA.to_string(),
             case: FUZZ_CASE_SCHEMA.to_string(),
             case_log: FUZZ_CASE_LOG_SCHEMA.to_string(),
+            sequence_plan: FUZZ_SEQUENCE_PLAN_SCHEMA.to_string(),
+            sequence_result: FUZZ_SEQUENCE_RESULT_SCHEMA.to_string(),
             seed: FUZZ_SEED_SCHEMA.to_string(),
             coverage: FUZZ_COVERAGE_SCHEMA.to_string(),
             finding: FUZZ_FINDING_SCHEMA.to_string(),

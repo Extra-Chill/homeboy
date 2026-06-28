@@ -13,6 +13,11 @@ fn core_contract_lists_product_neutral_schema_ids() {
     assert_eq!(contract.schemas.campaign, FUZZ_CAMPAIGN_SCHEMA);
     assert_eq!(contract.schemas.case, FUZZ_CASE_SCHEMA);
     assert_eq!(contract.schemas.case_log, FUZZ_CASE_LOG_SCHEMA);
+    assert_eq!(contract.schemas.sequence_plan, FUZZ_SEQUENCE_PLAN_SCHEMA);
+    assert_eq!(
+        contract.schemas.sequence_result,
+        FUZZ_SEQUENCE_RESULT_SCHEMA
+    );
     assert_eq!(contract.schemas.replay, FUZZ_REPLAY_SCHEMA);
     assert_eq!(
         contract.schemas.coverage_summary,
@@ -137,6 +142,11 @@ fn core_contract_deserializes_without_operation_families() {
     assert!(contract
         .operation_families
         .contains(&FuzzOperationFamily::Render));
+    assert_eq!(contract.schemas.sequence_plan, FUZZ_SEQUENCE_PLAN_SCHEMA);
+    assert_eq!(
+        contract.schemas.sequence_result,
+        FUZZ_SEQUENCE_RESULT_SCHEMA
+    );
     assert_eq!(
         contract.schemas.sampling_request,
         FUZZ_SAMPLING_REQUEST_SCHEMA

@@ -28,6 +28,8 @@ pub struct FuzzResultEnvelopeArtifactSummary {
     pub gate_status: String,
     pub campaign_id: String,
     pub gate_count: usize,
+    pub sequence_case_count: usize,
+    pub sequence_step_count: usize,
     pub required_artifact_count: usize,
     pub artifact_ref_count: usize,
 }
@@ -171,6 +173,7 @@ fn summarize_validated_envelope(
             .as_ref()
             .map(|campaign| campaign.artifacts.len())
             .unwrap_or(0);
+    let (sequence_case_count, sequence_step_count) = sequence_counts(envelope);
     let summary = FuzzResultEnvelopeArtifactSummary {
         schema: envelope.schema.clone(),
         envelope_id: envelope.id.clone(),
@@ -178,10 +181,69 @@ fn summarize_validated_envelope(
         gate_status: envelope.status.clone(),
         campaign_id,
         gate_count: envelope.gates.len(),
+        sequence_case_count,
+        sequence_step_count,
         required_artifact_count: envelope.required_artifacts.len(),
         artifact_ref_count,
     };
     (Some(summary), errors)
+}
+
+fn sequence_counts(envelope: &FuzzResultEnvelope) -> (usize, usize) {
+    let mut counts = SequenceCounts::default();
+    collect_sequence_counts(&envelope.metadata, &mut counts);
+    collect_sequence_counts(&envelope.request.metadata, &mut counts);
+    if let Some(campaign) = envelope.campaign.as_ref() {
+        collect_sequence_counts(&campaign.metadata, &mut counts);
+        for case in &campaign.cases {
+            collect_sequence_counts(&case.metadata, &mut counts);
+            collect_sequence_counts(&case.observed, &mut counts);
+        }
+    }
+    (counts.cases, counts.steps)
+}
+
+#[derive(Default)]
+struct SequenceCounts {
+    cases: usize,
+    steps: usize,
+}
+
+fn collect_sequence_counts(value: &serde_json::Value, counts: &mut SequenceCounts) {
+    if value.is_null() {
+        return;
+    }
+    for key in ["sequence", "sequence_plan", "sequence_result"] {
+        if let Some(sequence) = value.get(key) {
+            collect_sequence_counts_from_node(sequence, counts);
+        }
+    }
+    collect_sequence_counts_from_node(value, counts);
+}
+
+fn collect_sequence_counts_from_node(value: &serde_json::Value, counts: &mut SequenceCounts) {
+    if let Some(cases) = value
+        .get("cases")
+        .or_else(|| value.get("sequence_cases"))
+        .and_then(serde_json::Value::as_array)
+    {
+        counts.cases += cases.len();
+        for case in cases {
+            counts.steps += case
+                .get("steps")
+                .or_else(|| case.get("sequence_steps"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+        }
+    }
+    if let Some(steps) = value
+        .get("steps")
+        .or_else(|| value.get("sequence_steps"))
+        .and_then(serde_json::Value::as_array)
+    {
+        counts.steps += steps.len();
+    }
 }
 
 fn validate_artifact_refs(
