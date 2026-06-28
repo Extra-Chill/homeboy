@@ -139,7 +139,7 @@ name: Runtime Agent Full Run (reusable)
         type: boolean
         default: true
       proof_profile:
-        description: Controller-loop proof profile: artifact_only, cook_to_pr, or none.
+        description: "Controller-loop proof profile: artifact_only, cook_to_pr, or none."
         type: string
         default: artifact_only
       success_completion_outcomes:
