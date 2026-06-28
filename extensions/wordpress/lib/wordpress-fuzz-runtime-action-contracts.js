@@ -1,19 +1,26 @@
 'use strict';
 
-const RANDOM_WALK_RUNTIME_CONTRACT_UNAVAILABLE_REASON = 'wp-codebox-random-walk-runtime-contract-unavailable';
-const STATEFUL_SEQUENCE_RUNTIME_CONTRACT_UNAVAILABLE_REASON = 'wp-codebox-stateful-sequence-runtime-contract-unavailable';
+const WP_CODEBOX_RUNTIME_ACTION_TYPES = Object.freeze([
+	'admin_page',
+	'browser',
+	'browser_probe',
+	'crud_operation',
+	'editor_open',
+	'page',
+	'php',
+	'rest_request',
+	'wp_cli',
+]);
 
-function declaredOnlyRuntimeActionFields() {
+function wpCodeboxRuntimeActionTarget(type) {
 	return {
-		executable: false,
-		execution_tier: 'plan_only',
-		planned: true,
-		declared_only: true,
+		kind: 'runtime-action',
+		id: `runtime-action:${type}`,
+		entrypoint: type,
 	};
 }
 
 module.exports = {
-	RANDOM_WALK_RUNTIME_CONTRACT_UNAVAILABLE_REASON,
-	STATEFUL_SEQUENCE_RUNTIME_CONTRACT_UNAVAILABLE_REASON,
-	declaredOnlyRuntimeActionFields,
+	WP_CODEBOX_RUNTIME_ACTION_TYPES,
+	wpCodeboxRuntimeActionTarget,
 };

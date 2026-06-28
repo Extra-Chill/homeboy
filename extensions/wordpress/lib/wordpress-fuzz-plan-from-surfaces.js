@@ -31,9 +31,7 @@ const {
 	attachWordPressFuzzRuntimeWorkloadOperationDescriptor,
 } = require('./wordpress-fuzz-runtime-workload-operations');
 const {
-	RANDOM_WALK_RUNTIME_CONTRACT_UNAVAILABLE_REASON,
-	STATEFUL_SEQUENCE_RUNTIME_CONTRACT_UNAVAILABLE_REASON,
-	declaredOnlyRuntimeActionFields,
+	wpCodeboxRuntimeActionTarget,
 } = require('./wordpress-fuzz-runtime-action-contracts');
 
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -657,49 +655,84 @@ function randomWalkCaseFromSurface(surface, context, options = {}) {
 	const actionFamilies = randomWalkActionFamilies(options.random_walk_action_families || options.randomWalkActionFamilies);
 	const startUrl = randomWalkStartUrl(surface, context);
 	const requiredCapabilities = context === 'editor' ? ['browser', 'block-editor'] : ['browser'];
-	const input = stripUndefined({
-		type: 'random_walk',
+	const walkMaxSteps = Number.isFinite(maxSteps) ? maxSteps : 8;
+	const resetPolicy = randomWalkResetPolicy(surface, context, options);
+	const input = randomWalkRuntimeActionInput({
 		context,
 		seed,
-		max_steps: Number.isFinite(maxSteps) ? maxSteps : 8,
+		max_steps: walkMaxSteps,
 		action_families: actionFamilies,
 		start_url: startUrl,
-		reset_policy: randomWalkResetPolicy(surface, context, options),
+		reset_policy: resetPolicy,
 	});
 	const replay = stripUndefined({
 		schema: 'wp-codebox/browser-random-walk/v1',
 		seed,
-		maxSteps: input.max_steps,
+		maxSteps: walkMaxSteps,
 		actionFamilies,
 		context,
 		startUrl,
-		resetPolicy: input.reset_policy,
+		resetPolicy: resetPolicy,
 	});
 	return gateWordPressFuzzCaseForRuntimeCapabilities({
 		id: `${surface.id}-${context}-random-walk`,
 		intent: `${context}-random-walk`,
 		operation_id: `${surface.id}:${context}:random-walk`,
-		operation: stripUndefined({ ...operationForSurface(surface), runtime_action: 'random_walk', context, start_url: startUrl }),
-		executable: false,
-		execution_tier: 'plan_only',
+		operation: stripUndefined({ ...operationForSurface(surface), runtime_action: input.type, context, start_url: startUrl }),
 		seed,
-		target: { kind: 'runtime-action', id: 'wordpress.browser-actions', entrypoint: 'wordpress.browser-actions' },
+		target: wpCodeboxRuntimeActionTarget(input.type),
 		input,
 		required_capabilities: requiredCapabilities,
-		skip_reasons: reasonList([...normalizeArray(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason), RANDOM_WALK_RUNTIME_CONTRACT_UNAVAILABLE_REASON]),
+		skip_reasons: reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
 		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
 		metadata: stripUndefined({
 			surface,
 			random_walk: replay,
 			replay,
-			reset: input.reset_policy,
-			...declaredOnlyRuntimeActionFields(),
+			reset: replay.resetPolicy,
+			runtime_action_type: input.type,
 			safety: { mutation: 'bounded_random_user_actions', reset_required: true },
 		}),
 	}, options.runtimeCapabilities || options.runtime_capabilities, {
 		required_capabilities: requiredCapabilities,
 		mutation_mode: normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode),
 		mutates: true,
+	});
+}
+
+function randomWalkRuntimeActionInput(input = {}) {
+	if (input.context === 'editor') {
+		return stripUndefined({
+			type: 'editor_open',
+			url: input.start_url,
+			capture: ['console', 'network'],
+			metadata: randomWalkInputMetadata(input),
+		});
+	}
+	if (input.context === 'admin') {
+		return stripUndefined({
+			type: 'admin_page',
+			path: input.start_url || '/wp-admin/',
+			capture: ['console', 'network'],
+			metadata: randomWalkInputMetadata(input),
+		});
+	}
+	return stripUndefined({
+		type: 'browser_probe',
+		url: input.start_url || '/',
+		capture: ['console', 'network'],
+		metadata: randomWalkInputMetadata(input),
+	});
+}
+
+function randomWalkInputMetadata(input = {}) {
+	return stripUndefined({
+		random_walk: true,
+		context: input.context,
+		seed: input.seed,
+		max_steps: input.max_steps,
+		action_families: input.action_families,
+		reset_policy: input.reset_policy,
 	});
 }
 
@@ -1245,6 +1278,8 @@ function dbMutationCasesFromSurface(surface, operationId, options = {}) {
 				columns: mutation.columns,
 				options: mutation.options,
 			}),
+			target: wpCodeboxRuntimeActionTarget('php'),
+			input: dbMutationRuntimeActionInput(surface, mutation),
 			seed: options.seed,
 			required_capabilities: DB_MUTATION_REQUIRED_CAPABILITIES,
 			skip_reasons: [],
@@ -1257,6 +1292,7 @@ function dbMutationCasesFromSurface(surface, operationId, options = {}) {
 				mutation_lifecycle: mutationLifecycleContract({ kind: 'database', surface }),
 				isolation: isolatedMutationMetadata({ mutationMode, kind: 'database' }),
 				reset: isolatedResetMetadata({ kind: 'db_mutation', mutationMode }),
+				runtime_action_type: 'php',
 			},
 		}, options.runtimeCapabilities || options.runtime_capabilities, {
 			required_capabilities: DB_MUTATION_REQUIRED_CAPABILITIES,
@@ -1289,13 +1325,50 @@ function dbQueryCasesFromSurface(surface, operationId, options = {}) {
 				limit: 1,
 				options: { generated: true, bounded: true, source: 'schema-driven-db-query-generation' },
 			}),
+			target: wpCodeboxRuntimeActionTarget('php'),
+			input: dbQueryRuntimeActionInput(surface, column),
 			seed: options.seed,
 			metadata: {
 				surface,
 				db_generation: { schema: 'homeboy/wordpress-db-query-generation/v1', source: 'table-column-metadata', column: column.name },
 				replay: { source: 'schema-driven-db-query-generation', table: surface.table || surface.name || surface.id, column: column.name },
+				runtime_action_type: 'php',
 			},
 		}, { mutates: false }));
+}
+
+function dbQueryRuntimeActionInput(surface, column) {
+	const table = surface.table || surface.name || surface.id;
+	return {
+		type: 'php',
+		code: `$wpdb->get_results( $wpdb->prepare( 'SELECT * FROM ${table} WHERE ${column.name} = %s LIMIT 1', ${JSON.stringify(String(sampleValueForDbColumn(column)))} ) );`,
+		diagnostics: { capture: ['wpdb-queries'] },
+	};
+}
+
+function dbMutationRuntimeActionInput(surface, mutation = {}) {
+	const table = surface.table || surface.name || surface.id;
+	const operation = String(mutation.operation || mutation.name || mutation.type || 'update').toLowerCase();
+	const values = mutation.values || {};
+	const where = mutation.where || {};
+	return {
+		type: 'php',
+		code: dbMutationPhpCode({ table, operation, values, where, statement: mutation.statement || mutation.sql }),
+		diagnostics: { capture: ['wpdb-queries'] },
+	};
+}
+
+function dbMutationPhpCode({ table, operation, values, where, statement }) {
+	if (statement) {
+		return `$wpdb->query( ${JSON.stringify(String(statement))} );`;
+	}
+	if (operation === 'insert') {
+		return `$wpdb->insert( ${JSON.stringify(table)}, ${JSON.stringify(values || {})} );`;
+	}
+	if (operation === 'delete') {
+		return `$wpdb->delete( ${JSON.stringify(table)}, ${JSON.stringify(where || {})} );`;
+	}
+	return `$wpdb->update( ${JSON.stringify(table)}, ${JSON.stringify(values || {})}, ${JSON.stringify(where || {})} );`;
 }
 
 function generatedDbMutationMetadata(surface, options = {}) {
@@ -1333,7 +1406,10 @@ function statefulSequenceTargetsFromSurfaces(surfaces = [], options = {}) {
 	const ordered = deterministicShuffle(eligible, seed).slice(0, Number.isFinite(maxSteps) && maxSteps > 0 ? maxSteps : 8);
 	const steps = ordered.map((surface, index) => sequenceStepFromSurface(surface, index + 1));
 	const input = stripUndefined({
-		type: 'stateful_sequence',
+		type: 'php',
+		code: `$homeboy_stateful_sequence = ${JSON.stringify(steps)}; return $homeboy_stateful_sequence;`,
+		diagnostics: { capture: ['wpdb-queries'] },
+		sequence_type: 'stateful_sequence',
 		seed,
 		max_steps: steps.length,
 		steps,
@@ -1355,20 +1431,18 @@ function statefulSequenceTargetsFromSurfaces(surfaces = [], options = {}) {
 			id: 'wordpress-stateful-sequence-random-walk',
 			intent: 'stateful-sequence',
 			operation_id: 'wordpress-stateful-sequence:random-walk',
-			operation: { runtime_action: 'stateful_sequence', steps },
-			executable: false,
-			execution_tier: 'plan_only',
+			operation: { runtime_action: 'php', sequence_type: 'stateful_sequence', steps },
 			seed,
-			target: { kind: 'runtime-action', id: 'wordpress.run-stateful-sequence', entrypoint: 'wordpress.run-stateful-sequence' },
+			target: wpCodeboxRuntimeActionTarget('php'),
 			input,
 			required_capabilities: ['sequence', 'snapshot', 'restore'],
-			skip_reasons: [STATEFUL_SEQUENCE_RUNTIME_CONTRACT_UNAVAILABLE_REASON],
+			skip_reasons: [],
 			destructive_reasons: ['stateful-sequence-may-mutate'],
 			metadata: {
 				sequence: replay,
 				replay,
 				reset: input.reset_policy,
-				...declaredOnlyRuntimeActionFields(),
+				runtime_action_type: 'php',
 				safety: { mutation: 'bounded_stateful_sequence', reset_required: true },
 			},
 		}, options.runtimeCapabilities || options.runtime_capabilities, {

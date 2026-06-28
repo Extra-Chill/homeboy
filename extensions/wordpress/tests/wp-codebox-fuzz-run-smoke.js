@@ -300,8 +300,8 @@ const readinessContract = {
 		capabilities: ['target:runtime', 'runtime'],
 		targetKinds: ['runtime'],
 		operationKinds: ['read', 'crud', 'mutation'],
-		runtimeActionTypes: ['crud_operation', 'rest_request', 'db_operation'],
-		commands: ['wordpress.crud-operation', 'wordpress.rest-request', 'wordpress.db-operation', 'wordpress.run-workload'],
+		runtimeActionTypes: ['crud_operation', 'rest_request', 'php', 'wp_cli'],
+		commands: ['wordpress.crud-operation', 'wordpress.rest-request', 'wordpress.run-php', 'wordpress.wp-cli', 'wordpress.run-workload'],
 		unsupportedRequiredCapabilities: [],
 	},
 	unsupportedRequiredCapabilities: [],
@@ -314,7 +314,7 @@ const readinessCapabilities = detectWpCodeboxPublicFuzzCapabilities({
 assert.equal(readinessCapabilities.readiness.schema, 'wp-codebox/fuzz-runner-readiness/v1');
 assert.equal(readinessCapabilities.commands['run-fuzz-suite'], true);
 assert.equal(readinessCapabilities.commands['run-wordpress-workload'], true);
-assert.deepEqual(readinessCapabilities.capabilities, ['crud', 'database', 'query-observation', 'rest']);
+assert.deepEqual(readinessCapabilities.capabilities, ['crud', 'database', 'query-observation', 'rest', 'sequence']);
 const preflightReadinessPassed = preflightWpCodeboxFuzzCapabilityContract({
 	request: taskRequest,
 	runtimeContractManifest: manifest,
@@ -699,15 +699,16 @@ const descriptorPlanWorkloadInput = wpCodeboxFuzzSuiteInput({
 					id: 'rest:posts-get',
 					intent: 'request-rest-route',
 					operation: { method: 'GET', route: '/wp/v2/posts' },
-					runtime_operation: { schema: 'homeboy/wordpress-fuzz-runtime-workload-operation/v1', command: 'wordpress.request-rest-route', family: 'rest', status: 'ready' },
+					runtime_operation: { schema: 'homeboy/wordpress-fuzz-runtime-workload-operation/v1', command: 'wordpress.rest-request', family: 'rest', status: 'ready' },
 				}],
 			}],
 		},
 	},
 });
-assert.equal(descriptorPlanWorkloadInput.cases[0].target.entrypoint, 'wordpress.request-rest-route');
-assert.equal(descriptorPlanWorkloadInput.cases[0].phases.action[0].command, 'wordpress.request-rest-route');
-assert.equal(descriptorPlanWorkloadInput.cases[0].input.runtime_operation.family, 'rest');
+assert.equal(descriptorPlanWorkloadInput.cases[0].target.kind, 'runtime-action');
+assert.equal(descriptorPlanWorkloadInput.cases[0].target.entrypoint, 'rest_request');
+assert.equal(descriptorPlanWorkloadInput.cases[0].phases, undefined);
+assert.deepEqual(descriptorPlanWorkloadInput.cases[0].input, { type: 'rest_request', method: 'GET', path: '/wp/v2/posts' });
 
 const genericPlanTaskRequest = wpCodeboxFuzzSuiteTaskRequest({ taskId: 'generic-plan-task', input: genericPlanWorkloadInput });
 const genericPlanPreflight = preflightWpCodeboxFuzzCapabilityContract({

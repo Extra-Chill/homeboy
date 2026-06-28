@@ -14,13 +14,13 @@ const WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_SCHEMA = 'homeboy/wordpress-fuzz
 const WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_VALIDATION_SCHEMA = 'homeboy/wordpress-fuzz-runtime-workload-operation-validation/v1';
 
 const FAMILY_COMMANDS = Object.freeze({
-	crud: 'wordpress.crud',
-	rest: 'wordpress.request-rest-route',
-	admin_page: 'wordpress.load-admin-page',
-	frontend_page: 'wordpress.load-frontend-page',
-	block: 'wordpress.exercise-block',
-	database: 'wordpress.profile-database',
-	sequence: 'wordpress.run-stateful-sequence',
+	crud: 'wordpress.crud-operation',
+	rest: 'wordpress.rest-request',
+	admin_page: 'wordpress.admin-page-load',
+	frontend_page: 'wordpress.frontend-page-load',
+	block: 'wordpress.run-php',
+	database: 'wordpress.run-php',
+	sequence: 'wordpress.run-php',
 });
 
 const WP_CODEBOX_WORKLOAD_COMMAND = 'run-wordpress-workload';
@@ -37,6 +37,9 @@ const FAMILY_REQUIRED_CAPABILITIES = Object.freeze({
 });
 
 function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, options = {}) {
+	if (testCase.target?.kind === 'runtime-action') {
+		return undefined;
+	}
 	if (testCase.input?.type === 'random_walk' || testCase.operation?.runtime_action === 'random_walk') {
 		return undefined;
 	}
@@ -96,16 +99,6 @@ function runtimeReadinessBlockerForOperation(family, testCase = {}, readiness) {
 	const source = objectOrUndefined(readiness);
 	const operationKind = readinessOperationKindForFamily(family, testCase);
 	if (!source) {
-		if (operationKind === 'mutation') {
-			return {
-				code: 'wp-codebox-fuzz-live-readiness-required',
-				message: 'Mutating runtime workload operations require live WP Codebox readiness evidence before executable status can be claimed.',
-				operation_kind: operationKind,
-				skip_reason: 'wp-codebox-fuzz-live-readiness-required',
-				status: 'planned',
-				blocker: true,
-			};
-		}
 		return undefined;
 	}
 	if (source.command_available === false) {

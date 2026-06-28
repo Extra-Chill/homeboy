@@ -33,7 +33,7 @@ const crudDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crud
 });
 assert.equal(crudDescriptor.schema, WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_SCHEMA);
 assert.equal(crudDescriptor.family, 'crud');
-assert.equal(crudDescriptor.command, 'wordpress.crud');
+assert.equal(crudDescriptor.command, 'wordpress.crud-operation');
 assert.equal(crudDescriptor.wp_codebox_command, 'run-wordpress-workload');
 assert.equal(crudDescriptor.wp_codebox_ability, 'wp-codebox/run-wordpress-workload');
 assert.equal(crudDescriptor.metadata.wp_codebox_command, 'run-wordpress-workload');
@@ -48,7 +48,7 @@ const restDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
 	operation: { method: 'GET', route: '/wp/v2/posts' },
 }, { runtimeCapabilities: { capabilities: ['rest'] } });
 assert.equal(restDescriptor.family, 'rest');
-assert.equal(restDescriptor.command, 'wordpress.request-rest-route');
+assert.equal(restDescriptor.command, 'wordpress.rest-request');
 assert.deepEqual(restDescriptor.input, { method: 'GET', route: '/wp/v2/posts' });
 
 const readinessSupportedRestDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
@@ -78,7 +78,7 @@ assert.equal(readinessMissingCommandDescriptor.skip_reason, 'wp-codebox-fuzz-rea
 
 const adminDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ intent: 'request-admin-page', operation: { path: '/wp-admin/edit.php' } }, { runtimeCapabilities: { capabilities: ['admin'] } });
 assert.equal(adminDescriptor.family, 'admin_page');
-assert.equal(adminDescriptor.command, 'wordpress.load-admin-page');
+assert.equal(adminDescriptor.command, 'wordpress.admin-page-load');
 
 const adminMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
 	id: 'case:admin-post',
@@ -91,8 +91,8 @@ const adminMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescri
 		mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'admin', method: 'POST' }),
 	},
 }, { runtimeCapabilities: { capabilities: ['admin', 'snapshot', 'restore', 'reset'] } });
-assert.equal(adminMutationDescriptor.status, 'planned');
-assert.equal(adminMutationDescriptor.skip_reason, 'wp-codebox-fuzz-live-readiness-required');
+assert.equal(adminMutationDescriptor.status, 'ready');
+assert.equal(adminMutationDescriptor.skip_reason, undefined);
 assert.deepEqual(adminMutationDescriptor.required_capabilities, ['admin', 'reset', 'restore', 'snapshot']);
 assert.equal(adminMutationDescriptor.input.interaction_kind, 'form');
 assert.equal(adminMutationDescriptor.input.selector, '#posts-filter');
@@ -102,16 +102,16 @@ assert.deepEqual(adminMutationDescriptor.input.nonce_context, { required: true, 
 
 const pageDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ intent: 'request-frontend-page', metadata: { surface: { type: 'frontend-url' } }, operation: { path: '/' } }, { runtimeCapabilities: { capabilities: ['browser'] } });
 assert.equal(pageDescriptor.family, 'frontend_page');
-assert.equal(pageDescriptor.command, 'wordpress.load-frontend-page');
+assert.equal(pageDescriptor.command, 'wordpress.frontend-page-load');
 
 const blockDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ intent: 'render-block', operation: { block_name: 'core/paragraph', lifecycle: 'render' } }, { runtimeCapabilities: { capabilities: ['block'] } });
 assert.equal(blockDescriptor.family, 'block');
-assert.equal(blockDescriptor.command, 'wordpress.exercise-block');
+assert.equal(blockDescriptor.command, 'wordpress.run-php');
 assert.deepEqual(requiredCapabilitiesForWordPressFuzzRuntimeOperation({ intent: 'insert-block-in-editor', operation: { block_name: 'core/paragraph' } }), ['block', 'block-editor', 'browser']);
 
 const dbDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ intent: 'profile-database-query', operation: { query: 'SELECT ID FROM wp_posts' } }, { runtimeCapabilities: { capabilities: ['database', 'query-observation'] } });
 assert.equal(dbDescriptor.family, 'database');
-assert.equal(dbDescriptor.command, 'wordpress.profile-database');
+assert.equal(dbDescriptor.command, 'wordpress.run-php');
 assert.deepEqual(dbDescriptor.required_capabilities, ['database', 'query-observation']);
 
 const dbMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
@@ -120,8 +120,8 @@ const dbMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescripto
 	destructive_reasons: ['db-mutation'],
 	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'database' }) },
 }, { runtimeCapabilities: { capabilities: ['database', 'snapshot', 'transaction', 'reset'] } });
-assert.equal(dbMutationDescriptor.status, 'planned');
-assert.equal(dbMutationDescriptor.skip_reason, 'wp-codebox-fuzz-live-readiness-required');
+assert.equal(dbMutationDescriptor.status, 'ready');
+assert.equal(dbMutationDescriptor.skip_reason, undefined);
 assert.deepEqual(dbMutationDescriptor.required_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
 
 const capabilityOnlyMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
@@ -130,8 +130,8 @@ const capabilityOnlyMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperat
 	operation: { method: 'POST', route: '/example/v1/items' },
 	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'POST' }) },
 }, { runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback'] } });
-assert.equal(capabilityOnlyMutationDescriptor.status, 'planned');
-assert.equal(capabilityOnlyMutationDescriptor.skip_reason, 'wp-codebox-fuzz-live-readiness-required');
+assert.equal(capabilityOnlyMutationDescriptor.status, 'ready');
+assert.equal(capabilityOnlyMutationDescriptor.skip_reason, undefined);
 
 const mutationLifecycle = buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' });
 const mutatingDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({

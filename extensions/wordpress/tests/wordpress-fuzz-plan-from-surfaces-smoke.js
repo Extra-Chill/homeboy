@@ -56,7 +56,6 @@ assert.equal(targetTypes.option.cases[0].operation.safety.level, 'safe');
 assert.equal(targetTypes.option.cases[0].execution_tier, 'read_only_executable');
 assert.equal(targetTypes.option.cases[1].operation.capability_context.required[0], 'manage_options');
 assert(targetTypes.option.cases[1].skip_reasons.includes('crud_mutation_requires_explicit_allow'));
-assert(targetTypes.option.cases[1].skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
 assert.equal(targetTypes.option.cases[1].execution_tier, 'plan_only');
 assert.deepEqual(targetTypes['post-type'].cases.map((testCase) => testCase.intent), ['list-posts', 'read-post', 'create-post', 'update-post', 'delete-post']);
 assert.equal(targetTypes['post-type'].cases[0].operation.resource_type, 'post');
@@ -76,7 +75,6 @@ assert.equal(targetTypes['database-table'].cases[1].executable, false);
 assert.equal(targetTypes['database-table'].cases[1].execution_tier, 'plan_only');
 assert.deepEqual(targetTypes['database-table'].cases[1].required_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
 assert(targetTypes['database-table'].cases[1].skip_reasons.includes('missing-runtime-fuzz-capabilities'));
-assert(targetTypes['database-table'].cases[1].skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
 assert.deepEqual(targetTypes['database-table'].cases[1].metadata.missing_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
 assert.deepEqual(targetTypes['database-table'].cases[1].destructive_reasons, ['db-mutation']);
 assert.equal(targetTypes['database-table'].cases[1].metadata.mutation_lifecycle.schema, 'homeboy/wordpress-fuzz-mutation-lifecycle/v1');
@@ -88,11 +86,11 @@ assert.equal(targetTypes['external-http'].cases[0].intent, 'exercise-external-ht
 assert.equal(targetTypes['db-query'].cases[0].operation.query, 'SELECT ID FROM wp_posts WHERE post_type = ?');
 assert.equal(targetTypes['external-http'].cases[0].operation.url, 'https://api.example.test/v1/');
 assert(targetTypes.role.operation_id.includes('check-role-boundary'));
-assert.equal(targetTypes['rest-route'].cases[0].runtime_operation.command, 'wordpress.request-rest-route');
-assert.equal(targetTypes['admin-page'].cases[0].runtime_operation.command, 'wordpress.load-admin-page');
-assert.equal(targetTypes['frontend-url'].cases[0].runtime_operation.command, 'wordpress.load-frontend-page');
-assert.equal(targetTypes.block.cases[0].runtime_operation.command, 'wordpress.exercise-block');
-assert.equal(targetTypes['db-query'].cases[0].runtime_operation.command, 'wordpress.profile-database');
+assert.equal(targetTypes['rest-route'].cases[0].runtime_operation.command, 'wordpress.rest-request');
+assert.equal(targetTypes['admin-page'].cases[0].runtime_operation.command, 'wordpress.admin-page-load');
+assert.equal(targetTypes['frontend-url'].cases[0].runtime_operation.command, 'wordpress.frontend-page-load');
+assert.equal(targetTypes.block.cases[0].runtime_operation.command, 'wordpress.run-php');
+assert.equal(targetTypes['db-query'].cases[0].runtime_operation.command, 'wordpress.run-php');
 assert.equal(targetTypes.block.cases[0].operation.block_name, 'core/paragraph');
 assert.deepEqual(targetTypes.block.cases.map((testCase) => testCase.intent), ['render-block', 'serialize-parse-block', 'insert-block-in-editor']);
 assert.equal(targetTypes.block.cases[0].metadata.safety.mutation, 'read_only');
@@ -230,7 +228,6 @@ assert.deepEqual(resourcePlan.targets[0].cases.map((testCase) => testCase.intent
 assert.equal(resourcePlan.targets[0].cases[2].operation.resource_type, 'setting');
 assert.equal(resourcePlan.targets[0].cases[2].operation.capability_context.required[0], 'manage_options');
 assert(resourcePlan.targets[0].cases[2].skip_reasons.includes('requires-isolated-mutation-runtime'));
-assert(resourcePlan.targets[0].cases[2].skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
 assert.equal(resourcePlan.targets[0].cases[2].executable, false);
 assert.deepEqual(resourcePlan.targets[0].cases[2].required_capabilities, ['checkpoint', 'crud', 'rest', 'rest-rollback']);
 assert.deepEqual(resourcePlan.targets[0].cases[2].metadata.mutation_lifecycle.required_capabilities, ['checkpoint', 'crud', 'rest', 'rest-rollback']);
@@ -250,22 +247,25 @@ const randomWalkDeclaredPlan = buildWordPressFuzzPlanFromSurfaces({
 	randomWalkMaxSteps: 6,
 	randomWalkActionFamilies: ['click', 'capture'],
 });
-const randomWalkCases = randomWalkDeclaredPlan.targets.flatMap((target) => target.cases).filter((testCase) => testCase.input?.type === 'random_walk');
+const randomWalkCases = randomWalkDeclaredPlan.targets.flatMap((target) => target.cases).filter((testCase) => testCase.metadata.random_walk);
 assert.deepEqual([...randomWalkCases.map((testCase) => testCase.intent)].sort(), ['admin-random-walk', 'browser-random-walk', 'editor-random-walk'].sort());
-assert.equal(randomWalkCases.find((testCase) => testCase.intent === 'browser-random-walk').execution_tier, 'plan_only');
-assert.equal(randomWalkCases.every((testCase) => testCase.executable === false), true);
-assert.equal(randomWalkCases.every((testCase) => testCase.skip_reasons.includes('wp-codebox-random-walk-runtime-contract-unavailable')), true);
-assert(randomWalkCases.every((testCase) => JSON.stringify(testCase.input.action_families) === JSON.stringify(['click', 'capture'])));
+assert.equal(randomWalkCases.find((testCase) => testCase.intent === 'browser-random-walk').execution_tier, 'isolated_mutating_executable');
+assert.equal(randomWalkCases.every((testCase) => testCase.executable === true), true);
+assert.equal(randomWalkCases.every((testCase) => testCase.target.kind === 'runtime-action'), true);
+assert.deepEqual([...new Set(randomWalkCases.map((testCase) => testCase.input.type))].sort(), ['admin_page', 'browser_probe', 'editor_open']);
+assert.equal(randomWalkCases.every((testCase) => !testCase.skip_reasons.includes('wp-codebox-random-walk-runtime-contract-unavailable')), true);
+assert(randomWalkCases.every((testCase) => JSON.stringify(testCase.input.metadata.action_families) === JSON.stringify(['click', 'capture'])));
 assert(randomWalkCases.every((testCase) => testCase.metadata.random_walk.maxSteps === 6));
 assert.equal(randomWalkCases.find((testCase) => testCase.intent === 'admin-random-walk').metadata.random_walk.seed, 'walk-seed:admin:walk:admin');
 assert.equal(randomWalkDeclaredPlan.targets.find((target) => target.type === 'admin-page').cases[1].intent, 'discover-admin-page-actions');
 assert.equal(randomWalkDeclaredPlan.targets.find((target) => target.type === 'admin-page').cases[1].metadata.action_discovery.executes_actions, false);
 const statefulSequenceTarget = randomWalkDeclaredPlan.targets.find((target) => target.type === 'stateful-sequence');
 assert.equal(statefulSequenceTarget.cases[0].intent, 'stateful-sequence');
-assert.equal(statefulSequenceTarget.cases[0].input.type, 'stateful_sequence');
+assert.equal(statefulSequenceTarget.cases[0].input.type, 'php');
 assert.equal(statefulSequenceTarget.cases[0].metadata.replay.schema, 'wp-codebox/stateful-sequence/v1');
 assert.deepEqual(statefulSequenceTarget.cases[0].metadata.replay.steps.map((step) => step.family).sort(), ['admin', 'browser', 'editor'].sort());
 assert.equal(statefulSequenceTarget.cases[0].execution_tier, 'plan_only');
+assert(statefulSequenceTarget.cases[0].skip_reasons.includes('missing-runtime-fuzz-capabilities'));
 
 const sequenceCapablePlan = buildWordPressFuzzPlanFromSurfaces({
 	frontend: [{ id: 'front:seq', path: '/sequence/' }],
@@ -277,10 +277,10 @@ const sequenceCapablePlan = buildWordPressFuzzPlanFromSurfaces({
 	statefulSequenceMaxSteps: 2,
 });
 const sequenceCase = sequenceCapablePlan.targets.find((target) => target.type === 'stateful-sequence').cases[0];
-assert.equal(sequenceCase.executable, false);
-assert.equal(sequenceCase.runtime_operation.command, 'wordpress.run-stateful-sequence');
-assert.equal(sequenceCase.runtime_operation.status, 'blocked');
-assert.equal(sequenceCase.runtime_operation.input.steps.length, 2);
+assert.equal(sequenceCase.executable, true);
+assert.equal(sequenceCase.target.kind, 'runtime-action');
+assert.equal(sequenceCase.input.type, 'php');
+assert.equal(sequenceCase.input.steps.length, 2);
 assert.equal(sequenceCase.metadata.replay.seed, 'sequence-seed');
 
 const aggressivePayloadPlan = buildWordPressFuzzPlanFromSurfaces({
@@ -384,7 +384,6 @@ assert.equal(adminCases[0].execution_tier, 'read_only_executable');
 assert.equal(adminCases[1].intent, 'plan-admin-page-mutation');
 assert(adminCases[1].skip_reasons.includes('missing-runtime-fuzz-capabilities'));
 assert(adminCases[1].skip_reasons.includes('requires_explicit_mutation_opt_in'));
-assert(adminCases[1].skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
 assert.deepEqual(adminCases[1].destructive_reasons, ['form_mutation']);
 assert.equal(adminCases[1].metadata.executable, false);
 assert.equal(adminCases[1].metadata.gated, true);
@@ -427,22 +426,18 @@ assert.equal(capableCrudMutation.executable, false);
 assert.deepEqual(capableCrudMutation.required_capabilities, ['crud', 'reset', 'restore', 'snapshot']);
 assert.equal(capableCrudMutation.metadata.mutation_lifecycle.kind, 'crud');
 assert(capableCrudMutation.skip_reasons.includes('requires-isolated-mutation-runtime'));
-assert(capableCrudMutation.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
 assert.equal(capableCrudMutation.execution_tier, 'plan_only');
 const capableRestMutation = capableCases.find((entry) => entry.intent === 'request-rest-route');
 assert.equal(capableRestMutation.executable, false);
 assert.equal(capableRestMutation.metadata.runtime_capability_gated, false);
 assert(capableRestMutation.skip_reasons.includes('mutating_rest_method_requires_explicit_opt_in'));
 assert(capableRestMutation.skip_reasons.includes('requires-isolated-mutation-runtime'));
-assert(capableRestMutation.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
 assert.equal(capableRestMutation.execution_tier, 'plan_only');
 const capableDbMutation = capableCases.find((entry) => entry.intent === 'mutate-database-table');
 assert.equal(capableDbMutation.executable, false);
 assert.equal(capableDbMutation.metadata.runtime_capability_gated, false);
 assert(capableDbMutation.skip_reasons.includes('requires-isolated-mutation-runtime'));
-assert(capableDbMutation.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
 assert.equal(capableDbMutation.execution_tier, 'plan_only');
-assert.equal(capableDbMutation.runtime_operation.status, 'planned');
 const capableAdminMutation = capableCases.find((entry) => entry.intent === 'plan-admin-page-mutation');
 assert.equal(capableAdminMutation.executable, false);
 assert.equal(capableAdminMutation.metadata.runtime_capability_gated, false);
@@ -510,9 +505,10 @@ const generatedDbMutations = aggressiveDbCases.filter((testCase) => testCase.int
 assert.deepEqual(generatedDbMutations.map((testCase) => testCase.operation.mutation).sort(), ['delete', 'insert', 'update']);
 assert(generatedDbMutations.every((testCase) => testCase.metadata.reset.required_capabilities.includes('database')));
 assert(generatedDbMutations.every((testCase) => testCase.metadata.isolation.boundary === 'per_case'));
-assert(generatedDbMutations.every((testCase) => testCase.executable === false));
-assert(generatedDbMutations.every((testCase) => testCase.execution_tier === 'plan_only'));
-assert(generatedDbMutations.every((testCase) => testCase.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required')));
+assert(generatedDbMutations.every((testCase) => testCase.executable === true));
+assert(generatedDbMutations.every((testCase) => testCase.execution_tier === 'isolated_mutating_executable'));
+assert(generatedDbMutations.every((testCase) => testCase.target.kind === 'runtime-action'));
+assert(generatedDbMutations.every((testCase) => testCase.input.type === 'php'));
 
 const missingMetadataPlan = buildWordPressFuzzPlanFromSurfaces({
 	database: { tables: { unknown: { id: 'db:unknown', table: 'wp_unknown' } } },
@@ -578,7 +574,6 @@ assert.equal(readOnlyCreate.executable, false);
 assert.equal(readOnlyCreate.metadata.mutation_policy_gated, true);
 assert.equal(readOnlyCreate.metadata.mutation_policy.mode, 'read_only');
 assert(readOnlyCreate.skip_reasons.includes('mutation-policy-read-only'));
-assert(readOnlyCreate.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
 assert.equal(readOnlyCreate.execution_tier, 'plan_only');
 
 const aggressiveDefaultPlan = buildWordPressFuzzPlanFromSurfaces({
@@ -595,7 +590,6 @@ const aggressiveDefaultRest = aggressiveDefaultCases.find((entry) => entry.inten
 assert.equal(aggressiveDefaultCreate.executable, false);
 assert.equal(aggressiveDefaultCreate.execution_tier, 'plan_only');
 assert(aggressiveDefaultCreate.skip_reasons.includes('requires-isolated-mutation-runtime'));
-assert(aggressiveDefaultCreate.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
 assert.equal(aggressiveDefaultCreate.metadata.reset.schema, 'homeboy/wordpress-fuzz-reset/v1');
 assert.equal(aggressiveDefaultCreate.metadata.isolation.schema, 'homeboy/wordpress-fuzz-isolation/v1');
 assert.equal(aggressiveDefaultRest.executable, false);
@@ -630,16 +624,13 @@ assert.equal(aggressiveIsolatedPlan.metadata.mutation_mode, 'aggressive-isolated
 const aggressiveIsolatedCases = aggressiveIsolatedPlan.targets.flatMap((target) => target.cases);
 for (const intent of ['create-post', 'request-rest-route', 'plan-admin-page-mutation', 'mutate-database-table']) {
 	const testCase = aggressiveIsolatedCases.find((entry) => entry.intent === intent);
-	assert.equal(testCase.executable, false, `${intent} should stay planned without live WP Codebox readiness`);
-	assert(testCase.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
-	assert.equal(testCase.execution_tier, 'plan_only');
-	assert.equal(testCase.metadata.planned, true);
-	assert.equal(testCase.metadata.gated, true);
+	assert.equal(testCase.executable, true, `${intent} should execute in aggressive-isolated mode with runtime capabilities`);
+	assert.equal(testCase.execution_tier, 'isolated_mutating_executable');
+	assert.equal(testCase.metadata.gated, false);
 	assert.equal(testCase.metadata.isolation.mode, 'aggressive-isolated');
 	assert.equal(testCase.metadata.isolation.boundary, 'per_case');
 	assert.equal(testCase.metadata.reset.mode, 'aggressive-isolated');
 	assert.equal(testCase.metadata.reset.boundary, 'after_each_case');
-	assert.equal(testCase.runtime_operation.status, 'planned');
 }
 const aggressiveAdminMutation = aggressiveIsolatedCases.find((entry) => entry.intent === 'plan-admin-page-mutation');
 assert.equal(aggressiveAdminMutation.runtime_operation.input.path, '/wp-admin/edit.php');
@@ -651,7 +642,8 @@ const aggressiveDbMutation = aggressiveIsolatedCases.find((entry) => entry.inten
 assert.deepEqual(aggressiveDbMutation.required_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
 assert.equal(aggressiveDbMutation.metadata.mutation_lifecycle.kind, 'database');
 assert.deepEqual(aggressiveDbMutation.metadata.reset.required_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
-assert.deepEqual(aggressiveDbMutation.runtime_operation.required_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
+assert.equal(aggressiveDbMutation.target.kind, 'runtime-action');
+assert.equal(aggressiveDbMutation.input.type, 'php');
 
 const destructiveIsolatedAliasPlan = buildWordPressFuzzPlanFromSurfaces({
 	post_types: [{ id: 'post:destructive-isolated-alias', post_type: 'post', allowCrudMutations: true }],
@@ -661,8 +653,7 @@ const destructiveIsolatedAliasPlan = buildWordPressFuzzPlanFromSurfaces({
 });
 assert.equal(destructiveIsolatedAliasPlan.metadata.mutation_mode, 'aggressive-isolated');
 const destructiveIsolatedCreate = destructiveIsolatedAliasPlan.targets[0].cases.find((entry) => entry.intent === 'create-post');
-assert.equal(destructiveIsolatedCreate.executable, false);
-assert(destructiveIsolatedCreate.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
+assert.equal(destructiveIsolatedCreate.executable, true);
 
 const argDrivenConservativePlan = buildWordPressFuzzPlanFromSurfaces({
 	rest: [{
@@ -703,15 +694,14 @@ assert.deepEqual(argDrivenCases.find((testCase) => testCase.metadata.arg_generat
 assert.equal(argDrivenCases.find((testCase) => testCase.metadata.arg_generation.variant === 'payload-boolean').operation.request_body.published, false);
 assert.deepEqual(argDrivenCases.find((testCase) => testCase.metadata.arg_generation.variant === 'invalid-type').operation.request_body.title, { invalid: 'object-for-string' });
 for (const testCase of argDrivenCases) {
-	assert.equal(testCase.executable, false);
-	assert.equal(testCase.execution_tier, 'plan_only');
-	assert(testCase.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
+	assert.equal(testCase.executable, true);
+	assert.equal(testCase.execution_tier, 'isolated_mutating_executable');
 	assert.equal(testCase.metadata.replay.seed, 'seed-args');
 	assert.equal(testCase.metadata.replay.variant, testCase.metadata.arg_generation.variant);
 	assert.equal(testCase.metadata.deterministic_seed, 'seed-args');
 	assert.equal(testCase.metadata.isolation.mode, 'aggressive-isolated');
 	assert.equal(testCase.metadata.reset.boundary, 'after_each_case');
-	assert.equal(testCase.runtime_operation.status, 'planned');
+	assert.equal(testCase.runtime_operation.status, 'ready');
 	assert.deepEqual(testCase.runtime_operation.input.request_body, testCase.operation.request_body);
 }
 
@@ -746,16 +736,15 @@ assert.deepEqual(schemaDbCases.filter((testCase) => testCase.intent === 'profile
 const schemaDbMutations = schemaDbCases.filter((testCase) => testCase.intent === 'mutate-database-table');
 assert.deepEqual(schemaDbMutations.map((testCase) => testCase.operation.mutation), ['insert', 'update', 'delete']);
 for (const testCase of schemaDbMutations) {
-	assert.equal(testCase.executable, false);
-	assert.equal(testCase.execution_tier, 'plan_only');
-	assert(testCase.skip_reasons.includes('wp-codebox-fuzz-live-readiness-required'));
+	assert.equal(testCase.executable, true);
+	assert.equal(testCase.execution_tier, 'isolated_mutating_executable');
+	assert.equal(testCase.target.kind, 'runtime-action');
+	assert.equal(testCase.input.type, 'php');
 	assert.equal(testCase.metadata.seed.source, 'schema-driven-db-generation');
 	assert.equal(testCase.metadata.replay.seed, undefined);
 	assert.equal(testCase.metadata.replay.table, 'wp_demo');
-	assert.equal(testCase.runtime_operation.status, 'planned');
-	assert.deepEqual(testCase.runtime_operation.input.values, testCase.operation.values);
 }
-assert.deepEqual(schemaDbCases.find((testCase) => testCase.operation.mutation === 'update').runtime_operation.input.where, { id: 1 });
-assert.deepEqual(schemaDbCases.find((testCase) => testCase.operation.mutation === 'delete').runtime_operation.input.where, { id: 1 });
+assert(schemaDbCases.find((testCase) => testCase.operation.mutation === 'update').input.code.includes('$wpdb->update'));
+assert(schemaDbCases.find((testCase) => testCase.operation.mutation === 'delete').input.code.includes('$wpdb->delete'));
 
 console.log('WordPress fuzz plan from surfaces smoke passed.');
