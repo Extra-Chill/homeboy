@@ -20,6 +20,7 @@ const FAMILY_COMMANDS = Object.freeze({
 	frontend_page: 'wordpress.load-frontend-page',
 	block: 'wordpress.exercise-block',
 	database: 'wordpress.profile-database',
+	sequence: 'wordpress.run-stateful-sequence',
 });
 
 const WP_CODEBOX_WORKLOAD_COMMAND = 'run-wordpress-workload';
@@ -32,6 +33,7 @@ const FAMILY_REQUIRED_CAPABILITIES = Object.freeze({
 	frontend_page: Object.freeze(['browser']),
 	block: Object.freeze(['block']),
 	database: Object.freeze(['database']),
+	sequence: Object.freeze(['sequence']),
 });
 
 function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, options = {}) {
@@ -287,6 +289,9 @@ function requiredInputFieldsForFamily(family, input = {}) {
 	if (family === 'database') {
 		return input.table || input.query || input.statement ? [] : ['query'];
 	}
+	if (family === 'sequence') {
+		return ['steps'];
+	}
 	return [];
 }
 
@@ -350,6 +355,9 @@ function runtimeOperationFamily(testCase = {}) {
 	if (intent.includes('database') || intent.includes('db-query') || ['database-table', 'db-query'].includes(surfaceType) || operation.table || operation.query || operation.statement) {
 		return 'database';
 	}
+	if (intent === 'stateful-sequence' || operation.runtime_action === 'stateful_sequence' || testCase.input?.type === 'stateful_sequence') {
+		return 'sequence';
+	}
 	return undefined;
 }
 
@@ -396,6 +404,9 @@ function runtimeOperationInput(testCase = {}, { family } = {}) {
 	}
 	if (family === 'database') {
 		return stripUndefined({ table: operation.table || surface.table, query: operation.query || surface.query, statement: operation.statement || surface.statement, mutation: operation.mutation, where: operation.where, values: operation.values, columns: operation.columns, limit: operation.limit, options: operation.options, observation: operation.observation || operation.profile });
+	}
+	if (family === 'sequence') {
+		return testCase.input || operation;
 	}
 	return operation;
 }

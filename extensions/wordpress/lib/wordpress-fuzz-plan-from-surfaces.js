@@ -44,7 +44,10 @@ function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 		label: input.label || options.label || 'WordPress surface discovery',
 		surfaces: collectWordPressFuzzPlanSurfaces(input),
 	});
-	const targets = decoratePlanTargets(discovery.surfaces.map((surface) => targetFromSurface(surface, targetOptions)), targetOptions);
+	const targets = decoratePlanTargets([
+		...discovery.surfaces.map((surface) => targetFromSurface(surface, targetOptions)),
+		...statefulSequenceTargetsFromSurfaces(discovery.surfaces, targetOptions),
+	], targetOptions);
 
 	return normalizeWordPressFuzzPlan({
 		schema: WORDPRESS_FUZZ_PLAN_SCHEMA,
@@ -328,13 +331,27 @@ function restRouteCaseWithArgVariant(baseCase, surface, method, variant, options
 				schema: 'homeboy/wordpress-rest-arg-driven-case/v1',
 				mode: 'aggressive-isolated',
 				variant: variant.name,
+				payload_family: variant.payload_family,
 				arg_names: variant.arg_names,
 				types: variant.types,
+				max_payload_bounds: restPayloadBoundsForVariant(surface, variant),
 			},
 			replay,
 			deterministic_seed: options.seed,
 		}),
 	};
+}
+
+function restPayloadBoundsForVariant(surface, variant) {
+	const args = normalizeRestRouteArgs(surface.args || surface.arguments || surface.params || surface.parameters);
+	const bounds = {};
+	for (const name of variant.arg_names || []) {
+		const arg = args.find((entry) => entry.name === name);
+		if (arg) {
+			bounds[name] = { bytes: restPayloadBound(arg, 'bytes'), items: restPayloadBound(arg, 'items'), depth: restPayloadBound(arg, 'depth') };
+		}
+	}
+	return Object.keys(bounds).length > 0 ? bounds : undefined;
 }
 
 function bindRestArgVariantToOperation(operation, method, variant) {
@@ -358,9 +375,15 @@ function restArgDrivenVariants(surface, method) {
 	const requiredArgs = args.filter((arg) => arg.required);
 	variants.push(restArgVariant('valid-minimal', Object.fromEntries(requiredArgs.map((arg) => [arg.name, sampleValueForRestArg(arg)])), requiredArgs));
 
-	const boundaryArgs = args.filter((arg) => restArgTypes(arg).some((type) => ['string', 'array'].includes(type))).slice(0, 2);
+	const boundaryArgs = args.filter((arg) => restArgTypes(arg).some((type) => ['string', 'array', 'object'].includes(type))).slice(0, 2);
 	if (boundaryArgs.length > 0) {
-		variants.push(restArgVariant('boundary-large', Object.fromEntries(boundaryArgs.map((arg) => [arg.name, boundaryValueForRestArg(arg)])), boundaryArgs));
+		variants.push(restArgVariant('boundary-large', Object.fromEntries(boundaryArgs.map((arg) => [arg.name, boundaryValueForRestArg(arg)])), boundaryArgs, { payload_family: 'large' }));
+	}
+	for (const family of ['empty', 'null', 'enum', 'numeric', 'boolean', 'nested', 'repeated']) {
+		const familyArgs = args.filter((arg) => payloadFamilySupportsRestArg(family, arg)).slice(0, 2);
+		if (familyArgs.length > 0) {
+			variants.push(restArgVariant(`payload-${family}`, Object.fromEntries(familyArgs.map((arg) => [arg.name, payloadFamilyValueForRestArg(family, arg)])), familyArgs, { payload_family: family }));
+		}
 	}
 
 	const invalidArg = args.find((arg) => arg.name);
@@ -368,15 +391,16 @@ function restArgDrivenVariants(surface, method) {
 		variants.push(restArgVariant('invalid-type', { [invalidArg.name]: invalidValueForRestArg(invalidArg) }, [invalidArg]));
 	}
 
-	return variants.filter((variant) => Object.keys(variant.values).length > 0).slice(0, 3).map((variant) => ({ ...variant, method }));
+	return variants.filter((variant) => Object.keys(variant.values).length > 0).map((variant) => ({ ...variant, method }));
 }
 
-function restArgVariant(name, values, args) {
+function restArgVariant(name, values, args, metadata = {}) {
 	return {
 		name,
 		values,
 		arg_names: args.map((arg) => arg.name).filter(Boolean),
 		types: Object.fromEntries(args.map((arg) => [arg.name, restArgTypes(arg)]).filter(([name]) => Boolean(name))),
+		...metadata,
 	};
 }
 
@@ -435,9 +459,79 @@ function sampleValueForRestArg(arg) {
 
 function boundaryValueForRestArg(arg) {
 	if (restArgTypes(arg).includes('array')) {
-		return Array.from({ length: 16 }, (_, index) => `item-${index + 1}`);
+		return Array.from({ length: restPayloadBound(arg, 'items') }, (_, index) => `item-${index + 1}`);
 	}
-	return 'x'.repeat(4096);
+	if (restArgTypes(arg).includes('object')) {
+		return nestedPayloadValue(restPayloadBound(arg, 'depth'));
+	}
+	return 'x'.repeat(restPayloadBound(arg, 'bytes'));
+}
+
+function payloadFamilySupportsRestArg(family, arg) {
+	const types = restArgTypes(arg);
+	if (family === 'empty' || family === 'null' || family === 'repeated') {
+		return true;
+	}
+	if (family === 'enum') {
+		return Array.isArray(arg.enum) && arg.enum.length > 0;
+	}
+	if (family === 'numeric') {
+		return types.some((type) => ['integer', 'number'].includes(type));
+	}
+	if (family === 'boolean') {
+		return types.includes('boolean');
+	}
+	if (family === 'nested') {
+		return types.some((type) => ['object', 'array'].includes(type));
+	}
+	return false;
+}
+
+function payloadFamilyValueForRestArg(family, arg) {
+	const types = restArgTypes(arg);
+	if (family === 'empty') {
+		return types.includes('array') ? [] : (types.includes('object') ? {} : '');
+	}
+	if (family === 'null') {
+		return null;
+	}
+	if (family === 'enum') {
+		return arg.enum[arg.enum.length - 1];
+	}
+	if (family === 'numeric') {
+		const explicitMax = Number(arg.maximum ?? arg.max ?? arg.max_value ?? arg.maxValue);
+		if (Number.isFinite(explicitMax)) {
+			return types.includes('integer') ? Math.floor(explicitMax) : explicitMax;
+		}
+		return types.includes('integer') ? 1 : 1.5;
+	}
+	if (family === 'boolean') {
+		return false;
+	}
+	if (family === 'nested') {
+		return nestedPayloadValue(restPayloadBound(arg, 'depth'));
+	}
+	if (family === 'repeated') {
+		return Array.from({ length: restPayloadBound(arg, 'items') }, (_, index) => sampleValueForRestArg({ ...arg, default: undefined, enum: undefined, name: `${arg.name}-${index}` }));
+	}
+	return sampleValueForRestArg(arg);
+}
+
+function restPayloadBound(arg = {}, kind) {
+	const bounds = arg.max_payload_bounds || arg.maxPayloadBounds || arg.bounds || {};
+	const value = Number(bounds[kind] || bounds.max || arg[`max_${kind}`] || arg[`max${kind[0].toUpperCase()}${kind.slice(1)}`]);
+	if (Number.isFinite(value) && value > 0) {
+		return Math.floor(value);
+	}
+	return { bytes: 4096, items: 16, depth: 3 }[kind];
+}
+
+function nestedPayloadValue(depth) {
+	let value = { leaf: 'sample' };
+	for (let index = 0; index < depth; index += 1) {
+		value = { level: index + 1, child: value, items: [value] };
+	}
+	return value;
 }
 
 function invalidValueForRestArg(arg) {
@@ -522,7 +616,7 @@ function casesForSurface(surface, options = {}) {
 	}
 	if (['database-table', 'db-query'].includes(surface.type)) {
 		const testCase = genericCaseForSurface(surface, options);
-		return [testCase, ...dbMutationCasesFromSurface(surface, testCase.operation_id, options)];
+		return [testCase, ...dbQueryCasesFromSurface(surface, testCase.operation_id, options), ...dbMutationCasesFromSurface(surface, testCase.operation_id, options)];
 	}
 	const crudResource = crudResourceForSurface(surface);
 	if (!crudResource) {
@@ -1164,9 +1258,41 @@ function dbMutationCasesFromSurface(surface, operationId, options = {}) {
 	});
 }
 
+function dbQueryCasesFromSurface(surface, operationId, options = {}) {
+	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
+	if (surface.type !== 'database-table' || mutationMode !== 'aggressive-isolated') {
+		return [];
+	}
+	const keyColumn = dbPrimaryishColumn(surface);
+	const valueColumn = dbWritableColumn(surface);
+	if (!keyColumn && !valueColumn) {
+		return [];
+	}
+	return [keyColumn, valueColumn]
+		.filter(Boolean)
+		.map((column) => annotateWordPressFuzzCaseExecutionTier({
+			id: `${surface.id}-schema-query-${safeIdPart(column.name)}`,
+			intent: 'profile-database-query',
+			operation_id: `${operationId}:schema-query:${safeIdPart(column.name)}`,
+			operation: stripUndefined({
+				...operationForSurface(surface),
+				query: `SELECT * FROM ${surface.table || surface.name || surface.id} WHERE ${column.name} = ? LIMIT 1`,
+				where: { [column.name]: sampleValueForDbColumn(column) },
+				limit: 1,
+				options: { generated: true, bounded: true, source: 'schema-driven-db-query-generation' },
+			}),
+			seed: options.seed,
+			metadata: {
+				surface,
+				db_generation: { schema: 'homeboy/wordpress-db-query-generation/v1', source: 'table-column-metadata', column: column.name },
+				replay: { source: 'schema-driven-db-query-generation', table: surface.table || surface.name || surface.id, column: column.name },
+			},
+		}, { mutates: false }));
+}
+
 function generatedDbMutationMetadata(surface, options = {}) {
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode);
-	if (surface.type !== 'database-table' || mutationMode !== 'aggressive-isolated' || !dbTableWritable(surface)) {
+	if (!['database-table', 'db-query'].includes(surface.type) || mutationMode !== 'aggressive-isolated' || !dbTableWritable(surface)) {
 		return [];
 	}
 	const keyColumn = dbPrimaryishColumn(surface);
@@ -1184,6 +1310,103 @@ function generatedDbMutationMetadata(surface, options = {}) {
 		seed: { source: 'schema-driven-db-generation', table: surface.table || surface.name || surface.id, operation },
 		replay: { source: 'schema-driven-db-generation', table: surface.table || surface.name || surface.id, operation, primary_key: keyColumn.name },
 	}));
+}
+
+function statefulSequenceTargetsFromSurfaces(surfaces = [], options = {}) {
+	if (!wordpressFuzzAggressiveIsolatedMode(options)) {
+		return [];
+	}
+	const eligible = surfaces.filter(sequenceSurfaceSupported);
+	if (eligible.length === 0) {
+		return [];
+	}
+	const seed = options.seed || 'wordpress-stateful-sequence';
+	const maxSteps = Number(options.stateful_sequence_max_steps || options.statefulSequenceMaxSteps || options.random_walk_max_steps || options.randomWalkMaxSteps || 8);
+	const ordered = deterministicShuffle(eligible, seed).slice(0, Number.isFinite(maxSteps) && maxSteps > 0 ? maxSteps : 8);
+	const steps = ordered.map((surface, index) => sequenceStepFromSurface(surface, index + 1));
+	const input = stripUndefined({
+		type: 'stateful_sequence',
+		seed,
+		max_steps: steps.length,
+		steps,
+		reset_policy: { mode: 'checkpoint-per-sequence', required: true },
+	});
+	const replay = {
+		schema: 'wp-codebox/stateful-sequence/v1',
+		seed,
+		maxSteps: steps.length,
+		steps,
+		resetPolicy: input.reset_policy,
+	};
+	return [{
+		id: 'wordpress-stateful-sequence',
+		surface_id: 'wordpress-stateful-sequence',
+		type: 'stateful-sequence',
+		operation_id: 'wordpress-stateful-sequence:random-walk',
+		cases: [gateWordPressFuzzCaseForRuntimeCapabilities({
+			id: 'wordpress-stateful-sequence-random-walk',
+			intent: 'stateful-sequence',
+			operation_id: 'wordpress-stateful-sequence:random-walk',
+			operation: { runtime_action: 'stateful_sequence', steps },
+			seed,
+			target: { kind: 'runtime-action', id: 'wordpress.run-stateful-sequence', entrypoint: 'wordpress.run-stateful-sequence' },
+			input,
+			required_capabilities: ['sequence', 'snapshot', 'restore'],
+			skip_reasons: [],
+			destructive_reasons: ['stateful-sequence-may-mutate'],
+			metadata: {
+				sequence: replay,
+				replay,
+				reset: input.reset_policy,
+				safety: { mutation: 'bounded_stateful_sequence', reset_required: true },
+			},
+		}, options.runtimeCapabilities || options.runtime_capabilities, {
+			required_capabilities: ['sequence', 'snapshot', 'restore'],
+			mutation_mode: normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode),
+			mutates: true,
+		})],
+		metadata: { type: 'stateful-sequence', sequence: replay, execution_tiers: {} },
+	}];
+}
+
+function sequenceSurfaceSupported(surface = {}) {
+	return ['rest-route', 'admin-page', 'frontend-url', 'block', 'database-table', 'db-query'].includes(surface.type);
+}
+
+function sequenceStepFromSurface(surface, index) {
+	const family = {
+		'rest-route': 'rest',
+		'admin-page': 'admin',
+		'frontend-url': 'browser',
+		block: 'editor',
+		'database-table': 'database',
+		'db-query': 'database',
+	}[surface.type] || 'surface';
+	return stripUndefined({
+		index,
+		family,
+		surface_id: surface.id,
+		type: surface.type,
+		method: restMethodsForSurface(surface)[0] || surface.method,
+		route: surface.route,
+		path: surface.path || surface.url,
+		block_name: surface.block_name || surface.blockName,
+		table: surface.table,
+		query: surface.query,
+	});
+}
+
+function deterministicShuffle(items, seed) {
+	return [...items].sort((left, right) => deterministicNumber(`${seed}:${left.id}`) - deterministicNumber(`${seed}:${right.id}`));
+}
+
+function deterministicNumber(value) {
+	let hash = 2166136261;
+	for (const char of String(value)) {
+		hash ^= char.charCodeAt(0);
+		hash = Math.imul(hash, 16777619);
+	}
+	return hash >>> 0;
 }
 
 function dbTableWritable(surface) {
@@ -1472,6 +1695,13 @@ function wordpressFuzzPlanDiagnostics(targets) {
 			diagnostics.push({
 				code: 'wordpress-db-schema-driven-generation-unavailable',
 				message: 'Database table schema metadata did not declare executable mutation cases; planner did not synthesize fake DB mutations.',
+				surface_id: target.surface_id || target.id,
+			});
+		}
+		if (target.type === 'rest-route' && !target.cases?.some((testCase) => testCase.metadata?.arg_generation)) {
+			diagnostics.push({
+				code: 'wordpress-rest-arg-generation-unavailable',
+				message: 'REST route argument metadata was missing or empty; planner did not synthesize payload-family cases.',
 				surface_id: target.surface_id || target.id,
 			});
 		}

@@ -255,6 +255,56 @@ assert(randomWalkCases.every((testCase) => testCase.metadata.random_walk.maxStep
 assert.equal(randomWalkCases.find((testCase) => testCase.intent === 'admin-random-walk').metadata.random_walk.seed, 'walk-seed:admin:walk:admin');
 assert.equal(randomWalkExecutablePlan.targets.find((target) => target.type === 'admin-page').cases[1].intent, 'discover-admin-page-actions');
 assert.equal(randomWalkExecutablePlan.targets.find((target) => target.type === 'admin-page').cases[1].metadata.action_discovery.executes_actions, false);
+const statefulSequenceTarget = randomWalkExecutablePlan.targets.find((target) => target.type === 'stateful-sequence');
+assert.equal(statefulSequenceTarget.cases[0].intent, 'stateful-sequence');
+assert.equal(statefulSequenceTarget.cases[0].input.type, 'stateful_sequence');
+assert.equal(statefulSequenceTarget.cases[0].metadata.replay.schema, 'wp-codebox/stateful-sequence/v1');
+assert.deepEqual(statefulSequenceTarget.cases[0].metadata.replay.steps.map((step) => step.family).sort(), ['admin', 'browser', 'editor'].sort());
+assert.equal(statefulSequenceTarget.cases[0].execution_tier, 'plan_only');
+
+const sequenceCapablePlan = buildWordPressFuzzPlanFromSurfaces({
+	frontend: [{ id: 'front:seq', path: '/sequence/' }],
+	rest: [{ id: 'rest:seq', route: '/wp/v2/posts', method: 'GET' }],
+}, {
+	seed: 'sequence-seed',
+	mutation_mode: 'aggressive-isolated',
+	runtimeCapabilities: { capabilities: ['browser', 'rest', 'sequence', 'snapshot', 'restore'] },
+	statefulSequenceMaxSteps: 2,
+});
+const sequenceCase = sequenceCapablePlan.targets.find((target) => target.type === 'stateful-sequence').cases[0];
+assert.equal(sequenceCase.executable, true);
+assert.equal(sequenceCase.runtime_operation.command, 'wordpress.run-stateful-sequence');
+assert.equal(sequenceCase.runtime_operation.input.steps.length, 2);
+assert.equal(sequenceCase.metadata.replay.seed, 'sequence-seed');
+
+const aggressivePayloadPlan = buildWordPressFuzzPlanFromSurfaces({
+	rest: [{
+		id: 'rest:payloads',
+		route: '/example/v1/payloads',
+		method: 'POST',
+		args: [
+			{ name: 'title', type: 'string', required: true, max_payload_bounds: { bytes: 24 } },
+			{ name: 'count', type: 'integer' },
+			{ name: 'enabled', type: 'boolean' },
+			{ name: 'mode', type: 'string', enum: ['draft', 'publish'] },
+			{ name: 'meta', type: 'object', max_payload_bounds: { depth: 2 } },
+		],
+	}],
+}, {
+	seed: 'payload-seed',
+	mutation_mode: 'aggressive-isolated',
+	runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback', 'restore', 'sequence', 'snapshot'] },
+});
+const payloadCases = aggressivePayloadPlan.targets.find((target) => target.type === 'rest-route').cases;
+const payloadFamilies = new Set(payloadCases.map((testCase) => testCase.metadata.arg_generation?.payload_family).filter(Boolean));
+for (const family of ['large', 'empty', 'null', 'enum', 'numeric', 'boolean', 'nested', 'repeated']) {
+	assert(payloadFamilies.has(family), `missing REST payload family: ${family}`);
+}
+const largePayloadCase = payloadCases.find((testCase) => testCase.metadata.arg_generation?.variant === 'boundary-large');
+assert.equal(largePayloadCase.metadata.arg_generation.payload_family, 'large');
+assert.equal(largePayloadCase.operation.request_body.title.length, 24);
+assert.equal(largePayloadCase.metadata.arg_generation.max_payload_bounds.title.bytes, 24);
+assert(payloadCases.every((testCase) => testCase.metadata.deterministic_seed === 'payload-seed'));
 
 const fixtureBoundCrudPlan = buildWordPressFuzzPlanFromSurfaces({
 	surfaces: [{
@@ -418,6 +468,41 @@ const isolatedCrudDelete = isolatedCases.find((entry) => entry.intent === 'delet
 assert.equal(isolatedRestMutation.metadata.rollback_contract.schema, 'homeboy/wordpress-rest-mutation-rollback-contract/v1');
 assert.deepEqual(isolatedRestMutation.metadata.required_any_capabilities, [['reset', 'restore']]);
 assert(isolatedCrudDelete.metadata.mutation_lifecycle.required_evidence.some((entry) => entry.kind === 'delete-boundary'));
+
+const aggressiveDbPlan = buildWordPressFuzzPlanFromSurfaces({
+	database: {
+		tables: {
+			posts: {
+				id: 'db:posts',
+				table: 'wp_posts',
+				columns: [
+					{ name: 'ID', type: 'bigint unsigned', key: 'PRI', extra: 'auto_increment' },
+					{ name: 'post_title', type: 'text' },
+				],
+				indexes: [{ name: 'PRIMARY', column: 'ID', unique: true, sequence: 1 }],
+			},
+		},
+	},
+}, {
+	seed: 'db-seed',
+	mutation_mode: 'aggressive-isolated',
+	runtimeCapabilities: { capabilities: ['database', 'query-observation', 'snapshot', 'restore', 'reset', 'transaction', 'sequence'] },
+});
+const aggressiveDbCases = aggressiveDbPlan.targets.find((target) => target.type === 'database-table').cases;
+assert(aggressiveDbCases.some((testCase) => testCase.intent === 'profile-database-query' && testCase.metadata.db_generation.column === 'ID'));
+assert(aggressiveDbCases.some((testCase) => testCase.intent === 'profile-database-query' && testCase.metadata.db_generation.column === 'post_title'));
+const generatedDbMutations = aggressiveDbCases.filter((testCase) => testCase.intent === 'mutate-database-table');
+assert.deepEqual(generatedDbMutations.map((testCase) => testCase.operation.mutation).sort(), ['delete', 'insert', 'update']);
+assert(generatedDbMutations.every((testCase) => testCase.metadata.reset.required_capabilities.includes('database')));
+assert(generatedDbMutations.every((testCase) => testCase.metadata.isolation.boundary === 'per_case'));
+assert(generatedDbMutations.every((testCase) => testCase.executable === true));
+
+const missingMetadataPlan = buildWordPressFuzzPlanFromSurfaces({
+	database: { tables: { unknown: { id: 'db:unknown', table: 'wp_unknown' } } },
+	rest: [{ id: 'rest:no-args', route: '/example/v1/no-args', method: 'GET' }],
+}, { mutation_mode: 'aggressive-isolated' });
+assert(missingMetadataPlan.metadata.diagnostics.some((diagnostic) => diagnostic.code === 'wordpress-db-schema-driven-generation-unavailable'));
+assert(missingMetadataPlan.metadata.diagnostics.some((diagnostic) => diagnostic.code === 'wordpress-rest-arg-generation-unavailable'));
 
 const optInRestMutationPlan = buildWordPressFuzzPlanFromSurfaces({
 	rest: [{ id: 'rest:generic-items', route: '/example/v1/items/(?P<id>[\\d]+)', methods: ['POST', 'PATCH', 'DELETE'] }],
@@ -588,11 +673,14 @@ const argDrivenAggressivePlan = buildWordPressFuzzPlanFromSurfaces({
 	runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback', 'restore', 'reset'] },
 });
 const argDrivenCases = argDrivenAggressivePlan.targets[0].cases;
-assert.deepEqual(argDrivenCases.map((testCase) => testCase.metadata.arg_generation.variant), ['valid-minimal', 'boundary-large', 'invalid-type']);
+assert.deepEqual(argDrivenCases.map((testCase) => testCase.metadata.arg_generation.variant), ['valid-minimal', 'boundary-large', 'payload-empty', 'payload-null', 'payload-boolean', 'payload-nested', 'payload-repeated', 'invalid-type']);
 assert.deepEqual(argDrivenCases[0].operation.request_body, { title: 'sample' });
 assert.equal(argDrivenCases[1].operation.request_body.title.length, 4096);
 assert.equal(argDrivenCases[1].operation.request_body.tags.length, 16);
-assert.deepEqual(argDrivenCases[2].operation.request_body.title, { invalid: 'object-for-string' });
+assert.deepEqual(argDrivenCases.find((testCase) => testCase.metadata.arg_generation.variant === 'payload-empty').operation.request_body, { title: '', tags: [] });
+assert.deepEqual(argDrivenCases.find((testCase) => testCase.metadata.arg_generation.variant === 'payload-null').operation.request_body, { title: null, tags: null });
+assert.equal(argDrivenCases.find((testCase) => testCase.metadata.arg_generation.variant === 'payload-boolean').operation.request_body.published, false);
+assert.deepEqual(argDrivenCases.find((testCase) => testCase.metadata.arg_generation.variant === 'invalid-type').operation.request_body.title, { invalid: 'object-for-string' });
 for (const testCase of argDrivenCases) {
 	assert.equal(testCase.executable, true);
 	assert.equal(testCase.execution_tier, 'isolated_mutating_executable');
@@ -631,9 +719,11 @@ const schemaDrivenDbPlan = buildWordPressFuzzPlanFromSurfaces({
 	runtimeCapabilities: { capabilities: ['database', 'snapshot', 'restore', 'reset', 'transaction'] },
 });
 const schemaDbCases = schemaDrivenDbPlan.targets[0].cases;
-assert.deepEqual(schemaDbCases.map((testCase) => testCase.intent), ['inspect-database-table', 'mutate-database-table', 'mutate-database-table', 'mutate-database-table']);
-assert.deepEqual(schemaDbCases.slice(1).map((testCase) => testCase.operation.mutation), ['insert', 'update', 'delete']);
-for (const testCase of schemaDbCases.slice(1)) {
+assert.deepEqual(schemaDbCases.map((testCase) => testCase.intent), ['inspect-database-table', 'profile-database-query', 'profile-database-query', 'mutate-database-table', 'mutate-database-table', 'mutate-database-table']);
+assert.deepEqual(schemaDbCases.filter((testCase) => testCase.intent === 'profile-database-query').map((testCase) => testCase.metadata.db_generation.column), ['id', 'name']);
+const schemaDbMutations = schemaDbCases.filter((testCase) => testCase.intent === 'mutate-database-table');
+assert.deepEqual(schemaDbMutations.map((testCase) => testCase.operation.mutation), ['insert', 'update', 'delete']);
+for (const testCase of schemaDbMutations) {
 	assert.equal(testCase.executable, true);
 	assert.equal(testCase.execution_tier, 'isolated_mutating_executable');
 	assert.equal(testCase.metadata.seed.source, 'schema-driven-db-generation');
