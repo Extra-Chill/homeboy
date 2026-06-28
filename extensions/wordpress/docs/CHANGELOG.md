@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.1] - 2026-06-28
+
+### Fixed
+- require explicit Codebox runtime overlays
+
 ## [3.21.0] - 2026-06-28
 
 ### Added
