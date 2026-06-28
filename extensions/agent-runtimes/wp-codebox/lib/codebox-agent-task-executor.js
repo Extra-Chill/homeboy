@@ -1656,8 +1656,6 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const provider = config.provider || options.provider || defaultProvider(settings);
   const providerConfig = providerConfigFor(provider, settings, providerDefaults);
   const model = config.model || options.model || defaultModelForProvider(provider, settings, providerConfig);
-  const phpAiClientPath = defaultPhpAiClientPath(settings, options);
-
   return {
     agentRuntime: agentRuntimePath,
     agentRuntimeTools: agentRuntimeToolsPath,
@@ -1669,7 +1667,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     secretEnv: defaultSecretEnv(config, options, settings, providerConfig),
     wpCodeboxBin: wpCodeboxBin({ settings, executable: '' }),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
-    runtimeOverlays: defaultRuntimeOverlays(settings, phpAiClientPath),
+    runtimeOverlays: defaultRuntimeOverlays(settings),
     runtimeRequirements: defaultRuntimeRequirements(),
     runtimeEnv: defaultRuntimeEnv(settings),
     runtimeStateMounts: defaultRuntimeStateMounts(settings),
@@ -1701,20 +1699,13 @@ function defaultRuntimeOverlayProfiles(settings) {
   return normalizeArray(settings.wp_codebox_runtime_overlay_profiles || settings.runtime_overlay_profiles);
 }
 
-function defaultRuntimeOverlays(settings, phpAiClientPath = '') {
+function defaultRuntimeOverlays(settings) {
   const explicit = normalizeArray(settings.wp_codebox_runtime_overlays || settings.runtime_overlays);
   if (explicit.length > 0) {
     return explicit;
   }
 
-  return phpAiClientPath ? [{
-    kind: 'bundled-library',
-    library: 'php-ai-client',
-    source: phpAiClientPath,
-    target: '/wordpress/wp-includes/php-ai-client',
-    strategy: 'wordpress-scoped-bundle',
-    metadata: { component: 'php-ai-client', source: 'homeboy-extensions-default' },
-  }] : [];
+  return [];
 }
 
 function defaultRuntimeRequirements() {
@@ -1781,16 +1772,6 @@ function envPathList(value) {
     // Fall through to PATH-style lists for simple environment configuration.
   }
   return String(value).split(path.delimiter).map((entry) => entry.trim()).filter(Boolean);
-}
-
-function defaultPhpAiClientPath(settings, options = {}) {
-  return firstExistingPath(
-    options.phpAiClient,
-    settings.wp_codebox_php_ai_client_path,
-    settings.php_ai_client_path,
-    process.env.HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH,
-    process.env.PHP_AI_CLIENT_PATH,
-  );
 }
 
 function defaultRuntimeEnv(settings) {

@@ -161,6 +161,7 @@
     "fixture:agent-task-core-contract:check": "node ../agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs --check",
     "test:runtime-agent-host-lifecycle": "node tests/runtime-agent-host-lifecycle-smoke.js",
     "test:codebox-agent-task-executor-boundary": "node tests/codebox-agent-task-executor-boundary.test.js",
+    "test:codebox-runtime-overlay-defaults": "node tests/codebox-runtime-overlay-defaults.test.js",
     "test:provider-outcome-normalizer": "node tests/provider-outcome-normalizer.test.js",
     "test:codebox-agent-task-executor": "node tests/codebox-agent-task-executor-smoke.js",
     "test:codebox-agent-task-matrix": "node tests/codebox-agent-task-matrix-smoke.js",
