@@ -868,3 +868,262 @@ mod tests {
         fp.methods
     );
 }
+
+// ============================================================================
+// Grammar-driven aggregate / hook-callback / call-site extraction (#6826)
+//
+// These prove the grammar engine now populates the four FileFingerprint fields
+// that were hardcoded to `Vec::new()` — starving the aggregate-construction,
+// dead-code, and deprecation-age detectors for every grammar-fingerprinted
+// Rust/PHP file. The grammar config below mirrors the per-language reference
+// fingerprint scripts (homeboy-extensions rust/wordpress fingerprint.sh), which
+// are the only prior producers of these fields and define the correct output.
+// ============================================================================
+
+/// Rust grammar extended with the construction-seam + aggregate-literal policy
+/// the reference Rust fingerprint script encodes.
+fn rust_aggregate_grammar() -> Grammar {
+    let mut grammar = rust_grammar();
+    grammar.fingerprint.aggregate_seams = Some(AggregateSeamConfig {
+        method_names: vec!["new".to_string(), "builder".to_string(), "default".to_string()],
+        method_prefixes: vec!["from_".to_string(), "for_".to_string(), "with_".to_string()],
+        type_method_templates: vec!["build_{type}".to_string(), "create_{type}".to_string()],
+    });
+    grammar.fingerprint.aggregate_literals = Some(grammar::AggregateLiteralConfig {
+        pattern: r"\b([A-Z][A-Za-z0-9_]*)\s*\{([^{};]*)\}".to_string(),
+        field_pattern: r"\b([a-z_][A-Za-z0-9_]*)\s*:".to_string(),
+        min_fields: 2,
+        skip_before_pattern: Some(r"(?:struct|enum|impl|trait|type|use)\s+$".to_string()),
+        skip_before_window: 80,
+    });
+    grammar
+}
+
+/// PHP metadata grammar extended with the hook-callback + call-site policy the
+/// reference WordPress fingerprint script encodes.
+fn php_callback_grammar() -> Grammar {
+    let mut grammar = php_metadata_grammar();
+    // Match the WordPress grammar's PHP call skip set so free-function call
+    // sites mirror the reference script.
+    grammar.fingerprint.skip_calls = [
+        "if", "while", "for", "foreach", "switch", "match", "catch", "return", "echo", "print",
+        "isset", "unset", "empty", "list", "array", "function", "class", "interface", "trait",
+        "new", "require", "require_once", "include", "include_once", "define", "defined", "die",
+        "exit", "eval", "compact", "extract", "var_dump", "print_r", "var_export",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    grammar.fingerprint.hook_callback_patterns = vec![
+        // add_action/add_filter/add_shortcode with string callback
+        r#"(?:add_action|add_filter|add_shortcode)\s*\([^,]+,\s*['"](\w+)['"]\s*[,)]"#.to_string(),
+        // ... with array( $this, 'method' )
+        r#"(?:add_action|add_filter|add_shortcode)\s*\([^,]+,\s*array\s*\(\s*\$this\s*,\s*['"](\w+)['"]\s*\)"#.to_string(),
+        // ... with [ $this, 'method' ]
+        r#"(?:add_action|add_filter|add_shortcode)\s*\([^,]+,\s*\[\s*\$this\s*,\s*['"](\w+)['"]\s*\]"#.to_string(),
+        // ... with __CLASS__ / self::class / static::class
+        r#"(?:add_action|add_filter|add_shortcode)\s*\([^,]+,\s*(?:array\s*\(|\[)\s*(?:__CLASS__|self::class|static::class)\s*,\s*['"](\w+)['"]"#.to_string(),
+        // register_(de)activation/uninstall hooks
+        r#"register_(?:activation|deactivation|uninstall)_hook\s*\([^,]+,\s*['"](\w+)['"]"#.to_string(),
+        // 'callback' => 'function_name'
+        r#"['"](?:callback|[a-z_]+_callback)['"]\s*=>\s*['"](\w+)['"]"#.to_string(),
+        // 'callback' => array( $this, 'method' )
+        r#"['"](?:callback|[a-z_]+_callback)['"]\s*=>\s*(?:array\s*\(|\[)\s*\$this\s*,\s*['"](\w+)['"]"#.to_string(),
+        // 'callback' => array( self::class, 'method' )
+        r#"['"](?:callback|[a-z_]+_callback)['"]\s*=>\s*(?:array\s*\(|\[)\s*(?:__CLASS__|self::class|static::class)\s*,\s*['"](\w+)['"]"#.to_string(),
+    ];
+    grammar.fingerprint.call_sites = Some(grammar::CallSiteConfig {
+        patterns: vec![
+            grammar::CallSitePattern {
+                regex: r"(?:\$this->|self::|static::|[A-Z]\w*::)(\w+)\s*\(".to_string(),
+                apply_skip_calls: false,
+            },
+            grammar::CallSitePattern {
+                regex: r"\b([a-z_]\w*)\s*\(".to_string(),
+                apply_skip_calls: true,
+            },
+        ],
+        skip_line_pattern: Some(
+            r"(?:public|protected|private|static|abstract|final|\s)*function\s".to_string(),
+        ),
+        skip_name_prefixes: vec!["test".to_string()],
+    });
+    grammar
+}
+
+#[test]
+fn grammar_engine_extracts_rust_aggregate_seams_and_literals() {
+    // Reference Rust fingerprint script output for this source:
+    //   aggregate_construction_seams: [{Config,new},{Config,from_parts}]
+    //   aggregate_literals:           [{Other,[x,y]}]
+    let grammar = rust_aggregate_grammar();
+    let content = r#"pub struct Config { a: String, b: usize }
+
+impl Config {
+    pub fn new(a: String) -> Self {
+        Self { a, b: 0 }
+    }
+    pub fn from_parts(a: String, b: usize) -> Config {
+        Config { a, b }
+    }
+    pub fn describe(&self) -> String {
+        self.a.clone()
+    }
+}
+
+pub fn build_something() -> Other {
+    Other { x: 1, y: 2 }
+}
+"#;
+
+    let fp = fingerprint_from_grammar(content, &grammar, "src/config.rs")
+        .expect("fingerprint should succeed");
+
+    // Seams: canonical constructors on Config — `new` (exact) and `from_parts`
+    // (from_ prefix). `describe` is not a seam; `build_something` is a free
+    // function with no owning type.
+    let mut seams: Vec<(String, String)> = fp
+        .aggregate_construction_seams
+        .iter()
+        .map(|s| (s.type_name.clone(), s.method.clone()))
+        .collect();
+    seams.sort();
+    assert_eq!(
+        seams,
+        vec![
+            ("Config".to_string(), "from_parts".to_string()),
+            ("Config".to_string(), "new".to_string()),
+        ],
+        "expected Config::new + Config::from_parts seams, got {:?}",
+        fp.aggregate_construction_seams
+    );
+
+    // Literals: only the explicit `Other { x: 1, y: 2 }` qualifies. The struct
+    // definition is skipped (preceded by `struct `), and `Self { a, b: 0 }` /
+    // `Config { a, b }` have fewer than two `field:` initializers.
+    let literals: Vec<(String, Vec<String>)> = fp
+        .aggregate_literals
+        .iter()
+        .map(|l| (l.type_name.clone(), l.fields.clone()))
+        .collect();
+    assert_eq!(
+        literals,
+        vec![("Other".to_string(), vec!["x".to_string(), "y".to_string()])],
+        "expected a single Other literal with fields [x, y], got {:?}",
+        fp.aggregate_literals
+    );
+}
+
+#[test]
+fn restored_aggregate_fields_make_construction_detector_fire() {
+    use crate::core::code_audit::detectors::aggregate_construction;
+
+    let grammar = rust_aggregate_grammar();
+    let def = r#"pub struct Widget { name: String, size: usize, active: bool }
+impl Widget {
+    pub fn new(name: String) -> Self {
+        Self { name, size: 0, active: false }
+    }
+}
+"#;
+    let usage = |var: &str| {
+        format!(
+            "pub fn make_{var}() -> Widget {{\n    Widget {{ name: n, size: s, active: t }}\n}}\n"
+        )
+    };
+
+    let fingerprints = vec![
+        fingerprint_from_grammar(def, &grammar, "src/widget.rs").unwrap(),
+        fingerprint_from_grammar(&usage("a"), &grammar, "src/a.rs").unwrap(),
+        fingerprint_from_grammar(&usage("b"), &grammar, "src/b.rs").unwrap(),
+        fingerprint_from_grammar(&usage("c"), &grammar, "src/c.rs").unwrap(),
+    ];
+
+    // With the fields populated, the seam (Widget::new) + three repeated inline
+    // literals across files trip the direct-aggregate-construction detector.
+    let refs: Vec<&FileFingerprint> = fingerprints.iter().collect();
+    let findings = aggregate_construction::run(&refs);
+    assert_eq!(
+        findings.len(),
+        1,
+        "expected the construction detector to fire, got {findings:?}"
+    );
+    assert!(
+        findings[0].description.contains("Widget"),
+        "finding should name the Widget aggregate: {}",
+        findings[0].description
+    );
+
+    // Proof of the regression: with the four fields empty (the pre-fix state),
+    // the very same files produce no finding — the detector was starved.
+    let starved: Vec<FileFingerprint> = fingerprints
+        .iter()
+        .cloned()
+        .map(|mut fp| {
+            fp.aggregate_literals.clear();
+            fp.aggregate_construction_seams.clear();
+            fp
+        })
+        .collect();
+    let starved_refs: Vec<&FileFingerprint> = starved.iter().collect();
+    assert!(
+        aggregate_construction::run(&starved_refs).is_empty(),
+        "with the fields empty the detector must not fire — proving the starvation"
+    );
+}
+
+#[test]
+fn grammar_engine_extracts_php_hook_callbacks_and_call_sites() {
+    // Reference WordPress fingerprint script output for this source:
+    //   hook_callbacks: ["handle"]
+    //   call_sites includes: {add_action, .., 2} and {compute, .., 2}
+    let grammar = php_callback_grammar();
+    let content = "<?php\nnamespace Sample;\n\nclass Plugin {\n    public function register() {\n        add_action( 'init', array( $this, 'handle' ) );\n        register_rest_route( 'ns/v1', '/x', array( 'callback' => array( $this, 'handle' ) ) );\n    }\n    public function handle( $request ) {\n        return $this->compute( 1, 2 );\n    }\n    public function compute( $a, $b ) {\n        return $a + $b;\n    }\n}\n";
+
+    let fp = fingerprint_from_grammar(content, &grammar, "inc/Plugin.php")
+        .expect("fingerprint should succeed");
+
+    assert_eq!(
+        fp.hook_callbacks,
+        vec!["handle".to_string()],
+        "expected the hook callback `handle` to be extracted, got {:?}",
+        fp.hook_callbacks
+    );
+
+    // add_action(...) is a free-function call with two top-level args.
+    assert!(
+        fp.call_sites
+            .iter()
+            .any(|cs| cs.target == "add_action" && cs.arg_count == 2),
+        "expected an add_action call site with arg_count 2, got {:?}",
+        fp.call_sites
+    );
+    // $this->compute( 1, 2 ) is a receiver-qualified call with two args.
+    assert!(
+        fp.call_sites
+            .iter()
+            .any(|cs| cs.target == "compute" && cs.arg_count == 2),
+        "expected a compute call site with arg_count 2, got {:?}",
+        fp.call_sites
+    );
+    // Declaration lines (`public function handle(...)`) are signatures, not
+    // call sites, and must not be recorded as calls.
+    assert!(
+        !fp.call_sites.iter().any(|cs| cs.target == "handle"),
+        "function declarations must not appear as call sites, got {:?}",
+        fp.call_sites
+    );
+}
+
+#[test]
+fn grammar_aggregate_fields_stay_empty_without_grammar_policy() {
+    // Without seam/literal/callback/call-site policy in the grammar, the engine
+    // emits nothing — language idioms stay grammar-owned, not baked into core.
+    let grammar = rust_grammar();
+    let content = "pub struct Config { a: usize }\nimpl Config {\n    pub fn new() -> Self { Self { a: 0 } }\n}\n";
+    let fp = fingerprint_from_grammar(content, &grammar, "src/config.rs").unwrap();
+    assert!(fp.aggregate_construction_seams.is_empty());
+    assert!(fp.aggregate_literals.is_empty());
+    assert!(fp.hook_callbacks.is_empty());
+    assert!(fp.call_sites.is_empty());
+}

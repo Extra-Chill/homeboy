@@ -98,6 +98,109 @@ pub struct FingerprintGrammar {
     /// than a parsed source symbol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace_derivation: Option<NamespaceDerivationConfig>,
+
+    /// Recognition rules for canonical aggregate construction seams (the
+    /// blessed constructors/builders for an aggregate type). Drives the
+    /// `aggregate_construction_seams` fingerprint field. Grammar owners declare
+    /// the naming policy; core stays language-agnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_seams: Option<AggregateSeamConfig>,
+
+    /// Recognition rules for direct aggregate literal construction sites. Drives
+    /// the `aggregate_literals` fingerprint field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_literals: Option<AggregateLiteralConfig>,
+
+    /// Patterns matching framework runtime hook/callback registrations. Each
+    /// regex's first capture group is the registered callback name. Drives the
+    /// `hook_callbacks` fingerprint field, which the dead-code detector uses to
+    /// recognize functions invoked by a framework runtime rather than by direct
+    /// calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook_callback_patterns: Vec<String>,
+
+    /// Call-site extraction configuration. Drives the `call_sites` fingerprint
+    /// field consumed by cross-file parameter analysis and deprecation-age
+    /// reference counting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_sites: Option<CallSiteConfig>,
+}
+
+/// Recognition rules for canonical aggregate construction seams.
+///
+/// A construction seam is the canonical way to build an aggregate type — e.g.
+/// `Config::new`, `Plan::builder`, `Report::from_parts`. The grammar owner
+/// declares the naming policy so core never hardcodes language idioms.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AggregateSeamConfig {
+    /// Exact method names that are canonical seams (e.g. `new`, `builder`,
+    /// `default`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub method_names: Vec<String>,
+    /// Method-name prefixes that denote a canonical seam (e.g. `from_`, `for_`,
+    /// `with_`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub method_prefixes: Vec<String>,
+    /// Method-name templates derived from the snake_case type name. The literal
+    /// `{type}` is replaced with the aggregate type's snake_case form, e.g.
+    /// `build_{type}` matches `build_dispatch_plan` for type `DispatchPlan`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_method_templates: Vec<String>,
+}
+
+/// Recognition rules for direct aggregate literal construction sites.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateLiteralConfig {
+    /// Regex matching a literal construction site. Capture group 1 is the
+    /// aggregate type name; capture group 2 is the literal body scanned for
+    /// field names.
+    pub pattern: String,
+    /// Regex matching a single initialized field inside the literal body.
+    /// Capture group 1 is the field name.
+    pub field_pattern: String,
+    /// Minimum number of distinct fields a literal must initialize to be
+    /// recorded.
+    #[serde(default)]
+    pub min_fields: usize,
+    /// Regex tested against the text immediately preceding a candidate match.
+    /// When it matches, the candidate is a type definition (not a literal) and
+    /// is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_before_pattern: Option<String>,
+    /// Number of preceding characters fed to `skip_before_pattern`.
+    #[serde(default)]
+    pub skip_before_window: usize,
+}
+
+/// Recognition rules for call-site extraction with argument counting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CallSiteConfig {
+    /// Call-match patterns. Each pattern's first capture group is the call
+    /// target, and the match must end at the call's opening delimiter so
+    /// argument counting can begin there. Patterns are applied in order on each
+    /// line; the first pattern to record a `(target, line)` pair wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<CallSitePattern>,
+    /// Regex identifying declaration lines (which are not call sites). A line
+    /// whose trimmed start matches is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_line_pattern: Option<String>,
+    /// Call-target name prefixes whose calls are ignored (e.g. `test`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_name_prefixes: Vec<String>,
+}
+
+/// A single call-site match pattern.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallSitePattern {
+    /// Regex whose first capture group is the call target and which ends at the
+    /// opening call delimiter.
+    pub regex: String,
+    /// When true, targets present in `skip_calls` are ignored. Use this for
+    /// bare free-function calls; leave false for receiver-qualified calls
+    /// (`$this->m(`, `Type::m(`) whose name space cannot collide with keywords.
+    #[serde(default)]
+    pub apply_skip_calls: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +234,10 @@ impl FingerprintGrammar {
             && self.registration_skip_names.is_empty()
             && self.registration_skip_prefixes.is_empty()
             && self.namespace_derivation.is_none()
+            && self.aggregate_seams.is_none()
+            && self.aggregate_literals.is_none()
+            && self.hook_callback_patterns.is_empty()
+            && self.call_sites.is_none()
     }
 }
 
