@@ -3,10 +3,11 @@ use crate::core::{agent_task_lifecycle, paths, Error, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn controller_status_report(loop_id: &str) -> Result<AgentTaskLoopControllerStatusReport> {
     let controller = controller_status(loop_id)?;
@@ -155,28 +156,43 @@ fn failed_child_action_diagnostic(
         .as_ref()
         .map(|run| format!("{:?}", run.state).to_ascii_lowercase());
     let aggregate = child_run_id.as_deref().and_then(load_child_aggregate_value);
-    let top_diagnostic = action
-        .diagnostics
-        .first()
-        .map(|diagnostic| diagnostic.message.clone())
-        .or_else(|| aggregate.as_ref().and_then(first_diagnostic_message))
-        .unwrap_or_else(|| "controller child action failed".to_string());
+    let child_task_id = aggregate.as_ref().and_then(first_failed_task_id);
+    let top_diagnostic = action_top_diagnostic(action)
+        .or_else(|| aggregate.as_ref().and_then(first_diagnostic))
+        .unwrap_or_else(|| CollectedDiagnostic {
+            class: "controller_child_action_failed".to_string(),
+            message: "controller child action failed".to_string(),
+        });
     let hydrated_root_cause = child_run
         .as_ref()
         .and_then(root_cause_from_run_evidence)
         .or_else(|| aggregate.as_ref().and_then(root_cause_from_aggregate))
-        .filter(|message| message != &top_diagnostic)
+        .filter(|message| message != &top_diagnostic.message)
         .filter(|message| {
-            diagnostic_priority("", message) <= diagnostic_priority("", &top_diagnostic)
+            diagnostic_priority("", message) <= diagnostic_priority("", &top_diagnostic.message)
         });
     let evidence_refs = child_run
         .as_ref()
         .map(evidence_refs_from_run)
         .unwrap_or_default();
+    let artifact_dir = child_run.as_ref().and_then(run_artifact_dir);
     let owner_surface = classify_failed_child_owner(
-        hydrated_root_cause.as_deref().unwrap_or(&top_diagnostic),
+        hydrated_root_cause
+            .as_deref()
+            .unwrap_or(&top_diagnostic.message),
         &evidence_refs,
     );
+    let signature_root = hydrated_root_cause
+        .clone()
+        .unwrap_or_else(|| top_diagnostic.message.clone());
+    let failure_signature = failed_child_failure_signature(
+        child_run_id.as_deref(),
+        child_task_id.as_deref(),
+        Some(top_diagnostic.class.as_str()),
+        &signature_root,
+        &owner_surface,
+    );
+    let repeated_failure = repeated_failure_diagnostic(record, &failure_signature);
     let next_command = child_run_id
         .as_ref()
         .map(|run_id| format!("homeboy agent-task status {run_id} --full"))
@@ -191,13 +207,112 @@ fn failed_child_action_diagnostic(
         action_id: action.action_id.clone(),
         dedupe_key: action.dedupe_key.clone(),
         child_run_id,
+        child_task_id,
         child_run_status,
-        top_diagnostic,
+        top_diagnostic: top_diagnostic.message,
+        top_diagnostic_class: Some(top_diagnostic.class),
         hydrated_root_cause,
+        artifact_dir,
         owner_surface,
+        failure_signature,
+        repeated_failure,
         next_command,
         evidence_refs,
     }
+}
+
+fn action_top_diagnostic(action: &AgentTaskLoopPolicyActionRecord) -> Option<CollectedDiagnostic> {
+    action
+        .diagnostics
+        .first()
+        .map(|diagnostic| CollectedDiagnostic {
+            class: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+        })
+}
+
+fn first_failed_task_id(value: &Value) -> Option<String> {
+    value
+        .get("outcomes")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|outcome| {
+            outcome
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "succeeded" && status != "no_op")
+        })
+        .and_then(|outcome| outcome.get("task_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn run_artifact_dir(run: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<String> {
+    run.aggregate_path
+        .as_deref()
+        .and_then(|path| Path::new(path).parent())
+        .map(|path| path.display().to_string())
+}
+
+fn failed_child_failure_signature(
+    child_run_id: Option<&str>,
+    task_id: Option<&str>,
+    diagnostic_class: Option<&str>,
+    root_message: &str,
+    owner_surface: &str,
+) -> AgentTaskLoopFailureSignature {
+    let normalized_message = normalize_signature_text(root_message);
+    let signature_material = format!(
+        "{}\n{}\n{}",
+        owner_surface,
+        diagnostic_class.unwrap_or(""),
+        normalized_message
+    );
+    let digest = format!("sha256:{:x}", Sha256::digest(signature_material.as_bytes()));
+    AgentTaskLoopFailureSignature {
+        digest,
+        task_id: task_id.or(child_run_id).map(str::to_string),
+        diagnostic_class: diagnostic_class.map(str::to_string),
+        root_message: root_message.to_string(),
+        owner_surface: owner_surface.to_string(),
+    }
+}
+
+fn repeated_failure_diagnostic(
+    record: &AgentTaskLoopControllerRecord,
+    signature: &AgentTaskLoopFailureSignature,
+) -> Option<AgentTaskLoopRepeatedFailureDiagnostic> {
+    let matching_failed_child_action_count = record
+        .next_actions
+        .iter()
+        .filter(|action| {
+            matches!(action.status, AgentTaskLoopActionStatus::Failed)
+                && action_top_diagnostic(action).is_some_and(|diagnostic| {
+                    failed_child_failure_signature(
+                        action_referenced_run_id(action, record).as_deref(),
+                        None,
+                        Some(diagnostic.class.as_str()),
+                        &diagnostic.message,
+                        &signature.owner_surface,
+                    )
+                    .digest
+                        == signature.digest
+                })
+        })
+        .count();
+    (matching_failed_child_action_count > 1).then(|| AgentTaskLoopRepeatedFailureDiagnostic {
+        matching_failed_child_action_count,
+        guidance: "This failure signature has repeated in this controller; inspect the child input or provider boundary before another full rerun.".to_string(),
+        next_command: "homeboy agent-task evidence <child-run-id> --failure-only".to_string(),
+    })
+}
+
+fn normalize_signature_text(message: &str) -> String {
+    message
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 fn load_child_aggregate_value(run_id: &str) -> Option<Value> {
@@ -272,11 +387,8 @@ fn push_failed_child_evidence_ref(
     }
 }
 
-fn first_diagnostic_message(value: &Value) -> Option<String> {
-    collect_diagnostics(value)
-        .into_iter()
-        .next()
-        .map(|diagnostic| diagnostic.message)
+fn first_diagnostic(value: &Value) -> Option<CollectedDiagnostic> {
+    collect_diagnostics(value).into_iter().next()
 }
 
 fn root_cause_from_aggregate(value: &Value) -> Option<String> {

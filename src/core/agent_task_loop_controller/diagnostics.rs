@@ -66,14 +66,39 @@ pub struct AgentTaskLoopFailedChildActionDiagnostic {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_run_status: Option<String>,
     pub top_diagnostic: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_diagnostic_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hydrated_root_cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_dir: Option<String>,
     pub owner_surface: String,
+    pub failure_signature: AgentTaskLoopFailureSignature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeated_failure: Option<AgentTaskLoopRepeatedFailureDiagnostic>,
     pub next_command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<AgentTaskLoopFailedChildEvidenceRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopFailureSignature {
+    pub digest: String,
+    pub task_id: Option<String>,
+    pub diagnostic_class: Option<String>,
+    pub root_message: String,
+    pub owner_surface: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopRepeatedFailureDiagnostic {
+    pub matching_failed_child_action_count: usize,
+    pub guidance: String,
+    pub next_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
