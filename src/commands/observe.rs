@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,6 +17,7 @@ use homeboy::core::extension::trace::{
     ActiveTraceProbes, TraceArtifact, TraceEvent, TraceProbeConfig, TraceResults, TraceStatus,
 };
 use homeboy::core::git::short_head_revision_at;
+use homeboy::core::io::{write_output_file_atomically, OutputWriteOptions};
 use homeboy::core::observation::{ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::core::Error;
 
@@ -259,7 +259,8 @@ fn collect_timeline(args: &ObserveArgs) -> homeboy::core::Result<Vec<TraceEvent>
         for watch in &mut process_watches {
             if watch_process_is_due(watch, start, args.watch_process_interval) {
                 if process_snapshot.is_none() {
-                    process_snapshot = Some(capture_process_snapshot()?);
+                    process_snapshot =
+                        Some(homeboy::core::resources::process::capture_process_snapshot()?);
                 }
                 timeline.extend(poll_process_watch_from_snapshot(
                     watch,
@@ -433,21 +434,6 @@ fn poll_tail_log(state: &mut TailLogState, t_ms: u64) -> homeboy::core::Result<V
     Ok(events)
 }
 
-fn capture_process_snapshot() -> homeboy::core::Result<String> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,command="])
-        .output()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("observe.process.ps".to_string())))?;
-    if !output.status.success() {
-        return Err(Error::internal_unexpected(format!(
-            "ps failed while observing processes: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 fn poll_process_watch_from_snapshot(
     state: &mut ProcessWatchState,
     t_ms: u64,
@@ -531,7 +517,7 @@ fn write_trace_results(path: &Path, results: &TraceResults) -> homeboy::core::Re
     let content = serde_json::to_string_pretty(results).map_err(|e| {
         Error::internal_unexpected(format!("Failed to serialize observe timeline: {e}"))
     })?;
-    std::fs::write(path, content).map_err(|e| {
+    write_output_file_atomically(path, content, OutputWriteOptions::file()).map_err(|e| {
         Error::internal_io(
             format!("Failed to write observe timeline {}: {}", path.display(), e),
             Some("observe.write_trace_results".to_string()),
