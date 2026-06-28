@@ -13,7 +13,7 @@ use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_executable_requirement_diagnostics, declared_run_followups_for_legacy,
     declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
-    lab_runner_homeboy_output, runner_artifact_feature_diagnostics,
+    lab_runner_homeboy_output, runner_artifact_feature_diagnostics, runner_followups,
     runner_status_operator_commands,
 };
 
@@ -133,6 +133,15 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
     assert!(serialized.contains("homeboy runner job reconcile homeboy-lab"));
     assert!(serialized.contains("homeboy runner job artifacts homeboy-lab job-123 <artifact-id>"));
     assert!(!serialized.contains("curl -fsS"));
+}
+
+#[test]
+fn runner_followups_include_workspace_prune_for_disk_pressure_recovery() {
+    let followups = runner_followups(Some("homeboy-lab"));
+    let serialized = serde_json::to_string(&followups).expect("serialize followups");
+
+    assert!(serialized.contains("homeboy runner workspace prune homeboy-lab --apply"));
+    assert!(serialized.contains("disk pressure"));
 }
 
 #[test]
