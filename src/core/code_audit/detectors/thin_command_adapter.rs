@@ -58,6 +58,8 @@ pub(in crate::core::code_audit) fn run(
         return Vec::new();
     }
 
+    let ignore_line_matches = compile_ignore_line_matches(config);
+
     let files = match walk_candidate_files(root, config) {
         Ok(files) => files,
         Err(_) => return Vec::new(),
@@ -79,7 +81,7 @@ pub(in crate::core::code_audit) fn run(
             continue;
         };
 
-        let hits = scan_orchestration(&content, &groups, config);
+        let hits = scan_orchestration(&content, &groups, &ignore_line_matches, config);
         let total_weight: u32 = hits.iter().map(|hit| hit.weight).sum();
         if total_weight < config.max_orchestration_weight {
             continue;
@@ -111,6 +113,14 @@ fn compile_marker_groups(config: &ThinCommandAdapterConfig) -> Vec<CompiledMarke
                 patterns,
             })
         })
+        .collect()
+}
+
+fn compile_ignore_line_matches(config: &ThinCommandAdapterConfig) -> Vec<Regex> {
+    config
+        .ignore_line_matches
+        .iter()
+        .filter_map(|pattern| Regex::new(pattern).ok())
         .collect()
 }
 
@@ -150,6 +160,7 @@ fn is_in_scope(normalized: &str, config: &ThinCommandAdapterConfig) -> bool {
 fn scan_orchestration(
     content: &str,
     groups: &[CompiledMarkerGroup],
+    ignore_line_matches: &[Regex],
     config: &ThinCommandAdapterConfig,
 ) -> Vec<OrchestrationHit> {
     let mut hits = Vec::new();
@@ -173,6 +184,13 @@ fn scan_orchestration(
             .ignore_line_prefixes
             .iter()
             .any(|prefix| trimmed.starts_with(prefix.as_str()))
+        {
+            continue;
+        }
+
+        if ignore_line_matches
+            .iter()
+            .any(|pattern| pattern.is_match(raw_line))
         {
             continue;
         }

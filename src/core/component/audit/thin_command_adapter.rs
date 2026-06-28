@@ -68,6 +68,11 @@ pub struct ThinCommandAdapterConfig {
     /// Line prefixes ignored entirely (e.g. comment markers).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_line_prefixes: Vec<String>,
+    /// Regex patterns; any line matching one is skipped entirely (does not
+    /// contribute orchestration weight). Use for line shapes that are never
+    /// orchestration, e.g. function declarations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_line_matches: Vec<String>,
     /// When a line equals one of these (trimmed), the remainder of the file is
     /// ignored (e.g. an inline test module marker).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -118,6 +123,7 @@ impl Default for ThinCommandAdapterConfig {
             file_extensions: Vec::new(),
             allow_line_contains: Vec::new(),
             ignore_line_prefixes: Vec::new(),
+            ignore_line_matches: Vec::new(),
             ignore_after_line_equals: Vec::new(),
             orchestration_markers: Vec::new(),
             max_orchestration_weight: default_thin_command_adapter_threshold(),
@@ -148,6 +154,7 @@ impl ThinCommandAdapterConfig {
         extend_unique(&mut self.file_extensions, &other.file_extensions);
         extend_unique(&mut self.allow_line_contains, &other.allow_line_contains);
         extend_unique(&mut self.ignore_line_prefixes, &other.ignore_line_prefixes);
+        extend_unique(&mut self.ignore_line_matches, &other.ignore_line_matches);
         extend_unique(
             &mut self.ignore_after_line_equals,
             &other.ignore_after_line_equals,

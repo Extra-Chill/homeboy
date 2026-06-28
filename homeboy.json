@@ -452,6 +452,9 @@
       "ignore_after_line_equals": [
         "#[cfg(test)]"
       ],
+      "ignore_line_matches": [
+        "^\\s*(pub(\\([^)]*\\))?\\s+)?(async\\s+)?fn\\s"
+      ],
       "ignore_line_prefixes": [
         "//",
         "///",

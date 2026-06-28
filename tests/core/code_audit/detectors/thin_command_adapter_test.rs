@@ -126,6 +126,70 @@ fn test_module_tail_is_ignored() {
     assert!(findings.is_empty());
 }
 
+fn name_shaped_config() -> ThinCommandAdapterConfig {
+    ThinCommandAdapterConfig {
+        include_path_contains: vec!["src/commands/".to_string()],
+        file_extensions: vec!["rs".to_string()],
+        orchestration_markers: vec![ThinCommandAdapterMarkerGroup {
+            label: "dispatch".to_string(),
+            patterns: vec![r"dispatch_[A-Za-z0-9_]+\s*\(".to_string()],
+            weight: 1,
+        }],
+        max_orchestration_weight: 1,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn ignore_line_matches_excludes_fn_definitions() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/def_only.rs",
+        "pub fn dispatch_foo() {\n    let x = 1;\n}\n",
+    );
+    let mut config = name_shaped_config();
+    config.ignore_line_matches = vec![r"^\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s".to_string()];
+    let findings = super::run(dir.path(), &config);
+    assert!(
+        findings.is_empty(),
+        "fn-definition line should not count as orchestration"
+    );
+}
+
+#[test]
+fn ignore_line_matches_still_flags_real_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/real_call.rs",
+        "pub fn run() {\n    dispatch_foo();\n}\n",
+    );
+    let mut config = name_shaped_config();
+    config.ignore_line_matches = vec![r"^\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s".to_string()];
+    let findings = super::run(dir.path(), &config);
+    assert_eq!(
+        findings.len(),
+        1,
+        "an actual dispatch_foo() call must still be flagged"
+    );
+    assert!(findings[0].description.contains("dispatch"));
+}
+
+#[test]
+fn empty_ignore_line_matches_preserves_existing_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/def_only.rs",
+        "pub fn dispatch_foo() {\n    let x = 1;\n}\n",
+    );
+    // With no ignore_line_matches, the fn-def line trips the marker (legacy
+    // behavior) and produces a finding.
+    let findings = super::run(dir.path(), &name_shaped_config());
+    assert_eq!(findings.len(), 1);
+}
+
 #[test]
 fn weighted_group_reaches_threshold_alone() {
     let dir = tempfile::tempdir().unwrap();
