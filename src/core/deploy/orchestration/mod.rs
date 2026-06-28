@@ -217,22 +217,33 @@ pub(super) fn deploy_components(
 
         let mut result = execute_preflighted_component_deploy(prepared, ctx, base_path, &project);
 
-        // Record which git ref was deployed
-        if let Some(checkout) = tag_checkouts
+        // Record which git ref was deployed. The same label feeds build provenance
+        // so `deployed_ref` and `build_provenance.built_from_ref` never disagree.
+        let deployed_ref = if let Some(checkout) = tag_checkouts
             .iter()
             .find(|c| c.component_id == component.id)
         {
-            result = result.with_deployed_ref(checkout.provenance_ref());
+            Some(checkout.provenance_ref())
         } else if config.head {
             // Deploying from HEAD — record the current branch
-            if let Some(branch) = crate::core::engine::command::run_in_optional(
+            crate::core::engine::command::run_in_optional(
                 &component.local_path,
                 "git",
                 &["rev-parse", "--abbrev-ref", "HEAD"],
-            ) {
-                result = result.with_deployed_ref(format!("{} (HEAD)", branch));
-            }
+            )
+            .map(|branch| format!("{} (HEAD)", branch))
+        } else {
+            None
+        };
+
+        if let Some(ref git_ref) = deployed_ref {
+            result = result.with_deployed_ref(git_ref.clone());
         }
+
+        // Attach explicit build provenance to every result, regardless of strategy.
+        let mut build_provenance = prepared.build_provenance.clone();
+        build_provenance.built_from_ref = deployed_ref;
+        result = result.with_build_provenance(build_provenance);
 
         if result.status == "deployed" {
             succeeded += 1;

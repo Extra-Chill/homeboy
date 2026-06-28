@@ -8,7 +8,10 @@ use crate::core::project::Project;
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::super::policy::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
-use super::super::types::{ComponentDeployResult, DeployArtifactSource, DeployConfig};
+use super::super::provenance::capture_build_provenance;
+use super::super::types::{
+    BuildProvenance, BuildSource, ComponentDeployResult, DeployArtifactSource, DeployConfig,
+};
 use super::super::version_overrides::is_self_deploy;
 use super::preflight::{resolve_preflight_artifact_path, validate_preflight_file_artifact};
 use super::release_plan::{
@@ -25,6 +28,7 @@ pub(crate) struct PreparedComponentDeploy {
     pub build_exit_code: Option<i32>,
     pub artifact_path: Option<PathBuf>,
     pub artifact_source: Option<DeployArtifactSource>,
+    pub build_provenance: BuildProvenance,
     pub cleanup_local_artifact: bool,
 }
 
@@ -192,6 +196,24 @@ pub(crate) fn prepare_component_deploy(
         release_artifact.is_none() && !config.skip_build && !is_self_deploy(component)
     });
 
+    // Capture provenance now, while the source tree is at the built state and the
+    // artifact still exists on disk (it may be cleaned up after a successful deploy).
+    let build_ran =
+        !(is_git_deploy || is_file_deploy || config.skip_build || release_artifact.is_some());
+    let build_source = if is_git_deploy {
+        BuildSource::GitPush
+    } else if is_file_deploy {
+        BuildSource::FileCopy
+    } else if release_artifact.is_some() {
+        BuildSource::DownloadedRelease
+    } else if config.skip_build {
+        BuildSource::ReusedArtifact
+    } else {
+        BuildSource::FreshBuild
+    };
+    let build_provenance =
+        capture_build_provenance(component, build_source, build_ran, artifact_path.as_deref());
+
     Ok(PreparedComponentDeploy {
         component: component.clone(),
         config: config.clone(),
@@ -201,6 +223,7 @@ pub(crate) fn prepare_component_deploy(
         build_exit_code,
         artifact_path,
         artifact_source,
+        build_provenance,
         cleanup_local_artifact,
     })
 }
