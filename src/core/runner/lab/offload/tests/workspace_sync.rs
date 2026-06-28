@@ -249,6 +249,36 @@ fn required_git_checkout_preflight_rejects_dirty_checkout() {
 }
 
 #[test]
+fn required_git_checkout_preflight_accepts_homeboy_runner_metadata_when_excluded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .status()
+        .expect("init git repo");
+    std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/Extra-Chill/homeboy.git",
+        ])
+        .current_dir(dir.path())
+        .status()
+        .expect("add origin");
+    std::fs::create_dir_all(dir.path().join(".homeboy")).expect("metadata dir");
+    std::fs::write(
+        dir.path().join(".homeboy/runner-workspace.json"),
+        "{\"schema\":\"homeboy/runner-workspace/v1\"}\n",
+    )
+    .expect("metadata");
+    std::fs::write(dir.path().join(".git/info/exclude"), ".homeboy/\n").expect("exclude metadata");
+
+    preflight_patch_provider_git_checkout(dir.path())
+        .expect("Homeboy-owned runner metadata should not fail patch-capture preflight");
+}
+
+#[test]
 fn required_git_checkout_preflight_accepts_clean_checkout_with_origin() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::process::Command::new("git")

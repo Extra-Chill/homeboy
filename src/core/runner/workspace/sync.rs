@@ -730,6 +730,7 @@ fn write_workspace_metadata(
     );
     match runner.kind {
         RunnerKind::Local => {
+            exclude_homeboy_metadata_from_git_status(Path::new(&metadata.remote_path))?;
             let path = Path::new(&metadata_path);
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
@@ -751,7 +752,8 @@ fn write_workspace_metadata(
             client.env.extend(runner.env.clone());
             let parent = parent_remote_path(&metadata_path);
             let command = format!(
-                "mkdir -p {parent} && cat > {path} <<'HOMEBOY_WORKSPACE_METADATA'\n{json}\nHOMEBOY_WORKSPACE_METADATA",
+                "remote_path={remote_path}; if [ -d \"$remote_path/.git\" ]; then mkdir -p \"$remote_path/.git/info\" && touch \"$remote_path/.git/info/exclude\" && grep -qxF '.homeboy/' \"$remote_path/.git/info/exclude\" || printf '\\n.homeboy/\\n' >> \"$remote_path/.git/info/exclude\"; fi; mkdir -p {parent} && cat > {path} <<'HOMEBOY_WORKSPACE_METADATA'\n{json}\nHOMEBOY_WORKSPACE_METADATA",
+                remote_path = shell::quote_arg(&metadata.remote_path),
                 parent = shell::quote_arg(&parent),
                 path = shell::quote_arg(&metadata_path),
                 json = json,
@@ -767,6 +769,40 @@ fn write_workspace_metadata(
             }
         }
     }
+}
+
+fn exclude_homeboy_metadata_from_git_status(workspace_path: &Path) -> Result<()> {
+    let git_dir = workspace_path.join(".git");
+    if !git_dir.is_dir() {
+        return Ok(());
+    }
+
+    let exclude_path = git_dir.join("info/exclude");
+    if let Some(parent) = exclude_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("create workspace git exclude dir".to_string()),
+            )
+        })?;
+    }
+
+    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == ".homeboy/") {
+        return Ok(());
+    }
+
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(".homeboy/\n");
+    fs::write(&exclude_path, next).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("write workspace git exclude".to_string()),
+        )
+    })
 }
 
 fn prune_candidates_local(

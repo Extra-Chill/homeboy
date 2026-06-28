@@ -351,6 +351,15 @@ fn snapshot_git_sync_materializes_dirty_source_as_synthetic_git_checkout() {
             git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
             "https://github.com/example/app.git"
         );
+        assert_eq!(
+            git_output(remote, &["status", "--porcelain=v1"]).unwrap(),
+            "",
+            "Homeboy-owned runner metadata must not dirty synthetic checkouts before patch capture"
+        );
+        assert!(fs::read_to_string(remote.join(".git/info/exclude"))
+            .unwrap()
+            .lines()
+            .any(|line| line == ".homeboy/"));
         assert!(git_output(remote, &["log", "-1", "--pretty=%B"])
             .unwrap()
             .contains(&output.snapshot_identity));
