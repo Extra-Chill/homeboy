@@ -8,6 +8,7 @@ If you are trying to perform a task, start with [Workflows](../workflows/index.m
 
 - [Homeboy model](homeboy-model.md) - components, extensions, commands, evidence, runners, and operations.
 - [Structured evidence](structured-evidence.md) - human output, JSON output, persisted runs, and reviewer-safe artifacts.
+- [Headless agent orchestration](headless-agent-orchestration.md) - why Homeboy helps agents produce durable, reviewable engineering work.
 - [Code Factory](code-factory.md) - automated code maintenance through lint, test, audit, release, and deploy stages.
 
 ## Deeper Concepts

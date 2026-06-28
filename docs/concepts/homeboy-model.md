@@ -32,6 +32,17 @@ Commands print human-readable output and can write structured JSON with `--outpu
 
 Runners let Homeboy route hot or remote-capable commands to another execution environment while preserving the same command contract.
 
+## Headless Orchestration
+
+Agent tasks, loops, controllers, runs, and artifacts make Homeboy useful without a chat session or interactive shell. Durable ids let terminals, CI jobs, runners, scheduled tasks, and chat bridges observe and resume the same work.
+
 ## Operations
 
 Projects, servers, and fleets add remote operations for deployments, SSH, logs, files, databases, and fleet fan-out. These are useful for configured environments but are not required for the local quality loop.
+
+## Related
+
+- [Headless agent orchestration](headless-agent-orchestration.md)
+- [Structured evidence](structured-evidence.md)
+- [Set up Lab runners](../workflows/set-up-lab-runners.md)
+- [Set up extensions](../workflows/set-up-extensions.md)

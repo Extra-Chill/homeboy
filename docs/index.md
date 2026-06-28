@@ -23,8 +23,12 @@ Task-oriented guides for using Homeboy:
 - [Reproduce CI](workflows/reproduce-ci.md)
 - [Capture evidence](workflows/capture-evidence.md)
 - [Use runners](workflows/use-runners.md)
+- [Set up Lab runners](workflows/set-up-lab-runners.md)
+- [Set up extensions](workflows/set-up-extensions.md)
 - [Run agent task loops](workflows/run-agent-task-loops.md)
+- [Manage local environments](workflows/manage-local-environments.md)
 - [Release a component](workflows/release-a-component.md)
+- [Deploy and operate fleets](workflows/deploy-and-operate-fleets.md)
 
 ## Concepts
 
@@ -33,6 +37,7 @@ Mental models and vocabulary:
 - [Concepts index](concepts/index.md)
 - [Homeboy model](concepts/homeboy-model.md)
 - [Structured evidence](concepts/structured-evidence.md)
+- [Headless agent orchestration](concepts/headless-agent-orchestration.md)
 - [Code Factory](concepts/code-factory.md)
 
 ## Reference
