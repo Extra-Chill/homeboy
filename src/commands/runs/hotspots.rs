@@ -365,21 +365,44 @@ fn skipped_artifact(
 }
 
 fn rank_hotspots(artifacts: &[LoadedFuzzArtifact], limit: usize) -> Vec<HotspotRanking> {
-    let mut by_key: BTreeMap<String, HotspotAccumulator> = BTreeMap::new();
+    let mut by_run_key: BTreeMap<(String, String), HotspotPoint> = BTreeMap::new();
+    let mut sources_by_run_key: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     for artifact in artifacts {
         for point in extract_hotspot_points(&artifact.json) {
-            let entry = by_key.entry(point.key.clone()).or_default();
-            if entry.label.is_none() {
-                entry.label = point.label;
+            let run_key = (artifact.run_id.clone(), point.key.clone());
+            sources_by_run_key
+                .entry(run_key.clone())
+                .or_default()
+                .insert(format!(
+                    "{}:{}:{}",
+                    artifact.run_id, artifact.artifact_kind, point.source
+                ));
+            match by_run_key.get_mut(&run_key) {
+                Some(existing) if point.score > existing.score => {
+                    *existing = point;
+                }
+                Some(_) => {}
+                None => {
+                    by_run_key.insert(run_key, point);
+                }
             }
-            entry.score += point.score;
-            entry.occurrences += 1;
-            entry.run_ids.insert(artifact.run_id.clone());
-            entry.sources.insert(format!(
-                "{}:{}:{}",
-                artifact.run_id, artifact.artifact_kind, point.source
-            ));
         }
+    }
+
+    let mut by_key: BTreeMap<String, HotspotAccumulator> = BTreeMap::new();
+    for ((run_id, key), point) in by_run_key {
+        let entry = by_key.entry(point.key.clone()).or_default();
+        if entry.label.is_none() {
+            entry.label = point.label;
+        }
+        entry.score += point.score;
+        entry.occurrences += 1;
+        entry.run_ids.insert(run_id.clone());
+        entry.sources.extend(
+            sources_by_run_key
+                .remove(&(run_id, key))
+                .unwrap_or_default(),
+        );
     }
 
     let mut ranked = by_key
@@ -421,6 +444,7 @@ fn extract_hotspot_points(json: &Value) -> Vec<HotspotPoint> {
         return points;
     }
 
+    points.extend(db_query_hotspots(json));
     points.extend(finding_hotspots(json));
     points.extend(coverage_gap_hotspots(json));
     points
@@ -598,6 +622,76 @@ fn coverage_gap_hotspots(json: &Value) -> Vec<HotspotPoint> {
         .collect()
 }
 
+fn db_query_hotspots(json: &Value) -> Vec<HotspotPoint> {
+    let mut collected = Vec::new();
+    collect_db_query_hotspots(json, "$", &mut collected);
+
+    let mut by_key = BTreeMap::<String, HotspotPoint>::new();
+    for point in collected {
+        match by_key.get_mut(&point.key) {
+            Some(existing) if point.score > existing.score => {
+                *existing = point;
+            }
+            Some(_) => {}
+            None => {
+                by_key.insert(point.key.clone(), point);
+            }
+        }
+    }
+
+    by_key.into_values().collect()
+}
+
+fn collect_db_query_hotspots(value: &Value, source: &str, points: &mut Vec<HotspotPoint>) {
+    if let Some(top_queries) =
+        value_at(value, &["db_query", "top_queries"]).and_then(Value::as_array)
+    {
+        for query in top_queries {
+            let summary = query.get("summary").unwrap_or(query);
+            let query_count = numeric_field(summary, &["query_count"]).unwrap_or(0.0);
+            let total_time_ms =
+                numeric_field(summary, &["total_time_ms", "query_time_ms"]).unwrap_or(0.0);
+            if query_count <= 0.0 && total_time_ms <= 0.0 {
+                continue;
+            }
+
+            let method = string_field(query, &["method"]).unwrap_or_else(|| "REQUEST".to_string());
+            let path = string_field(query, &["path"]).or_else(|| string_field(query, &["case_id"]));
+            let Some(path) = path else {
+                continue;
+            };
+            let key = format!("db-query:{method} {path}");
+            points.push(HotspotPoint {
+                label: Some(format!("{method} {path}")),
+                key,
+                score: if total_time_ms > 0.0 {
+                    total_time_ms
+                } else {
+                    query_count
+                },
+                source: format!("{source}.db_query.top_queries"),
+            });
+        }
+    }
+
+    match value {
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_db_query_hotspots(item, &format!("{source}[{index}]"), points);
+            }
+        }
+        Value::Object(object) => {
+            for (key, item) in object {
+                if key == "prior_observations" {
+                    continue;
+                }
+                collect_db_query_hotspots(item, &format!("{source}.{key}"), points);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn is_fuzz_json(json: &Value) -> bool {
     string_field(json, &["schema"]).is_some_and(|schema| schema.contains("fuzz"))
         || value_at(json, &["campaign"])
@@ -717,6 +811,40 @@ mod tests {
         assert_eq!(ranked[0].run_ids, vec!["run-a", "run-b"]);
         assert_eq!(ranked[1].key, "beta");
         assert_eq!(ranked[1].score, 4.0);
+    }
+
+    #[test]
+    fn ranking_dedupes_duplicate_keys_per_run() {
+        let artifacts = vec![
+            artifact(
+                "run-a",
+                json!({
+                    "schema": "https://schemas.homeboy.dev/fuzz/result-envelope.json",
+                    "hotspots": [
+                        { "id": "same-key", "score": 2.0 },
+                        { "id": "same-key", "score": 5.0 }
+                    ]
+                }),
+            ),
+            artifact(
+                "run-b",
+                json!({
+                    "schema": "https://schemas.homeboy.dev/fuzz/result-envelope.json",
+                    "hotspots": [
+                        { "id": "same-key", "score": 3.0 }
+                    ]
+                }),
+            ),
+        ];
+
+        let ranked = rank_hotspots(&artifacts, 10);
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].key, "same-key");
+        assert_eq!(ranked[0].score, 8.0);
+        assert_eq!(ranked[0].occurrences, 2);
+        assert_eq!(ranked[0].run_count, 2);
+        assert_eq!(ranked[0].run_ids, vec!["run-a", "run-b"]);
     }
 
     #[test]
@@ -929,6 +1057,54 @@ mod tests {
         );
         assert_eq!(points[0].score, 750.0);
         assert!(!points.iter().any(|point| point.key == "duplicate-prior"));
+    }
+
+    #[test]
+    fn fallback_extracts_nested_db_query_profiles() {
+        let points = extract_hotspot_points(&json!({
+            "schema": "homeboy/fuzz-result-envelope/v1",
+            "metadata": {
+                "runner_result": {
+                    "cases": [
+                        {
+                            "id": "rest-db-query-profile:default",
+                            "db_query": {
+                                "case_count": 2,
+                                "top_queries": [
+                                    {
+                                        "case_id": "catalog-items",
+                                        "method": "GET",
+                                        "path": "/api/catalog/items",
+                                        "summary": {
+                                            "query_count": 1,
+                                            "total_time_ms": 0.9999275207519531
+                                        }
+                                    },
+                                    {
+                                        "case_id": "admin-index",
+                                        "method": "GET",
+                                        "path": "/api/admin",
+                                        "summary": {
+                                            "query_count": 0,
+                                            "total_time_ms": 0
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].key, "db-query:GET /api/catalog/items");
+        assert_eq!(points[0].label.as_deref(), Some("GET /api/catalog/items"));
+        assert_eq!(points[0].score, 0.9999275207519531);
+        assert_eq!(
+            points[0].source,
+            "$.metadata.runner_result.cases[0].db_query.top_queries"
+        );
     }
 
     #[test]
