@@ -64,7 +64,7 @@ pub use operations_changes::{
 pub use operations_commit::{commit, commit_at, commit_from_json, CommitJsonOutput, CommitOptions};
 pub use operations_push::{push, push_at, push_bulk, PushOptions};
 pub use operations_tags::{
-    delete_local_tag, delete_remote_tag, fetch_origin, get_head_commit, get_tag_commit,
+    delete_local_tag, delete_remote_tag, fetch_origin, fetch_tags, get_head_commit, get_tag_commit,
     is_ancestor, remote_branch_commit, remote_tag_commit, short_head_revision_at, tag, tag_at,
     tag_exists_locally, tag_exists_on_remote,
 };

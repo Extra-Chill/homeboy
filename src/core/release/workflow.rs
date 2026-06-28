@@ -658,6 +658,26 @@ fn release_command_exit_code(
     }
 }
 
+/// Which batch summary counter a per-component release status rolls up into.
+#[derive(Debug, PartialEq, Eq)]
+enum BatchStatusBucket {
+    Released,
+    Skipped,
+    Failed,
+}
+
+/// Map an authoritative per-component release status string to its batch
+/// summary bucket. Only a clean `released` counts as released; `skipped` is its
+/// own bucket; every other outcome (failed, missing, partial, or unknown) rolls
+/// up as failed so the summary never overstates success (issue #6916).
+fn batch_status_bucket(status: &str) -> BatchStatusBucket {
+    match status {
+        "released" => BatchStatusBucket::Released,
+        "skipped" => BatchStatusBucket::Skipped,
+        _ => BatchStatusBucket::Failed,
+    }
+}
+
 /// Run releases for multiple components sequentially.
 ///
 /// Continue-on-error: if one component fails, the rest still run.
@@ -699,18 +719,22 @@ pub fn run_batch(
 
         match run_command(input) {
             Ok((result, _exit_code)) => {
-                let was_skipped = result.skipped_reason.is_some();
-                let status = if was_skipped {
-                    skipped += 1;
-                    "skipped"
-                } else {
-                    released += 1;
-                    "released"
-                };
+                // Roll up the authoritative per-component status rather than
+                // assuming a non-skipped `Ok` means "released". A component can
+                // return `Ok` with a nested status of failed/missing/partial
+                // (e.g. a dependency release failed), and counting that as
+                // `released` produced a misleading `{released, failed}` summary
+                // (issue #6916).
+                let status = result.status.clone();
+                match batch_status_bucket(&status) {
+                    BatchStatusBucket::Skipped => skipped += 1,
+                    BatchStatusBucket::Released => released += 1,
+                    BatchStatusBucket::Failed => failed += 1,
+                }
 
                 results.push(BatchReleaseComponentResult {
                     component_id: component_id.clone(),
-                    status: status.to_string(),
+                    status,
                     error: None,
                     result: Some(result),
                 });
@@ -760,6 +784,17 @@ mod tests {
     use crate::core::plan::{PlanStep, PlanStepStatus, PlanValues};
     use crate::core::release::types::ReleasePhase;
     use crate::core::release::{ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus};
+
+    #[test]
+    fn batch_status_bucket_rolls_up_non_released_outcomes_as_failed() {
+        // Issue #6916: a failed component must not be counted as released.
+        assert_eq!(batch_status_bucket("released"), BatchStatusBucket::Released);
+        assert_eq!(batch_status_bucket("skipped"), BatchStatusBucket::Skipped);
+        assert_eq!(batch_status_bucket("failed"), BatchStatusBucket::Failed);
+        assert_eq!(batch_status_bucket("missing"), BatchStatusBucket::Failed);
+        assert_eq!(batch_status_bucket("partial"), BatchStatusBucket::Failed);
+        assert_eq!(batch_status_bucket("unknown"), BatchStatusBucket::Failed);
+    }
 
     #[test]
     fn extracts_new_version_from_plan() {

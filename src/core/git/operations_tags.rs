@@ -129,6 +129,65 @@ pub fn fetch_origin(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Ensure the operating checkout has the relevant release tags (and enough
+/// connecting history) before a reachability/changelog-range guard inspects
+/// them.
+///
+/// A release checkout can be materialized without tags, or shallow, so the
+/// latest release tag is either absent or its connecting commits are missing.
+/// Either way the reachability guard sees "tag not reachable from HEAD" and
+/// refuses, even though the tag genuinely is an ancestor of HEAD in the real
+/// history on `origin` (issue #6916).
+///
+/// This fetches tags from the resolved default remote and, when the checkout is
+/// shallow, unshallows it so `git merge-base --is-ancestor` can be computed
+/// accurately. It is intentionally best-effort: a missing network or remote is
+/// not fatal here, because the downstream guard still runs against whatever
+/// local history exists and remains correct — it just no longer refuses a tag
+/// that was only missing because tags were never fetched.
+pub fn fetch_tags(path: &str) -> Result<()> {
+    if !super::is_git_repo(path) {
+        return Ok(());
+    }
+
+    let remote = super::resolve_default_remote(Path::new(path));
+
+    // Unshallow first when shallow so the fetched tags have their connecting
+    // commits and ancestry can be evaluated. `--unshallow` errors on a complete
+    // repo, so it is gated on the shallow marker and run best-effort.
+    if is_shallow(path) {
+        let _ = crate::core::engine::command::run_in_optional(
+            path,
+            "git",
+            &["fetch", "--unshallow", "--tags", &remote],
+        );
+    }
+
+    // Fetch tags from the remote so the latest release tag and its commits are
+    // present locally. Best-effort: offline/no-remote checkouts fall through to
+    // the guard with whatever local history exists.
+    let _ = crate::core::engine::command::run_in_optional(
+        path,
+        "git",
+        &["fetch", "--tags", &remote],
+    );
+
+    Ok(())
+}
+
+/// Return true when the checkout is a shallow clone (has a `shallow` file in the
+/// git dir). Used to decide whether an `--unshallow` fetch is applicable before
+/// computing tag reachability.
+fn is_shallow(path: &str) -> bool {
+    crate::core::engine::command::run_in_optional(
+        path,
+        "git",
+        &["rev-parse", "--is-shallow-repository"],
+    )
+    .map(|out| out.trim() == "true")
+    .unwrap_or(false)
+}
+
 /// Return true when `ancestor` is an ancestor of (i.e. reachable from)
 /// `descendant`. Used to confirm a stale tag's commit is strictly behind HEAD
 /// before moving it, so a tag is never relocated onto an unrelated/divergent
