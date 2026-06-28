@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.4] - 2026-06-28
+
+### Fixed
+- clean vendor/ before composer install in WP build
+
 ## [3.21.3] - 2026-06-28
 
 ### Changed
