@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
-use crate::core::runner::workspace::sync::{prune_workspaces, sync_workspace};
+use crate::core::runner::workspace::sync::{prune_scan_command, prune_workspaces, sync_workspace};
 use crate::core::runner::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
@@ -103,6 +104,107 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
         assert!(Path::new(&live.remote_path).exists());
         assert!(unmanaged.exists());
     });
+}
+
+#[test]
+fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
+    crate::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let workspace = runner_root
+            .path()
+            .join("_lab_workspaces")
+            .join("repo's odd (name) with spaces");
+        fs::create_dir_all(workspace.join(".homeboy")).expect("workspace metadata dir");
+        fs::write(workspace.join("file.txt"), "orphan\n").expect("workspace file");
+        fs::write(
+            workspace.join(".homeboy/runner-workspace.json"),
+            serde_json::json!({
+                "schema": "homeboy/runner-workspace/v1",
+                "runner_id": "lab-local-prune-odd-preview",
+                "local_path": runner_root.path().join("missing source's (odd) path").display().to_string(),
+                "remote_path": workspace.display().to_string(),
+                "sync_mode": "snapshot",
+                "snapshot_identity": "synthetic",
+                "synced_at": "2026-06-28T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .expect("write metadata");
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-odd-preview","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (output, exit_code) = prune_workspaces(
+            "lab-local-prune-odd-preview",
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 0,
+                limit: 10,
+            },
+        )
+        .expect("prune preview");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.dry_run);
+        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(
+            output.candidates[0].remote_path,
+            workspace.display().to_string()
+        );
+        assert!(output.candidates[0]
+            .source_path
+            .contains("missing source's (odd) path"));
+        assert_eq!(output.candidates[0].reason, "source_path_missing");
+        assert!(workspace.exists());
+        assert!(output.removed.is_empty());
+    });
+}
+
+#[test]
+fn ssh_prune_scan_command_handles_paths_that_need_shell_quoting() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("root's (quoted) workspaces");
+    let workspace = root.join("repo's odd (name) with spaces");
+    fs::create_dir_all(workspace.join(".homeboy")).expect("workspace metadata dir");
+    fs::write(workspace.join("file.txt"), "orphan\n").expect("workspace file");
+    fs::write(
+        workspace.join(".homeboy/runner-workspace.json"),
+        serde_json::json!({
+            "schema": "homeboy/runner-workspace/v1",
+            "runner_id": "lab-ssh-prune-odd-scan",
+            "local_path": "/missing/source's (odd) path",
+            "remote_path": workspace.display().to_string(),
+            "sync_mode": "snapshot",
+            "snapshot_identity": "synthetic",
+            "synced_at": "2026-06-28T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .expect("write metadata");
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(prune_scan_command(&root.display().to_string(), 0))
+        .output()
+        .expect("run generated prune scan command");
+
+    assert!(
+        output.status.success(),
+        "scan command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&workspace.display().to_string()),
+        "{stdout}"
+    );
+    assert!(stdout.contains('\t'), "{stdout}");
+    assert!(stdout.lines().count() == 1, "{stdout}");
 }
 
 fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
