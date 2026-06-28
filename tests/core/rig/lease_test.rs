@@ -1,7 +1,10 @@
 //! Tests for active rig run leases.
 
 use crate::core::error::ErrorCode;
-use crate::core::rig::lease::{acquire_active_run_lease, active_run_leases};
+use crate::core::rig::lease::{
+    acquire_active_run_lease, active_run_leases, release_active_run_lease, ReleaseLeaseOutcome,
+    RIG_LEASE_TTL_ENV,
+};
 use crate::core::rig::spec::{RigResourcesSpec, RigSpec};
 use crate::core::rig::{run_up, RigRunLease};
 use crate::test_support::with_isolated_home;
@@ -247,6 +250,165 @@ fn test_acquire_active_run_lease_prunes_stale_pid() {
         assert!(acquire_active_run_lease(&studio_bfb, "up")
             .expect("stale pid ignored")
             .is_some());
+    });
+}
+
+fn write_lease(lease: &RigRunLease) {
+    let lease_dir = crate::core::paths::rig_leases_dir().expect("lease dir");
+    std::fs::create_dir_all(&lease_dir).expect("create lease dir");
+    std::fs::write(
+        lease_dir.join(format!("{}.json", lease.rig_id)),
+        serde_json::to_string_pretty(lease).expect("serialize lease"),
+    )
+    .expect("write lease");
+}
+
+fn live_lease(rig_id: &str, started_at: &str) -> RigRunLease {
+    RigRunLease {
+        rig_id: rig_id.to_string(),
+        command: "bench".to_string(),
+        // This test process is alive, so the lease holder is a live pid.
+        pid: std::process::id(),
+        started_at: started_at.to_string(),
+        run_id: Some("run-abc".to_string()),
+        runner_id: Some("lab-runner-1".to_string()),
+        resources: resources(),
+    }
+}
+
+#[test]
+fn test_ttl_reclaims_live_but_stale_lease() {
+    with_isolated_home(|_| {
+        let _ttl = EnvVarGuard::set(RIG_LEASE_TTL_ENV, "1");
+        // Live holder pid, but started far in the past => past the 1s TTL.
+        write_lease(&live_lease("studio", "2020-01-01T00:00:00Z"));
+
+        let studio_bfb = rig("studio-bfb", resources());
+        assert!(
+            acquire_active_run_lease(&studio_bfb, "bench")
+                .expect("ttl-stale lease is reclaimable")
+                .is_some(),
+            "a live-but-stale holder past its TTL must be reclaimable"
+        );
+    });
+}
+
+#[test]
+fn test_live_holder_within_ttl_still_conflicts() {
+    with_isolated_home(|_| {
+        let _ttl = EnvVarGuard::set(RIG_LEASE_TTL_ENV, "100000");
+        let studio = rig("studio", resources());
+        let lease = acquire_active_run_lease(&studio, "bench")
+            .expect("first lease")
+            .expect("resourceful rig leases");
+
+        let studio_bfb = rig("studio-bfb", resources());
+        let conflict = acquire_active_run_lease(&studio_bfb, "bench")
+            .expect_err("a live, recent holder within its TTL must still conflict");
+        assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
+
+        drop(lease);
+    });
+}
+
+#[test]
+fn test_no_ttl_keeps_live_holder_locked() {
+    with_isolated_home(|_| {
+        // No TTL configured: even a very old live holder is never auto-reclaimed.
+        std::env::remove_var(RIG_LEASE_TTL_ENV);
+        write_lease(&live_lease("studio", "2020-01-01T00:00:00Z"));
+
+        let studio_bfb = rig("studio-bfb", resources());
+        let conflict = acquire_active_run_lease(&studio_bfb, "bench")
+            .expect_err("without a TTL a live holder is never stolen");
+        assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
+    });
+}
+
+#[test]
+fn test_resource_conflict_includes_age_and_reclaim_command() {
+    with_isolated_home(|_| {
+        write_lease(&live_lease("studio", "2020-01-01T00:00:00Z"));
+
+        let studio_bfb = rig("studio-bfb", resources());
+        let conflict = acquire_active_run_lease(&studio_bfb, "bench")
+            .expect_err("live holder conflicts without a TTL");
+
+        let age = conflict.details["held_by"]["age_seconds"]
+            .as_i64()
+            .expect("age_seconds present");
+        assert!(age > 0, "holder age should be a positive number of seconds");
+        assert!(conflict.message.contains("held for"));
+        assert!(
+            conflict.hints.iter().any(|hint| hint
+                .message
+                .contains("homeboy rig release-lock studio --force")),
+            "conflict must surface the exact reclaim command"
+        );
+    });
+}
+
+#[test]
+fn test_release_lock_reports_no_lease_when_absent() {
+    with_isolated_home(|_| {
+        let outcome = release_active_run_lease("studio", false).expect("release with no lease");
+        assert!(matches!(outcome, ReleaseLeaseOutcome::NoLease { .. }));
+    });
+}
+
+#[test]
+fn test_release_lock_frees_dead_holder_without_force() {
+    with_isolated_home(|_| {
+        let dead = RigRunLease {
+            rig_id: "studio".to_string(),
+            command: "bench".to_string(),
+            pid: u32::MAX,
+            started_at: "2020-01-01T00:00:00Z".to_string(),
+            run_id: None,
+            runner_id: None,
+            resources: resources(),
+        };
+        write_lease(&dead);
+
+        let outcome = release_active_run_lease("studio", false).expect("release dead holder");
+        match outcome {
+            ReleaseLeaseOutcome::Released {
+                was_reclaimable,
+                forced,
+                ..
+            } => {
+                assert!(was_reclaimable, "dead holder is reclaimable");
+                assert!(!forced, "no force was needed for a dead holder");
+            }
+            other => panic!("expected Released, got {other:?}"),
+        }
+        assert!(active_run_leases().expect("list").is_empty());
+    });
+}
+
+#[test]
+fn test_release_lock_requires_force_for_live_holder() {
+    with_isolated_home(|_| {
+        std::env::remove_var(RIG_LEASE_TTL_ENV);
+        write_lease(&live_lease("studio", "2020-01-01T00:00:00Z"));
+
+        let err = release_active_run_lease("studio", false)
+            .expect_err("a live holder must not be released without force");
+        assert_eq!(err.code, ErrorCode::RigResourceConflict);
+
+        let outcome =
+            release_active_run_lease("studio", true).expect("force releases the live holder");
+        match outcome {
+            ReleaseLeaseOutcome::Released {
+                was_reclaimable,
+                forced,
+                ..
+            } => {
+                assert!(!was_reclaimable, "live holder was not otherwise reclaimable");
+                assert!(forced, "force was required");
+            }
+            other => panic!("expected Released, got {other:?}"),
+        }
     });
 }
 

@@ -219,6 +219,27 @@ pub struct RigResourceConflictInfo {
     pub held_since: String,
     pub held_by_run_id: Option<String>,
     pub held_by_runner_id: Option<String>,
+    /// Wall-clock age of the holding lease in seconds, when it can be derived
+    /// from `held_since`. Surfaced so operators can judge whether the holder is
+    /// a fresh, legitimate run or a stale/wedged one worth reclaiming.
+    pub held_age_seconds: Option<i64>,
+}
+
+/// Render a duration in seconds as a compact human string (e.g. `28m`, `2h 5m`).
+fn humanize_age_seconds(seconds: i64) -> String {
+    if seconds < 0 {
+        return "unknown".to_string();
+    }
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {secs}s")
+    } else {
+        format!("{secs}s")
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -608,10 +629,15 @@ impl Error {
     pub fn rig_resource_conflict(info: RigResourceConflictInfo) -> Self {
         let held_by_run_id = info.held_by_run_id.clone();
         let held_by_runner_id = info.held_by_runner_id.clone();
+        let held_rig_id = info.held_by_rig.clone();
+        let age_label = info
+            .held_age_seconds
+            .map(humanize_age_seconds)
+            .unwrap_or_else(|| "unknown".to_string());
         let mut error = Self::new(
             ErrorCode::RigResourceConflict,
             format!(
-                "Rig '{}' cannot run '{}': {} resource '{}' is already held by rig '{}' running '{}' (pid {}, since {})",
+                "Rig '{}' cannot run '{}': {} resource '{}' is already held by rig '{}' running '{}' (pid {}, since {}, held for {})",
                 info.rig_id,
                 info.command,
                 info.resource_kind,
@@ -619,7 +645,8 @@ impl Error {
                 info.held_by_rig,
                 info.held_by_command,
                 info.held_by_pid,
-                info.held_since
+                info.held_since,
+                age_label
             ),
             serde_json::json!({
                 "rig_id": info.rig_id,
@@ -631,6 +658,7 @@ impl Error {
                     "command": info.held_by_command,
                     "pid": info.held_by_pid,
                     "since": info.held_since,
+                    "age_seconds": info.held_age_seconds,
                     "run_id": info.held_by_run_id,
                     "runner_id": info.held_by_runner_id,
                 }
@@ -639,7 +667,11 @@ impl Error {
         .with_hint(
             "If this parallel run is intentional, give each run a distinct namespace or port range so their rig resources no longer overlap."
                 .to_string(),
-        );
+        )
+        .with_hint(format!(
+            "If the holder (pid {}) is dead or wedged and will never finish, reclaim the lock with `homeboy rig release-lock {} --force`; without `--force` the lock is only released when its holder is provably gone or past its TTL.",
+            info.held_by_pid, held_rig_id
+        ));
         if let Some(run_id) = held_by_run_id {
             error = error
                 .with_hint(format!(

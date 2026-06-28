@@ -8,8 +8,17 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 mod lock;
+
+/// Environment variable that, when set to a positive integer number of seconds,
+/// enables time-to-live based reclaim of rig run leases. A lease whose holder is
+/// still alive but has been held longer than this TTL is treated as stale and
+/// becomes reclaimable on the next acquire. Unset (the default) means leases are
+/// only reclaimed when their holder process is provably gone — a live, recent
+/// holder is never reclaimed automatically.
+pub const RIG_LEASE_TTL_ENV: &str = "HOMEBOY_RIG_LEASE_TTL_SECS";
 
 use super::expand::expand_resources;
 use super::spec::{RigResourcesSpec, RigSpec};
@@ -74,6 +83,7 @@ pub fn acquire_active_run_lease(rig: &RigSpec, command: &str) -> Result<Option<A
         return Ok(None);
     }
     if let Some(conflict) = find_conflict(rig, command, &resources)? {
+        let held_age_seconds = lease_age_seconds(&conflict.lease.started_at);
         return Err(Error::rig_resource_conflict(RigResourceConflictInfo {
             rig_id: rig.id.clone(),
             command: command.to_string(),
@@ -85,6 +95,7 @@ pub fn acquire_active_run_lease(rig: &RigSpec, command: &str) -> Result<Option<A
             held_since: conflict.lease.started_at,
             held_by_run_id: conflict.lease.run_id,
             held_by_runner_id: conflict.lease.runner_id,
+            held_age_seconds,
         }));
     }
 
@@ -233,12 +244,46 @@ fn paths_overlap(a: &str, b: &str) -> bool {
     a == b || a.starts_with(b) || b.starts_with(a)
 }
 
+/// Read the configured lease TTL, if any. Returns `None` when the env var is
+/// unset, empty, non-numeric, or zero — in which case TTL-based reclaim is
+/// disabled and only dead holders are reclaimed.
+fn lease_ttl() -> Option<Duration> {
+    std::env::var(RIG_LEASE_TTL_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+}
+
+/// Wall-clock age of a lease in seconds derived from its `started_at` timestamp.
+/// Returns `None` if the timestamp cannot be parsed.
+fn lease_age_seconds(started_at: &str) -> Option<i64> {
+    let started = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let age = chrono::Utc::now().signed_duration_since(started.with_timezone(&chrono::Utc));
+    Some(age.num_seconds())
+}
+
+/// A lease is reclaimable when its holder process is provably gone, or — when a
+/// TTL is configured — when it has been held longer than that TTL. A live holder
+/// within its TTL window is never reclaimable: we never steal an active lock.
+fn lease_is_reclaimable(lease: &RigRunLease) -> bool {
+    if !crate::core::process::pid_is_running(lease.pid) {
+        return true;
+    }
+    if let Some(ttl) = lease_ttl() {
+        if let Some(age) = lease_age_seconds(&lease.started_at) {
+            return age >= 0 && (age as u64) > ttl.as_secs();
+        }
+    }
+    false
+}
+
 fn prune_stale_leases() -> Result<()> {
     for path in lease_files()? {
         let Some(lease) = read_lease(&path)? else {
             continue;
         };
-        if !crate::core::process::pid_is_running(lease.pid) {
+        if lease_is_reclaimable(&lease) {
             fs::remove_file(&path).map_err(|e| {
                 Error::internal_unexpected(format!(
                     "Failed to remove stale rig lease {}: {}",
@@ -255,12 +300,83 @@ fn live_leases() -> Result<Vec<RigRunLease>> {
     let mut leases = Vec::new();
     for path in lease_files()? {
         if let Some(lease) = read_lease(&path)? {
-            if crate::core::process::pid_is_running(lease.pid) {
+            if !lease_is_reclaimable(&lease) {
                 leases.push(lease);
             }
         }
     }
     Ok(leases)
+}
+
+/// Outcome of an operator-initiated rig lock release.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseLeaseOutcome {
+    /// No lease was held for this rig.
+    NoLease { rig_id: String },
+    /// A lease was released.
+    Released {
+        rig_id: String,
+        /// The released lease.
+        lease: RigRunLease,
+        /// Wall-clock age of the released lease in seconds, when derivable.
+        age_seconds: Option<i64>,
+        /// Whether the holder was already dead/stale (safe release) vs. a live
+        /// holder forcibly reclaimed via `--force`.
+        was_reclaimable: bool,
+        /// Whether `--force` was used to override a live holder.
+        forced: bool,
+    },
+}
+
+/// Release the active run lease held for `rig_id`.
+///
+/// Without `force`, a lease is only released when its holder is provably gone or
+/// past its configured TTL — releasing a live, recent holder requires `force`.
+/// Releasing the lock does not terminate the holder process; it only frees the
+/// local guardrail so a new run can proceed. With `force`, the caller is
+/// asserting the holder is dead or wedged.
+pub fn release_active_run_lease(rig_id: &str, force: bool) -> Result<ReleaseLeaseOutcome> {
+    let _lock = LeaseIndexLock::acquire()?;
+    let path = lease_path(rig_id)?;
+    let Some(lease) = read_lease(&path)? else {
+        return Ok(ReleaseLeaseOutcome::NoLease {
+            rig_id: rig_id.to_string(),
+        });
+    };
+
+    let was_reclaimable = lease_is_reclaimable(&lease);
+    let age_seconds = lease_age_seconds(&lease.started_at);
+    if !was_reclaimable && !force {
+        return Err(Error::rig_resource_conflict(RigResourceConflictInfo {
+            rig_id: rig_id.to_string(),
+            command: "release-lock".to_string(),
+            resource_kind: "rig".to_string(),
+            resource_value: rig_id.to_string(),
+            held_by_rig: lease.rig_id.clone(),
+            held_by_command: lease.command.clone(),
+            held_by_pid: lease.pid,
+            held_since: lease.started_at.clone(),
+            held_by_run_id: lease.run_id.clone(),
+            held_by_runner_id: lease.runner_id.clone(),
+            held_age_seconds: age_seconds,
+        }));
+    }
+
+    fs::remove_file(&path).map_err(|e| {
+        Error::internal_unexpected(format!(
+            "Failed to release rig lease for '{}': {}",
+            rig_id, e
+        ))
+    })?;
+
+    Ok(ReleaseLeaseOutcome::Released {
+        rig_id: rig_id.to_string(),
+        lease,
+        age_seconds,
+        was_reclaimable,
+        forced: force && !was_reclaimable,
+    })
 }
 
 /// List active rig run leases without acquiring or mutating leases.

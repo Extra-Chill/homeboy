@@ -51,7 +51,10 @@ pub use install::{
     DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata,
     StackSourceMetadata,
 };
-pub use lease::{acquire_active_run_lease, active_run_leases, ActiveRigRunLease, RigRunLease};
+pub use lease::{
+    acquire_active_run_lease, active_run_leases, release_active_run_lease, ActiveRigRunLease,
+    ReleaseLeaseOutcome, RigRunLease, RIG_LEASE_TTL_ENV,
+};
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
 pub use runner::{
     head_sha_and_branch, run_bench_prepare, run_check, run_check_groups, run_down,
