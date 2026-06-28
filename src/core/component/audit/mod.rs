@@ -279,6 +279,7 @@ mod tests {
                     label: "process execution".to_string(),
                     patterns: vec!["Command::new".to_string()],
                     weight: 1,
+                    exempt_when_line_matches: Vec::new(),
                 }],
                 ..Default::default()
             },

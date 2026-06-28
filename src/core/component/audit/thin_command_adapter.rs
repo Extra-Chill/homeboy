@@ -18,6 +18,12 @@ pub struct ThinCommandAdapterMarkerGroup {
         skip_serializing_if = "is_default_thin_command_adapter_group_weight"
     )]
     pub weight: u32,
+    /// Regex patterns; if a line matches this group's `patterns` AND also matches
+    /// one of these, the hit is NOT counted. Use to exempt module-qualified
+    /// delegation calls from name-shaped markers (calling into another
+    /// module/core is correct, not a leak).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exempt_when_line_matches: Vec<String>,
 }
 
 fn default_thin_command_adapter_group_weight() -> u32 {
