@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.3] - 2026-06-28
+
+### Changed
+- Gate destructive WordPress fuzz runs on Codebox artifacts
+
 ## [3.21.2] - 2026-06-28
 
 ### Fixed
