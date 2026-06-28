@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.269.3] - 2026-06-28
+
+### Changed
+- Absolutize --path override so component root is always absolute
+
+### Fixed
+- keep workspace metadata out of git status
+- harden workspace prune scan quoting
+
 ## [0.269.2] - 2026-06-28
 
 ### Fixed
