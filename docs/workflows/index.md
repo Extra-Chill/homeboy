@@ -8,6 +8,7 @@ Workflow docs are task-oriented. They explain which Homeboy commands to use toge
 - [Reproduce CI](reproduce-ci.md) - run declared CI profiles and classify baseline-versus-head outcomes.
 - [Capture evidence](capture-evidence.md) - collect benchmark, trace, fuzz, and persisted run artifacts for humans and agents.
 - [Use runners](use-runners.md) - route hot commands through configured runners and inspect runner health.
+- [Run agent task loops](run-agent-task-loops.md) - operate durable multi-agent loops, controllers, events, retries, and human handoffs.
 - [Release a component](release-a-component.md) - plan and apply releases from component metadata and commit history.
 
 ## Related Reference
@@ -16,3 +17,4 @@ Workflow docs are task-oriented. They explain which Homeboy commands to use toge
 - [JSON output contract](../architecture/output-system.md)
 - [Persisted runs](../commands/runs.md)
 - [Runner command](../commands/runner.md)
+- [Agent task command](../commands/agent-task.md)

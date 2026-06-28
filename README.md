@@ -40,7 +40,7 @@ Portable repo config starts with `homeboy.json`:
 ## Common Paths
 
 - [Start here](docs/start-here.md) - first-time setup and first successful run.
-- [Workflows](docs/workflows/index.md) - task guides for reviews, CI reproduction, evidence, runners, and releases.
+- [Workflows](docs/workflows/index.md) - task guides for reviews, CI reproduction, evidence, runners, agent-task loops, and releases.
 - [Concepts](docs/concepts/index.md) - mental models for components, extensions, evidence, runners, and scope.
 - [Reference](docs/reference/index.md) - command, config, schema, output, and template references.
 - [Internals](docs/internals/index.md) - maintainer architecture, contracts, and docs-maintenance guidance.

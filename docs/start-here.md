@@ -54,6 +54,7 @@ That JSON is the handoff point for CI, scheduled automation, and coding agents.
 - I want to reproduce CI: [Reproduce CI](workflows/reproduce-ci.md)
 - I want benchmark, trace, fuzz, or run artifacts: [Capture evidence](workflows/capture-evidence.md)
 - I need runner/offload behavior: [Use runners](workflows/use-runners.md)
+- I need durable multi-agent orchestration: [Run agent task loops](workflows/run-agent-task-loops.md)
 - I need release automation: [Release a component](workflows/release-a-component.md)
 - I need the mental model: [Concepts](concepts/index.md)
 - I need exact CLI or config details: [Reference](reference/index.md)
@@ -78,4 +79,5 @@ Read by task, not by command name:
 - Add [Reproduce CI](workflows/reproduce-ci.md) when the component declares CI profiles.
 - Add [Capture evidence](workflows/capture-evidence.md) when a result must be consumed by a reviewer, CI job, or agent.
 - Add [Use runners](workflows/use-runners.md) when the command should run off the controller machine.
+- Add [Run agent task loops](workflows/run-agent-task-loops.md) when work needs durable controller state, retries, events, or human handoffs.
 - Add [Release a component](workflows/release-a-component.md) only after the review/evidence loop is clear.

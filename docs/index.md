@@ -23,6 +23,7 @@ Task-oriented guides for using Homeboy:
 - [Reproduce CI](workflows/reproduce-ci.md)
 - [Capture evidence](workflows/capture-evidence.md)
 - [Use runners](workflows/use-runners.md)
+- [Run agent task loops](workflows/run-agent-task-loops.md)
 - [Release a component](workflows/release-a-component.md)
 
 ## Concepts
