@@ -378,6 +378,23 @@ fn glob_to_awk_regex(glob: &str) -> String {
     regex
 }
 
+/// Detect whether the current deploy target exists as a symlink.
+///
+/// A dev/rig workflow may symlink an external checkout into the deploy location.
+/// When an override install replaces that symlink with a real directory, the
+/// resolved (real) path of the target changes. Surfacing this lets callers and
+/// environments that cache a path mapping for the old destination know they may
+/// need to refresh/recycle. This stays generic: it makes no assumptions about
+/// the runtime that owns the target or how (or whether) it caches paths.
+fn target_is_symlink(ssh_client: &SshClient, target_path: &str) -> bool {
+    if target_path.is_empty() {
+        return false;
+    }
+    ssh_client
+        .execute(&format!("test -L {}", shell::quote_path(target_path)))
+        .success
+}
+
 /// Deploy using extension-defined override strategy.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn deploy_with_override(
@@ -458,6 +475,21 @@ pub(super) fn deploy_with_override(
         cli_path,
         domain,
     );
+
+    // Surface a symlink -> real-directory transition before the swap happens. A
+    // dev/rig workflow may symlink an external checkout into the deploy location;
+    // the install command atomically replaces that symlink with a real directory,
+    // which changes the resolved (real) path of the target. Environments caching
+    // a path mapping for the old symlink destination may need to be recycled or
+    // refreshed to pick up the new location. Generic: no assumptions about the
+    // target runtime or its caching behavior.
+    if target_is_symlink(ssh_client, remote_path) {
+        log_status!(
+            "deploy",
+            "⚠ Deploy target {} is currently a symlink; the install will replace it with a real directory. Any environment that caches the symlink's resolved path may need to be refreshed or recycled to pick up the new location.",
+            remote_path
+        );
+    }
 
     let install_cmd = render_map(&override_config.install_command, &vars);
     log_status!("deploy", "Running install command: {}", install_cmd);
@@ -1217,6 +1249,127 @@ mod tests {
                 &vars,
             ),
             "mktemp -d /srv/htdocs/wp-content/plugins/.homeboy-install.XXXXXX && cp /tmp/homeboy-staging/artifact.zip /srv/htdocs/wp-content/plugins/sample-plugin/installed.zip"
+        );
+    }
+
+    // The generated archive-install command must stage extraction into an
+    // adjacent temp dir and swap the target into place with same-filesystem
+    // renames. It must never `rm -rf` the live target before the new tree is
+    // staged (that opens a window where the target does not exist).
+    #[test]
+    fn archive_install_command_stages_adjacent_and_swaps_atomically() {
+        let policy = package_archive_policy("/tmp/staging".to_string());
+        let cmd = archive_install_override(&policy).install_command;
+
+        assert!(
+            cmd.contains("mktemp -d \"{{targetAdjacentTempPattern}}\""),
+            "install must extract into an adjacent temp dir: {cmd}"
+        );
+        assert!(
+            cmd.contains("unzip -oq \"{{stagingArtifact}}\" -d \"$staged\""),
+            "install must unpack into the adjacent temp dir, not over the target: {cmd}"
+        );
+        assert!(
+            cmd.contains("mv \"$extracted\" \"$target\""),
+            "install must rename the staged tree into place: {cmd}"
+        );
+        assert!(
+            !cmd.contains("rm -rf \"{{targetDir}}\""),
+            "install must not rm -rf the live target before staging the new tree: {cmd}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_is_symlink_detects_symlink_vs_real_dir() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let real = temp.path().join("real");
+        fs::create_dir(&real).expect("real dir");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        assert!(target_is_symlink(
+            &local_client(),
+            link.to_str().expect("link path")
+        ));
+        assert!(!target_is_symlink(
+            &local_client(),
+            real.to_str().expect("real path")
+        ));
+        assert!(!target_is_symlink(
+            &local_client(),
+            temp.path().join("missing").to_str().expect("missing path")
+        ));
+        assert!(!target_is_symlink(&local_client(), ""));
+    }
+
+    // A dev symlink at the deploy target must be replaced by a real directory
+    // atomically, without writing *through* the symlink into the external
+    // checkout it points at. This is the exact footgun from issue #6867.
+    #[cfg(unix)]
+    #[test]
+    fn test_archive_install_replaces_symlink_target_with_real_dir() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("fixture.zip");
+        let staging = temp.path().join("staging");
+        let parent = temp.path().join("packages");
+        fs::create_dir_all(&parent).expect("parent dir");
+        let target = parent.join("fixture");
+
+        // A dev workflow symlinked an external checkout into the deploy location.
+        let workspace = temp.path().join("workspace-fixture");
+        fs::create_dir_all(&workspace).expect("workspace dir");
+        fs::write(workspace.join("workspace-only.php"), "workspace").expect("workspace file");
+        std::os::unix::fs::symlink(&workspace, &target).expect("symlink target");
+
+        write_zip(
+            &artifact,
+            &[("fixture/fixture.manifest", "Package Name: Fixture\n")],
+        );
+
+        let policy = package_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+        let verification = archive_install_verification(&policy).expect("verification");
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            Some(&verification),
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
+        // Target is now a real directory, not a symlink.
+        assert!(
+            !fs::symlink_metadata(&target)
+                .expect("target metadata")
+                .file_type()
+                .is_symlink(),
+            "target should be a real directory after install"
+        );
+        assert!(target.join("fixture.manifest").exists());
+        // The install must not have written through the old symlink into the
+        // external checkout it pointed at.
+        assert!(
+            workspace.join("workspace-only.php").exists(),
+            "external checkout must be preserved"
+        );
+        assert!(
+            !workspace.join("fixture.manifest").exists(),
+            "install must not write through the symlink into the external checkout"
+        );
+        // No adjacent extraction temp dir or backup dir may leak.
+        assert!(
+            list_adjacent_install_temp_dirs(&parent, "fixture").is_empty(),
+            "adjacent install/backup dirs leaked: {:?}",
+            list_adjacent_install_temp_dirs(&parent, "fixture")
         );
     }
 }
