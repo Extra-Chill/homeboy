@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.267.0] - 2026-06-28
+
+### Added
+- add lint-only entry point and array-merge mode for extends
+- add core emit-lint-finding and emit-test-failure shims
+
+### Changed
+- Document composable workload evidence contract
+- extract observe process-probing + trace-result writes to core
+- move gh-actions artifact/cache fs writes to core
+- move loop-inventory run persistence to core/observation
+- inject core's resolved changed-file list into runners
+- Surface generic DB query fuzz hotspots
+- move settings-matrix parent-run persistence to core
+- move observed-workflow abstraction from command layer to core/observation
+- make four recurring local test reds deterministic
+- Consolidate vestigial CLI top-levels: lab→runner, doctor→self
+
+### Fixed
+- fix(code-audit): grammar-drive the four starved fingerprint fields
+- tolerate compatible (same-minor) controller/runner version drift
+
 ## [0.266.3] - 2026-06-27
 
 ### Changed
