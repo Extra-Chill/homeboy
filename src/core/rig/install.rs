@@ -501,19 +501,116 @@ fn materialized_runner_source_root(path: &Path) -> Option<PathBuf> {
         .map(|window| window[1].to_path_buf())
 }
 
-fn merge_json(target: &mut serde_json::Value, overlay: serde_json::Value) {
-    match (target, overlay) {
-        (serde_json::Value::Object(target), serde_json::Value::Object(overlay)) => {
-            for (key, value) in overlay {
-                match target.get_mut(&key) {
-                    Some(existing) => merge_json(existing, value),
-                    None => {
-                        target.insert(key, value);
-                    }
-                }
+/// Opt-in array merge mode for `extends` template inheritance.
+///
+/// A child array selects a mode by placing a single directive object —
+/// `{ "$merge": "<mode>" }` — as its first element. Without a directive an
+/// overlay array fully replaces the base array, preserving the historical
+/// `extends` behavior for every existing consumer.
+#[derive(Clone, Copy)]
+enum ArrayMergeMode {
+    /// Base elements first, then the child's elements.
+    Append,
+    /// Child elements first, then the base's elements.
+    Prepend,
+    /// Merge by `label`: child elements deep-merge into the base element with
+    /// the same `label` (or append when no match / no label).
+    ByLabel,
+}
+
+const ARRAY_MERGE_DIRECTIVE_KEY: &str = "$merge";
+
+/// Detect a leading `{ "$merge": "<mode>" }` directive on an overlay array.
+///
+/// The directive object must be the array's first element and carry exactly the
+/// single `$merge` key so a real step that happens to set other fields is never
+/// misread as a directive.
+fn array_merge_mode(overlay: &[serde_json::Value]) -> Option<ArrayMergeMode> {
+    let directive = overlay.first()?.as_object()?;
+    if directive.len() != 1 {
+        return None;
+    }
+    match directive.get(ARRAY_MERGE_DIRECTIVE_KEY)?.as_str()? {
+        "append" => Some(ArrayMergeMode::Append),
+        "prepend" => Some(ArrayMergeMode::Prepend),
+        "by_label" => Some(ArrayMergeMode::ByLabel),
+        _ => None,
+    }
+}
+
+fn merge_array(target: &mut serde_json::Value, overlay: Vec<serde_json::Value>) {
+    let Some(mode) = array_merge_mode(&overlay) else {
+        *target = serde_json::Value::Array(overlay);
+        return;
+    };
+
+    // Strip the leading directive element; the remainder is the child payload.
+    let child: Vec<serde_json::Value> = overlay.into_iter().skip(1).collect();
+    let base = match target.take() {
+        serde_json::Value::Array(base) => base,
+        // No base array (key absent or a different type): the child payload
+        // stands alone, with append/prepend/by_label all collapsing to it.
+        _ => Vec::new(),
+    };
+
+    let merged = match mode {
+        ArrayMergeMode::Append => {
+            let mut merged = base;
+            merged.extend(child);
+            merged
+        }
+        ArrayMergeMode::Prepend => {
+            let mut merged = child;
+            merged.extend(base);
+            merged
+        }
+        ArrayMergeMode::ByLabel => merge_array_by_label(base, child),
+    };
+
+    *target = serde_json::Value::Array(merged);
+}
+
+fn merge_array_by_label(
+    base: Vec<serde_json::Value>,
+    child: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut merged = base;
+    for item in child {
+        let label = item
+            .get("label")
+            .and_then(|label| label.as_str())
+            .map(str::to_string);
+        if let Some(label) = label {
+            if let Some(existing) = merged.iter_mut().find(|entry| {
+                entry.get("label").and_then(|label| label.as_str()) == Some(label.as_str())
+            }) {
+                merge_json(existing, item);
+                continue;
             }
         }
-        (target, overlay) => *target = overlay,
+        merged.push(item);
+    }
+    merged
+}
+
+fn merge_json(target: &mut serde_json::Value, overlay: serde_json::Value) {
+    match overlay {
+        serde_json::Value::Object(overlay) => {
+            if let serde_json::Value::Object(target) = target {
+                for (key, value) in overlay {
+                    match target.get_mut(&key) {
+                        Some(existing) => merge_json(existing, value),
+                        None => {
+                            target.insert(key, value);
+                        }
+                    }
+                }
+            } else {
+                *target = serde_json::Value::Object(overlay);
+            }
+        }
+        serde_json::Value::Array(overlay) => merge_array(target, overlay),
+        overlay => *target = overlay,
     }
 }
 

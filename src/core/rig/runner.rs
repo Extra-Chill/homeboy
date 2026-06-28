@@ -229,6 +229,33 @@ pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
     result
 }
 
+/// Run ONLY the env-independent rig package lint.
+///
+/// Unlike [`run_check`], this skips `evaluate_requirements` and the live
+/// `check` probe pipeline (HTTP/command/file probes) entirely. It runs just the
+/// `run_package_lint` walk/conflict/JSON/template-materialize checks, which
+/// depend only on the package contents on disk — no component checkouts,
+/// services, or network.
+///
+/// This is the CI-friendly entry point: in CI no component checkouts exist, so
+/// `run_check`'s requirement step always fails, making it unusable as a pure
+/// package linter. `run_lint` validates package structure with zero environment
+/// dependencies.
+///
+/// Like [`run_check_groups`], it intentionally does not update `last_check`: a
+/// package lint is not proof that the whole rig passed `homeboy rig check`.
+pub fn run_lint(rig: &RigSpec) -> Result<CheckReport> {
+    let outcome = run_package_lint(rig)?;
+
+    Ok(CheckReport {
+        rig_id: rig.id.clone(),
+        run_id: None,
+        success: outcome.is_success(),
+        pipeline: outcome,
+        artifact_index: None,
+    })
+}
+
 fn merge_check_outcomes(outcomes: Vec<PipelineOutcome>) -> PipelineOutcome {
     let mut steps = Vec::new();
     let mut passed = 0;
