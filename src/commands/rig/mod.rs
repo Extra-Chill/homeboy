@@ -11,9 +11,9 @@ use homeboy::core::rig;
 
 use self::output::{
     RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledStackSummary,
-    RigInstalledSummary, RigListOutput, RigRepairOutput, RigShowOutput, RigSourceSummary,
-    RigStatusOutput, RigSummary, RigSyncOutput, RigUpOutput, RigUpPlanOutput, RigUpPlanStep,
-    RigUpdateOutput,
+    RigInstalledSummary, RigListOutput, RigReleaseLockOutput, RigRepairOutput, RigShowOutput,
+    RigSourceSummary, RigStatusOutput, RigSummary, RigSyncOutput, RigUpOutput, RigUpPlanOutput,
+    RigUpPlanStep, RigUpdateOutput,
 };
 use super::CmdResult;
 use crate::command_contract::{
@@ -165,6 +165,19 @@ enum RigCommand {
         #[arg(long, default_value_t = 20)]
         limit: i64,
     },
+    /// Release a stuck active-run lock (rig lease) so a new run can proceed.
+    ///
+    /// By default the lock is only released when its holder is provably gone or
+    /// past its TTL. Pass `--force` to reclaim a lock whose holder is still
+    /// alive but wedged. Releasing the lock frees the local guardrail; it does
+    /// not terminate the holder process.
+    ReleaseLock {
+        /// Rig ID
+        rig_id: String,
+        /// Reclaim the lock even if its holder process is still alive.
+        #[arg(long)]
+        force: bool,
+    },
     /// Install rigs from a local package path or git URL
     Install {
         /// Git URL or local path containing rig.json or rigs/<id>/rig.json
@@ -239,6 +252,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
         RigCommand::Status { rig_id } => status(&rig_id),
         RigCommand::Runs { rig_id, limit } => runs(&rig_id, limit),
+        RigCommand::ReleaseLock { rig_id, force } => release_lock(&rig_id, force),
         RigCommand::Install {
             source,
             id,
@@ -249,6 +263,17 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Sources { command } => sources::run(command),
         RigCommand::App { command } => app(command),
     }
+}
+
+fn release_lock(rig_id: &str, force: bool) -> CmdResult<RigCommandOutput> {
+    let outcome = rig::release_active_run_lease(rig_id, force)?;
+    Ok((
+        RigCommandOutput::ReleaseLock(RigReleaseLockOutput {
+            command: "rig.release_lock",
+            outcome,
+        }),
+        0,
+    ))
 }
 
 fn runs(rig_id: &str, limit: i64) -> CmdResult<RigCommandOutput> {

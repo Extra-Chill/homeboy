@@ -26,6 +26,14 @@ pub enum RigCommandOutput {
     Sources(RigSourcesOutput),
     App(RigAppOutput),
     Runs(RunsOutput),
+    ReleaseLock(RigReleaseLockOutput),
+}
+
+#[derive(Serialize)]
+pub struct RigReleaseLockOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub outcome: rig::ReleaseLeaseOutcome,
 }
 
 #[derive(Serialize)]
