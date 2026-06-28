@@ -283,12 +283,14 @@ fn prepare_lab_offload_workspace_stage_inner(
         );
     }
 
-    let source_snapshot = SourceSnapshot::collect_local(
+    let mut source_snapshot = SourceSnapshot::collect_local(
         runner_id,
         Path::new(&synced.local_path),
         Some(&remote_cwd),
         "lab_offload",
     );
+    source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
+    validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
     if contract.routing_policy.requires_extension_parity {
         plan = with_step(
             plan,
@@ -455,6 +457,71 @@ fn prepare_lab_offload_workspace_stage_inner(
         runtime_overlay_env,
         runtime_overlay_metadata,
     })
+}
+
+pub(crate) fn validate_lab_source_snapshot_handoff(
+    requested_source_path: &Path,
+    synced: &RunnerWorkspaceSyncOutput,
+    source_snapshot: &SourceSnapshot,
+) -> Result<()> {
+    let expected_local_path = requested_source_path
+        .canonicalize()
+        .unwrap_or_else(|_| requested_source_path.to_path_buf())
+        .display()
+        .to_string();
+    let actual_synced_local_path = synced.local_path.trim();
+    let actual_snapshot_local_path = source_snapshot.local_path.as_deref().unwrap_or("").trim();
+    let expected_remote_path = synced.remote_path.trim();
+    let actual_snapshot_remote_path = source_snapshot.remote_path.as_deref().unwrap_or("").trim();
+    let expected_workspace_identity = synced.snapshot_identity.trim();
+    let actual_workspace_identity = source_snapshot
+        .workspace_snapshot_identity
+        .as_deref()
+        .unwrap_or("")
+        .trim();
+
+    let mut mismatches = Vec::new();
+    if actual_synced_local_path != expected_local_path {
+        mismatches.push(format!(
+            "workspace sync local_path `{actual_synced_local_path}` did not match requested source path `{expected_local_path}`"
+        ));
+    }
+    if actual_snapshot_local_path != expected_local_path {
+        mismatches.push(format!(
+            "source snapshot local_path `{actual_snapshot_local_path}` did not match requested source path `{expected_local_path}`"
+        ));
+    }
+    if actual_snapshot_remote_path != expected_remote_path {
+        mismatches.push(format!(
+            "source snapshot remote_path `{actual_snapshot_remote_path}` did not match synced remote path `{expected_remote_path}`"
+        ));
+    }
+    if actual_workspace_identity != expected_workspace_identity {
+        mismatches.push(format!(
+            "source snapshot workspace identity `{actual_workspace_identity}` did not match synced workspace identity `{expected_workspace_identity}`"
+        ));
+    }
+
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "source_snapshot",
+        "Lab offload source snapshot does not match the materialized runner workspace",
+        Some(format!(
+            "requested_source_path={expected_local_path}; synced_local_path={actual_synced_local_path}; synced_remote_path={expected_remote_path}; snapshot_local_path={actual_snapshot_local_path}; snapshot_remote_path={actual_snapshot_remote_path}; synced_workspace_identity={expected_workspace_identity}; snapshot_workspace_identity={actual_workspace_identity}; snapshot_hash={}",
+            source_snapshot.snapshot_hash
+        )),
+        Some(
+            mismatches
+                .into_iter()
+                .chain(std::iter::once(
+                    "Retry after syncing the intended local worktree; Homeboy refuses to dispatch Lab work against an ambiguous source snapshot.".to_string(),
+                ))
+                .collect(),
+        ),
+    ))
 }
 
 fn path_remaps_from_workspace_mapping(

@@ -1,5 +1,98 @@
 use super::*;
 
+fn synced_workspace(local_path: String) -> RunnerWorkspaceSyncOutput {
+    RunnerWorkspaceSyncOutput {
+        variant: "workspace_sync",
+        command: "runner.workspace.sync",
+        runner_id: "lab".to_string(),
+        local_path: local_path.clone(),
+        remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
+        current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
+            local_path: local_path.clone(),
+            remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
+            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            materialized: true,
+            source_commit: None,
+            source_ref: None,
+            source_dirty: None,
+            synthetic_checkout_commit: None,
+        },
+        workspace_lease: crate::core::runner::RunnerWorkspaceLease {
+            runner_id: "lab".to_string(),
+            local_path,
+            remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
+            sync_mode: "snapshot".to_string(),
+            materialized: true,
+            lifecycle_owner: crate::core::runner::RunnerLifecycleOwner::Controller,
+            source_commit: None,
+            source_ref: None,
+            source_dirty: None,
+        },
+        sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+        snapshot_identity: "snapshot:workspace".to_string(),
+        counts: crate::core::runner::ByteFileCounts::default(),
+        excludes: Vec::new(),
+        includes: Vec::new(),
+        workspace_cleanliness: "snapshot_unique_workspace".to_string(),
+        validation_dependencies: Vec::new(),
+    }
+}
+
+fn source_snapshot(local_path: String) -> SourceSnapshot {
+    SourceSnapshot {
+        runner_id: "lab".to_string(),
+        local_path: Some(local_path),
+        remote_path: Some("/srv/homeboy/_lab_workspaces/app-abc".to_string()),
+        workspace_root: None,
+        git_branch: Some("main".to_string()),
+        git_sha: Some("abc123".to_string()),
+        dirty: false,
+        sync_mode: "lab_offload".to_string(),
+        workspace_snapshot_identity: Some("snapshot:workspace".to_string()),
+        snapshot_hash: "sha256:source".to_string(),
+        synced_at: "2026-06-28T00:00:00Z".to_string(),
+        sync_excludes: Vec::new(),
+    }
+}
+
+#[test]
+fn lab_source_snapshot_handoff_accepts_matching_materialized_workspace() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let local_path = dir.path().canonicalize().unwrap().display().to_string();
+    let synced = synced_workspace(local_path.clone());
+    let snapshot = source_snapshot(local_path);
+
+    validate_lab_source_snapshot_handoff(dir.path(), &synced, &snapshot)
+        .expect("matching snapshot should pass");
+}
+
+#[test]
+fn lab_source_snapshot_handoff_rejects_mismatched_source_paths() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let local_path = dir.path().canonicalize().unwrap().display().to_string();
+    let synced = synced_workspace(local_path);
+    let mut snapshot = source_snapshot("/Users/user/Developer/other-worktree".to_string());
+    snapshot.remote_path = Some("/srv/homeboy/_lab_workspaces/other".to_string());
+    snapshot.workspace_snapshot_identity = Some("snapshot:other".to_string());
+
+    let err = validate_lab_source_snapshot_handoff(dir.path(), &synced, &snapshot)
+        .expect_err("mismatched snapshot should fail before dispatch");
+
+    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    assert!(err.message.contains("source snapshot does not match"));
+    let detail = err.details.to_string();
+    assert!(detail.contains("requested_source_path"));
+    assert!(detail.contains("snapshot_remote_path"));
+    assert!(detail.contains("snapshot_workspace_identity"));
+    assert!(err.details["tried"]
+        .as_array()
+        .expect("mismatch diagnostics")
+        .iter()
+        .any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("source snapshot remote_path"))));
+}
+
 #[test]
 fn lab_git_workspace_sync_uses_snapshot_for_private_proxied_sources() {
     let source_policy = crate::core::runner::source_materialization::SourceMaterializationPolicy {

@@ -271,6 +271,7 @@ mod tests {
             sync_mode: "snapshot".to_string(),
             git_sha: Some("abc".to_string()),
             dirty: false,
+            workspace_snapshot_identity: Some("snapshot".to_string()),
             snapshot_hash: "sha256:snapshot".to_string(),
             synced_at: "2026-05-31T00:00:00Z".to_string(),
             sync_excludes: Vec::new(),
