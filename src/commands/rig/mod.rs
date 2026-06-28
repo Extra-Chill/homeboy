@@ -121,6 +121,19 @@ enum RigCommand {
         #[arg(long, value_name = "CHECKOUT")]
         path: Option<String>,
     },
+    /// Lint a rig package without touching the environment.
+    ///
+    /// Runs ONLY the env-independent package lint (conflict markers, JSON
+    /// validity, and `extends` template materialization) — no requirements and
+    /// no live `check` probes. This is the entry point CI uses to validate a
+    /// rig package where no component checkouts exist.
+    Lint {
+        /// Rig ID, local package path, or direct rig.json path
+        target: String,
+        /// Select a rig from a local package path containing multiple rigs
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// Tear down a rig: stop services and run its `down` pipeline
     Down {
         /// Rig ID
@@ -220,6 +233,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Show { rig_id } => show(&rig_id),
         RigCommand::Up { rig_id, dry_run } => up(&rig_id, dry_run),
         RigCommand::Check { target, id, path } => check(&target, id.as_deref(), path.as_deref()),
+        RigCommand::Lint { target, id } => lint(&target, id.as_deref()),
         RigCommand::Down { rig_id } => down(&rig_id),
         RigCommand::Repair { rig_id } => repair(&rig_id),
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
@@ -533,6 +547,31 @@ fn check(
     ))
 }
 
+fn lint(target: &str, id: Option<&str>) -> CmdResult<RigCommandOutput> {
+    let rig = if std::path::Path::new(target).exists() {
+        rig::load_local_source(target, id)?
+    } else {
+        if id.is_some() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "id",
+                "--id is only valid when linting a local package path",
+                id.map(str::to_string),
+                None,
+            ));
+        }
+        rig::load(target)?
+    };
+    let report = rig::run_lint(&rig)?;
+    let exit_code = if report.success { 0 } else { 1 };
+    Ok((
+        RigCommandOutput::Check(RigCheckOutput {
+            command: "rig.lint",
+            report,
+        }),
+        exit_code,
+    ))
+}
+
 fn apply_check_path_override(rig: &mut rig::RigSpec, path: &str) -> homeboy::core::Result<()> {
     if path.trim().is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -788,6 +827,65 @@ mod tests {
 
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("bench.default_component"));
+        });
+    }
+
+    #[test]
+    fn lint_command_parses_target_and_id() {
+        let cli = TestCli::try_parse_from(["homeboy", "lint", "./pkg", "--id", "alpha"])
+            .expect("rig lint should parse");
+
+        let RigCommand::Lint { target, id } = cli.rig.command else {
+            panic!("expected rig lint command");
+        };
+        assert_eq!(target, "./pkg");
+        assert_eq!(id.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn lint_runs_package_lint_only_ignoring_requirements() {
+        crate::test_support::with_isolated_home(|home| {
+            write_rig(
+                home.path(),
+                "lint-cmd",
+                serde_json::json!({
+                    "id": "lint-cmd",
+                    "requirements": {
+                        "filesystem_assertions": [
+                            { "kind": "file", "path": "/definitely/missing/lint-cmd/marker.txt" }
+                        ]
+                    }
+                }),
+            );
+
+            // Full check fails on the missing requirement file.
+            let (_check, check_exit) = check("lint-cmd", None, None).expect("rig check runs");
+            assert_eq!(check_exit, 1, "missing requirement should fail rig check");
+
+            // The lint command skips requirements entirely and succeeds.
+            let (output, exit_code) = lint("lint-cmd", None).expect("rig lint runs");
+            assert_eq!(exit_code, 0);
+            let json = serde_json::to_value(output).expect("serialize lint output");
+            assert_eq!(json["payload"]["command"], "rig.lint");
+            assert_eq!(json["payload"]["success"], true);
+        });
+    }
+
+    #[test]
+    fn lint_rejects_id_for_installed_rig_id() {
+        crate::test_support::with_isolated_home(|home| {
+            write_rig(
+                home.path(),
+                "lint-id-guard",
+                serde_json::json!({ "id": "lint-id-guard" }),
+            );
+
+            let err = match lint("lint-id-guard", Some("alpha")) {
+                Ok(_) => panic!("--id against an installed rig id should fail"),
+                Err(err) => err,
+            };
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("local package path"));
         });
     }
 

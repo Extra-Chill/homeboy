@@ -55,7 +55,7 @@ pub use lease::{acquire_active_run_lease, active_run_leases, ActiveRigRunLease, 
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
 pub use runner::{
     head_sha_and_branch, run_bench_prepare, run_check, run_check_groups, run_down,
-    run_fuzz_prepare, run_repair, run_status, run_up, snapshot_state, BenchPrepareReport,
+    run_fuzz_prepare, run_lint, run_repair, run_status, run_up, snapshot_state, BenchPrepareReport,
     CheckReport, DownReport, FuzzPrepareReport, RepairReport, RepairResourceReport,
     RigStatusReport, SymlinkStatusReport, SymlinkStatusState, UpReport,
 };

@@ -2,7 +2,7 @@
 
 use crate::core::rig::{
     declared_id, discover_rigs, install, list, list_ids, load, load_local_source,
-    read_source_metadata, read_stack_source_metadata, run_check,
+    read_source_metadata, read_stack_source_metadata, run_check, run_lint,
 };
 use crate::core::ErrorCode;
 use crate::test_support::HomeGuard;
@@ -718,6 +718,286 @@ mod install_flows {
         assert!(workloads[0]
             .trace_span_metadata()
             .contains_key("phase.start_to_done"));
+    }
+
+    #[test]
+    fn run_lint_ignores_requirements_and_probes() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        write_rig(
+            package.path(),
+            "lint-only",
+            r#"{
+            "id": "lint-only",
+            "requirements": {
+                "filesystem_assertions": [
+                    { "kind": "file", "path": "/definitely/missing/lint-only/marker.txt" }
+                ]
+            },
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "missing marker", "file": "/definitely/missing/lint-only/marker.txt" }
+                ]
+            }
+        }"#,
+        );
+
+        install(package.path().to_str().unwrap(), None, false).expect("install");
+        let rig = load("lint-only").expect("load rig");
+
+        // Full check fails: the requirement file and probe file are both absent.
+        let check = run_check(&rig).expect("check report");
+        assert!(!check.success, "missing requirement should fail rig check");
+
+        // Lint-only ignores requirements and probes entirely; a clean package passes.
+        let lint = run_lint(&rig).expect("lint report");
+        assert!(
+            lint.success,
+            "lint should pass for a clean package regardless of requirements/probes"
+        );
+        assert!(
+            lint.pipeline
+                .steps
+                .iter()
+                .all(|step| step.kind == "rig-package-lint"),
+            "lint must run only package-lint steps, not requirement/probe steps"
+        );
+    }
+
+    #[test]
+    fn run_lint_reports_package_conflict_markers() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        write_rig(package.path(), "lint-conflict", &minimal_rig("lint-conflict"));
+        fs::write(package.path().join("conflicted.txt"), "<<<<<<< ours\n")
+            .expect("conflict fixture");
+
+        install(package.path().to_str().unwrap(), None, false).expect("install");
+        let rig = load("lint-conflict").expect("load rig");
+        let lint = run_lint(&rig).expect("lint report");
+
+        assert!(!lint.success, "conflict markers should fail rig lint");
+        assert!(lint.pipeline.steps.iter().any(|step| {
+            step.kind == "rig-package-lint"
+                && step.status == "fail"
+                && step
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("conflicted.txt")
+        }));
+    }
+
+    #[test]
+    fn run_lint_ignores_datamachine_directory() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        write_rig(package.path(), "lint-dm", &minimal_rig("lint-dm"));
+        let datamachine = package.path().join(".datamachine");
+        fs::create_dir_all(&datamachine).expect("datamachine dir");
+        fs::write(datamachine.join("notes.txt"), "<<<<<<< ours\n")
+            .expect("conflict inside ignored dir");
+
+        install(package.path().to_str().unwrap(), None, false).expect("install");
+        let rig = load("lint-dm").expect("load rig");
+        let lint = run_lint(&rig).expect("lint report");
+
+        assert!(
+            lint.success,
+            "conflict markers inside .datamachine must be ignored by the lint walk"
+        );
+    }
+
+    #[test]
+    fn install_appends_pipeline_steps_for_extends_with_merge_directive() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        fs::create_dir_all(package.path().join("templates")).expect("templates dir");
+        fs::write(
+            package.path().join("templates/base.json"),
+            r#"{
+            "description": "base rig",
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "npm available", "command": "npm --version" }
+                ]
+            }
+        }"#,
+        )
+        .expect("base template");
+        write_rig(
+            package.path(),
+            "appender",
+            r#"{
+            "extends": "../../templates/base.json",
+            "id": "appender",
+            "pipeline": {
+                "check": [
+                    { "$merge": "append" },
+                    { "kind": "check", "label": "wp codebox cli exists", "command": "wp-codebox --version" }
+                ]
+            }
+        }"#,
+        );
+
+        install(package.path().to_str().unwrap(), None, false).expect("install");
+
+        let installed_path = crate::core::paths::rig_config("appender").expect("rig config");
+        let installed = fs::read_to_string(&installed_path).expect("installed rig");
+        assert!(
+            !installed.contains("$merge"),
+            "merge directive must be stripped from the materialized spec"
+        );
+        let value: serde_json::Value = serde_json::from_str(&installed).expect("materialized json");
+        let labels: Vec<&str> = value["pipeline"]["check"]
+            .as_array()
+            .expect("check array")
+            .iter()
+            .map(|step| step["label"].as_str().expect("label"))
+            .collect();
+        assert_eq!(labels, vec!["npm available", "wp codebox cli exists"]);
+
+        // The materialized spec still parses as a rig (directive fully removed).
+        load("appender").expect("load appended rig");
+    }
+
+    #[test]
+    fn install_prepends_pipeline_steps_for_extends_with_merge_directive() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        fs::create_dir_all(package.path().join("templates")).expect("templates dir");
+        fs::write(
+            package.path().join("templates/base.json"),
+            r#"{
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "base last", "command": "echo base" }
+                ]
+            }
+        }"#,
+        )
+        .expect("base template");
+        write_rig(
+            package.path(),
+            "prepender",
+            r#"{
+            "extends": "../../templates/base.json",
+            "id": "prepender",
+            "pipeline": {
+                "check": [
+                    { "$merge": "prepend" },
+                    { "kind": "check", "label": "child first", "command": "echo child" }
+                ]
+            }
+        }"#,
+        );
+
+        install(package.path().to_str().unwrap(), None, false).expect("install");
+        let installed_path = crate::core::paths::rig_config("prepender").expect("rig config");
+        let installed = fs::read_to_string(&installed_path).expect("installed rig");
+        let value: serde_json::Value = serde_json::from_str(&installed).expect("materialized json");
+        let labels: Vec<&str> = value["pipeline"]["check"]
+            .as_array()
+            .expect("check array")
+            .iter()
+            .map(|step| step["label"].as_str().expect("label"))
+            .collect();
+        assert_eq!(labels, vec!["child first", "base last"]);
+    }
+
+    #[test]
+    fn install_merges_pipeline_steps_by_label_for_extends() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        fs::create_dir_all(package.path().join("templates")).expect("templates dir");
+        fs::write(
+            package.path().join("templates/base.json"),
+            r#"{
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "npm available", "command": "npm --version" },
+                    { "kind": "check", "label": "build", "command": "make build" }
+                ]
+            }
+        }"#,
+        )
+        .expect("base template");
+        write_rig(
+            package.path(),
+            "keyed",
+            r#"{
+            "extends": "../../templates/base.json",
+            "id": "keyed",
+            "pipeline": {
+                "check": [
+                    { "$merge": "by_label" },
+                    { "kind": "check", "label": "build", "command": "make build --fast" },
+                    { "kind": "check", "label": "lint", "command": "make lint" }
+                ]
+            }
+        }"#,
+        );
+
+        install(package.path().to_str().unwrap(), None, false).expect("install");
+        let installed_path = crate::core::paths::rig_config("keyed").expect("rig config");
+        let installed = fs::read_to_string(&installed_path).expect("installed rig");
+        let value: serde_json::Value = serde_json::from_str(&installed).expect("materialized json");
+        let checks = value["pipeline"]["check"].as_array().expect("check array");
+        let labels: Vec<&str> = checks
+            .iter()
+            .map(|step| step["label"].as_str().expect("label"))
+            .collect();
+        // Base order preserved, the overridden "build" stays in place, "lint" appended.
+        assert_eq!(labels, vec!["npm available", "build", "lint"]);
+        let build = checks
+            .iter()
+            .find(|step| step["label"] == "build")
+            .expect("build step");
+        assert_eq!(build["command"], "make build --fast");
+    }
+
+    #[test]
+    fn install_replaces_pipeline_steps_for_extends_without_merge_directive() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        fs::create_dir_all(package.path().join("templates")).expect("templates dir");
+        fs::write(
+            package.path().join("templates/base.json"),
+            r#"{
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "base only", "command": "echo base" }
+                ]
+            }
+        }"#,
+        )
+        .expect("base template");
+        write_rig(
+            package.path(),
+            "replacer",
+            r#"{
+            "extends": "../../templates/base.json",
+            "id": "replacer",
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "child only", "command": "echo child" }
+                ]
+            }
+        }"#,
+        );
+
+        install(package.path().to_str().unwrap(), None, false).expect("install");
+        let installed_path = crate::core::paths::rig_config("replacer").expect("rig config");
+        let installed = fs::read_to_string(&installed_path).expect("installed rig");
+        let value: serde_json::Value = serde_json::from_str(&installed).expect("materialized json");
+        let labels: Vec<&str> = value["pipeline"]["check"]
+            .as_array()
+            .expect("check array")
+            .iter()
+            .map(|step| step["label"].as_str().expect("label"))
+            .collect();
+        // Default behavior unchanged: no directive means the child array wins wholesale.
+        assert_eq!(labels, vec!["child only"]);
     }
 }
 

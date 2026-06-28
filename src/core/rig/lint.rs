@@ -9,10 +9,18 @@ use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
 use super::spec::RigSpec;
 use crate::core::error::{Error, Result};
 
+/// Directories the rig package lint never descends into.
+///
+/// This MUST stay the union of the directories the downstream
+/// `homeboy-rigs` linter ignores (`scripts/lint-rig-packages.mjs`) so a rig
+/// package can never pass one linter and fail the other. `.sampleplugin` holds
+/// generated WP Codebox sample-plugin scaffolds; `.datamachine` is the
+/// top-level Data Machine working directory the homeboy-rigs package carries.
 const IGNORED_DIRECTORIES: &[&str] = &[
     ".git",
     ".claude",
     ".sampleplugin",
+    ".datamachine",
     ".opencode",
     "node_modules",
     "vendor",
