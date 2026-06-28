@@ -1,0 +1,37 @@
+// Fixture file: deliberately exceeds the high-item-count threshold (>30).
+// Generated content for the audit runtime regression harness.
+pub fn item_1() -> u32 { 1 }
+pub fn item_2() -> u32 { 2 }
+pub fn item_3() -> u32 { 3 }
+pub fn item_4() -> u32 { 4 }
+pub fn item_5() -> u32 { 5 }
+pub fn item_6() -> u32 { 6 }
+pub fn item_7() -> u32 { 7 }
+pub fn item_8() -> u32 { 8 }
+pub fn item_9() -> u32 { 9 }
+pub fn item_10() -> u32 { 10 }
+pub fn item_11() -> u32 { 11 }
+pub fn item_12() -> u32 { 12 }
+pub fn item_13() -> u32 { 13 }
+pub fn item_14() -> u32 { 14 }
+pub fn item_15() -> u32 { 15 }
+pub fn item_16() -> u32 { 16 }
+pub fn item_17() -> u32 { 17 }
+pub fn item_18() -> u32 { 18 }
+pub fn item_19() -> u32 { 19 }
+pub fn item_20() -> u32 { 20 }
+pub fn item_21() -> u32 { 21 }
+pub fn item_22() -> u32 { 22 }
+pub fn item_23() -> u32 { 23 }
+pub fn item_24() -> u32 { 24 }
+pub fn item_25() -> u32 { 25 }
+pub fn item_26() -> u32 { 26 }
+pub fn item_27() -> u32 { 27 }
+pub fn item_28() -> u32 { 28 }
+pub fn item_29() -> u32 { 29 }
+pub fn item_30() -> u32 { 30 }
+pub fn item_31() -> u32 { 31 }
+pub fn item_32() -> u32 { 32 }
+pub fn item_33() -> u32 { 33 }
+pub fn item_34() -> u32 { 34 }
+pub fn item_35() -> u32 { 35 }

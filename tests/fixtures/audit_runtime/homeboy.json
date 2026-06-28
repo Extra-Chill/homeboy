@@ -1,0 +1,35 @@
+{
+  "id": "audit-runtime-fixture",
+  "remote_path": "",
+  "audit": {
+    "source_policies": [
+      {
+        "id": "fixture-forbidden-term",
+        "kind": "source_policy",
+        "severity": "warning",
+        "convention": "fixture_source_policy",
+        "include_path_contains": ["src/"],
+        "description": "Forbidden term `{term}` appears at line {line} in {classification} context `{context}`",
+        "suggestion": "Remove the forbidden term `{term}` from source.",
+        "type": "forbidden_terms",
+        "terms": [
+          { "value": "forbiddenmarker", "match_mode": "token" }
+        ],
+        "case_insensitive": false
+      }
+    ],
+    "thin_command_adapter": {
+      "convention": "fixture_thin_command_adapter",
+      "include_path_contains": ["src/commands/"],
+      "skip_test_paths": true,
+      "max_orchestration_weight": 1,
+      "orchestration_markers": [
+        {
+          "label": "fixture orchestration",
+          "patterns": ["ORCHESTRATION_MARKER"],
+          "weight": 1
+        }
+      ]
+    }
+  }
+}

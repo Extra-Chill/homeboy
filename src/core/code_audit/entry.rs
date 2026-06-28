@@ -205,3 +205,7 @@ pub(super) fn audit_config_for(
 
     audit_config
 }
+
+#[cfg(test)]
+#[path = "../../../tests/core/code_audit/audit_runtime_regression_test.rs"]
+mod audit_runtime_regression_test;
