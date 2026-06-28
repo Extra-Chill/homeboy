@@ -2,6 +2,16 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.0] - 2026-06-28
+
+### Added
+- orchestrate chaos fuzz generation
+- add aggressive isolated WordPress fuzz planning
+
+### Fixed
+- emit executable Codebox fuzz actions
+- align aggressive fuzz readiness
+
 ## [3.20.1] - 2026-06-28
 
 ### Fixed
