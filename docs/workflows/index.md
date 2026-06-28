@@ -5,6 +5,7 @@ Workflow docs are task-oriented. They explain which Homeboy commands to use toge
 ## Common Workflows
 
 - [Review a branch](review-a-branch.md) - run the scoped audit, lint, and test umbrella reviewers care about.
+- [Reproduce CI](reproduce-ci.md) - run declared CI profiles and classify baseline-versus-head outcomes.
 - [Capture evidence](capture-evidence.md) - collect benchmark, trace, fuzz, and persisted run artifacts for humans and agents.
 - [Use runners](use-runners.md) - route hot commands through configured runners and inspect runner health.
 - [Release a component](release-a-component.md) - plan and apply releases from component metadata and commit history.

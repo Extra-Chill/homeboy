@@ -2,6 +2,8 @@
 
 Reference docs describe exact command behavior, configuration fields, schemas, templates, and output contracts. Use workflows first when you need a task path.
 
+Reference pages are intentionally dense. If you are deciding what to run next, start with [Workflows](../workflows/index.md); if you already know the command or config surface, use this section.
+
 ## CLI
 
 - [Root command and global flags](cli/homeboy-root-command.md)

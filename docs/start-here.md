@@ -2,6 +2,8 @@
 
 Homeboy is a component-aware automation CLI. It gives local developers, CI jobs, scheduled automation, and coding agents one consistent way to run checks, capture evidence, and operate projects.
 
+If you only remember one thing: Homeboy turns common engineering workflows into repeatable commands with structured evidence. Start with `review`, then add CI profiles, persisted run artifacts, runners, and releases as your workflow needs them.
+
 ## 1. Run A Local Review Gate
 
 From a repository with Homeboy configuration, run:
@@ -49,6 +51,7 @@ That JSON is the handoff point for CI, scheduled automation, and coding agents.
 ## 4. Pick Your Next Path
 
 - I want to review a branch: [Review a branch](workflows/review-a-branch.md)
+- I want to reproduce CI: [Reproduce CI](workflows/reproduce-ci.md)
 - I want benchmark, trace, fuzz, or run artifacts: [Capture evidence](workflows/capture-evidence.md)
 - I need runner/offload behavior: [Use runners](workflows/use-runners.md)
 - I need release automation: [Release a component](workflows/release-a-component.md)
@@ -66,3 +69,13 @@ homeboy docs list
 homeboy docs index
 homeboy docs commands/commands-index
 ```
+
+## What To Read Next
+
+Read by task, not by command name:
+
+- Start with [Review a branch](workflows/review-a-branch.md) for the core quality gate.
+- Add [Reproduce CI](workflows/reproduce-ci.md) when the component declares CI profiles.
+- Add [Capture evidence](workflows/capture-evidence.md) when a result must be consumed by a reviewer, CI job, or agent.
+- Add [Use runners](workflows/use-runners.md) when the command should run off the controller machine.
+- Add [Release a component](workflows/release-a-component.md) only after the review/evidence loop is clear.

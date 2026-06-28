@@ -20,6 +20,7 @@ Task-oriented guides for using Homeboy:
 
 - [Workflows index](workflows/index.md)
 - [Review a branch](workflows/review-a-branch.md)
+- [Reproduce CI](workflows/reproduce-ci.md)
 - [Capture evidence](workflows/capture-evidence.md)
 - [Use runners](workflows/use-runners.md)
 - [Release a component](workflows/release-a-component.md)
