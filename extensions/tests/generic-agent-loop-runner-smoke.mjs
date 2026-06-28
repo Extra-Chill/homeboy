@@ -93,7 +93,7 @@ const adapterLoop = runGenericAgentLoop({
   runtime: {
     id: 'wp-codebox',
     capabilities: ['structured_outcome'],
-    executor: { backend: 'codebox', path: '/not-called' },
+    executor: { backend: 'wp-codebox', path: '/not-called' },
     manifest: {
       agent_loop: {
         outcome_adapter: {

@@ -17,12 +17,12 @@ const {
 const providerInterface = auditFanoutRuntimeProviderInterface({
   id: 'wordpress.audit-fanout-codebox-runtime',
   label: 'WP Codebox audit fanout runtime',
-  backend: 'codebox',
+  backend: 'wp-codebox',
 });
 
 assert.equal(providerInterface.schema, AUDIT_FANOUT_RUNTIME_PROVIDER_SCHEMA);
 assert.equal(providerInterface.id, 'wordpress.audit-fanout-codebox-runtime');
-assert.equal(providerInterface.backend, 'codebox');
+assert.equal(providerInterface.backend, 'wp-codebox');
 assert.equal(providerInterface.operations.dispatch.request_schema, AUDIT_FANOUT_DISPATCH_REQUEST_SCHEMA);
 assert.equal(providerInterface.operations.apply.request_schema, AUDIT_FANOUT_APPLY_REQUEST_SCHEMA);
 assert.equal(providerInterface.capabilities.includes('audit_fanout.dispatch'), true);

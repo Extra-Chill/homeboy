@@ -38,7 +38,7 @@ try {
 		task_id: 'runtime-package-contract-smoke',
 		instructions: 'Run a runtime package with declared artifacts.',
 		executor: {
-			backend: 'codebox',
+			backend: 'wp-codebox',
 			model: 'gpt-5.5',
 			config: {
 				provider: 'codex',

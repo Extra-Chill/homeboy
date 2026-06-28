@@ -289,7 +289,7 @@ async function main() {
   });
   assert.equal(delegatedResult.status, 'applied');
   const delegatedArgs = JSON.parse(fs.readFileSync(fakeWpCliCapture, 'utf8'));
-  assert.deepEqual(delegatedArgs.slice(0, 5), ['codebox', 'artifacts', 'apply-preflight', '--bundle', fs.realpathSync(fixture.bundle)]);
+  assert.deepEqual(delegatedArgs.slice(0, 5), ['wp-codebox', 'artifacts', 'apply-preflight', '--bundle', fs.realpathSync(fixture.bundle)]);
   assert.equal(delegatedArgs.includes('--approved-file'), true);
 
   console.log('WP Codebox apply adapter smoke passed');

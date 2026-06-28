@@ -14,7 +14,7 @@ const {
 } = packageRequire('homeboy-runtime-agent-ci/runtime-workflow-inputs');
 
 const rendered = renderRuntimeWorkflowInputs({
-	runtime: 'codebox',
+	runtime: 'wp-codebox',
 	runtime_profile: 'example-runtime',
 	runtime_profiles: {
 		'example-runtime': {
@@ -72,7 +72,7 @@ assert.deepEqual(defaultRendered.runtime_requirements, { id: 'example-profile', 
 
 const runtimeMounts = [{ source: '/host/workload', target: '/runtime/workload', mode: 'readonly' }];
 const objectProfileRendered = renderRuntimeWorkflowInputs({
-	runtime: 'codebox',
+	runtime: 'wp-codebox',
 	runtime_profile: {
 		id: 'object-profile',
 		plugins: [{ slug: 'object-provider', source: '.ci/object-provider', activate: true }],
@@ -102,7 +102,7 @@ assert.deepEqual(namedToolProfileRendered.workflow_inputs.sandbox_tool_policy.pu
 
 const cliResult = spawnSync(process.execPath, [
 	path.join(rootDir, 'runtime-agent-ci', 'scripts', 'render-runtime-workflow-inputs.cjs'),
-	'--runtime', 'codebox',
+	'--runtime', 'wp-codebox',
 	'--runtime-profile', JSON.stringify({ id: 'cli-profile', custom: true }),
 	'--runtime-mounts', JSON.stringify(runtimeMounts),
 ], { encoding: 'utf8' });
@@ -118,7 +118,7 @@ const actionScriptResult = spawnSync(process.execPath, [
 	encoding: 'utf8',
 	env: {
 		...process.env,
-		RUNTIME: 'codebox',
+		RUNTIME: 'wp-codebox',
 		RUNTIME_PROFILE: 'action-profile',
 		RUNTIME_MOUNTS: JSON.stringify(runtimeMounts),
 	},

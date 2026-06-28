@@ -55,9 +55,9 @@ assert.equal(codeboxSpec.tasks[0].runtime_profile, 'codebox-codex');
 
 const codeboxRequest = buildGenericAgentLoopRequest({
   plan: codeboxSpec.tasks[0],
-  runtime: { id: 'wp-codebox', executor: { backend: 'codebox' } },
+  runtime: { id: 'wp-codebox', executor: { backend: 'wp-codebox' } },
 });
-assert.equal(codeboxRequest.executor.backend, 'codebox');
+assert.equal(codeboxRequest.executor.backend, 'wp-codebox');
 assert.equal(codeboxRequest.executor.config.provider, 'codex');
 assert.equal(codeboxRequest.executor.config.model, 'gpt-5.5');
 assert.deepEqual(codeboxRequest.executor.secret_env, []);

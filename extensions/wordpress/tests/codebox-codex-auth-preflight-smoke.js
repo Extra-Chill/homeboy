@@ -56,7 +56,7 @@ try {
       schema: 'homeboy/agent-task-request/v1',
       task_id: 'codex-stale-refresh-token-preflight',
       executor: {
-        backend: 'codebox',
+        backend: 'wp-codebox',
         model: 'gpt-5.5',
         secret_env: codexSecretEnv,
         config: {

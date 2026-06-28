@@ -24,7 +24,7 @@ try {
 		task_id: 'wp-codebox-runtime-profile-defaults-smoke',
 		instructions: 'Validate profile-driven runtime defaults.',
 		executor: {
-			backend: 'codebox',
+			backend: 'wp-codebox',
 			config: {
 				provider: 'codex',
 				model: 'gpt-5.5',
@@ -55,7 +55,7 @@ try {
 		task_id: 'wp-codebox-generic-runtime-profile-smoke',
 		instructions: 'Validate generic WP Codebox runtime profile primitives.',
 		executor: {
-			backend: 'codebox',
+			backend: 'wp-codebox',
 			config: {
 				provider: 'codex',
 				model: 'gpt-5.5',

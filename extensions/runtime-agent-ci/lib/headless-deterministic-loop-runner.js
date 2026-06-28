@@ -316,6 +316,7 @@ function defaultExecuteControllerExecution(options = {}) {
   if (controllerExecution.output) {
     args.push('--output', controllerExecution.output);
   }
+  args.push(...controllerExecutionRunnerEnvArgs(env));
   args.push(...controllerExecutionRunModeArgs(controllerExecution));
   const run = spawnSync(homeboyBin, args, { cwd, env, encoding: 'utf8' });
   if (run.status !== 0) {
@@ -336,6 +337,23 @@ function defaultExecuteControllerExecution(options = {}) {
     stderr: run.stderr || '',
     result: parsed,
   };
+}
+
+function controllerExecutionRunnerEnvArgs(env = {}) {
+  const names = [
+    'HOMEBOY_WP_CODEBOX_BIN',
+    'WP_CODEBOX_BIN',
+    'HOMEBOY_WP_CODEBOX_CORE_MODULE',
+    'WP_CODEBOX_CORE_MODULE',
+    'HOMEBOY_AGENT_RUNTIME_PROVIDER',
+    'HOMEBOY_AGENT_RUNTIME_MODEL',
+    'HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATHS',
+    'HOMEBOY_AGENT_RUNTIME_SECRET_ENV',
+  ];
+  return names.flatMap((name) => {
+    const value = env[name];
+    return typeof value === 'string' && value !== '' ? ['--runner-env', `${name}=${value}`] : [];
+  });
 }
 
 function controllerExecutionRunModeArgs(controllerExecution) {

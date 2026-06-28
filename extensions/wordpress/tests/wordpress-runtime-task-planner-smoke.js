@@ -36,7 +36,7 @@ const plan = wordpressRuntimeTaskPlan({
 	runtimeProfile: 'wp-codebox',
 	runtimeProfiles: {
 		'wp-codebox': {
-			backend: 'codebox',
+			backend: 'wp-codebox',
 			runtime: 'wp-codebox',
 		},
 	},
@@ -57,7 +57,7 @@ assert.equal(plan.options.concurrency, 2);
 assert.equal(plan.tasks.length, 2);
 for (const task of plan.tasks) {
 	assert.equal(task.schema, contract.schemas.request);
-	assert.equal(task.executor.backend, 'codebox');
+	assert.equal(task.executor.backend, 'wp-codebox');
 	assert.equal(task.executor.runtime, 'wp-codebox');
 	assert.equal(task.executor.config.runtime_id, 'wp-codebox');
 	assert.equal(task.executor.config.runtime_task.ability, 'datamachine/run-runtime-task');
@@ -89,7 +89,7 @@ const request = wordpressRuntimeTaskRequest({
 	taskId: 'single-runtime-task-smoke',
 	ability: 'example/materialize-artifact',
 	abilityInput: { slug: 'example' },
-	backend: 'codebox',
+	backend: 'wp-codebox',
 	runtime: 'wp-codebox',
 });
 assert.equal(request.schema, contract.schemas.request);
@@ -117,7 +117,7 @@ assert.deepEqual(
 			taskId: 'single-runtime-task-smoke',
 			ability: 'example/materialize-artifact',
 			abilityInput: { slug: 'example' },
-			backend: 'codebox',
+			backend: 'wp-codebox',
 			runtime: 'wp-codebox',
 		}),
 	})
@@ -134,7 +134,7 @@ const crudRequest = wordpressRuntimeTaskRequest({
 			rollback_policy: { strategy: 'delete-created' },
 		},
 	},
-	backend: 'codebox',
+	backend: 'wp-codebox',
 	runtime: 'wp-codebox',
 });
 assert.deepEqual(crudRequest.inputs.ability_input.expected_result_contracts, [WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA]);
@@ -148,7 +148,7 @@ const explicitArtifactCrudRequest = wordpressRuntimeTaskRequest({
 	ability: 'wordpress/execute-crud-operation',
 	abilityInput: { operation: { action: 'delete', resource_type: 'post' } },
 	expectedArtifacts: ['runtime-log'],
-	backend: 'codebox',
+	backend: 'wp-codebox',
 	runtime: 'wp-codebox',
 });
 assert.deepEqual(explicitArtifactCrudRequest.expected_artifacts, ['runtime-log', 'wordpress-crud-operation-result']);
@@ -158,7 +158,7 @@ const result = spawnSync(process.execPath, [
 	script,
 	'--plan-id', 'cli-runtime-task-plan-smoke',
 	'--ability', 'example/validate-artifact',
-	'--backend', 'codebox',
+	'--backend', 'wp-codebox',
 	'--runtime-id', 'wp-codebox',
 	'--ability-input', '{"artifact":"report.json"}',
 	'--dla-url', 'https://dla.example/export/123',

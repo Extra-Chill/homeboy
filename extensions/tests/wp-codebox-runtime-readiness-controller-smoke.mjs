@@ -28,7 +28,7 @@ process.stdout.write(JSON.stringify({ success: true, status: 'completed' }));
     schema: 'homeboy/agent-task-request/v1',
     task_id: 'runtime-readiness-controller-smoke',
     executor: {
-      backend: 'codebox',
+      backend: 'wp-codebox',
       model: 'gpt-5.5',
       config: {
         provider: 'openai',

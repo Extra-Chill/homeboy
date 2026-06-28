@@ -18,7 +18,7 @@ const commandRequest = normalizeDelegatedRunRequest({
 	schema: 'homeboy/agent-task-request/v1',
 	task_id: 'delegated-command-smoke',
 	executor: {
-		backend: 'codebox',
+		backend: 'wp-codebox',
 		config: {
 			delegated_run: {
 				type: 'command',
@@ -56,7 +56,7 @@ assert.equal(Object.hasOwn(commandRequest.metadata.entries[0], 'credential'), fa
 const agentRequest = normalizeDelegatedRunRequest({
 	schema: 'homeboy/agent-task-request/v1',
 	task_id: 'delegated-agent-smoke',
-	executor: { backend: 'codebox' },
+	executor: { backend: 'wp-codebox' },
 	instructions: 'Inspect the workspace and report findings.',
 	tools: ['workspace_read'],
 	inputs: {
@@ -98,7 +98,7 @@ assert.equal(Object.hasOwn(result.metadata, 'credential'), false);
 assert.equal(normalizeDelegatedRunRequest({
 	schema: 'homeboy/agent-task-request/v1',
 	task_id: 'no-delegated-run',
-	executor: { backend: 'codebox' },
+	executor: { backend: 'wp-codebox' },
 	instructions: 'No delegated run requested.',
 }), null);
 

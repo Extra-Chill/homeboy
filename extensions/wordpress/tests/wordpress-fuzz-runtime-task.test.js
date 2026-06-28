@@ -42,7 +42,7 @@ const codeboxRuntimeRequest = wpCodeboxFuzzRuntimeTaskRequest({
 });
 assert.equal(codeboxRuntimeRequest.schema, WORDPRESS_FUZZ_RUNTIME_TASK_REQUEST_SCHEMA);
 assert.equal(codeboxRuntimeRequest.provider.id, 'wp-codebox');
-assert.equal(codeboxRuntimeRequest.provider_request.executor.backend, 'codebox');
+assert.equal(codeboxRuntimeRequest.provider_request.executor.backend, 'wp-codebox');
 assert.equal(codeboxRuntimeRequest.input.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(codeboxRuntimeRequest.provider_request.schema, 'homeboy/agent-task-request/v1');
 assert.equal(codeboxRuntimeRequest.provider_metadata.wp_codebox.ability, 'wp-codebox/run-fuzz-suite');

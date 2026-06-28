@@ -28,7 +28,7 @@ try {
 		task_id: 'wp-codebox-provider-plugin-defaults-smoke',
 		instructions: 'Validate provider plugin path defaults.',
 		executor: {
-			backend: 'codebox',
+			backend: 'wp-codebox',
 			config: {
 				provider: 'codex',
 				model: 'gpt-5.5',

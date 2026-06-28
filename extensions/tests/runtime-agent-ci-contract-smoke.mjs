@@ -59,7 +59,7 @@ const runtimeProfile = {
 };
 
 const genericConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
-  runtimeProvider: 'codebox',
+  runtime: 'wp-codebox',
   provider: 'example-provider',
   model: 'example-model',
   runtimeProfile: runtimeProfile.id,
@@ -235,8 +235,8 @@ assert.throws(
 
 const genericRequest = runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
   taskId: 'task-1',
-  backend: 'codebox',
-  runtimeProvider: 'codebox',
+  backend: 'wp-codebox',
+  runtime: 'wp-codebox',
   runtimeProfile: runtimeProfile.id,
   runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
   ability: 'example/run-task',
@@ -245,7 +245,7 @@ const genericRequest = runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
 });
 
 assert.equal(genericRequest.schema, 'homeboy/agent-task-request/v1');
-assert.equal(genericRequest.executor.backend, 'codebox');
+assert.equal(genericRequest.executor.backend, 'wp-codebox');
 assert.equal(genericRequest.executor.runtime, 'wp-codebox');
 assert.deepEqual(genericRequest.expected_artifacts, ['packet']);
 assert.deepEqual(genericRequest.executor.config.runtime_task, { ability: 'example/run-task', input: { prompt: 'Cook.' } });
@@ -253,8 +253,8 @@ assert.deepEqual(genericRequest.executor.config.runtime_task, { ability: 'exampl
 assert.deepEqual(
   runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
     taskId: 'equivalent-task',
-    backend: 'codebox',
-    runtimeProvider: 'codebox',
+    backend: 'wp-codebox',
+    runtime: 'wp-codebox',
     runtimeProfile: runtimeProfile.id,
     runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
     ability: 'example/run-task',
@@ -266,8 +266,8 @@ assert.deepEqual(
     instructions: '',
     inputs: {},
     runnerSpec: runtimeAgentCi.runtimeAgentCiRunnerSpec({
-      backend: 'codebox',
-      runtimeProvider: 'codebox',
+      backend: 'wp-codebox',
+      runtime: 'wp-codebox',
       runtimeProfile: runtimeProfile.id,
       runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
       ability: 'example/run-task',

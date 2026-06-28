@@ -37,7 +37,7 @@ const {
 	wpCodeboxCommand,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-adapter-descriptor.js'));
 
-assert.equal(WP_CODEBOX_BACKEND, 'codebox');
+assert.equal(WP_CODEBOX_BACKEND, 'wp-codebox');
 assert.equal(WP_CODEBOX_PROVIDER_ID, 'wordpress.codebox-agent-task-executor');
 assert.equal(WP_CODEBOX_PROVIDER_LABEL, 'WP Codebox agent task executor');
 assert.equal(WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA, 'wp-codebox/provider-credential-boundary/v1');

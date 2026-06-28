@@ -21,7 +21,7 @@ const runtimeInvocation = auditFanoutRuntimeInvocation({
     'wp-codebox': {
       schema: 'homeboy/agent-runtime-manifest/v1',
       id: 'wp-codebox',
-      agent_task_executors: [{ id: 'wp-codebox.fixture', backend: 'codebox', invocation: { argv: ['node', '{{runtime_path}}/fixture.cjs'] } }],
+      agent_task_executors: [{ id: 'wp-codebox.fixture', backend: 'wp-codebox', invocation: { argv: ['node', '{{runtime_path}}/fixture.cjs'] } }],
     },
   },
   repoRoot: '/repo',

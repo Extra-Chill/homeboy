@@ -367,7 +367,10 @@ function runtimeInvocationEnv(options = {}) {
 
   const names = new Set([
     ...DEFAULT_RUNTIME_ENV_ALLOWLIST,
-    ...normalizeArray(config.env_allowlist || config.envAllowlist || invocation.env_allowlist || invocation.envAllowlist),
+    ...normalizeArray(config.env_allowlist),
+    ...normalizeArray(config.envAllowlist),
+    ...normalizeArray(invocation.env_allowlist),
+    ...normalizeArray(invocation.envAllowlist),
     ...normalizeArray(config.runtime_env_allowlist || config.runtimeEnvAllowlist),
     ...normalizeArray(config.secret_env),
     ...normalizeArray(executor.secret_env),
@@ -440,6 +443,7 @@ function runtimeExecutorInvocation(runtime = {}) {
       stdin: executor.invocation.stdin || 'request_json',
       stdout: executor.invocation.stdout || 'outcome_json',
       stderr: executor.invocation.stderr || 'inherit_on_failure',
+      env_allowlist: normalizeArray(executor.invocation.env_allowlist || executor.invocation.envAllowlist),
       artifacts: executor.invocation.artifacts || {},
       results: executor.invocation.results || {},
     };

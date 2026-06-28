@@ -8,6 +8,7 @@ process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(__dirname, '..', '..', 
 
 const {
 	runtimeDescriptorSupportsCommand,
+	wpCodeboxBin,
 	wpCodeboxBinaryDiagnostic,
 	wpCodeboxProviderPluginPathsFromEnv,
 	wpCodeboxResolveCommand,
@@ -35,6 +36,10 @@ assert.deepEqual(wpCodeboxProviderPluginPathsFromEnv({
 assert.equal(wpCodeboxBinaryDiagnostic('').class, 'wp-codebox.config.missing_binary');
 assert.equal(wpCodeboxBinaryDiagnostic('wp-codebox'), null);
 assert.deepEqual(wpCodeboxResolveCommand('/tmp/wp-codebox.cjs', ['run-agent-task']).args, ['/tmp/wp-codebox.cjs', 'run-agent-task']);
+assert.equal(wpCodeboxBin({
+	env: { HOMEBOY_WP_CODEBOX_BIN: '/tmp/env-wp-codebox' },
+	settings: { wp_codebox_bin: '/tmp/settings-wp-codebox' },
+}), '/tmp/env-wp-codebox');
 
 assert.equal(runtimeDescriptorSupportsCommand({ commands: { 'run-agent-task': true } }, 'run-agent-task'), true);
 assert.equal(runtimeDescriptorSupportsCommand({ runtime: { tasks: ['run-agent-task'] } }, 'run-agent-task'), true);
