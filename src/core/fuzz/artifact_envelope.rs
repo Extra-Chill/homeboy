@@ -5,7 +5,10 @@ use serde::Serialize;
 use crate::core::observation::ArtifactRecord;
 
 use super::envelope::FuzzResultEnvelope;
-use super::schemas::FUZZ_RESULT_ENVELOPE_SCHEMA;
+use super::schemas::{
+    FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA,
+};
+use super::{FuzzSequencePlan, FuzzSequenceResult};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FuzzResultEnvelopeArtifactInspection {
@@ -28,6 +31,9 @@ pub struct FuzzResultEnvelopeArtifactSummary {
     pub gate_status: String,
     pub campaign_id: String,
     pub gate_count: usize,
+    pub sequence_count_source: String,
+    pub sequence_case_count: usize,
+    pub sequence_step_count: usize,
     pub required_artifact_count: usize,
     pub artifact_ref_count: usize,
 }
@@ -171,6 +177,7 @@ fn summarize_validated_envelope(
             .as_ref()
             .map(|campaign| campaign.artifacts.len())
             .unwrap_or(0);
+    let sequence_counts = sequence_counts(envelope);
     let summary = FuzzResultEnvelopeArtifactSummary {
         schema: envelope.schema.clone(),
         envelope_id: envelope.id.clone(),
@@ -178,10 +185,113 @@ fn summarize_validated_envelope(
         gate_status: envelope.status.clone(),
         campaign_id,
         gate_count: envelope.gates.len(),
+        sequence_count_source: sequence_counts.source,
+        sequence_case_count: sequence_counts.cases,
+        sequence_step_count: sequence_counts.steps,
         required_artifact_count: envelope.required_artifacts.len(),
         artifact_ref_count,
     };
     (Some(summary), errors)
+}
+
+fn sequence_counts(envelope: &FuzzResultEnvelope) -> SequenceCounts {
+    let mut counts = SequenceCounts::default();
+    collect_sequence_counts(&envelope.metadata, &mut counts);
+    collect_sequence_counts(&envelope.request.metadata, &mut counts);
+    if let Some(campaign) = envelope.campaign.as_ref() {
+        collect_sequence_counts(&campaign.metadata, &mut counts);
+        for case in &campaign.cases {
+            collect_sequence_counts(&case.metadata, &mut counts);
+            collect_sequence_counts(&case.observed, &mut counts);
+        }
+    }
+    counts
+}
+
+struct SequenceCounts {
+    cases: usize,
+    steps: usize,
+    source: String,
+}
+
+impl Default for SequenceCounts {
+    fn default() -> Self {
+        Self {
+            cases: 0,
+            steps: 0,
+            source: "none".to_string(),
+        }
+    }
+}
+
+fn collect_sequence_counts(value: &serde_json::Value, counts: &mut SequenceCounts) {
+    if value.is_null() {
+        return;
+    }
+    for key in ["sequence", "sequence_plan", "sequence_result"] {
+        if let Some(sequence) = value.get(key) {
+            collect_sequence_counts_from_node(sequence, counts);
+        }
+    }
+    collect_sequence_counts_from_node(value, counts);
+}
+
+fn collect_sequence_counts_from_node(value: &serde_json::Value, counts: &mut SequenceCounts) {
+    if let Some(schema) = value.get("schema").and_then(serde_json::Value::as_str) {
+        match schema {
+            FUZZ_SEQUENCE_PLAN_SCHEMA => {
+                if let Ok(plan) = FuzzSequencePlan::from_value(value.clone()) {
+                    counts.add_schema_backed(&plan.cases);
+                    return;
+                }
+            }
+            FUZZ_SEQUENCE_RESULT_SCHEMA => {
+                if let Ok(result) = FuzzSequenceResult::from_value(value.clone()) {
+                    counts.add_schema_backed(&result.cases);
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(cases) = value
+        .get("cases")
+        .or_else(|| value.get("sequence_cases"))
+        .and_then(serde_json::Value::as_array)
+    {
+        counts.mark_best_effort();
+        counts.cases += cases.len();
+        for case in cases {
+            counts.steps += case
+                .get("steps")
+                .or_else(|| case.get("sequence_steps"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+        }
+    }
+    if let Some(steps) = value
+        .get("steps")
+        .or_else(|| value.get("sequence_steps"))
+        .and_then(serde_json::Value::as_array)
+    {
+        counts.mark_best_effort();
+        counts.steps += steps.len();
+    }
+}
+
+impl SequenceCounts {
+    fn add_schema_backed(&mut self, cases: &[super::FuzzSequenceCase]) {
+        self.source = "schema_backed".to_string();
+        self.cases += cases.len();
+        self.steps += cases.iter().map(|case| case.steps.len()).sum::<usize>();
+    }
+
+    fn mark_best_effort(&mut self) {
+        if self.source == "none" {
+            self.source = "best_effort_metadata".to_string();
+        }
+    }
 }
 
 fn validate_artifact_refs(
@@ -292,5 +402,42 @@ mod tests {
             .errors
             .iter()
             .any(|error| error == "gate id is required"));
+    }
+
+    #[test]
+    fn sequence_summary_prefers_schema_backed_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("runner-output.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "schema":"homeboy/fuzz-result-envelope/v1",
+                "version":1,
+                "id":"envelope-1",
+                "status":"passed",
+                "request":{"id":"request-1","component":"homeboy"},
+                "campaign":{
+                    "id":"campaign-1",
+                    "safety_class":"read_only",
+                    "metadata":{
+                        "sequence_plan":{
+                            "schema":"homeboy/fuzz-sequence-plan/v1",
+                            "version":1,
+                            "id":"sequence-plan-1",
+                            "cases":[{"id":"case-1","steps":[{"id":"step-1","kind":"prepare"}]}]
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write fixture");
+
+        let inspection =
+            inspect_fuzz_result_envelope_artifact(&artifact(&path)).expect("recognized");
+        let summary = inspection.summary.expect("summary");
+
+        assert_eq!(summary.sequence_count_source, "schema_backed");
+        assert_eq!(summary.sequence_case_count, 1);
+        assert_eq!(summary.sequence_step_count, 1);
     }
 }

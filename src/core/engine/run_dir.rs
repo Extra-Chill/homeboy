@@ -39,6 +39,8 @@ pub mod files {
     pub const BENCH_RESULTS: &str = "bench-results.json";
     pub const BENCH_RESPONSIVENESS: &str = "bench-responsiveness.jsonl";
     pub const FUZZ_RESULTS: &str = "fuzz-results.json";
+    pub const FUZZ_EXECUTION_REQUEST: &str = "fuzz-execution-request.json";
+    pub const FUZZ_COVERAGE_RECONCILIATION: &str = "fuzz-coverage-reconciliation.json";
     pub const FUZZ_ARTIFACTS_DIR: &str = "fuzz-artifacts";
     pub const TRACE_RESULTS: &str = "trace.json";
     pub const RESOURCE_SUMMARY: &str = "resource-summary.json";

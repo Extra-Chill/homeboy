@@ -324,6 +324,7 @@ const RELEASE_DANGEROUS_FLAGS: &[&str] = &[
 ];
 const UPGRADE_DANGEROUS_FLAGS: &[&str] = &["--force", "--upgrade-runner"];
 const LINT_DANGEROUS_FLAGS: &[&str] = &["--fix", "--force"];
+const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const TRIAGE_DANGEROUS_FLAGS: &[&str] = &["--auto-merge"];
 const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write", "--commit"];
@@ -383,12 +384,15 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "portable Lab offload is available for benchmark runs",
         BENCH_LAB_SUPPORT,
     ),
-    lab_command_spec_with_summary(
-        "fuzz",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for fuzz runs",
-        FUZZ_LAB_SUPPORT,
-    ),
+    CommandSpec {
+        safety: guarded_safety(FUZZ_DANGEROUS_FLAGS),
+        ..lab_command_spec_with_summary(
+            "fuzz",
+            CommandJsonFamily::Quality,
+            "fuzz is measurement-only by default; --allow-destructive is guarded by verified generic isolation proof from Lab/offloaded runner context",
+            FUZZ_LAB_SUPPORT,
+        )
+    },
     CommandSpec {
         safety: mutating_safety(),
         ..lab_command_spec_with_output_notes_and_summary(

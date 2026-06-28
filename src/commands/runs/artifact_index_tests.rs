@@ -271,7 +271,21 @@ fn runs_artifacts_recognizes_canonical_fuzz_result_envelope() {
                 "id": "envelope-1",
                 "status": "passed",
                 "request": { "id": "request-1", "component": "homeboy" },
-                "campaign": { "id": "campaign-1", "safety_class": "read_only" },
+                "campaign": {
+                    "id": "campaign-1",
+                    "safety_class": "read_only",
+                    "metadata": {
+                        "sequence_plan": {
+                            "cases": [{
+                                "id": "sequence-case-1",
+                                "steps": [
+                                    { "id": "step-1", "kind": "prepare" },
+                                    { "id": "step-2", "kind": "exercise" }
+                                ]
+                            }]
+                        }
+                    }
+                },
                 "artifacts": [{ "id": "case-log", "kind": "case_log" }],
                 "required_artifacts": [{ "id": "case-log", "kind": "case_log", "required": true }],
                 "gates": [{ "id": "open-findings", "kind": "threshold", "metric": "open_findings", "operator": "equal", "value": 0 }]
@@ -299,6 +313,8 @@ fn runs_artifacts_recognizes_canonical_fuzz_result_envelope() {
         assert_eq!(summary.campaign_id, "campaign-1");
         assert_eq!(summary.gate_status, "passed");
         assert_eq!(summary.gate_count, 1);
+        assert_eq!(summary.sequence_case_count, 1);
+        assert_eq!(summary.sequence_step_count, 2);
         assert_eq!(summary.required_artifact_count, 1);
         assert_eq!(summary.artifact_ref_count, 1);
     });

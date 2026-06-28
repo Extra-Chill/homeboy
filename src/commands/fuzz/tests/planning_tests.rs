@@ -174,6 +174,115 @@ fn fuzz_plan_operation_filter_limits_inventory_selection() {
 }
 
 #[test]
+fn fuzz_plan_skips_destructive_operations_by_default() {
+    let _guard = test_isolation_env_guard(None);
+    let metadata =
+        super::plan_inventory_selection(&planner_args(), &destructive_inventory()).unwrap();
+
+    assert!(metadata["selection"]["operations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        metadata["skipped"]["operations"][0]["reason"],
+        serde_json::json!("destructive")
+    );
+    assert_eq!(metadata["isolation"]["mode"], serde_json::json!("shared"));
+    assert_eq!(
+        metadata["isolation"]["destructive_allowed"],
+        serde_json::json!(false)
+    );
+}
+
+#[test]
+fn fuzz_plan_skips_destructive_operations_without_verified_isolation() {
+    let _guard = test_isolation_env_guard(None);
+    let mut args = planner_args();
+    args.run.allow_destructive = true;
+    args.run.isolation = FuzzIsolationArg::Isolated;
+
+    let metadata = super::plan_inventory_selection(&args, &destructive_inventory()).unwrap();
+
+    assert!(metadata["selection"]["operations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        metadata["skipped"]["operations"][0]["reason"],
+        serde_json::json!("destructive")
+    );
+    assert_eq!(
+        metadata["skipped"]["operations"][0]["detail"],
+        serde_json::json!(
+            "destructive fuzz requires verified generic isolation proof from Lab/offloaded runner metadata"
+        )
+    );
+    assert_eq!(metadata["isolation"]["mode"], serde_json::json!("isolated"));
+    assert_eq!(
+        metadata["isolation"]["destructive_allowed"],
+        serde_json::json!(false)
+    );
+    assert_eq!(metadata["isolation"]["verified"], serde_json::json!(false));
+}
+
+#[test]
+fn fuzz_plan_includes_destructive_operations_with_verified_isolation_opt_in() {
+    let _guard = test_isolation_env_guard(Some("1"));
+    let mut args = planner_args();
+    args.run.allow_destructive = true;
+    args.run.isolation = FuzzIsolationArg::Isolated;
+
+    let metadata = super::plan_inventory_selection(&args, &destructive_inventory()).unwrap();
+
+    assert_eq!(
+        metadata["selection"]["operations"][0]["operation_id"],
+        serde_json::json!("api.users.delete")
+    );
+    assert!(metadata["skipped"]["operations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(metadata["isolation"]["mode"], serde_json::json!("isolated"));
+    assert_eq!(
+        metadata["isolation"]["allow_destructive"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        metadata["isolation"]["destructive_allowed"],
+        serde_json::json!(true)
+    );
+    assert_eq!(metadata["isolation"]["verified"], serde_json::json!(true));
+    assert_eq!(
+        metadata["isolation"]["proof_source"],
+        serde_json::json!("test_env")
+    );
+    assert_eq!(
+        metadata["sampling"]["metadata"]["destructive_allowed"],
+        serde_json::json!(true)
+    );
+}
+
+#[test]
+fn fuzz_plan_workload_safety_participates_in_destructive_skip() {
+    let _guard = test_isolation_env_guard(None);
+    let mut inventory = planner_inventory();
+    inventory.workloads[0].safety_class = homeboy::core::fuzz::FuzzSafetyClass::Destructive;
+    let mut args = planner_args();
+    args.run.workload_id = Some("api-fuzz".to_string());
+
+    let metadata = super::plan_inventory_selection(&args, &inventory).unwrap();
+
+    assert!(metadata["selection"]["operations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        metadata["skipped"]["operations"][0]["reason"],
+        serde_json::json!("destructive")
+    );
+}
+
+#[test]
 fn fuzz_plan_budget_flags_override_inventory_workload_budgets() {
     let mut args = planner_args();
     args.case_budget = Some(5);
@@ -273,6 +382,9 @@ fn fuzz_run_parses_generic_contract_flags() {
         "--require-result-envelope",
         "--max-duration",
         "60s",
+        "--allow-destructive",
+        "--isolation",
+        "isolated",
         "--expect-metric",
         "side_effect_grouped_created_count=2",
         "--",
@@ -300,6 +412,8 @@ fn fuzz_run_parses_generic_contract_flags() {
             assert!(run.require_coverage_summary);
             assert!(run.require_result_envelope);
             assert_eq!(run.max_duration.as_deref(), Some("60s"));
+            assert!(run.allow_destructive);
+            assert_eq!(run.isolation, FuzzIsolationArg::Isolated);
             assert_eq!(
                 run.expect_metric,
                 vec![(

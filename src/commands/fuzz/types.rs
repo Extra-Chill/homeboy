@@ -194,6 +194,14 @@ pub struct FuzzRunArgs {
     #[arg(long = "gate-profile", value_enum, default_value_t = FuzzGateProfileArg::Measurement)]
     pub(crate) gate_profile: FuzzGateProfileArg,
 
+    /// Permit destructive fuzz operations when verified generic isolation proof is present.
+    #[arg(long = "allow-destructive")]
+    pub(crate) allow_destructive: bool,
+
+    /// Requested generic runner isolation contract for the fuzz run. This flag is advisory; destructive fuzz also requires verified isolation proof from the run context.
+    #[arg(long = "isolation", value_enum, default_value_t = FuzzIsolationArg::Shared)]
+    pub(crate) isolation: FuzzIsolationArg,
+
     /// Require a numeric metric emitted by the fuzz campaign to equal this value.
     /// Repeatable. Format: `--expect-metric metric_name=2`.
     #[arg(long = "expect-metric", value_name = "METRIC=VALUE", value_parser = crate::commands::parse_key_val)]
@@ -270,6 +278,25 @@ impl FuzzPlanStrategy {
             Self::Crud => "crud",
             Self::CoverageGaps => "coverage-gaps",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum FuzzIsolationArg {
+    Shared,
+    Isolated,
+}
+
+impl FuzzIsolationArg {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Isolated => "isolated",
+        }
+    }
+
+    pub(crate) fn requests_isolation(self) -> bool {
+        matches!(self, Self::Isolated)
     }
 }
 

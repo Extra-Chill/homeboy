@@ -10,26 +10,32 @@ use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use homeboy::core::fuzz::{
-    parse_fuzz_results_file, FuzzArtifact, FuzzCampaign, FuzzFindingStatus, FuzzGateProfile,
+    fuzz_gate_profile_contract, parse_fuzz_results_file, FuzzArtifact, FuzzCampaign,
+    FuzzCoverageReconciliation, FuzzExecutionRequest, FuzzFindingStatus, FuzzGateProfile,
+    FuzzSamplingRequest, FuzzTargetInventory, FUZZ_CONTRACT_VERSION,
+    FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA,
 };
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
+use super::planning::plan_inventory_selection;
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates_for_profile, fuzz_coverage_completeness,
     fuzz_result_envelope_evidence_ref, fuzz_result_envelope_from_campaign, gate_status,
     persist_fuzz_run_result_envelope,
 };
 use super::types::{
-    FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzExecutionOutput, FuzzRunArgs,
-    FuzzRunOutput, FuzzRunnerContract, FuzzWorkloadOutput,
+    FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzExecutionOutput, FuzzPlanArgs,
+    FuzzPlanStrategy, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzWorkloadOutput,
 };
 use super::workloads::{
     build_target_inventory, fuzz_invocation_requirements, fuzz_workloads, load_rig,
     resolve_component_id, resolve_fuzz_context, select_workload, FuzzRigContext,
 };
+
+const FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND: &str = "fuzz_coverage_reconciliation";
 
 pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
     if args
@@ -84,6 +90,18 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let invocation_requirements =
         fuzz_invocation_requirements(rig_context.as_ref(), ctx.extension_id.as_deref());
     let run_dir = RunDir::create()?;
+    let rig_id = rig_context.as_ref().map(|context| context.spec.id.clone());
+    let workload_id = selected_workload
+        .map(|workload| workload.id.clone())
+        .or_else(|| args.workload_id.clone());
+    let execution_request = build_fuzz_execution_request(
+        &args,
+        &ctx.component_id,
+        rig_id.as_deref(),
+        workload_id.clone(),
+        &target_inventory,
+    )?;
+    let execution_request_path = persist_fuzz_execution_request(&run_dir, &execution_request)?;
     let runner_output = run_fuzz_extension_script(
         &ctx,
         &args,
@@ -91,6 +109,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         selected_workload,
         invocation_requirements,
         &run_dir,
+        &execution_request_path,
     )?;
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let artifacts_dir =
@@ -133,10 +152,6 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let exit_code = outcome.exit_code;
     let success = outcome.success;
     let status = outcome.status.to_string();
-    let rig_id = rig_context.map(|context| context.spec.id);
-    let workload_id = selected_workload
-        .map(|workload| workload.id.clone())
-        .or_else(|| args.workload_id.clone());
     let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
     let persisted_evidence = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
         run_id: args.run_id.as_deref(),
@@ -148,6 +163,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         exit_code,
         success,
         args: &args,
+        execution_request_path: Some(&execution_request_path),
         results_path: &results_path,
         artifacts_dir: &artifacts_dir,
         results: results.as_ref(),
@@ -289,6 +305,8 @@ fn fuzz_requested_settings(args: &FuzzRunArgs) -> serde_json::Value {
     serde_json::json!({
         "setting": args.setting_args.setting,
         "setting_json": args.setting_args.setting_json,
+        "allow_destructive": args.allow_destructive,
+        "isolation": args.isolation.as_str(),
         "expect_metric": args.expect_metric,
     })
 }
@@ -707,6 +725,7 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) exit_code: i32,
     pub(super) success: bool,
     pub(super) args: &'a FuzzRunArgs,
+    pub(super) execution_request_path: Option<&'a Path>,
     pub(super) results_path: &'a Path,
     pub(super) artifacts_dir: &'a Path,
     pub(super) results: Option<&'a FuzzCampaign>,
@@ -739,6 +758,7 @@ pub(super) fn persist_fuzz_run_evidence(
         "seed": input.args.seed.clone(),
         "max_duration": input.args.max_duration.clone(),
         "passthrough_args": input.args.args.clone(),
+        "execution_request_file": input.execution_request_path.map(|path| path.to_string_lossy().to_string()),
         "tracker_refs": input.args.tracker_refs,
         "exit_code": input.exit_code,
         "success": input.success,
@@ -789,7 +809,28 @@ pub(super) fn persist_fuzz_run_evidence(
     if input.results_path.is_file() {
         store.record_artifact(&run_id, "fuzz_results", input.results_path)?;
     }
+    if let Some(execution_request_path) = input.execution_request_path {
+        if execution_request_path.is_file() {
+            store.record_artifact_with_metadata(
+                &run_id,
+                "fuzz_execution_request",
+                execution_request_path,
+                serde_json::json!({
+                    "schema": FUZZ_EXECUTION_REQUEST_SCHEMA,
+                    "source": "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",
+                }),
+            )?;
+        }
+    }
     if let Some(campaign) = input.results {
+        if let Some(execution_request_path) = input.execution_request_path {
+            persist_fuzz_coverage_reconciliation(
+                &store,
+                &run_id,
+                execution_request_path,
+                campaign,
+            )?;
+        }
         let mut envelope =
             fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
         envelope.status = gate_status(&evaluate_fuzz_gates_for_profile(
@@ -835,6 +876,72 @@ pub(super) fn persist_fuzz_run_evidence(
     Ok(FuzzRunPersistedEvidence {
         run: Some(run),
         evidence_refs,
+    })
+}
+
+fn persist_fuzz_coverage_reconciliation(
+    store: &ObservationStore,
+    run_id: &str,
+    execution_request_path: &Path,
+    campaign: &FuzzCampaign,
+) -> homeboy::core::Result<Option<homeboy::core::observation::ArtifactRecord>> {
+    if !execution_request_path.is_file() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(execution_request_path).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some(execution_request_path.display().to_string()),
+        )
+    })?;
+    let request: FuzzExecutionRequest = serde_json::from_str(&raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "fuzz_execution_request",
+            format!("failed to parse fuzz execution request for coverage reconciliation: {error}"),
+            Some(execution_request_path.display().to_string()),
+            None,
+        )
+    })?;
+    let reconciliation = homeboy::core::fuzz::reconcile_fuzz_coverage(&request, campaign);
+    let artifact_path = fuzz_coverage_reconciliation_path(execution_request_path);
+    write_fuzz_coverage_reconciliation(&artifact_path, &reconciliation)?;
+    store
+        .record_artifact_with_metadata(
+            run_id,
+            FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND,
+            &artifact_path,
+            serde_json::json!({
+                "schema": FUZZ_COVERAGE_RECONCILIATION_SCHEMA,
+                "source": "homeboy fuzz run",
+                "request_id": reconciliation.request_id,
+                "campaign_id": reconciliation.campaign_id,
+            }),
+        )
+        .map(Some)
+}
+
+fn fuzz_coverage_reconciliation_path(execution_request_path: &Path) -> PathBuf {
+    execution_request_path
+        .parent()
+        .map(|parent| {
+            parent.join(homeboy::core::engine::run_dir::files::FUZZ_COVERAGE_RECONCILIATION)
+        })
+        .unwrap_or_else(|| {
+            PathBuf::from(homeboy::core::engine::run_dir::files::FUZZ_COVERAGE_RECONCILIATION)
+        })
+}
+
+fn write_fuzz_coverage_reconciliation(
+    path: &Path,
+    reconciliation: &FuzzCoverageReconciliation,
+) -> homeboy::core::Result<()> {
+    let raw = serde_json::to_vec_pretty(reconciliation).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "failed to encode fuzz coverage reconciliation: {error}"
+        ))
+    })?;
+    std::fs::write(path, raw).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
     })
 }
 
@@ -1049,6 +1156,7 @@ pub(super) fn default_runner_contract() -> FuzzRunnerContract {
 pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerContract {
     let mut env: Vec<String> = [
         "HOMEBOY_FUZZ_RESULTS_FILE",
+        "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",
         "HOMEBOY_FUZZ_ARTIFACTS_DIR",
         "HOMEBOY_FUZZ_WORKLOAD_ID",
         "HOMEBOY_FUZZ_WORKLOAD_PATH",
@@ -1058,6 +1166,8 @@ pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerCon
         "HOMEBOY_FUZZ_INVENTORY_FILE",
         "HOMEBOY_FUZZ_MAX_DURATION",
         "HOMEBOY_FUZZ_GATE_PROFILE",
+        "HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE",
+        "HOMEBOY_FUZZ_ISOLATION",
         "HOMEBOY_ARTIFACT_POSTPROCESS_ID",
         "HOMEBOY_ARTIFACT_POSTPROCESS_HELPER",
         "HOMEBOY_ARTIFACT_POSTPROCESS_ACTION",
@@ -1093,6 +1203,7 @@ fn run_fuzz_extension_script(
     workload: Option<&FuzzWorkloadOutput>,
     invocation_requirements: InvocationRequirements,
     run_dir: &RunDir,
+    execution_request_path: &Path,
 ) -> homeboy::core::Result<homeboy::core::extension::RunnerOutput> {
     let execution_context =
         extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
@@ -1121,7 +1232,14 @@ fn run_fuzz_extension_script(
         .script_args(&args.args);
 
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
-    let env = fuzz_runner_env(args, rig_context, workload, &results_path, run_dir)?;
+    let env = fuzz_runner_env(
+        args,
+        rig_context,
+        workload,
+        &results_path,
+        run_dir,
+        Some(execution_request_path),
+    )?;
     for (key, value) in env {
         runner = runner.env(&key, &value);
     }
@@ -1182,11 +1300,18 @@ pub(super) fn fuzz_runner_env(
     workload: Option<&FuzzWorkloadOutput>,
     results_path: &Path,
     run_dir: &RunDir,
+    execution_request_path: Option<&Path>,
 ) -> homeboy::core::Result<Vec<(String, String)>> {
     let mut env = vec![(
         "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
         results_path.to_string_lossy().to_string(),
     )];
+    if let Some(execution_request_path) = execution_request_path {
+        env.push((
+            "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE".to_string(),
+            execution_request_path.to_string_lossy().to_string(),
+        ));
+    }
     let artifacts_dir =
         run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
     std::fs::create_dir_all(&artifacts_dir).map_err(|error| {
@@ -1228,7 +1353,98 @@ pub(super) fn fuzz_runner_env(
         "HOMEBOY_FUZZ_GATE_PROFILE".to_string(),
         args.gate_profile.as_str().to_string(),
     ));
+    env.push((
+        "HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE".to_string(),
+        args.allow_destructive.to_string(),
+    ));
+    env.push((
+        "HOMEBOY_FUZZ_ISOLATION".to_string(),
+        args.isolation.as_str().to_string(),
+    ));
     Ok(env)
+}
+
+pub(super) fn persist_fuzz_execution_request(
+    run_dir: &RunDir,
+    request: &FuzzExecutionRequest,
+) -> homeboy::core::Result<PathBuf> {
+    let path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_EXECUTION_REQUEST);
+    let raw = serde_json::to_vec_pretty(request).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("serialize fuzz execution request".to_string()),
+        )
+    })?;
+    std::fs::write(&path, raw).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?;
+    Ok(path)
+}
+
+pub(super) fn build_fuzz_execution_request(
+    args: &FuzzRunArgs,
+    component_id: &str,
+    rig_id: Option<&str>,
+    workload_id: Option<String>,
+    target_inventory: &FuzzTargetInventory,
+) -> homeboy::core::Result<FuzzExecutionRequest> {
+    let plan_args = FuzzPlanArgs {
+        run: args.clone(),
+        request_id: args.run_id.clone(),
+        strategy: FuzzPlanStrategy::All,
+        operations: Vec::new(),
+        operation_families: Vec::new(),
+        case_budget: None,
+        duration_budget_seconds: None,
+    };
+    let mut metadata = plan_inventory_selection(&plan_args, target_inventory)?;
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "target_inventory".to_string(),
+            serde_json::to_value(target_inventory).map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("serialize fuzz target inventory".to_string()),
+                )
+            })?,
+        );
+    }
+    let sampling: FuzzSamplingRequest = serde_json::from_value(
+        metadata
+            .get("sampling")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Null),
+    )
+    .map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "sampling",
+            format!("invalid fuzz sampling request: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let (required_artifacts, gates) = fuzz_gate_profile_contract(args.gate_profile.as_core());
+    Ok(FuzzExecutionRequest {
+        schema: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
+        version: FUZZ_CONTRACT_VERSION,
+        id: args
+            .run_id
+            .clone()
+            .or_else(|| workload_id.clone())
+            .unwrap_or_else(|| format!("{component_id}-fuzz-request")),
+        component: component_id.to_string(),
+        rig_id: rig_id.map(str::to_string),
+        workload_id,
+        case_ids: Vec::new(),
+        seed: args.seed.clone(),
+        max_duration: args.max_duration.clone(),
+        args: args.args.clone(),
+        required_artifacts,
+        gates,
+        sampling,
+        metadata,
+        extra: std::collections::BTreeMap::new(),
+    })
 }
 
 fn fuzz_runner_workload_path(

@@ -16,6 +16,10 @@ use super::workloads::{
 };
 use homeboy::core::extension::ExtensionCapability;
 
+#[cfg(test)]
+pub(super) const TEST_VERIFIED_FUZZ_ISOLATION_ENV: &str = "HOMEBOY_TEST_VERIFIED_FUZZ_ISOLATION";
+pub(super) const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
+
 pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
     let rig_context = load_rig(args.run.rig.as_deref(), &args.run.setting_args)?;
     let effective_id = resolve_component_id(
@@ -126,7 +130,12 @@ pub(super) fn plan_inventory_selection(
     let workload_operations = workload
         .map(|workload| workload.operations.iter().cloned().collect::<BTreeSet<_>>())
         .unwrap_or_default();
+    let workload_safety_class = workload.map(|workload| workload.safety_class);
     let surface_safety = inventory_surface_safety(inventory);
+    let isolation_proof = verified_fuzz_isolation_proof();
+    let destructive_allowed = args.run.allow_destructive
+        && args.run.isolation.requests_isolation()
+        && isolation_proof.verified;
 
     let mut selected_target_ids = BTreeSet::new();
     let mut selected_families = BTreeSet::new();
@@ -167,16 +176,18 @@ pub(super) fn plan_inventory_selection(
         }
 
         for (operation, _) in target_operations {
-            let safety_class = surface_safety
+            let surface_safety_class = surface_safety
                 .get(&target.id)
                 .copied()
                 .unwrap_or(FuzzSafetyClass::ReadOnly);
+            let safety_class = effective_safety_class(surface_safety_class, workload_safety_class);
             let family = operation.family;
             let skip_reason = operation_skip_reason(
                 operation,
                 family,
                 safety_class,
                 args.strategy,
+                destructive_allowed,
                 &filters,
                 &workload_operations,
             );
@@ -187,6 +198,7 @@ pub(super) fn plan_inventory_selection(
                     "operation_id": operation.id,
                     "operation_kind": operation.kind,
                     "reason": reason,
+                    "detail": skip_reason_detail(reason, args, &isolation_proof),
                 }));
                 continue;
             }
@@ -317,6 +329,11 @@ pub(super) fn plan_inventory_selection(
             "operation_filters": args.operations,
             "operation_family_filters": args.operation_families,
             "gate_profile": args.run.gate_profile.as_str(),
+            "allow_destructive": args.run.allow_destructive,
+            "isolation": args.run.isolation.as_str(),
+            "destructive_allowed": destructive_allowed,
+            "verified_isolation": isolation_proof.verified,
+            "isolation_proof_source": isolation_proof.source,
         }),
         extra: BTreeMap::new(),
     };
@@ -327,6 +344,11 @@ pub(super) fn plan_inventory_selection(
             "operation_filters": args.operations,
             "operation_family_filters": args.operation_families,
             "gate_profile": args.run.gate_profile.as_str(),
+            "allow_destructive": args.run.allow_destructive,
+            "isolation": args.run.isolation.as_str(),
+            "destructive_allowed": destructive_allowed,
+            "verified_isolation": isolation_proof.verified,
+            "isolation_proof_source": isolation_proof.source,
         },
         "selection": {
             "target_ids": target_ids,
@@ -343,6 +365,11 @@ pub(super) fn plan_inventory_selection(
         "sampling": sampling,
         "isolation": {
             "required": isolation_required,
+            "mode": args.run.isolation.as_str(),
+            "allow_destructive": args.run.allow_destructive,
+            "destructive_allowed": destructive_allowed,
+            "verified": isolation_proof.verified,
+            "proof_source": isolation_proof.source,
             "requirements": if isolation_required { vec!["isolated_mutation"] } else { Vec::<&str>::new() },
         },
         "required_artifact_ids": profile_artifacts.into_iter().map(|artifact| artifact.id).collect::<Vec<_>>(),
@@ -357,6 +384,102 @@ pub(super) fn plan_inventory_selection(
             "operation_filters": workload_operations.into_iter().collect::<Vec<_>>(),
         }
     }))
+}
+
+#[derive(Clone, Copy)]
+struct FuzzIsolationProof {
+    verified: bool,
+    source: &'static str,
+}
+
+fn verified_fuzz_isolation_proof() -> FuzzIsolationProof {
+    if lab_offload_metadata_verifies_isolation() {
+        return FuzzIsolationProof {
+            verified: true,
+            source: "lab_offload_metadata",
+        };
+    }
+    if std::env::var_os(RUNNER_HOSTED_EXEC_ENV).is_some() {
+        return FuzzIsolationProof {
+            verified: true,
+            source: "runner_hosted_exec",
+        };
+    }
+    #[cfg(test)]
+    if std::env::var(TEST_VERIFIED_FUZZ_ISOLATION_ENV)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+    {
+        return FuzzIsolationProof {
+            verified: true,
+            source: "test_env",
+        };
+    }
+    FuzzIsolationProof {
+        verified: false,
+        source: "none",
+    }
+}
+
+fn lab_offload_metadata_verifies_isolation() -> bool {
+    let Ok(raw) = std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV) else {
+        return false;
+    };
+    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let status = metadata.get("status").and_then(serde_json::Value::as_str);
+    let remote_workspace = metadata
+        .get("remote_workspace")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    matches!(status, Some("offloaded" | "success" | "completed")) || remote_workspace
+}
+
+fn effective_safety_class(
+    surface: FuzzSafetyClass,
+    workload: Option<FuzzSafetyClass>,
+) -> FuzzSafetyClass {
+    workload
+        .map(|workload| max_safety_class(surface, workload))
+        .unwrap_or(surface)
+}
+
+fn max_safety_class(a: FuzzSafetyClass, b: FuzzSafetyClass) -> FuzzSafetyClass {
+    if safety_rank(a) >= safety_rank(b) {
+        a
+    } else {
+        b
+    }
+}
+
+fn safety_rank(class: FuzzSafetyClass) -> u8 {
+    match class {
+        FuzzSafetyClass::ReadOnly => 0,
+        FuzzSafetyClass::Idempotent => 1,
+        FuzzSafetyClass::IsolatedMutation => 2,
+        FuzzSafetyClass::Destructive => 3,
+    }
+}
+
+fn skip_reason_detail(
+    reason: &str,
+    args: &FuzzPlanArgs,
+    isolation_proof: &FuzzIsolationProof,
+) -> &'static str {
+    if reason != "destructive" {
+        return "operation is outside the selected strategy, filters, or supported operation families";
+    }
+    if !args.run.allow_destructive {
+        return "destructive fuzz requires --allow-destructive";
+    }
+    if !args.run.isolation.requests_isolation() {
+        return "destructive fuzz requires --isolation isolated";
+    }
+    if !isolation_proof.verified {
+        return "destructive fuzz requires verified generic isolation proof from Lab/offloaded runner metadata";
+    }
+    "destructive fuzz is not allowed for this operation"
 }
 
 fn operation_filters(args: &FuzzPlanArgs) -> homeboy::core::Result<BTreeSet<String>> {
@@ -384,10 +507,11 @@ fn operation_skip_reason(
     family: Option<FuzzOperationFamily>,
     safety_class: FuzzSafetyClass,
     strategy: FuzzPlanStrategy,
+    destructive_allowed: bool,
     filters: &BTreeSet<String>,
     workload_operations: &BTreeSet<String>,
 ) -> Option<&'static str> {
-    if matches!(safety_class, FuzzSafetyClass::Destructive) {
+    if matches!(safety_class, FuzzSafetyClass::Destructive) && !destructive_allowed {
         return Some("destructive");
     }
     if family.is_none() {
