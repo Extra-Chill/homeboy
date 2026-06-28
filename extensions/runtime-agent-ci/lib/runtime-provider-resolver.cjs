@@ -248,12 +248,20 @@ function normalizeRuntimeId(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 }
 
 function runtimeIdFromOptions(options = {}, env = process.env) {
+	// Mirror the env precedence used by setup-runtime.cjs
+	// (RUNTIME || RUNTIME_PROVIDER || BACKEND). Consumers commonly set only
+	// RUNTIME_PROVIDER; without honoring it here, materialize-dependencies
+	// resolves DEFAULT_RUNTIME_ID instead of the real runtime and never checks
+	// out the runtime provider repo, so its setup_commands later fail on a
+	// missing cwd.
 	return firstString(
 		options.runtimeId,
 		options.runtime_id,
 		options.runtime,
 		env.RUNTIME_ID,
 		env.RUNTIME,
+		env.RUNTIME_PROVIDER,
+		env.BACKEND,
 		DEFAULT_RUNTIME_ID
 	);
 }

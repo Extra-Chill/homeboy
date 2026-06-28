@@ -195,8 +195,16 @@ function getByPath(value, expression) {
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: 'inherit', ...options });
+  // spawnSync returns status: null both when the process is killed by a signal
+  // and when it cannot be spawned at all (result.error, e.g. a missing cwd).
+  // Surface the real cause instead of a bare "status null".
+  if (result.error) {
+    const cwd = options.cwd ? ` (cwd: ${options.cwd})` : '';
+    throw new Error(`${command} ${args.join(' ')} failed to spawn${cwd}: ${result.error.message}`);
+  }
   if (result.status !== 0) {
-    throw new Error(`${command} ${args.join(' ')} failed with status ${result.status}`);
+    const detail = result.signal ? ` (signal ${result.signal})` : '';
+    throw new Error(`${command} ${args.join(' ')} failed with status ${result.status}${detail}`);
   }
 }
 
