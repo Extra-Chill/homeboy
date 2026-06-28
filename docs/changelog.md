@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.269.0] - 2026-06-28
+
+### Added
+- opt-in remote cancel on controller wait-timeout
+- add chaos fuzz sequence contracts
+- allow isolated destructive campaigns
+
+### Changed
+- runtime audit regression harness on fixture tree (#6855 enabler)
+- make stuck rig locks reclaimable + surface holder details (refs #6891)
+
+### Fixed
+- verify destructive isolation
+- validate lab source snapshot handoff
+- fix(agent-task): inspect provider boundary inputs
+- fix(agent-task): surface child failure signatures
+
 ## [0.268.0] - 2026-06-28
 
 ### Added
