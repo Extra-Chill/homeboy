@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.268.0] - 2026-06-28
+
+### Added
+- per-group exempt_when_line_matches for thin_command_adapter (skip delegation false positives)
+- add ignore_line_matches to thin_command_adapter (skip fn-decl false positives)
+- report explicit build provenance on every deploy
+
+### Fixed
+- surface symlink->real-dir target swaps on archive install
+
 ## [0.267.1] - 2026-06-28
 
 ### Fixed
