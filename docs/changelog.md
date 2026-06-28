@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.267.1] - 2026-06-28
+
+### Fixed
+- hydrate remote matrix packets and accept run labels
+
 ## [0.267.0] - 2026-06-28
 
 ### Added
