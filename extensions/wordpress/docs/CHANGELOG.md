@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.20.1] - 2026-06-28
+
+### Fixed
+- honor AbortSignal/timeoutMs in wp-codebox-recipe-helper to kill+reap wedged recipe-run
+
 ## [3.20.0] - 2026-06-28
 
 ### Added
