@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.20.0] - 2026-06-28
+
+### Added
+- declared local-workspace dependency overrides with peer dedup
+
 ## [3.19.30] - 2026-06-28
 
 ### Changed
