@@ -1420,10 +1420,10 @@ try {
   });
   assert.deepEqual(configuredOverlayWithEmptyProfileRequest.runtime_overlays, configuredRuntimeOverlays);
 
-  const explicitPhpAiClientPath = writePhpAiClientOverlay(defaultsRoot, { name: 'explicit-php-ai-client' });
-  const explicitPhpAiClientRequest = codeboxTaskRequestFromAgentTaskRequest({
+  const legacyPhpAiClientPath = writePhpAiClientOverlay(defaultsRoot, { name: 'legacy-php-ai-client' });
+  const legacyPhpAiClientRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
-    task_id: 'explicit-php-ai-client-runtime-stack-task-123',
+    task_id: 'legacy-php-ai-client-runtime-stack-task-123',
     executor: {
       backend: 'codebox',
       config: { provider: 'codex' },
@@ -1432,11 +1432,10 @@ try {
       target: { root: workspaceRoot },
     },
   }, {
-    settings: { wp_codebox_php_ai_client_path: explicitPhpAiClientPath },
+    settings: { wp_codebox_php_ai_client_path: legacyPhpAiClientPath },
   });
-  assert.equal(fs.realpathSync(explicitPhpAiClientRequest.runtime_overlays[0].source), fs.realpathSync(explicitPhpAiClientPath));
-  assert.equal(explicitPhpAiClientRequest.runtime_overlays[0].strategy, 'wordpress-scoped-bundle');
-  assert.deepEqual(runtimeOverlayReadinessDiagnostics(explicitPhpAiClientRequest), []);
+  assert.deepEqual(legacyPhpAiClientRequest.runtime_overlays, []);
+  assert(!JSON.stringify(legacyPhpAiClientRequest).includes(legacyPhpAiClientPath));
 
   const stalePhpAiClientPath = writePhpAiClientOverlay(defaultsRoot, { name: 'stale-php-ai-client', withoutDescription: true });
   const stalePhpAiClientDiagnostics = runtimeOverlayReadinessDiagnostics({
