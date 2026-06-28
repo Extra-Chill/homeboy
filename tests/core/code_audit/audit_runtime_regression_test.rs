@@ -15,6 +15,21 @@
 //! the live audit. This test closes it: any change that alters what the audit
 //! emits on a fixed input fails here, locally, at `cargo test`.
 //!
+//! FIXTURE COVERAGE: the fixture tree deliberately exercises the two detector
+//! behaviors a real-codebase regression (#6906) slipped past the original
+//! harness:
+//!   1. TEST-PATH SKIPPING — `src/commands/tests/skipped_helper.rs` carries the
+//!      configured orchestration marker but lives under a `/tests/` path, so the
+//!      `thin_command_adapter` policy (with `skip_test_paths: true`) must skip
+//!      it. Its absence from the snapshot, plus the dedicated
+//!      `audit_runtime_regression_skips_test_paths` test, catch a regression
+//!      that wrongly scans test files.
+//!   2. CORE-AGNOSTIC / CORE-BOUNDARY-LEAK — `src/boundary_leak.rs` contains a
+//!      synthetic ecosystem term (`florpstack`) on a behavioral line, firing the
+//!      `core_boundary_leaks` detector, while an allowlisted comment occurrence
+//!      proves the allow path is honored. This exercises the detector whose
+//!      findings exploded in #6906.
+//!
 //! IF THIS TEST FAILS after a detector/config/grammar change: inspect the diff
 //! between `actual` and `EXPECTED_FINDINGS`. The change altered audit output.
 //! Only update the snapshot below if the change is *intentional* — never to
@@ -64,9 +79,11 @@ fn finding_fingerprints(result: &crate::core::code_audit::CodeAuditResult) -> Ve
 ///
 /// This list IS the regression guard. See module docs before editing.
 const EXPECTED_FINDINGS: &[&str] = &[
+    "core_boundary_leak::src/boundary_leak.rs",
     "high_item_count::src/god_file.rs",
     "source_policy_violation::src/policy_violation.rs",
     "thin_command_adapter_violation::src/commands/thick_adapter.rs",
+    "unreferenced_export::src/boundary_leak.rs",
     "unreferenced_export::src/god_file.rs",
     "unreferenced_export::src/policy_violation.rs",
 ];
@@ -106,5 +123,34 @@ fn audit_runtime_regression_is_deterministic() {
     assert_eq!(
         first, second,
         "audit output must be deterministic across runs"
+    );
+}
+
+/// Invariant: the audit must never emit a finding for a file living under a
+/// test path (a path segment of `tests/`), because the walker skips test paths.
+///
+/// This directly encodes the contract that the #6906 regression violated, where
+/// test files were wrongly scanned. The fixture ships
+/// `src/commands/tests/skipped_helper.rs` — a command-path file carrying the
+/// configured `ORCHESTRATION_MARKER`. The `thin_command_adapter` policy has
+/// `skip_test_paths: true`, so a healthy walker skips it. If test-path skipping
+/// regresses, that file produces a `thin_command_adapter_violation` whose `file`
+/// contains `/tests/`, tripping this assertion (and the snapshot test above).
+#[test]
+fn audit_runtime_regression_skips_test_paths() {
+    let root = fixture_root();
+    let result = audit_path_with_id(FIXTURE_COMPONENT_ID, &root.to_string_lossy())
+        .expect("audit pipeline runs on the fixture tree");
+
+    let test_path_findings: Vec<String> = result
+        .findings
+        .iter()
+        .map(|finding| finding.file.replace('\\', "/"))
+        .filter(|file| file.starts_with("tests/") || file.contains("/tests/"))
+        .collect();
+
+    assert!(
+        test_path_findings.is_empty(),
+        "audit emitted findings for test-path files (walker test-path skipping regressed): {test_path_findings:#?}"
     );
 }
