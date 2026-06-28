@@ -41,7 +41,7 @@ Find actual usage workflows in existing code, tests, and examples. Document real
 Create subdirectories in `/docs` that directly correspond to actual code extensions and components.
 
 ### 6. Create Documentation Files
-Use `homeboy docs map <component>` to generate a codebase map for AI-assisted documentation, then create files manually following the structure standards in `homeboy docs documentation/structure`.
+Use `homeboy docs map <component>` to generate a codebase map for AI-assisted documentation, then create files manually following the structure standards in `homeboy docs internals/docs-maintenance/structure`.
 
 ### 7. Write Content
 For each file:
@@ -75,7 +75,7 @@ Never generate:
 - Use descriptive filenames that reflect functionality being documented
 - No generic names like `readme.md`, `index.md`, or `overview.md` in subdirectories
 - File names describe what the content covers
-- For directory entry points, use `{directory}/{directory}.md` pattern (see `homeboy docs documentation/structure`)
+- For directory entry points, use `{directory}/{directory}.md` pattern (see `homeboy docs internals/docs-maintenance/structure`)
 
 ## Completion Criteria
 

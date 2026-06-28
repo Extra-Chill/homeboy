@@ -235,5 +235,5 @@ homeboy api myproject get /users
 
 - [Auth command](../commands/auth.md) - Manage API authentication
 - [API command](../commands/api.md) - Make API requests
-- [Project schema](../schemas/project-schema.md) - API configuration structure
+- [Project schema](../reference/schemas/project-schema.md) - API configuration structure
 - [Keychain/secrets management](./keychain-secrets.md) - How secrets are stored

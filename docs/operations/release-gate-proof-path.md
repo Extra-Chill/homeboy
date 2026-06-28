@@ -146,4 +146,4 @@ use that routed result as the proof.
 - [runner](../commands/runner.md) — Lab runner selection, offload routing, and managed follow-ups
 - [Controller to runner reverse-runner setup](controller-runner-reverse-runner.md) — gated reverse-runner path
 - [agent-task](../commands/agent-task.md) — durable lifecycle and runner-side gate dispatch
-- [Code Factory](../code-factory.md) — the lint → test → audit → release pipeline this proof feeds
+- [Code Factory](../concepts/code-factory.md) — the lint → test → audit → release pipeline this proof feeds

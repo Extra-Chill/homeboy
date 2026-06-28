@@ -2,7 +2,7 @@
 
 This page is a field-level reference for Homeboy configuration structures. For
 the higher-level system model and core/extension boundary, see
-[Architecture Overview](developer-guide/architecture-overview.md).
+[Architecture Overview](../internals/developer-guide/architecture-overview.md).
 
 ## Configuration
 

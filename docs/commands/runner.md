@@ -75,7 +75,7 @@ the structured `runner.exec` response under `structured_summaries`, with the run
 id, runner id, command, declared path, and promoted artifact id/path so LLM
 workflows can consume the compact result without spelunking remote stdout or
 artifact directories. See
-[Artifact loop for runner and matrix workflows](../operators/artifact-loop-runner-matrix.md)
+[Artifact loop for runner and matrix workflows](../operations/artifact-loop-runner-matrix.md)
 for static HTML and matrix examples, plus proposed attach/promote command shapes
 for successful runner jobs that produced files but registered zero artifacts.
 
@@ -399,7 +399,7 @@ development runner with `homeboy runner disconnect <runner-id>` followed by
 ```
 
 For the generic controller-to-runner operator path, see
-[Controller to runner reverse-runner setup](../operators/controller-runner-reverse-runner.md).
+[Controller to runner reverse-runner setup](../operations/controller-runner-reverse-runner.md).
 That guide is machine-agnostic and intentionally explicit about what is available
 now and what remains gated by #2990, #2991, #2992, and #2947 before production
 broker exposure.

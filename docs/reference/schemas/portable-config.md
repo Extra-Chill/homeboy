@@ -96,4 +96,4 @@ homeboy.json (repo)  →  CLI flags (override)  →  ~/.config/homeboy/component
 ## Related
 
 - [Component schema](component-schema.md) - Full component configuration reference
-- [Component command](../commands/component.md) - CLI reference
+- [Component command](../../commands/component.md) - CLI reference

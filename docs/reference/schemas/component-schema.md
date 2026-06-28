@@ -206,7 +206,7 @@ Components are stored as individual JSON files under the OS config directory:
 
 ## Related
 
-- [Component command](../commands/component.md) - Manage component configuration
-- [Hooks system](../architecture/hooks.md) - Lifecycle hooks for version and release operations
+- [Component command](../../commands/component.md) - Manage component configuration
+- [Hooks system](../../architecture/hooks.md) - Lifecycle hooks for version and release operations
 - [Project schema](project-schema.md) - How components link to projects
 - [Extension manifest schema](extension-manifest-schema.md) - Extension configuration structure

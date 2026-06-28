@@ -52,5 +52,5 @@ Topics are sorted lexicographically.
 
 ## Related
 
-- [Docs command](../../commands/docs.md)
-- [Changelog command](../../commands/changelog.md)
+- [Docs command](../commands/docs.md)
+- [Changelog command](../commands/changelog.md)
