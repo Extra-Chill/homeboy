@@ -34,11 +34,14 @@
 //! - Comment and string syntax
 //! - Block delimiters
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use crate::core::extension::grammar::{self, Grammar, Symbol};
-use crate::core::extension::{self, DeadCodeMarker, HookRef, UnusedParam};
+use crate::core::extension::grammar::{self, AggregateSeamConfig, Grammar, Symbol};
+use crate::core::extension::{
+    self, AggregateConstructionSeam, AggregateLiteral, CallSite, DeadCodeMarker, HookRef,
+    UnusedParam,
+};
 
 use super::conventions::Language;
 use super::fingerprint::FileFingerprint;
@@ -230,6 +233,14 @@ pub fn fingerprint_from_grammar(
     // --- Runtime-dispatched types (extension-owned grammar metadata) ---
     let runtime_dispatched_types = extract_runtime_dispatched_types(&symbols);
 
+    // --- Aggregate construction facts (grammar-driven) ---
+    let aggregate_construction_seams = extract_aggregate_construction_seams(&functions, grammar);
+    let aggregate_literals = extract_aggregate_literals(content, grammar);
+
+    // --- Hook/callback targets and call sites (grammar-driven) ---
+    let hook_callbacks = extract_hook_callbacks(content, grammar);
+    let call_sites = extract_call_sites(content, grammar);
+
     Some(FileFingerprint {
         relative_path: relative_path.to_string(),
         language,
@@ -251,14 +262,14 @@ pub fn fingerprint_from_grammar(
         unused_parameters,
         dead_code_markers,
         internal_calls,
-        call_sites: Vec::new(), // Core grammar engine doesn't extract call sites yet
+        call_sites,
         public_api,
-        hook_callbacks: Vec::new(), // Core grammar engine doesn't extract hook callbacks yet
+        hook_callbacks,
         runtime_dispatched_types,
         convention_tags: Vec::new(),
         trait_impl_methods,
-        aggregate_literals: Vec::new(),
-        aggregate_construction_seams: Vec::new(),
+        aggregate_literals,
+        aggregate_construction_seams,
     })
 }
 
@@ -299,8 +310,12 @@ struct FunctionInfo {
     /// that happen to start with `test_` are NOT actual tests.
     has_test_attr: bool,
     is_trait_impl: bool,
+    /// Owning aggregate type name when this function is an impl method.
+    /// `None` for free functions. Drives construction-seam recognition.
+    impl_type: Option<String>,
     params: String,
-    _start_line: usize,
+    /// 1-indexed declaration line. Used as the construction-seam source line.
+    start_line: usize,
 }
 
 /// Build a map of line ranges → impl context.
@@ -317,7 +332,7 @@ fn build_impl_contexts(symbols: &[Symbol]) -> Vec<ImplContext> {
             ImplContext {
                 line: s.line,
                 depth: s.depth,
-                _type_name: type_name,
+                type_name,
                 trait_name,
             }
         })
@@ -327,7 +342,7 @@ fn build_impl_contexts(symbols: &[Symbol]) -> Vec<ImplContext> {
 struct ImplContext {
     line: usize,
     depth: i32,
-    _type_name: String,
+    type_name: String,
     trait_name: Option<String>,
 }
 
@@ -433,18 +448,23 @@ fn extract_functions(
         let in_test_mod = is_in_test_range(symbol.line, test_range);
         let is_test = has_test_attr || in_test_mod;
 
-        // Determine if inside a trait impl by finding the nearest enclosing
-        // impl context (the last one that starts before this function at a
-        // shallower depth). Using `any()` was wrong — it matched unrelated
-        // impl blocks earlier in the file.
-        let is_trait_impl = if symbol.depth > 0 {
+        // Find the nearest enclosing impl context (the last one that starts
+        // before this function at a shallower depth). Using `any()` was wrong —
+        // it matched unrelated impl blocks earlier in the file. This drives both
+        // trait-impl detection and the owning type used for construction-seam
+        // recognition.
+        let enclosing_impl = if symbol.depth > 0 {
             impl_contexts
                 .iter()
                 .rfind(|ctx| ctx.depth < symbol.depth && ctx.line < symbol.line)
-                .is_some_and(|ctx| ctx.trait_name.as_ref().is_some_and(|t| !t.is_empty()))
         } else {
-            false
+            None
         };
+        let is_trait_impl = enclosing_impl
+            .is_some_and(|ctx| ctx.trait_name.as_ref().is_some_and(|t| !t.is_empty()));
+        let impl_type = enclosing_impl
+            .map(|ctx| ctx.type_name.clone())
+            .filter(|t| !t.is_empty());
 
         // Extract visibility
         let visibility = extract_fn_visibility(symbol);
@@ -462,8 +482,9 @@ fn extract_functions(
             is_test,
             has_test_attr,
             is_trait_impl,
+            impl_type,
             params,
-            _start_line: symbol.line,
+            start_line: symbol.line,
         });
     }
 
@@ -1039,6 +1060,357 @@ fn extract_hooks(symbols: &[Symbol], grammar: &Grammar) -> Vec<HookRef> {
     }
 
     hooks
+}
+
+// ============================================================================
+// Aggregate construction facts (grammar-driven)
+// ============================================================================
+
+/// Extract canonical aggregate construction seams from impl methods.
+///
+/// A seam is a method whose owning type and name match the grammar's
+/// construction-seam naming policy (e.g. `Config::new`, `Plan::from_parts`).
+/// Drives the `aggregate_construction_seams` fingerprint field consumed by the
+/// direct-aggregate-construction detector. Test functions and free functions
+/// with no owning type are excluded. Returns empty when the grammar declares no
+/// seam policy.
+fn extract_aggregate_construction_seams(
+    functions: &[FunctionInfo],
+    grammar: &Grammar,
+) -> Vec<AggregateConstructionSeam> {
+    let Some(cfg) = grammar.fingerprint.aggregate_seams.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut seams = Vec::new();
+    let mut seen = HashSet::new();
+    for f in functions {
+        if f.is_test {
+            continue;
+        }
+        let Some(type_name) = f.impl_type.as_ref() else {
+            continue;
+        };
+        if !is_canonical_seam(&f.name, type_name, cfg) {
+            continue;
+        }
+        if seen.insert((type_name.clone(), f.name.clone())) {
+            seams.push(AggregateConstructionSeam {
+                type_name: type_name.clone(),
+                method: f.name.clone(),
+                line: f.start_line,
+            });
+        }
+    }
+
+    seams
+}
+
+/// Whether `method` is a canonical construction seam for `type_name` under the
+/// grammar's naming policy.
+fn is_canonical_seam(method: &str, type_name: &str, cfg: &AggregateSeamConfig) -> bool {
+    if cfg.method_names.iter().any(|name| name == method) {
+        return true;
+    }
+    if cfg
+        .method_prefixes
+        .iter()
+        .any(|prefix| method.starts_with(prefix.as_str()))
+    {
+        return true;
+    }
+    if !cfg.type_method_templates.is_empty() {
+        let snake = to_snake_case(type_name);
+        if cfg
+            .type_method_templates
+            .iter()
+            .any(|template| method == template.replace("{type}", &snake))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Convert a type name to snake_case (e.g. `DispatchPlan` → `dispatch_plan`).
+fn to_snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Extract direct aggregate literal construction sites from raw content.
+///
+/// Drives the `aggregate_literals` fingerprint field. The grammar supplies the
+/// literal-site regex (capture 1 = type, capture 2 = body), the field regex
+/// (capture 1 = field name), the minimum field count, and an optional
+/// "skip if preceded by a definition keyword" guard. Returns empty when the
+/// grammar declares no literal policy.
+fn extract_aggregate_literals(content: &str, grammar: &Grammar) -> Vec<AggregateLiteral> {
+    let Some(cfg) = grammar.fingerprint.aggregate_literals.as_ref() else {
+        return Vec::new();
+    };
+    let Some(literal_re) = grammar::cached_regex(&cfg.pattern) else {
+        return Vec::new();
+    };
+    let Some(field_re) = grammar::cached_regex(&cfg.field_pattern) else {
+        return Vec::new();
+    };
+    let skip_before_re = cfg
+        .skip_before_pattern
+        .as_ref()
+        .and_then(|pattern| grammar::cached_regex(pattern));
+
+    let mut literals = Vec::new();
+    let mut seen: HashSet<(String, Vec<String>, usize)> = HashSet::new();
+
+    for caps in literal_re.captures_iter(content) {
+        let full = match caps.get(0) {
+            Some(m) => m,
+            None => continue,
+        };
+        let Some(type_match) = caps.get(1) else {
+            continue;
+        };
+        let type_name = type_match.as_str().to_string();
+        let before = &content[..full.start()];
+
+        // Skip type definitions (e.g. `struct Foo { ... }`); only construction
+        // sites count as literals.
+        if let Some(re) = &skip_before_re {
+            if re.is_match(window_suffix(before, cfg.skip_before_window)) {
+                continue;
+            }
+        }
+
+        let body = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        let mut fields: Vec<String> = Vec::new();
+        for field_caps in field_re.captures_iter(body) {
+            if let Some(field) = field_caps.get(1) {
+                let field = field.as_str().to_string();
+                if !fields.contains(&field) {
+                    fields.push(field);
+                }
+            }
+        }
+        if fields.len() < cfg.min_fields {
+            continue;
+        }
+
+        let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let key = (type_name.clone(), fields.clone(), line);
+        if seen.insert(key) {
+            literals.push(AggregateLiteral {
+                type_name,
+                fields,
+                line,
+            });
+        }
+    }
+
+    literals
+}
+
+/// Return the last `window` characters of `s`. A `window` of 0 returns all of
+/// `s` (no limit), which is safe for end-anchored guard patterns.
+fn window_suffix(s: &str, window: usize) -> &str {
+    if window == 0 {
+        return s;
+    }
+    match s.char_indices().rev().nth(window - 1) {
+        Some((idx, _)) => &s[idx..],
+        None => s,
+    }
+}
+
+// ============================================================================
+// Hook callbacks and call sites (grammar-driven)
+// ============================================================================
+
+/// Extract framework runtime hook/callback registration targets from raw
+/// content.
+///
+/// Drives the `hook_callbacks` fingerprint field, which the dead-code detector
+/// uses to recognize that a function defined and hook-registered in the same
+/// file is live code invoked by the framework runtime. Each grammar pattern's
+/// first capture group is the callback name. Returns a sorted, de-duplicated
+/// list; empty when the grammar declares no hook-callback patterns.
+fn extract_hook_callbacks(content: &str, grammar: &Grammar) -> Vec<String> {
+    let patterns = &grammar.fingerprint.hook_callback_patterns;
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+
+    let mut callbacks: BTreeSet<String> = BTreeSet::new();
+    for pattern in patterns {
+        let Some(re) = grammar::cached_regex(pattern) else {
+            continue;
+        };
+        for caps in re.captures_iter(content) {
+            if let Some(name) = caps.get(1) {
+                callbacks.insert(name.as_str().to_string());
+            }
+        }
+    }
+
+    callbacks.into_iter().collect()
+}
+
+/// Extract call sites with argument counts from raw content.
+///
+/// Drives the `call_sites` fingerprint field consumed by cross-file parameter
+/// analysis (dead-code) and deprecation-age reference counting. The grammar
+/// supplies call-match patterns (capture 1 = target, match ends at the opening
+/// delimiter), an optional declaration-line skip pattern, and target name
+/// prefixes to ignore. Patterns are applied in order per line; the first to
+/// record a `(target, line)` pair wins. Returns empty when the grammar declares
+/// no call-site policy.
+fn extract_call_sites(content: &str, grammar: &Grammar) -> Vec<CallSite> {
+    let Some(cfg) = grammar.fingerprint.call_sites.as_ref() else {
+        return Vec::new();
+    };
+    if cfg.patterns.is_empty() {
+        return Vec::new();
+    }
+
+    let skip_line_re = cfg
+        .skip_line_pattern
+        .as_ref()
+        .and_then(|pattern| grammar::cached_regex(pattern));
+    let skip_calls: HashSet<&str> = grammar
+        .fingerprint
+        .skip_calls
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let compiled: Vec<(Option<regex::Regex>, bool)> = cfg
+        .patterns
+        .iter()
+        .map(|pattern| (grammar::cached_regex(&pattern.regex), pattern.apply_skip_calls))
+        .collect();
+
+    let mut sites = Vec::new();
+    let mut seen: HashSet<(String, usize)> = HashSet::new();
+
+    for (idx, line) in content.split('\n').enumerate() {
+        let line_no = idx + 1;
+
+        // Declaration lines are signatures, not call sites.
+        if let Some(re) = &skip_line_re {
+            let trimmed = line.trim_start();
+            if re.find(trimmed).is_some_and(|m| m.start() == 0) {
+                continue;
+            }
+        }
+
+        for (re, apply_skip_calls) in &compiled {
+            let Some(re) = re else {
+                continue;
+            };
+            for caps in re.captures_iter(line) {
+                let Some(name_match) = caps.get(1) else {
+                    continue;
+                };
+                let name = name_match.as_str();
+                if cfg
+                    .skip_name_prefixes
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix.as_str()))
+                {
+                    continue;
+                }
+                if *apply_skip_calls && skip_calls.contains(name) {
+                    continue;
+                }
+                let key = (name.to_string(), line_no);
+                if seen.contains(&key) {
+                    continue;
+                }
+                // The match ends at the opening delimiter; count args from there.
+                let full = match caps.get(0) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                let remaining = &line[full.end().saturating_sub(1)..];
+                let Some(arg_count) = count_call_args(remaining) else {
+                    continue;
+                };
+                seen.insert(key);
+                sites.push(CallSite {
+                    target: name.to_string(),
+                    line: line_no,
+                    arg_count,
+                });
+            }
+        }
+    }
+
+    sites
+}
+
+/// Count the arguments in a call whose text begins at the opening `(`.
+///
+/// Tracks paren depth and counts top-level commas, honoring single/double
+/// quoted strings so commas and parens inside string literals do not skew the
+/// count. Returns `None` when the parentheses do not balance within `text`
+/// (e.g. a multi-line call), matching the reference behavior of skipping such
+/// call sites.
+fn count_call_args(text: &str) -> Option<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.first() != Some(&'(') {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    let mut commas: usize = 0;
+    let mut has_content = false;
+    let mut in_single = false;
+    let mut in_double = false;
+    for i in 0..chars.len() {
+        let ch = chars[i];
+        if in_single {
+            if ch == '\'' && (i == 0 || chars[i - 1] != '\\') {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '"' && (i == 0 || chars[i - 1] != '\\') {
+                in_double = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                has_content = true;
+            }
+            '"' => {
+                in_double = true;
+                has_content = true;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(if has_content { commas + 1 } else { 0 });
+                }
+            }
+            ',' if depth == 1 => commas += 1,
+            c if depth == 1 && !c.is_whitespace() => has_content = true,
+            _ => {}
+        }
+    }
+
+    None
 }
 
 // ============================================================================

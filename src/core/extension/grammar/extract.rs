@@ -129,7 +129,7 @@ pub fn extract(content: &str, grammar: &Grammar) -> Vec<Symbol> {
 
 static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<Regex>>>> = OnceLock::new();
 
-fn cached_regex(pattern: &str) -> Option<Regex> {
+pub(crate) fn cached_regex(pattern: &str) -> Option<Regex> {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     if let Some(cached) = cache
