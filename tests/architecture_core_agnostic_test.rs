@@ -264,9 +264,9 @@ fn core_facades_expose_named_operation_contracts() {
 fn architecture_docs_source_paths_exist() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let docs = [
-        "docs/architecture.md",
-        "docs/developer-guide/architecture-overview.md",
-        "docs/developer-guide/architecture-cleanup-map.md",
+        "docs/reference/configuration.md",
+        "docs/internals/developer-guide/architecture-overview.md",
+        "docs/internals/developer-guide/architecture-cleanup-map.md",
     ];
     let mut missing = Vec::new();
 

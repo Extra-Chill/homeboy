@@ -65,7 +65,7 @@ When a run passed but `runs evidence` has zero artifacts, the command completed
 but did not produce reviewable evidence. Preserve the run id and output directory,
 then promote or attach artifacts through the command-specific surface when it is
 available. See
-[Artifact loop for runner and matrix workflows](../operators/artifact-loop-runner-matrix.md)
+[Artifact loop for runner and matrix workflows](../operations/artifact-loop-runner-matrix.md)
 for generic runner, static HTML, and matrix examples.
 
 `homeboy runs artifacts <run-id> --pull` retrieves every retrievable artifact's bytes for a run to the operator-local artifact root in one pass, so a completed run is self-contained instead of pointing only at runner-resident paths or non-resolving tunnel URLs. The retrieval is best-effort and per-artifact: the listing still prints, and the JSON output gains a `pull` summary where each artifact reports `already_local` (file/directory already on the controller), `pulled` (bytes copied from a runner/remote store), `skipped` (metadata-only or non-file artifacts), or `failed` (with the error message) — so it is clear exactly which diagnostics are unreachable and why. Pass `--pull-dir <dir>` to write pulled bytes into a chosen directory instead of the default run-scoped path under the artifact root. `--pull` operates on the local mirrored observation store and is mutually exclusive with `--runner`.

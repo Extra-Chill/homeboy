@@ -9,7 +9,7 @@ runner and for core maintainers improving the cross-extension surface.
 
 For the cross-command verification phase model (`syntax`, `lint`, `typecheck`,
 `audit`, `test`), see
-[`docs/development/contracts/verification-phases.md`](../development/contracts/verification-phases.md).
+[`docs/internals/development/contracts/verification-phases.md`](../internals/development/contracts/verification-phases.md).
 
 ## Capability model
 

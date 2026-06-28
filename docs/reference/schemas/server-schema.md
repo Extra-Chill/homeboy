@@ -192,6 +192,6 @@ Enable agent forwarding cautiously - it grants the remote server access to your 
 
 ## Related
 
-- [Server command](../commands/server.md) - Manage server configuration
-- [SSH key management](../architecture/ssh-key-management.md) - Detailed SSH key handling
-- [SSH command](../commands/ssh.md) - Remote shell access
+- [Server command](../../commands/server.md) - Manage server configuration
+- [SSH key management](../../architecture/ssh-key-management.md) - Detailed SSH key handling
+- [SSH command](../../commands/ssh.md) - Remote shell access

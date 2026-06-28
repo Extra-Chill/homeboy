@@ -256,7 +256,7 @@ pub fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPl
     let evidence_paths = evidence_paths(&args);
     let next_commands = next_commands(&args, &evidence_paths);
     let docs = vec![
-        "docs/operators/artifact-loop-runner-matrix.md".to_string(),
+        "docs/operations/artifact-loop-runner-matrix.md".to_string(),
         "docs/commands/runner.md".to_string(),
     ];
     let execution_envelope =

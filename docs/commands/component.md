@@ -21,7 +21,7 @@ The component ID comes from an existing `homeboy.json` `id` when present; otherw
 
 Options:
 
-- `--local-path <path>`: absolute path to local **source / git checkout** directory (required; ID derived from directory name; `~` is expanded). Must be a git repo — not the production deploy target (see [component schema](../schemas/component-schema.md#local_path-vs-remote_path))
+- `--local-path <path>`: absolute path to local **source / git checkout** directory (required; ID derived from directory name; `~` is expanded). Must be a git repo — not the production deploy target (see [component schema](../reference/schemas/component-schema.md#local_path-vs-remote_path))
 - `--remote-path <path>`: remote path relative to project `base_path` (required for deployable components unless already present in `homeboy.json`)
 - `--build-artifact <path>`: build artifact path relative to `local_path` (required for artifact deploys; must include a filename)
 - `--version-target <TARGET>`: version target in format `file` or `file::pattern` (repeatable)

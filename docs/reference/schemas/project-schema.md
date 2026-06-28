@@ -166,7 +166,7 @@ Database passwords should not be stored directly in project JSON files. Use the 
 
 ## Related
 
-- [Project command](../commands/project.md) - Manage project configuration
+- [Project command](../../commands/project.md) - Manage project configuration
 - [Server schema](server-schema.md) - Server linkage configuration
 - [Component schema](component-schema.md) - Component linkage configuration
-- [API client system](../architecture/api-client.md) - How API authentication works
+- [API client system](../../architecture/api-client.md) - How API authentication works

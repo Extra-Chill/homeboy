@@ -32,19 +32,19 @@ User-facing documentation. Explains how to use the system from an end-user persp
 ### Alignment (Existing Docs)
 When maintaining existing documentation:
 ```
-homeboy docs documentation/alignment
+homeboy docs internals/docs-maintenance/alignment
 ```
 
 ### Generation (New Docs)
 When creating documentation from scratch:
 ```
-homeboy docs documentation/generation
+homeboy docs internals/docs-maintenance/generation
 ```
 
 ### Structure Standards
 For file organization and naming conventions:
 ```
-homeboy docs documentation/structure
+homeboy docs internals/docs-maintenance/structure
 ```
 
 ### Change Detection
@@ -57,9 +57,9 @@ Projects using Homeboy can add documentation guidance to their agent context fil
 ```markdown
 ## Documentation Standards
 This project uses Homeboy for documentation management.
-Run `homeboy docs documentation/index` for documentation philosophy.
-When maintaining docs, follow `homeboy docs documentation/alignment`.
-When generating docs, follow `homeboy docs documentation/generation`.
+Run `homeboy docs internals/docs-maintenance/index` for documentation philosophy.
+When maintaining docs, follow `homeboy docs internals/docs-maintenance/alignment`.
+When generating docs, follow `homeboy docs internals/docs-maintenance/generation`.
 ```
 
 This ensures AI agents discover documentation standards through their standard context loading.

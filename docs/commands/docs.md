@@ -66,7 +66,7 @@ homeboy docs map my-plugin --source-dirs src,lib
 
 **Agent workflow:**
 1. Run `homeboy docs map <component>` to gather source structure for documentation work.
-2. Read the relevant embedded guidance topic, such as `homeboy docs documentation/alignment` or `homeboy docs documentation/generation`.
+2. Read the relevant embedded guidance topic, such as `homeboy docs internals/docs-maintenance/alignment` or `homeboy docs internals/docs-maintenance/generation`.
 3. Edit documentation manually against the current source.
 4. Use focused source checks, `homeboy audit`, and `homeboy lint` as appropriate for the repository.
 
@@ -82,7 +82,7 @@ homeboy docs map my-plugin --source-dirs src,lib
 
 ```sh
 homeboy docs commands/deploy
-homeboy docs documentation/generation
+homeboy docs internals/docs-maintenance/generation
 ```
 
 ### `list`
@@ -93,18 +93,18 @@ homeboy docs documentation/generation
 
 Homeboy includes embedded documentation for AI agents:
 
-- `homeboy docs documentation/index` - Documentation philosophy and overview
-- `homeboy docs documentation/alignment` - Instructions for aligning existing docs with code
-- `homeboy docs documentation/generation` - Instructions for generating new documentation
-- `homeboy docs documentation/structure` - File organization and naming patterns
+- `homeboy docs internals/docs-maintenance/index` - Documentation philosophy and overview
+- `homeboy docs internals/docs-maintenance/alignment` - Instructions for aligning existing docs with code
+- `homeboy docs internals/docs-maintenance/generation` - Instructions for generating new documentation
+- `homeboy docs internals/docs-maintenance/structure` - File organization and naming patterns
 
 ## Workflow
 
 Typical documentation workflow using these commands:
 
-1. **Learn**: `homeboy docs documentation/generation` — read guidelines
+1. **Learn**: `homeboy docs internals/docs-maintenance/generation` — read guidelines
 2. **Map**: `homeboy docs map <component>` — generate codebase map for AI context
-3. **Maintain**: `homeboy docs documentation/alignment` — keep docs current
+3. **Maintain**: `homeboy docs internals/docs-maintenance/alignment` — keep docs current
 4. **Verify**: run focused source checks plus `homeboy audit` or `homeboy lint` when those commands cover the changed files
 
 ## Errors

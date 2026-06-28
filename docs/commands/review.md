@@ -29,7 +29,7 @@ Output is deterministic and matches each command's per-stage output.
 command** for agents. Run it through normal/Lab routing — never with
 `--force-hot`/`--allow-local-hot` or a source/`cargo` invocation, which are
 debugging aids, not proof. See
-[Release-gate proof: canonical non-local command path](../operators/release-gate-proof-path.md).
+[Release-gate proof: canonical non-local command path](../operations/release-gate-proof-path.md).
 
 ## Arguments
 

@@ -1,121 +1,71 @@
-# Homeboy CLI documentation
+# Homeboy Documentation
 
-This directory contains the markdown docs embedded into the `homeboy` binary and displayed via `homeboy docs`.
+Homeboy documentation is organized by reader intent. If you are new, start with [Start here](start-here.md). If you already know what you need, jump to workflows, concepts, reference, internals, or operations.
 
-Homeboy is headless automation for agentic software engineering workflows. It
-provides a component-aware CLI, stable JSON output, persisted evidence, and
-runner/daemon surfaces for local developers, CI, scheduled jobs, and coding
-agents.
+These docs are also embedded in the `homeboy` binary:
 
-Core is domain-agnostic. Homeboy owns orchestration, configuration, scope
-resolution, output contracts, persisted runs, runners, and generic workflow
-primitives. Domain-specific behavior belongs in extensions such as the shared
-[homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions)
-repository.
+```bash
+homeboy docs list
+homeboy docs <topic>
+```
 
-## Code Factory
+## Start Here
 
-- [Code Factory](code-factory.md) - Automated code maintenance: lint+fix → test+fix → audit+fix → release → deploy
+- [Start here](start-here.md) - first local run, smallest useful config, JSON evidence, and next steps.
+- [README](../README.md) - project overview and installation.
 
-## Operator Guides
+## Workflows
 
-- [Release-gate proof: canonical non-local command path](operators/release-gate-proof-path.md) - The one documented `homeboy review` proof path for agents, why local-hot bypass flags are debugging aids (not proof), and how to repair stale runners or missing secrets instead of running locally
-- [Controller to runner reverse-runner setup](operators/controller-runner-reverse-runner.md) - Setup, smoke evidence, and troubleshooting for the gated reverse-runner path tracked by #2993 and #2950
-- [Artifact loop for runner and matrix workflows](operators/artifact-loop-runner-matrix.md) - How to make runner, static HTML, and matrix outputs reviewable through persisted run artifacts
+Task-oriented guides for using Homeboy:
 
-## CLI
+- [Workflows index](workflows/index.md)
+- [Review a branch](workflows/review-a-branch.md)
+- [Capture evidence](workflows/capture-evidence.md)
+- [Use runners](workflows/use-runners.md)
+- [Release a component](workflows/release-a-component.md)
 
-- Root command + global flags: [Root command](cli/homeboy-root-command.md)
-- Full built-in command list: [Commands index](commands/commands-index.md)
-- Code audit (convention drift, structural analysis): [audit](commands/audit.md), [audit-baseline](commands/audit-baseline.md)
-- Changes summary: [changes](commands/changes.md)
-- Reproducible local dev environments: [rig](commands/rig.md)
-- Rig spec JSON schema: [rig-spec](commands/rig-spec.md)
-- Combined-fixes branch specs: [stack](commands/stack.md)
-- Performance benchmarks with baseline ratchet: [bench](commands/bench.md)
-- Generic fuzz workload execution and evidence: [fuzz](commands/fuzz.md)
-- API authentication scoped per project: [auth](commands/auth.md)
-- JSON output envelope: [JSON output contract](architecture/output-system.md)
-- CI artifact payload for PR review agents: [CI result JSON contract](architecture/ci-results-contract.md)
-- Embedded docs behavior: [Embedded docs topic resolution](architecture/embedded-docs-topic-resolution.md)
-- Changelog content: [Changelog](changelog.md)
-- Template variables: [Template variables reference](templates.md)
+## Concepts
 
-## Schemas
+Mental models and vocabulary:
 
-JSON configuration schemas for components, projects, servers, fleets, and extensions:
+- [Concepts index](concepts/index.md)
+- [Homeboy model](concepts/homeboy-model.md)
+- [Structured evidence](concepts/structured-evidence.md)
+- [Code Factory](concepts/code-factory.md)
 
-- [Component schema](schemas/component-schema.md) - Buildable, testable, reviewable units
-- [Project schema](schemas/project-schema.md) - Deployable environments
-- [Server schema](schemas/server-schema.md) - SSH connection settings
-- [Fleet schema](schemas/fleet-schema.md) - Named groups of projects
-- [Extension manifest schema](schemas/extension-manifest-schema.md) - Extension configuration
+## Reference
 
-## Architecture
+Exact CLI, configuration, schema, and output details:
 
-Internal system architecture and internals:
+- [Reference index](reference/index.md)
+- [Root command and global flags](reference/cli/homeboy-root-command.md)
+- [Command index](commands/commands-index.md)
+- [Configuration reference](reference/configuration.md)
+- [Template variables](reference/template-variables.md)
+- [Configuration schemas](reference/schemas/index.md)
+- [JSON output contract](architecture/output-system.md)
+- [CI result JSON contract](architecture/ci-results-contract.md)
 
-- [Architecture overview](developer-guide/architecture-overview.md) - High-level system design
-- [API client system](architecture/api-client.md) - HTTP client and authentication
-- [Keychain/secrets management](architecture/keychain-secrets.md) - Secure credential storage
-- [SSH key management](architecture/ssh-key-management.md) - SSH key handling
-- [Release pipeline system](architecture/release-pipeline.md) - Local release orchestration
-- [Planned change execution](architecture/planned-change-execution.md) - Core lifecycle vocabulary for plan, execute, artifact, approve, apply, and publish
-- [Apply and publish contract](architecture/apply-publish-contract.md) - Local apply boundary and post-apply publish semantics
-- [Agent task executor adapter](architecture/agent-task-executor-adapter.md) - Provider-neutral adapter boundary for runtime providers, CLI sessions, and runner backends
-- [Provider fanout boundary](architecture/provider-fanout-boundary.md) - Ownership contract for durable orchestration versus provider runtime fanout
-- [Composable workload evidence contract](architecture/composable-workload-evidence-contract.md) - Boundary between rig semantics, WP Codebox artifacts, WordPress extension plumbing, and Homeboy evidence comparison
-- [Secret env contract](architecture/secret-env-contract.md) - Core-owned required secret env normalization, resolution, and redacted status metadata
-- [Preview metadata](architecture/preview-metadata.md) - Generic preview URL, hold, lifecycle, runtime, and cleanup metadata preserved across runs
-- [Scope model](architecture/scope-model.md) - Components, targets/projects, rigs, fleets, workspace, and paths
-- [Execution context](architecture/execution-context.md) - Runtime context for extensions
-- [Rig matrix axis composition](architecture/rig-matrix-axis-composition.md) - Design for derived rig variants
-- [Embedded docs](architecture/embedded-docs-topic-resolution.md) - Documentation system internals
+## Internals
 
-## Developer Guide
+Maintainer architecture and implementation contracts:
 
-Guides for contributing to Homeboy:
+- [Internals index](internals/index.md)
+- [Architecture overview](internals/developer-guide/architecture-overview.md)
+- [Architecture cleanup map](internals/developer-guide/architecture-cleanup-map.md)
+- [Docs maintenance](internals/docs-maintenance/index.md)
+- [Embedded docs topic resolution](architecture/embedded-docs-topic-resolution.md)
 
-- [Architecture overview](developer-guide/architecture-overview.md) - System architecture
-- [Architecture cleanup map](developer-guide/architecture-cleanup-map.md) - Core/command boundary cleanup map and compatibility-removal inventory
-- [Config directory structure](developer-guide/config-directory.md) - File organization
-- [Error handling patterns](developer-guide/error-handling.md) - Error recovery strategies
+## Operations
 
-## Documentation Management
+Runbooks for operators and agents:
 
-Homeboy provides embedded docs and AI-assisted documentation mapping:
+- [Operations index](operations/index.md)
+- [Release-gate proof path](operations/release-gate-proof-path.md)
+- [Controller to runner reverse-runner setup](operations/controller-runner-reverse-runner.md)
+- [Artifact loop for runner and matrix workflows](operations/artifact-loop-runner-matrix.md)
 
-- `homeboy docs <topic>` - Display embedded documentation topics
-- `homeboy docs map <component>` - Generate machine-optimized codebase map for AI context
-- `homeboy docs list` - List embedded documentation topics
-- `homeboy docs documentation/index` - Documentation philosophy and principles
-- `homeboy docs documentation/alignment` - Instructions for maintaining existing docs
-- `homeboy docs documentation/generation` - Instructions for generating new docs
-- `homeboy docs documentation/structure` - File organization standards
+## Historical Reference
 
-## Configuration
-
-Configuration and state live under universal directory `~/.config/homeboy/` (all platforms).
-
-- macOS: `~/.config/homeboy/`
-- Linux: `~/.config/homeboy/`
-- Windows: `%APPDATA%\homeboy\`
-
-Common paths:
-
-- ~/.config/homeboy/projects/
-- ~/.config/homeboy/servers/
-- ~/.config/homeboy/components/
-- ~/.config/homeboy/fleets/
-- ~/.config/homeboy/extensions/
-- ~/.config/homeboy/keys/
-- ~/.config/homeboy/backups/
-
-Notes:
-
-- Embedded CLI docs ship inside the binary (see [Embedded docs topic resolution](architecture/embedded-docs-topic-resolution.md)).
-- Extension docs load from each installed extension's `docs/` folder under the Homeboy config root: `~/.config/homeboy/extensions/<extension_id>/docs/` (same topic-key rules as core docs).
-- The CLI does not write documentation into `~/.config/homeboy/docs/`.
-
-
-- [Cross-Compilation Guide](cross-compilation.md) - Platform requirements for native binaries
+- [Changelog](changelog.md)
+- [Cross-compilation](cross-compilation.md)

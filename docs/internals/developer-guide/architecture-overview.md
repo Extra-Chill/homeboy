@@ -402,9 +402,9 @@ OS-specific credential storage:
 
 ## Related
 
-- [API client system](../architecture/api-client.md) - HTTP client details
-- [Keychain/secrets management](../architecture/keychain-secrets.md) - Credential storage
-- [SSH key management](../architecture/ssh-key-management.md) - SSH operations
-- [Release pipeline system](../architecture/release-pipeline.md) - Release orchestration
-- [Execution context](../architecture/execution-context.md) - Runtime context building
+- [API client system](../../architecture/api-client.md) - HTTP client details
+- [Keychain/secrets management](../../architecture/keychain-secrets.md) - Credential storage
+- [SSH key management](../../architecture/ssh-key-management.md) - SSH operations
+- [Release pipeline system](../../architecture/release-pipeline.md) - Release orchestration
+- [Execution context](../../architecture/execution-context.md) - Runtime context building
 - [Config directory structure](./config-directory.md) - File organization
