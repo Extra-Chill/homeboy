@@ -96,6 +96,7 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
         None,
         None,
         None,
+        None,
         &release_run_dir,
     )
     .and_then(|runner| runner.run())
