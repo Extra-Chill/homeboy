@@ -4,7 +4,8 @@
 use super::super::*;
 use super::fixtures::*;
 use crate::core::agent_task::{
-    expand_agent_task_matrix, AgentTaskArtifact, AgentTaskMatrixAggregate, AgentTaskMatrixAxis,
+    expand_agent_task_matrix, AgentTaskArtifact, AgentTaskArtifactDeclaration,
+    AgentTaskMatrixAggregate, AgentTaskMatrixAxis, AgentTaskTypedArtifact,
     AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
 };
 use serde_json::{json, Value};
@@ -730,6 +731,115 @@ mod artifact_binding_tests {
     }
 
     #[test]
+    fn required_concept_packet_binding_uses_canonical_typed_artifact() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(ConceptPacketExecutor {
+            observed: Arc::clone(&observed),
+            emit_concept_packet: true,
+        });
+        let mut plan = AgentTaskPlan::new(
+            "plan-concept-packet-typed-artifact",
+            vec![request("idea"), request("build")],
+        );
+        plan.options.max_concurrency = 2;
+        plan.tasks[0].artifact_declarations = vec![concept_packet_declaration()];
+        plan.tasks[1].inputs = json!({ "concept_packet": "{{outputs.concept_packet}}" });
+        plan.output_dependencies.insert(
+            "build".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: Vec::new(),
+                bindings: HashMap::from([(
+                    "concept_packet".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "idea".to_string(),
+                        path: String::new(),
+                        artifact: Some(AgentTaskArtifactBinding {
+                            kind: "concept_packet".to_string(),
+                            schema: Some("wp-site-generator/ConceptPacket/v1".to_string()),
+                            artifact_id: None,
+                            payload_path: None,
+                        }),
+                        required: true,
+                        default: Value::Null,
+                    },
+                )]),
+            },
+        );
+
+        let aggregate = scheduler.run(plan);
+        let observed = observed.lock().expect("observed requests");
+        let build = observed
+            .iter()
+            .find(|request| request.task_id == "build")
+            .expect("build request dispatched");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 2);
+        assert_eq!(build.inputs["concept_packet"]["title"], "Typed concept");
+    }
+
+    #[test]
+    fn required_concept_packet_binding_fails_without_canonical_typed_artifact() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(ConceptPacketExecutor {
+            observed: Arc::clone(&observed),
+            emit_concept_packet: false,
+        });
+        let mut plan = AgentTaskPlan::new(
+            "plan-concept-packet-missing-typed-artifact",
+            vec![request("idea"), request("build")],
+        );
+        plan.options.max_concurrency = 2;
+        plan.tasks[0].artifact_declarations = vec![concept_packet_declaration()];
+        plan.output_dependencies.insert(
+            "build".to_string(),
+            AgentTaskOutputDependencies {
+                depends_on: Vec::new(),
+                bindings: HashMap::from([(
+                    "concept_packet".to_string(),
+                    AgentTaskOutputBinding {
+                        task_id: "idea".to_string(),
+                        path: String::new(),
+                        artifact: Some(AgentTaskArtifactBinding {
+                            kind: "concept_packet".to_string(),
+                            schema: Some("wp-site-generator/ConceptPacket/v1".to_string()),
+                            artifact_id: None,
+                            payload_path: None,
+                        }),
+                        required: true,
+                        default: Value::Null,
+                    },
+                )]),
+            },
+        );
+
+        let aggregate = scheduler.run(plan);
+        let observed = observed.lock().expect("observed requests");
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert!(observed.iter().all(|request| request.task_id != "build"));
+        let idea = aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == "idea")
+            .expect("idea outcome");
+        assert!(idea.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "agent_task.required_typed_artifacts_missing"
+                && diagnostic.message.contains("concept_packet")
+        }));
+        let build = aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == "build")
+            .expect("build skipped outcome");
+        assert!(build.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "output_dependency_missing"
+                && diagnostic.message.contains("required artifact binding")
+                && diagnostic.message.contains("concept_packet")
+        }));
+    }
+
+    #[test]
     fn binds_artifacts_to_generic_child_run_ids_for_durable_fanout() {
         let scheduler = AgentTaskScheduler::new(GenericChildRunExecutor);
         let mut plan = AgentTaskPlan::new(
@@ -742,23 +852,27 @@ mod artifact_binding_tests {
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.child_runs.len(), 2);
-        assert_eq!(aggregate.child_runs[0].task_id, "case-a");
-        assert_eq!(aggregate.child_runs[0].run_id, "child-case-a");
+        let mut child_runs = aggregate.child_runs.clone();
+        child_runs.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+        assert_eq!(child_runs[0].task_id, "case-a");
+        assert_eq!(child_runs[0].run_id, "child-case-a");
         assert_eq!(
-            aggregate.child_runs[0].provider.as_deref(),
+            child_runs[0].provider.as_deref(),
             Some("generic-fuzz")
         );
-        assert_eq!(aggregate.child_runs[0].state, AgentTaskState::Succeeded);
+        assert_eq!(child_runs[0].state, AgentTaskState::Succeeded);
         assert_eq!(aggregate.artifact_bindings.len(), 2);
-        assert_eq!(aggregate.artifact_bindings[0].task_id, "case-a");
-        assert_eq!(aggregate.artifact_bindings[0].run_id, "child-case-a");
+        let mut artifact_bindings = aggregate.artifact_bindings.clone();
+        artifact_bindings.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+        assert_eq!(artifact_bindings[0].task_id, "case-a");
+        assert_eq!(artifact_bindings[0].run_id, "child-case-a");
         assert_eq!(
-            aggregate.artifact_bindings[0].artifact_id,
+            artifact_bindings[0].artifact_id,
             "artifact-case-a"
         );
-        assert_eq!(aggregate.artifact_bindings[0].kind, "fuzz-report");
+        assert_eq!(artifact_bindings[0].kind, "fuzz-report");
         assert_eq!(
-            aggregate.artifact_bindings[0].path.as_deref(),
+            artifact_bindings[0].path.as_deref(),
             Some("artifacts/case-a/report.json")
         );
     }
@@ -1266,6 +1380,63 @@ mod plan_projection_tests {
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 2);
         assert_eq!(design.instructions, "Build design for issue #3447");
+    }
+}
+
+fn concept_packet_declaration() -> AgentTaskArtifactDeclaration {
+    AgentTaskArtifactDeclaration {
+        name: "concept_packet".to_string(),
+        artifact_type: Some("concept_packet".to_string()),
+        artifact_schema: Some("wp-site-generator/ConceptPacket/v1".to_string()),
+        path: None,
+        required: true,
+        description: None,
+        metadata: Value::Null,
+    }
+}
+
+struct ConceptPacketExecutor {
+    observed: Arc<Mutex<Vec<AgentTaskRequest>>>,
+    emit_concept_packet: bool,
+}
+
+impl AgentTaskExecutorAdapter for ConceptPacketExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        self.observed
+            .lock()
+            .expect("observed requests")
+            .push(request.clone());
+
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("ok".to_string()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: if self.emit_concept_packet {
+                vec![AgentTaskTypedArtifact {
+                    name: "concept_packet".to_string(),
+                    artifact_type: Some("concept_packet".to_string()),
+                    artifact_schema: Some("wp-site-generator/ConceptPacket/v1".to_string()),
+                    payload: json!({ "title": "Typed concept" }),
+                    artifact: None,
+                    metadata: json!({ "source": "wp-codebox/artifact-result-envelope/v1" }),
+                }]
+            } else {
+                Vec::new()
+            },
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
     }
 }
 
