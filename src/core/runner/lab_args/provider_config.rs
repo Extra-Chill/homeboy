@@ -382,7 +382,11 @@ fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> Result<
     // spec always needs inlining). Without that pruning a stale path is forwarded
     // verbatim and breaks remote recipe validation, so we cannot early-return
     // here just because there is nothing to remap.
-    if !needs_inlining && mappings.is_empty() && !spec_has_provider_plugin_paths(spec) {
+    if !needs_inlining
+        && mappings.is_empty()
+        && !spec_has_provider_plugin_paths(spec)
+        && !spec_has_runtime_env_path_aliases(spec)
+    {
         return Ok(spec.to_string());
     }
 
@@ -417,6 +421,7 @@ fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> Result<
     };
     remap_paths_in_value(&mut value, mappings);
     prune_unresolved_provider_plugin_paths(&mut value, mappings);
+    normalize_runtime_env_path_aliases(&mut value);
     Ok(serde_json::to_string(&value).unwrap_or_else(|_| spec.to_string()))
 }
 
@@ -425,6 +430,119 @@ fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> Result<
 /// need pruning. Avoids round-tripping every untouched provider-config.
 fn spec_has_provider_plugin_paths(spec: &str) -> bool {
     spec.contains("provider_plugin_paths")
+}
+
+fn spec_has_runtime_env_path_aliases(spec: &str) -> bool {
+    spec.contains("runtime_env_path_aliases") || spec.contains("runtime_env_aliases")
+}
+
+/// Normalize declared legacy/runtime env aliases to the structured component path.
+///
+/// Homeboy core stays provider-agnostic by requiring the provider config to
+/// declare aliases explicitly, either as:
+///
+/// - `runtime_env_path_aliases`: `{ "component_key": "ENV_NAME" }`
+/// - `runtime_env_aliases`: `{ "ENV_NAME": "component_key" }`
+///
+/// When both the structured component path and env alias are present but differ,
+/// `runtime_component_paths` wins. The original env value and precedence rule are
+/// retained in `runtime_env_path_alias_diagnostics` for operator diagnostics.
+fn normalize_runtime_env_path_aliases(value: &mut Value) {
+    let aliases = runtime_env_path_aliases(value);
+    if aliases.is_empty() {
+        return;
+    }
+
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    let component_paths = root
+        .get("runtime_component_paths")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if component_paths.is_empty() {
+        return;
+    }
+
+    if !root.get("runtime_env").is_some_and(Value::is_object) {
+        root.insert(
+            "runtime_env".to_string(),
+            Value::Object(serde_json::Map::new()),
+        );
+    }
+
+    let mut diagnostics = Vec::new();
+    let Some(runtime_env) = root.get_mut("runtime_env").and_then(Value::as_object_mut) else {
+        return;
+    };
+
+    for (component_key, env_name) in aliases {
+        let Some(selected_path) = component_paths
+            .get(&component_key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let previous = runtime_env.get(&env_name).cloned().unwrap_or(Value::Null);
+        if previous.as_str() == Some(selected_path.as_str()) {
+            continue;
+        }
+        runtime_env.insert(env_name.clone(), Value::String(selected_path.clone()));
+        diagnostics.push(serde_json::json!({
+            "component_path_field": format!("runtime_component_paths.{component_key}"),
+            "env_field": format!("runtime_env.{env_name}"),
+            "selected_path": selected_path,
+            "overridden_path": previous,
+            "precedence": "runtime_component_paths wins over declared runtime_env alias before provider launch",
+        }));
+    }
+
+    if !diagnostics.is_empty() {
+        root.insert(
+            "runtime_env_path_alias_diagnostics".to_string(),
+            Value::Array(diagnostics),
+        );
+    }
+}
+
+fn runtime_env_path_aliases(value: &Value) -> Vec<(String, String)> {
+    let mut aliases = Vec::new();
+    if let Some(map) = value
+        .get("runtime_env_path_aliases")
+        .and_then(Value::as_object)
+    {
+        for (component_key, env_names) in map {
+            collect_alias_env_names(component_key, env_names, &mut aliases);
+        }
+    }
+    if let Some(map) = value.get("runtime_env_aliases").and_then(Value::as_object) {
+        for (env_name, component_key) in map {
+            if let Some(component_key) = component_key.as_str() {
+                aliases.push((component_key.to_string(), env_name.to_string()));
+            }
+        }
+    }
+    aliases
+}
+
+fn collect_alias_env_names(
+    component_key: &str,
+    value: &Value,
+    aliases: &mut Vec<(String, String)>,
+) {
+    match value {
+        Value::String(env_name) => aliases.push((component_key.to_string(), env_name.to_string())),
+        Value::Array(items) => {
+            for item in items {
+                if let Some(env_name) = item.as_str() {
+                    aliases.push((component_key.to_string(), env_name.to_string()));
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Drop `provider_plugin_paths` entries that point at a controller-local

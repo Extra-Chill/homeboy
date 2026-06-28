@@ -19,7 +19,7 @@ use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
 use homeboy::core::redaction::{self, RedactionPolicy};
 
 use super::super::CmdResult;
-use super::args::{CancelArgs, DiagnoseArgs, EvidenceArgs, StatusArgs};
+use super::args::{CancelArgs, DiagnoseArgs, EvidenceArgs, ReplayProviderBoundaryArgs, StatusArgs};
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
 /// aggregate cannot flood recovery output. Overflow is reported as an
@@ -252,11 +252,177 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     ))
 }
 
+pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdResult<Value> {
+    let artifacts = agent_task_service::artifacts(&args.run_id)?;
+    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
+    let plan = agent_task_lifecycle::load_plan(&args.run_id).ok();
+    let evidence_entries = evidence_refs_with_tasks(&artifacts.evidence_refs, aggregate.as_ref());
+    let candidates = evidence_entries
+        .into_iter()
+        .filter(|(evidence_ref, task_id)| {
+            evidence_ref.kind == "executor-input"
+                && args
+                    .task
+                    .as_deref()
+                    .is_none_or(|requested| task_id.as_deref() == Some(requested))
+        })
+        .collect::<Vec<_>>();
+
+    let candidate_count = candidates.len();
+    let selected_index = candidates
+        .iter()
+        .position(|(evidence_ref, _)| !evidence_ref.uri.contains("/plan#"))
+        .unwrap_or(0);
+    let Some((evidence_ref, task_id)) = candidates.into_iter().nth(selected_index) else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "agent-task replay-provider-boundary",
+            "no executor-input evidence was found for this run",
+            Some(args.run_id),
+            Some(vec![
+                "Run the task through an executor that records latest raw executor input evidence.".to_string(),
+                "Pass --task when inspecting a multi-task run and only one task should be selected.".to_string(),
+            ]),
+        ));
+    };
+
+    let hydrated = hydrate_evidence_ref(
+        &args.run_id,
+        &evidence_ref,
+        task_id.as_deref(),
+        plan.as_ref(),
+        aggregate.as_ref(),
+    );
+    let input = hydrated_executor_input_value(&hydrated)?;
+    let boundary = provider_boundary_projection(&input);
+    let report = json!({
+        "schema": "homeboy/agent-task-provider-boundary-replay/v1",
+        "run_id": args.run_id,
+        "task_id": task_id,
+        "selected_evidence": {
+            "kind": evidence_ref.kind,
+            "label": evidence_ref.label,
+            "uri": evidence_ref.uri,
+        },
+        "selection": {
+            "matching_executor_input_count": candidate_count,
+            "rule": "prefer concrete executor-input evidence over plan-level input refs; otherwise first matching ref wins",
+        },
+        "normalized_provider_boundary": boundary,
+    });
+    let evidence_uri = persist_provider_boundary_replay_evidence(&report);
+    let report = match evidence_uri {
+        Some(uri) => {
+            let mut report = report;
+            report["typed_evidence"] = json!({
+                "kind": "provider-boundary-replay",
+                "uri": uri,
+                "label": "provider boundary replay inspection",
+            });
+            report
+        }
+        None => report,
+    };
+
+    Ok((report, 0))
+}
+
 pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
     let record = agent_task_service::cancel(&args.run_id, args.reason.as_deref())?;
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     surface_cancellation_recovery(&mut value);
     Ok((value, 0))
+}
+
+fn hydrated_executor_input_value(result: &HydratedEvidence) -> homeboy::core::Result<Value> {
+    if result.status != "ok" {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "executor-input evidence",
+            "selected executor-input evidence could not be hydrated",
+            result.error.clone(),
+            None,
+        ));
+    }
+    if result.truncated {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "executor-input evidence",
+            "selected executor-input evidence is truncated and cannot be replayed deterministically",
+            Some(result.uri.clone()),
+            None,
+        ));
+    }
+    match result.content.get("format").and_then(Value::as_str) {
+        Some("json") => Ok(result.content.get("value").cloned().unwrap_or(Value::Null)),
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "executor-input evidence",
+            "selected executor-input evidence is not JSON",
+            Some(result.uri.clone()),
+            None,
+        )),
+    }
+}
+
+fn provider_boundary_projection(input: &Value) -> Value {
+    let executor_config = input
+        .get("executor")
+        .and_then(|executor| executor.get("config"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let runtime_task = input
+        .get("inputs")
+        .and_then(|inputs| inputs.get("runtime_task"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let package_descriptor = runtime_task
+        .pointer("/input/package")
+        .or_else(|| input.pointer("/inputs/package_descriptor"))
+        .or_else(|| input.pointer("/metadata/package_descriptor"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    json!({
+        "runtime_task": runtime_task,
+        "provider_config": executor_config,
+        "runtime_component_paths": input.pointer("/executor/config/runtime_component_paths").cloned().unwrap_or(Value::Null),
+        "runtime_env": input.pointer("/executor/config/runtime_env").cloned().unwrap_or(Value::Null),
+        "artifact_declarations": input.get("artifact_declarations").cloned().unwrap_or(Value::Null),
+        "package_descriptor": package_descriptor,
+    })
+}
+
+fn persist_provider_boundary_replay_evidence(report: &Value) -> Option<String> {
+    let run_id = report.get("run_id")?.as_str().unwrap_or("unknown-run");
+    let task_id = report
+        .get("task_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown-task");
+    let dir = std::env::temp_dir()
+        .join("homeboy-agent-task-evidence")
+        .join(sanitize_evidence_path_part(run_id));
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!(
+        "provider-boundary-replay-{}.json",
+        sanitize_evidence_path_part(task_id)
+    ));
+    fs::write(&path, serde_json::to_vec_pretty(report).ok()?).ok()?;
+    Some(format!("file://{}", path.display()))
+}
+
+fn sanitize_evidence_path_part(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
 }
 
 #[derive(Serialize)]
