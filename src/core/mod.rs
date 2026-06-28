@@ -86,6 +86,7 @@ pub mod finding;
 pub mod fleet;
 pub mod fuzz;
 pub mod gate;
+pub mod gh_actions_cache;
 pub mod git;
 pub mod http_api;
 pub(crate) mod http_probe;
