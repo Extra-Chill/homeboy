@@ -235,6 +235,27 @@ impl AgentTaskScheduleSupport {
         };
 
         if let Some(artifact_binding) = &binding.artifact {
+            if let Some(typed_artifact) = outcome.typed_artifacts.iter().find(|artifact| {
+                Self::typed_artifact_matches_artifact_binding(artifact, artifact_binding)
+            }) {
+                let artifact_value = serde_json::to_value(typed_artifact).unwrap_or(Value::Null);
+                if let Some(payload_path) = &artifact_binding.payload_path {
+                    if let Some(value) = typed_artifact
+                        .payload
+                        .pointer(payload_path)
+                        .or_else(|| artifact_value.pointer(payload_path))
+                    {
+                        return Ok(value.clone());
+                    }
+                    return missing_binding_fallback(format!(
+                        "task '{}' skipped because required typed artifact binding '{}' payload was missing at '{}' from task '{}'",
+                        request.task_id, name, payload_path, binding.task_id
+                    ));
+                }
+
+                return Ok(typed_artifact.payload.clone());
+            }
+
             let Some(artifact) = outcome.artifacts.iter().find(|artifact| {
                 artifact.kind == artifact_binding.kind
                     && artifact_binding
@@ -359,10 +380,110 @@ impl AgentTaskScheduleSupport {
                         sha256: artifact.sha256.clone(),
                         payload,
                     });
+                    continue;
+                }
+
+                if let Some(typed_artifact) = outcome.typed_artifacts.iter().find(|artifact| {
+                    Self::typed_artifact_matches_output_declaration(artifact, declaration)
+                }) {
+                    let payload = declaration
+                        .payload_path
+                        .as_ref()
+                        .and_then(|payload_path| typed_artifact.payload.pointer(payload_path))
+                        .cloned()
+                        .unwrap_or_else(|| typed_artifact.payload.clone());
+
+                    lineage.push(AgentTaskArtifactLineage {
+                        task_id: outcome.task_id.clone(),
+                        name: declaration.name.clone(),
+                        kind: typed_artifact
+                            .artifact_type
+                            .clone()
+                            .unwrap_or_else(|| declaration.kind.clone()),
+                        schema: declaration
+                            .schema
+                            .clone()
+                            .or_else(|| typed_artifact.artifact_schema.clone()),
+                        artifact_id: typed_artifact
+                            .artifact
+                            .as_ref()
+                            .map(|artifact| artifact.id.clone()),
+                        path: typed_artifact
+                            .artifact
+                            .as_ref()
+                            .and_then(|artifact| artifact.path.clone()),
+                        url: typed_artifact
+                            .artifact
+                            .as_ref()
+                            .and_then(|artifact| artifact.url.clone()),
+                        sha256: typed_artifact
+                            .artifact
+                            .as_ref()
+                            .and_then(|artifact| artifact.sha256.clone()),
+                        payload,
+                    });
                 }
             }
         }
         lineage
+    }
+
+    fn typed_artifact_matches_artifact_binding(
+        artifact: &AgentTaskTypedArtifact,
+        binding: &AgentTaskArtifactBinding,
+    ) -> bool {
+        let kind_matches = artifact.name == binding.kind
+            || artifact.artifact_type.as_deref() == Some(binding.kind.as_str())
+            || artifact.artifact_schema.as_deref() == Some(binding.kind.as_str());
+        if !kind_matches {
+            return false;
+        }
+
+        if binding.artifact_id.as_ref().map(|artifact_id| {
+            artifact
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.id.as_str())
+                == Some(artifact_id.as_str())
+                || artifact.name == *artifact_id
+        }) == Some(false)
+        {
+            return false;
+        }
+
+        binding
+            .schema
+            .as_ref()
+            .map(|schema| artifact.artifact_schema.as_deref() == Some(schema.as_str()))
+            .unwrap_or(true)
+    }
+
+    fn typed_artifact_matches_output_declaration(
+        artifact: &AgentTaskTypedArtifact,
+        declaration: &AgentTaskArtifactOutputDeclaration,
+    ) -> bool {
+        let name_matches = artifact.name == declaration.name || artifact.name == declaration.kind;
+        let kind_matches = artifact.artifact_type.as_deref() == Some(declaration.kind.as_str())
+            || artifact.artifact_schema.as_deref() == Some(declaration.kind.as_str());
+        let artifact_id_matches = declaration
+            .artifact_id
+            .as_ref()
+            .map(|artifact_id| {
+                artifact
+                    .artifact
+                    .as_ref()
+                    .map(|artifact| artifact.id.as_str())
+                    == Some(artifact_id.as_str())
+                    || artifact.name == *artifact_id
+            })
+            .unwrap_or(true);
+        let schema_matches = declaration
+            .schema
+            .as_ref()
+            .map(|schema| artifact.artifact_schema.as_deref() == Some(schema.as_str()))
+            .unwrap_or(true);
+
+        (name_matches || kind_matches) && artifact_id_matches && schema_matches
     }
 
     pub(super) fn backpressure_kind(

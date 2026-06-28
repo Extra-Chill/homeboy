@@ -222,5 +222,5 @@ If agent forwarding fails:
 
 - [Server command](../commands/server.md) - Manage server configuration
 - [SSH command](../commands/ssh.md) - Remote shell access
-- [Server schema](../schemas/server-schema.md) - Server configuration structure
+- [Server schema](../reference/schemas/server-schema.md) - Server configuration structure
 - [Keychain/secrets management](./keychain-secrets.md) - Passphrase storage

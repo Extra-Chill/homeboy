@@ -35,6 +35,8 @@ use crate::core::engine::shell;
 use crate::core::server::{self, SshClient};
 
 const WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
+const MIN_RUNNER_WORKSPACE_FREE_BYTES: u64 = 1024 * 1024 * 1024;
+const MIN_RUNNER_WORKSPACE_FREE_RATIO: f64 = 0.01;
 
 pub fn sync_workspace(
     runner_id: &str,
@@ -53,6 +55,7 @@ pub fn sync_workspace(
         )
     })?;
     validate_absolute_path("workspace_root", workspace_root)?;
+    require_runner_workspace_disk_headroom(&runner, workspace_root)?;
 
     let mut excludes = DEFAULT_EXCLUDES
         .iter()
@@ -771,6 +774,136 @@ fn write_workspace_metadata(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunnerWorkspaceDiskProbe {
+    available_bytes: u64,
+    total_bytes: u64,
+}
+
+fn require_runner_workspace_disk_headroom(
+    runner: &super::super::Runner,
+    workspace_root: &str,
+) -> Result<()> {
+    let Some(probe) = runner_workspace_disk_probe(runner, workspace_root)? else {
+        return Ok(());
+    };
+    if !runner_workspace_disk_is_critical(probe) {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "workspace_root",
+        format!(
+            "runner workspace filesystem for `{}` is critically low on free space: {} available of {} total; refusing to sync another Lab workspace",
+            runner.id,
+            human_bytes(probe.available_bytes),
+            human_bytes(probe.total_bytes)
+        ),
+        Some(workspace_root.to_string()),
+        Some(vec![
+            format!(
+                "Preview safe cleanup candidates with `homeboy runner workspace prune {}`.",
+                shell_arg(&runner.id)
+            ),
+            format!(
+                "Remove safe cleanup candidates with `homeboy runner workspace prune {} --apply`.",
+                shell_arg(&runner.id)
+            ),
+            "Increase runner.workspace_root capacity before retrying the Lab run.".to_string(),
+        ]),
+    ))
+}
+
+fn runner_workspace_disk_is_critical(probe: RunnerWorkspaceDiskProbe) -> bool {
+    if probe.available_bytes < MIN_RUNNER_WORKSPACE_FREE_BYTES {
+        return true;
+    }
+    probe.total_bytes > 0
+        && (probe.available_bytes as f64 / probe.total_bytes as f64)
+            < MIN_RUNNER_WORKSPACE_FREE_RATIO
+}
+
+fn runner_workspace_disk_probe(
+    runner: &super::super::Runner,
+    workspace_root: &str,
+) -> Result<Option<RunnerWorkspaceDiskProbe>> {
+    match runner.kind {
+        RunnerKind::Local => Ok(local_runner_workspace_disk_probe(Path::new(workspace_root))),
+        RunnerKind::Ssh => ssh_runner_workspace_disk_probe(runner, workspace_root),
+    }
+}
+
+#[cfg(unix)]
+fn local_runner_workspace_disk_probe(path: &Path) -> Option<RunnerWorkspaceDiskProbe> {
+    let probe_path = existing_ancestor(path)?;
+    let c_path = std::ffi::CString::new(probe_path.to_string_lossy().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let stat = unsafe { stat.assume_init() };
+    let block_size = u128::from(stat.f_frsize.max(1));
+    Some(RunnerWorkspaceDiskProbe {
+        available_bytes: u64::try_from(u128::from(stat.f_bavail).saturating_mul(block_size))
+            .ok()?,
+        total_bytes: u64::try_from(u128::from(stat.f_blocks).saturating_mul(block_size)).ok()?,
+    })
+}
+
+#[cfg(not(unix))]
+fn local_runner_workspace_disk_probe(_path: &Path) -> Option<RunnerWorkspaceDiskProbe> {
+    None
+}
+
+fn existing_ancestor(path: &Path) -> Option<&Path> {
+    let mut current = path;
+    loop {
+        if current.exists() {
+            return Some(current);
+        }
+        current = current.parent()?;
+    }
+}
+
+fn ssh_runner_workspace_disk_probe(
+    runner: &super::super::Runner,
+    workspace_root: &str,
+) -> Result<Option<RunnerWorkspaceDiskProbe>> {
+    let (_server, mut client) = ssh_client_for_runner(runner)?;
+    client.env.extend(runner.env.clone());
+    let command = format!(
+        "p={path}; while [ ! -e \"$p\" ] && [ \"$p\" != / ]; do p=$(dirname \"$p\"); done; df -Pk \"$p\" 2>/dev/null | awk 'NR==2 {{print $2 \" \" $4}}'",
+        path = shell::quote_arg(workspace_root),
+    );
+    let output = client.execute(&command);
+    if !output.success {
+        return Ok(None);
+    }
+    let mut parts = output.stdout.split_whitespace();
+    let total_kb = match parts.next().and_then(|value| value.parse::<u64>().ok()) {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    let available_kb = match parts.next().and_then(|value| value.parse::<u64>().ok()) {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    Ok(Some(RunnerWorkspaceDiskProbe {
+        available_bytes: available_kb.saturating_mul(1024),
+        total_bytes: total_kb.saturating_mul(1024),
+    }))
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else {
+        format!("{} MiB", bytes / MIB)
+    }
+}
+
 fn exclude_homeboy_metadata_from_git_status(workspace_path: &Path) -> Result<()> {
     let git_dir = workspace_path.join(".git");
     if !git_dir.is_dir() {
@@ -908,13 +1041,7 @@ fn prune_candidates_ssh(
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
     let min_age = options.min_age_hours.saturating_mul(3600);
-    let command = format!(
-        "root={root}; meta_rel={meta}; now=$(date +%s); if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'meta_rel=$1; now=$2; min_age=$3; shift 3; for dir do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; bytes=$(du -sk \"$dir\" 2>/dev/null | awk '\''{{print $1 * 1024}}'\''); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done' sh {meta_arg} \"$now\" {min_age_arg} {{}} +; fi",
-        root = shell::quote_arg(root),
-        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
-        meta_arg = shell::quote_arg(WORKSPACE_METADATA_FILE),
-        min_age_arg = shell::quote_arg(&min_age.to_string()),
-    );
+    let command = prune_scan_command(root, min_age);
     let output = client.execute(&command);
     if !output.success {
         return Err(Error::internal_unexpected(format!(
@@ -972,6 +1099,16 @@ fn prune_candidates_ssh(
             .then_with(|| b.age_seconds.cmp(&a.age_seconds))
     });
     Ok(candidates)
+}
+
+pub(crate) fn prune_scan_command(root: &str, min_age: u64) -> String {
+    format!(
+        "root={root}; meta_rel={meta}; now=$(date +%s); if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'meta_rel=$1; now=$2; min_age=$3; shift 3; for dir do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; blocks=$(du -sk \"$dir\" 2>/dev/null); blocks=${{blocks%%[!0-9]*}}; bytes=$((blocks * 1024)); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done' sh {meta_arg} \"$now\" {min_age_arg} {{}} +; fi",
+        root = shell::quote_arg(root),
+        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        meta_arg = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        min_age_arg = shell::quote_arg(&min_age.to_string()),
+    )
 }
 
 fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str) -> Result<()> {
@@ -1119,5 +1256,40 @@ fn local_git_state(local_path: &Path) -> LocalGitState {
         commit,
         ref_name,
         dirty,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{runner_workspace_disk_is_critical, RunnerWorkspaceDiskProbe};
+
+    #[test]
+    fn runner_workspace_disk_pressure_blocks_low_absolute_free_space() {
+        assert!(runner_workspace_disk_is_critical(
+            RunnerWorkspaceDiskProbe {
+                available_bytes: 512 * 1024 * 1024,
+                total_bytes: 500 * 1024 * 1024 * 1024,
+            }
+        ));
+    }
+
+    #[test]
+    fn runner_workspace_disk_pressure_blocks_low_free_ratio() {
+        assert!(runner_workspace_disk_is_critical(
+            RunnerWorkspaceDiskProbe {
+                available_bytes: 2 * 1024 * 1024 * 1024,
+                total_bytes: 500 * 1024 * 1024 * 1024,
+            }
+        ));
+    }
+
+    #[test]
+    fn runner_workspace_disk_pressure_allows_headroom() {
+        assert!(!runner_workspace_disk_is_critical(
+            RunnerWorkspaceDiskProbe {
+                available_bytes: 20 * 1024 * 1024 * 1024,
+                total_bytes: 500 * 1024 * 1024 * 1024,
+            }
+        ));
     }
 }

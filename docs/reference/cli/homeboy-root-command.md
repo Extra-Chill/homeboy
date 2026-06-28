@@ -50,7 +50,7 @@ explain why `--runner` is unavailable.
 
 ## Subcommands
 
-See the full list of supported subcommands in the [Commands index](../commands/commands-index.md).
+See the full list of supported subcommands in the [Commands index](../../commands/commands-index.md).
 
 Automation that needs command safety, docs, output, and Lab metadata should use
 the first-class recursive manifest surface:

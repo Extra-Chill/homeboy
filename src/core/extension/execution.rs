@@ -500,7 +500,7 @@ pub(crate) fn resolve_capability_component(
     };
 
     if let Some(path) = path_override {
-        comp.local_path = path.to_string();
+        comp.local_path = absolutize_path_override(path);
     }
 
     Ok(comp)
@@ -515,10 +515,38 @@ pub(crate) fn build_capability_execution_context(
     execution.component = component;
 
     if let Some(path) = path_override {
-        execution.component.local_path = path.to_string();
+        execution.component.local_path = absolutize_path_override(path);
     }
 
     execution
+}
+
+/// Resolve a `--path` override to an absolute, canonical path so downstream
+/// consumers receive a stable component root regardless of the caller's working
+/// directory.
+///
+/// The override is published verbatim to extension runners via
+/// `HOMEBOY_COMPONENT_PATH`. A relative override such as `--path .` would
+/// otherwise reach a runner as-is; any tool that composes a config file from the
+/// component root and then executes from a different working directory (for
+/// example a generated config in a temp dir that references files relative to
+/// the component) cannot resolve those references, so an otherwise-clean run
+/// fails (Extra-Chill/homeboy#6818). Absolutizing here makes a relative `--path`
+/// behave identically to an absolute one. This is framework-agnostic: core
+/// guarantees an absolute component root and leaves all language/tool specifics
+/// to the component's own extension runner.
+fn absolutize_path_override(path: &str) -> String {
+    let candidate = Path::new(path);
+    if let Ok(canonical) = candidate.canonicalize() {
+        return canonical.to_string_lossy().into_owned();
+    }
+    if candidate.is_absolute() {
+        return path.to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(candidate).to_string_lossy().into_owned(),
+        Err(_) => path.to_string(),
+    }
 }
 
 pub(crate) fn prepare_capability_run(
@@ -1258,5 +1286,127 @@ mod tests {
         assert_eq!(output.exit_code, 124);
         assert_eq!(output.stdout, "started\n");
         assert!(output.stderr.contains("Homeboy command timed out"));
+    }
+
+    fn lint_execution_context() -> crate::core::extension::ExtensionExecutionContext {
+        crate::core::extension::ExtensionExecutionContext {
+            component: Component::new(
+                "fixture".to_string(),
+                "/configured/path".to_string(),
+                "fixture-extension".to_string(),
+                None,
+            ),
+            capability: crate::core::extension::ExtensionCapability::Lint,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: std::path::PathBuf::from("/tmp/fixture-extension"),
+            script_path: "lint.sh".to_string(),
+            settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn absolutize_path_override_makes_relative_paths_absolute() {
+        // A non-existent relative override still resolves to an absolute path so
+        // it never reaches a runner verbatim.
+        let resolved = absolutize_path_override("some/relative/component");
+        assert!(
+            Path::new(&resolved).is_absolute(),
+            "expected absolute path, got {resolved}"
+        );
+        assert!(resolved.ends_with("some/relative/component"));
+    }
+
+    #[test]
+    fn absolutize_path_override_canonicalizes_existing_dir() {
+        let dir = tempfile::tempdir().expect("component dir");
+        let resolved = absolutize_path_override(&dir.path().to_string_lossy());
+        let canonical = dir.path().canonicalize().expect("canonical dir");
+        assert_eq!(Path::new(&resolved), canonical.as_path());
+    }
+
+    #[test]
+    fn absolutize_path_override_preserves_absolute_nonexistent_path() {
+        // An absolute path that does not exist yet stays exactly as supplied
+        // instead of being rebased onto the working directory.
+        let resolved = absolutize_path_override("/does/not/exist/component");
+        assert_eq!(resolved, "/does/not/exist/component");
+    }
+
+    #[test]
+    fn path_override_resolves_to_absolute_component_root() {
+        // Regression for Extra-Chill/homeboy#6818: a non-absolute / non-canonical
+        // `--path` must be normalized so the component root handed to the runner
+        // resolves regardless of the working directory the runner (or a tool it
+        // invokes) ultimately executes from. A non-canonical absolute override
+        // (`<root>/sub/..`) exercises the same `canonicalize` normalization that
+        // a relative `--path .` triggers, without mutating the process-global
+        // working directory. The assertion stays framework-agnostic: core only
+        // guarantees an absolute component root and that a config file living at
+        // that root is locatable from the normalized path.
+        let component_root = tempfile::tempdir().expect("component dir");
+        std::fs::create_dir(component_root.path().join("sub")).expect("nested dir");
+        std::fs::write(component_root.path().join("config.toml"), "")
+            .expect("component-root config file");
+
+        // Non-canonical absolute override pointing back at the component root.
+        let noncanonical = component_root.path().join("sub").join("..");
+
+        let result = build_capability_execution_context(
+            &lint_execution_context(),
+            Component::new(
+                "fixture".to_string(),
+                "/configured/path".to_string(),
+                "fixture-extension".to_string(),
+                None,
+            ),
+            Some(&noncanonical.to_string_lossy()),
+        );
+
+        let resolved_root = Path::new(&result.component.local_path);
+        assert!(
+            resolved_root.is_absolute(),
+            "--path must resolve to an absolute component root, got {}",
+            result.component.local_path
+        );
+        assert_eq!(
+            resolved_root,
+            component_root
+                .path()
+                .canonicalize()
+                .expect("canonical root")
+        );
+        assert!(
+            resolved_root.join("config.toml").is_file(),
+            "normalized component root must locate component-root files"
+        );
+    }
+
+    #[test]
+    fn resolve_capability_component_normalizes_override() {
+        let component_root = tempfile::tempdir().expect("component dir");
+        std::fs::create_dir(component_root.path().join("sub")).expect("nested dir");
+        let noncanonical = component_root.path().join("sub").join("..");
+
+        let preloaded = Component::new(
+            "fixture".to_string(),
+            "/configured/path".to_string(),
+            "fixture-extension".to_string(),
+            None,
+        );
+        let resolved = resolve_capability_component(
+            &lint_execution_context(),
+            Some(&preloaded),
+            Some(&noncanonical.to_string_lossy()),
+        )
+        .expect("resolve component");
+
+        assert_eq!(
+            Path::new(&resolved.local_path),
+            component_root
+                .path()
+                .canonicalize()
+                .expect("canonical root")
+        );
     }
 }

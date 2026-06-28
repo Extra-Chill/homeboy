@@ -111,5 +111,5 @@ extension release actions.
 ## Related
 
 - [Release command](../commands/release.md)
-- [Component schema](../schemas/component-schema.md)
-- [Extension manifest schema](../schemas/extension-manifest-schema.md)
+- [Component schema](../reference/schemas/component-schema.md)
+- [Extension manifest schema](../reference/schemas/extension-manifest-schema.md)

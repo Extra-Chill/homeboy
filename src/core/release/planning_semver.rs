@@ -293,6 +293,17 @@ pub(super) fn resolve_tag_and_commits(
     local_path: &str,
     monorepo: Option<&git::MonorepoContext>,
 ) -> Result<(Option<String>, Vec<git::CommitInfo>)> {
+    // Make release tags (and connecting history) available before the
+    // reachability/changelog-range guard inspects them. A tagless or shallow
+    // release checkout would otherwise report a genuinely-reachable tag as "not
+    // reachable from HEAD" and refuse (issue #6916). Best-effort: offline
+    // checkouts still fall through to the guard against local history, so a tag
+    // that is truly not an ancestor of HEAD is still refused.
+    let guard_root = monorepo
+        .map(|ctx| ctx.git_root.as_str())
+        .unwrap_or(local_path);
+    git::fetch_tags(guard_root)?;
+
     match monorepo {
         Some(ctx) => {
             let latest_tag = git::get_latest_tag_with_prefix(&ctx.git_root, Some(&ctx.tag_prefix))?;
@@ -721,5 +732,107 @@ mod tests {
             .expect("validation should run");
 
         assert!(message.is_none());
+    }
+
+    /// Issue #6916: a release checkout that is missing the latest release tag
+    /// locally, but where the tag is genuinely reachable on `origin`, must
+    /// fetch the tag and proceed past the reachability/changelog-range guard
+    /// rather than refusing.
+    #[test]
+    fn resolve_tag_and_commits_fetches_missing_tag_reachable_on_origin() {
+        // Build a real upstream repo: initial commit, a release tag, then a
+        // post-release fix commit on the same linear history.
+        let origin = git_repo();
+        let origin_dir = origin.path();
+        commit_file(origin_dir, "README.md", "initial", "chore: initial");
+        run_git(origin_dir, &["branch", "-M", "main"]);
+        run_git(origin_dir, &["tag", "v0.1.18"]);
+        commit_file(origin_dir, "fix.txt", "fix", "fix: patch bug");
+
+        // Materialize a tagless working checkout from origin: the connecting
+        // history is present (the tag's commit IS an ancestor of HEAD) but the
+        // tag ref itself was never fetched, mirroring the materialization that
+        // triggered the false "not reachable from HEAD" refusal.
+        let work = tempfile::tempdir().expect("tempdir");
+        let work_dir = work.path();
+        run_git(
+            work_dir,
+            &[
+                "clone",
+                "--no-tags",
+                "-q",
+                &origin_dir.to_string_lossy(),
+                ".",
+            ],
+        );
+        run_git(work_dir, &["config", "user.email", "homeboy@example.com"]);
+        run_git(work_dir, &["config", "user.name", "Homeboy Test"]);
+
+        // Precondition: the release tag is genuinely absent locally.
+        let listed = std::process::Command::new("git")
+            .args(["tag", "-l", "v0.1.18"])
+            .current_dir(work_dir)
+            .output()
+            .expect("git tag -l");
+        assert!(
+            String::from_utf8_lossy(&listed.stdout).trim().is_empty(),
+            "tag should be missing locally before the fetch-before-guard step"
+        );
+
+        // resolve_tag_and_commits fetches tags from origin before the guard, so
+        // the now-reachable tag is found and the call proceeds.
+        let (latest_tag, commits) = resolve_tag_and_commits(&work_dir.to_string_lossy(), None)
+            .expect("tag reachable on origin should let the release proceed past the guard");
+
+        assert_eq!(latest_tag.as_deref(), Some("v0.1.18"));
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "fix: patch bug");
+    }
+
+    /// Guard correctness preserved: a tag that is genuinely NOT an ancestor of
+    /// HEAD must still refuse, even after the fetch-before-guard step pulls all
+    /// tags from origin.
+    #[test]
+    fn resolve_tag_and_commits_still_refuses_genuinely_unreachable_tag_after_fetch() {
+        // Upstream has a tag on an off-branch commit that never merges into the
+        // main line that the working checkout tracks.
+        let origin = git_repo();
+        let origin_dir = origin.path();
+        commit_file(origin_dir, "README.md", "initial", "chore: initial");
+        run_git(origin_dir, &["branch", "-M", "main"]);
+        run_git(origin_dir, &["tag", "v0.1.0"]);
+        commit_file(origin_dir, "feature.txt", "work", "feat: first work");
+        run_git(origin_dir, &["branch", "release-v0.2.0"]);
+        run_git(origin_dir, &["checkout", "-q", "release-v0.2.0"]);
+        commit_file(origin_dir, "VERSION", "0.2.0", "release: v0.2.0");
+        run_git(origin_dir, &["tag", "v0.2.0"]);
+        run_git(origin_dir, &["checkout", "-q", "main"]);
+        commit_file(origin_dir, "fix.txt", "more", "fix: second work");
+
+        // Working checkout tracks main and, like the real failure, is missing
+        // tags locally. The fetch step will pull v0.2.0, but it remains
+        // off-branch — so the guard must still fail closed.
+        let work = tempfile::tempdir().expect("tempdir");
+        let work_dir = work.path();
+        run_git(
+            work_dir,
+            &[
+                "clone",
+                "--no-tags",
+                "-q",
+                "--branch",
+                "main",
+                &origin_dir.to_string_lossy(),
+                ".",
+            ],
+        );
+        run_git(work_dir, &["config", "user.email", "homeboy@example.com"]);
+        run_git(work_dir, &["config", "user.name", "Homeboy Test"]);
+
+        let err = resolve_tag_and_commits(&work_dir.to_string_lossy(), None)
+            .expect_err("off-branch tag must still fail closed after fetching tags");
+
+        assert!(err.message.contains("Latest release tag v0.2.0"));
+        assert!(err.message.contains("not reachable from HEAD"));
     }
 }

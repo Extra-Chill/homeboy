@@ -102,5 +102,5 @@ These are set alongside Homeboy's standard environment variables.
 ## Related
 
 - [Extension command](../commands/extension.md)
-- [Extension manifest schema](../schemas/extension-manifest-schema.md)
-- [Template variables](../templates.md)
+- [Extension manifest schema](../reference/schemas/extension-manifest-schema.md)
+- [Template variables](../reference/template-variables.md)

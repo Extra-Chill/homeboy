@@ -132,7 +132,7 @@ This helps identify natural groupings for fleet creation.
 
 ## Related
 
-- [Fleet command](../commands/fleet.md) - Fleet management commands
-- [Deploy command](../commands/deploy.md) - `--fleet` and `--shared` flags
-- [Component command](../commands/component.md) - `component shared` command
+- [Fleet command](../../commands/fleet.md) - Fleet management commands
+- [Deploy command](../../commands/deploy.md) - `--fleet` and `--shared` flags
+- [Component command](../../commands/component.md) - `component shared` command
 - [Project schema](project-schema.md) - Project configuration

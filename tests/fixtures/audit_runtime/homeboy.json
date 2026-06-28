@@ -2,6 +2,11 @@
   "id": "audit-runtime-fixture",
   "remote_path": "",
   "audit": {
+    "core_boundary_leaks": {
+      "terms": ["florpstack"],
+      "scan_path_contains": ["src/"],
+      "allow_line_contains": ["audit-allow-florpstack"]
+    },
     "source_policies": [
       {
         "id": "fixture-forbidden-term",

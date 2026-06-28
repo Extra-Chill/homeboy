@@ -653,7 +653,7 @@ Most hooks execute locally in the component's directory. `post:deploy` hooks exe
 | `{{install_dir}}` | Remote install directory (base_path + remote_path) |
 | `{{base_path}}` | Project base path on the remote server |
 
-See [hooks architecture](../architecture/hooks.md) for details on execution order and failure modes.
+See [hooks architecture](../../architecture/hooks.md) for details on execution order and failure modes.
 
 ## Documentation Configuration
 
@@ -745,5 +745,5 @@ Extension manifests are stored in the extension directory:
 
 ## Related
 
-- [Extension command](../commands/extension.md) - Manage extension installation and execution
-- [Template variables](../templates.md) - Variable reference for templates
+- [Extension command](../../commands/extension.md) - Manage extension installation and execution
+- [Template variables](../template-variables.md) - Variable reference for templates

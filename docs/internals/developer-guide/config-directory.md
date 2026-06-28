@@ -210,11 +210,11 @@ While Homeboy provides CLI commands for most operations, configurations can be e
 
 ### Schema References
 
-- [Component schema](../schemas/component-schema.md)
-- [Project schema](../schemas/project-schema.md)
-- [Server schema](../schemas/server-schema.md)
-- [Fleet schema](../schemas/fleet-schema.md)
-- [Extension manifest schema](../schemas/extension-manifest-schema.md)
+- [Component schema](../../reference/schemas/component-schema.md)
+- [Project schema](../../reference/schemas/project-schema.md)
+- [Server schema](../../reference/schemas/server-schema.md)
+- [Fleet schema](../../reference/schemas/fleet-schema.md)
+- [Extension manifest schema](../../reference/schemas/extension-manifest-schema.md)
 
 ## Migration and Backups
 
@@ -303,10 +303,10 @@ If configuration file is invalid:
 
 ## Related
 
-- [Status command](../commands/status.md) - Inspect current Homeboy context and component state
-- [Config command](../commands/config.md) - Manage global configuration
-- [Project command](../commands/project.md) - Manage project configurations
-- [Server command](../commands/server.md) - Manage server configurations
-- [Component command](../commands/component.md) - Manage component configurations
-- [Fleet command](../commands/fleet.md) - Manage fleet configurations
-- [Extension command](../commands/extension.md) - Manage extension installations
+- [Status command](../../commands/status.md) - Inspect current Homeboy context and component state
+- [Config command](../../commands/config.md) - Manage global configuration
+- [Project command](../../commands/project.md) - Manage project configurations
+- [Server command](../../commands/server.md) - Manage server configurations
+- [Component command](../../commands/component.md) - Manage component configurations
+- [Fleet command](../../commands/fleet.md) - Manage fleet configurations
+- [Extension command](../../commands/extension.md) - Manage extension installations
