@@ -76,6 +76,144 @@ fn timeout_mirrors_remote_job_without_cancelling() {
     });
 }
 
+fn running_job_with_id(id: uuid::Uuid) -> Job {
+    Job {
+        id,
+        operation: "runner.exec".to_string(),
+        status: JobStatus::Running,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_001_000,
+        started_at_ms: Some(1_700_000_000_000),
+        finished_at_ms: None,
+        event_count: 0,
+        source_snapshot: None,
+        stale_reason: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+    }
+}
+
+#[test]
+fn opt_in_cancels_remote_job_on_wait_timeout() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    crate::test_support::with_isolated_home(|_| {
+        let _env = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "1");
+        let calls: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let recorder = calls.clone();
+        let _hook = test_cancel_hook::install(Box::new(move |runner_id: &str, job_id: &str| {
+            recorder
+                .borrow_mut()
+                .push((runner_id.to_string(), job_id.to_string()));
+            Ok(())
+        }));
+
+        let runner = ssh_runner();
+        let job_id = uuid::Uuid::new_v4();
+        let job = running_job_with_id(job_id);
+        let err = daemon_job_wait_timeout(
+            &runner,
+            "/srv/homeboy/project",
+            &["homeboy".to_string(), "bench".to_string()],
+            &job,
+            &[],
+            "runner daemon job",
+            true,
+        );
+
+        // The opt-in cancel primitive fired exactly once, targeting this job.
+        assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(
+            calls.borrow()[0],
+            ("lab".to_string(), job_id.to_string())
+        );
+        // The timeout still surfaces, but no longer claims the job was left running.
+        assert!(!err.message.contains("was not cancelled"));
+        assert!(err.message.contains("remote cancellation was requested"));
+        assert_eq!(err.details["cancel_on_wait_timeout"], "requested");
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("requested remote cancellation of job")));
+    });
+}
+
+#[test]
+fn opt_in_off_leaves_remote_job_uncancelled() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    crate::test_support::with_isolated_home(|_| {
+        let _env = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
+        let calls: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
+        let recorder = calls.clone();
+        let _hook = test_cancel_hook::install(Box::new(move |_runner_id: &str, _job_id: &str| {
+            *recorder.borrow_mut() += 1;
+            Ok(())
+        }));
+
+        let runner = ssh_runner();
+        let job_id = uuid::Uuid::new_v4();
+        let job = running_job_with_id(job_id);
+        let err = daemon_job_wait_timeout(
+            &runner,
+            "/srv/homeboy/project",
+            &["homeboy".to_string(), "bench".to_string()],
+            &job,
+            &[],
+            "runner daemon job",
+            true,
+        );
+
+        // Default contract: the cancel primitive is never invoked.
+        assert_eq!(*calls.borrow(), 0);
+        assert!(err.message.contains("was not cancelled"));
+        assert_eq!(err.details["cancel_on_wait_timeout"], "disabled");
+    });
+}
+
+#[test]
+fn opt_in_surfaces_remote_cancel_failure_on_wait_timeout() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    crate::test_support::with_isolated_home(|_| {
+        let _env = EnvVarGuard::set(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV, "true");
+        let calls: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
+        let recorder = calls.clone();
+        let _hook = test_cancel_hook::install(Box::new(move |_runner_id: &str, _job_id: &str| {
+            *recorder.borrow_mut() += 1;
+            Err(crate::core::error::Error::internal_unexpected(
+                "runner is not connected",
+            ))
+        }));
+
+        let runner = ssh_runner();
+        let job_id = uuid::Uuid::new_v4();
+        let job = running_job_with_id(job_id);
+        let err = daemon_job_wait_timeout(
+            &runner,
+            "/srv/homeboy/project",
+            &["homeboy".to_string(), "bench".to_string()],
+            &job,
+            &[],
+            "runner daemon job",
+            true,
+        );
+
+        assert_eq!(*calls.borrow(), 1);
+        assert!(err.message.contains("remote cancellation was requested"));
+        assert!(err.message.contains("but failed"));
+        assert!(err.message.contains("runner is not connected"));
+        assert_eq!(err.details["cancel_on_wait_timeout"], "failed");
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("remote cancellation failed")));
+    });
+}
+
 #[test]
 fn lab_offload_handoff_hints_render_durable_commands() {
     let hints = lab_offload_handoff_hints(
