@@ -66,6 +66,13 @@
       "type": "object",
       "default": {},
       "description": "Additional non-secret environment values consumed by Node.js bench workloads."
+    },
+    {
+      "id": "local_workspace_dependencies",
+      "label": "Local workspace dependency overrides",
+      "type": "array",
+      "default": [],
+      "description": "Declared local (unpublished) workspace package dependencies to build from source, pack, and install into the consumer as a self-contained built tarball before the build runs. Installing a built tarball (not a file: symlink) lets peer dependencies such as React dedupe to the consumer's single copy. Each entry is an object: name (required package name), path (required source path relative to the component, may reference sibling repos), and optional package_dir (monorepo subpackage to pack), build (explicit build command run in path; defaults to install + run build script), and package_manager (npm|pnpm|yarn, auto-detected by default)."
     }
   ],
   "ci": {

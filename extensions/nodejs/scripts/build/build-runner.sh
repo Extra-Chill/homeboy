@@ -32,9 +32,20 @@ homeboy_runner_init --bash 4 --failure-trap
 source "$COMMAND_CAPTURE_HELPER"
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
+# shellcheck source=../lib/local-workspace-deps.sh
+source "${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${SCRIPT_DIR}/../lib/local-workspace-deps.sh}"
 homeboy_require_package_json
 homeboy_detect_package_manager
 homeboy_ensure_node_dependencies
+
+# Apply declared local-workspace-dependency overrides (no-op unless declared in
+# HOMEBOY_SETTINGS_JSON). Runs after deps are installed and before the build so
+# the built, deduped tarball is resolvable during the consumer build.
+if ! homeboy_apply_local_workspace_dependencies "${PROJECT_PATH}"; then
+    FAILED_STEP="Local workspace dependency override failed"
+    FAILURE_OUTPUT="A declared local_workspace_dependencies override failed to build/pack/install. See output above."
+    exit 1
+fi
 
 # Resolve the build command.
 BUILD_CMD=""

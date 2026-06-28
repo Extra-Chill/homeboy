@@ -337,6 +337,44 @@ least one file. Included package artifacts are copied into the staging directory
 after the default rsync excludes and reported with SHA-256 values in the build
 output.
 
+### Local workspace dependency overrides
+
+A component can depend on a sibling workspace package that is intentionally not
+published — "cooked locally" on a branch (e.g. an `@scope/ui` package in a
+sibling pnpm monorepo built on `trunk`). An npm `file:` install symlinks the
+dependency's own `node_modules`, so its peer deps (React) resolve to a *second*
+copy → "Invalid hook call" → a blank app. Declare the dependency instead and the
+build will build it from source, pack it, and install the built tarball so peer
+deps dedupe to the consumer's single copy:
+
+```json
+{
+	"extensions": {
+		"wordpress": {
+			"local_workspace_dependencies": [
+				{
+					"name": "@automattic/agenttic-ui",
+					"path": "../agenttic",
+					"package_dir": "packages/agenttic-ui",
+					"build": "pnpm install --frozen-lockfile && pnpm --filter @automattic/agenttic-ui build",
+					"package_manager": "pnpm"
+				}
+			]
+		}
+	}
+}
+```
+
+Only `name` and `path` are required. `path` is resolved relative to the
+component (sibling repos via `..` are allowed) and `name` is validated against
+the resolved package. When `build` is omitted the dependency's own `build`
+script is run after installing its dependencies. The override runs after the
+consumer's own dependencies are installed and before the consumer build, and a
+declared override that fails is a fatal build error. The mechanism is generic
+Node.js behavior shared with the `nodejs` build runner
+(`nodejs/scripts/lib/local-workspace-deps.sh`); it carries no WordPress
+specifics.
+
 ## Bench runner
 
 Bench workloads run through WP Codebox. WP Codebox owns the disposable WordPress

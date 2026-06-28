@@ -57,6 +57,13 @@ RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOL
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context --component-alias PLUGIN_PATH
 
+# Generic local-workspace-dependency override helper. The mechanism (build a
+# local sibling package, pack it, install the built tarball so peer deps dedupe)
+# is generic Node.js behavior and lives in the nodejs extension, which is
+# installed alongside this one. Resolve via an explicit runtime override first,
+# then the sibling extension path.
+LOCAL_WORKSPACE_DEPS_HELPER="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${EXTENSION_PATH}/../nodejs/scripts/lib/local-workspace-deps.sh}"
+
 # Output functions
 print_status() {
     echo -e "${BLUE}[BUILD]${NC} $1"
@@ -407,6 +414,43 @@ install_frontend_dependencies() {
     fi
 }
 
+# Apply declared local-workspace-dependency overrides for the current directory.
+#
+# No-op unless `local_workspace_dependencies` is declared in HOMEBOY_SETTINGS_JSON.
+# When declared, the generic nodejs helper builds each local dependency from
+# source, packs it, and installs the built tarball into this consumer so peer
+# deps (React) dedupe to the consumer's single copy — the fix for the
+# "Invalid hook call" blank-app failure caused by `file:` symlink dupes.
+apply_local_workspace_overrides() {
+    case "${HOMEBOY_SETTINGS_JSON:-}" in
+        ""|"{}") return 0 ;;
+    esac
+
+    # Cheap pre-check: only engage the helper when overrides are actually
+    # declared. The helper does full validation; this just avoids requiring it
+    # for the common case where nothing is declared.
+    if ! printf '%s' "$HOMEBOY_SETTINGS_JSON" | grep -q 'local_workspace_dependencies'; then
+        return 0
+    fi
+
+    if [ ! -f "$LOCAL_WORKSPACE_DEPS_HELPER" ]; then
+        print_error "local_workspace_dependencies declared but helper not found: $LOCAL_WORKSPACE_DEPS_HELPER"
+        return 1
+    fi
+
+    # Match the consumer install's peer-dep handling for the tarball install.
+    local npm_flags=()
+    while IFS= read -r flag; do
+        npm_flags+=("$flag")
+    done < <(npm_install_flags)
+
+    print_status "Applying local workspace dependency overrides..."
+    # shellcheck source=/dev/null
+    HOMEBOY_LOCAL_WORKSPACE_DEP_NPM_FLAGS="${npm_flags[*]}" \
+        bash -c 'source "$1"; homeboy_apply_local_workspace_dependencies "$2"' \
+        _ "$LOCAL_WORKSPACE_DEPS_HELPER" "$(pwd)"
+}
+
 # Build frontend assets (Gutenberg blocks via @wordpress/scripts, Vite, or generic npm build)
 #
 # Frontend builds are non-fatal for PHP-primary plugins. If node/npm is
@@ -453,6 +497,18 @@ build_frontend_assets() {
 
     # Ensure dependencies exist and expected local build binary is present.
     install_frontend_dependencies "$build_tool" ""
+
+    # Apply any declared local-workspace-dependency overrides after the
+    # consumer's own deps are installed (so peer deps exist to dedupe against)
+    # and before the consumer build runs (so the built artifact is resolvable).
+    #
+    # A declared override is explicit intent that the dependency matters, so a
+    # failure here is fatal rather than silently shipping a bundle missing the
+    # dependency — even for otherwise PHP-primary plugins.
+    if ! apply_local_workspace_overrides; then
+        print_error "Local workspace dependency override failed"
+        exit 1
+    fi
 
     # Run the build command
     print_status "Building frontend assets..."
