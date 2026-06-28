@@ -342,11 +342,33 @@ remove_stale_dir() {
 }
 
 # Install production dependencies
+#
+# Always installs from a clean slate. A dev checkout (or a copy of one carried
+# into a temp build dir) can hold a vendor/ tree whose packages were installed
+# from source/git — this happens for `minimum-stability: dev` components, where
+# composer installs some dependencies (e.g. symfony/deprecation-contracts) from
+# git rather than dist. When that tree is carried into the build with its
+# per-package .git directories stripped (the build copy intentionally drops
+# .git), composer's GitDownloader aborts trying to reconcile the now-.git-less
+# source package:
+#
+#   In GitDownloader.php line 155:
+#     The .git directory is missing from .../vendor/symfony/deprecation-contracts
+#
+# and no artifact is produced → the release fails. --prefer-dist alone does not
+# fix this: the problem is the pre-existing source vendor/, not the install
+# flags. Removing vendor/ before installing forces a fresh, dist-based install
+# that is independent of the dev checkout's install state. Components without
+# composer deps are unaffected (the whole block is skipped when no composer.json
+# exists, and a missing vendor/ is a harmless no-op to remove).
 install_production_deps() {
     print_status "Installing production dependencies..."
 
     if [ -f "composer.json" ]; then
-        composer install --no-dev --optimize-autoloader --no-interaction --quiet 2>&1
+        # Drop any carried-in vendor/ so the install can never trip over a
+        # source/git package whose .git was stripped during the build copy.
+        rm -rf vendor
+        composer install --no-dev --optimize-autoloader --prefer-dist --no-interaction --quiet 2>&1
         print_success "Production dependencies installed"
     else
         print_warning "No composer.json found, skipping Composer dependencies"
