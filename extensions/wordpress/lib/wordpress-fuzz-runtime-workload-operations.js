@@ -22,6 +22,9 @@ const FAMILY_COMMANDS = Object.freeze({
 	database: 'wordpress.profile-database',
 });
 
+const WP_CODEBOX_WORKLOAD_COMMAND = 'run-wordpress-workload';
+const WP_CODEBOX_WORKLOAD_ABILITY = 'wp-codebox/run-wordpress-workload';
+
 const FAMILY_REQUIRED_CAPABILITIES = Object.freeze({
 	crud: Object.freeze(['crud']),
 	rest: Object.freeze(['rest']),
@@ -32,6 +35,9 @@ const FAMILY_REQUIRED_CAPABILITIES = Object.freeze({
 });
 
 function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, options = {}) {
+	if (testCase.input?.type === 'random_walk' || testCase.operation?.runtime_action === 'random_walk') {
+		return undefined;
+	}
 	const family = runtimeOperationFamily(testCase);
 	if (!family) {
 		return undefined;
@@ -64,6 +70,8 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 		case_id: testCase.case_id || testCase.caseId || testCase.id,
 		family,
 		command: FAMILY_COMMANDS[family],
+		wp_codebox_command: WP_CODEBOX_WORKLOAD_COMMAND,
+		wp_codebox_ability: WP_CODEBOX_WORKLOAD_ABILITY,
 		status,
 		required_capabilities: requiredCapabilities,
 		missing_capabilities: missingCapabilities.length > 0 ? missingCapabilities : undefined,
@@ -75,6 +83,8 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 		metadata: stripUndefined({
 			intent: testCase.intent,
 			operation_id: testCase.operation_id || testCase.operationId,
+			wp_codebox_command: WP_CODEBOX_WORKLOAD_COMMAND,
+			wp_codebox_ability: WP_CODEBOX_WORKLOAD_ABILITY,
 			mutation_lifecycle: mutationLifecycle,
 		}),
 	});
@@ -178,7 +188,8 @@ function readinessOperationKindForFamily(family, testCase = {}) {
 		return 'crud';
 	}
 	const mutationLifecycle = normalizeWordPressFuzzMutationLifecycleContract(testCase.metadata?.mutation_lifecycle || testCase.metadata?.mutationLifecycle || testCase.mutation_lifecycle || testCase.mutationLifecycle) || {};
-	if (mutationLifecycle.delete_boundary_required || mutationLifecycle.mutates || ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(testCase.operation?.method || '').toUpperCase())) {
+	const destructiveReasons = reasonList(testCase.destructive_reasons || testCase.destructiveReasons || testCase.destructive_reason || testCase.destructiveReason);
+	if (mutationLifecycle.delete_boundary_required || mutationLifecycle.required_capabilities?.length > 0 || destructiveReasons.length > 0 || String(testCase.intent || '').includes('mutate') || ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(testCase.operation?.method || '').toUpperCase())) {
 		return 'mutation';
 	}
 	return 'read';
@@ -311,7 +322,8 @@ function summarizeWordPressFuzzRuntimeWorkloadOperations(plan = {}) {
 function requiredCapabilitiesForWordPressFuzzRuntimeOperation(testCase = {}, options = {}) {
 	const family = options.family || runtimeOperationFamily(testCase);
 	const base = FAMILY_REQUIRED_CAPABILITIES[family] || [];
-	return mergeCapabilities(base, extraCapabilitiesForCase(testCase, family));
+	const mutationLifecycle = normalizeWordPressFuzzMutationLifecycleContract(testCase.metadata?.mutation_lifecycle || testCase.metadata?.mutationLifecycle || testCase.mutation_lifecycle || testCase.mutationLifecycle) || {};
+	return mergeCapabilities(base, extraCapabilitiesForCase(testCase, family), mutationLifecycle.required_capabilities, testCase.required_capabilities || testCase.requiredCapabilities);
 }
 
 function runtimeOperationFamily(testCase = {}) {
@@ -358,16 +370,32 @@ function runtimeOperationInput(testCase = {}, { family } = {}) {
 		return operation;
 	}
 	if (family === 'rest') {
-		return stripUndefined({ method: operation.method || surface.method || 'GET', route: operation.route || operation.path || surface.route || surface.path || surface.metadata?.value, route_params: operation.route_params, request_body: operation.request_body });
+		return stripUndefined({ method: operation.method || surface.method || 'GET', route: operation.route || operation.path || surface.route || surface.path || surface.metadata?.value, route_params: operation.route_params, query_params: operation.query_params, request_body: operation.request_body });
 	}
-	if (family === 'admin_page' || family === 'frontend_page') {
+	if (family === 'admin_page') {
+		const metadata = objectOrUndefined(testCase.metadata) || {};
+		const interaction = objectOrUndefined(metadata.interaction) || {};
+		return stripUndefined({
+			path: operation.path || operation.url || surface.path || surface.url || surface.metadata?.value,
+			method: operation.method || interaction.method || surface.method || 'GET',
+			interaction_kind: operation.interaction_kind || interaction.kind,
+			interaction_id: operation.interaction_id || interaction.id || interaction.name || interaction.selector || interaction.action,
+			selector: operation.selector || interaction.selector,
+			action: operation.action || interaction.action,
+			fields: operation.fields || interaction.fields,
+			capability_context: objectOrUndefined(metadata.capability_context || metadata.capabilityContext),
+			nonce_context: objectOrUndefined(metadata.nonce_context || metadata.nonceContext),
+			safety: objectOrUndefined(metadata.safety),
+		});
+	}
+	if (family === 'frontend_page') {
 		return stripUndefined({ path: operation.path || operation.url || surface.path || surface.url || surface.metadata?.value, method: operation.method || surface.method || 'GET', interaction: operation.interaction });
 	}
 	if (family === 'block') {
 		return stripUndefined({ block_name: operation.block_name || operation.blockName || operation.name || surface.block_name || surface.blockName || surface.name, lifecycle: operation.lifecycle, attributes: operation.attributes_sample || operation.attributes || surface.attributes_sample || surface.attributes });
 	}
 	if (family === 'database') {
-		return stripUndefined({ table: operation.table || surface.table, query: operation.query || surface.query, statement: operation.statement || surface.statement, mutation: operation.mutation, observation: operation.observation || operation.profile });
+		return stripUndefined({ table: operation.table || surface.table, query: operation.query || surface.query, statement: operation.statement || surface.statement, mutation: operation.mutation, where: operation.where, values: operation.values, columns: operation.columns, limit: operation.limit, options: operation.options, observation: operation.observation || operation.profile });
 	}
 	return operation;
 }

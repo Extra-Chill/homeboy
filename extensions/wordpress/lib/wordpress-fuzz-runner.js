@@ -455,7 +455,7 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 			success: codeboxResult?.succeeded,
 			wp_codebox_result_schema: codeboxResult?.result_schema,
 			diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
-			artifact_refs: normalizeArray(codeboxResult?.artifacts),
+			artifact_refs: reportedCodeboxArtifactRefs(codeboxResult),
 			observation_set: codeboxResult?.observation_set,
 			hotspot_summary: codeboxResult?.hotspot_summary,
 			observation: codeboxResult?.observation,
@@ -463,6 +463,10 @@ function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, stat
 			fuzz_result_envelope: homeboyFuzzResultEnvelope,
 		}),
 	});
+}
+
+function reportedCodeboxArtifactRefs(codeboxResult = {}) {
+	return normalizeArray(codeboxResult.artifacts).filter((artifact) => objectOrUndefined(artifact) && artifact.payload === undefined);
 }
 
 function buildHomeboyFuzzResultEnvelope({ runId, workloadId, seed, maxDuration, workload, plan, codeboxResult, status, runtimeTaskRequest, taskRequest }) {

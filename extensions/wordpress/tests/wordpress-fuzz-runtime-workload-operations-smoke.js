@@ -31,6 +31,9 @@ const crudDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crud
 assert.equal(crudDescriptor.schema, WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_SCHEMA);
 assert.equal(crudDescriptor.family, 'crud');
 assert.equal(crudDescriptor.command, 'wordpress.crud');
+assert.equal(crudDescriptor.wp_codebox_command, 'run-wordpress-workload');
+assert.equal(crudDescriptor.wp_codebox_ability, 'wp-codebox/run-wordpress-workload');
+assert.equal(crudDescriptor.metadata.wp_codebox_command, 'run-wordpress-workload');
 assert.equal(crudDescriptor.status, 'ready');
 assert.equal(crudDescriptor.validation.schema, WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_VALIDATION_SCHEMA);
 assert.equal(crudDescriptor.validation.ok, true);
@@ -74,6 +77,25 @@ const adminDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ i
 assert.equal(adminDescriptor.family, 'admin_page');
 assert.equal(adminDescriptor.command, 'wordpress.load-admin-page');
 
+const adminMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:admin-post',
+	intent: 'plan-admin-page-mutation',
+	operation: { path: '/wp-admin/edit.php', method: 'POST', interaction_kind: 'form', interaction_id: 'bulk-action', selector: '#posts-filter', fields: { action: 'edit' } },
+	destructive_reasons: ['form_mutation'],
+	metadata: {
+		capability_context: { required: ['edit_posts'] },
+		nonce_context: { required: true, action: 'bulk-posts', field: '_wpnonce' },
+		mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'admin', method: 'POST' }),
+	},
+}, { runtimeCapabilities: { capabilities: ['admin', 'snapshot', 'restore', 'reset'] } });
+assert.equal(adminMutationDescriptor.status, 'ready');
+assert.deepEqual(adminMutationDescriptor.required_capabilities, ['admin', 'reset', 'restore', 'snapshot']);
+assert.equal(adminMutationDescriptor.input.interaction_kind, 'form');
+assert.equal(adminMutationDescriptor.input.selector, '#posts-filter');
+assert.deepEqual(adminMutationDescriptor.input.fields, { action: 'edit' });
+assert.deepEqual(adminMutationDescriptor.input.capability_context, { required: ['edit_posts'] });
+assert.deepEqual(adminMutationDescriptor.input.nonce_context, { required: true, action: 'bulk-posts', field: '_wpnonce' });
+
 const pageDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ intent: 'request-frontend-page', metadata: { surface: { type: 'frontend-url' } }, operation: { path: '/' } }, { runtimeCapabilities: { capabilities: ['browser'] } });
 assert.equal(pageDescriptor.family, 'frontend_page');
 assert.equal(pageDescriptor.command, 'wordpress.load-frontend-page');
@@ -87,6 +109,15 @@ const dbDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ inte
 assert.equal(dbDescriptor.family, 'database');
 assert.equal(dbDescriptor.command, 'wordpress.profile-database');
 assert.deepEqual(dbDescriptor.required_capabilities, ['database', 'query-observation']);
+
+const dbMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	intent: 'mutate-database-table',
+	operation: { table: 'wp_posts', mutation: 'insert' },
+	destructive_reasons: ['db-mutation'],
+	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'database' }) },
+}, { runtimeCapabilities: { capabilities: ['database', 'snapshot', 'transaction', 'reset'] } });
+assert.equal(dbMutationDescriptor.status, 'ready');
+assert.deepEqual(dbMutationDescriptor.required_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
 
 const mutationLifecycle = buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' });
 const mutatingDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
@@ -104,7 +135,7 @@ const mutationIsolationBlockedDescriptor = buildWordPressFuzzRuntimeWorkloadOper
 	operation: { method: 'POST', route: '/example/v1/items' },
 	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'POST' }) },
 }, {
-	runtimeCapabilities: { capabilities: ['rest'] },
+	runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback'] },
 	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'] },
 });
 assert.equal(mutationIsolationBlockedDescriptor.status, 'blocked');
@@ -117,7 +148,7 @@ const deleteBoundaryBlockedDescriptor = buildWordPressFuzzRuntimeWorkloadOperati
 	operation: { method: 'DELETE', route: '/example/v1/items/42' },
 	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' }) },
 }, {
-	runtimeCapabilities: { capabilities: ['rest'] },
+	runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback'] },
 	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], mutationIsolation: true },
 });
 assert.equal(deleteBoundaryBlockedDescriptor.status, 'blocked');
@@ -130,7 +161,7 @@ const readyMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescri
 	operation: { method: 'DELETE', route: '/example/v1/items/42' },
 	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' }) },
 }, {
-	runtimeCapabilities: { capabilities: ['rest'] },
+	runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback'] },
 	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], mutationIsolation: true, deleteBoundary: true },
 });
 assert.equal(readyMutationDescriptor.status, 'ready');
