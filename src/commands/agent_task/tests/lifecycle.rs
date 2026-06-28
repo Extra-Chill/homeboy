@@ -256,6 +256,88 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 }
 
 #[test]
+fn replay_provider_boundary_projects_latest_executor_input() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let evidence_path = evidence_dir.path().join("executor-input.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "task_id": "task-a",
+                "executor": {
+                    "backend": "codebox",
+                    "config": {
+                        "runtime_component_paths": {
+                            "agent_runtime": "/runner/data-machine-patched"
+                        },
+                        "runtime_env": {
+                            "WP_CODEBOX_DATA_MACHINE_PATH": "/runner/data-machine-patched"
+                        }
+                    }
+                },
+                "inputs": {
+                    "runtime_task": {
+                        "ability": "runtime-package/run",
+                        "input": {
+                            "package": {
+                                "source": "data-machine"
+                            }
+                        }
+                    }
+                },
+                "artifact_declarations": [
+                    { "name": "runtime-package", "required": true }
+                ]
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        run_loaded_plan(
+            test_plan(),
+            Some("run-cli-provider-boundary-replay"),
+            ExecutorInputEvidenceExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            },
+        )
+        .expect("run completed");
+
+        let (value, exit_code) = replay_provider_boundary(ReplayProviderBoundaryArgs {
+            run_id: "run-cli-provider-boundary-replay".to_string(),
+            task: Some("task-a".to_string()),
+        })
+        .expect("replay report");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["schema"],
+            "homeboy/agent-task-provider-boundary-replay/v1"
+        );
+        assert_eq!(
+            value["normalized_provider_boundary"]["runtime_task"]["ability"],
+            "runtime-package/run"
+        );
+        assert_eq!(
+            value["normalized_provider_boundary"]["runtime_component_paths"]["agent_runtime"],
+            "/runner/data-machine-patched"
+        );
+        assert_eq!(
+            value["normalized_provider_boundary"]["runtime_env"]["WP_CODEBOX_DATA_MACHINE_PATH"],
+            "/runner/data-machine-patched"
+        );
+        assert_eq!(
+            value["normalized_provider_boundary"]["package_descriptor"]["source"],
+            "data-machine"
+        );
+        assert_eq!(
+            value["normalized_provider_boundary"]["artifact_declarations"][0]["name"],
+            "runtime-package"
+        );
+        assert_eq!(value["typed_evidence"]["kind"], "provider-boundary-replay");
+    });
+}
+
+#[test]
 fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
     with_temp_home(|| {
         let run_id = "run-contract-import-diagnostics";

@@ -35,8 +35,8 @@ pub use args::{
     AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, DiagnoseArgs, EvidenceArgs, FinalizePrArgs,
-    GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, ProvidersArgs, RetryArgs, ReviewArgs,
-    RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, ProvidersArgs, ReplayProviderBoundaryArgs,
+    RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -69,6 +69,9 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Artifacts(status_args) => status::artifacts(status_args),
         AgentTaskCommand::Evidence(evidence_args) => status::evidence(evidence_args),
         AgentTaskCommand::Diagnose(diagnose_args) => status::diagnose(diagnose_args),
+        AgentTaskCommand::ReplayProviderBoundary(replay_args) => {
+            status::replay_provider_boundary(replay_args)
+        }
         AgentTaskCommand::Cancel(cancel_args) => status::cancel(cancel_args),
         AgentTaskCommand::Resume(status_args) => run::resume(status_args),
         AgentTaskCommand::Retry(retry_args) => run::retry(retry_args),

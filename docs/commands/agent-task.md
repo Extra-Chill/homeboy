@@ -32,12 +32,20 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `latest [--limit <n>]` | Show the latest durable run. |
 | `logs <run-id>` | Read durable run scheduler events. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
+| `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. |
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
 `agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task active --reconcile` cancels stale, suspect, or unreconciled active records through the durable lifecycle path; add `--dry-run` to report candidates without mutating records.
+
+`agent-task replay-provider-boundary <run-id>` is a focused inspect/replay path for
+provider-boundary debugging. It loads saved `executor-input` evidence, projects the
+normalized `runtime_task`, provider config, `runtime_component_paths`,
+`runtime_env`, artifact declarations, and package descriptor, then persists the
+inspection as `provider-boundary-replay` evidence. Use `--task <task-id>` for
+multi-task runs.
 
 ### Durable Fanout Batches
 

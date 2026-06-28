@@ -239,6 +239,8 @@ pub enum AgentTaskCommand {
     Evidence(EvidenceArgs),
     /// Lifecycle: hydrate run evidence into a structured diagnostic report.
     Diagnose(DiagnoseArgs),
+    /// Provider: inspect the latest raw executor input at the provider boundary.
+    ReplayProviderBoundary(ReplayProviderBoundaryArgs),
     /// Lifecycle: mark a queued or stale-running durable agent-task run as cancelled.
     Cancel(CancelArgs),
     /// Lifecycle: resume a queued or stale-running durable run.
@@ -689,6 +691,16 @@ pub struct EvidenceArgs {
 pub struct DiagnoseArgs {
     /// Durable run id returned by `agent-task submit` or `agent-task run-plan --record-run-id`.
     pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ReplayProviderBoundaryArgs {
+    /// Durable run id whose latest executor input should be inspected.
+    pub run_id: String,
+
+    /// Task id to inspect when the run has multiple executor-input evidence refs.
+    #[arg(long = "task", value_name = "TASK_ID")]
+    pub task: Option<String>,
 }
 
 #[derive(Args, Debug)]

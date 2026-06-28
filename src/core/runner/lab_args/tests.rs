@@ -474,6 +474,60 @@ mod provider_config_remap_tests {
     }
 
     #[test]
+    fn remap_normalizes_runtime_env_alias_to_structured_component_path() {
+        let config = serde_json::json!({
+            "runtime_component_paths": {
+                "agent_runtime": "/runner/data-machine-patched"
+            },
+            "runtime_env": {
+                "WP_CODEBOX_DATA_MACHINE_PATH": "/runner/data-machine-stale"
+            },
+            "runtime_env_path_aliases": {
+                "agent_runtime": "WP_CODEBOX_DATA_MACHINE_PATH"
+            }
+        })
+        .to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--provider-config".to_string(),
+            config,
+        ];
+
+        let out = remap_provider_config_in_args(&args, &[]).expect("remap provider config");
+        let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
+        let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
+
+        assert_eq!(
+            remapped["runtime_env"]["WP_CODEBOX_DATA_MACHINE_PATH"],
+            "/runner/data-machine-patched"
+        );
+        assert_eq!(
+            remapped["runtime_env_path_alias_diagnostics"][0]["component_path_field"],
+            "runtime_component_paths.agent_runtime"
+        );
+        assert_eq!(
+            remapped["runtime_env_path_alias_diagnostics"][0]["env_field"],
+            "runtime_env.WP_CODEBOX_DATA_MACHINE_PATH"
+        );
+        assert_eq!(
+            remapped["runtime_env_path_alias_diagnostics"][0]["selected_path"],
+            "/runner/data-machine-patched"
+        );
+        assert_eq!(
+            remapped["runtime_env_path_alias_diagnostics"][0]["overridden_path"],
+            "/runner/data-machine-stale"
+        );
+        assert!(
+            remapped["runtime_env_path_alias_diagnostics"][0]["precedence"]
+                .as_str()
+                .expect("precedence")
+                .contains("runtime_component_paths wins")
+        );
+    }
+
+    #[test]
     fn remap_preserves_relative_and_materialized_provider_plugin_paths() {
         // Relative paths resolve against the runner workspace, and non-string
         // entries (materialized ref objects) are left untouched. Neither should be
