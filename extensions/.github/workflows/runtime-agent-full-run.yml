@@ -698,6 +698,7 @@ jobs:
             ${{ runner.temp }}/runtime-agent-run/events.json
             ${{ runner.temp }}/runtime-agent-run/loop-result.json
             ${{ runner.temp }}/runtime-agent-run/loop-policy.json
+            ${{ runner.temp }}/runtime-agent-run/*-runtime-stderr.txt
           if-no-files-found: warn
 
       - name: Upload replay bundle artifact

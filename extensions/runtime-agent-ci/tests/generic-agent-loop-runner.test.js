@@ -444,4 +444,77 @@ function proofOutcome(request, evidenceRefs) {
   };
 }
 
+// A hard runtime failure routes the underlying agent/CLI stderr into the outcome
+// diagnostics (not its own stderr). Surface that detail to the job's stderr and
+// persist it as the runtime stderr artifact so the real crash reason is visible
+// even when a later assertion throws a generic message and results.json is never
+// written.
+(() => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-agent-stderr-surface-'));
+  const executorScript = path.join(runDir, 'failing-executor.cjs');
+  fs.writeFileSync(executorScript, `'use strict';
+const outcome = {
+  schema: 'homeboy/agent-task-outcome/v1',
+  task_id: 'technical-docs-bootstrap-flow',
+  status: 'failed',
+  summary: 'WP Codebox agent-task-run failed.',
+  diagnostics: [{
+    class: 'wp-codebox.agent_task_run_failed',
+    message: 'WP Codebox agent-task-run failed.',
+    data: { status: 1, stderr: 'PLAYGROUND_BOOT_FATAL: sandbox could not start' },
+  }],
+};
+process.stdout.write(JSON.stringify(outcome));
+process.exitCode = 1;
+`);
+
+  const runtime = {
+    id: 'wp-codebox',
+    executor: {
+      backend: 'wp-codebox',
+      invocation: { command: process.execPath, argv: [executorScript], stderr: 'inherit_on_failure' },
+    },
+  };
+  const request = {
+    schema: 'homeboy/agent-task-request/v1',
+    task_id: 'technical-docs-bootstrap-flow',
+    instructions: 'run',
+    executor: { backend: 'wp-codebox' },
+  };
+
+  const captured = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk, ...rest) => {
+    captured.push(String(chunk));
+    return originalWrite.call(process.stderr, chunk, ...rest);
+  };
+  let result;
+  try {
+    result = genericLoopRunner.runGenericAgentLoop({
+      runtime,
+      request,
+      validate: false,
+      run_dir: runDir,
+    });
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  const stderrText = captured.join('');
+  assert.ok(
+    stderrText.includes('PLAYGROUND_BOOT_FATAL: sandbox could not start'),
+    'failed runtime outcome diagnostics must be surfaced to stderr'
+  );
+
+  const stderrFile = path.join(runDir, 'technical-docs-bootstrap-flow-runtime-stderr.txt');
+  assert.ok(fs.existsSync(stderrFile), 'runtime stderr artifact file must be written on failure');
+  assert.ok(
+    fs.readFileSync(stderrFile, 'utf8').includes('PLAYGROUND_BOOT_FATAL: sandbox could not start'),
+    'runtime stderr artifact must contain the underlying failure detail'
+  );
+  assert.equal(result.outcome.status, 'failed');
+
+  fs.rmSync(runDir, { recursive: true, force: true });
+})();
+
 process.stdout.write('Generic agent loop runner behavior checks passed\n');

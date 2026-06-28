@@ -352,7 +352,63 @@ function executeRuntimeProvider(options = {}) {
     };
   }
   const outcome = JSON.parse(stdout);
-  return captureInvocationResult(outcome, invocation, result, { stderrArtifact });
+  const failureArtifact = surfaceFailedRuntimeOutcome(outcome, { ...options, invocation, result, stderrArtifact });
+  return captureInvocationResult(outcome, invocation, result, { stderrArtifact: failureArtifact || stderrArtifact });
+}
+
+function isFailedRuntimeOutcome(outcome) {
+  if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) {
+    return false;
+  }
+  if (outcome.success === false) {
+    return true;
+  }
+  return ['failed', 'error'].includes(String(outcome.status || '').toLowerCase());
+}
+
+function failedRuntimeOutcomeDetail(outcome) {
+  const lines = [];
+  if (outcome.summary) {
+    lines.push(`summary: ${outcome.summary}`);
+  }
+  for (const diagnostic of normalizeArray(outcome.diagnostics)) {
+    const diagnosticClass = diagnostic.class || diagnostic.kind || diagnostic.code || '';
+    lines.push(`diagnostic${diagnosticClass ? ` [${diagnosticClass}]` : ''}: ${diagnostic.message || ''}`);
+    const detail = diagnostic.data && typeof diagnostic.data === 'object'
+      ? (diagnostic.data.stderr || diagnostic.data.error || '')
+      : '';
+    if (detail) {
+      lines.push(String(detail));
+    }
+  }
+  return lines.join('\n').trim();
+}
+
+// Surface the real failure reason from a failed runtime outcome to the job's
+// stderr (so it lands in CI logs) and persist it as the runtime stderr artifact.
+// The runtime executor routes the underlying agent/CLI stderr into the outcome's
+// diagnostics rather than its own stderr, so without this the only thing a hard
+// failure leaves behind is a later generic assertion message — the actual crash
+// reason is lost because results.json is never written once the loop throws.
+function surfaceFailedRuntimeOutcome(outcome, options = {}) {
+  if (!isFailedRuntimeOutcome(outcome)) {
+    return options.stderrArtifact || null;
+  }
+  const detail = failedRuntimeOutcomeDetail(outcome);
+  if (!detail) {
+    return options.stderrArtifact || null;
+  }
+  if (options.stderr !== false) {
+    process.stderr.write(`${boundedText(detail, options.stderrMaxBytes || options.stderr_max_bytes || DEFAULT_STDIO_SUMMARY_BYTES)}\n`);
+  }
+  if (options.stderrArtifact) {
+    return options.stderrArtifact;
+  }
+  const artifact = persistRuntimeInvocationStderr(detail, options);
+  if (artifact && options.stderr !== false) {
+    process.stderr.write(`Runtime failure detail artifact: ${artifact.path}\n`);
+  }
+  return artifact;
 }
 
 function runtimeInvocationEnv(options = {}) {
