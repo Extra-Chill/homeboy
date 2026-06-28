@@ -64,7 +64,7 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 		})),
 		...(readinessBlocker ? [readinessBlocker] : []),
 	];
-	const status = validation.ok ? (readinessBlocker?.blocking ? 'blocked' : (missingCapabilities.length > 0 || readinessBlocker ? 'skipped' : 'ready')) : 'blocked';
+	const status = validation.ok ? (readinessBlocker?.status || (readinessBlocker?.blocking ? 'blocked' : (missingCapabilities.length > 0 || readinessBlocker ? 'planned' : 'ready'))) : 'blocked';
 
 	return stripUndefined({
 		schema: WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_SCHEMA,
@@ -94,7 +94,18 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 
 function runtimeReadinessBlockerForOperation(family, testCase = {}, readiness) {
 	const source = objectOrUndefined(readiness);
+	const operationKind = readinessOperationKindForFamily(family, testCase);
 	if (!source) {
+		if (operationKind === 'mutation') {
+			return {
+				code: 'wp-codebox-fuzz-live-readiness-required',
+				message: 'Mutating runtime workload operations require live WP Codebox readiness evidence before executable status can be claimed.',
+				operation_kind: operationKind,
+				skip_reason: 'wp-codebox-fuzz-live-readiness-required',
+				status: 'planned',
+				blocker: true,
+			};
+		}
 		return undefined;
 	}
 	if (source.command_available === false) {
@@ -110,7 +121,16 @@ function runtimeReadinessBlockerForOperation(family, testCase = {}, readiness) {
 	if (operationKinds.length === 0) {
 		return undefined;
 	}
-	const operationKind = readinessOperationKindForFamily(family, testCase);
+	if (operationKind === 'mutation' && !hasLiveWordPressFuzzReadinessEvidence(source)) {
+		return {
+			code: 'wp-codebox-fuzz-live-readiness-required',
+			message: 'Mutating runtime workload operations require live WP Codebox readiness evidence before executable status can be claimed.',
+			operation_kind: operationKind,
+			skip_reason: 'wp-codebox-fuzz-live-readiness-required',
+			status: 'planned',
+			blocker: true,
+		};
+	}
 	if (!operationKinds.includes(operationKind)) {
 		return {
 			code: 'unsupported-runtime-workload-operation-kind',
@@ -152,6 +172,11 @@ function runtimeReadinessBlockerForOperation(family, testCase = {}, readiness) {
 	return undefined;
 }
 
+function hasLiveWordPressFuzzReadinessEvidence(readiness = {}) {
+	return readiness.schema === 'wp-codebox/fuzz-runner-readiness/v1'
+		&& ['ready', 'blocked', 'unsupported'].includes(String(readiness.status || ''));
+}
+
 function readinessSupportsMutationIsolation(readiness = {}) {
 	const capabilities = objectOrUndefined(readiness.capabilities) || {};
 	const mutation = objectOrUndefined(readiness.mutation) || objectOrUndefined(capabilities.mutation) || {};
@@ -187,6 +212,10 @@ function readinessSupportsDeleteBoundary(readiness = {}) {
 
 function readinessOperationKindForFamily(family, testCase = {}) {
 	if (family === 'crud') {
+		const action = String(testCase.operation?.action || testCase.metadata?.crud?.action || '').toLowerCase();
+		if (['create', 'update', 'delete'].includes(action)) {
+			return 'mutation';
+		}
 		return 'crud';
 	}
 	const mutationLifecycle = normalizeWordPressFuzzMutationLifecycleContract(testCase.metadata?.mutation_lifecycle || testCase.metadata?.mutationLifecycle || testCase.mutation_lifecycle || testCase.mutationLifecycle) || {};
@@ -290,9 +319,19 @@ function requiredInputFieldsForFamily(family, input = {}) {
 		return input.table || input.query || input.statement ? [] : ['query'];
 	}
 	if (family === 'sequence') {
-		return ['steps'];
+		return ['steps', ...missingSequenceOperationFields(input)];
 	}
 	return [];
+}
+
+function missingSequenceOperationFields(input = {}) {
+	const steps = Array.isArray(input.steps) ? input.steps : [];
+	if (steps.length === 0) {
+		return [];
+	}
+	return steps.some((step) => !objectOrUndefined(step.operation || step.runtime_operation || step.runtimeOperation))
+		? ['steps[].operation']
+		: [];
 }
 
 function validationDiagnostic(code, message, path) {

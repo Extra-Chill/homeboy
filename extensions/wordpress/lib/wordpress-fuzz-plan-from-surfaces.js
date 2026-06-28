@@ -30,6 +30,11 @@ const {
 const {
 	attachWordPressFuzzRuntimeWorkloadOperationDescriptor,
 } = require('./wordpress-fuzz-runtime-workload-operations');
+const {
+	RANDOM_WALK_RUNTIME_CONTRACT_UNAVAILABLE_REASON,
+	STATEFUL_SEQUENCE_RUNTIME_CONTRACT_UNAVAILABLE_REASON,
+	declaredOnlyRuntimeActionFields,
+} = require('./wordpress-fuzz-runtime-action-contracts');
 
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const DB_MUTATION_REQUIRED_CAPABILITIES = requiredCapabilitiesForWordPressFuzzCase('db_mutation');
@@ -675,17 +680,20 @@ function randomWalkCaseFromSurface(surface, context, options = {}) {
 		intent: `${context}-random-walk`,
 		operation_id: `${surface.id}:${context}:random-walk`,
 		operation: stripUndefined({ ...operationForSurface(surface), runtime_action: 'random_walk', context, start_url: startUrl }),
+		executable: false,
+		execution_tier: 'plan_only',
 		seed,
 		target: { kind: 'runtime-action', id: 'wordpress.browser-actions', entrypoint: 'wordpress.browser-actions' },
 		input,
 		required_capabilities: requiredCapabilities,
-		skip_reasons: reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
+		skip_reasons: reasonList([...normalizeArray(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason), RANDOM_WALK_RUNTIME_CONTRACT_UNAVAILABLE_REASON]),
 		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
 		metadata: stripUndefined({
 			surface,
 			random_walk: replay,
 			replay,
 			reset: input.reset_policy,
+			...declaredOnlyRuntimeActionFields(),
 			safety: { mutation: 'bounded_random_user_actions', reset_required: true },
 		}),
 	}, options.runtimeCapabilities || options.runtime_capabilities, {
@@ -1348,16 +1356,19 @@ function statefulSequenceTargetsFromSurfaces(surfaces = [], options = {}) {
 			intent: 'stateful-sequence',
 			operation_id: 'wordpress-stateful-sequence:random-walk',
 			operation: { runtime_action: 'stateful_sequence', steps },
+			executable: false,
+			execution_tier: 'plan_only',
 			seed,
 			target: { kind: 'runtime-action', id: 'wordpress.run-stateful-sequence', entrypoint: 'wordpress.run-stateful-sequence' },
 			input,
 			required_capabilities: ['sequence', 'snapshot', 'restore'],
-			skip_reasons: [],
+			skip_reasons: [STATEFUL_SEQUENCE_RUNTIME_CONTRACT_UNAVAILABLE_REASON],
 			destructive_reasons: ['stateful-sequence-may-mutate'],
 			metadata: {
 				sequence: replay,
 				replay,
 				reset: input.reset_policy,
+				...declaredOnlyRuntimeActionFields(),
 				safety: { mutation: 'bounded_stateful_sequence', reset_required: true },
 			},
 		}, options.runtimeCapabilities || options.runtime_capabilities, {
