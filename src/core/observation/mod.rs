@@ -9,6 +9,7 @@ pub mod context;
 pub mod disk_budget;
 pub mod evidence_report;
 mod lifecycle;
+pub mod loop_inventory_run;
 pub mod observed_workflow;
 pub mod records;
 mod run_failure_causes;
@@ -21,6 +22,8 @@ pub use lifecycle::{
     finish_run_best_effort, merge_metadata, run_owner_pid, running_status_note, ActiveObservation,
     ACTIVE_RUN_ID_ENV,
 };
+
+pub use loop_inventory_run::persist_loop_inventory_run;
 
 pub use budget_findings::finding_records_from_budget;
 pub use context::{RunContext, RunProvenance};

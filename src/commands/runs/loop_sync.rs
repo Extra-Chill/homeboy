@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use homeboy::core::observation::{ArtifactRecord, NewRunRecord, ObservationStore, RunStatus};
+use homeboy::core::observation::{persist_loop_inventory_run, ArtifactRecord, NewRunRecord};
 use homeboy::core::{Error, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -156,26 +156,20 @@ fn persist_loop_inventory(
     triage: &LoopTriageSummary,
     args: &RunsLoopSyncArgs,
 ) -> Result<(Option<String>, Vec<ArtifactRecord>)> {
-    let store = ObservationStore::open_initialized()?;
-    let run = store.start_run(loop_run_record(inventory, triage, args))?;
-    let mut artifacts = Vec::new();
+    let indexed_artifacts = files_for_artifact_index(inventory)
+        .into_iter()
+        .map(|file| {
+            let kind = classify_file(&file).to_string();
+            (file, kind)
+        })
+        .collect::<Vec<_>>();
 
-    for archive in &inventory.archives {
-        if archive.is_dir() {
-            artifacts.push(store.record_directory_artifact(&run.id, "loop_archive", archive)?);
-        } else if archive.is_file() {
-            artifacts.push(store.record_artifact(&run.id, "loop_archive", archive)?);
-        }
-    }
-
-    for file in files_for_artifact_index(inventory) {
-        if file.is_file() {
-            artifacts.push(store.record_artifact(&run.id, classify_file(&file), file)?);
-        }
-    }
-
-    let finished = store.finish_run(&run.id, RunStatus::Pass, None)?;
-    Ok((Some(finished.id), artifacts))
+    let (run_id, artifacts) = persist_loop_inventory_run(
+        loop_run_record(inventory, triage, args),
+        &inventory.archives,
+        &indexed_artifacts,
+    )?;
+    Ok((Some(run_id), artifacts))
 }
 
 fn loop_run_record(

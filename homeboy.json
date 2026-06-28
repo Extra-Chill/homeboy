@@ -682,8 +682,7 @@
         "test_quality::tests/command_surface_test.rs::VacuousTest",
         "thin_command_adapter::src/commands/observe.rs::ThinCommandAdapterViolation",
         "thin_command_adapter::src/commands/review/mod.rs::ThinCommandAdapterViolation",
-        "thin_command_adapter::src/commands/runs/gh_actions.rs::ThinCommandAdapterViolation",
-        "thin_command_adapter::src/commands/runs/loop_sync.rs::ThinCommandAdapterViolation"
+        "thin_command_adapter::src/commands/runs/gh_actions.rs::ThinCommandAdapterViolation"
       ],
       "metadata": {
         "alignment_score": 0.9021739363670349,
