@@ -40,6 +40,10 @@ where
     let mut orphaned_pending_action_count = 0;
     let acceptance_gates = acceptance_gate_diagnostics(record);
     let failed_child_actions = failed_child_action_diagnostics(record);
+    let controller_state = controller_state_diagnostic(record);
+    let relevant_action = relevant_action_diagnostic(record);
+    let next_commands =
+        controller_next_commands(record, &controller_state, relevant_action.as_ref());
     let missing_acceptance_gate_count = acceptance_gates
         .iter()
         .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Missing)
@@ -119,10 +123,171 @@ where
             failed_acceptance_gate_count,
             pending_acceptance_gate_count,
         },
+        controller_state,
+        relevant_action,
+        next_commands,
         failed_child_actions,
         pending_actions,
         acceptance_gates,
     })
+}
+
+fn controller_state_diagnostic(
+    record: &AgentTaskLoopControllerRecord,
+) -> AgentTaskLoopControllerStateDiagnostic {
+    if runtime_is_off(&record.metadata) {
+        return AgentTaskLoopControllerStateDiagnostic {
+            state: "paused_off".to_string(),
+            label: "paused/off".to_string(),
+            actionable: true,
+            reason:
+                "loop runtime metadata is off; resume only after intentionally turning the loop on"
+                    .to_string(),
+        };
+    }
+
+    if record
+        .next_actions
+        .iter()
+        .any(|action| action.status == AgentTaskLoopActionStatus::Running)
+    {
+        return AgentTaskLoopControllerStateDiagnostic {
+            state: "running_active_work".to_string(),
+            label: "running with active work".to_string(),
+            actionable: false,
+            reason: "at least one controller action is currently running".to_string(),
+        };
+    }
+
+    if record.next_actions.iter().any(is_failed_or_blocked_action) {
+        return AgentTaskLoopControllerStateDiagnostic {
+            state: "running_blocked_failed_action".to_string(),
+            label: "running but blocked on failed action".to_string(),
+            actionable: true,
+            reason: "controller is marked running, but a failed or blocked action must be resolved before ordinary progress is safe".to_string(),
+        };
+    }
+
+    if record
+        .next_actions
+        .iter()
+        .any(|action| action.status == AgentTaskLoopActionStatus::Pending)
+    {
+        return AgentTaskLoopControllerStateDiagnostic {
+            state: "running_pending_work".to_string(),
+            label: "running with pending work".to_string(),
+            actionable: true,
+            reason: "pending controller actions are available to run".to_string(),
+        };
+    }
+
+    AgentTaskLoopControllerStateDiagnostic {
+        state: format!("{:?}", record.state).to_ascii_lowercase(),
+        label: format!("{:?}", record.state).to_ascii_lowercase(),
+        actionable: !matches!(record.state, AgentTaskLoopControllerState::Completed),
+        reason: "no failed, running, or pending action is recorded".to_string(),
+    }
+}
+
+fn runtime_is_off(metadata: &Value) -> bool {
+    metadata
+        .get("runtime")
+        .and_then(|runtime| runtime.get("on"))
+        .and_then(Value::as_bool)
+        == Some(false)
+}
+
+fn relevant_action_diagnostic(
+    record: &AgentTaskLoopControllerRecord,
+) -> Option<AgentTaskLoopRelevantActionDiagnostic> {
+    let action = record
+        .next_actions
+        .iter()
+        .rev()
+        .find(|action| is_failed_or_blocked_action(action))
+        .or_else(|| {
+            record
+                .next_actions
+                .iter()
+                .find(|action| action.status == AgentTaskLoopActionStatus::Running)
+        })
+        .or_else(|| {
+            record
+                .next_actions
+                .iter()
+                .find(|action| action.status == AgentTaskLoopActionStatus::Pending)
+        })?;
+    let action_value = action_value(action);
+    Some(AgentTaskLoopRelevantActionDiagnostic {
+        action_id: action.action_id.clone(),
+        action: action_name(&action.action).to_string(),
+        status: action.status,
+        dedupe_key: action.dedupe_key.clone(),
+        selected_executor: selected_executor_diagnostic(action_value.as_ref(), &record.metadata),
+        referenced_run_id: action_referenced_run_id(action, record),
+    })
+}
+
+fn selected_executor_diagnostic(
+    action: Option<&Value>,
+    metadata: &Value,
+) -> Option<AgentTaskLoopSelectedExecutorDiagnostic> {
+    let executor = AgentTaskLoopSelectedExecutorDiagnostic {
+        backend: first_dispatch_backend(action, metadata),
+        selector: first_dispatch_selector(action, metadata),
+        model: first_dispatch_model(action, metadata),
+    };
+    (executor.backend.is_some() || executor.selector.is_some() || executor.model.is_some())
+        .then_some(executor)
+}
+
+fn controller_next_commands(
+    record: &AgentTaskLoopControllerRecord,
+    controller_state: &AgentTaskLoopControllerStateDiagnostic,
+    relevant_action: Option<&AgentTaskLoopRelevantActionDiagnostic>,
+) -> Vec<String> {
+    let loop_id = shell_arg(&record.loop_id);
+    match controller_state.state.as_str() {
+        "paused_off" => vec![format!(
+            "homeboy agent-task loop resume {loop_id}  # turns the loop back on and resumes pending work"
+        )],
+        "running_active_work" => vec![format!(
+            "homeboy agent-task controller status {loop_id}  # active work is still running"
+        )],
+        "running_blocked_failed_action" => {
+            let mut commands = vec![format!(
+                "homeboy agent-task controller diagnose {loop_id}  # inspect failed action evidence"
+            )];
+            if let Some(action) = relevant_action {
+                commands.push(format!(
+                    "homeboy agent-task controller run {loop_id} --action-id {}  # retry this persisted action",
+                    shell_arg(&action.action_id)
+                ));
+            }
+            commands.push(format!(
+                "homeboy agent-task controller from-spec <spec> --resume --fork  # start fresh with a new backend/spec without changing this state"
+            ));
+            commands.push(format!(
+                "homeboy agent-task controller from-spec <spec> --resume --replace  # discard this persisted controller state"
+            ));
+            commands.push(format!(
+                "homeboy agent-task controller from-spec <spec> --resume-existing  # intentionally continue this persisted state"
+            ));
+            commands
+        }
+        "running_pending_work" => vec![format!("homeboy agent-task controller resume {loop_id}")],
+        _ => vec![format!("homeboy agent-task controller status {loop_id}")],
+    }
+}
+
+fn is_failed_or_blocked_action(action: &AgentTaskLoopPolicyActionRecord) -> bool {
+    matches!(
+        action.status,
+        AgentTaskLoopActionStatus::Failed
+            | AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+            | AgentTaskLoopActionStatus::BlockedRemoteMaterialization
+            | AgentTaskLoopActionStatus::BlockedLocalFallbackDenied
+    )
 }
 
 fn failed_child_action_diagnostics(

@@ -37,12 +37,48 @@ pub struct AgentTaskLoopControllerDiagnostics {
     pub schema: String,
     pub stale_pending_threshold_seconds: i64,
     pub summary: AgentTaskLoopControllerDiagnosticSummary,
+    pub controller_state: AgentTaskLoopControllerStateDiagnostic,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relevant_action: Option<AgentTaskLoopRelevantActionDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_commands: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_child_actions: Vec<AgentTaskLoopFailedChildActionDiagnostic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_actions: Vec<AgentTaskLoopPendingActionDiagnostic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acceptance_gates: Vec<AgentTaskLoopAcceptanceGateDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopControllerStateDiagnostic {
+    pub state: String,
+    pub label: String,
+    pub actionable: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopRelevantActionDiagnostic {
+    pub action_id: String,
+    pub action: String,
+    pub status: AgentTaskLoopActionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_executor: Option<AgentTaskLoopSelectedExecutorDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referenced_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopSelectedExecutorDiagnostic {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

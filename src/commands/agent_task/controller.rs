@@ -4,7 +4,8 @@
 use serde_json::Value;
 
 use homeboy::core::agent_task_controller_service::{
-    build_run_failure_summary, init_from_spec_for_resume_with_resolution,
+    build_run_failure_summary, controller_spec_fingerprint_for_status,
+    init_from_spec_for_resume_with_resolution, spec_fingerprint_for_status,
     ControllerResumeStateResolution,
 };
 use homeboy::core::agent_task_loop_definition::{
@@ -31,8 +32,9 @@ use super::args::{
     AgentTaskControllerDispatchArgs, AgentTaskControllerFromSpecArgs,
     AgentTaskControllerMaterializeArgs, AgentTaskControllerPlanArgs, AgentTaskControllerProofArgs,
     AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
-    AgentTaskControllerValidateProofArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
-    AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs,
+    AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs, AgentTaskLoopArgs,
+    AgentTaskLoopCommand, AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs,
+    AgentTaskLoopStatusArgs,
 };
 use super::command_json_value;
 
@@ -56,21 +58,24 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
         }
         AgentTaskControllerCommand::Plan(plan_args) => controller_plan(plan_args),
         AgentTaskControllerCommand::Status(status_args) => {
-            let report = homeboy::core::agent_tasks::loop_controller::controller_status_report(
-                &status_args.loop_id,
-            )?;
-            Ok((command_json_value(report)?, 0))
+            let value = controller_status_report_value(status_args)?;
+            Ok((command_json_value(value)?, 0))
         }
         AgentTaskControllerCommand::Diagnose(status_args) => {
-            let report = homeboy::core::agent_tasks::loop_controller::controller_status_report(
-                &status_args.loop_id,
-            )?;
+            let report = controller_status_report_value(status_args)?;
+            let loop_id = report["controller"]["loop_id"]
+                .as_str()
+                .unwrap_or("<loop-id>");
             Ok((
                 command_json_value(serde_json::json!({
                     "schema": "homeboy/agent-task-loop-controller-diagnose-result/v1",
-                    "loop_id": status_args.loop_id,
-                    "failed_child_actions": report.diagnostics.failed_child_actions,
-                    "next_command": format!("homeboy agent-task controller status {}", status_args.loop_id),
+                    "loop_id": loop_id,
+                    "controller_state": report["diagnostics"]["controller_state"].clone(),
+                    "relevant_action": report["diagnostics"]["relevant_action"].clone(),
+                    "requested_context": report["diagnostics"]["requested_context"].clone(),
+                    "failed_child_actions": report["diagnostics"]["failed_child_actions"].clone(),
+                    "next_commands": report["diagnostics"]["next_commands"].clone(),
+                    "next_command": format!("homeboy agent-task controller status {}", loop_id),
                 }))?,
                 0,
             ))
@@ -95,6 +100,108 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
         }
         AgentTaskControllerCommand::Proof(proof_args) => controller_proof(proof_args),
     }
+}
+
+fn controller_status_report_value(
+    args: AgentTaskControllerStatusArgs,
+) -> homeboy::core::Result<Value> {
+    let report =
+        homeboy::core::agent_tasks::loop_controller::controller_status_report(&args.loop_id)?;
+    let mut value = serde_json::to_value(report)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    if args.spec.is_some()
+        || args.dispatch.dispatch_backend.is_some()
+        || args.dispatch.dispatch_selector.is_some()
+        || args.dispatch.dispatch_model.is_some()
+        || args.dispatch.dispatch_provider_config.is_some()
+    {
+        let requested = requested_controller_status_context(&value, &args)?;
+        if let Some(diagnostics) = value.get_mut("diagnostics").and_then(Value::as_object_mut) {
+            diagnostics.insert("requested_context".to_string(), requested);
+        }
+    }
+    Ok(value)
+}
+
+fn requested_controller_status_context(
+    report: &Value,
+    args: &AgentTaskControllerStatusArgs,
+) -> homeboy::core::Result<Value> {
+    let persisted_spec_fingerprint = report.get("controller").and_then(|controller| {
+        serde_json::from_value(controller.clone())
+            .ok()
+            .and_then(|record| controller_spec_fingerprint_for_status(&record))
+    });
+    let requested_spec_fingerprint = if let Some(spec_source) = &args.spec {
+        let raw = config::read_json_spec_to_string(spec_source)?;
+        let spec: AgentTaskRepoLoopSpec = serde_json::from_str(&raw).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "spec",
+                error.to_string(),
+                Some(spec_source.to_string()),
+                None,
+            )
+        })?;
+        Some(spec_fingerprint_for_status(&spec)?)
+    } else {
+        None
+    };
+    let persisted_executor = report
+        .pointer("/diagnostics/relevant_action/selected_executor")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let requested_executor = serde_json::json!({
+        "backend": args.dispatch.dispatch_backend,
+        "selector": args.dispatch.dispatch_selector,
+        "model": args.dispatch.dispatch_model,
+        "provider_config_summary": requested_provider_config_summary(args.dispatch.dispatch_provider_config.as_deref()),
+    });
+    let stale_spec = requested_spec_fingerprint.is_some()
+        && persisted_spec_fingerprint != requested_spec_fingerprint;
+    let executor_mismatch = requested_executor_mismatch(&persisted_executor, &requested_executor);
+
+    Ok(serde_json::json!({
+        "schema": "homeboy/agent-task-loop-controller-requested-context/v1",
+        "persisted_spec_fingerprint": persisted_spec_fingerprint,
+        "requested_spec_fingerprint": requested_spec_fingerprint,
+        "stale_spec": stale_spec,
+        "persisted_executor": persisted_executor,
+        "requested_executor": requested_executor,
+        "executor_mismatch": executor_mismatch,
+        "guidance": requested_context_guidance(stale_spec, executor_mismatch),
+    }))
+}
+
+fn requested_executor_mismatch(persisted: &Value, requested: &Value) -> bool {
+    ["backend", "selector", "model"].into_iter().any(|key| {
+        let requested_value = requested.get(key).and_then(Value::as_str);
+        requested_value.is_some() && requested_value != persisted.get(key).and_then(Value::as_str)
+    })
+}
+
+fn requested_context_guidance(stale_spec: bool, executor_mismatch: bool) -> Vec<String> {
+    if stale_spec || executor_mismatch {
+        return vec![
+            "Use --fork to launch the requested spec/backend without mutating persisted state.".to_string(),
+            "Use --replace to discard persisted state and run the requested spec/backend under this loop id.".to_string(),
+            "Use --resume-existing only when intentionally continuing the persisted state/backend.".to_string(),
+        ];
+    }
+    vec!["Persisted state matches the supplied status context; resume is the safe continuation path.".to_string()]
+}
+
+fn requested_provider_config_summary(raw: Option<&str>) -> Value {
+    let Some(raw) = raw else {
+        return Value::Null;
+    };
+    let parsed = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
+    let mut summary = serde_json::Map::new();
+    for key in ["provider", "model", "runtime", "backend", "selector"] {
+        if let Some(value) = parsed.get(key).and_then(Value::as_str) {
+            summary.insert(key.to_string(), Value::String(value.to_string()));
+        }
+    }
+    Value::Object(summary)
 }
 
 pub(super) fn loop_command(args: AgentTaskLoopArgs) -> CmdResult<Value> {
