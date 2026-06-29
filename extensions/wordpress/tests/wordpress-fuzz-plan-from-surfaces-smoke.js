@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 
 const {
-	buildWordPressFuzzPlanFromSurfaces,
+	buildWordPressFuzzPlanFromSurfaces: buildWordPressFuzzPlanFromSurfacesBase,
 	collectWordPressFuzzPlanSurfaces,
 } = require('../lib/wordpress-fuzz-plan-from-surfaces');
 const {
@@ -37,6 +37,39 @@ const manifest = {
 	admin: [{ id: 'admin:posts', path: '/wp-admin/edit.php' }],
 	rest: [{ id: 'rest:wp-v2-posts', method: 'GET', route: '/wp/v2/posts' }],
 };
+
+function actionContract(action) {
+	return {
+		schema: 'wp-codebox/wordpress-runtime-action/v1',
+		action,
+		ability: `wp-codebox/runtime-action/${action}`,
+	};
+}
+
+const codeboxRuntimeContracts = {
+	schema: 'wp-codebox/wordpress-runtime-action-contracts/v1',
+	actions: Object.fromEntries([
+		'rest_request',
+		'crud_operation',
+		'admin_page_load',
+		'frontend_page_load',
+		'block_render',
+		'block_editor',
+		'db_query',
+		'wp_cli',
+		'login_as',
+		'nonce_for',
+		'checkpoint',
+		'restore',
+		'reset_state',
+		'replay_case',
+		'minimize_case',
+	].map((action) => [action, actionContract(action)])),
+};
+
+function buildWordPressFuzzPlanFromSurfaces(input, options = {}) {
+	return buildWordPressFuzzPlanFromSurfacesBase(input, { codeboxRuntimeContracts, ...options });
+}
 
 const surfaces = collectWordPressFuzzPlanSurfaces(manifest);
 assert.equal(surfaces.length, 16);
@@ -89,8 +122,8 @@ assert(targetTypes.role.operation_id.includes('check-role-boundary'));
 assert.equal(targetTypes['rest-route'].cases[0].runtime_operation.command, 'wordpress.rest-request');
 assert.equal(targetTypes['admin-page'].cases[0].runtime_operation.command, 'wordpress.admin-page-load');
 assert.equal(targetTypes['frontend-url'].cases[0].runtime_operation.command, 'wordpress.frontend-page-load');
-assert.equal(targetTypes.block.cases[0].runtime_operation.command, 'wordpress.run-php');
-assert.equal(targetTypes['db-query'].cases[0].runtime_operation.command, 'wordpress.run-php');
+assert.equal(targetTypes.block.cases[0].runtime_operation.command, 'wordpress.block-render');
+assert.equal(targetTypes['db-query'].cases[0].runtime_operation.command, 'wordpress.db-query');
 assert.equal(targetTypes.block.cases[0].operation.block_name, 'core/paragraph');
 assert.deepEqual(targetTypes.block.cases.map((testCase) => testCase.intent), ['render-block', 'serialize-parse-block', 'insert-block-in-editor']);
 assert.equal(targetTypes.block.cases[0].metadata.safety.mutation, 'read_only');
@@ -243,7 +276,7 @@ const randomWalkDeclaredPlan = buildWordPressFuzzPlanFromSurfaces({
 }, {
 	seed: 'walk-seed',
 	mutation_mode: 'aggressive-isolated',
-	runtimeCapabilities: { capabilities: ['browser', 'block-editor', 'snapshot', 'restore', 'reset'] },
+	runtimeCapabilities: { capabilities: ['admin', 'browser', 'block', 'block-editor', 'snapshot', 'restore', 'reset'] },
 	randomWalkMaxSteps: 6,
 	randomWalkActionFamilies: ['click', 'capture'],
 });

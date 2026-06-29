@@ -15,6 +15,22 @@ const {
 	detectWordPressFuzzPlanResultGaps,
 } = require('../lib/wordpress-fuzz-campaign');
 
+function actionContract(action) {
+	return {
+		schema: 'wp-codebox/wordpress-runtime-action/v1',
+		action,
+		ability: `wp-codebox/runtime-action/${action}`,
+	};
+}
+
+const codeboxRuntimeContracts = {
+	schema: 'wp-codebox/wordpress-runtime-action-contracts/v1',
+	actions: Object.fromEntries([
+		'rest_request',
+		'admin_page_load',
+	].map((action) => [action, actionContract(action)])),
+};
+
 const campaign = compileWordPressFuzzCampaign({
 	id: 'generic-wordpress-campaign',
 	discovery_id: 'generic-runtime-surfaces',
@@ -26,7 +42,7 @@ const campaign = compileWordPressFuzzCampaign({
 	],
 }, {
 	taskId: 'generic-wordpress-campaign-task',
-	plan: { seed: 'seed-1' },
+	plan: { seed: 'seed-1', codeboxRuntimeContracts },
 });
 
 assert.equal(campaign.schema, WORDPRESS_FUZZ_CAMPAIGN_SCHEMA);
