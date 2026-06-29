@@ -126,6 +126,50 @@ fn fuzz_replay_resolves_campaign_metadata_without_executing() {
 }
 
 #[test]
+fn fuzz_replay_resolves_persisted_run_artifact_without_path() {
+    with_isolated_home(|home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                homeboy::core::observation::NewRunRecord::builder("fuzz")
+                    .component_id("component-a")
+                    .command("homeboy fuzz run component-a")
+                    .cwd_path(home.path())
+                    .build(),
+            )
+            .expect("run");
+        let path = write_replay_campaign(home.path());
+        store
+            .record_artifact(&run.id, "fuzz_results", &path)
+            .expect("artifact");
+
+        let (output, exit) = run_replay(FuzzReplayArgs {
+            component: None,
+            path: None,
+            rig: None,
+            extension_override: ExtensionOverrideArgs::default(),
+            setting_args: SettingArgs::default(),
+            artifact_or_case: None,
+            artifact: None,
+            case_id: Some("case-1".to_string()),
+            run_id: Some(run.id.clone()),
+            dry_run: true,
+            args: Vec::new(),
+        })
+        .expect("resolve run-backed replay");
+
+        assert_eq!(exit, 0);
+        assert_eq!(output.status, "dry_run");
+        assert_eq!(output.campaign_id.as_deref(), Some("campaign-1"));
+        assert_eq!(output.case_id.as_deref(), Some("case-1"));
+        assert_eq!(output.run_id.as_deref(), Some(run.id.as_str()));
+        assert!(output.artifact_file.as_deref().is_some_and(|artifact| {
+            artifact.ends_with("fuzz-results.json") && artifact != path.to_string_lossy()
+        }));
+    });
+}
+
+#[test]
 fn fuzz_replay_executes_manifest_replay_command_with_env() {
     with_isolated_home(|home| {
         let component_dir = tempfile::tempdir().expect("component dir");
