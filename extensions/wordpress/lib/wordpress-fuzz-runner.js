@@ -48,7 +48,7 @@ function readWordPressFuzzRunnerEnv(env = process.env) {
 
 function buildWordPressFuzzRunnerResult(options = {}) {
 	const context = buildWordPressFuzzRunnerContext(options);
-	const codeboxResult = normalizeCodeboxResult(context.workload, { runId: context.runId });
+	const codeboxResult = normalizeCodeboxResult(context.workload, { runId: context.runId, fixtureOnly: precomputedCodeboxResultIsFixtureOnly(context.workload) });
 	return buildWordPressFuzzRunnerSummary({ ...context, codeboxResult });
 }
 
@@ -155,7 +155,7 @@ function buildWordPressFuzzRunnerSummary({
 
 async function resolveCodeboxResult(context, options = {}) {
 	if (hasPrecomputedCodeboxResult(context.workload)) {
-		return normalizeCodeboxResult(context.workload, { runId: context.runId });
+		return normalizeCodeboxResult(context.workload, { runId: context.runId, fixtureOnly: precomputedCodeboxResultIsFixtureOnly(context.workload) });
 	}
 
 	const runner = options.runFuzzSuite || options.runRuntimeTask || options.runTask;
@@ -387,6 +387,21 @@ function firstCasePluginActivation(workload = {}) {
 function normalizeCodeboxResult(workload, context = {}) {
 	const result = precomputedCodeboxResult(workload);
 	if (result) {
+		if (context.fixtureOnly !== true) {
+			return normalizeWpCodeboxFuzzSuiteResult({
+				schema: 'wp-codebox/fuzz-suite-result/v1',
+				request_id: context.runId,
+				status: 'unsupported',
+				diagnostics: [
+					{
+						severity: 'error',
+						code: 'wp_codebox_precomputed_fuzz_result_not_fixture_only',
+						message: 'Embedded WP Codebox fuzz results are accepted only for explicit fixture-only workloads. Production fuzz execution must consume the WP Codebox runtime manifest and fuzz readiness contract.',
+					},
+				],
+				metadata: { unsupported: true, precomputed_result_blocked: true },
+			});
+		}
 		return normalizeWpCodeboxFuzzSuiteResult(result);
 	}
 	return normalizeWpCodeboxFuzzSuiteResult({
@@ -409,6 +424,13 @@ function hasPrecomputedCodeboxResult(workload = {}) {
 
 function precomputedCodeboxResult(workload = {}) {
 	return workload.wp_codebox_result || workload.wpCodeboxResult || workload.wp_codebox_suite_result || workload.wpCodeboxSuiteResult || workload.result;
+}
+
+function precomputedCodeboxResultIsFixtureOnly(workload = {}) {
+	return workload.fixture_only === true
+		|| workload.fixtureOnly === true
+		|| workload.metadata?.fixture_only === true
+		|| workload.metadata?.fixtureOnly === true;
 }
 
 function aggregateCoverage(workload, codeboxResult) {

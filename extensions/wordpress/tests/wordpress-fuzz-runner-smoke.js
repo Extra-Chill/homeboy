@@ -128,6 +128,7 @@ const executedResult = buildWordPressFuzzRunnerResult({
 	},
 	workload: {
 		...workload,
+		fixture_only: true,
 		metadata: {
 			...(workload.metadata || {}),
 			dispatch_identity: {

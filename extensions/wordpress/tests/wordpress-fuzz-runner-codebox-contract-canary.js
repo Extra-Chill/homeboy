@@ -62,6 +62,23 @@ const fs = require('node:fs');
 
 const command = process.argv[2];
 const inputFileIndex = process.argv.indexOf('--input-file');
+if (command === 'fuzz' && process.argv[3] === 'readiness' && process.argv.includes('--format=json')) {
+  process.stdout.write(JSON.stringify({
+    schema: 'wp-codebox/fuzz-runner-readiness/v1',
+    status: 'ready',
+    mode: 'runtime-backed',
+    commands: ['run-fuzz-suite', 'run-wordpress-workload'],
+    capabilities: {
+      commands: ['wordpress.rest-request', 'wordpress.run-workload'],
+      runtimeActionTypes: ['rest_request'],
+      capabilities: ['rest', 'runtime-isolation', 'artifact-export']
+    },
+    isolation: { runtime_backed: true },
+    artifacts: { export: true },
+    unsupportedRequiredCapabilities: []
+  }));
+  process.exit(0);
+}
 if (command === 'run-fuzz-suite' && process.argv.includes('--help')) {
 	process.stdout.write('usage: wp-codebox run-fuzz-suite');
 	process.exit(0);

@@ -40,6 +40,17 @@ const manifest = {
       input: 'wp-codebox/fanout-aggregation-input/v1',
       output: 'wp-codebox/fanout-aggregation-output/v1',
     },
+    wordpressRuntime: {
+      workloadRun: 'wp-codebox/wordpress-workload-run/v1',
+      fuzzSuite: 'wp-codebox/fuzz-suite/v1',
+      fuzzSuiteResult: 'wp-codebox/fuzz-suite-result/v1',
+    },
+  },
+  abilities: {
+    wordpressRuntime: {
+      runWorkload: 'wp-codebox/run-wordpress-workload',
+      runFuzzSuite: 'wp-codebox/run-fuzz-suite',
+    },
   },
   providerRuntime: {
     schema: 'wp-codebox/provider-runtime-invocation-contract/v1',

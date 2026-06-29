@@ -1252,13 +1252,8 @@ function detectWpCodeboxPublicFuzzCapabilities(options = {}) {
 		return normalizeWpCodeboxPublicFuzzCapabilitiesFromReadiness(parseWpCodeboxPublicCliJson(readiness.stdout, { command: 'fuzz readiness' }));
 	}
 
-	const commands = {};
-	for (const command of WP_CODEBOX_PUBLIC_CLI_COMMANDS) {
-		const result = runWpCodeboxPublicCliHelp(command, options);
-		commands[command] = result.status === 0;
-	}
 	return normalizeWpCodeboxPublicFuzzCapabilities({
-		commands,
+		commands: {},
 		readiness: {
 			schema: WP_CODEBOX_FUZZ_RUNNER_READINESS_SCHEMA,
 			status: 'blocked',
@@ -1327,7 +1322,7 @@ function preflightWpCodeboxFuzzCapabilityContract(options = {}) {
 	}
 
 	const missingManifestPaths = missingWpCodeboxFuzzRuntimeContractPaths(manifest);
-	if (!publicReadinessSatisfied && missingManifestPaths.length > 0) {
+	if (missingManifestPaths.length > 0) {
 		missingContracts.push({
 			type: 'runtime_contract_manifest',
 			missing_paths: missingManifestPaths,
@@ -1720,10 +1715,6 @@ function unsupportedWpCodeboxPublicFuzzResult({ request = {}, capabilities = {},
 		metadata: { readiness: { level: 'declared' }, unsupported: true, preflight },
 		diagnostics,
 	};
-}
-
-function runWpCodeboxPublicCliHelp(command, options = {}) {
-	return runWpCodeboxPublicCliCommand([command, '--help'], options);
 }
 
 async function runWpCodeboxPublicCli(command, input, options = {}) {
