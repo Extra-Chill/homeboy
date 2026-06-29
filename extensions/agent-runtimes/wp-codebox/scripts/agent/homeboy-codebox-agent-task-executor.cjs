@@ -63,6 +63,13 @@ function requireWpCodeboxCoreLoader() {
 }
 
 const DEFAULT_TASK_RUNNER = path.resolve(__dirname, 'homeboy-wp-codebox-task-runner.cjs');
+
+// Diagnostics mode. When enabled, the task-runner subprocess stderr is
+// fd-inherited so the deeper wp-codebox CLI stderr streams live to the job log.
+function runtimeAgentDebugEnabled(env = process.env) {
+  return ['1', 'true', 'yes', 'on'].includes(String(env.HOMEBOY_RUNTIME_AGENT_DEBUG || '').trim().toLowerCase());
+}
+
 function argValue(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : '';
@@ -613,12 +620,16 @@ async function runTaskRunner(request) {
     }
     return true;
   });
+  const debug = runtimeAgentDebugEnabled();
   const result = spawnSync(process.execPath, [runner, ...args, ...configArgs], {
     encoding: 'utf8',
     input: JSON.stringify(taskInput),
     env: { ...process.env, ...providerAuthEnv(taskInput) },
     maxBuffer: 1024 * 1024 * 20,
     timeout: requestTimeoutMs(request),
+    // In debug mode inherit the task-runner stderr so the wp-codebox CLI
+    // stderr streams live to this process's stderr (and onward to the job log).
+    ...(debug ? { stdio: ['pipe', 'pipe', 'inherit'] } : {}),
   });
 
   if (result.stderr) {

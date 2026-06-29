@@ -20,6 +20,8 @@ const DEFAULT_STDIO_SUMMARY_BYTES = 8192;
 const DEFAULT_RUNTIME_ENV_ALLOWLIST = [
   'CI',
   'HOME',
+  'HOMEBOY_RUNTIME_AGENT_DEBUG',
+  'HOMEBOY_RUNTIME_AGENT_RUN_DIR',
   'LANG',
   'LC_ALL',
   'LOGNAME',
@@ -30,6 +32,16 @@ const DEFAULT_RUNTIME_ENV_ALLOWLIST = [
   'TMPDIR',
   'USER',
 ];
+
+// Diagnostics mode. When enabled, the runtime executor subprocess stderr is
+// fd-inherited so the full spawn chain (executor -> task-runner -> wp-codebox
+// CLI) streams raw stderr straight to this process's stderr — which, since this
+// runner shares the process that the CI step launches, lands directly in the
+// job log in real time, even on a hard crash or timeout that produces no
+// structured outcome.
+function runtimeAgentDebugEnabled(env = process.env) {
+  return ['1', 'true', 'yes', 'on'].includes(String(env.HOMEBOY_RUNTIME_AGENT_DEBUG || '').trim().toLowerCase());
+}
 
 function buildGenericAgentLoopRequest(options = {}) {
   const plan = requiredObject(options.plan, 'plan');
@@ -328,12 +340,18 @@ function executeRuntimeProvider(options = {}) {
     throw new Error(`Runtime ${runtime.id || '(unknown)'} does not declare an executor command.`);
   }
   const spawn = options.spawnSync || spawnSync;
+  const debug = runtimeAgentDebugEnabled(options.env) || runtimeAgentDebugEnabled(process.env);
   const result = spawn(invocation.command, invocation.argv || [], {
     encoding: 'utf8',
     cwd: invocation.cwd || process.cwd(),
     input: invocationStdin(invocation, options.request),
     env: runtimeInvocationEnv({ ...options, invocation }),
     maxBuffer: 1024 * 1024 * 20,
+    // In debug mode inherit the executor stderr so the entire spawn chain's
+    // raw stderr streams live to the job log, independent of any structured
+    // outcome (which is never produced on a hard crash). stdout stays piped to
+    // capture the JSON outcome.
+    ...(debug ? { stdio: ['pipe', 'pipe', 'inherit'] } : {}),
   });
   const stderrArtifact = handleRuntimeInvocationStderr(result.stderr, { ...options, invocation, result });
   const stdout = String(result.stdout || '');

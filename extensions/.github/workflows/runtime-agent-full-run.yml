@@ -573,6 +573,10 @@ jobs:
           PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
           PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
           HOMEBOY_RUNTIME_AGENT_RUN_DIR: ${{ runner.temp }}/runtime-agent-run
+          # Stream raw subprocess stdout/stderr live to the job log so a hard
+          # crash or timeout inside the runtime agent is visible even when no
+          # structured outcome is produced. Defaulted on for diagnostics.
+          HOMEBOY_RUNTIME_AGENT_DEBUG: '1'
           HOMEBOY_RUNTIME_AGENT_RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
           HOMEBOY_AGENT_TASK_OUTCOME_FILE: ${{ runner.temp }}/runtime-agent-run/outcome.json
           HOMEBOY_RUNTIME_AGENT_EVENTS_FILE: ${{ runner.temp }}/runtime-agent-run/events.json
@@ -699,6 +703,7 @@ jobs:
             ${{ runner.temp }}/runtime-agent-run/loop-result.json
             ${{ runner.temp }}/runtime-agent-run/loop-policy.json
             ${{ runner.temp }}/runtime-agent-run/*-runtime-stderr.txt
+            ${{ runner.temp }}/runtime-agent-run/*-runtime-stdout.txt
           if-no-files-found: warn
 
       - name: Upload replay bundle artifact
