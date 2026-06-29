@@ -8,7 +8,7 @@ use homeboy::core::Error;
 use super::types::{RunsArgs, RunsArtifactArgs, RunsArtifactCommand, RunsCommand, RunsOutput};
 use super::{
     bench, compare, distribution, dossier, drift, evidence, findings, fuzz_compare, handlers,
-    hotspots, latest, loop_sync, query, reconcile, refs,
+    hotspots, latest, loop_sync, proof, query, reconcile, refs,
 };
 use super::{CmdResult, GlobalArgs};
 
@@ -21,6 +21,12 @@ impl RunsArgs {
 
     pub fn dossier_summary_eligible(&self) -> bool {
         matches!(self.command, RunsCommand::Dossier { json: false, .. })
+    }
+
+    /// Whether this is a `runs proof <id>` invocation eligible for the compact
+    /// human summary (i.e. the caller did not pass `--json`).
+    pub fn proof_summary_eligible(&self) -> bool {
+        matches!(self.command, RunsCommand::Proof { json: false, .. })
     }
 
     pub fn absorb_global_runner_for_list(&mut self, runner: Option<String>) -> Option<String> {
@@ -83,6 +89,7 @@ impl RunsArgs {
                 ],
             ),
             RunsCommand::Show { run_id, .. }
+            | RunsCommand::Proof { run_id, .. }
             | RunsCommand::Dossier { run_id, .. }
             | RunsCommand::ResumePlan { run_id }
             | RunsCommand::Evidence { run_id }
@@ -139,6 +146,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Hotspots(args) => hotspots::runs_hotspots(args),
         RunsCommand::Reconcile(args) => reconcile::reconcile_runs(args),
         RunsCommand::Show { run_id, json: _ } => handlers::show_run(&run_id),
+        RunsCommand::Proof { run_id, json: _ } => proof::proof(&run_id),
         RunsCommand::Dossier { run_id, json: _ } => dossier::runs_dossier(&run_id),
         RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&run_id),
         RunsCommand::Evidence { run_id } => evidence::evidence(&run_id),

@@ -29,6 +29,7 @@ mod handlers;
 mod hotspots;
 mod latest;
 mod loop_sync;
+mod proof;
 mod query;
 mod reconcile;
 mod refs;
