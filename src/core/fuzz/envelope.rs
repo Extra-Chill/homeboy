@@ -118,8 +118,10 @@ pub struct IsolationProof {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_ref: Option<Value>,
     pub disposable: bool,
-    pub snapshot_ref: String,
-    pub reset_supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_supported: Option<bool>,
     pub teardown_required: bool,
     pub mutation_boundary: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -147,15 +149,16 @@ impl IsolationProof {
             ));
         }
         self.runtime_kind = required_trimmed("isolation_proof.runtime_kind", &self.runtime_kind)?;
-        self.snapshot_ref = required_trimmed("isolation_proof.snapshot_ref", &self.snapshot_ref)?;
+        self.snapshot_ref = self
+            .snapshot_ref
+            .as_deref()
+            .map(|snapshot_ref| required_trimmed("isolation_proof.snapshot_ref", snapshot_ref))
+            .transpose()?;
         self.mutation_boundary =
             required_trimmed("isolation_proof.mutation_boundary", &self.mutation_boundary)?;
         self.verified_by = required_trimmed("isolation_proof.verified_by", &self.verified_by)?;
         if !self.disposable {
             return Err("isolation_proof.disposable must be true".to_string());
-        }
-        if !self.reset_supported {
-            return Err("isolation_proof.reset_supported must be true".to_string());
         }
         if !self.teardown_required {
             return Err("isolation_proof.teardown_required must be true".to_string());

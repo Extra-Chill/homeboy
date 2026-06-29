@@ -203,8 +203,6 @@ fn isolation_proof() -> IsolationProof {
         "runtime_kind": "ephemeral-runner",
         "provider_ref": { "id": "provider-opaque-ref" },
         "disposable": true,
-        "snapshot_ref": "snapshot://baseline-1",
-        "reset_supported": true,
         "teardown_required": true,
         "mutation_boundary": "runner-workspace",
         "proof_artifacts": [

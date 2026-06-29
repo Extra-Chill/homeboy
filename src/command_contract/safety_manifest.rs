@@ -356,7 +356,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "replays a persisted fuzz case against local code and may write run artifacts";
         }
         ["fuzz"] | ["fuzz", "run"] | ["fuzz", "plan"] => {
-            metadata.output_notes = "read-only fuzz planning/execution contract by default; --allow-destructive requires explicit homeboy/isolation-proof/v1 input";
+            metadata.output_notes = "read-only fuzz planning/execution contract by default; --allow-destructive requires explicit disposable homeboy/isolation-proof/v1 input";
             metadata.dangerous_flags = vec!["--allow-destructive"];
         }
         ["db", "delete-row"] | ["db", "drop-table"] => {
