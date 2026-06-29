@@ -26,6 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PACKAGE_SH="${EXTENSION_PATH}/scripts/release/package.sh"
 PUBLISH_SH="${EXTENSION_PATH}/scripts/release/publish.sh"
+UPDATE_DEP_SH="${EXTENSION_PATH}/scripts/release/update-dependency.sh"
 
 if [[ ! -x "${PACKAGE_SH}" ]]; then
   echo "FAIL: package.sh is not executable" >&2
@@ -34,6 +35,11 @@ fi
 
 if [[ ! -x "${PUBLISH_SH}" ]]; then
   echo "FAIL: publish.sh is not executable" >&2
+  exit 1
+fi
+
+if [[ ! -x "${UPDATE_DEP_SH}" ]]; then
+  echo "FAIL: update-dependency.sh is not executable" >&2
   exit 1
 fi
 
@@ -304,6 +310,162 @@ else
   else
     echo "OK: publish.sh force-pushes release-latest branch when configured"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# update-dependency.sh: repins a Composer custom-package to a released upstream
+# and mirrors the coordinates into composer.lock. Asserts the EXACT rewrite
+# shape (version, dist.url archive tag, dist/source reference, require
+# constraint). composer is skipped so the deterministic JSON rewrite is what is
+# under test.
+# ---------------------------------------------------------------------------
+UPDATE_DIR="$(mktemp -d -t homeboy-wp-update-dep.XXXXXX)"
+trap 'rm -rf "${WORK_DIR}" "${STUB_BIN_DIR}" "${HAPPY_DIR}" "${BRANCH_DIR}" "${UPDATE_DIR}"' EXIT
+
+cat > "${UPDATE_DIR}/composer.json" <<'JSON'
+{
+  "name": "chubes/static-site-importer",
+  "require": {
+    "php": ">=8.1",
+    "chubes/php-transformer": "1.3.0"
+  },
+  "repositories": [
+    {
+      "type": "package",
+      "package": {
+        "name": "chubes/php-transformer",
+        "version": "1.3.0",
+        "dist": {
+          "type": "zip",
+          "url": "https://github.com/chubes4/php-transformer/archive/refs/tags/v1.3.0.zip",
+          "reference": "oldsha111"
+        },
+        "source": {
+          "type": "git",
+          "url": "https://github.com/chubes4/php-transformer.git",
+          "reference": "oldsha111"
+        }
+      }
+    }
+  ]
+}
+JSON
+
+cat > "${UPDATE_DIR}/composer.lock" <<'JSON'
+{
+  "content-hash": "stale000",
+  "packages": [
+    {
+      "name": "chubes/php-transformer",
+      "version": "1.3.0",
+      "dist": {
+        "type": "zip",
+        "url": "https://github.com/chubes4/php-transformer/archive/refs/tags/v1.3.0.zip",
+        "reference": "oldsha111"
+      },
+      "source": {
+        "type": "git",
+        "url": "https://github.com/chubes4/php-transformer.git",
+        "reference": "oldsha111"
+      }
+    }
+  ],
+  "packages-dev": []
+}
+JSON
+
+UPDATE_PAYLOAD='{"release":{"component_id":"static-site-importer","local_path":"'"${UPDATE_DIR}"'"},"dependency":{"released_id":"php-transformer","package":"chubes/php-transformer","version":"1.4.0","tag":"v1.4.0","sha":"newsha999"}}'
+
+set +e
+update_out="$(
+  cd "${UPDATE_DIR}" && \
+  HOMEBOY_SKIP_COMPOSER_UPDATE=1 \
+  HOMEBOY_COMPONENT_ID="static-site-importer" \
+  HOMEBOY_SETTINGS_JSON="${UPDATE_PAYLOAD}" \
+  "${UPDATE_DEP_SH}" 2>/dev/null
+)"
+update_status=$?
+set -e
+
+if [[ ${update_status} -ne 0 ]]; then
+  echo "FAIL: update-dependency.sh exited ${update_status}" >&2
+  failures=$((failures + 1))
+else
+  cj="${UPDATE_DIR}/composer.json"
+  expected_url="https://github.com/chubes4/php-transformer/archive/refs/tags/v1.4.0.zip"
+  if ! jq -e --arg u "${expected_url}" '
+        (.repositories[0].package.version == "1.4.0")
+        and (.repositories[0].package.dist.url == $u)
+        and (.repositories[0].package.dist.reference == "newsha999")
+        and (.repositories[0].package.source.reference == "newsha999")
+        and (.require["chubes/php-transformer"] == "1.4.0")
+      ' "${cj}" >/dev/null 2>&1; then
+    echo "FAIL: update-dependency.sh composer.json rewrite shape wrong; got: $(cat "${cj}")" >&2
+    failures=$((failures + 1))
+  elif ! echo "${update_out}" | jq -e '.success == true and .composer_lock_updated == true and .composer_refreshed == false' >/dev/null 2>&1; then
+    echo "FAIL: update-dependency.sh receipt unexpected; got: ${update_out}" >&2
+    failures=$((failures + 1))
+  elif ! jq -e --arg u "${expected_url}" '
+        (.packages[0].version == "1.4.0")
+        and (.packages[0].dist.url == $u)
+        and (.packages[0].dist.reference == "newsha999")
+        and (.packages[0].source.reference == "newsha999")
+      ' "${UPDATE_DIR}/composer.lock" >/dev/null 2>&1; then
+    echo "FAIL: update-dependency.sh composer.lock mirror wrong; got: $(cat "${UPDATE_DIR}/composer.lock")" >&2
+    failures=$((failures + 1))
+  else
+    echo "OK: update-dependency.sh repins custom-package version/dist/source/constraint + lock mirror"
+  fi
+fi
+
+# update-dependency.sh: a package not declared as a custom-package repository
+# must fail loudly rather than ship an unchanged pin.
+NOPKG_DIR="$(mktemp -d -t homeboy-wp-update-nopkg.XXXXXX)"
+trap 'rm -rf "${WORK_DIR}" "${STUB_BIN_DIR}" "${HAPPY_DIR}" "${BRANCH_DIR}" "${UPDATE_DIR}" "${NOPKG_DIR}"' EXIT
+cat > "${NOPKG_DIR}/composer.json" <<'JSON'
+{
+  "name": "chubes/static-site-importer",
+  "require": { "php": ">=8.1" },
+  "repositories": []
+}
+JSON
+
+set +e
+nopkg_err="$(
+  cd "${NOPKG_DIR}" && \
+  HOMEBOY_SKIP_COMPOSER_UPDATE=1 \
+  HOMEBOY_SETTINGS_JSON='{"dependency":{"package":"chubes/php-transformer","version":"1.4.0","tag":"v1.4.0","sha":"x"}}' \
+  "${UPDATE_DEP_SH}" 2>&1 >/dev/null
+)"
+nopkg_status=$?
+set -e
+
+if [[ ${nopkg_status} -eq 0 ]]; then
+  echo "FAIL: update-dependency.sh exited 0 when package is not a custom-package repository" >&2
+  failures=$((failures + 1))
+elif ! echo "${nopkg_err}" | grep -q "custom-package repository"; then
+  echo "FAIL: update-dependency.sh did not surface the missing custom-package error; got: ${nopkg_err}" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: update-dependency.sh fails loudly when package is not a custom-package repository"
+fi
+
+# update-dependency.sh: missing required dependency coordinates must fail.
+set +e
+missing_err="$(
+  cd "${UPDATE_DIR}" && \
+  HOMEBOY_SKIP_COMPOSER_UPDATE=1 \
+  HOMEBOY_SETTINGS_JSON='{"dependency":{"package":"chubes/php-transformer"}}' \
+  "${UPDATE_DEP_SH}" 2>&1 >/dev/null
+)"
+missing_status=$?
+set -e
+
+if [[ ${missing_status} -eq 0 ]]; then
+  echo "FAIL: update-dependency.sh exited 0 with missing version/tag" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: update-dependency.sh rejects missing dependency coordinates"
 fi
 
 if [[ ${failures} -gt 0 ]]; then

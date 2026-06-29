@@ -1189,6 +1189,16 @@
         "release": "{{payload.release}}",
         "config": "{{payload.config}}"
       }
+    },
+    {
+      "id": "release.update_dependency",
+      "label": "Repin Composer custom-package to a released upstream",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/update-dependency.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "dependency": "{{payload.dependency}}"
+      }
     }
   ]
 }
