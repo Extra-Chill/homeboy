@@ -6,7 +6,8 @@ use super::execution::{
     fuzz_campaign_contract, fuzz_evidence_followups, fuzz_expected_metric_error, fuzz_max_duration,
     fuzz_postprocess_error, fuzz_run_artifact_validation_error, fuzz_run_outcome,
     fuzz_runner_contract, fuzz_runner_env, persist_fuzz_execution_request,
-    persist_fuzz_run_evidence, run_fuzz_artifact_postprocess, FuzzRunEvidenceInput,
+    persist_fuzz_run_evidence, persist_fuzz_sequence_plan, run_fuzz_artifact_postprocess,
+    FuzzRunEvidenceInput,
 };
 use super::planning::plan_inventory_selection;
 use super::replay::{run_minimize, run_replay};
@@ -30,7 +31,7 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::FuzzConfig;
 use homeboy::core::fuzz::{
     FuzzCampaign, FuzzCase, FuzzCoverageSkip, FuzzCoverageSummary, FuzzExecutionRequest,
-    FuzzFinding, FuzzFindingStatus, FuzzTargetInventory, IsolationProof,
+    FuzzFinding, FuzzFindingStatus, FuzzSequencePlan, FuzzTargetInventory, IsolationProof,
 };
 use homeboy::core::lifecycle::{
     LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus, LifecycleResultMetadata,
@@ -89,6 +90,7 @@ fn planner_args() -> FuzzPlanArgs {
             tracker_refs: vec![],
             seed: None,
             inventory: None,
+            sequence_plan: None,
             require_case_log: false,
             require_coverage_summary: false,
             require_result_envelope: false,
@@ -277,6 +279,7 @@ fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         tracker_refs: vec![],
         seed: Some("1234".to_string()),
         inventory: None,
+        sequence_plan: None,
         require_case_log: false,
         require_coverage_summary: false,
         require_result_envelope: false,

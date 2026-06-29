@@ -118,6 +118,7 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         tracker_refs: vec![],
         seed: Some("1234".to_string()),
         inventory: Some(PathBuf::from("/tmp/fuzz-inventory.json")),
+        sequence_plan: None,
         require_case_log: false,
         require_coverage_summary: false,
         require_result_envelope: false,
@@ -151,6 +152,7 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         &results_path,
         &run_dir,
         Some(&execution_request_path),
+        None,
     )
     .expect("fuzz runner env");
 
@@ -293,6 +295,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         tracker_refs: vec![],
         seed: None,
         inventory: None,
+        sequence_plan: None,
         require_case_log: false,
         require_coverage_summary: false,
         require_result_envelope: false,
@@ -328,6 +331,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         Some(&workload),
         &results_path,
         &run_dir,
+        None,
         None,
     )
     .expect("fuzz runner env");

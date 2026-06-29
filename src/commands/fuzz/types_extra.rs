@@ -159,6 +159,7 @@ pub struct FuzzRunOutput {
     pub run_id: Option<String>,
     pub seed: Option<String>,
     pub inventory_file: Option<String>,
+    pub sequence_plan_file: Option<String>,
     pub max_duration: Option<String>,
     pub passthrough_args: Vec<String>,
     pub requested_settings: serde_json::Value,
