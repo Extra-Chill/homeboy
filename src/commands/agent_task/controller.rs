@@ -669,7 +669,12 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
     let report = if args.resume {
         init_from_spec_for_resume_with_resolution(
             ControllerFromSpecRequest { spec },
-            resume_state_resolution(false, args.replace, args.fork, args.resume_existing),
+            resume_state_resolution(
+                args.reconcile_stale,
+                args.replace,
+                args.fork,
+                args.resume_existing,
+            ),
         )?
     } else {
         agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?

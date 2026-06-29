@@ -501,6 +501,35 @@ fn run_from_spec_proof_args(
     }
 }
 
+fn from_spec_resume_args(
+    loop_id: &str,
+    prompt: &str,
+    reconcile_stale: bool,
+) -> AgentTaskControllerFromSpecArgs {
+    AgentTaskControllerFromSpecArgs {
+        spec: serde_json::to_string(&json!({
+            "loop_id": loop_id,
+            "workflows": [{ "workflow_id": "brief", "prompt": prompt }]
+        }))
+        .expect("spec json"),
+        resume: true,
+        inputs: None,
+        policy_results: Vec::new(),
+        max_actions: Some(1),
+        reconcile_stale,
+        replace: false,
+        fork: false,
+        resume_existing: false,
+        doctor: false,
+        dispatch: AgentTaskControllerDispatchArgs {
+            dispatch_backend: Some("fixture".to_string()),
+            dispatch_selector: None,
+            dispatch_model: None,
+            dispatch_provider_config: None,
+        },
+    }
+}
+
 #[test]
 fn controller_run_from_spec_guards_stale_state_with_actionable_diagnostics() {
     with_temp_home(|| {
@@ -546,6 +575,33 @@ fn controller_run_from_spec_guards_stale_state_with_actionable_diagnostics() {
 }
 
 #[test]
+fn controller_from_spec_resume_guards_stale_state_with_valid_reconcile_hint() {
+    with_temp_home(|| {
+        controller_from_spec(from_spec_resume_args(
+            "from-spec-stale-guard",
+            "Draft the brief.",
+            false,
+        ))
+        .expect("base from-spec resume");
+
+        let error = controller_from_spec(from_spec_resume_args(
+            "from-spec-stale-guard",
+            "Rewrite the brief.",
+            false,
+        ))
+        .expect_err("stale state is guarded");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error
+            .message
+            .contains("refusing to reuse stale persisted controller state"));
+        assert!(error
+            .message
+            .contains("--reconcile-stale to safely reset run-scoped state"));
+    });
+}
+
+#[test]
 fn controller_run_from_spec_reconcile_stale_recovers_without_manual_cleanup() {
     with_temp_home(|| {
         controller_run_from_spec_with_test_executor(
@@ -563,6 +619,38 @@ fn controller_run_from_spec_reconcile_stale_recovers_without_manual_cleanup() {
 
         assert_eq!(exit_code, 0, "{value:#}");
         assert_eq!(value["loop_id"], "run-from-spec-reconcile");
+        assert_eq!(value["from_spec"]["initialized"], true);
+        assert_eq!(value["from_spec"]["resume_state"]["action"], "replacing");
+        assert_eq!(
+            value["from_spec"]["resume_state"]["resolution"],
+            "reconcile-stale"
+        );
+        assert_eq!(
+            value["from_spec"]["resume_state"]["fingerprint_match"],
+            false
+        );
+    });
+}
+
+#[test]
+fn controller_from_spec_resume_reconcile_stale_recovers_without_manual_cleanup() {
+    with_temp_home(|| {
+        controller_from_spec(from_spec_resume_args(
+            "from-spec-reconcile",
+            "Draft the brief.",
+            false,
+        ))
+        .expect("base from-spec resume");
+
+        let (value, exit_code) = controller_from_spec(from_spec_resume_args(
+            "from-spec-reconcile",
+            "Rewrite the brief.",
+            true,
+        ))
+        .expect("from-spec --reconcile-stale recovers");
+
+        assert_eq!(exit_code, 0, "{value:#}");
+        assert_eq!(value["from_spec"]["loop_id"], "from-spec-reconcile");
         assert_eq!(value["from_spec"]["initialized"], true);
         assert_eq!(value["from_spec"]["resume_state"]["action"], "replacing");
         assert_eq!(

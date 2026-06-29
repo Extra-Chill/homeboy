@@ -117,16 +117,20 @@ pub struct AgentTaskControllerFromSpecArgs {
     )]
     pub max_actions: Option<u32>,
 
+    /// On --resume, automatically reset stale persisted controller state and re-create it from this spec.
+    #[arg(long = "reconcile-stale", conflicts_with_all = ["replace", "fork", "resume_existing"])]
+    pub reconcile_stale: bool,
+
     /// On --resume, discard stale persisted controller state and re-create it from this spec.
-    #[arg(long, conflicts_with_all = ["fork", "resume_existing"])]
+    #[arg(long, conflicts_with_all = ["fork", "resume_existing", "reconcile_stale"])]
     pub replace: bool,
 
     /// On --resume, apply this spec under a derived fork loop id, leaving the original untouched.
-    #[arg(long, conflicts_with_all = ["replace", "resume_existing"])]
+    #[arg(long, conflicts_with_all = ["replace", "resume_existing", "reconcile_stale"])]
     pub fork: bool,
 
     /// On --resume, accept stale/mismatched persisted state and resume the existing controller as-is.
-    #[arg(long = "resume-existing", conflicts_with_all = ["replace", "fork"])]
+    #[arg(long = "resume-existing", conflicts_with_all = ["replace", "fork", "reconcile_stale"])]
     pub resume_existing: bool,
 
     /// Compile and preflight generic controller prerequisites without writing state.
