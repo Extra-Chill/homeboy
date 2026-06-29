@@ -1430,6 +1430,95 @@ mod tests {
     }
 
     #[test]
+    fn connected_direct_daemon_runner_with_failed_active_job_poll_still_accepts_jobs() {
+        // Regression: a connected direct_daemon/direct_ssh runner (worker_pid:
+        // None) whose live `/jobs` poll transiently failed reports
+        // `active_job_state: Unavailable` with a 0 count. `runner status`
+        // recovers to `available` on the next poll, so the lab-offload preflight
+        // must not hard-reject it while it is connected and under capacity.
+        let availability = RunnerAvailability::from_status_parts(
+            "homeboy-lab",
+            true,
+            false,
+            0,
+            &RunnerActiveJobState::Unavailable,
+            Some(8),
+        );
+
+        assert!(
+            availability.accepts_jobs,
+            "connected, under-capacity runner with a transient active-job poll \
+             failure must still accept jobs: {availability:?}"
+        );
+        assert!(
+            availability.reasons.is_empty(),
+            "no blocking reasons expected: {:?}",
+            availability.reasons
+        );
+        assert_eq!(availability.active_job_count, 0);
+        assert_eq!(availability.capacity, Some(8));
+    }
+
+    #[test]
+    fn available_direct_daemon_runner_accepts_jobs() {
+        // The healthy steady-state both paths agree on.
+        let availability = RunnerAvailability::from_status_parts(
+            "homeboy-lab",
+            true,
+            false,
+            0,
+            &RunnerActiveJobState::Available,
+            Some(8),
+        );
+
+        assert!(availability.accepts_jobs);
+        assert!(availability.reasons.is_empty());
+    }
+
+    #[test]
+    fn at_capacity_runner_still_rejects_even_with_failed_active_job_poll() {
+        // A genuinely busy runner stays blocked; the soft active-job signal must
+        // not let a saturated runner through.
+        let availability = RunnerAvailability::from_status_parts(
+            "homeboy-lab",
+            true,
+            false,
+            8,
+            &RunnerActiveJobState::Available,
+            Some(8),
+        );
+
+        assert!(!availability.accepts_jobs);
+        assert!(availability
+            .reasons
+            .iter()
+            .any(|reason| reason == "capacity_reached"));
+    }
+
+    #[test]
+    fn disconnected_runner_with_unavailable_active_jobs_still_rejects() {
+        // A disconnected runner stays blocked, and the active-job signal remains
+        // visible alongside the hard `not_connected` blocker for diagnostics.
+        let availability = RunnerAvailability::from_status_parts(
+            "homeboy-lab",
+            false,
+            false,
+            0,
+            &RunnerActiveJobState::Unavailable,
+            Some(8),
+        );
+
+        assert!(!availability.accepts_jobs);
+        assert_eq!(
+            availability.reasons,
+            vec![
+                "not_connected".to_string(),
+                "active_jobs_unavailable".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn default_lab_runner_skips_stale_daemon_runner() {
         let mut stale = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
         stale.stale_daemon = true;
