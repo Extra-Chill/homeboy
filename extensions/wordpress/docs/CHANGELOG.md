@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.5] - 2026-06-29
+
+### Fixed
+- fix(wp-codebox): suppress inner runtime_task for native run-agent-task self-call
+
 ## [3.21.4] - 2026-06-28
 
 ### Fixed
