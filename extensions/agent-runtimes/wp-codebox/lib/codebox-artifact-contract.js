@@ -45,8 +45,8 @@ function normalizeTypedArtifactEntry(name, artifact, options = {}) {
   const entry = cleanObject({
     schema: TYPED_ARTIFACT_SCHEMA,
     name: artifactName,
-    type: artifact.type || artifact.kind || artifact.artifact_type || artifact.artifactType,
-    artifact_schema: artifact.artifact_schema || artifact.artifactSchema || artifact.schema,
+    type: artifact.type || artifact.kind || artifact.artifact_type,
+    artifact_schema: artifact.artifact_schema || artifact.schema,
     payload: artifact.payload !== undefined ? artifact.payload : artifact.data,
     provenance: plainObject(artifact.provenance) ? artifact.provenance : {},
     file_refs: typedArtifactFileRefs(artifact),
@@ -460,14 +460,12 @@ function normalizeCodeboxArtifactDeclaration(defaultName, declaration, options =
     ...normalizeArray(options.ignoredSchemas),
   ]);
   const artifactSchema = declaration.artifact_schema
-    || declaration.artifactSchema
     || declaration.content_schema
-    || declaration.contentSchema
     || (declaration.schema && !ignoredSchemas.has(declaration.schema) ? declaration.schema : undefined);
   return cleanObject({
     schema: WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA,
     name,
-    type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType,
+    type: declaration.type || declaration.kind || declaration.artifact_type,
     artifact_schema: artifactSchema,
     path: declaration.path,
     required: declaration.required === undefined ? true : declaration.required === true,
@@ -502,9 +500,6 @@ function normalizeCodeboxArtifactOutcome(artifact, rawArtifact = {}, options = {
 function typedArtifactFileRefs(artifact) {
   if (Array.isArray(artifact?.file_refs)) {
     return artifact.file_refs;
-  }
-  if (Array.isArray(artifact?.fileRefs)) {
-    return artifact.fileRefs;
   }
   return [];
 }

@@ -32,9 +32,11 @@ assert.equal(registry['local-shell'].id, 'local-shell');
 assert.equal(registry['fake-runtime'], undefined);
 assert.equal(registry['package'], undefined);
 assert.equal(registry['homeboy-agent-task-core-contract'], undefined);
-assert.equal(normalizeRuntimeId('wp-codebox'), 'wp-codebox');
+assert.equal(normalizeRuntimeId('codebox'), 'codebox');
 assert.equal(DEFAULT_RUNTIME_ID, 'local-shell');
 assert.equal(resolveRuntimeProvider(undefined, { repoRoot, registry }).id, 'local-shell');
+assert.throws(() => resolveRuntimeProvider('codebox', { repoRoot, registry }), /Unsupported agent_runtime: codebox/);
+assert.equal(normalizeRuntimeId('wp-codebox'), 'wp-codebox');
 assert.equal(resolveRuntimeProvider('wp-codebox', { repoRoot, registry }).id, 'wp-codebox');
 assert.equal(resolveRuntimeProvider('local-shell', { repoRoot, registry }).executor.backend, 'local-shell');
 
@@ -137,8 +139,8 @@ assert.equal(
 	runtimeAgentCiRunnerSpec({
 		backend: 'opencode',
 		ability: 'example/run-task',
-		runtimeProfile: 'example-runtime-ci',
-		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
+		runtime_profile: 'example-runtime-ci',
+		runtime_profiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.runtime,
 	undefined
 );
@@ -146,8 +148,8 @@ assert.equal(
 	runtimeAgentCiRunnerSpec({
 		runtime: 'opencode',
 		ability: 'example/run-task',
-		runtimeProfile: 'example-runtime-ci',
-		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
+		runtime_profile: 'example-runtime-ci',
+		runtime_profiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.backend,
 	'opencode'
 );
@@ -155,8 +157,8 @@ assert.equal(
 	runtimeAgentCiRunnerSpec({
 		runtime: 'opencode',
 		ability: 'example/run-task',
-		runtimeProfile: 'example-runtime-ci',
-		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
+		runtime_profile: 'example-runtime-ci',
+		runtime_profiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.runtime,
 	'opencode'
 );
@@ -164,8 +166,8 @@ assert.equal(
 	runtimeAgentCiRunnerSpec({
 		runtime: 'wp-codebox',
 		ability: 'example/run-task',
-		runtimeProfile: 'example-runtime-ci',
-		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
+		runtime_profile: 'example-runtime-ci',
+		runtime_profiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.runtime,
 	'wp-codebox'
 );
@@ -173,8 +175,8 @@ assert.equal(
 	runtimeAgentCiRunnerSpec({
 		runtime: 'wp-codebox',
 		ability: 'example/run-task',
-		runtimeProfile: 'example-runtime-ci',
-		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
+		runtime_profile: 'example-runtime-ci',
+		runtime_profiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.backend,
 	'wp-codebox'
 );

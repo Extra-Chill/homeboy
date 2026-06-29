@@ -23,6 +23,10 @@ const {
 	wpCodeboxFuzzSuiteTaskRequest,
 } = require('./wp-codebox-fuzz-run');
 const { aggregateWordPressFuzzCoverage } = require('./wordpress-fuzz-coverage-aggregate');
+const {
+	requiredWpCodeboxContractsForFuzzCase,
+	requiredWpCodeboxContractsForFuzzPlan,
+} = require('./wordpress-fuzz-command-manifest');
 
 const WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA = 'homeboy/wordpress-fuzz-runner-result/v1';
 const HOMEBOY_FUZZ_CAMPAIGN_SCHEMA = 'homeboy/fuzz-campaign/v1';
@@ -60,15 +64,17 @@ async function runWordPressFuzzRunnerResult(options = {}) {
 
 function buildWordPressFuzzRunnerContext(options = {}) {
 	const env = options.env || readWordPressFuzzRunnerEnv();
-	const workload = options.workload || readJsonFile(requiredString(env.workloadPath, 'HOMEBOY_FUZZ_WORKLOAD_PATH'));
+	const workloadPath = requiredString(env.workloadPath, 'HOMEBOY_FUZZ_WORKLOAD_PATH');
+	const workload = options.workload || readJsonFile(workloadPath);
+	const packageRoot = options.packageRoot || options.package_root || packageRootFromManifestPath(workloadPath);
 	const runId = requiredString(env.runId || workload.run_id || workload.runId || workload.id, 'HOMEBOY_FUZZ_RUN_ID');
 	const workloadId = env.workloadId || workload.workload_id || workload.workloadId || workload.id || null;
 	const seed = env.seed || workload.seed || null;
 	const maxDuration = numericValue(env.maxDuration ?? workload.max_duration ?? workload.maxDuration);
 	const plan = normalizeRunnerPlan(workload.plan || workload.fuzz_plan || workload.fuzzPlan || workload);
-	const runtimeCapabilities = normalizeWordPressFuzzRuntimeCapabilities(workload.runtime_capabilities || workload.runtimeCapabilities || workload.runtime_profile?.fuzz_runtime_capabilities || workload.runtimeProfile?.fuzzRuntimeCapabilities || []);
+	const runtimeCapabilities = normalizeWordPressFuzzRuntimeCapabilities(resolveRuntimeCapabilitiesForWorkload(workload, plan));
 	const instructions = fuzzSuiteInstructions({ workload, workloadId, runId });
-	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities });
+	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities, packageRoot });
 	const runtimeRequirements = wpCodeboxRuntimeRequirementsFromWorkload(workload, { env });
 	const runtimeTaskRequest = wpCodeboxFuzzRuntimeTaskRequest({
 		taskId: runId,
@@ -98,11 +104,48 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 		plan,
 		runtimeCapabilities,
 		wpCodeboxInput,
+		packageRoot,
 		runtimeRequirements,
 		runtimeTaskRequest,
 		taskRequest,
 		codeboxPlanRecipe,
 	};
+}
+
+function packageRootFromManifestPath(manifestPath) {
+	const directory = path.dirname(String(manifestPath || ''));
+	return ['fuzz', 'bench', 'manifests', 'tools'].includes(path.basename(directory)) ? path.dirname(directory) : directory;
+}
+
+function resolveRuntimeCapabilitiesForWorkload(workload = {}, plan = {}) {
+	const declared = workload.runtime_capabilities || workload.runtimeCapabilities || workload.runtime_profile?.fuzz_runtime_capabilities || workload.runtimeProfile?.fuzzRuntimeCapabilities;
+	if (hasRuntimeCapabilities(declared)) {
+		return declared;
+	}
+
+	if (!isWpCodeboxBackedWorkload(workload)) {
+		return [];
+	}
+
+	const planCapabilities = requiredWpCodeboxContractsForFuzzPlan(plan).capabilities;
+	const caseCapabilities = normalizeArray(workload.cases).flatMap((testCase) => requiredWpCodeboxContractsForFuzzCase(testCase).capabilities);
+
+	return {
+		capabilities: [...new Set([...planCapabilities, ...caseCapabilities])].sort(),
+		metadata: { source: 'wp-codebox-command-manifest' },
+	};
+}
+
+function hasRuntimeCapabilities(value) {
+	return normalizeWordPressFuzzRuntimeCapabilities(value || []).capabilities.length > 0;
+}
+
+function isWpCodeboxBackedWorkload(workload = {}) {
+	const runner = workload.wordpress_runner || workload.wordpressRunner || workload.runner || workload.workload?.runner || workload.metadata?.wordpress_runner || workload.metadata?.wordpressRunner;
+	const entry = workload.workload?.entry || workload.entry || workload.metadata?.entry;
+	return String(runner || '').toLowerCase() === 'wp-codebox'
+		|| String(entry || '').startsWith('wp-codebox/')
+		|| workload.schema === 'homeboy/fuzz-workload/v1';
 }
 
 function buildWordPressFuzzRunnerSummary({
@@ -190,13 +233,14 @@ function normalizeRunnerPlan(input) {
 	});
 }
 
-function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities }) {
-	const homeboyFuzzWorkload = workload.schema === 'homeboy/fuzz-workload/v1' ? workload : undefined;
+function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions, runtimeCapabilities, packageRoot }) {
+	const homeboyFuzzWorkload = homeboyFuzzWorkloadForCodebox(workload, { workloadId });
 	return wpCodeboxFuzzSuiteInput({
 		id: runId,
 		goal: instructions,
 		target: workload.target || { type: 'wordpress', workload_id: workloadId },
 		homeboyFuzzWorkload,
+		packageRoot,
 		workload: stripUndefined({
 			id: workloadId,
 			plan_id: plan.id,
@@ -215,6 +259,33 @@ function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDurat
 		fixture_plan: workload.fixture_plan || workload.fixturePlan || workload.metadata?.fixture_plan || workload.metadata?.fixturePlan,
 		rest_mutation_opt_ins: workload.rest_mutation_opt_ins || workload.restMutationOptIns || workload.rest_mutation_opt_in || workload.restMutationOptIn || workload.metadata?.rest_mutation_opt_ins || workload.metadata?.restMutationOptIns,
 		metadata: stripUndefined({ ...(workload.metadata || {}), runner: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA, runtime_capabilities: runtimeCapabilities, workload: stripUndefined({ id: workloadId }) }),
+	});
+}
+
+function homeboyFuzzWorkloadForCodebox(workload = {}, { workloadId } = {}) {
+	if (workload.schema === 'homeboy/fuzz-workload/v1') {
+		return workload;
+	}
+	if (!isWpCodeboxBackedWorkload(workload)) {
+		return undefined;
+	}
+	const workloadPath = workload.workload?.path || workload.workload_path || workload.workloadPath || workload.metadata?.workload_path || workload.metadata?.workloadPath;
+	const workloadDefinition = objectOrUndefined(workload.workload?.definition || workload.workload_definition || workload.workloadDefinition || workload.metadata?.workload_definition || workload.metadata?.workloadDefinition);
+	if (!workloadDefinition && (typeof workloadPath !== 'string' || workloadPath.trim() === '')) {
+		return undefined;
+	}
+	return stripUndefined({
+		...workload,
+		schema: 'homeboy/fuzz-workload/v1',
+		id: workload.id || workloadId,
+		workload: stripUndefined({
+			...(objectOrUndefined(workload.workload) || {}),
+			path: workloadPath,
+			definition: workloadDefinition,
+			type: workload.workload?.type || workload.workload_type || workload.workloadType || workload.metadata?.workload_type || workload.metadata?.workloadType,
+			entry: workload.workload?.entry || workload.entry || workload.metadata?.entry || workload.id || workloadId,
+			runner: workload.workload?.runner || workload.runner || workload.metadata?.wordpress_runner || workload.metadata?.wordpressRunner,
+		}),
 	});
 }
 
