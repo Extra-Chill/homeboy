@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.14] - 2026-06-29
+
+### Changed
+- Add generic WordPress scale fuzz dimensions
+
 ## [3.21.13] - 2026-06-29
 
 ### Changed
