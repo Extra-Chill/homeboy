@@ -1585,8 +1585,12 @@ function adminPageInteractionCase(surface, interaction, options = {}) {
 		interaction_id: interaction.id || interaction.name || interaction.selector || interaction.action || `${interaction.kind}-${interaction.index + 1}`,
 		selector: interaction.selector,
 		action: interaction.action,
+		action_path: interaction.action_path || interaction.actionPath,
 		method: interaction.method,
 		fields: interaction.fields,
+		input_descriptors: interaction.input_descriptors || interaction.inputDescriptors,
+		submit_controls: interaction.submit_controls || interaction.submitControls,
+		bulk_action: interaction.bulk_action || interaction.bulkAction,
 	});
 	const safety = adminPageInteractionSafety(interaction);
 	const skipReasons = reasonList(interaction.skip_reasons || interaction.skipReasons || interaction.skip_reason || interaction.skipReason);
@@ -1701,7 +1705,7 @@ function normalizeNonceContext(interaction) {
 
 function operationForSurface(surface) {
 	const operation = { id: surface.operation_id || surface.operationId, surface_type: surface.type };
-	for (const key of ['id', 'name', 'hook', 'action', 'event', 'option', 'post_type', 'taxonomy', 'block_name', 'path', 'route', 'method', 'url', 'role', 'capability', 'table', 'query', 'request', 'endpoint']) {
+	for (const key of ['id', 'name', 'hook', 'action', 'event', 'option', 'post_type', 'taxonomy', 'block_name', 'path', 'route', 'method', 'url', 'role', 'capability', 'table', 'query', 'request', 'endpoint', 'input_descriptors', 'submit_controls', 'bulk_action', 'nonce_context', 'capability_context']) {
 		if (surface[key] !== undefined) {
 			operation[key] = surface[key];
 		}

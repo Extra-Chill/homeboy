@@ -613,7 +613,7 @@ function runtimeOperationAction(testCase = {}, { family } = {}) {
 function adminRuntimeOperationAction(testCase = {}) {
 	const operation = objectOrUndefined(testCase.operation) || {};
 	const surface = objectOrUndefined(testCase.metadata?.surface || testCase.target_metadata?.surface || testCase.target_metadata) || {};
-	const path = String(operation.path || operation.url || surface.path || surface.url || '');
+	const path = String(operation.action_path || operation.actionPath || operation.path || operation.url || surface.path || surface.url || '');
 	if (surface.type === 'ajax-action' || path.includes('admin-ajax.php')) {
 		return 'ajax_action';
 	}
@@ -746,7 +746,7 @@ function runtimeOperationInput(testCase = {}, { family, action } = {}) {
 		const metadata = objectOrUndefined(testCase.metadata) || {};
 		const interaction = objectOrUndefined(metadata.interaction) || {};
 		return stripUndefined({
-			path: operation.path || operation.url || surface.path || surface.url || surface.metadata?.value,
+			path: operation.action_path || operation.actionPath || operation.path || operation.url || surface.path || surface.url || surface.metadata?.value,
 			method: operation.method || interaction.method || surface.method || 'GET',
 			interaction_kind: operation.interaction_kind || interaction.kind,
 			interaction_id: operation.interaction_id || interaction.id || interaction.name || interaction.selector || interaction.action,
@@ -754,8 +754,11 @@ function runtimeOperationInput(testCase = {}, { family, action } = {}) {
 			action: operation.action || interaction.action || interaction.id || interaction.name || surface.action || surface.hook || surface.name || surface.id,
 			hook: surface.hook,
 			fields: operation.fields || interaction.fields,
-			capability_context: objectOrUndefined(metadata.capability_context || metadata.capabilityContext),
-			nonce_context: objectOrUndefined(metadata.nonce_context || metadata.nonceContext),
+			input_descriptors: operation.input_descriptors || operation.inputDescriptors || interaction.input_descriptors || interaction.inputDescriptors,
+			submit_controls: operation.submit_controls || operation.submitControls || interaction.submit_controls || interaction.submitControls,
+			bulk_action: operation.bulk_action || operation.bulkAction || interaction.bulk_action || interaction.bulkAction,
+			capability_context: objectOrUndefined(metadata.capability_context || metadata.capabilityContext || operation.capability_context || operation.capabilityContext || surface.capability_context || surface.capabilityContext),
+			nonce_context: objectOrUndefined(metadata.nonce_context || metadata.nonceContext || operation.nonce_context || operation.nonceContext || surface.nonce_context || surface.nonceContext),
 			session_context: objectOrUndefined(metadata.session_context || metadata.sessionContext),
 			action_auth_context: objectOrUndefined(metadata.action_auth_context || metadata.actionAuthContext),
 			safety: objectOrUndefined(metadata.safety),

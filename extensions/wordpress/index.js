@@ -8,6 +8,7 @@ const staticVisualParity = require('./lib/static-visual-parity');
 module.exports = {
 	...require('./lib/admin-page-scenarios'),
 	...require('./lib/admin-page-fuzz-surfaces'),
+	...require('./lib/wordpress-admin-form-action-surfaces'),
 	...require('./lib/wordpress-bootstrap-timeline'),
 	...require('./lib/request-profiler'),
 	...require('./lib/rest-db-query-profiler'),
