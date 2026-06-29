@@ -88,6 +88,21 @@ const RUNTIME_PACKAGE_ABILITY_ALIASES = new Set([
 ]);
 const LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE = 'legacy-runtime-package-ability-alias';
 
+// The wp-codebox native agent-run ability is the OUTER invocation the runner
+// drives via the `run-agent-task` CLI command; it is not a delegated ability
+// that runs inside the sandbox. A profile must still declare it as
+// runtime_task_ability to satisfy the runner contract, but when it surfaces as
+// the resolved inner runtime task we suppress the sandbox-side runtime_task so
+// the sandbox runs its native agents/chat loop with the agent + goal already
+// present in the task input. A non-empty inner runtime_task would otherwise make
+// the sandbox self-delegate wp-codebox/run-agent-task with an input that lacks
+// goal. This mirrors how studio-native invokes run-agent-task with no inner
+// runtime_task.
+const WP_CODEBOX_NATIVE_AGENT_RUN_ABILITIES = new Set([
+  'wp-codebox/run-agent-task',
+  'wp-codebox/agent-task-run',
+]);
+
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
   'bundle_host_path',
@@ -382,7 +397,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     ],
   });
   components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
-  const runtimeTaskAbilityNormalization = runtimeTaskAbilityNormalizationEvidence(runtimeTask);
+  const sandboxRuntimeTask = sandboxRuntimeTaskForNativeAgentRun(runtimeTask);
+  const runtimeTaskAbilityNormalization = runtimeTaskAbilityNormalizationEvidence(sandboxRuntimeTask);
   const context = {
     ...clientContext,
     ...(clientInputs.context || {}),
@@ -407,7 +423,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     context,
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
-    runtime_task: runtimeTask,
+    ...(sandboxRuntimeTask ? { runtime_task: sandboxRuntimeTask } : {}),
     ...(runtimeTaskAbilityNormalization ? { runtime_task_ability_normalization: runtimeTaskAbilityNormalization } : {}),
     ability_requirements: abilityRequirements,
     callback_data: firstDefined(inputs.callback_data, inputs.callbackData, config.callback_data, config.callbackData, runtimeOptions.callbackData),
@@ -491,7 +507,8 @@ function codeboxFanoutRequestFromAgentTaskRequest(request, config = {}, inputs =
   const workers = normalizeArray(source.workers).map((worker, index) => {
     const metadata = firstObject(worker.metadata) || {};
     const runtimeTask = fanoutWorkerRuntimeTask(worker, request, config, runtimeOptions);
-    const runtimeTaskAbilityNormalization = runtimeTaskAbilityNormalizationEvidence(runtimeTask);
+    const sandboxRuntimeTask = sandboxRuntimeTaskForNativeAgentRun(runtimeTask);
+    const runtimeTaskAbilityNormalization = runtimeTaskAbilityNormalizationEvidence(sandboxRuntimeTask);
     return withoutUndefinedValues({
       ...worker,
       id: firstValue(worker.id, worker.worker_id, `${request.task_id}-worker-${index + 1}`),
@@ -499,7 +516,7 @@ function codeboxFanoutRequestFromAgentTaskRequest(request, config = {}, inputs =
       agent: firstValue(worker.agent, source.agent, config.agent, runtimeOptions.agent),
       dependsOn: normalizeArray(firstValue(worker.dependsOn, worker.depends_on)),
       artifactNamespace: firstValue(worker.artifactNamespace, worker.artifact_namespace, `${request.task_id}/${index + 1}`),
-      ...(runtimeTask ? { runtime_task: runtimeTask } : {}),
+      ...(sandboxRuntimeTask ? { runtime_task: sandboxRuntimeTask } : {}),
       ...(runtimeTaskAbilityNormalization ? { runtime_task_ability_normalization: runtimeTaskAbilityNormalization } : {}),
       ability_requirements: runtimeTask?.ability ? uniqueStrings([runtimeTask.ability, ...normalizeArray(worker.ability_requirements), ...normalizeArray(worker.abilityRequirements)]) : firstDefined(worker.ability_requirements, worker.abilityRequirements),
       metadata: {
@@ -1019,6 +1036,25 @@ function genericAbilityRuntimeTask(request, config, inputs) {
 
 function normalizeRuntimeTaskAbilityForCodebox(ability) {
   return RUNTIME_PACKAGE_ABILITY_ALIASES.has(ability) ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : ability;
+}
+
+function isNativeWpCodeboxAgentRunAbility(ability) {
+  return typeof ability === 'string' && WP_CODEBOX_NATIVE_AGENT_RUN_ABILITIES.has(ability.trim());
+}
+
+function isNativeWpCodeboxAgentRunRuntimeTask(runtimeTask) {
+  return Boolean(runtimeTask)
+    && typeof runtimeTask === 'object'
+    && !Array.isArray(runtimeTask)
+    && isNativeWpCodeboxAgentRunAbility(runtimeTask.ability);
+}
+
+// Suppress the inner sandbox runtime_task for the native wp-codebox/run-agent-task
+// self-call so the sandbox runs its native agents/chat loop instead of delegating
+// the runtime's own outer invocation back to itself. Genuine delegated abilities
+// and the runtime-package path are preserved.
+function sandboxRuntimeTaskForNativeAgentRun(runtimeTask) {
+  return isNativeWpCodeboxAgentRunRuntimeTask(runtimeTask) ? undefined : runtimeTask;
 }
 
 function runtimePackageTaskInputForCodebox(input, options = {}) {
