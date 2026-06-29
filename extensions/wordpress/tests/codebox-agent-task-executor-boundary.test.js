@@ -1301,7 +1301,12 @@ assert.deepEqual(repoLoopWorkspaceMount.metadata, {
   kind: 'homeboy-runtime-workspace',
   workspace_slug: 'wp-site-generator',
   workspaceRef: 'wp-site-generator@wpsg-lab-proof-20260622-2102',
+  artifactExcludePaths: ['.ci/**'],
 });
+// The runner materializes its dependency checkouts into `.ci/` inside the target
+// repo working tree; the workspace mount must exclude that directory from the
+// captured sandbox patch so dependency clones do not masquerade as agent changes.
+assert.deepEqual(repoLoopWorkspaceMount.metadata.artifactExcludePaths, ['.ci/**']);
 assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('workspace_apply_patch'), true);
 assert.deepEqual(repoLoopWorkspaceTaskInput.workspace_materialization, {
   repo: 'example-repo@example-loop-main-20260616',

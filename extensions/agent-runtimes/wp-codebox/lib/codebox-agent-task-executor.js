@@ -74,6 +74,13 @@ const {
 } = require('./provider-credential-boundary');
 
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
+// The full-run runner materializes its dependency checkouts into `.ci/` inside
+// the target repo working tree (see materialize-dependencies.cjs). Those clones
+// are untracked relative to the target repo's HEAD, so the sandbox workspace
+// diff would otherwise report every materialized file as an agent change. The
+// runner owns that directory, so it excludes its own materialization from the
+// captured workspace patch; genuine agent changes outside `.ci/` are retained.
+const RUNNER_MATERIALIZATION_EXCLUDE_PATHS = Object.freeze(['.ci/**']);
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
 const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const AGENT_TASK_EVENT_SCHEMA = 'homeboy/agent-task-event/v1';
@@ -2077,7 +2084,12 @@ function defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options)
       source: workspaceRoot,
       target: workspaceTarget,
       mode: workspaceMode(request, config, inputs),
-      metadata: { kind: WP_CODEBOX_WORKSPACE_MOUNT_KIND, workspace_slug: workspaceSlug(workspaceRoot), workspaceRef: path.basename(workspaceRoot) },
+      metadata: {
+        kind: WP_CODEBOX_WORKSPACE_MOUNT_KIND,
+        workspace_slug: workspaceSlug(workspaceRoot),
+        workspaceRef: path.basename(workspaceRoot),
+        artifactExcludePaths: [...RUNNER_MATERIALIZATION_EXCLUDE_PATHS],
+      },
     },
   ];
 }
