@@ -47,6 +47,7 @@ mod offload_metadata;
 mod origin_refs;
 mod resource_metrics;
 mod rig_materialization;
+mod runtime_overlay_freshness;
 mod session;
 mod source_materialization;
 mod tool_registry;
