@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.269.4"
+version = "0.270.0"
 dependencies = [
  "arboard",
  "base64",

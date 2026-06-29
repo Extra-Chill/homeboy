@@ -4,6 +4,32 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.270.0] - 2026-06-29
+
+### Added
+- add `runs watch` live watcher + daemon completion notifier
+
+### Changed
+- Report relative fuzz hotspot convergence
+- Add generic fuzz hotspot dimensions
+- Translate rig-install source path on --runner offload
+- Detect stale runner-side component builds (runtime overlays)
+- Add fuzz sequence plan handoff
+- Improve fuzz evidence replay portability
+- Relax destructive fuzz isolation proof reset requirements
+- add -q/--field JSONPath selector and harden artifact get --output
+- Add generic dependency-aware release cascade (--cascade)
+- Normalize component local_path to absolute on set and reconcile
+- Add compact runs proof signal surface (#6945)
+- Stop duplicating stdout in runner job logs; add compact/tail modes
+- Surface the failing command and output for release preflight.test
+- Add fuzz minimize and portable bundle bytes
+- Enforce explicit isolation proof for destructive fuzz
+- Add generic fuzz exploration contracts
+
+### Fixed
+- Fix fuzz run action policy parity
+
 ## [0.269.4] - 2026-06-29
 
 ### Changed
