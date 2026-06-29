@@ -19,12 +19,14 @@ use super::normalize::{
     trim_or_default,
 };
 use super::schema_defaults::{
-    fuzz_campaign_schema, fuzz_case_log_schema, fuzz_case_schema, fuzz_contract_version,
-    fuzz_seed_schema, fuzz_sequence_plan_schema, fuzz_sequence_result_schema, fuzz_surface_schema,
+    fuzz_action_model_schema, fuzz_campaign_schema, fuzz_case_log_schema, fuzz_case_schema,
+    fuzz_contract_version, fuzz_exploration_policy_schema, fuzz_seed_schema,
+    fuzz_sequence_plan_schema, fuzz_sequence_result_schema, fuzz_surface_schema,
     fuzz_target_schema, fuzz_workload_schema,
 };
 use super::schemas::{
-    FUZZ_CASE_LOG_SCHEMA, FUZZ_CONTRACT_VERSION, FUZZ_SEED_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
+    FUZZ_ACTION_MODEL_SCHEMA, FUZZ_CASE_LOG_SCHEMA, FUZZ_CONTRACT_VERSION,
+    FUZZ_EXPLORATION_POLICY_SCHEMA, FUZZ_SEED_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
     FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
 };
 
@@ -199,6 +201,157 @@ impl FuzzWorkload {
         self.surface_ids = normalize_string_vec(std::mem::take(&mut self.surface_ids));
         self.operations = normalize_string_vec(std::mem::take(&mut self.operations));
         self.seed_ids = normalize_string_vec(std::mem::take(&mut self.seed_ids));
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzActionModel {
+    #[serde(default = "fuzz_action_model_schema")]
+    pub schema: String,
+    #[serde(default = "fuzz_contract_version")]
+    pub version: u32,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<FuzzAction>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzActionModel {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let mut model: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
+        model.normalize()?;
+        Ok(model)
+    }
+
+    pub(super) fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_ACTION_MODEL_SCHEMA);
+        require_schema(&self.schema, FUZZ_ACTION_MODEL_SCHEMA, "fuzz action model")?;
+        if self.version != FUZZ_CONTRACT_VERSION {
+            return Err(format!(
+                "fuzz action model version must be {FUZZ_CONTRACT_VERSION}"
+            ));
+        }
+        self.id = required_trimmed("action_model.id", &self.id)?;
+        if self.actions.is_empty() {
+            return Err("action model must declare at least one action".to_string());
+        }
+        for action in &mut self.actions {
+            action.normalize()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzAction {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<FuzzOperationFamily>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_generators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preconditions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invariants: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzAction {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.id = required_trimmed("action.id", &self.id)?;
+        self.kind = required_trimmed("action.kind", &self.kind)?;
+        if self.family.is_none() {
+            self.family = canonical_operation_family(&self.kind);
+        }
+        if self
+            .weight
+            .is_some_and(|weight| !weight.is_finite() || weight < 0.0)
+        {
+            return Err("action.weight must be a finite non-negative number".to_string());
+        }
+        self.input_generators = normalize_string_vec(std::mem::take(&mut self.input_generators));
+        self.preconditions = normalize_string_vec(std::mem::take(&mut self.preconditions));
+        self.effects = normalize_string_vec(std::mem::take(&mut self.effects));
+        self.invariants = normalize_string_vec(std::mem::take(&mut self.invariants));
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzExplorationPolicy {
+    #[serde(default = "fuzz_exploration_policy_schema")]
+    pub schema: String,
+    #[serde(default = "fuzz_contract_version")]
+    pub version: u32,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_model_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub action_weights: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_budget_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_cadence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_seed_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corpus_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invariants: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzExplorationPolicy {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let mut policy: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
+        policy.normalize()?;
+        Ok(policy)
+    }
+
+    pub(super) fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_EXPLORATION_POLICY_SCHEMA);
+        require_schema(
+            &self.schema,
+            FUZZ_EXPLORATION_POLICY_SCHEMA,
+            "fuzz exploration policy",
+        )?;
+        if self.version != FUZZ_CONTRACT_VERSION {
+            return Err(format!(
+                "fuzz exploration policy version must be {FUZZ_CONTRACT_VERSION}"
+            ));
+        }
+        self.id = required_trimmed("exploration_policy.id", &self.id)?;
+        self.action_model_ref = normalize_optional_string(self.action_model_ref.take());
+        self.reset_cadence = normalize_optional_string(self.reset_cadence.take());
+        self.replay_seed_ref = normalize_optional_string(self.replay_seed_ref.take());
+        self.corpus_refs = normalize_string_vec(std::mem::take(&mut self.corpus_refs));
+        self.invariants = normalize_string_vec(std::mem::take(&mut self.invariants));
+        if let Some((action, _)) = self
+            .action_weights
+            .iter()
+            .find(|(_, weight)| !weight.is_finite() || **weight < 0.0)
+        {
+            return Err(format!(
+                "exploration policy action weight for `{action}` must be a finite non-negative number"
+            ));
+        }
         Ok(())
     }
 }

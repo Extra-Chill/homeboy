@@ -8,7 +8,7 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
-homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>]
+homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>]
 homeboy fuzz validate <results-file>
 homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--output-envelope <path>]
 homeboy fuzz compare <baseline-envelope> <candidate-envelope> [--hotspot-policy <advisory|blocking|off>]
@@ -140,6 +140,56 @@ families, selected operation ids, seed/corpus refs, effective budgets, isolation
 requirements, selected gate profile, required artifact ids, gate ids, inventory
 provenance, and skipped target or operation reasons. The planner is product-neutral: it uses inventory-declared
 operation families and safety classes, not product-specific target names.
+
+`homeboy fuzz plan --action-model <path>` accepts a
+`homeboy/fuzz-action-model/v1` JSON contract. The action model declares generic
+actions with ids, free-form kinds, optional canonical operation families,
+non-negative weights, opaque input generator refs, preconditions, effects, and
+invariants. Homeboy validates the schema/version and preserves the contract in
+the execution request metadata; concrete generation and execution behavior stays
+runner-owned.
+
+```json
+{
+  "schema": "homeboy/fuzz-action-model/v1",
+  "version": 1,
+  "id": "generic-actions",
+  "actions": [
+    {
+      "id": "resource.read",
+      "kind": "read",
+      "family": "read",
+      "weight": 3.0,
+      "input_generators": ["generator:resource-id"],
+      "preconditions": ["resource.exists"],
+      "effects": ["observation.recorded"],
+      "invariants": ["resource.integrity"]
+    }
+  ]
+}
+```
+
+`homeboy fuzz plan --exploration-policy <path>` accepts a
+`homeboy/fuzz-exploration-policy/v1` JSON contract. The policy declares generic
+planning constraints such as action model refs, action weights, case and duration
+budgets, reset cadence, replay seed refs, corpus refs, and invariants. Homeboy
+validates and embeds the policy without implementing downstream exploration.
+
+```json
+{
+  "schema": "homeboy/fuzz-exploration-policy/v1",
+  "version": 1,
+  "id": "bounded-exploration",
+  "action_model_ref": "generic-actions",
+  "action_weights": { "resource.read": 3.0 },
+  "case_budget": 50,
+  "duration_budget_seconds": 300,
+  "reset_cadence": "after_each_case",
+  "replay_seed_ref": "seed:stable-1",
+  "corpus_refs": ["corpus:generic-fixture"],
+  "invariants": ["resource.integrity"]
+}
+```
 
 Selection strategies are intentionally small. `all` selects supported
 non-destructive inventory operations. `read-only` selects read-like families,
