@@ -62,7 +62,7 @@ const crudCase = {
 
 const crudDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crudCase, {
 	runtimeCapabilities: { capabilities: ['crud'] },
-	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], mutationIsolation: true },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], disposable: true, isolation: { runtime_backed: true, disposable: true } },
 	codeboxRuntimeContracts: runtimeActionContracts,
 });
 assert.equal(crudDescriptor.schema, WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_SCHEMA);
@@ -155,10 +155,10 @@ const adminMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescri
 		nonce_context: { required: true, action: 'bulk-posts', field: '_wpnonce' },
 		mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'admin', method: 'POST' }),
 	},
-}, { runtimeCapabilities: { capabilities: ['admin', 'snapshot', 'restore', 'reset'] }, codeboxRuntimeContracts: runtimeActionContracts });
+}, { runtimeCapabilities: { capabilities: ['admin'] }, codeboxRuntimeContracts: runtimeActionContracts });
 assert.equal(adminMutationDescriptor.status, 'ready');
 assert.equal(adminMutationDescriptor.skip_reason, undefined);
-assert.deepEqual(adminMutationDescriptor.required_capabilities, ['admin', 'reset', 'restore', 'snapshot']);
+assert.deepEqual(adminMutationDescriptor.required_capabilities, ['admin']);
 assert.equal(adminMutationDescriptor.input.interaction_kind, 'form');
 assert.equal(adminMutationDescriptor.input.selector, '#posts-filter');
 assert.deepEqual(adminMutationDescriptor.input.fields, { action: 'edit' });
@@ -187,17 +187,17 @@ const dbMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescripto
 	operation: { table: 'wp_posts', mutation: 'insert' },
 	destructive_reasons: ['db-mutation'],
 	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'database' }) },
-}, { runtimeCapabilities: { capabilities: ['database', 'snapshot', 'transaction', 'reset'] }, codeboxRuntimeContracts: runtimeActionContracts });
+}, { runtimeCapabilities: { capabilities: ['database'] }, codeboxRuntimeContracts: runtimeActionContracts });
 assert.equal(dbMutationDescriptor.status, 'ready');
 assert.equal(dbMutationDescriptor.skip_reason, undefined);
-assert.deepEqual(dbMutationDescriptor.required_capabilities, ['database', 'reset', 'snapshot', 'transaction']);
+assert.deepEqual(dbMutationDescriptor.required_capabilities, ['database']);
 
 const capabilityOnlyMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
 	id: 'case:rest-post-capability-only',
 	intent: 'request-rest-route',
 	operation: { method: 'POST', route: '/example/v1/items' },
 	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'POST' }) },
-}, { runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback'] }, codeboxRuntimeContracts: runtimeActionContracts });
+}, { runtimeCapabilities: { capabilities: ['rest'] }, codeboxRuntimeContracts: runtimeActionContracts });
 assert.equal(capabilityOnlyMutationDescriptor.status, 'ready');
 assert.equal(capabilityOnlyMutationDescriptor.skip_reason, undefined);
 
@@ -225,19 +225,19 @@ assert.equal(mutationIsolationBlockedDescriptor.status, 'blocked');
 assert.equal(mutationIsolationBlockedDescriptor.skip_reason, 'wp-codebox-fuzz-mutation-isolation-unsupported');
 assert.equal(mutationIsolationBlockedDescriptor.blockers[0].code, 'wp-codebox-fuzz-mutation-isolation-unsupported');
 
-const deleteBoundaryBlockedDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
-	id: 'case:rest-delete-no-boundary',
+const disposableDeleteDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:rest-delete-disposable',
 	intent: 'request-rest-route',
 	operation: { method: 'DELETE', route: '/example/v1/items/42' },
 	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' }) },
 }, {
-	runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback'] },
-	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], mutationIsolation: true },
+	runtimeCapabilities: { capabilities: ['rest'] },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], disposable: true, isolation: { runtime_backed: true, disposable: true } },
 	codeboxRuntimeContracts: runtimeActionContracts,
 });
-assert.equal(deleteBoundaryBlockedDescriptor.status, 'blocked');
-assert.equal(deleteBoundaryBlockedDescriptor.skip_reason, 'wp-codebox-fuzz-delete-boundary-unsupported');
-assert.equal(deleteBoundaryBlockedDescriptor.blockers[0].code, 'wp-codebox-fuzz-delete-boundary-unsupported');
+assert.equal(disposableDeleteDescriptor.status, 'ready');
+assert.equal(disposableDeleteDescriptor.skip_reason, undefined);
+assert.equal(disposableDeleteDescriptor.mutation_lifecycle.delete_boundary_required, true);
 
 const readyMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
 	id: 'case:rest-delete-ready',
@@ -245,8 +245,8 @@ const readyMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescri
 	operation: { method: 'DELETE', route: '/example/v1/items/42' },
 	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' }) },
 }, {
-	runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback'] },
-	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], mutationIsolation: true, deleteBoundary: true },
+	runtimeCapabilities: { capabilities: ['rest'] },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], disposable: true, isolation: { runtime_backed: true, disposable: true } },
 	codeboxRuntimeContracts: runtimeActionContracts,
 });
 assert.equal(readyMutationDescriptor.status, 'ready');

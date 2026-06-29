@@ -253,16 +253,6 @@ function runtimeReadinessBlockerForOperation(family, testCase = {}, readiness) {
 			blocker: true,
 		};
 	}
-	if (operationKind === 'mutation' && restDeleteBoundaryRequired(testCase) && !readinessSupportsDeleteBoundary(source)) {
-		return {
-			code: 'wp-codebox-fuzz-delete-boundary-unsupported',
-			message: 'WP Codebox fuzz readiness does not declare delete-boundary support; DELETE mutation cases cannot execute.',
-			operation_kind: operationKind,
-			skip_reason: 'wp-codebox-fuzz-delete-boundary-unsupported',
-			blocking: true,
-			blocker: true,
-		};
-	}
 	if (source.status === 'unsupported') {
 		return {
 			code: 'wp-codebox-fuzz-readiness-unsupported',
@@ -285,31 +275,19 @@ function readinessSupportsMutationIsolation(readiness = {}) {
 	const isolation = objectOrUndefined(readiness.isolation) || objectOrUndefined(capabilities.isolation) || {};
 	return readiness.mutationIsolation === true
 		|| readiness.mutation_isolation === true
+		|| readiness.disposable === true
 		|| capabilities.mutationIsolation === true
 		|| capabilities.mutation_isolation === true
+		|| capabilities.disposable === true
 		|| mutation.isolated === true
 		|| mutation.isolation === true
+		|| mutation.disposable === true
 		|| isolation.mutation === true
+		|| isolation.disposable === true
+		|| isolation.runtime_backed === true
+		|| isolation.runtimeBacked === true
 		|| isolation.checkpoint === true
 		|| isolation.snapshot === true;
-}
-
-function restDeleteBoundaryRequired(testCase = {}) {
-	const mutationLifecycle = normalizeWordPressFuzzMutationLifecycleContract(testCase.metadata?.mutation_lifecycle || testCase.metadata?.mutationLifecycle || testCase.mutation_lifecycle || testCase.mutationLifecycle) || {};
-	return mutationLifecycle.delete_boundary_required === true || String(testCase.operation?.method || '').toUpperCase() === 'DELETE';
-}
-
-function readinessSupportsDeleteBoundary(readiness = {}) {
-	const capabilities = objectOrUndefined(readiness.capabilities) || {};
-	const mutation = objectOrUndefined(readiness.mutation) || objectOrUndefined(capabilities.mutation) || {};
-	const deleteBoundary = objectOrUndefined(readiness.delete_boundary) || objectOrUndefined(readiness.deleteBoundary) || objectOrUndefined(capabilities.delete_boundary) || objectOrUndefined(capabilities.deleteBoundary) || {};
-	return readiness.deleteBoundary === true
-		|| readiness.delete_boundary === true
-		|| capabilities.deleteBoundary === true
-		|| capabilities.delete_boundary === true
-		|| mutation.delete_boundary === true
-		|| mutation.deleteBoundary === true
-		|| deleteBoundary.supported === true;
 }
 
 function readinessOperationKindForFamily(family, testCase = {}) {
@@ -476,8 +454,7 @@ function requiredCapabilitiesForWordPressFuzzRuntimeOperation(testCase = {}, opt
 	const family = options.family || runtimeOperationFamily(testCase);
 	const action = options.action || runtimeOperationAction(testCase, { family });
 	const base = ACTION_REQUIRED_CAPABILITIES[action] || FAMILY_REQUIRED_CAPABILITIES[family] || [];
-	const mutationLifecycle = normalizeWordPressFuzzMutationLifecycleContract(testCase.metadata?.mutation_lifecycle || testCase.metadata?.mutationLifecycle || testCase.mutation_lifecycle || testCase.mutationLifecycle) || {};
-	return mergeCapabilities(base, extraCapabilitiesForCase(testCase, family), mutationLifecycle.required_capabilities, testCase.required_capabilities || testCase.requiredCapabilities);
+	return mergeCapabilities(base, extraCapabilitiesForCase(testCase, family), testCase.required_capabilities || testCase.requiredCapabilities);
 }
 
 function runtimeOperationAction(testCase = {}, { family } = {}) {
