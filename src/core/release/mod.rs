@@ -1,4 +1,5 @@
 mod advanced_remote;
+pub mod cascade;
 pub mod changelog;
 mod checkout_guard;
 mod context;
@@ -26,6 +27,7 @@ pub mod version;
 mod workflow;
 mod workflow_recover;
 
+pub use cascade::{run_cascade, CascadeResult, CascadeStepResult, ReleasedCoordinates};
 pub use package_recovery::{package_existing_tag, ReleasePackageResult};
 pub use pipeline::run;
 pub use planner::plan;

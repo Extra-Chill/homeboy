@@ -132,6 +132,13 @@ pub struct ReleaseArgs {
     /// When set, configures git user.name and user.email before committing.
     #[arg(long)]
     git_identity: Option<String>,
+
+    /// After releasing the component, release every dependent that declares a
+    /// dependency on it: update the dependent's declared dependency pin and
+    /// release it with an automatic patch bump, transitively. Single-component
+    /// releases only.
+    #[arg(long)]
+    cascade: bool,
 }
 
 #[derive(Serialize)]
@@ -139,6 +146,10 @@ pub struct ReleaseArgs {
 pub struct ReleaseOutput {
     pub variant: &'static str,
     pub result: ReleaseCommandResult,
+    /// Dependency-aware cascade result, present when `--cascade` released
+    /// dependents after this component.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cascade: Option<release::CascadeResult>,
 }
 
 #[derive(Serialize)]
@@ -290,6 +301,7 @@ impl ReleaseArgs {
             no_github_release: false,
             i_know_ci_creates_the_github_release: false,
             git_identity: None,
+            cascade: false,
         }
     }
 }
@@ -313,7 +325,7 @@ pub fn run(
     // Single component: use the original single-release flow
     if component_ids.len() == 1 {
         let component_id = &component_ids[0];
-        let (result, exit_code) = release::run_command(ReleaseCommandInput {
+        let input = ReleaseCommandInput {
             component_id: component_id.clone(),
             path_override: args.path.clone(),
             dry_run: args.dry_run_args.dry_run,
@@ -328,14 +340,27 @@ pub fn run(
             skip_github_release: args.no_github_release,
             git_identity: args.git_identity.clone(),
             execution: Some(execution.clone()),
-        })?;
+        };
+        let (result, exit_code) = release::run_command(input.clone())?;
+
+        let cascade = run_cascade_if_requested(&args, component_id, &result, &input)?;
 
         return Ok((
             ReleaseCommandOutput::Single(ReleaseOutput {
                 variant: "single",
                 result,
+                cascade,
             }),
             exit_code,
+        ));
+    }
+
+    if args.cascade {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "cascade",
+            "--cascade releases dependents of a single component; run one component at a time",
+            None,
+            None,
         ));
     }
 
@@ -415,6 +440,45 @@ pub fn run(
         }),
         exit_code,
     ))
+}
+
+/// Run the dependency-aware cascade after a single-component release, when
+/// `--cascade` was requested and the component actually released.
+fn run_cascade_if_requested(
+    args: &ReleaseArgs,
+    component_id: &str,
+    result: &ReleaseCommandResult,
+    input: &ReleaseCommandInput,
+) -> Result<Option<release::CascadeResult>, homeboy::core::Error> {
+    if !args.cascade {
+        return Ok(None);
+    }
+
+    if args.dry_run_args.dry_run {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "cascade",
+            "--cascade mutates and releases dependents; it cannot be combined with --dry-run",
+            None,
+            None,
+        ));
+    }
+
+    // Only cascade when the upstream actually produced a release; a skipped or
+    // failed upstream has no new coordinates to propagate.
+    if result.status != "released" {
+        return Ok(None);
+    }
+
+    let component = component::resolve_effective(Some(component_id), args.path.as_deref(), None)?;
+    let sha = homeboy::core::git::get_head_commit(&component.local_path).unwrap_or_default();
+    let root = release::ReleasedCoordinates {
+        component_id: component_id.to_string(),
+        version: result.new_version.clone().unwrap_or_default(),
+        tag: result.tag.clone().unwrap_or_default(),
+        sha,
+    };
+
+    Ok(Some(release::run_cascade(&root, input)?))
 }
 
 fn run_package_only(
@@ -741,6 +805,7 @@ mod tests {
             no_github_release: false,
             i_know_ci_creates_the_github_release: false,
             git_identity: None,
+            cascade: false,
         }
     }
 
