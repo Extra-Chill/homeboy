@@ -38,6 +38,7 @@ mod remote_artifact;
 #[cfg(test)]
 mod tests;
 mod types;
+mod watch;
 
 use super::{CmdResult, GlobalArgs};
 

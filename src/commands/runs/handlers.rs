@@ -32,11 +32,18 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
 
     let store = ObservationStore::open_initialized()?;
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
-    let status_filter = args.status.clone();
+    // `--running` is shorthand for `--status running`; the two are mutually
+    // exclusive at the CLI layer so this never overrides an explicit status.
+    let status = if args.running {
+        Some("running".to_string())
+    } else {
+        args.status
+    };
+    let status_filter = status.clone();
     let run_records = store.list_runs(RunListFilter {
         kind: args.kind,
         component_id: args.component_id,
-        status: args.status,
+        status,
         rig_id: args.rig,
         limit: Some(args.limit),
     })?;

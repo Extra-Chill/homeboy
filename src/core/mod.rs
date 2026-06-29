@@ -99,6 +99,7 @@ pub mod lab_routing;
 pub mod lifecycle;
 pub(crate) mod markdown;
 pub mod matrix_artifact_summary;
+pub mod notify;
 pub mod observation;
 pub mod output;
 pub(crate) mod ownership;
