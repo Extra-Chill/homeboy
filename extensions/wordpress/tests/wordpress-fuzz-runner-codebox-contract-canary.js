@@ -71,9 +71,10 @@ if (command === 'fuzz' && process.argv[3] === 'readiness' && process.argv.includ
     capabilities: {
       commands: ['wordpress.rest-request', 'wordpress.run-workload'],
       runtimeActionTypes: ['rest_request'],
-      capabilities: ['rest', 'runtime-isolation', 'artifact-export']
+      capabilities: ['rest', 'disposable-runtime', 'runtime-isolation', 'artifact-export']
     },
-    isolation: { runtime_backed: true },
+    disposable: true,
+    isolation: { runtime_backed: true, disposable: true },
     artifacts: { export: true },
     unsupportedRequiredCapabilities: []
   }));

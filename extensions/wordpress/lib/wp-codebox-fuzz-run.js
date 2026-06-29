@@ -180,9 +180,7 @@ const DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS = [
 	},
 ];
 const WP_CODEBOX_DESTRUCTIVE_READINESS_REQUIREMENTS = [
-	{ key: 'runtime_isolation', label: 'runtime-backed isolation' },
-	{ key: 'rollback_checkpoint', label: 'snapshot/checkpoint rollback primitive' },
-	{ key: 'rollback_restore', label: 'restore/reset rollback primitive' },
+	{ key: 'disposable_runtime', label: 'disposable runtime isolation' },
 	{ key: 'external_http_guardrail', label: 'external HTTP guardrail' },
 	{ key: 'artifact_export', label: 'artifact export' },
 ];
@@ -1524,9 +1522,7 @@ function normalizeWpCodeboxDestructiveReadiness(readiness = {}, { request = {}, 
 	const source = objectOrUndefined(readiness) || {};
 	const capabilities = new Set(wordpressRuntimeCapabilitiesFromFuzzReadiness(source));
 	const facts = {
-		runtime_isolation: wpCodeboxReadinessRuntimeIsolation(source, capabilities),
-		rollback_checkpoint: wpCodeboxReadinessHasAny(source, capabilities, ['snapshot', 'checkpoint', 'transaction'], ['snapshot', 'checkpoint', 'transaction']),
-		rollback_restore: wpCodeboxReadinessHasAny(source, capabilities, ['restore', 'reset', 'rest-rollback'], ['restore', 'reset', 'rollback', 'rest_rollback', 'rest-rollback']),
+		disposable_runtime: wpCodeboxReadinessDisposableRuntime(source, capabilities),
 		external_http_guardrail: wpCodeboxReadinessHasAny(source, capabilities, ['external-http-guardrail'], ['external_http_guardrail', 'externalHttpGuardrail', 'external_http', 'externalHttp', 'http_guardrail', 'httpGuardrail']),
 		artifact_export: wpCodeboxReadinessHasAny(source, capabilities, ['artifact-export'], ['artifact_export', 'artifactExport', 'artifacts_export', 'artifactsExport', 'export_artifacts', 'exportArtifacts']),
 	};
@@ -1662,11 +1658,12 @@ function normalizeMutationMode(value) {
 	return ['isolated', 'aggressive-isolated', 'read-only', 'destructive-deny'].includes(label) ? label : undefined;
 }
 
-function wpCodeboxReadinessRuntimeIsolation(readiness = {}, capabilities = new Set()) {
+function wpCodeboxReadinessDisposableRuntime(readiness = {}, capabilities = new Set()) {
 	return readiness.status === 'ready'
 		&& readiness.mode === 'runtime-backed'
-		&& (capabilities.has('runtime-isolation')
-			|| booleanAtAnyPath(readiness, ['isolation.runtime_backed', 'isolation.runtimeBacked', 'isolation.sandboxed', 'runtime_isolation', 'runtimeIsolation', 'sandbox.isolated']));
+		&& (capabilities.has('disposable-runtime')
+			|| capabilities.has('runtime-isolation')
+			|| booleanAtAnyPath(readiness, ['disposable', 'sandbox.disposable', 'runtime.disposable', 'isolation.disposable', 'isolation.runtime_backed', 'isolation.runtimeBacked', 'isolation.sandboxed', 'runtime_isolation', 'runtimeIsolation', 'sandbox.isolated']));
 }
 
 function wpCodeboxReadinessHasAny(readiness = {}, capabilities = new Set(), capabilityNames = [], paths = []) {
@@ -1732,7 +1729,7 @@ function wordpressRuntimeCapabilitiesFromFuzzReadiness(readiness = {}) {
 		...(runtimeActions.has('browser') || runtimeActions.has('browser_probe') || runtimeActions.has('page') || commands.has('wordpress.browser-actions') || commands.has('wordpress.browser-probe') || commands.has('wordpress.frontend-page-load') ? ['browser'] : []),
 		...(runtimeActions.has('editor_open') ? ['block-editor'] : []),
 		...(runtimeActions.has('php') || runtimeActions.has('wp_cli') || commands.has('wordpress.run-php') || commands.has('wordpress.wp-cli') ? ['database', 'query-observation', 'sequence'] : []),
-		...(readiness.mode === 'runtime-backed' && booleanAtAnyPath(readiness, ['isolation.runtime_backed', 'isolation.runtimeBacked', 'isolation.sandboxed', 'runtime_isolation', 'runtimeIsolation', 'sandbox.isolated']) ? ['runtime-isolation'] : []),
+		...(readiness.mode === 'runtime-backed' && booleanAtAnyPath(readiness, ['disposable', 'sandbox.disposable', 'runtime.disposable', 'isolation.disposable', 'isolation.runtime_backed', 'isolation.runtimeBacked', 'isolation.sandboxed', 'runtime_isolation', 'runtimeIsolation', 'sandbox.isolated']) ? ['disposable-runtime', 'runtime-isolation'] : []),
 		...(wpCodeboxReadinessHasAny(readiness, new Set(declaredCapabilities), [], ['external_http_guardrail', 'externalHttpGuardrail', 'external_http', 'externalHttp', 'http_guardrail', 'httpGuardrail']) ? ['external-http-guardrail'] : []),
 		...(wpCodeboxReadinessHasAny(readiness, new Set(declaredCapabilities), [], ['artifact_export', 'artifactExport', 'artifacts_export', 'artifactsExport', 'export_artifacts', 'exportArtifacts']) ? ['artifact-export'] : []),
 	]);

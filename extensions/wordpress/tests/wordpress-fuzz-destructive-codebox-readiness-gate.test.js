@@ -101,7 +101,7 @@ assert.equal(blockedPreflight.ok, false);
 assert.equal(blockedPreflight.destructive_readiness.required, true);
 assert.deepEqual(
 	blockedPreflight.destructive_readiness.missing_primitives.map((primitive) => primitive.key),
-	['runtime_isolation', 'rollback_checkpoint', 'rollback_restore', 'external_http_guardrail', 'artifact_export']
+	['disposable_runtime', 'external_http_guardrail', 'artifact_export']
 );
 assert.equal(blockedPreflight.missing_contracts.some((contract) => contract.type === 'destructive_readiness'), true);
 assert.equal(blockedPreflight.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_destructive_readiness'), true);
@@ -136,13 +136,13 @@ assert.equal(missingManifestPreflight.missing_contracts.some((contract) => contr
 
 const completeReadiness = {
 	...incompleteReadiness,
-	isolation: { runtime_backed: true, snapshot: true, restore: true, reset: true },
-	rollback: { checkpoint: true, restore: true },
+	disposable: true,
+	isolation: { runtime_backed: true, disposable: true },
 	guardrails: { external_http_guardrail: true },
 	artifacts: { export: true },
 	capabilities: {
 		...incompleteReadiness.capabilities,
-		capabilities: ['snapshot', 'checkpoint', 'restore', 'reset', 'runtime-backed-isolation', 'external-http-guardrail', 'artifact-export'],
+		capabilities: ['disposable-runtime', 'runtime-backed-isolation', 'external-http-guardrail', 'artifact-export'],
 	},
 };
 
@@ -154,11 +154,10 @@ const passedPreflight = preflightWpCodeboxFuzzCapabilityContract({
 
 assert.equal(passedPreflight.ok, true);
 assert.equal(passedPreflight.destructive_readiness.ok, true);
-assert.equal(passedPreflight.destructive_readiness.facts.runtime_isolation, true);
-assert.equal(passedPreflight.destructive_readiness.facts.rollback_checkpoint, true);
-assert.equal(passedPreflight.destructive_readiness.facts.rollback_restore, true);
+assert.equal(passedPreflight.destructive_readiness.facts.disposable_runtime, true);
 assert.equal(passedPreflight.destructive_readiness.facts.external_http_guardrail, true);
 assert.equal(passedPreflight.destructive_readiness.facts.artifact_export, true);
+assert.equal(passedPreflight.capabilities.capabilities.includes('disposable-runtime'), true);
 assert.equal(passedPreflight.capabilities.capabilities.includes('runtime-isolation'), true);
 assert.equal(passedPreflight.capabilities.capabilities.includes('external-http-guardrail'), true);
 assert.equal(passedPreflight.capabilities.capabilities.includes('artifact-export'), true);
