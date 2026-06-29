@@ -33,6 +33,9 @@ const {
 const {
 	wpCodeboxRuntimeActionTarget,
 } = require('./wordpress-fuzz-runtime-action-contracts');
+const {
+	normalizeWordPressSurfaceFamilyContracts,
+} = require('./wordpress-surface-family-contracts');
 
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const DB_MUTATION_REQUIRED_CAPABILITIES = requiredCapabilitiesForWordPressFuzzCase('db_mutation');
@@ -51,6 +54,11 @@ function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 		...discovery.surfaces.map((surface) => targetFromSurface(surface, targetOptions)),
 		...statefulSequenceTargetsFromSurfaces(discovery.surfaces, targetOptions),
 	], targetOptions);
+	const surfaceFamilyContracts = normalizeWordPressSurfaceFamilyContracts({
+		id: `${discovery.id}-surface-family-contracts`,
+		surfaces: discovery.surfaces,
+		targets,
+	});
 
 	return normalizeWordPressFuzzPlan({
 		schema: WORDPRESS_FUZZ_PLAN_SCHEMA,
@@ -61,6 +69,7 @@ function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 		metadata: {
 			...(input.metadata || {}),
 			planner: 'homeboy/wordpress-fuzz-plan-from-surfaces/v1',
+			surface_family_contracts: surfaceFamilyContracts,
 			mutation_mode: mutationMode || undefined,
 			execution_tiers: summarizeExecutionTiers(targets),
 			diagnostics: wordpressFuzzPlanDiagnostics(targets),

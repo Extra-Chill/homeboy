@@ -386,6 +386,17 @@ only; they do not select a runtime, generate cases, or execute fuzzing.
   options, cron events, database tables, frontend URLs, and WP-CLI commands.
 - `wordpress-fuzz-plan/v1` groups fuzz cases by discovered surface target.
 - `wordpress-fuzz-result/v1` reports normalized case outcomes and summaries.
+- `homeboy/wordpress-surface-family-contracts/v1` labels explicit WordPress
+  surface families and their executable state: `read_only_executable`,
+  `isolated_mutating_executable`, `discovered`, or `unsupported`.
+
+Surface family contracts are generic WordPress contracts. They cover REST, CRUD,
+admin pages/actions, frontend, blocks/editor, DB tables/queries, WP-CLI,
+hooks/cron, options/settings, and users/roles/media/taxonomies without feature
+checks or product-specific assumptions. A discovered surface with no executable
+runtime collector remains present as `discovered`; a planned case gated by the
+current contract is surfaced as `unsupported` rather than hidden as a skipped
+test.
 
 ```json
 {
