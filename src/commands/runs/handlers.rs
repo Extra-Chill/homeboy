@@ -20,7 +20,8 @@ use super::types::{
     RunDetail, RunsArtifactArgs, RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactGetOutput,
     RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs,
     RunsArtifactsOutput, RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
-    RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsShowOutput,
+    RunsFieldSelectionOutput, RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput,
+    RunsSelectedField, RunsShowOutput,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -525,6 +526,15 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
 }
 
 pub(crate) fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
+    let fields = args.field.clone();
+    let (output, exit_code) = artifact_get_inner(args)?;
+    if fields.is_empty() {
+        return Ok((output, exit_code));
+    }
+    apply_field_selection(output, &fields)
+}
+
+fn artifact_get_inner(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
     if let Some(runner_id) = args.runner.clone() {
         return remote::runner_artifact_get(&runner_id, args);
     }
@@ -571,6 +581,64 @@ pub(crate) fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
             None,
         )),
     }
+}
+
+/// Project `--field`/`-q` selectors over a `show` or `artifact get` result,
+/// returning a compact [`RunsOutput::FieldSelection`] carrying only the
+/// requested fields. Show selectors are rooted at the run detail; artifact-get
+/// selectors at the artifact-get result. Unsupported variants are returned
+/// unchanged so the selector never silently swallows other output.
+pub(super) fn apply_field_selection(
+    output: RunsOutput,
+    fields: &[String],
+) -> CmdResult<RunsOutput> {
+    let value = serde_json::to_value(&output).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("serialize runs output for field selection".to_string()),
+        )
+    })?;
+    let variant = value.get("variant").and_then(Value::as_str).unwrap_or_default();
+    let payload = value.get("payload").cloned().unwrap_or(Value::Null);
+    let (root, run_id, artifact_id) = match variant {
+        "show" => {
+            let run = payload.get("run").cloned().unwrap_or(Value::Null);
+            let run_id = run
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            (run, run_id, None)
+        }
+        "artifact_get" => {
+            let run_id = payload
+                .get("run_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let artifact_id = payload
+                .get("artifact_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            (payload.clone(), run_id, artifact_id)
+        }
+        _ => return Ok((output, 0)),
+    };
+
+    let selected = super::common::select_fields(&root, fields)?
+        .into_iter()
+        .map(|(field, value)| RunsSelectedField { field, value })
+        .collect();
+
+    Ok((
+        RunsOutput::FieldSelection(RunsFieldSelectionOutput {
+            command: "runs.field",
+            run_id,
+            artifact_id,
+            fields: selected,
+        }),
+        0,
+    ))
 }
 
 pub(super) fn require_run(

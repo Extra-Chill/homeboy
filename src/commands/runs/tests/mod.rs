@@ -781,6 +781,7 @@ fn artifact_get_copies_registered_file_without_raw_path_lookup() {
             artifact_id: artifact.id.clone(),
             runner: None,
             output: Some(output_path.clone()),
+            field: Vec::new(),
         })
         .expect("get artifact");
 
@@ -799,11 +800,82 @@ fn artifact_get_copies_registered_file_without_raw_path_lookup() {
             artifact_id: artifact_path.display().to_string(),
             runner: None,
             output: Some(home.path().join("bad.json")),
+            field: Vec::new(),
         }) {
             Ok(_) => panic!("raw paths are not accepted as artifact ids"),
             Err(err) => err,
         };
         assert!(err.to_string().contains("artifact record not found"));
+    });
+}
+
+#[test]
+fn artifact_get_field_selector_projects_only_requested_fields() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+            .expect("run");
+        let artifact_path = home.path().join("bench-results.json");
+        std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("artifact");
+        let artifact = store
+            .record_artifact(&run.id, "bench_results", &artifact_path)
+            .expect("record artifact");
+        let output_path = home.path().join("downloaded.json");
+
+        let (output, _) = artifact_get(RunsArtifactGetArgs {
+            run_id: run.id.clone(),
+            artifact_id: artifact.id.clone(),
+            runner: None,
+            output: Some(output_path.clone()),
+            field: vec!["$.output_path".to_string(), "$.artifact_id".to_string()],
+        })
+        .expect("get artifact with field selector");
+
+        // The artifact bytes are still written even when fields are projected.
+        assert_eq!(
+            std::fs::read(&output_path).expect("downloaded"),
+            br#"{"ok":true}"#
+        );
+
+        let RunsOutput::FieldSelection(selection) = output else {
+            panic!("expected field-selection output");
+        };
+        assert_eq!(selection.command, "runs.field");
+        assert_eq!(selection.run_id, run.id);
+        assert_eq!(selection.artifact_id.as_deref(), Some(artifact.id.as_str()));
+        assert_eq!(selection.fields.len(), 2);
+        assert_eq!(selection.fields[0].field, "$.output_path");
+        assert_eq!(
+            selection.fields[0].value,
+            Value::String(output_path.display().to_string())
+        );
+        assert_eq!(selection.fields[1].field, "$.artifact_id");
+        assert_eq!(selection.fields[1].value, Value::String(artifact.id.clone()));
+    });
+}
+
+#[test]
+fn show_run_field_selector_projects_run_detail_fields() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+            .expect("run");
+
+        let (output, _) = show_run(&run.id).expect("show");
+        let (selection_output, _) =
+            super::handlers::apply_field_selection(output, &["$.status".to_string()])
+                .expect("apply field selection");
+        let RunsOutput::FieldSelection(selection) = selection_output else {
+            panic!("expected field-selection output");
+        };
+        assert_eq!(selection.run_id, run.id);
+        assert!(selection.artifact_id.is_none());
+        assert_eq!(selection.fields[0].field, "$.status");
+        assert_eq!(selection.fields[0].value, Value::String("running".into()));
     });
 }
 
@@ -859,6 +931,7 @@ fn artifact_get_fetches_nested_publication_artifact_store_ref() {
             artifact_id: "nested-result".to_string(),
             runner: None,
             output: Some(output_path.clone()),
+            field: Vec::new(),
         })
         .expect("get nested artifact");
 

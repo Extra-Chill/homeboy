@@ -147,6 +147,38 @@ pub fn eval_jsonpath(path: &serde_json_path::JsonPath, value: &Value) -> Vec<Val
     path.query(value).all().into_iter().cloned().collect()
 }
 
+/// Project one or more JSONPath selectors over `root`, returning a
+/// `(selector, value)` pair per expression. Each value collapses the matched
+/// nodes: `null` for no match, the single match, or an array for many. Backs
+/// the `-q`/`--field` selectors on `runs show` and `runs artifact get` so a
+/// caller extracts only the fields it needs instead of the whole structure.
+pub fn select_fields(
+    root: &Value,
+    exprs: &[String],
+) -> homeboy::core::Result<Vec<(String, Value)>> {
+    let mut selected = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        let trimmed = expr.trim();
+        if trimmed.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "field",
+                "--field/-q selector must not be empty",
+                None,
+                None,
+            ));
+        }
+        let path = compile_jsonpath(trimmed)?;
+        let matches = eval_jsonpath(&path, root);
+        let value = match matches.len() {
+            0 => Value::Null,
+            1 => matches.into_iter().next().unwrap(),
+            _ => Value::Array(matches),
+        };
+        selected.push((trimmed.to_string(), value));
+    }
+    Ok(selected)
+}
+
 /// Render a JSON value as a flat scalar string suitable for grouping or
 /// table display. Returns `None` for objects, arrays, and `null`.
 ///
@@ -386,6 +418,39 @@ mod tests {
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("10x").is_err());
         assert!(parse_duration("h").is_err());
+    }
+
+    #[test]
+    fn select_fields_collapses_matches_per_selector() {
+        let root = serde_json::json!({
+            "status": "pass",
+            "metadata": { "run_dir": "/tmp/run" },
+            "tags": ["a", "b"]
+        });
+        let selected = select_fields(
+            &root,
+            &[
+                "$.status".to_string(),
+                "$.metadata.run_dir".to_string(),
+                "$.tags[*]".to_string(),
+                "$.missing".to_string(),
+            ],
+        )
+        .expect("select");
+        assert_eq!(selected[0], ("$.status".to_string(), Value::String("pass".into())));
+        assert_eq!(
+            selected[1],
+            ("$.metadata.run_dir".to_string(), Value::String("/tmp/run".into()))
+        );
+        assert_eq!(selected[2].1, serde_json::json!(["a", "b"]));
+        assert_eq!(selected[3].1, Value::Null);
+    }
+
+    #[test]
+    fn select_fields_rejects_empty_and_invalid_selectors() {
+        let root = serde_json::json!({ "a": 1 });
+        assert!(select_fields(&root, &["   ".to_string()]).is_err());
+        assert!(select_fields(&root, &["$[".to_string()]).is_err());
     }
 
     #[test]
