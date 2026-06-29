@@ -259,6 +259,8 @@ function runtimeIdFromOptions(options = {}, env = process.env) {
 		options.runtime,
 		env.RUNTIME_ID,
 		env.RUNTIME,
+		env.RUNTIME_PROVIDER,
+		env.BACKEND,
 		DEFAULT_RUNTIME_ID
 	);
 }
