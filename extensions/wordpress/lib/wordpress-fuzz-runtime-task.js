@@ -6,6 +6,7 @@ const WORDPRESS_FUZZ_HOTSPOT_SET_SCHEMA = 'homeboy/fuzz-hotspot-set/v1';
 const WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA = WORDPRESS_FUZZ_HOTSPOT_SET_SCHEMA;
 const WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA = 'homeboy/fuzz-observation-set/v1';
 const WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA = 'wp-codebox/wordpress-hotspots/v1';
+const WP_CODEBOX_WORDPRESS_OBSERVATIONS_SCHEMA = 'wp-codebox/wordpress-observations/v1';
 
 function buildWordPressFuzzRuntimeTaskRequest(options = {}) {
 	const provider = normalizeProvider(options.provider || options.runtimeId || options.runtime_id || 'wp-codebox');
@@ -84,12 +85,25 @@ function codeboxMeasurementCandidates(source = {}) {
 		source.metrics,
 		source.performance_measurements,
 		source.performanceMeasurements,
+		...codeboxWordPressObservationCandidates(source),
 	];
-	const plurals = { query: 'queries', action: 'actions', resource: 'resources', timing: 'timings', counter: 'counters' };
-	for (const family of ['query', 'action', 'resource', 'timing', 'counter']) {
+	const plurals = { query: 'queries', action: 'actions', resource: 'resources', timing: 'timings', counter: 'counters', cache: 'caches', write: 'writes' };
+	for (const family of ['query', 'action', 'resource', 'timing', 'counter', 'cache', 'write']) {
 		candidates.push(source[family], source[plurals[family]], source[`${family}_measurements`], source[`${family}Measurements`]);
 	}
 	return candidates.flatMap(normalizeArray);
+}
+
+function codeboxWordPressObservationCandidates(source = {}) {
+	const performanceDatabase = source.performance?.database || source.database;
+	return [
+		...normalizeArray(source.sql || source.sql_observations || source.sqlObservations).map((entry) => ({ family: 'query', ...entry })),
+		...normalizeArray(source.cache_observations || source.cacheObservations).map((entry) => ({ family: 'cache', ...entry })),
+		...normalizeArray(source.write_observations || source.writeObservations || source.database_writes || source.databaseWrites).map((entry) => ({ family: 'write', ...entry })),
+		...normalizeArray(source.action_correlations || source.actionCorrelations).map((entry) => ({ family: 'action', metric: 'correlation_count', ...entry })),
+		...normalizeArray(performanceDatabase?.fingerprints).map((entry) => ({ family: 'query', category: 'query_fingerprint', ...entry })),
+		...normalizeArray(performanceDatabase?.repeatedQueries || performanceDatabase?.repeated_queries).map((entry) => ({ family: 'query', category: 'duplicate_query_group', duplicate: true, ...entry })),
+	];
 }
 
 function normalizeFuzzObservation(entry = {}, defaults = {}) {
@@ -99,14 +113,17 @@ function normalizeFuzzObservation(entry = {}, defaults = {}) {
 	const metadata = objectOrUndefined(entry.metadata) || {};
 	const family = normalizeObservationFamily(entry.family || entry.type || entry.kind || metadata.family || inferObservationFamily(entry));
 	const metric = nonEmptyString(entry.metric || entry.metric_name || entry.metricName || entry.name || inferMetric(entry));
-	const value = numericValue(entry.value ?? entry.metric_value ?? entry.metricValue ?? entry.count ?? entry.total ?? entry.duration_ms ?? entry.durationMs ?? entry.elapsed_ms ?? entry.elapsedMs ?? entry.memory_bytes ?? entry.memoryBytes ?? entry.bytes);
-	const subject = nonEmptyString(entry.subject || entry.query || entry.sql || entry.action || entry.hook || entry.resource || entry.endpoint || entry.route || entry.url || entry.name || metric);
+	const value = numericValue(entry.value ?? entry.metric_value ?? entry.metricValue ?? entry.count ?? entry.total ?? entry.duration_ms ?? entry.durationMs ?? entry.elapsed_ms ?? entry.elapsedMs ?? entry.totalTimeMs ?? entry.total_time_ms ?? entry.sampleMs ?? entry.sample_ms ?? entry.memory_bytes ?? entry.memoryBytes ?? entry.bytes ?? entry.rows ?? entry.sets ?? entry.deletes ?? entry.hits ?? entry.misses);
+	const subject = nonEmptyString(entry.subject || entry.query || entry.sql || entry.fingerprint || entry.table || entry.cache_key || entry.cacheKey || entry.transient || entry.option || entry.action || entry.hook || entry.resource || entry.endpoint || entry.route || entry.url || entry.name || metric);
 	if (!family || !metric || value === undefined || !subject) {
 		return undefined;
 	}
+	const category = normalizeObservationCategory(entry.category || entry.group || entry.grouping || metadata.category || inferObservationCategory(entry, family));
 	const caseId = nonEmptyString(entry.case_id || entry.caseId || metadata.case_id || metadata.caseId);
 	const targetId = nonEmptyString(entry.target_id || entry.targetId || entry.surface_id || entry.surfaceId || metadata.target_id || metadata.targetId || metadata.surface_id || metadata.surfaceId);
 	const operationId = nonEmptyString(entry.operation_id || entry.operationId || entry.operation || metadata.operation_id || metadata.operationId || metadata.operation);
+	const action = nonEmptyString(entry.action || entry.hook || metadata.action || metadata.hook);
+	const workloadId = nonEmptyString(entry.workload_id || entry.workloadId || metadata.workload_id || metadata.workloadId);
 	return stripUndefined({
 		id: nonEmptyString(entry.id || entry.key) || observationId({ defaults, family, caseId, targetId, operationId, metric, subject }),
 		family,
@@ -123,6 +140,16 @@ function normalizeFuzzObservation(entry = {}, defaults = {}) {
 		metadata: stripUndefined({
 			...metadata,
 			provider: defaults.provider,
+			category,
+			group_key: observationGroupKey(entry, category, subject),
+			table: nonEmptyString(entry.table || metadata.table),
+			cache_key: nonEmptyString(entry.cache_key || entry.cacheKey || entry.key || metadata.cache_key || metadata.cacheKey),
+			cache_group: nonEmptyString(entry.cache_group || entry.cacheGroup || entry.group || metadata.cache_group || metadata.cacheGroup),
+			option: nonEmptyString(entry.option || entry.option_name || entry.optionName || metadata.option || metadata.option_name || metadata.optionName),
+			autoload: booleanOrUndefined(entry.autoload ?? metadata.autoload),
+			write_family: nonEmptyString(entry.write_family || entry.writeFamily || entry.operation || entry.verb || metadata.write_family || metadata.writeFamily),
+			action,
+			workload_id: workloadId,
 		}),
 	});
 }
@@ -136,15 +163,79 @@ function observationId({ defaults = {}, family, caseId, targetId, operationId, m
 
 function normalizeObservationFamily(value) {
 	const family = String(value || '').trim().toLowerCase().replace(/[\s.-]+/g, '_');
-	if (['action', 'query', 'resource', 'timing', 'counter', 'rollback'].includes(family)) {
+	if (['action', 'query', 'resource', 'timing', 'counter', 'rollback', 'cache', 'write'].includes(family)) {
 		return family;
 	}
 	return undefined;
 }
 
+function normalizeObservationCategory(value) {
+	const category = String(value || '').trim().toLowerCase().replace(/[\s.-]+/g, '_');
+	if (['query_fingerprint', 'table', 'duplicate_query_group', 'cache_key_group', 'transient_key_group', 'option_autoload_churn', 'db_write_family', 'action_case_workload_correlation'].includes(category)) {
+		return category;
+	}
+	return undefined;
+}
+
+function inferObservationCategory(entry = {}, family) {
+	if (entry.duplicate === true || entry.repeated === true || entry.duplicate_group || entry.duplicateGroup) {
+		return 'duplicate_query_group';
+	}
+	if (family === 'query' && (entry.fingerprint || entry.query || entry.sql)) {
+		return 'query_fingerprint';
+	}
+	if (family === 'query' && entry.table) {
+		return 'table';
+	}
+	if (family === 'cache' && (entry.transient === true || /^_transient_/.test(String(entry.key || entry.cache_key || entry.cacheKey || '')))) {
+		return 'transient_key_group';
+	}
+	if (family === 'cache') {
+		return 'cache_key_group';
+	}
+	if (family === 'write' && (entry.option || entry.option_name || entry.optionName || entry.autoload !== undefined)) {
+		return 'option_autoload_churn';
+	}
+	if (family === 'write') {
+		return 'db_write_family';
+	}
+	if (family === 'action') {
+		return 'action_case_workload_correlation';
+	}
+	return undefined;
+}
+
+function observationGroupKey(entry = {}, category, subject) {
+	if (category === 'query_fingerprint' || category === 'duplicate_query_group') {
+		return nonEmptyString(entry.fingerprint || entry.query || entry.sql || subject);
+	}
+	if (category === 'table') {
+		return nonEmptyString(entry.table || subject);
+	}
+	if (category === 'cache_key_group' || category === 'transient_key_group') {
+		return [entry.cache_group || entry.cacheGroup || entry.group, entry.cache_key || entry.cacheKey || entry.key || entry.transient || subject].filter(Boolean).join(':');
+	}
+	if (category === 'option_autoload_churn') {
+		return [entry.option || entry.option_name || entry.optionName || subject, entry.autoload === undefined ? undefined : `autoload:${entry.autoload === true ? 'yes' : 'no'}`].filter(Boolean).join(':');
+	}
+	if (category === 'db_write_family') {
+		return [entry.table, entry.write_family || entry.writeFamily || entry.operation || entry.verb || subject].filter(Boolean).join(':');
+	}
+	if (category === 'action_case_workload_correlation') {
+		return [entry.action || entry.hook, entry.case_id || entry.caseId, entry.workload_id || entry.workloadId].filter(Boolean).join(':') || subject;
+	}
+	return subject;
+}
+
 function inferObservationFamily(entry = {}) {
 	if (entry.query !== undefined || entry.sql !== undefined || entry.query_count !== undefined || entry.queryCount !== undefined) {
 		return 'query';
+	}
+	if (entry.cache_key !== undefined || entry.cacheKey !== undefined || entry.cache_group !== undefined || entry.cacheGroup !== undefined || entry.transient !== undefined) {
+		return 'cache';
+	}
+	if (entry.write_family !== undefined || entry.writeFamily !== undefined || entry.table !== undefined || entry.rows !== undefined || entry.autoload !== undefined || entry.option !== undefined || entry.option_name !== undefined || entry.optionName !== undefined) {
+		return 'write';
 	}
 	if (entry.action !== undefined || entry.hook !== undefined) {
 		return 'action';
@@ -177,18 +268,41 @@ function fuzzHotspotSummaryFromObservationSet(input, defaults = {}) {
 		return undefined;
 	}
 	return normalizeFuzzHotspotSummary({
-		items: observationSet.observations.map((observation) => ({
-			surface_key: observation.target_id || observation.subject,
-			operation_key: observation.operation_id || observation.phase || observation.subject,
-			dimension: observation.family,
-			metric: observation.metric,
-			value: observation.value,
-			unit: observation.unit,
-			sample_count: observation.sample_count,
-			metadata: stripUndefined({ observation_id: observation.id, family: observation.family }),
-		})),
+		items: groupedHotspotItemsFromObservations(observationSet.observations),
 		metadata: { observation_set_id: observationSet.id },
 	}, defaults);
+}
+
+function groupedHotspotItemsFromObservations(observations = []) {
+	const groups = new Map();
+	for (const observation of observations) {
+		const metadata = observation.metadata || {};
+		const category = metadata.category || observation.family;
+		const groupKey = metadata.group_key || observation.fingerprint || observation.subject;
+		const operationKey = [observation.operation_id, observation.case_id, metadata.action, metadata.workload_id].filter(Boolean).join(':') || observation.phase || observation.subject;
+		const key = [category, groupKey, operationKey, observation.metric].join('\u0000');
+		const current = groups.get(key) || {
+			surface_key: groupKey,
+			operation_key: operationKey,
+			dimension: category,
+			metric: observation.metric,
+			value: 0,
+			unit: observation.unit,
+			sample_count: 0,
+			metadata: stripUndefined({ category, family: observation.family, group_key: groupKey, observations: [] }),
+		};
+		current.value = Number((current.value + observation.value).toFixed(6));
+		current.sample_count += observation.sample_count || 1;
+		current.metadata.observations.push(observation.id);
+		groups.set(key, current);
+	}
+	const items = Array.from(groups.values()).sort((a, b) => b.value - a.value || String(a.surface_key).localeCompare(String(b.surface_key)));
+	const max = items.reduce((largest, item) => Math.max(largest, item.value), 0) || 1;
+	return items.map((item, index) => ({
+		...item,
+		rank: index + 1,
+		relative_score: Number((item.value / max).toFixed(6)),
+	}));
 }
 
 function normalizeFuzzHotspotSummary(input, defaults = {}) {
@@ -277,6 +391,24 @@ function normalizeFuzzHotspotItem(entry = {}, defaults = {}) {
 }
 
 function inferMetric(entry = {}) {
+	if (entry.totalTimeMs !== undefined || entry.total_time_ms !== undefined || entry.sampleMs !== undefined || entry.sample_ms !== undefined) {
+		return 'query_time_ms';
+	}
+	if (entry.rows !== undefined) {
+		return 'rows';
+	}
+	if (entry.sets !== undefined) {
+		return 'cache_sets';
+	}
+	if (entry.deletes !== undefined) {
+		return 'cache_deletes';
+	}
+	if (entry.hits !== undefined) {
+		return 'cache_hits';
+	}
+	if (entry.misses !== undefined) {
+		return 'cache_misses';
+	}
 	if (entry.duration_ms !== undefined || entry.durationMs !== undefined) {
 		return 'duration_ms';
 	}
@@ -344,6 +476,19 @@ function numericValue(value, fallback) {
 	return Number.isFinite(number) ? number : fallback;
 }
 
+function booleanOrUndefined(value) {
+	if (value === true || value === false) {
+		return value;
+	}
+	if (value === 'yes' || value === 'true' || value === '1') {
+		return true;
+	}
+	if (value === 'no' || value === 'false' || value === '0') {
+		return false;
+	}
+	return undefined;
+}
+
 function nonEmptyString(value) {
 	return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }
@@ -373,6 +518,7 @@ module.exports = {
 	WORDPRESS_FUZZ_HOTSPOT_SET_SCHEMA,
 	WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA,
 	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+	WP_CODEBOX_WORDPRESS_OBSERVATIONS_SCHEMA,
 	buildWordPressFuzzRuntimeTaskRequest,
 	fuzzHotspotSummaryFromObservationSet,
 	normalizeFuzzObservationSet,

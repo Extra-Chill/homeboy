@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict');
 
+const codeboxWordPressObservationsFixture = require('./fixtures/wp-codebox-wordpress-observations-v1.json');
+
 const {
 	WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA,
 	WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA,
@@ -10,6 +12,7 @@ const {
 	fuzzHotspotSummaryFromObservationSet,
 	normalizeFuzzObservationSet,
 	normalizeFuzzHotspotSummary,
+	WP_CODEBOX_WORDPRESS_OBSERVATIONS_SCHEMA,
 	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
 } = require('../lib/wordpress-fuzz-runtime-task');
 const {
@@ -71,7 +74,40 @@ assert.equal(codeboxObservations.observations[0].metric, 'query_count');
 assert.equal(codeboxObservations.observations[1].unit, 'ms');
 const observationHotspots = fuzzHotspotSummaryFromObservationSet(codeboxObservations);
 assert.equal(observationHotspots.schema, WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA);
-assert.equal(observationHotspots.items[0].metadata.observation_id, codeboxObservations.observations[0].id);
+assert.deepEqual(observationHotspots.items.find((item) => item.dimension === 'query_fingerprint').metadata.observations, [codeboxObservations.observations[0].id]);
+
+assert.equal(codeboxWordPressObservationsFixture.schema, WP_CODEBOX_WORDPRESS_OBSERVATIONS_SCHEMA);
+const explicitCodeboxObservations = normalizeFuzzObservationSet(codeboxWordPressObservationsFixture, { provider: 'wp-codebox', taskId: 'wp-codebox-observation-fixture' });
+assert.equal(explicitCodeboxObservations.schema, WORDPRESS_FUZZ_OBSERVATION_SET_SCHEMA);
+assert.deepEqual(
+	[...new Set(explicitCodeboxObservations.observations.map((observation) => observation.metadata.category))].sort(),
+	[
+		'action_case_workload_correlation',
+		'cache_key_group',
+		'db_write_family',
+		'duplicate_query_group',
+		'option_autoload_churn',
+		'query_fingerprint',
+		'table',
+		'transient_key_group',
+	]
+);
+assert.equal(explicitCodeboxObservations.observations.find((observation) => observation.metadata.category === 'query_fingerprint').fingerprint, 'SELECT * FROM wp_posts WHERE post_type = ?');
+assert.equal(explicitCodeboxObservations.observations.find((observation) => observation.metadata.category === 'option_autoload_churn').metadata.autoload, true);
+assert.equal(explicitCodeboxObservations.observations.find((observation) => observation.metadata.category === 'action_case_workload_correlation').metadata.workload_id, 'post-crud-workload');
+
+const explicitCodeboxHotspots = fuzzHotspotSummaryFromObservationSet(explicitCodeboxObservations, { provider: 'wp-codebox', taskId: 'wp-codebox-observation-fixture' });
+assert.equal(explicitCodeboxHotspots.schema, WORDPRESS_FUZZ_HOTSPOT_SUMMARY_SCHEMA);
+assert.equal(explicitCodeboxHotspots.items[0].dimension, 'query_fingerprint');
+assert.equal(explicitCodeboxHotspots.items[0].value, 12);
+assert.equal(explicitCodeboxHotspots.items[0].relative_score, 1);
+assert.equal(explicitCodeboxHotspots.items.find((item) => item.dimension === 'table').metadata.surface_key, 'wp_options');
+assert.equal(explicitCodeboxHotspots.items.find((item) => item.dimension === 'duplicate_query_group').value, 4);
+assert.equal(explicitCodeboxHotspots.items.find((item) => item.dimension === 'transient_key_group').metadata.surface_key, 'transient:_transient_feed_mod_example');
+assert.equal(explicitCodeboxHotspots.items.find((item) => item.dimension === 'option_autoload_churn').metadata.surface_key, 'blog_public:autoload:yes');
+assert.equal(explicitCodeboxHotspots.items.find((item) => item.dimension === 'db_write_family').metadata.surface_key, 'wp_posts:insert');
+assert.equal(explicitCodeboxHotspots.items.find((item) => item.dimension === 'action_case_workload_correlation').metadata.operation_key, 'create-post:save_post:post-crud-workload');
+assert(!JSON.stringify(explicitCodeboxHotspots).includes('woocommerce'), 'Codebox observation hotspot normalization must stay product-agnostic');
 
 const codeboxWordPressHotspots = normalizeFuzzHotspotSummary({
 	schema: WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
@@ -234,7 +270,9 @@ Promise.all([
 				runtime_command_results: [{
 					command: 'wordpress.rest-request',
 					artifacts: {
-						'rollback-lifecycle': { path: '/Users/chubes/tmp/rollback.json', semantic_key: 'fuzz.rollback.lifecycle', status: 'restored' },
+						'sandbox-isolation-proof': { path: 'artifacts/sandbox-isolation-proof.json', semantic_key: 'fuzz.disposable.sandbox_isolation_proof' },
+						'mutation-isolation-artifact': { path: 'artifacts/mutation-isolation-artifact.json', semantic_key: 'fuzz.mutation.isolation' },
+						'delete-boundary-artifact': { path: 'artifacts/delete-boundary-artifact.json', semantic_key: 'fuzz.delete.boundary' },
 						'external-http-guardrail': { url: 'http://localhost:8881/wp-content/homeboy-external-http.jsonl', semantic_key: 'fuzz.external_http.guardrail', ref: 'artifact:fuzz.external_http.guardrail' },
 						'runtime-access': { path: 'artifacts/runtime-access.json', semantic_key: 'fuzz.runtime.access' },
 					},
@@ -248,19 +286,15 @@ Promise.all([
 		}),
 	}).then((summary) => {
 		assert.equal(summary.status, 'succeeded');
-		const rollbackArtifact = summary.artifacts.find((artifact) => artifact.semantic_key === 'fuzz.rollback.lifecycle');
 		const httpArtifact = summary.artifacts.find((artifact) => artifact.semantic_key === 'fuzz.external_http.guardrail');
 		const runtimeAccessArtifact = summary.artifacts.find((artifact) => artifact.semantic_key === 'fuzz.runtime.access');
-		assert.equal(rollbackArtifact.path, undefined);
-		assert.equal(rollbackArtifact.artifact_ref, 'artifact:fuzz.rollback.lifecycle');
-		assert.equal(rollbackArtifact.metadata.local_path_redacted, true);
 		assert.equal(httpArtifact.url, undefined);
 		assert.equal(httpArtifact.artifact_ref, 'artifact:fuzz.external_http.guardrail');
 		assert.equal(httpArtifact.metadata.local_url_redacted, true);
 		assert.equal(runtimeAccessArtifact.path, 'artifacts/runtime-access.json');
 		assert.equal(summary.coverage_gaps[0].id, 'external-http:blocked-request');
 		assert.equal(summary.hotspot_summary.items[0].metadata.operation_key, 'DELETE /wp/v2/posts/1');
-		assert.equal(summary.runtime_task_result.artifacts.some((artifact) => artifact.role === 'rollback_lifecycle'), true);
+		assert.equal(summary.runtime_task_result.artifacts.some((artifact) => artifact.role === 'sandbox_isolation_proof'), true);
 	}),
 
 	runWpCodeboxFuzzSuite({
@@ -280,7 +314,7 @@ Promise.all([
 		}),
 	}).then((summary) => {
 		assert.equal(summary.status, 'failed');
-		assert(summary.failures.some((failure) => failure.code === 'wp_codebox_fuzz_rollback_lifecycle_artifacts_missing'));
+		assert(summary.failures.some((failure) => failure.code === 'wp_codebox_fuzz_disposable_lifecycle_artifacts_missing'));
 	}),
 ]).then(() => {
 	console.log('WordPress fuzz runtime task contract tests passed.');
