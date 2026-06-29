@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.10] - 2026-06-29
+
+### Changed
+- Exclude runner .ci materialization from captured workspace patch
+
 ## [3.21.9] - 2026-06-29
 
 ### Changed
