@@ -35,6 +35,8 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             isolation: FuzzIsolationArg::Shared,
             isolation_proof: None,
             expect_metric: vec![],
+            action_model: None,
+            exploration_policy: None,
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");
@@ -230,6 +232,106 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
             "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE"
         );
     });
+}
+
+#[test]
+fn fuzz_run_cli_preserves_action_model_and_exploration_policy_in_execution_request() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let action_model = temp.path().join("action-model.json");
+    let exploration_policy = temp.path().join("exploration-policy.json");
+    fs::write(
+        &action_model,
+        serde_json::json!({
+            "schema": "homeboy/fuzz-action-model/v1",
+            "version": 1,
+            "id": "generic-actions",
+            "actions": [
+                {
+                    "id": "resource.read",
+                    "kind": "read",
+                    "family": "read",
+                    "weight": 3.0,
+                    "input_generators": ["generator:resource-id"],
+                    "preconditions": ["resource.exists"],
+                    "effects": ["observation.recorded"],
+                    "invariants": ["resource.integrity"]
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write action model");
+    fs::write(
+        &exploration_policy,
+        serde_json::json!({
+            "schema": "homeboy/fuzz-exploration-policy/v1",
+            "version": 1,
+            "id": "bounded-exploration",
+            "action_model_ref": "generic-actions",
+            "action_weights": { "resource.read": 3.0 },
+            "case_budget": 50,
+            "duration_budget_seconds": 300,
+            "reset_cadence": "after_each_case",
+            "replay_seed_ref": "seed:stable-1",
+            "corpus_refs": ["corpus:generic-fixture"],
+            "invariants": ["resource.integrity"]
+        })
+        .to_string(),
+    )
+    .expect("write exploration policy");
+
+    let cli = FuzzCli::try_parse_from([
+        "fuzz",
+        "run",
+        "component-a",
+        "--workload",
+        "api-fuzz",
+        "--run-id",
+        "proof-1",
+        "--action-model",
+        action_model.to_str().expect("utf8 action model path"),
+        "--exploration-policy",
+        exploration_policy
+            .to_str()
+            .expect("utf8 exploration policy path"),
+    ])
+    .expect("parse fuzz run cli");
+    let Some(FuzzCommand::Run(args)) = cli.args.command else {
+        panic!("expected fuzz run command");
+    };
+
+    let request = build_fuzz_execution_request(
+        &args,
+        "component-a",
+        args.rig.as_deref(),
+        args.workload_id.clone(),
+        &planner_inventory(),
+    )
+    .expect("execution request");
+    let run_dir = RunDir::create().expect("run dir");
+    let request_path = persist_fuzz_execution_request(&run_dir, &request).expect("persist request");
+    let persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&request_path).expect("read request artifact"))
+            .expect("request json");
+
+    assert_eq!(persisted["schema"], "homeboy/fuzz-execution-request/v1");
+    assert_eq!(persisted["id"], "proof-1");
+    assert_eq!(
+        persisted["metadata"]["action_model"]["schema"],
+        "homeboy/fuzz-action-model/v1"
+    );
+    assert_eq!(
+        persisted["metadata"]["action_model"]["actions"][0]["input_generators"],
+        serde_json::json!(["generator:resource-id"])
+    );
+    assert_eq!(
+        persisted["metadata"]["exploration_policy"]["schema"],
+        "homeboy/fuzz-exploration-policy/v1"
+    );
+    assert_eq!(
+        persisted["metadata"]["exploration_policy"]["corpus_refs"],
+        serde_json::json!(["corpus:generic-fixture"])
+    );
 }
 
 #[test]
@@ -1103,6 +1205,8 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             isolation: FuzzIsolationArg::Shared,
             isolation_proof: None,
             expect_metric: vec![],
+            action_model: None,
+            exploration_policy: None,
             args: vec![],
         };
         let results_path = home.path().join("fuzz-results.json");

@@ -5,8 +5,8 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ## Synopsis
 
 ```bash
-homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
-homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
+homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
+homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
 homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>]
 homeboy fuzz validate <results-file>
@@ -142,7 +142,8 @@ requirements, selected gate profile, required artifact ids, gate ids, inventory
 provenance, and skipped target or operation reasons. The planner is product-neutral: it uses inventory-declared
 operation families and safety classes, not product-specific target names.
 
-`homeboy fuzz plan --action-model <path>` accepts a
+`homeboy fuzz plan --action-model <path>` and
+`homeboy fuzz run --action-model <path>` accept a
 `homeboy/fuzz-action-model/v1` JSON contract. The action model declares generic
 actions with ids, free-form kinds, optional canonical operation families,
 non-negative weights, opaque input generator refs, preconditions, effects, and
@@ -170,7 +171,8 @@ runner-owned.
 }
 ```
 
-`homeboy fuzz plan --exploration-policy <path>` accepts a
+`homeboy fuzz plan --exploration-policy <path>` and
+`homeboy fuzz run --exploration-policy <path>` accept a
 `homeboy/fuzz-exploration-policy/v1` JSON contract. The policy declares generic
 planning constraints such as action model refs, action weights, case and duration
 budgets, reset cadence, replay seed refs, corpus refs, and invariants. Homeboy

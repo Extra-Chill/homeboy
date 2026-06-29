@@ -342,11 +342,13 @@ pub(super) fn plan_inventory_selection(
         .or_else(|| args.run.workload_id.clone())
         .map(|id| format!("{id}-sampling"));
     let action_model = args
+        .run
         .action_model
         .as_deref()
         .map(parse_fuzz_action_model_file)
         .transpose()?;
     let exploration_policy = args
+        .run
         .exploration_policy
         .as_deref()
         .map(parse_fuzz_exploration_policy_file)
