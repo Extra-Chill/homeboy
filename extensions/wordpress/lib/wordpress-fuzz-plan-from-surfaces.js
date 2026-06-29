@@ -39,7 +39,6 @@ const {
 
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const DB_MUTATION_REQUIRED_CAPABILITIES = requiredCapabilitiesForWordPressFuzzCase('db_mutation');
-const REST_ROLLBACK_ANY_CAPABILITIES = Object.freeze([Object.freeze(['restore', 'reset'])]);
 
 function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode || input.mutation_mode || input.mutationMode);
@@ -287,11 +286,10 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 			fixture_binding: fixtureMetadata,
 			rest_mutation_opt_in: restMutationOptIn,
 			auth: surface.auth || surface.authentication || surface.authorization || null,
-			safety: safeMethod ? { level: 'safe', mutates: false } : { level: 'mutating', mutates: true, requires_explicit_opt_in: true, rollback_required: true },
+			safety: safeMethod ? { level: 'safe', mutates: false } : { level: 'mutating', mutates: true, requires_explicit_opt_in: true },
 			mutation_lifecycle: safeMethod ? undefined : mutationLifecycleContract({ kind: 'rest', surface, method }),
 			isolation: safeMethod ? undefined : isolatedMutationMetadata({ mutationMode, kind: 'rest' }),
 			reset: safeMethod ? undefined : isolatedResetMetadata({ kind: 'mutating_rest', mutationMode }),
-			rollback_contract: safeMethod ? undefined : restMutationRollbackContract({ surface, method }),
 			planned: !safeMethod,
 			gated: !safeMethod,
 		},
@@ -301,7 +299,6 @@ function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReason
 	}
 	return gateWordPressFuzzCaseForRuntimeCapabilities(testCase, options.runtimeCapabilities || options.runtime_capabilities, {
 		required_capabilities: requiredCapabilitiesForWordPressFuzzCase('mutating_rest'),
-		required_any_capabilities: REST_ROLLBACK_ANY_CAPABILITIES,
 		mutation_mode: mutationMode,
 		mutates: true,
 	});
@@ -809,7 +806,6 @@ function crudCaseForSurface(surface, resource, action, options = {}) {
 			mutation_lifecycle: mutates ? mutationLifecycleContract({ kind: restTransport ? 'rest_crud' : 'crud', surface, method: operation.transport?.method, action: action.action }) : undefined,
 			isolation: mutates ? isolatedMutationMetadata({ mutationMode, kind: restTransport ? 'rest_crud' : 'crud' }) : undefined,
 			reset: mutates ? isolatedResetMetadata({ kind: restTransport ? 'rest_crud_mutation' : 'mutating_crud', mutationMode }) : undefined,
-			rollback_contract: mutates && restTransport ? restMutationRollbackContract({ surface, method: operation.transport.method, action: action.action }) : undefined,
 		}),
 	};
 	if (!mutates || gateReasons.length > 0) {
@@ -817,23 +813,8 @@ function crudCaseForSurface(surface, resource, action, options = {}) {
 	}
 	return gateWordPressFuzzCaseForRuntimeCapabilities(testCase, options.runtimeCapabilities || options.runtime_capabilities, {
 		required_capabilities: requiredCapabilities,
-		required_any_capabilities: restTransport ? REST_ROLLBACK_ANY_CAPABILITIES : undefined,
 		mutation_mode: mutationMode,
 		mutates: true,
-	});
-}
-
-function restMutationRollbackContract({ surface = {}, method, action } = {}) {
-	return stripUndefined({
-		schema: 'homeboy/wordpress-rest-mutation-rollback-contract/v1',
-		strategy: 'checkpoint-restore-or-reset',
-		required_capabilities: requiredCapabilitiesForWordPressFuzzCase(action ? 'rest_crud_mutation' : 'mutating_rest'),
-		required_any_capabilities: REST_ROLLBACK_ANY_CAPABILITIES.map((group) => [...group]),
-		restore_boundary: 'after_each_case',
-		delete_boundary_artifacts: method === 'DELETE' || action === 'delete',
-		route: surface.route,
-		method,
-		action,
 	});
 }
 
@@ -854,7 +835,6 @@ function isolatedResetMetadata({ kind, mutationMode } = {}) {
 		strategy: 'checkpoint-restore-or-reset',
 		boundary: 'after_each_case',
 		required_capabilities: reasonList(requiredCapabilitiesForWordPressFuzzCase(kind)),
-		required_any_capabilities: ['mutating_rest', 'rest_crud_mutation'].includes(kind) ? REST_ROLLBACK_ANY_CAPABILITIES.map((group) => [...group]) : undefined,
 	});
 }
 

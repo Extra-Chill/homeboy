@@ -82,6 +82,19 @@ assert.equal(restMutationExecutable.executable, true);
 assert.equal(restMutationExecutable.execution_tier, 'isolated_mutating_executable');
 assert.equal(restMutationExecutable.metadata.required_any_capabilities, undefined);
 
+const explicitAnyCapabilityMissing = gateWordPressFuzzCaseForRuntimeCapabilities({
+	id: 'case-explicit-any-missing',
+	skip_reasons: [],
+	metadata: { safety: { mutates: true } },
+}, { capabilities: ['rest', 'disposable-runtime', 'disposable-sandbox-boundary', 'destructive-permission', 'mutation-isolation-artifact', 'sandbox-isolation-proof'] }, {
+	required_capabilities: ['rest', 'disposable-runtime', 'disposable-sandbox-boundary', 'destructive-permission', 'mutation-isolation-artifact', 'sandbox-isolation-proof'],
+	required_any_capabilities: [['restore', 'reset']],
+	mutation_mode: 'isolated',
+	mutates: true,
+});
+assert.equal(explicitAnyCapabilityMissing.executable, false);
+assert.deepEqual(explicitAnyCapabilityMissing.metadata.missing_any_capabilities, [['reset', 'restore']]);
+
 const restMutationMissingDisposableBoundary = gateWordPressFuzzCaseForRuntimeCapabilities({
 	id: 'case-rest-missing',
 	skip_reasons: [],

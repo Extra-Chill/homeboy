@@ -4,6 +4,10 @@
  * Internal dependencies
  */
 const {
+	WP_CODEBOX_RUNTIME_ACTION_CONTRACT_FIELDS,
+	wpCodeboxRuntimeActionTarget,
+} = require('./wordpress-fuzz-runtime-action-contracts');
+const {
 	normalizeWordPressFuzzRuntimeCapabilities,
 } = require('./wordpress-fuzz-runtime-capabilities');
 const {
@@ -16,14 +20,21 @@ const WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_VALIDATION_SCHEMA = 'homeboy/wor
 const ACTION_COMMANDS = Object.freeze({
 	rest_request: 'wordpress.rest-request',
 	crud_operation: 'wordpress.crud-operation',
+	db_operation: 'wordpress.db-operation',
 	admin_page_load: 'wordpress.admin-page-load',
+	admin_action: undefined,
+	ajax_action: undefined,
+	admin_post: undefined,
 	frontend_page_load: 'wordpress.frontend-page-load',
 	block_render: 'wordpress.block-render',
 	block_editor: 'wordpress.block-editor',
 	db_query: 'wordpress.db-query',
 	wp_cli: 'wordpress.wp-cli',
+	action_auth: undefined,
 	login_as: 'wordpress.login-as',
 	nonce_for: 'wordpress.nonce-for',
+	nonce: undefined,
+	session: undefined,
 	checkpoint: 'wordpress.checkpoint',
 	restore: 'wordpress.restore',
 	reset_state: 'wordpress.reset-state',
@@ -45,13 +56,20 @@ const ACTION_REQUIRED_CAPABILITIES = Object.freeze({
 	rest_request: Object.freeze(['rest']),
 	crud_operation: Object.freeze(['crud']),
 	admin_page_load: Object.freeze(['admin']),
+	admin_action: Object.freeze(['admin']),
+	ajax_action: Object.freeze(['admin']),
+	admin_post: Object.freeze(['admin']),
 	frontend_page_load: Object.freeze(['browser']),
 	block_render: Object.freeze(['block']),
 	block_editor: Object.freeze(['block', 'block-editor', 'browser']),
 	db_query: Object.freeze(['database']),
+	db_operation: Object.freeze(['database']),
 	wp_cli: Object.freeze(['wp-cli']),
+	action_auth: Object.freeze(['admin']),
 	login_as: Object.freeze(['admin']),
 	nonce_for: Object.freeze(['admin']),
+	nonce: Object.freeze(['admin']),
+	session: Object.freeze(['admin']),
 	checkpoint: Object.freeze(['checkpoint']),
 	restore: Object.freeze(['restore']),
 	reset_state: Object.freeze(['reset']),
@@ -79,7 +97,7 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 	const mutationLifecycle = normalizeWordPressFuzzMutationLifecycleContract(testCase.metadata?.mutation_lifecycle || testCase.metadata?.mutationLifecycle || testCase.mutation_lifecycle || testCase.mutationLifecycle) || {};
 	const input = runtimeOperationInput(testCase, { family: operationFamily, action });
 	const validation = validateWordPressFuzzRuntimeWorkloadOperationPayload({ family: operationFamily, action, input });
-	const contractMapping = mapWordPressRuntimeActionToCodeboxContract(action, options.codeboxRuntimeContracts || options.codebox_runtime_contracts || options.wpCodeboxRuntimeContracts || options.wp_codebox_runtime_contracts);
+	const contractMapping = mapWordPressRuntimeActionToCodeboxContract(action, options.codeboxRuntimeContracts || options.codebox_runtime_contracts || options.wpCodeboxRuntimeContracts || options.wp_codebox_runtime_contracts, { testCase, family: operationFamily, input });
 	const blockers = [
 		...validation.diagnostics.map((diagnostic) => ({ ...diagnostic, blocker: true })),
 		...(contractMapping.blocker ? [contractMapping.blocker] : []),
@@ -100,12 +118,14 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 		family: operationFamily,
 		action,
 		command: ACTION_COMMANDS[action],
+		target: contractMapping.target,
 		wp_codebox_action: contractMapping.action,
 		wp_codebox_command: contractMapping.command,
 		wp_codebox_ability: contractMapping.ability,
 		wp_codebox_input_schema: contractMapping.input_schema,
 		wp_codebox_output_schema: contractMapping.output_schema,
 		wp_codebox_contract_schema: contractMapping.contract_schema,
+		wp_codebox_mutation_contract_schema: contractMapping.mutation_contract_schema,
 		status,
 		required_capabilities: requiredCapabilities,
 		missing_capabilities: missingCapabilities.length > 0 ? missingCapabilities : undefined,
@@ -121,6 +141,9 @@ function buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase = {}, opt
 			wp_codebox_command: contractMapping.command,
 			wp_codebox_ability: contractMapping.ability,
 			wp_codebox_contract_schema: contractMapping.contract_schema,
+			wp_codebox_mutation_contract_schema: contractMapping.mutation_contract_schema,
+			sequence_plan: testCase.metadata?.sequence_plan || testCase.metadata?.sequencePlan || testCase.metadata?.sequence,
+			exploration: testCase.metadata?.exploration,
 			mutation_lifecycle: mutationLifecycle,
 		}),
 	});
@@ -142,7 +165,7 @@ function runtimeOperationStatus({ validation, contractMapping, readinessBlocker,
 	return 'ready';
 }
 
-function mapWordPressRuntimeActionToCodeboxContract(action, contracts) {
+function mapWordPressRuntimeActionToCodeboxContract(action, contracts, options = {}) {
 	if (!action) {
 		return { blocker: unsupportedRuntimeActionBlocker(action) };
 	}
@@ -161,7 +184,11 @@ function mapWordPressRuntimeActionToCodeboxContract(action, contracts) {
 	}
 	const descriptor = actionContracts.get(action);
 	if (!descriptor) {
-		return { blocker: unsupportedRuntimeActionBlocker(action, [...actionContracts.keys()]) };
+		return { blocker: unsupportedRuntimeActionBlocker(action, [...actionContracts.keys()], missingContractFieldsForAction(action)) };
+	}
+	const mutationContract = mutationContractForAction(action, contracts, options);
+	if (mutationContract.blocker) {
+		return { blocker: mutationContract.blocker };
 	}
 	return stripUndefined({
 		action,
@@ -170,6 +197,8 @@ function mapWordPressRuntimeActionToCodeboxContract(action, contracts) {
 		input_schema: descriptor.input_schema || descriptor.inputSchema || descriptor.request_schema || descriptor.requestSchema,
 		output_schema: descriptor.output_schema || descriptor.outputSchema || descriptor.result_schema || descriptor.resultSchema,
 		contract_schema: descriptor.schema,
+		mutation_contract_schema: mutationContract.schema,
+		target: wpCodeboxRuntimeActionTarget(action),
 	});
 }
 
@@ -178,11 +207,12 @@ function normalizeCodeboxRuntimeActionContracts(contracts) {
 	if (!source) {
 		return null;
 	}
+	const explicitDescriptors = explicitRuntimeActionDescriptors(source) || {};
 	const contractEntries = source.actions || source.runtime_actions || source.wordpress_runtime_actions || source.operations || source.workload_operations || source;
 	const entries = Array.isArray(contractEntries) ? contractEntries : [];
 	const pairs = entries.length > 0
 		? entries.map((entry) => [normalizeRuntimeAction(entry.action || entry.type || entry.id || entry.name), entry])
-		: Object.entries(contractEntries).map(([key, entry]) => [normalizeRuntimeAction(entry?.action || entry?.type || entry?.id || key), entry]);
+		: Object.entries({ ...explicitDescriptors, ...contractEntries }).map(([key, entry]) => [normalizeRuntimeAction(entry?.action || entry?.type || entry?.id || key), entry]);
 	const map = new Map();
 	for (const [key, entry] of pairs) {
 		if (key && objectOrUndefined(entry)) {
@@ -192,16 +222,96 @@ function normalizeCodeboxRuntimeActionContracts(contracts) {
 	return map;
 }
 
-function unsupportedRuntimeActionBlocker(action, supportedActions = []) {
+function explicitRuntimeActionDescriptors(source = {}) {
+	const entries = Object.entries(WP_CODEBOX_RUNTIME_ACTION_CONTRACT_FIELDS)
+		.map(([action, paths]) => [action, descriptorFromExplicitPaths(source, paths, action)])
+		.filter(([, descriptor]) => descriptor);
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function descriptorFromExplicitPaths(source, paths, action) {
+	for (const path of paths) {
+		const value = valueAtPath(source, path);
+		if (objectOrUndefined(value)) {
+			return { action, ...value };
+		}
+		if (typeof value === 'string') {
+			return { action, schema: value };
+		}
+	}
+	return undefined;
+}
+
+function missingContractFieldsForAction(action) {
+	return WP_CODEBOX_RUNTIME_ACTION_CONTRACT_FIELDS[action] || [`actions.${action}`];
+}
+
+function unsupportedRuntimeActionBlocker(action, supportedActions = [], expectedFields = []) {
 	return stripUndefined({
 		code: 'unsupported-wordpress-runtime-action',
 		message: `WP Codebox public runtime action contract does not declare ${action || '(missing)'} support.`,
 		action,
 		supported_actions: supportedActions.length > 0 ? supportedActions.sort() : undefined,
+		missing_contract_fields: expectedFields.length > 0 ? expectedFields : undefined,
 		skip_reason: 'unsupported-wordpress-runtime-action',
 		blocking: true,
 		blocker: true,
 	});
+}
+
+function mutationContractForAction(action, contracts, options = {}) {
+	if (!runtimeActionMutates(action, options.testCase, options.input)) {
+		return {};
+	}
+	const paths = mutationContractFieldsForAction(action);
+	for (const path of paths) {
+		const value = valueAtPath(contracts, path);
+		if (typeof value === 'string') {
+			return { schema: value };
+		}
+		if (objectOrUndefined(value)) {
+			return { schema: value.schema || value.id || value.$id };
+		}
+	}
+	return {
+		blocker: {
+			code: 'wp-codebox-runtime-mutation-contract-missing',
+			message: `WP Codebox public runtime contract is missing mutation contract for ${action}.`,
+			action,
+			missing_contract_fields: paths,
+			skip_reason: 'wp-codebox-runtime-mutation-contract-missing',
+			blocking: true,
+			blocker: true,
+		},
+	};
+}
+
+function mutationContractFieldsForAction(action) {
+	return {
+		rest_request: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.restMutation', 'mutationContracts.rest_request'],
+		crud_operation: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.crudMutation', 'mutationContracts.crud_operation'],
+		db_operation: ['schemas.wordpressDb.mutation', 'schemas.wordpressRuntime.disposableMutation', 'mutationContracts.db_operation'],
+		admin_action: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.adminActionMutation', 'mutationContracts.admin_action'],
+		ajax_action: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.ajaxActionMutation', 'mutationContracts.ajax_action'],
+		admin_post: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.adminPostMutation', 'mutationContracts.admin_post'],
+	}[action] || ['schemas.wordpressRuntime.disposableMutation', `mutationContracts.${action}`];
+}
+
+function runtimeActionMutates(action, testCase = {}, input = {}) {
+	if (action === 'crud_operation') {
+		return ['create', 'update', 'delete'].includes(String(input.action || testCase.operation?.action || '').toLowerCase());
+	}
+	if (action === 'db_operation') {
+		return String(input.operation || testCase.operation?.operation || '').toLowerCase() === 'write' || Boolean(testCase.operation?.mutation || testCase.operation?.statement);
+	}
+	if (['admin_action', 'ajax_action', 'admin_post'].includes(action)) {
+		return true;
+	}
+	if (action === 'rest_request') {
+		return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(input.method || testCase.operation?.method || '').toUpperCase());
+	}
+	const mutationLifecycle = normalizeWordPressFuzzMutationLifecycleContract(testCase.metadata?.mutation_lifecycle || testCase.metadata?.mutationLifecycle || testCase.mutation_lifecycle || testCase.mutationLifecycle) || {};
+	return mutationLifecycle.required_capabilities?.length > 0 || reasonList(testCase.destructive_reasons || testCase.destructiveReasons).length > 0;
 }
 
 function runtimeReadinessBlockerForOperation(family, testCase = {}, readiness) {
@@ -356,7 +466,7 @@ function validateWordPressFuzzRuntimeWorkloadOperationPayload(operation = {}) {
 	const action = operation.action;
 	const input = objectOrUndefined(operation.input) || {};
 	const diagnostics = [];
-	if (!ACTION_COMMANDS[action]) {
+	if (!Object.prototype.hasOwnProperty.call(ACTION_COMMANDS, action)) {
 		diagnostics.push(validationDiagnostic('unsupported-runtime-workload-operation-action', `Unsupported runtime workload operation action: ${action || '(missing)'}`, 'action'));
 	}
 	if (family && !FAMILY_REQUIRED_CAPABILITIES[family]) {
@@ -394,6 +504,15 @@ function requiredInputFieldsForAction(action, input = {}) {
 	if (action === 'crud_operation') {
 		return ['action', 'resource_type'];
 	}
+	if (action === 'db_operation') {
+		return ['operation'];
+	}
+	if (action === 'admin_action' || action === 'ajax_action' || action === 'admin_post') {
+		return input.action || input.fields?.action ? [] : ['action'];
+	}
+	if (action === 'action_auth') {
+		return ['action'];
+	}
 	if (action === 'admin_page_load' || action === 'frontend_page_load') {
 		return ['path'];
 	}
@@ -409,8 +528,11 @@ function requiredInputFieldsForAction(action, input = {}) {
 	if (action === 'login_as') {
 		return ['user'];
 	}
-	if (action === 'nonce_for') {
+	if (action === 'nonce_for' || action === 'nonce') {
 		return ['action'];
+	}
+	if (action === 'session') {
+		return ['scope'];
 	}
 	if (action === 'restore') {
 		return ['checkpoint_id'];
@@ -460,7 +582,7 @@ function requiredCapabilitiesForWordPressFuzzRuntimeOperation(testCase = {}, opt
 function runtimeOperationAction(testCase = {}, { family } = {}) {
 	const operation = objectOrUndefined(testCase.operation) || {};
 	const direct = normalizeRuntimeAction(operation.action_type || operation.actionType || operation.runtime_action || operation.runtimeAction || testCase.action || testCase.action_type || testCase.actionType || testCase.input?.action || testCase.input?.type);
-	if (direct && ACTION_COMMANDS[direct]) {
+	if (direct && Object.prototype.hasOwnProperty.call(ACTION_COMMANDS, direct)) {
 		return direct;
 	}
 	const operationFamily = family || runtimeOperationFamily(testCase);
@@ -471,7 +593,7 @@ function runtimeOperationAction(testCase = {}, { family } = {}) {
 		return 'crud_operation';
 	}
 	if (operationFamily === 'admin_page') {
-		return 'admin_page_load';
+		return adminRuntimeOperationAction(testCase) || 'admin_page_load';
 	}
 	if (operationFamily === 'frontend_page') {
 		return 'frontend_page_load';
@@ -480,12 +602,36 @@ function runtimeOperationAction(testCase = {}, { family } = {}) {
 		return testCase.intent === 'insert-block-in-editor' || operation.lifecycle === 'editor' ? 'block_editor' : 'block_render';
 	}
 	if (operationFamily === 'database') {
-		return 'db_query';
+		return databaseRuntimeOperationAction(testCase);
 	}
 	if (operationFamily === 'sequence') {
 		return 'replay_case';
 	}
 	return undefined;
+}
+
+function adminRuntimeOperationAction(testCase = {}) {
+	const operation = objectOrUndefined(testCase.operation) || {};
+	const surface = objectOrUndefined(testCase.metadata?.surface || testCase.target_metadata?.surface || testCase.target_metadata) || {};
+	const path = String(operation.path || operation.url || surface.path || surface.url || '');
+	if (surface.type === 'ajax-action' || path.includes('admin-ajax.php')) {
+		return 'ajax_action';
+	}
+	if (path.includes('admin-post.php')) {
+		return 'admin_post';
+	}
+	if (operation.interaction_kind || operation.interaction_id || operation.action || testCase.metadata?.interaction) {
+		return 'admin_action';
+	}
+	return undefined;
+}
+
+function databaseRuntimeOperationAction(testCase = {}) {
+	const operation = objectOrUndefined(testCase.operation) || {};
+	if (operation.mutation || operation.statement || ['write', 'insert', 'update', 'delete'].includes(String(operation.operation || '').toLowerCase())) {
+		return 'db_operation';
+	}
+	return 'db_query';
 }
 
 function normalizeRuntimeAction(value) {
@@ -499,7 +645,7 @@ function familyForRuntimeOperationAction(action) {
 	if (action === 'crud_operation') {
 		return 'crud';
 	}
-	if (action === 'admin_page_load' || action === 'login_as' || action === 'nonce_for') {
+	if (['admin_page_load', 'admin_action', 'ajax_action', 'admin_post', 'action_auth', 'login_as', 'nonce_for', 'nonce', 'session'].includes(action)) {
 		return 'admin_page';
 	}
 	if (action === 'frontend_page_load') {
@@ -508,7 +654,7 @@ function familyForRuntimeOperationAction(action) {
 	if (action === 'block_render' || action === 'block_editor') {
 		return 'block';
 	}
-	if (action === 'db_query' || action === 'wp_cli') {
+	if (action === 'db_query' || action === 'db_operation' || action === 'wp_cli') {
 		return 'database';
 	}
 	if (['checkpoint', 'restore', 'reset_state', 'replay_case', 'minimize_case'].includes(action)) {
@@ -529,7 +675,7 @@ function runtimeOperationFamily(testCase = {}) {
 	if (intent === 'request-rest-route' || surfaceType === 'rest-route' || operation.route) {
 		return 'rest';
 	}
-	if (intent.includes('admin-page') || surfaceType === 'admin-page') {
+	if (intent.includes('admin-page') || surfaceType === 'admin-page' || surfaceType === 'ajax-action') {
 		return 'admin_page';
 	}
 	if (intent.includes('frontend') || surfaceType === 'frontend-url') {
@@ -566,8 +712,14 @@ function runtimeOperationInput(testCase = {}, { family, action } = {}) {
 	if (action === 'login_as') {
 		return stripUndefined({ user: operation.user || operation.user_id || operation.userId || testCase.input?.user });
 	}
-	if (action === 'nonce_for') {
+	if (action === 'action_auth') {
+		return stripUndefined({ action: operation.action || testCase.input?.action, session: operation.session || testCase.input?.session, nonce: operation.nonce || testCase.input?.nonce });
+	}
+	if (action === 'nonce_for' || action === 'nonce') {
 		return stripUndefined({ action: operation.action || testCase.input?.action, user: operation.user || testCase.input?.user });
+	}
+	if (action === 'session') {
+		return stripUndefined({ scope: operation.scope || testCase.input?.scope || 'admin', user: operation.user || testCase.input?.user });
 	}
 	if (action === 'checkpoint') {
 		return stripUndefined({ label: operation.label || testCase.input?.label });
@@ -590,7 +742,7 @@ function runtimeOperationInput(testCase = {}, { family, action } = {}) {
 	if (family === 'rest') {
 		return stripUndefined({ method: operation.method || surface.method || 'GET', route: operation.route || operation.path || surface.route || surface.path || surface.metadata?.value, route_params: operation.route_params, query_params: operation.query_params, request_body: operation.request_body });
 	}
-	if (family === 'admin_page') {
+	if (['admin_action', 'ajax_action', 'admin_post'].includes(action)) {
 		const metadata = objectOrUndefined(testCase.metadata) || {};
 		const interaction = objectOrUndefined(metadata.interaction) || {};
 		return stripUndefined({
@@ -599,11 +751,22 @@ function runtimeOperationInput(testCase = {}, { family, action } = {}) {
 			interaction_kind: operation.interaction_kind || interaction.kind,
 			interaction_id: operation.interaction_id || interaction.id || interaction.name || interaction.selector || interaction.action,
 			selector: operation.selector || interaction.selector,
-			action: operation.action || interaction.action,
+			action: operation.action || interaction.action || interaction.id || interaction.name || surface.action || surface.hook || surface.name || surface.id,
+			hook: surface.hook,
 			fields: operation.fields || interaction.fields,
 			capability_context: objectOrUndefined(metadata.capability_context || metadata.capabilityContext),
 			nonce_context: objectOrUndefined(metadata.nonce_context || metadata.nonceContext),
+			session_context: objectOrUndefined(metadata.session_context || metadata.sessionContext),
+			action_auth_context: objectOrUndefined(metadata.action_auth_context || metadata.actionAuthContext),
 			safety: objectOrUndefined(metadata.safety),
+		});
+	}
+	if (family === 'admin_page') {
+		const metadata = objectOrUndefined(testCase.metadata) || {};
+		return stripUndefined({
+			path: operation.path || operation.url || surface.path || surface.url || surface.metadata?.value,
+			method: operation.method || surface.method || 'GET',
+			capability_context: objectOrUndefined(metadata.capability_context || metadata.capabilityContext),
 		});
 	}
 	if (family === 'frontend_page') {
@@ -613,7 +776,7 @@ function runtimeOperationInput(testCase = {}, { family, action } = {}) {
 		return stripUndefined({ block_name: operation.block_name || operation.blockName || operation.name || surface.block_name || surface.blockName || surface.name, lifecycle: operation.lifecycle, attributes: operation.attributes_sample || operation.attributes || surface.attributes_sample || surface.attributes });
 	}
 	if (family === 'database') {
-		return stripUndefined({ table: operation.table || surface.table, query: operation.query || surface.query, statement: operation.statement || surface.statement, mutation: operation.mutation, where: operation.where, values: operation.values, columns: operation.columns, limit: operation.limit, options: operation.options, observation: operation.observation || operation.profile });
+		return stripUndefined({ operation: operation.operation || (operation.mutation || operation.statement ? 'write' : 'query-summary'), table: operation.table || surface.table, resource: operation.table || surface.table ? { table: operation.table || surface.table } : undefined, query: operation.query || operation.statement || surface.query ? { sql: operation.statement || operation.query || surface.query, table: operation.table || surface.table, columns: operation.columns, where: operation.where, limit: operation.limit } : undefined, mutation: operation.mutation, where: operation.where, values: operation.values, options: operation.options, observation: operation.observation || operation.profile });
 	}
 	if (family === 'sequence') {
 		return testCase.input || operation;
@@ -647,6 +810,10 @@ function reasonList(value) {
 
 function objectOrUndefined(value) {
 	return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
+}
+
+function valueAtPath(value, pathName) {
+	return String(pathName || '').split('.').reduce((current, part) => current?.[part], value);
 }
 
 function stripUndefined(value) {

@@ -25,7 +25,7 @@ function buildWordPressFuzzMutationLifecycleContract(input = {}) {
 		method,
 		disposable_boundary: input.disposable_boundary || input.disposableBoundary || 'suite.metadata.disposableSandboxBoundary',
 		required_capabilities: input.required_capabilities || input.requiredCapabilities || LIFECYCLE_REQUIRED_CAPABILITIES[kind],
-		required_any_capabilities: input.required_any_capabilities || input.requiredAnyCapabilities || LIFECYCLE_REQUIRED_ANY_CAPABILITIES[kind],
+		required_any_capabilities: input.required_any_capabilities || input.requiredAnyCapabilities,
 		required_evidence: input.required_evidence || input.requiredEvidence || defaultLifecycleEvidence(kind, { deleteBoundary }),
 		required_any_evidence: input.required_any_evidence || input.requiredAnyEvidence || defaultLifecycleAnyEvidence(kind),
 		delete_boundary_required: deleteBoundary,

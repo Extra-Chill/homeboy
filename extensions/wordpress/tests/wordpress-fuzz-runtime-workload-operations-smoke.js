@@ -28,17 +28,39 @@ function actionContract(action) {
 
 const runtimeActionContracts = {
 	schema: 'wp-codebox/wordpress-runtime-action-contracts/v1',
+	schemas: {
+		wordpressRuntime: {
+			disposableMutation: 'wp-codebox/wordpress-disposable-mutation/v1',
+			actionAuth: 'wp-codebox/wordpress-action-auth/v1',
+			adminAction: 'wp-codebox/wordpress-admin-action/v1',
+			ajaxAction: 'wp-codebox/wordpress-ajax-action/v1',
+			adminPost: 'wp-codebox/wordpress-admin-post/v1',
+			nonce: 'wp-codebox/wordpress-nonce/v1',
+			session: 'wp-codebox/wordpress-session/v1',
+		},
+		wordpressDb: {
+			operation: 'wp-codebox/wordpress-db-operation/v1',
+			mutation: 'wp-codebox/wordpress-db-mutation/v1',
+		},
+	},
 	actions: Object.fromEntries([
 		'rest_request',
 		'crud_operation',
 		'admin_page_load',
+		'admin_action',
+		'ajax_action',
+		'admin_post',
 		'frontend_page_load',
 		'block_render',
 		'block_editor',
 		'db_query',
+		'db_operation',
 		'wp_cli',
+		'action_auth',
 		'login_as',
 		'nonce_for',
+		'nonce',
+		'session',
 		'checkpoint',
 		'restore',
 		'reset_state',
@@ -72,6 +94,7 @@ assert.equal(crudDescriptor.command, 'wordpress.crud-operation');
 assert.equal(crudDescriptor.wp_codebox_command, undefined);
 assert.equal(crudDescriptor.wp_codebox_ability, 'wp-codebox/runtime-action/crud_operation');
 assert.equal(crudDescriptor.wp_codebox_input_schema, 'wp-codebox/wordpress-runtime-action/crud_operation/input/v1');
+assert.equal(crudDescriptor.wp_codebox_mutation_contract_schema, 'wp-codebox/wordpress-disposable-mutation/v1');
 assert.equal(crudDescriptor.metadata.wp_codebox_ability, 'wp-codebox/runtime-action/crud_operation');
 assert.equal(crudDescriptor.status, 'ready');
 assert.equal(crudDescriptor.validation.schema, WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_VALIDATION_SCHEMA);
@@ -92,7 +115,16 @@ const unsupportedContractDescriptor = buildWordPressFuzzRuntimeWorkloadOperation
 assert.equal(unsupportedContractDescriptor.status, 'blocked');
 assert.equal(unsupportedContractDescriptor.skip_reason, 'unsupported-wordpress-runtime-action');
 assert.equal(unsupportedContractDescriptor.blockers[0].code, 'unsupported-wordpress-runtime-action');
+assert(unsupportedContractDescriptor.blockers[0].missing_contract_fields.includes('actions.crud_operation'));
 assert.deepEqual(unsupportedContractDescriptor.blockers[0].supported_actions, ['rest_request']);
+
+const missingMutationContractDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crudCase, {
+	runtimeCapabilities: { capabilities: ['crud'] },
+	codeboxRuntimeContracts: { schema: 'wp-codebox/wordpress-runtime-action-contracts/v1', actions: { crud_operation: actionContract('crud_operation') } },
+});
+assert.equal(missingMutationContractDescriptor.status, 'blocked');
+assert.equal(missingMutationContractDescriptor.skip_reason, 'wp-codebox-runtime-mutation-contract-missing');
+assert.deepEqual(missingMutationContractDescriptor.blockers[0].missing_contract_fields, ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.crudMutation', 'mutationContracts.crud_operation']);
 
 assert.deepEqual(mapWordPressRuntimeActionToCodeboxContract('rest_request', runtimeActionContracts), {
 	action: 'rest_request',
@@ -100,6 +132,7 @@ assert.deepEqual(mapWordPressRuntimeActionToCodeboxContract('rest_request', runt
 	input_schema: 'wp-codebox/wordpress-runtime-action/rest_request/input/v1',
 	output_schema: 'wp-codebox/wordpress-runtime-action/rest_request/output/v1',
 	contract_schema: 'wp-codebox/wordpress-runtime-action/v1',
+	target: { kind: 'runtime-action', id: 'runtime-action:rest_request', entrypoint: 'rest_request' },
 });
 
 const restDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
@@ -159,6 +192,10 @@ const adminMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescri
 assert.equal(adminMutationDescriptor.status, 'ready');
 assert.equal(adminMutationDescriptor.skip_reason, undefined);
 assert.deepEqual(adminMutationDescriptor.required_capabilities, ['admin']);
+assert.equal(adminMutationDescriptor.action, 'admin_action');
+assert.equal(adminMutationDescriptor.command, undefined);
+assert.equal(adminMutationDescriptor.wp_codebox_contract_schema, 'wp-codebox/wordpress-runtime-action/v1');
+assert.equal(adminMutationDescriptor.wp_codebox_mutation_contract_schema, 'wp-codebox/wordpress-disposable-mutation/v1');
 assert.equal(adminMutationDescriptor.input.interaction_kind, 'form');
 assert.equal(adminMutationDescriptor.input.selector, '#posts-filter');
 assert.deepEqual(adminMutationDescriptor.input.fields, { action: 'edit' });
@@ -191,6 +228,9 @@ const dbMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescripto
 assert.equal(dbMutationDescriptor.status, 'ready');
 assert.equal(dbMutationDescriptor.skip_reason, undefined);
 assert.deepEqual(dbMutationDescriptor.required_capabilities, ['database']);
+assert.equal(dbMutationDescriptor.action, 'db_operation');
+assert.equal(dbMutationDescriptor.command, 'wordpress.db-operation');
+assert.equal(dbMutationDescriptor.wp_codebox_mutation_contract_schema, 'wp-codebox/wordpress-db-mutation/v1');
 
 const capabilityOnlyMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
 	id: 'case:rest-post-capability-only',
@@ -255,6 +295,9 @@ const runtimeActionCases = [
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'wp_cli', args: ['plugin', 'list'] } }, 'wp_cli', { args: ['plugin', 'list'] }],
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'login_as', user: 1 } }, 'login_as', { user: 1 }],
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'nonce_for', action: 'bulk-posts' } }, 'nonce_for', { action: 'bulk-posts' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'action_auth', action: 'bulk-posts', nonce: 'abc' } }, 'action_auth', { action: 'bulk-posts', nonce: 'abc' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'nonce', action: 'bulk-posts' } }, 'nonce', { action: 'bulk-posts' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'session', scope: 'admin' } }, 'session', { scope: 'admin' }],
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'checkpoint', label: 'before' } }, 'checkpoint', { label: 'before' }],
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'restore', checkpoint_id: 'cp-1' } }, 'restore', { checkpoint_id: 'cp-1' }],
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'reset_state', scope: 'database' } }, 'reset_state', { scope: 'database' }],
