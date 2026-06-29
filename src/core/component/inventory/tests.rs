@@ -439,6 +439,55 @@ fn reconcile_apply_updates_stale_local_path_when_candidate_is_unique() {
 }
 
 #[test]
+fn reconcile_flags_relative_local_path_and_repairs_to_absolute() {
+    let dir = TempDir::new().unwrap();
+    let config_components = dir
+        .path()
+        .join(".config")
+        .join("homeboy")
+        .join("components");
+    fs::create_dir_all(&config_components).unwrap();
+
+    // A stable checkout lives under the workspace root ($HOME/Developer) so the
+    // existing candidate discovery can resolve the absolute path.
+    let checkout = dir.path().join("Developer").join("homeboy");
+    fs::create_dir_all(checkout.join(".git")).unwrap();
+    fs::write(
+        checkout.join("homeboy.json"),
+        serde_json::to_string_pretty(&serde_json::json!({ "id": "homeboy" })).unwrap(),
+    )
+    .unwrap();
+
+    // Registration stored with a RELATIVE local_path — the exact shape that
+    // fails `release` with "cannot be resolved". (#6938)
+    write_standalone_json(&config_components, "homeboy", "homeboy");
+
+    let _home = with_home_override(dir.path());
+    let report = reconcile_standalone_registration("homeboy", false).unwrap();
+
+    assert_eq!(report.status, "relative_local_path");
+    assert_eq!(
+        report.discovered_local_path.as_deref(),
+        Some(checkout.to_string_lossy().as_ref())
+    );
+    assert!(!report.applied);
+
+    let applied = reconcile_standalone_registration("homeboy", true).unwrap();
+    assert!(applied.applied);
+    let raw = fs::read_to_string(config_components.join("homeboy.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let persisted = json
+        .get("local_path")
+        .and_then(|value| value.as_str())
+        .unwrap();
+    assert!(
+        std::path::Path::new(persisted).is_absolute(),
+        "repaired local_path must be absolute, got {persisted}"
+    );
+    assert_eq!(persisted, checkout.to_string_lossy().as_ref());
+}
+
+#[test]
 fn local_path_diagnostic_flags_temp_checkout_and_reports_stable_candidate() {
     let dir = TempDir::new().unwrap();
     let stable_checkout = dir.path().join("Developer").join("homeboy");

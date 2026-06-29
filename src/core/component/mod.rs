@@ -40,8 +40,10 @@ pub use portable::{
 };
 pub use relationships::{associated_projects, projects_using, rename_component, shared_components};
 pub use resolution::{
-    resolve, resolve_artifact, resolve_effective, resolve_target, resolve_target_from_component,
-    validate_local_path, RegistryLookupPolicy, ResolvedTarget, TargetSpec,
+    local_path_is_relative, normalize_component_local_path,
+    normalize_component_local_path_against, resolve, resolve_artifact, resolve_effective,
+    resolve_target, resolve_target_from_component, validate_local_path, RegistryLookupPolicy,
+    ResolvedTarget, TargetSpec,
 };
 pub use scope::{resolve_component_scope, EffectiveScope, ScopeCommand};
 pub use versioning::{

@@ -175,6 +175,51 @@ pub fn validate_local_path(component: &Component) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Normalize a component `local_path` to an absolute, lexically-normalized
+/// string, resolving relative values against `base`.
+///
+/// Tilde (`~`) is expanded. Absolute inputs are normalized in place (collapsing
+/// `.`/`..` segments). Relative inputs (e.g. `php-transformer`) are resolved
+/// against `base` — the workspace/current working directory in production — so
+/// the stored value is always absolute and survives `release` resolution, which
+/// rejects relative `local_path` values (see [`validate_local_path`]). An empty
+/// value is returned unchanged so callers can decide how to treat it.
+pub fn normalize_component_local_path_against(raw: &str, base: &Path) -> String {
+    if raw.trim().is_empty() {
+        return raw.to_string();
+    }
+    let expanded = shellexpand::tilde(raw);
+    let candidate = Path::new(expanded.as_ref());
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        base.join(candidate)
+    };
+    crate::core::paths::normalize_local_path(absolute)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Normalize a component `local_path` to absolute against the current working
+/// directory. See [`normalize_component_local_path_against`].
+pub fn normalize_component_local_path(raw: &str) -> Result<String> {
+    let base = std::env::current_dir().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("resolve current directory for local_path normalization".to_string()),
+        )
+    })?;
+    Ok(normalize_component_local_path_against(raw, &base))
+}
+
+/// Returns whether a (tilde-expanded) `local_path` value is relative.
+pub fn local_path_is_relative(raw: &str) -> bool {
+    if raw.trim().is_empty() {
+        return false;
+    }
+    Path::new(shellexpand::tilde(raw).as_ref()).is_relative()
+}
+
 /// Detect component ID from current working directory.
 fn detect_from_cwd() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
@@ -987,5 +1032,47 @@ mod tests {
         .expect_err("synthetic target should be rejected");
 
         assert!(err.to_string().contains("not registered"));
+    }
+
+    #[test]
+    fn normalize_resolves_relative_local_path_against_base() {
+        let normalized =
+            normalize_component_local_path_against("php-transformer", Path::new("/Users/dev/work"));
+        assert_eq!(normalized, "/Users/dev/work/php-transformer");
+    }
+
+    #[test]
+    fn normalize_keeps_absolute_local_path_and_collapses_segments() {
+        let normalized = normalize_component_local_path_against(
+            "/Users/dev/work/../work/php-transformer",
+            Path::new("/ignored/base"),
+        );
+        assert_eq!(normalized, "/Users/dev/work/php-transformer");
+    }
+
+    #[test]
+    fn normalize_preserves_empty_local_path() {
+        assert_eq!(
+            normalize_component_local_path_against("", Path::new("/Users/dev/work")),
+            ""
+        );
+    }
+
+    #[test]
+    fn normalize_uses_current_dir_for_relative_input() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let base = std::fs::canonicalize(dir.path()).expect("canonicalize base");
+        let normalized = with_cwd(&base, || {
+            normalize_component_local_path("php-transformer").expect("normalize")
+        });
+        assert_eq!(normalized, base.join("php-transformer").to_string_lossy());
+    }
+
+    #[test]
+    fn local_path_is_relative_distinguishes_absolute_and_relative() {
+        assert!(local_path_is_relative("php-transformer"));
+        assert!(local_path_is_relative("./php-transformer"));
+        assert!(!local_path_is_relative("/Users/dev/php-transformer"));
+        assert!(!local_path_is_relative(""));
     }
 }

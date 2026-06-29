@@ -59,10 +59,23 @@ pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Re
         component.id = id.to_string();
     }
 
+    // Normalize a freshly-set `local_path` to an absolute path. A relative value
+    // (e.g. `php-transformer`) is rejected by `release` with "cannot be
+    // resolved"; persist absolute so the component is releasable from any
+    // directory. (#6938)
+    let local_path_set = patch
+        .get("local_path")
+        .and_then(|value| value.as_str())
+        .is_some();
+    if local_path_set && !component.local_path.trim().is_empty() {
+        component.local_path =
+            crate::core::component::normalize_component_local_path(&component.local_path)?;
+    }
+
     inventory::write_standalone_component_config(&component)?;
 
-    if let Some(local_path) = patch.get("local_path").and_then(|value| value.as_str()) {
-        update_project_attachment_local_paths(id, local_path)?;
+    if local_path_set {
+        update_project_attachment_local_paths(id, &component.local_path)?;
     }
 
     Ok(MergeOutput::Single(MergeResult {
@@ -345,6 +358,54 @@ mod tests {
 
             let project = crate::core::project::load("runtime").expect("load project");
             assert_eq!(project.components[0].local_path, new_repo.to_string_lossy());
+        });
+    }
+
+    #[test]
+    fn merge_normalizes_relative_local_path_to_absolute() {
+        crate::test_support::with_isolated_home(|home| {
+            let repo = home.path().join("php-transformer");
+            fs::create_dir_all(&repo).expect("repo dir");
+            fs::write(
+                repo.join("homeboy.json"),
+                r#"{"id":"php-transformer","remote_path":"wp-content/plugins/php-transformer"}"#,
+            )
+            .expect("homeboy.json");
+
+            let component = Component::new(
+                "php-transformer".to_string(),
+                repo.to_string_lossy().to_string(),
+                "wp-content/plugins/php-transformer".to_string(),
+                None,
+            );
+            inventory::write_standalone_registration(&component)
+                .expect("write initial standalone registration");
+
+            // A relative local_path (the exact shape that fails release with
+            // "cannot be resolved") must be persisted as an absolute path so
+            // `release` resolution succeeds from any directory. (#6938)
+            let patch = serde_json::json!({ "local_path": "php-transformer" }).to_string();
+            merge(Some("php-transformer"), &patch, &[]).expect("component merge");
+
+            let registration_path = home
+                .path()
+                .join(".config/homeboy/components/php-transformer.json");
+            let registration: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(registration_path).expect("read registration"),
+            )
+            .expect("parse registration");
+            let persisted = registration
+                .get("local_path")
+                .and_then(|value| value.as_str())
+                .expect("local_path present");
+            assert!(
+                Path::new(persisted).is_absolute(),
+                "registration local_path must be absolute, got {persisted}"
+            );
+            assert!(
+                persisted.ends_with("php-transformer"),
+                "registration local_path must retain the relative segment, got {persisted}"
+            );
         });
     }
 }

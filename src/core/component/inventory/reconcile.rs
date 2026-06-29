@@ -37,12 +37,28 @@ pub fn reconcile_standalone_registration(
         .unwrap_or_default()
         .to_string();
     let diagnostic = local_path_diagnostic_for(id, &registered_local_path);
-    let status = diagnostic.status.clone();
-    let discovered_local_path = if status == "ok" {
+    let mut status = diagnostic.status.clone();
+    let mut discovered_local_path = if status == "ok" {
         None
     } else {
         unique_candidate(diagnostic.discovered_candidates.clone())
     };
+
+    // A relative `local_path` is rejected by `release` even when it resolves
+    // relative to the current directory. Flag it and repair to an absolute path.
+    // (#6938)
+    if crate::core::component::local_path_is_relative(&registered_local_path) {
+        status = "relative_local_path".to_string();
+        if discovered_local_path.is_none() {
+            if let Ok(absolute) =
+                crate::core::component::normalize_component_local_path(&registered_local_path)
+            {
+                if std::path::Path::new(&absolute).exists() {
+                    discovered_local_path = Some(absolute);
+                }
+            }
+        }
+    }
     let repair = discovered_local_path
         .as_ref()
         .map(|path| format!("Update local_path to {path}"));
