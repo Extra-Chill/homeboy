@@ -35,8 +35,9 @@ homeboy fuzz list --rig <rig-id>
 ```
 
 `fuzz list` is the declared-workload view. It is not proof that a workload ran.
-Use the listed workload id in `fuzz run`, then use `runs show` or `runs evidence`
-to inspect the executable/proven state and recorded artifacts.
+Use the listed workload id in `fuzz run`, then use `runs show`, `runs evidence`,
+or run-backed replay/minimize to inspect the executable/proven state and recorded
+artifacts.
 
 Run one workload through the fuzz command surface:
 
@@ -50,12 +51,22 @@ through `homeboy runs` instead of opening temporary runner paths directly:
 ```bash
 homeboy runs show <run-id>
 homeboy runs artifact get <run-id> <artifact-id> --output <path>
+homeboy fuzz replay --run-id <run-id> --case-id <case-id> --dry-run
 ```
 
 `homeboy runs show` renders the compact summary, coverage metadata when the
 runner provides it, and fetch commands for recorded artifacts such as failing
 cases, repro cases, and coverage reports. Use `homeboy runs artifact get` for
 artifact bytes that are stored locally or mirrored from a runner.
+
+`homeboy fuzz replay --run-id <run-id> --case-id <case-id>` and
+`homeboy fuzz minimize --run-id <run-id> --case-id <case-id>` resolve the
+persisted fuzz campaign/result-envelope artifact from the run when no explicit
+artifact path is supplied. `--dry-run` prints the canonical replay environment
+and resolved extension command without executing it. If the selected extension
+does not declare `fuzz.replay_command` or `fuzz.minimize_command`, Homeboy returns
+`unsupported` with the resolved contract instead of pretending replay or
+minimization ran.
 
 Runner scripts receive `HOMEBOY_FUZZ_RESULTS_FILE` pointing at
 `fuzz-results.json` in the command run directory. When a runner writes a
@@ -72,6 +83,14 @@ reference those files from the campaign `artifacts` list or `metadata.artifact_r
 validates local refs that point inside it when possible. Homeboy core owns the
 path contract; extensions own artifact meaning and any runner/offload upload
 implementation beyond the persisted fuzz result envelope.
+
+`homeboy runs export --run <run-id> --output <bundle-dir>` includes file artifact
+bytes and directory artifact zip archives in `artifact_bytes.json`, with SHA-256
+and byte size recorded in the bundle and artifact metadata. `homeboy runs import`
+validates the checksums before importing, rehydrates directory artifacts from the
+zip archive into the bundle directory, and records the imported artifact as a
+directory rather than metadata-only evidence. This keeps reviewer-facing fuzz
+evidence portable after disposable runner or sandbox teardown.
 
 When a runner or extension promotes an artifact directory through `runner exec
 --artifact-dir`, Homeboy records each direct file or directory child as a generic

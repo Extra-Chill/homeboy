@@ -257,6 +257,95 @@ fn runs_export_import_preserves_file_artifact_bytes_with_checksum_refs() {
     });
 }
 
+#[test]
+fn runs_export_import_preserves_directory_artifact_as_checksumed_archive() {
+    let bundle_root = tempfile::tempdir().expect("bundle root");
+    let bundle = bundle_root.path().join("directory-bundle");
+    let mut exported_run_id = String::new();
+    let mut exported_sha256 = None;
+    let mut exported_size_bytes = None;
+
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("fuzz", "homeboy", "rig-a", Value::Null))
+            .expect("run");
+        exported_run_id = run.id.clone();
+
+        let artifact_dir = home.path().join("fuzz-artifacts");
+        std::fs::create_dir_all(artifact_dir.join("cases")).expect("artifact dir");
+        std::fs::write(
+            artifact_dir.join("cases/case-1.json"),
+            br#"{"id":"case-1"}"#,
+        )
+        .expect("case file");
+        std::fs::write(artifact_dir.join("summary.txt"), "portable directory").expect("summary");
+        store
+            .record_directory_artifact(&run.id, "fuzz_artifacts", &artifact_dir)
+            .expect("directory artifact");
+
+        let (output, exit) = export_runs(RunsExportArgs {
+            run: Some(run.id.clone()),
+            since: None,
+            output: bundle.clone(),
+        })
+        .expect("export");
+        assert_eq!(exit, 0);
+        let RunsOutput::Export(exported) = output else {
+            panic!("expected export output");
+        };
+        assert_eq!(exported.artifact_count, 1);
+        assert_eq!(exported.artifact_byte_count, 1);
+
+        let artifacts: Vec<ArtifactRecord> = read_bundle_test_json(&bundle.join("artifacts.json"));
+        assert_eq!(artifacts[0].artifact_type, "directory");
+        assert!(artifacts[0].path.starts_with("bundle://artifact-bytes/"));
+        assert_eq!(
+            artifacts[0].metadata_json["portable_bundle"]["archive_format"].as_str(),
+            Some("zip")
+        );
+
+        let artifact_bytes: Vec<Value> = read_bundle_test_json(&bundle.join("artifact_bytes.json"));
+        assert_eq!(artifact_bytes.len(), 1);
+        assert_eq!(artifact_bytes[0]["archive_format"].as_str(), Some("zip"));
+        let byte_ref = artifact_bytes[0]["path"].as_str().expect("byte path");
+        assert!(bundle.join(byte_ref).is_file());
+        exported_sha256 = artifact_bytes[0]["sha256"].as_str().map(str::to_string);
+        exported_size_bytes = artifact_bytes[0]["size_bytes"].as_i64();
+        assert!(exported_size_bytes.is_some_and(|size| size > 0));
+    });
+
+    with_isolated_home(|_| {
+        let _xdg = XdgGuard::unset();
+        import_runs(RunsImportArgs {
+            input: Some(bundle.clone()),
+            ..RunsImportArgs::default()
+        })
+        .expect("import");
+        let store = ObservationStore::open_initialized().expect("store");
+        let imported_artifact = store
+            .list_artifacts(&exported_run_id)
+            .expect("artifacts")
+            .into_iter()
+            .next()
+            .expect("artifact");
+        assert_eq!(imported_artifact.artifact_type, "directory");
+        assert_eq!(imported_artifact.sha256, exported_sha256);
+        assert_eq!(imported_artifact.size_bytes, exported_size_bytes);
+        let imported_dir = Path::new(&imported_artifact.path);
+        assert!(imported_dir.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(imported_dir.join("summary.txt")).expect("summary"),
+            "portable directory"
+        );
+        assert_eq!(
+            std::fs::read(imported_dir.join("cases/case-1.json")).expect("case"),
+            br#"{"id":"case-1"}"#
+        );
+    });
+}
+
 fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
     NewRunRecord::builder(kind)
         .component_id(component_id)

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -103,8 +104,10 @@ struct ObservationBundleArtifactBytes {
     path: String,
     sha256: String,
     size_bytes: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archive_format: Option<String>,
     #[serde(skip)]
-    source_path: Option<PathBuf>,
+    source_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -204,7 +207,7 @@ pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
     let mut artifacts = 0usize;
     let mut artifact_metadata_only = 0usize;
     for artifact in &bundle.artifacts {
-        let artifact = imported_artifact_record(artifact, &bundle, &input);
+        let artifact = imported_artifact_record(artifact, &bundle, &input)?;
         if artifact.artifact_type == "metadata-only" {
             artifact_metadata_only += 1;
         } else {
@@ -309,7 +312,7 @@ fn imported_artifact_record(
     artifact: &ArtifactRecord,
     bundle: &ObservationBundle,
     input: &Path,
-) -> ArtifactRecord {
+) -> homeboy::core::Result<ArtifactRecord> {
     if artifact.artifact_type == "file" {
         if let Some(bytes) = bundle.artifact_bytes.iter().find(|bytes| {
             bytes.artifact_id == artifact.id && artifact.path == bundle_artifact_uri(&bytes.path)
@@ -318,17 +321,32 @@ fn imported_artifact_record(
             imported.path = input.join(&bytes.path).to_string_lossy().to_string();
             imported.sha256 = Some(bytes.sha256.clone());
             imported.size_bytes = Some(bytes.size_bytes);
-            return imported;
+            return Ok(imported);
+        }
+    }
+
+    if artifact.artifact_type == "directory" {
+        if let Some(bytes) = bundle.artifact_bytes.iter().find(|bytes| {
+            bytes.artifact_id == artifact.id
+                && bytes.archive_format.as_deref() == Some("zip")
+                && artifact.path == bundle_artifact_uri(&bytes.path)
+        }) {
+            let extracted = extract_directory_artifact_archive(input, bytes)?;
+            let mut imported = artifact.clone();
+            imported.path = extracted.to_string_lossy().to_string();
+            imported.sha256 = Some(bytes.sha256.clone());
+            imported.size_bytes = Some(bytes.size_bytes);
+            return Ok(imported);
         }
     }
 
     if !matches!(artifact.artifact_type.as_str(), "file" | "directory") {
-        return artifact.clone();
+        return Ok(artifact.clone());
     }
     let mut imported = artifact.clone();
     imported.artifact_type = "metadata-only".to_string();
     imported.path = portable_artifact_label(&artifact.path, &artifact.id);
-    imported
+    Ok(imported)
 }
 
 fn portable_artifact_label(path: &str, fallback: &str) -> String {
@@ -435,31 +453,15 @@ fn portable_bundle_artifact_record(
                     Some(format!("read artifact bytes {}", source_path.display())),
                 )
             })?;
-            let sha256 = format!("{:x}", Sha256::digest(&bytes));
-            let size_bytes = i64::try_from(bytes.len()).map_err(|_| {
-                Error::internal_unexpected(format!(
-                    "artifact {} is too large to record a portable size",
-                    artifact.id
-                ))
-            })?;
-            let path = format!("artifact-bytes/{}", portable_artifact_file_name(&artifact));
-            let mut portable = artifact;
-            portable.path = bundle_artifact_uri(&path);
-            portable.sha256 = Some(sha256.clone());
-            portable.size_bytes = Some(size_bytes);
-            portable.metadata_json =
-                with_bundle_byte_metadata(portable.metadata_json, &path, &sha256, size_bytes);
-            let artifact_id = portable.id.clone();
-            return Ok((
-                portable,
-                Some(ObservationBundleArtifactBytes {
-                    artifact_id,
-                    path,
-                    sha256,
-                    size_bytes,
-                    source_path: Some(source_path),
-                }),
-            ));
+            return portable_artifact_with_bytes(artifact, bytes, None, None);
+        }
+    }
+
+    if artifact.artifact_type == "directory" {
+        let source_path = PathBuf::from(&artifact.path);
+        if source_path.is_dir() {
+            let bytes = zip_directory_artifact(&source_path)?;
+            return portable_artifact_with_bytes(artifact, bytes, Some("zip"), Some(".zip"));
         }
     }
 
@@ -473,6 +475,49 @@ fn portable_bundle_artifact_record(
         .artifacts
         .metadata_only_ref(&portable_artifact_label(&portable.path, &portable.id));
     Ok((portable, None))
+}
+
+fn portable_artifact_with_bytes(
+    artifact: ArtifactRecord,
+    bytes: Vec<u8>,
+    archive_format: Option<&str>,
+    extension: Option<&str>,
+) -> homeboy::core::Result<(ArtifactRecord, Option<ObservationBundleArtifactBytes>)> {
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let size_bytes = i64::try_from(bytes.len()).map_err(|_| {
+        Error::internal_unexpected(format!(
+            "artifact {} is too large to record a portable size",
+            artifact.id
+        ))
+    })?;
+    let mut file_name = portable_artifact_file_name(&artifact);
+    if let Some(extension) = extension {
+        file_name.push_str(extension);
+    }
+    let path = format!("artifact-bytes/{file_name}");
+    let mut portable = artifact;
+    portable.path = bundle_artifact_uri(&path);
+    portable.sha256 = Some(sha256.clone());
+    portable.size_bytes = Some(size_bytes);
+    portable.metadata_json = with_bundle_byte_metadata(
+        portable.metadata_json,
+        &path,
+        &sha256,
+        size_bytes,
+        archive_format,
+    );
+    let artifact_id = portable.id.clone();
+    Ok((
+        portable,
+        Some(ObservationBundleArtifactBytes {
+            artifact_id,
+            path,
+            sha256,
+            size_bytes,
+            archive_format: archive_format.map(str::to_string),
+            source_bytes: Some(bytes),
+        }),
+    ))
 }
 
 fn portable_artifact_file_name(artifact: &ArtifactRecord) -> String {
@@ -507,6 +552,7 @@ fn with_bundle_byte_metadata(
     path: &str,
     sha256: &str,
     size_bytes: i64,
+    archive_format: Option<&str>,
 ) -> serde_json::Value {
     let mut object = match metadata {
         serde_json::Value::Object(object) => object,
@@ -517,14 +563,15 @@ fn with_bundle_byte_metadata(
             object
         }
     };
-    object.insert(
-        "portable_bundle".to_string(),
-        serde_json::json!({
-            "byte_ref": path,
-            "sha256": sha256,
-            "size_bytes": size_bytes,
-        }),
-    );
+    let mut portable_bundle = serde_json::json!({
+        "byte_ref": path,
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+    });
+    if let Some(archive_format) = archive_format {
+        portable_bundle["archive_format"] = serde_json::Value::String(archive_format.to_string());
+    }
+    object.insert("portable_bundle".to_string(), portable_bundle);
     serde_json::Value::Object(object)
 }
 
@@ -628,7 +675,7 @@ fn write_artifact_bytes(
     artifact_bytes: &[ObservationBundleArtifactBytes],
 ) -> homeboy::core::Result<()> {
     for bytes in artifact_bytes {
-        let Some(source_path) = bytes.source_path.as_ref() else {
+        let Some(source_bytes) = bytes.source_bytes.as_ref() else {
             continue;
         };
         let output = bundle_dir.join(&bytes.path);
@@ -640,18 +687,195 @@ fn write_artifact_bytes(
                 )
             })?;
         }
-        fs::copy(source_path, &output).map_err(|e| {
+        fs::write(&output, source_bytes).map_err(|e| {
             Error::internal_io(
                 e.to_string(),
-                Some(format!(
-                    "copy artifact bytes {} to {}",
-                    source_path.display(),
-                    output.display()
-                )),
+                Some(format!("write artifact bytes {}", output.display())),
             )
         })?;
     }
     Ok(())
+}
+
+fn zip_directory_artifact(path: &Path) -> homeboy::core::Result<Vec<u8>> {
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for file in sorted_directory_files(path)? {
+            let relative = file.strip_prefix(path).map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "failed to compute relative path for {}: {}",
+                    file.display(),
+                    error
+                ))
+            })?;
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            zip.start_file(relative, options).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("archive directory artifact {}", path.display())),
+                )
+            })?;
+            let bytes = fs::read(&file).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read directory artifact file {}", file.display())),
+                )
+            })?;
+            zip.write_all(&bytes).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "write directory artifact archive {}",
+                        path.display()
+                    )),
+                )
+            })?;
+        }
+        zip.finish().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "finish directory artifact archive {}",
+                    path.display()
+                )),
+            )
+        })?;
+    }
+    Ok(cursor.into_inner())
+}
+
+fn sorted_directory_files(path: &Path) -> homeboy::core::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_directory_files(path, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_directory_files(path: &Path, files: &mut Vec<PathBuf>) -> homeboy::core::Result<()> {
+    for entry in fs::read_dir(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read directory artifact {}", path.display())),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read directory artifact entry {}", path.display())),
+            )
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "read directory artifact entry type {}",
+                    entry.path().display()
+                )),
+            )
+        })?;
+        if file_type.is_dir() {
+            collect_directory_files(&entry.path(), files)?;
+        } else if file_type.is_file() {
+            files.push(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn extract_directory_artifact_archive(
+    bundle_dir: &Path,
+    bytes: &ObservationBundleArtifactBytes,
+) -> homeboy::core::Result<PathBuf> {
+    let archive = bundle_dir.join(&bytes.path);
+    let output = bundle_dir.join(format!("{}-contents", bytes.path.trim_end_matches(".zip")));
+    fs::create_dir_all(&output).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "create extracted artifact directory {}",
+                output.display()
+            )),
+        )
+    })?;
+    let file = fs::File::open(&archive).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "open directory artifact archive {}",
+                archive.display()
+            )),
+        )
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+        Error::validation_invalid_argument(
+            "artifact_bytes",
+            format!("directory artifact archive is not a valid zip: {error}"),
+            Some(bytes.path.clone()),
+            None,
+        )
+    })?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read directory artifact archive entry {index}")),
+            )
+        })?;
+        let Some(name) = entry.enclosed_name().map(Path::to_path_buf) else {
+            return Err(Error::validation_invalid_argument(
+                "artifact_bytes",
+                "directory artifact archive contains an unsafe path",
+                Some(bytes.path.clone()),
+                None,
+            ));
+        };
+        let target = output.join(name);
+        if entry.is_dir() {
+            fs::create_dir_all(&target).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "create artifact archive directory {}",
+                        target.display()
+                    )),
+                )
+            })?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "create artifact archive parent {}",
+                        parent.display()
+                    )),
+                )
+            })?;
+        }
+        let mut output_file = fs::File::create(&target).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "create extracted artifact file {}",
+                    target.display()
+                )),
+            )
+        })?;
+        std::io::copy(&mut entry, &mut output_file).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "extract artifact archive file {}",
+                    target.display()
+                )),
+            )
+        })?;
+    }
+    Ok(output)
 }
 
 fn validate_artifact_bytes(

@@ -6,6 +6,8 @@ use homeboy::core::fuzz::{
     FuzzCampaign, FuzzReplayMetadata, FuzzResultEnvelope, FUZZ_CAMPAIGN_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
+use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
+use homeboy::core::Error;
 
 use super::super::utils::args::PositionalComponentArgs;
 use super::types::{
@@ -30,7 +32,10 @@ fn run_replay_like(
     args: ReplayLikeArgs,
     mode: ReplayLikeMode,
 ) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
-    let artifact_file = replay_artifact_path(&args);
+    let artifact_file = match replay_artifact_path(&args) {
+        Some(path) => Some(path),
+        None => resolve_run_replay_artifact_path(args.run_id.as_deref()).transpose()?,
+    };
     let positional_case = args.artifact_or_case.as_ref().and_then(|value| {
         if artifact_file.is_some() && !Path::new(value).exists() {
             Some(value.clone())
@@ -399,6 +404,66 @@ fn replay_artifact_path(args: &ReplayLikeArgs) -> Option<PathBuf> {
                 .then_some(path)
         })
     })
+}
+
+fn resolve_run_replay_artifact_path(
+    run_id: Option<&str>,
+) -> Option<homeboy::core::Result<PathBuf>> {
+    let run_id = run_id.filter(|run_id| !run_id.trim().is_empty())?;
+    Some(resolve_run_replay_artifact_path_inner(run_id))
+}
+
+fn resolve_run_replay_artifact_path_inner(run_id: &str) -> homeboy::core::Result<PathBuf> {
+    let store = ObservationStore::open_initialized()?;
+    let _run = runs_service::require_run(&store, run_id)?;
+    let mut candidates = runs_service::list_artifacts_for_run(&store, run_id)?
+        .into_iter()
+        .filter(|artifact| artifact.artifact_type == "file")
+        .filter(is_run_replay_artifact_candidate)
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(run_replay_artifact_rank);
+
+    candidates
+        .into_iter()
+        .map(|artifact| PathBuf::from(artifact.path))
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run-id",
+                format!("fuzz replay artifact not found for run: {run_id}"),
+                Some(run_id.to_string()),
+                Some(vec![
+                    format!("Run `homeboy runs artifacts {run_id}` to inspect recorded artifacts."),
+                    "Persist a fuzz campaign/result envelope artifact before replaying by run id."
+                        .to_string(),
+                ]),
+            )
+        })
+}
+
+fn is_run_replay_artifact_candidate(artifact: &ArtifactRecord) -> bool {
+    artifact.kind == "fuzz_result_envelope"
+        || artifact.kind == "fuzz_results"
+        || artifact
+            .metadata_json
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            == Some(FUZZ_RESULT_ENVELOPE_SCHEMA)
+}
+
+fn run_replay_artifact_rank(artifact: &ArtifactRecord) -> u8 {
+    if artifact.kind == "fuzz_result_envelope" {
+        0
+    } else if artifact
+        .metadata_json
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        == Some(FUZZ_RESULT_ENVELOPE_SCHEMA)
+    {
+        1
+    } else {
+        2
+    }
 }
 
 fn resolve_replay_artifact(
