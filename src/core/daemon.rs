@@ -24,6 +24,7 @@ use crate::core::upgrade::VERSION;
 
 mod artifact_download;
 mod broker_config;
+mod completion_tracker;
 mod control;
 mod patch_capture;
 mod remote_runner;
@@ -239,6 +240,8 @@ where
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 
+    spawn_completion_notifier();
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -255,6 +258,76 @@ where
     }
 
     Ok(state)
+}
+
+/// Environment variable overriding the completion-notifier poll interval in
+/// seconds. Defaults to [`COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS`].
+const COMPLETION_NOTIFY_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_NOTIFY_INTERVAL_SECS";
+const COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS: u64 = 5;
+
+/// Spawn the background thread that watches in-flight runs and fires a local
+/// notification when one completes, so a detached/offloaded run never becomes a
+/// ghost.
+///
+/// The thread is inert — and therefore not spawned — unless a notify command is
+/// configured (`HOMEBOY_NOTIFY_COMMAND`). This keeps default daemon behavior
+/// unchanged: operators opt in by wiring their own notifier.
+fn spawn_completion_notifier() {
+    if crate::core::notify::configured_command().is_none() {
+        return;
+    }
+    let interval = std::env::var(COMPLETION_NOTIFY_INTERVAL_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS);
+    std::thread::spawn(move || completion_notify_loop(std::time::Duration::from_secs(interval)));
+}
+
+/// Poll the observation store for in-flight runs and notify on completion.
+///
+/// Each pass refreshes mirrored runner evidence for currently-running records
+/// (so offloaded runs advance to their terminal state locally), re-reads the
+/// running set, and pings for any run that left it since the previous pass.
+fn completion_notify_loop(interval: std::time::Duration) {
+    use crate::core::observation::ObservationStore;
+
+    let mut tracker = completion_tracker::CompletionTracker::default();
+    loop {
+        if let Ok(store) = ObservationStore::open_initialized() {
+            let running = list_running_run_ids(&store);
+            for run_id in &running {
+                crate::core::observation::runs_service::refresh_mirrored_daemon_evidence_best_effort(
+                    run_id,
+                );
+            }
+            let running_after = list_running_run_ids(&store);
+            for completed_id in tracker.observe(running_after) {
+                let status = store
+                    .get_run(&completed_id)
+                    .ok()
+                    .flatten()
+                    .map(|run| run.status)
+                    .unwrap_or_else(|| "unknown".to_string());
+                let event = crate::core::notify::NotifyEvent::run_completed(&completed_id, &status);
+                let _ = crate::core::notify::dispatch(&event, None);
+            }
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+fn list_running_run_ids(store: &crate::core::observation::ObservationStore) -> Vec<String> {
+    store
+        .list_runs(crate::core::observation::RunListFilter {
+            status: Some(crate::core::observation::RunStatus::Running.as_str().to_string()),
+            limit: Some(1000),
+            ..Default::default()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|run| run.id)
+        .collect()
 }
 
 pub fn route(method: &str, path: &str) -> HttpResponse {

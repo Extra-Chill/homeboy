@@ -77,6 +77,7 @@ fn rig_runs_list_surfaces_compact_artifact_index() {
                 rig: Some("proof-rig".to_string()),
                 scenario_id: None,
                 status: None,
+                running: false,
                 limit: 20,
                 include_active_runner_jobs: false,
             },

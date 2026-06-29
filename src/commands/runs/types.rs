@@ -36,6 +36,7 @@ use super::proof::RunsProofOutput;
 use super::query::{RunsQueryArgs, RunsQueryOutput};
 use super::reconcile::{RunsReconcileArgs, RunsReconcileOutput};
 use super::refs::{RunsRefsArgs, RunsRefsOutput};
+use super::watch::{RunsWatchArgs, RunsWatchOutput};
 use crate::commands::fuzz::FuzzCompareOutput;
 
 pub(super) const DEFAULT_LIMIT: i64 = 20;
@@ -75,6 +76,11 @@ pub(super) enum RunsCommand {
     Hotspots(RunsHotspotsArgs),
     /// Mark orphaned running observation records stale
     Reconcile(RunsReconcileArgs),
+    /// Block and stream a run's status until it reaches a terminal state,
+    /// exiting with a code that reflects pass/fail. Works for attached and
+    /// detached/offloaded runs.
+    #[command(visible_aliases = ["follow", "tail"])]
+    Watch(RunsWatchArgs),
     /// Show one persisted observation run
     Show {
         run_id: String,
@@ -158,6 +164,10 @@ pub struct RunsListArgs {
     /// Run status
     #[arg(long)]
     pub status: Option<String>,
+    /// Show only in-flight runs. Shorthand for `--status running`; surfaces
+    /// runs that could otherwise become ghosts.
+    #[arg(long, conflicts_with = "status")]
+    pub running: bool,
     /// Maximum runs to return
     #[arg(long, default_value_t = DEFAULT_LIMIT)]
     pub limit: i64,
@@ -194,6 +204,7 @@ pub enum RunsOutput {
     FuzzCompare(FuzzCompareOutput),
     Hotspots(RunsHotspotsOutput),
     Reconcile(RunsReconcileOutput),
+    Watch(RunsWatchOutput),
     Export(RunsExportOutput),
     Import(RunsImportOutput),
     ImportFromGhActions(GhActionsImportOutput),
