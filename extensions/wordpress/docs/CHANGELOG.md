@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.8] - 2026-06-29
+
+### Changed
+- Accept disposable Codebox fuzz destruction
+- Harden Codebox fuzz runtime preflight
+
 ## [3.21.7] - 2026-06-29
 
 ### Changed
