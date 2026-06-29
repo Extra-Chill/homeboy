@@ -8,13 +8,14 @@ use super::schema_defaults::{
     lifecycle_result_schema, lifecycle_snapshot_ref_schema,
 };
 use super::schemas::{
-    standardized_fuzz_skip_reason_codes, FUZZ_ARTIFACT_SCHEMA, FUZZ_CAMPAIGN_SCHEMA,
-    FUZZ_CASE_LOG_SCHEMA, FUZZ_CASE_SCHEMA, FUZZ_CONTRACT_VERSION, FUZZ_CORE_CONTRACT_SCHEMA,
-    FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_COVERAGE_SCHEMA, FUZZ_COVERAGE_SUMMARY_SCHEMA,
-    FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA,
-    FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA,
-    FUZZ_REQUIRED_ARTIFACT_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA,
-    FUZZ_SEED_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SURFACE_SCHEMA,
+    standardized_fuzz_skip_reason_codes, FUZZ_ACTION_MODEL_SCHEMA, FUZZ_ARTIFACT_SCHEMA,
+    FUZZ_CAMPAIGN_SCHEMA, FUZZ_CASE_LOG_SCHEMA, FUZZ_CASE_SCHEMA, FUZZ_CONTRACT_VERSION,
+    FUZZ_CORE_CONTRACT_SCHEMA, FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_COVERAGE_SCHEMA,
+    FUZZ_COVERAGE_SUMMARY_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_EXPLORATION_POLICY_SCHEMA,
+    FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,
+    FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA,
+    FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEED_SCHEMA,
+    FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SURFACE_SCHEMA,
     FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
     ISOLATION_PROOF_SCHEMA,
 };
@@ -39,6 +40,10 @@ pub struct FuzzContractSchemas {
     pub surface: String,
     pub target: String,
     pub workload: String,
+    #[serde(default = "super::schema_defaults::fuzz_action_model_schema")]
+    pub action_model: String,
+    #[serde(default = "super::schema_defaults::fuzz_exploration_policy_schema")]
+    pub exploration_policy: String,
     pub campaign: String,
     pub case: String,
     #[serde(default = "super::schema_defaults::fuzz_case_log_schema")]
@@ -193,6 +198,8 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             surface: FUZZ_SURFACE_SCHEMA.to_string(),
             target: FUZZ_TARGET_SCHEMA.to_string(),
             workload: FUZZ_WORKLOAD_SCHEMA.to_string(),
+            action_model: FUZZ_ACTION_MODEL_SCHEMA.to_string(),
+            exploration_policy: FUZZ_EXPLORATION_POLICY_SCHEMA.to_string(),
             campaign: FUZZ_CAMPAIGN_SCHEMA.to_string(),
             case: FUZZ_CASE_SCHEMA.to_string(),
             case_log: FUZZ_CASE_LOG_SCHEMA.to_string(),

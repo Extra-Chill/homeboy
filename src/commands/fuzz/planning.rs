@@ -2,10 +2,11 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::core::fuzz::{
-    fuzz_gate_profile_contract, FuzzExecutionRequest, FuzzOperation, FuzzOperationFamily,
-    FuzzSafetyClass, FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism, FuzzSamplingRequest,
-    FuzzSamplingStratum, FuzzTargetInventory, IsolationProof, FUZZ_CONTRACT_VERSION,
-    FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA,
+    fuzz_gate_profile_contract, parse_fuzz_action_model_file, parse_fuzz_exploration_policy_file,
+    FuzzExecutionRequest, FuzzOperation, FuzzOperationFamily, FuzzSafetyClass,
+    FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism, FuzzSamplingRequest, FuzzSamplingStratum,
+    FuzzTargetInventory, IsolationProof, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    FUZZ_SAMPLING_REQUEST_SCHEMA,
 };
 
 use super::execution::fuzz_runner_contract;
@@ -300,6 +301,17 @@ pub(super) fn plan_inventory_selection(
         .clone()
         .or_else(|| args.run.workload_id.clone())
         .map(|id| format!("{id}-sampling"));
+    let action_model = args
+        .action_model
+        .as_deref()
+        .map(parse_fuzz_action_model_file)
+        .transpose()?;
+    let exploration_policy = args
+        .exploration_policy
+        .as_deref()
+        .map(parse_fuzz_exploration_policy_file)
+        .transpose()?;
+
     let sampling = FuzzSamplingRequest {
         schema: FUZZ_SAMPLING_REQUEST_SCHEMA.to_string(),
         strategy: args.strategy.as_str().to_string(),
@@ -346,7 +358,7 @@ pub(super) fn plan_inventory_selection(
         extra: BTreeMap::new(),
     };
 
-    Ok(json!({
+    let mut metadata = json!({
         "planner": {
             "strategy": args.strategy.as_str(),
             "operation_filters": args.operations,
@@ -394,7 +406,31 @@ pub(super) fn plan_inventory_selection(
             "surface_ids": workload_surface_ids.into_iter().collect::<Vec<_>>(),
             "operation_filters": workload_operations.into_iter().collect::<Vec<_>>(),
         }
-    }))
+    });
+
+    if let Some(action_model) = action_model {
+        metadata["action_model"] = serde_json::to_value(action_model).map_err(|err| {
+            homeboy::core::Error::validation_invalid_argument(
+                "action_model",
+                format!("invalid fuzz action model contract: {err}"),
+                None,
+                None,
+            )
+        })?;
+    }
+    if let Some(exploration_policy) = exploration_policy {
+        metadata["exploration_policy"] =
+            serde_json::to_value(exploration_policy).map_err(|err| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "exploration_policy",
+                    format!("invalid fuzz exploration policy contract: {err}"),
+                    None,
+                    None,
+                )
+            })?;
+    }
+
+    Ok(metadata)
 }
 
 pub(super) fn load_isolation_proof(

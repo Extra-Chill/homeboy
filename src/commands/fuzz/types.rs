@@ -264,6 +264,14 @@ pub(crate) struct FuzzPlanArgs {
     /// Maximum execution budget in seconds for downstream runners.
     #[arg(long = "duration-budget-seconds", value_name = "SECONDS")]
     pub(crate) duration_budget_seconds: Option<u64>,
+
+    /// Generic action model contract JSON (`homeboy/fuzz-action-model/v1`) to include in the plan.
+    #[arg(long = "action-model", value_name = "PATH")]
+    pub(crate) action_model: Option<PathBuf>,
+
+    /// Generic exploration policy contract JSON (`homeboy/fuzz-exploration-policy/v1`) to include in the plan.
+    #[arg(long = "exploration-policy", value_name = "PATH")]
+    pub(crate) exploration_policy: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

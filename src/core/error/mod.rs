@@ -205,6 +205,45 @@ pub struct InvalidArgumentDetails {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tried: Option<Vec<String>>,
+    /// Captured evidence for a failed command-backed validation (e.g. the
+    /// release `preflight.test`/`preflight.lint` gates). Carries the exact
+    /// resolved command, its working directory, exit code, and captured
+    /// stdout/stderr so an operator can see *what ran and why it failed*
+    /// directly in the structured error instead of having to reverse-engineer
+    /// the gate. Generic across every extension/test backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_evidence: Option<CommandEvidence>,
+}
+
+/// Captured evidence describing a single command-backed validation failure.
+///
+/// Surfaced inside [`InvalidArgumentDetails::command_evidence`] so structured
+/// error output (and the release step's `error_details`) carries the exact
+/// command, cwd, exit code, and bounded stdout/stderr that produced the
+/// failure. Intentionally ecosystem-agnostic: any extension test/lint backend
+/// can populate it from its captured runner output.
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandEvidence {
+    /// Human-readable description of the resolved command that ran (e.g. the
+    /// extension id plus script path, or a self-check command line).
+    pub command: String,
+    /// Working directory the command ran in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Where the command executed: `"local"` controller, or a named runner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Exit code the command returned.
+    pub exit_code: i32,
+    /// Captured stdout (already bounded by the caller). Empty when none.
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub stdout: String,
+    /// Captured stderr (already bounded by the caller). Empty when none.
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub stderr: String,
+    /// Whether either captured stream was truncated to fit the error payload.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +388,20 @@ impl Error {
         id: Option<String>,
         tried: Option<Vec<String>>,
     ) -> Self {
+        Self::validation_invalid_argument_with_evidence(field, problem, id, tried, None)
+    }
+
+    /// Same as [`Self::validation_invalid_argument`] but attaches captured
+    /// [`CommandEvidence`] (resolved command, cwd, exit code, stdout/stderr) so
+    /// command-backed validation failures (e.g. the release `preflight.test`
+    /// gate) surface *what ran and why it failed* in the structured error.
+    pub fn validation_invalid_argument_with_evidence(
+        field: impl Into<String>,
+        problem: impl Into<String>,
+        id: Option<String>,
+        tried: Option<Vec<String>>,
+        command_evidence: Option<CommandEvidence>,
+    ) -> Self {
         let field_str = field.into();
         let problem_str = problem.into();
         let message = format!("Invalid argument '{}': {}", field_str, problem_str);
@@ -357,6 +410,7 @@ impl Error {
             problem: problem_str,
             id,
             tried,
+            command_evidence,
         });
 
         Self::new(ErrorCode::ValidationInvalidArgument, message, details)

@@ -148,6 +148,131 @@ fn fuzz_plan_strict_profile_requests_required_artifacts_and_gates() {
 }
 
 #[test]
+fn fuzz_plan_cli_parses_action_model_and_exploration_policy_contracts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let action_model = temp.path().join("action-model.json");
+    let exploration_policy = temp.path().join("exploration-policy.json");
+    fs::write(
+        &action_model,
+        serde_json::json!({
+            "schema": "homeboy/fuzz-action-model/v1",
+            "version": 1,
+            "id": "generic-actions",
+            "actions": [
+                {
+                    "id": "resource.read",
+                    "kind": "read",
+                    "weight": 3.0,
+                    "input_generators": ["generator:resource-id"],
+                    "preconditions": ["resource.exists"],
+                    "effects": ["observation.recorded"],
+                    "invariants": ["resource.integrity"]
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write action model");
+    fs::write(
+        &exploration_policy,
+        serde_json::json!({
+            "schema": "homeboy/fuzz-exploration-policy/v1",
+            "version": 1,
+            "id": "bounded-exploration",
+            "action_model_ref": "generic-actions",
+            "action_weights": { "resource.read": 3.0 },
+            "case_budget": 50,
+            "duration_budget_seconds": 300,
+            "reset_cadence": "after_each_case",
+            "replay_seed_ref": "seed:stable-1",
+            "corpus_refs": ["corpus:generic-fixture"],
+            "invariants": ["resource.integrity"]
+        })
+        .to_string(),
+    )
+    .expect("write exploration policy");
+
+    let cli = FuzzCli::try_parse_from([
+        "fuzz",
+        "plan",
+        "component-a",
+        "--workload",
+        "api-fuzz",
+        "--run-id",
+        "proof-1",
+        "--action-model",
+        action_model.to_str().expect("utf8 action model path"),
+        "--exploration-policy",
+        exploration_policy
+            .to_str()
+            .expect("utf8 exploration policy path"),
+    ])
+    .expect("parse fuzz plan cli");
+    let Some(FuzzCommand::Plan(args)) = cli.args.command else {
+        panic!("expected fuzz plan command");
+    };
+
+    let metadata = super::plan_inventory_selection(&args, &planner_inventory(), None).unwrap();
+
+    assert_eq!(
+        metadata["action_model"]["schema"],
+        serde_json::json!(homeboy::core::fuzz::FUZZ_ACTION_MODEL_SCHEMA)
+    );
+    assert_eq!(
+        metadata["action_model"]["actions"][0]["input_generators"],
+        serde_json::json!(["generator:resource-id"])
+    );
+    assert_eq!(
+        metadata["exploration_policy"]["schema"],
+        serde_json::json!(homeboy::core::fuzz::FUZZ_EXPLORATION_POLICY_SCHEMA)
+    );
+    assert_eq!(
+        metadata["exploration_policy"]["reset_cadence"],
+        serde_json::json!("after_each_case")
+    );
+    assert_eq!(
+        metadata["exploration_policy"]["corpus_refs"],
+        serde_json::json!(["corpus:generic-fixture"])
+    );
+}
+
+#[test]
+fn fuzz_plan_rejects_invalid_action_model_schema_from_cli_contract_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let action_model = temp.path().join("action-model.json");
+    fs::write(
+        &action_model,
+        serde_json::json!({
+            "schema": "homeboy/fuzz-action-model/v2",
+            "version": 1,
+            "id": "generic-actions",
+            "actions": [ { "id": "resource.read", "kind": "read" } ]
+        })
+        .to_string(),
+    )
+    .expect("write action model");
+
+    let cli = FuzzCli::try_parse_from([
+        "fuzz",
+        "plan",
+        "component-a",
+        "--action-model",
+        action_model.to_str().expect("utf8 action model path"),
+    ])
+    .expect("parse fuzz plan cli");
+    let Some(FuzzCommand::Plan(args)) = cli.args.command else {
+        panic!("expected fuzz plan command");
+    };
+
+    let error = super::plan_inventory_selection(&args, &planner_inventory(), None)
+        .expect_err("invalid action model schema should fail");
+
+    assert!(error
+        .to_string()
+        .contains("fuzz action model schema must be homeboy/fuzz-action-model/v1"));
+}
+
+#[test]
 fn fuzz_plan_operation_filter_limits_inventory_selection() {
     let mut args = planner_args();
     args.operations = vec!["read".to_string()];

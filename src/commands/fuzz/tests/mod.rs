@@ -105,6 +105,8 @@ fn planner_args() -> FuzzPlanArgs {
         operation_families: Vec::new(),
         case_budget: None,
         duration_budget_seconds: None,
+        action_model: None,
+        exploration_policy: None,
     }
 }
 
