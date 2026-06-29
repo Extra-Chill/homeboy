@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.270.1] - 2026-06-29
+
+### Fixed
+- clarify blocked controller status
+- add controller reconcile-stale flag
+
 ## [0.270.0] - 2026-06-29
 
 ### Added
