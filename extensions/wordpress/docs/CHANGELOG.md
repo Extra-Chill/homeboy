@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.9] - 2026-06-29
+
+### Changed
+- Use disposable Codebox mutation semantics
+- Map WordPress runtime actions through Codebox contracts
+- Add explicit WordPress fuzz surface family contracts
+
 ## [3.21.8] - 2026-06-29
 
 ### Changed
