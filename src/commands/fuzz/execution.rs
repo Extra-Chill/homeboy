@@ -1397,7 +1397,9 @@ pub(super) fn build_fuzz_execution_request(
         case_budget: None,
         duration_budget_seconds: None,
     };
-    let mut metadata = plan_inventory_selection(&plan_args, target_inventory)?;
+    let isolation_proof = super::planning::load_isolation_proof(args.isolation_proof.as_deref())?;
+    let mut metadata =
+        plan_inventory_selection(&plan_args, target_inventory, isolation_proof.as_ref())?;
     if let Some(object) = metadata.as_object_mut() {
         object.insert(
             "target_inventory".to_string(),
@@ -1442,6 +1444,7 @@ pub(super) fn build_fuzz_execution_request(
         required_artifacts,
         gates,
         sampling,
+        isolation_proof,
         metadata,
         extra: std::collections::BTreeMap::new(),
     })

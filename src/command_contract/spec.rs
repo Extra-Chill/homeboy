@@ -389,7 +389,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ..lab_command_spec_with_summary(
             "fuzz",
             CommandJsonFamily::Quality,
-            "fuzz is measurement-only by default; --allow-destructive is guarded by verified generic isolation proof from Lab/offloaded runner context",
+            "fuzz is measurement-only by default; --allow-destructive requires explicit homeboy/isolation-proof/v1 input",
             FUZZ_LAB_SUPPORT,
         )
     },

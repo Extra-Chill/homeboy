@@ -9,6 +9,7 @@ use super::schemas::{
     FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEED_SCHEMA,
     FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SURFACE_SCHEMA,
     FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
+    ISOLATION_PROOF_SCHEMA,
 };
 
 pub(super) fn fuzz_core_contract_schema() -> String {
@@ -117,6 +118,10 @@ pub(super) fn fuzz_hotspot_set_schema() -> String {
 
 pub(super) fn fuzz_observation_set_schema() -> String {
     FUZZ_OBSERVATION_SET_SCHEMA.to_string()
+}
+
+pub(super) fn isolation_proof_schema() -> String {
+    ISOLATION_PROOF_SCHEMA.to_string()
 }
 
 pub(super) fn lifecycle_contract_schema() -> String {

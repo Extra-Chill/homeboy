@@ -56,7 +56,7 @@ fn fuzz_discover_requires_inventory_artifacts() {
 #[test]
 fn fuzz_plan_selects_inventory_targets_operations_seeds_and_budgets() {
     let args = planner_args();
-    let metadata = super::plan_inventory_selection(&args, &planner_inventory()).unwrap();
+    let metadata = super::plan_inventory_selection(&args, &planner_inventory(), None).unwrap();
 
     assert_eq!(
         metadata["selection"]["target_ids"].as_array().unwrap(),
@@ -131,7 +131,7 @@ fn fuzz_plan_strict_profile_requests_required_artifacts_and_gates() {
     let mut args = planner_args();
     args.run.gate_profile = FuzzGateProfileArg::Strict;
 
-    let metadata = super::plan_inventory_selection(&args, &planner_inventory()).unwrap();
+    let metadata = super::plan_inventory_selection(&args, &planner_inventory(), None).unwrap();
 
     assert_eq!(
         metadata["planner"]["gate_profile"],
@@ -152,7 +152,7 @@ fn fuzz_plan_operation_filter_limits_inventory_selection() {
     let mut args = planner_args();
     args.operations = vec!["read".to_string()];
 
-    let metadata = super::plan_inventory_selection(&args, &planner_inventory()).unwrap();
+    let metadata = super::plan_inventory_selection(&args, &planner_inventory(), None).unwrap();
 
     assert_eq!(
         metadata["selection"]["operation_families"]
@@ -175,9 +175,8 @@ fn fuzz_plan_operation_filter_limits_inventory_selection() {
 
 #[test]
 fn fuzz_plan_skips_destructive_operations_by_default() {
-    let _guard = test_isolation_env_guard(None);
     let metadata =
-        super::plan_inventory_selection(&planner_args(), &destructive_inventory()).unwrap();
+        super::plan_inventory_selection(&planner_args(), &destructive_inventory(), None).unwrap();
 
     assert!(metadata["selection"]["operations"]
         .as_array()
@@ -195,44 +194,26 @@ fn fuzz_plan_skips_destructive_operations_by_default() {
 }
 
 #[test]
-fn fuzz_plan_skips_destructive_operations_without_verified_isolation() {
-    let _guard = test_isolation_env_guard(None);
+fn fuzz_plan_rejects_destructive_mode_without_explicit_isolation_proof() {
     let mut args = planner_args();
     args.run.allow_destructive = true;
     args.run.isolation = FuzzIsolationArg::Isolated;
 
-    let metadata = super::plan_inventory_selection(&args, &destructive_inventory()).unwrap();
+    let error = super::plan_inventory_selection(&args, &destructive_inventory(), None)
+        .expect_err("destructive mode requires proof");
 
-    assert!(metadata["selection"]["operations"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        metadata["skipped"]["operations"][0]["reason"],
-        serde_json::json!("destructive")
-    );
-    assert_eq!(
-        metadata["skipped"]["operations"][0]["detail"],
-        serde_json::json!(
-            "destructive fuzz requires verified generic isolation proof from Lab/offloaded runner metadata"
-        )
-    );
-    assert_eq!(metadata["isolation"]["mode"], serde_json::json!("isolated"));
-    assert_eq!(
-        metadata["isolation"]["destructive_allowed"],
-        serde_json::json!(false)
-    );
-    assert_eq!(metadata["isolation"]["verified"], serde_json::json!(false));
+    assert!(error.to_string().contains("homeboy/isolation-proof/v1"));
 }
 
 #[test]
-fn fuzz_plan_includes_destructive_operations_with_verified_isolation_opt_in() {
-    let _guard = test_isolation_env_guard(Some("1"));
+fn fuzz_plan_includes_destructive_operations_with_explicit_isolation_proof() {
     let mut args = planner_args();
     args.run.allow_destructive = true;
     args.run.isolation = FuzzIsolationArg::Isolated;
+    let proof = isolation_proof();
 
-    let metadata = super::plan_inventory_selection(&args, &destructive_inventory()).unwrap();
+    let metadata =
+        super::plan_inventory_selection(&args, &destructive_inventory(), Some(&proof)).unwrap();
 
     assert_eq!(
         metadata["selection"]["operations"][0]["operation_id"],
@@ -253,8 +234,12 @@ fn fuzz_plan_includes_destructive_operations_with_verified_isolation_opt_in() {
     );
     assert_eq!(metadata["isolation"]["verified"], serde_json::json!(true));
     assert_eq!(
-        metadata["isolation"]["proof_source"],
-        serde_json::json!("test_env")
+        metadata["isolation"]["proof_schema"],
+        serde_json::json!("homeboy/isolation-proof/v1")
+    );
+    assert_eq!(
+        metadata["isolation"]["runtime_kind"],
+        serde_json::json!("ephemeral-runner")
     );
     assert_eq!(
         metadata["sampling"]["metadata"]["destructive_allowed"],
@@ -264,13 +249,12 @@ fn fuzz_plan_includes_destructive_operations_with_verified_isolation_opt_in() {
 
 #[test]
 fn fuzz_plan_workload_safety_participates_in_destructive_skip() {
-    let _guard = test_isolation_env_guard(None);
     let mut inventory = planner_inventory();
     inventory.workloads[0].safety_class = homeboy::core::fuzz::FuzzSafetyClass::Destructive;
     let mut args = planner_args();
     args.run.workload_id = Some("api-fuzz".to_string());
 
-    let metadata = super::plan_inventory_selection(&args, &inventory).unwrap();
+    let metadata = super::plan_inventory_selection(&args, &inventory, None).unwrap();
 
     assert!(metadata["selection"]["operations"]
         .as_array()
@@ -289,7 +273,7 @@ fn fuzz_plan_budget_flags_override_inventory_workload_budgets() {
     args.duration_budget_seconds = Some(10);
     args.run.max_duration = Some("30s".to_string());
 
-    let metadata = super::plan_inventory_selection(&args, &planner_inventory()).unwrap();
+    let metadata = super::plan_inventory_selection(&args, &planner_inventory(), None).unwrap();
 
     assert_eq!(metadata["budgets"]["case_budget"], serde_json::json!(5));
     assert_eq!(
@@ -312,7 +296,7 @@ fn fuzz_plan_sampling_metadata_records_caller_seed_deterministically() {
     let mut args = planner_args();
     args.run.seed = Some("seed-123".to_string());
 
-    let metadata = super::plan_inventory_selection(&args, &planner_inventory()).unwrap();
+    let metadata = super::plan_inventory_selection(&args, &planner_inventory(), None).unwrap();
 
     assert_eq!(metadata["sampling"]["seed"], serde_json::json!("seed-123"));
     assert_eq!(
@@ -344,7 +328,7 @@ fn fuzz_plan_skips_unsupported_inventory_operations() {
     }))
     .expect("inventory parses");
 
-    let metadata = super::plan_inventory_selection(&planner_args(), &inventory).unwrap();
+    let metadata = super::plan_inventory_selection(&planner_args(), &inventory, None).unwrap();
 
     assert!(metadata["selection"]["operations"]
         .as_array()
@@ -385,6 +369,8 @@ fn fuzz_run_parses_generic_contract_flags() {
         "--allow-destructive",
         "--isolation",
         "isolated",
+        "--isolation-proof",
+        "/tmp/isolation-proof.json",
         "--expect-metric",
         "side_effect_grouped_created_count=2",
         "--",
@@ -414,6 +400,10 @@ fn fuzz_run_parses_generic_contract_flags() {
             assert_eq!(run.max_duration.as_deref(), Some("60s"));
             assert!(run.allow_destructive);
             assert_eq!(run.isolation, FuzzIsolationArg::Isolated);
+            assert_eq!(
+                run.isolation_proof.as_deref(),
+                Some(Path::new("/tmp/isolation-proof.json"))
+            );
             assert_eq!(
                 run.expect_metric,
                 vec![(

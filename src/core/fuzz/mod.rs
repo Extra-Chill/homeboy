@@ -44,7 +44,7 @@ pub use defaults::{
 pub use envelope::{
     FuzzExecutionRequest, FuzzGate, FuzzRequiredArtifact, FuzzResultEnvelope,
     FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism, FuzzSamplingRequest, FuzzSamplingStratum,
-    FuzzTargetInventory,
+    FuzzTargetInventory, IsolationProof,
 };
 pub use hotspots::{
     parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot, FuzzHotspotSet,
@@ -67,7 +67,7 @@ pub use schemas::{
     FUZZ_SKIP_REASON_AUTH_REQUIRED, FUZZ_SKIP_REASON_CONFIG_REQUIRED, FUZZ_SKIP_REASON_DESTRUCTIVE,
     FUZZ_SKIP_REASON_LEGACY, FUZZ_SKIP_REASON_UNAVAILABLE, FUZZ_SKIP_REASON_UNSAFE,
     FUZZ_SKIP_REASON_UNSUPPORTED, FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA,
-    FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
+    FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA, ISOLATION_PROOF_SCHEMA,
 };
 pub use types::{
     FuzzCampaign, FuzzCase, FuzzCaseLogArtifactRef, FuzzCaseLogEntry, FuzzCaseLogStatus, FuzzInput,

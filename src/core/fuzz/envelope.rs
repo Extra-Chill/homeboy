@@ -10,9 +10,9 @@ use super::normalize::{require_schema, required_trimmed, trim_or_default};
 use super::schema_defaults::{
     fuzz_contract_version, fuzz_execution_request_schema, fuzz_gate_schema,
     fuzz_required_artifact_schema, fuzz_result_envelope_schema, fuzz_sampling_request_schema,
-    fuzz_target_inventory_schema,
+    fuzz_target_inventory_schema, isolation_proof_schema,
 };
-use super::schemas::{FUZZ_CONTRACT_VERSION, FUZZ_TARGET_INVENTORY_SCHEMA};
+use super::schemas::{FUZZ_CONTRACT_VERSION, FUZZ_TARGET_INVENTORY_SCHEMA, ISOLATION_PROOF_SCHEMA};
 use super::types::{FuzzCampaign, FuzzSeed, FuzzSurface, FuzzTarget, FuzzWorkload};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -100,10 +100,71 @@ pub struct FuzzExecutionRequest {
     pub gates: Vec<FuzzGate>,
     #[serde(default)]
     pub sampling: FuzzSamplingRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_proof: Option<IsolationProof>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsolationProof {
+    #[serde(default = "isolation_proof_schema")]
+    pub schema: String,
+    #[serde(default = "fuzz_contract_version")]
+    pub version: u32,
+    pub runtime_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_ref: Option<Value>,
+    pub disposable: bool,
+    pub snapshot_ref: String,
+    pub reset_supported: bool,
+    pub teardown_required: bool,
+    pub mutation_boundary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proof_artifacts: Vec<Value>,
+    pub verified_by: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl IsolationProof {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let mut proof: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
+        proof.normalize()?;
+        Ok(proof)
+    }
+
+    pub fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, ISOLATION_PROOF_SCHEMA);
+        require_schema(&self.schema, ISOLATION_PROOF_SCHEMA, "isolation proof")?;
+        if self.version != FUZZ_CONTRACT_VERSION {
+            return Err(format!(
+                "isolation proof version must be {FUZZ_CONTRACT_VERSION}"
+            ));
+        }
+        self.runtime_kind = required_trimmed("isolation_proof.runtime_kind", &self.runtime_kind)?;
+        self.snapshot_ref = required_trimmed("isolation_proof.snapshot_ref", &self.snapshot_ref)?;
+        self.mutation_boundary =
+            required_trimmed("isolation_proof.mutation_boundary", &self.mutation_boundary)?;
+        self.verified_by = required_trimmed("isolation_proof.verified_by", &self.verified_by)?;
+        if !self.disposable {
+            return Err("isolation_proof.disposable must be true".to_string());
+        }
+        if !self.reset_supported {
+            return Err("isolation_proof.reset_supported must be true".to_string());
+        }
+        if !self.teardown_required {
+            return Err("isolation_proof.teardown_required must be true".to_string());
+        }
+        if self.proof_artifacts.is_empty() {
+            return Err("isolation_proof.proof_artifacts must be non-empty".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
