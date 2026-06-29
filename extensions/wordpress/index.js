@@ -47,6 +47,7 @@ module.exports = {
 	...require('./lib/wp-codebox-browser-coverage'),
 	...require('./lib/wp-codebox-fuzz-run'),
 	...require('./lib/wordpress-workload-profile'),
+	...require('./lib/wordpress-workload-scale-profile'),
 	...require('./lib/wordpress-fuzz-manifest'),
 	...require('./lib/wordpress-fuzz-command-manifest'),
 	...require('./lib/wordpress-fuzz-runtime-capabilities'),

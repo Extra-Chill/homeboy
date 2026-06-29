@@ -36,6 +36,10 @@ const {
 const {
 	normalizeWordPressSurfaceFamilyContracts,
 } = require('./wordpress-surface-family-contracts');
+const {
+	normalizeWordPressWorkloadScaleProfile,
+	workloadScaleSurfacesFromProfile,
+} = require('./wordpress-workload-scale-profile');
 
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const DB_MUTATION_REQUIRED_CAPABILITIES = requiredCapabilitiesForWordPressFuzzCase('db_mutation');
@@ -43,6 +47,7 @@ const DB_MUTATION_REQUIRED_CAPABILITIES = requiredCapabilitiesForWordPressFuzzCa
 function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 	const mutationMode = normalizeWordPressFuzzMutationMode(options.mutation_mode || options.mutationMode || input.mutation_mode || input.mutationMode);
 	const targetOptions = mutationMode ? { ...options, mutation_mode: mutationMode } : options;
+	const workloadScaleProfile = workloadScaleProfileFromInput(input);
 	const discovery = normalizeWordPressSurfaceDiscovery({
 		schema: WORDPRESS_SURFACE_DISCOVERY_SCHEMA,
 		id: input.id || input.discovery_id || input.discoveryId || options.discoveryId || 'wordpress-surface-discovery',
@@ -68,6 +73,7 @@ function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 		metadata: {
 			...(input.metadata || {}),
 			planner: 'homeboy/wordpress-fuzz-plan-from-surfaces/v1',
+			workload_scale_profile: workloadScaleProfile,
 			surface_family_contracts: surfaceFamilyContracts,
 			mutation_mode: mutationMode || undefined,
 			execution_tiers: summarizeExecutionTiers(targets),
@@ -100,6 +106,10 @@ function collectWordPressFuzzPlanSurfaces(input = {}) {
 	}
 
 	const surfaces = [];
+	const scaleProfile = workloadScaleProfileFromInput(input);
+	if (scaleProfile) {
+		surfaces.push(...workloadScaleSurfacesFromProfile(scaleProfile));
+	}
 	for (const key of WORDPRESS_SURFACE_COLLECTION_KEYS) {
 		if (key === 'surfaces') {
 			appendSurfaceMap(surfaces, input.surfaces, undefined);
@@ -617,6 +627,9 @@ function restMethodsForSurface(surface) {
 }
 
 function casesForSurface(surface, options = {}) {
+	if (surface.type === 'workload-scale') {
+		return [workloadScaleCaseForSurface(surface, options)];
+	}
 	if (surface.type === 'block') {
 		const operation = operationForSurface(surface);
 		const operationId = surface.operation_id || surface.operationId || `${surface.id}:${caseIntent(surface.type)}`;
@@ -638,6 +651,32 @@ function casesForSurface(surface, options = {}) {
 
 	const actions = crudActionsForSurface(surface, crudResource);
 	return actions.map((action) => crudCaseForSurface(surface, crudResource, action, options));
+}
+
+function workloadScaleCaseForSurface(surface, options = {}) {
+	const scaleDimension = surface.metadata?.workload_scale_dimension || {};
+	return annotateWordPressFuzzCaseExecutionTier({
+		id: `${surface.id}-contract`,
+		intent: 'declare-workload-scale-contract',
+		operation_id: `${surface.id}:declare-workload-scale-contract`,
+		operation: stripUndefined({
+			type: 'workload-scale',
+			category: surface.scale_category || scaleDimension.category,
+			surface_type: surface.surface_type || scaleDimension.surface_type,
+			contract_state: surface.contract_state || scaleDimension.contract_state,
+			executable_state: surface.executable_state || scaleDimension.executable_state,
+			values: scaleDimension.values,
+			target: scaleDimension.target,
+		}),
+		seed: options.seed,
+		skip_reasons: ['declarative-scale-contract'],
+		metadata: {
+			surface,
+			workload_scale_dimension: scaleDimension,
+			executable_state: surface.executable_state || scaleDimension.executable_state || 'plan-only',
+			contract_state: surface.contract_state || scaleDimension.contract_state || 'external-values-required',
+		},
+	}, { mutates: false, executable: false });
 }
 
 function genericCaseForSurface(surface, options = {}) {
@@ -1728,7 +1767,13 @@ function caseIntent(type) {
 		role: 'check-role-boundary',
 		taxonomy: 'query-taxonomy',
 		user: 'query-user',
+		'workload-scale': 'declare-workload-scale-contract',
 	}[type] || 'exercise-wordpress-surface';
+}
+
+function workloadScaleProfileFromInput(input = {}) {
+	const profile = input.workload_scale_profile || input.workloadScaleProfile || input.workload_scale || input.workloadScale || input.scale_profile || input.scaleProfile;
+	return profile ? normalizeWordPressWorkloadScaleProfile(profile) : null;
 }
 
 function blockAttributeSample(surface) {

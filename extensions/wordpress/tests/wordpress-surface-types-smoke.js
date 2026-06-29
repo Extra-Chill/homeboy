@@ -28,6 +28,7 @@ assert.equal(normalizeWordPressSurfaceType('database_query'), 'db-query');
 assert.equal(normalizeWordPressSurfaceType('external_http'), 'external-http');
 assert.equal(normalizeWordPressSurfaceType('rest_route'), 'rest-route');
 assert.equal(normalizeWordPressSurfaceType('ajax'), 'ajax-action');
+assert.equal(normalizeWordPressSurfaceType('workload_scale'), 'workload-scale');
 assert.equal(normalizeWordPressSurfaceType('mystery_surface'), '');
 assert.equal(normalizeWordPressSurfaceType('mystery_surface', { allowUnknown: true }), 'mystery_surface');
 
@@ -42,10 +43,12 @@ assert.equal(normalizeWordPressCoverageSurfaceType('hook'), 'hook');
 assert.equal(normalizeWordPressCoverageSurfaceType('cron-event'), 'cron_event');
 assert.equal(normalizeWordPressCoverageSurfaceType('post_type'), 'post_type');
 assert.equal(normalizeWordPressCoverageSurfaceType('wp-cli'), 'wp_cli_command');
+assert.equal(normalizeWordPressCoverageSurfaceType('workload-scale'), 'workload_scale');
 
 assert.equal(wordpressSurfaceTypeFromCollectionKey('databaseTables'), 'database-table');
 assert.equal(wordpressSurfaceTypeFromCollectionKey('db_queries'), 'db-query');
 assert.equal(wordpressSurfaceTypeFromCollectionKey('admin_pages'), 'admin-page');
+assert.equal(wordpressSurfaceTypeFromCollectionKey('scaleDimensions'), 'workload-scale');
 
 assert.equal(normalizeWordPressDiscoverySurface({ kind: 'admin_page', path: '/wp-admin/' }).type, 'admin-page');
 assert.equal(normalizeWordPressDiscoverySurface({ kind: 'ajax_action', action: 'heartbeat' }).type, 'ajax-action');
