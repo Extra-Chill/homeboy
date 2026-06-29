@@ -213,6 +213,14 @@ pub struct FuzzRunArgs {
     #[arg(long = "expect-metric", value_name = "METRIC=VALUE", value_parser = crate::commands::parse_key_val)]
     pub(crate) expect_metric: Vec<(String, String)>,
 
+    /// Generic action model contract JSON (`homeboy/fuzz-action-model/v1`) to include in the execution request.
+    #[arg(long = "action-model", value_name = "PATH")]
+    pub(crate) action_model: Option<PathBuf>,
+
+    /// Generic exploration policy contract JSON (`homeboy/fuzz-exploration-policy/v1`) to include in the execution request.
+    #[arg(long = "exploration-policy", value_name = "PATH")]
+    pub(crate) exploration_policy: Option<PathBuf>,
+
     /// Additional runner arguments reserved for the fuzz extension script.
     #[arg(last = true)]
     pub(crate) args: Vec<String>,
@@ -266,14 +274,6 @@ pub(crate) struct FuzzPlanArgs {
     /// Maximum execution budget in seconds for downstream runners.
     #[arg(long = "duration-budget-seconds", value_name = "SECONDS")]
     pub(crate) duration_budget_seconds: Option<u64>,
-
-    /// Generic action model contract JSON (`homeboy/fuzz-action-model/v1`) to include in the plan.
-    #[arg(long = "action-model", value_name = "PATH")]
-    pub(crate) action_model: Option<PathBuf>,
-
-    /// Generic exploration policy contract JSON (`homeboy/fuzz-exploration-policy/v1`) to include in the plan.
-    #[arg(long = "exploration-policy", value_name = "PATH")]
-    pub(crate) exploration_policy: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

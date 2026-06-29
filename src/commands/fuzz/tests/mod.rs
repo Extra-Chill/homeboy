@@ -98,6 +98,8 @@ fn planner_args() -> FuzzPlanArgs {
             isolation: FuzzIsolationArg::Shared,
             isolation_proof: None,
             expect_metric: vec![],
+            action_model: None,
+            exploration_policy: None,
             args: Vec::new(),
         },
         request_id: None,
@@ -106,8 +108,6 @@ fn planner_args() -> FuzzPlanArgs {
         operation_families: Vec::new(),
         case_budget: None,
         duration_budget_seconds: None,
-        action_model: None,
-        exploration_policy: None,
     }
 }
 
@@ -286,6 +286,8 @@ fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         isolation: FuzzIsolationArg::Shared,
         isolation_proof: None,
         expect_metric: vec![],
+        action_model: None,
+        exploration_policy: None,
         args: vec![],
     }
 }

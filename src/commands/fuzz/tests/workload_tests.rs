@@ -127,6 +127,8 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         isolation: FuzzIsolationArg::Shared,
         isolation_proof: None,
         expect_metric: vec![],
+        action_model: None,
+        exploration_policy: None,
         args: vec![],
     };
     let workload = FuzzWorkloadOutput {
@@ -300,6 +302,8 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         isolation: FuzzIsolationArg::Shared,
         isolation_proof: None,
         expect_metric: vec![],
+        action_model: None,
+        exploration_policy: None,
         args: vec![],
     };
     let workload = FuzzWorkloadOutput {

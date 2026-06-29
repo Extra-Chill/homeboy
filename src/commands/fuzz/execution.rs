@@ -1396,8 +1396,6 @@ pub(super) fn build_fuzz_execution_request(
         operation_families: Vec::new(),
         case_budget: None,
         duration_budget_seconds: None,
-        action_model: None,
-        exploration_policy: None,
     };
     let isolation_proof = super::planning::load_isolation_proof(args.isolation_proof.as_deref())?;
     let mut metadata =
