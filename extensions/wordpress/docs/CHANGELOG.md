@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.6] - 2026-06-29
+
+### Changed
+- Remove legacy contract compatibility
+
 ## [3.21.5] - 2026-06-29
 
 ### Fixed
