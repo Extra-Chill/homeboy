@@ -37,22 +37,22 @@ function materializeLoopPolicy(policy = {}, revolutions = 0) {
 function runtimeOverrides(options = {}) {
   const provider = stringValue(options.provider);
   return cleanObject({
-    runtime_id: stringValue(options.runtimeId || options.runtime_id || options.runtime),
-    runtime_profile: stringValue(options.runtimeProfile || options.runtime_profile || options.profile),
-    runtime_profiles: objectValue(options.runtimeProfiles || options.runtime_profiles),
+    runtime_id: stringValue(options.runtime_id || options.runtime),
+    runtime_profile: stringValue(options.runtime_profile),
+    runtime_profiles: objectValue(options.runtime_profiles),
     provider,
     model: stringValue(options.model),
-    provider_plugin_paths: arrayValue(options.providerPluginPaths || options.provider_plugin_paths),
-    provider_plugins: arrayValue(options.providerPlugins || options.provider_plugins),
+    provider_plugin_paths: arrayValue(options.provider_plugin_paths),
+    provider_plugins: arrayValue(options.provider_plugins),
     secret_env: secretEnvOverrides(options, provider),
-    runtime_env: objectValue(options.runtimeEnv || options.runtime_env),
-    runtime_config_mounts: arrayValue(options.runtimeConfigMounts || options.runtime_config_mounts),
-    runtime_state_mounts: arrayValue(options.runtimeStateMounts || options.runtime_state_mounts),
+    runtime_env: objectValue(options.runtime_env),
+    runtime_config_mounts: arrayValue(options.runtime_config_mounts),
+    runtime_state_mounts: arrayValue(options.runtime_state_mounts),
   });
 }
 
 function secretEnvOverrides(options = {}, provider = '') {
-  return arrayValue(options.secretEnv || options.secret_env) || providerDefaultSecretEnv(provider, options.runtime || options.runtime_manifest || options.runtimeManifest);
+  return arrayValue(options.secret_env) || providerDefaultSecretEnv(provider, options.runtime || options.runtime_manifest);
 }
 
 function providerDefaultSecretEnv(provider = '', runtime = {}) {

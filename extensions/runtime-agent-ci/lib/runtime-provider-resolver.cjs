@@ -243,7 +243,6 @@ function isRuntimeManifest(manifest) {
 }
 
 function normalizeRuntimeId(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
-	void options;
 	return runtimeId || DEFAULT_RUNTIME_ID;
 }
 
@@ -260,8 +259,6 @@ function runtimeIdFromOptions(options = {}, env = process.env) {
 		options.runtime,
 		env.RUNTIME_ID,
 		env.RUNTIME,
-		env.RUNTIME_PROVIDER,
-		env.BACKEND,
 		DEFAULT_RUNTIME_ID
 	);
 }
@@ -379,7 +376,7 @@ function resolveExecutor(manifest, source, options = {}) {
 		path: scriptArg ? scriptArg.replace('{{runtime_path}}', runtimePath) : '',
 		invocation,
 		capabilities: Array.isArray(provider?.capabilities) ? provider.capabilities.filter(Boolean) : [],
-		runtime_execution_contracts: provider?.runtime_execution_contracts || provider?.execution_contracts || {},
+		runtime_execution_contracts: provider?.runtime_execution_contracts || {},
 		provider_metadata: provider?.provider_metadata || {},
 		provider_defaults: provider?.provider_defaults || {},
 		secret_env_requirements: Array.isArray(provider?.secret_env_requirements) ? provider.secret_env_requirements : [],

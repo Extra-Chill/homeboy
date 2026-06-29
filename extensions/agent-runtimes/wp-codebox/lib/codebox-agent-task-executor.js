@@ -80,13 +80,6 @@ const AGENT_TASK_EVENT_SCHEMA = 'homeboy/agent-task-event/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 const WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY = 'wp-codebox/run-runtime-package';
 const WP_CODEBOX_RUNTIME_PACKAGE_TASK_SCHEMA = 'wp-codebox/runtime-package-task/v1';
-const NEUTRAL_RUNTIME_PACKAGE_ABILITIES = new Set(['homeboy/run-runtime-package']);
-const LEGACY_RUNTIME_PACKAGE_ABILITIES = new Set(['agents/run-runtime-package', 'runtime-package/run']);
-const RUNTIME_PACKAGE_ABILITY_ALIASES = new Set([
-  ...NEUTRAL_RUNTIME_PACKAGE_ABILITIES,
-  ...LEGACY_RUNTIME_PACKAGE_ABILITIES,
-]);
-const LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE = 'legacy-runtime-package-ability-alias';
 
 // The wp-codebox native agent-run ability is the OUTER invocation the runner
 // drives via the `run-agent-task` CLI command; it is not a delegated ability
@@ -164,7 +157,7 @@ const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [
   },
   {
     gap: 'typed-artifact-dto-normalizer',
-    needed_primitive: 'WP Codebox should export a stable typed-artifact DTO normalizer compatible with Homeboy agent-task typed artifact declarations, including file_refs/fileRefs and artifact_schema/artifactSchema aliases while allowing caller-owned metadata redaction policy.',
+    needed_primitive: 'WP Codebox should export a stable typed-artifact DTO normalizer compatible with Homeboy agent-task typed artifact declarations while allowing caller-owned metadata redaction policy.',
   },
 ];
 const WP_CODEBOX_BUILTIN_ARTIFACT_DECLARATION_NAMES = new Set(['patch', 'agent_result', 'transcript']);
@@ -363,7 +356,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const provider = config.provider || runtimeOptions.provider || defaults.provider || '';
   const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
   const runtimeTask = runtimeTaskWithExecutionDefaults(
-    inputs.runtime_task || inputs.runtimeTask || clientInputs.runtime_task || clientInputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
+    inputs.runtime_task || config.runtime_task,
     { provider, model, agentBundles, runtimePackage: runtimePackageDefaultFromProfile(config, runtimeOptions), workspaceTarget: defaults.workspaceRoot ? defaultWorkspaceTarget(defaults.workspaceRoot) : '', request, config, inputs }
   );
   let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
@@ -678,17 +671,10 @@ function runtimePackageDefaultFromProfile(config = {}, runtimeOptions = {}) {
 }
 
 function artifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
-  const declarations = firstNonEmptyArray(
-    request.artifact_declarations,
-    options.artifactDeclarations,
-    []
-  )
+  const declarations = normalizeArray(request.artifact_declarations)
     .map((declaration) => wpCodeboxArtifactDeclarationFromHomeboy(declaration))
     .filter(Boolean);
-  return uniqueArtifactDeclarations([
-    ...declarations,
-    ...legacyArtifactDeclarationsFromAgentTaskRequest(request, config, inputs, options),
-  ]);
+  return uniqueArtifactDeclarations(declarations);
 }
 
 function uniqueArtifactDeclarations(declarations) {
@@ -705,78 +691,7 @@ function uniqueArtifactDeclarations(declarations) {
   });
 }
 
-function legacyArtifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
-  const clientContext = agentTaskClientContext(request, config, inputs, options);
-  const declarations = [
-    request.artifactDeclarations,
-    inputs.artifact_declarations,
-    inputs.artifactDeclarations,
-    config.artifact_declarations,
-    config.artifactDeclarations,
-    request.artifact_outputs,
-    request.artifactOutputs,
-    request.output_artifacts,
-    request.outputArtifacts,
-    request.artifacts?.outputs,
-    request.artifacts?.output_artifacts,
-    request.artifacts?.outputArtifacts,
-    request.outputs?.artifacts,
-    request.outputs?.artifact_outputs,
-    request.outputs?.artifactOutputs,
-    request.outputs?.typed_artifacts,
-    request.outputs?.typedArtifacts,
-    inputs.artifact_outputs,
-    inputs.artifactOutputs,
-    inputs.output_artifacts,
-    inputs.outputArtifacts,
-    inputs.artifacts?.outputs,
-    inputs.artifacts?.output_artifacts,
-    inputs.artifacts?.outputArtifacts,
-    inputs.outputs?.artifacts,
-    inputs.outputs?.artifact_outputs,
-    inputs.outputs?.artifactOutputs,
-    inputs.outputs?.typed_artifacts,
-    inputs.outputs?.typedArtifacts,
-    clientContext.artifacts,
-    clientContext.artifact_outputs,
-    clientContext.artifactOutputs,
-    clientContext.output_artifacts,
-    clientContext.outputArtifacts,
-    clientContext.outputs?.artifacts,
-    clientContext.outputs?.artifact_outputs,
-    clientContext.outputs?.artifactOutputs,
-    clientContext.outputs?.typed_artifacts,
-    clientContext.outputs?.typedArtifacts,
-    config.artifact_outputs,
-    config.artifactOutputs,
-    config.output_artifacts,
-    config.outputArtifacts,
-    config.artifacts?.outputs,
-    config.artifacts?.output_artifacts,
-    config.artifacts?.outputArtifacts,
-    options.artifactOutputs,
-    options.outputArtifacts,
-  ].flatMap(genericArtifactDeclarationEntries);
-  return declarations
-    .map(([name, declaration]) => wpCodeboxArtifactDeclarationFromLegacy(name, declaration))
-    .filter(Boolean);
-}
-
-function genericArtifactDeclarationEntries(value) {
-  if (Array.isArray(value)) {
-    return value.map((declaration) => ['', declaration]);
-  }
-  if (!value || typeof value !== 'object') {
-    return [];
-  }
-  return Object.entries(value);
-}
-
 function wpCodeboxArtifactDeclarationFromHomeboy(declaration) {
-  return wpCodeboxArtifactDeclarationFromLegacy('', declaration);
-}
-
-function wpCodeboxArtifactDeclarationFromLegacy(defaultName, declaration) {
   let normalizedDeclaration = declaration;
   if (declaration && typeof declaration === 'object' && !Array.isArray(declaration)) {
     normalizedDeclaration = { ...declaration };
@@ -790,7 +705,7 @@ function wpCodeboxArtifactDeclarationFromLegacy(defaultName, declaration) {
       }
     }
   }
-  return normalizeCodeboxArtifactDeclaration(defaultName, normalizedDeclaration, {
+  return normalizeCodeboxArtifactDeclaration('', normalizedDeclaration, {
     ignoredSchemas: [AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA],
   });
 }
@@ -988,56 +903,6 @@ function normalizeProviderPluginPaths(paths) {
   }));
 }
 
-function abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) {
-  const genericAbilityTask = genericAbilityRuntimeTask(request, config, inputs);
-  if (genericAbilityTask) {
-    return genericAbilityTask;
-  }
-
-  const executionKind = firstValue(inputs.execution_kind, inputs.executionKind, config.execution_kind, config.executionKind);
-  if (!['wp_codebox_ability', 'wordpress_ability'].includes(executionKind)) {
-    return null;
-  }
-  const ability = firstValue(inputs.ability, inputs.ability_name, inputs.abilityName, config.ability, config.ability_name, config.abilityName);
-  if (!ability || typeof ability !== 'string') {
-    return null;
-  }
-  const input = runtimeTaskInputFromAgentTaskRequest(request, config, inputs);
-  return { ability, input };
-}
-
-function genericAbilityRuntimeTask(request, config, inputs) {
-  const rawAbility = firstValue(inputs.ability, config.ability);
-  const abilityRequest = firstObject(
-    inputs.ability_request,
-    inputs.abilityRequest,
-    config.ability_request,
-    config.abilityRequest,
-  );
-  const declared = abilityRequest || firstObject(rawAbility);
-  const ability = typeof declared === 'string'
-    ? declared
-    : firstValue(declared?.id, declared?.name, declared?.ability, typeof rawAbility === 'string' ? rawAbility : '', inputs.ability_name, inputs.abilityName, config.ability_name, config.abilityName);
-  if (!ability || typeof ability !== 'string') {
-    return null;
-  }
-  const input = runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared);
-  const normalizedAbility = normalizeRuntimeTaskAbilityForCodebox(ability);
-  const abilityNormalization = runtimeTaskAbilityNormalization({ requestedAbility: ability, normalizedAbility });
-  if (RUNTIME_PACKAGE_ABILITY_ALIASES.has(ability) || normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
-    return {
-      ability: normalizedAbility,
-      ...(abilityNormalization ? { ability_normalization: abilityNormalization } : {}),
-      input: runtimePackageTaskInputForCodebox(agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs)),
-    };
-  }
-  return { ability: normalizedAbility, ...(abilityNormalization ? { ability_normalization: abilityNormalization } : {}), input };
-}
-
-function normalizeRuntimeTaskAbilityForCodebox(ability) {
-  return RUNTIME_PACKAGE_ABILITY_ALIASES.has(ability) ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : ability;
-}
-
 function isNativeWpCodeboxAgentRunAbility(ability) {
   return typeof ability === 'string' && WP_CODEBOX_NATIVE_AGENT_RUN_ABILITIES.has(ability.trim());
 }
@@ -1049,10 +914,6 @@ function isNativeWpCodeboxAgentRunRuntimeTask(runtimeTask) {
     && isNativeWpCodeboxAgentRunAbility(runtimeTask.ability);
 }
 
-// Suppress the inner sandbox runtime_task for the native wp-codebox/run-agent-task
-// self-call so the sandbox runs its native agents/chat loop instead of delegating
-// the runtime's own outer invocation back to itself. Genuine delegated abilities
-// and the runtime-package path are preserved.
 function sandboxRuntimeTaskForNativeAgentRun(runtimeTask) {
   return isNativeWpCodeboxAgentRunRuntimeTask(runtimeTask) ? undefined : runtimeTask;
 }
@@ -1075,7 +936,6 @@ function runtimePackageTaskInputForCodebox(input, options = {}) {
   }
   const artifactDeclarations = normalizeRuntimePackageTaskArtifactDeclarations(firstDefined(
     normalized.artifact_declarations,
-    normalized.artifactDeclarations,
     []
   ));
   normalized.artifact_declarations = artifactDeclarations;
@@ -1086,7 +946,6 @@ function runtimePackageTaskInputForCodebox(input, options = {}) {
   delete normalized.runtime_package;
   delete normalized.agent;
   delete normalized.agent_slug;
-  delete normalized.artifactDeclarations;
   delete normalized.artifacts;
   return normalized;
 }
@@ -1193,12 +1052,12 @@ function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, 
   if (declarations.length === 0) {
     return {
       ...input,
-      artifact_declarations: normalizeRuntimePackageTaskArtifactDeclarations(firstDefined(input.artifact_declarations, input.artifactDeclarations, [])),
+      artifact_declarations: normalizeRuntimePackageTaskArtifactDeclarations(firstDefined(input.artifact_declarations, [])),
     };
   }
 
   const artifactDeclarations = uniqueArtifactDeclarations([
-    ...normalizeRuntimePackageTaskArtifactDeclarations(firstDefined(input.artifact_declarations, input.artifactDeclarations, [])),
+    ...normalizeRuntimePackageTaskArtifactDeclarations(firstDefined(input.artifact_declarations, [])),
     ...declarations.map(runtimePackageArtifactDeclarationFromDeclaration).filter(Boolean),
   ]);
   const requiredArtifacts = runtimePackageRequiredArtifacts(input.required_artifacts, artifactDeclarations);
@@ -1279,9 +1138,8 @@ function runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared 
     config.abilityInputDefaults,
   ) || {};
   const mappedInput = runtimeMappedInputFromAgentTaskRequest(request, config, inputs, declared);
-  const legacyWorkflowInputs = legacyWorkflowInputsFromAgentTaskRequest(request, config, inputs, declared);
   const explicitInput = firstObject(declared?.input, declared?.args, inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
-  return { ...defaultInput, ...mappedInput, ...legacyWorkflowInputs, ...explicitInput };
+  return { ...defaultInput, ...mappedInput, ...explicitInput };
 }
 
 function runtimeMappedInputFromAgentTaskRequest(request, config, inputs, declared = {}) {
@@ -1343,21 +1201,6 @@ function runtimeInputMappingEntry(mapping) {
     return null;
   }
   return { from, to, default: mapping.default };
-}
-
-function legacyWorkflowInputsFromAgentTaskRequest(request, config, inputs, declared = {}) {
-  const legacyMerge = firstDefined(
-    declared?.allow_legacy_client_context_input_merge,
-    declared?.allowLegacyClientContextInputMerge,
-    inputs.allow_legacy_client_context_input_merge,
-    inputs.allowLegacyClientContextInputMerge,
-    config.allow_legacy_client_context_input_merge,
-    config.allowLegacyClientContextInputMerge,
-  );
-  if (legacyMerge !== true) {
-    return {};
-  }
-  return firstObject(agentTaskClientContext(request, config, inputs).inputs) || {};
 }
 
 function valueAtPath(source, fieldPath) {
@@ -1535,12 +1378,9 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
   if (!runtimeTask || typeof runtimeTask !== 'object' || Array.isArray(runtimeTask)) {
     return runtimeTask;
   }
-  const requestedAbility = runtimeTask.ability;
-  const normalizedAbility = typeof requestedAbility === 'string' ? normalizeRuntimeTaskAbilityForCodebox(requestedAbility) : requestedAbility;
-  const normalizedRuntimeTask = {
-    ...runtimeTask,
-    ...(typeof requestedAbility === 'string' ? { ability: normalizedAbility } : {}),
-  };
+  const normalizedRuntimeTask = { ...runtimeTask };
+  const requestedAbility = normalizedRuntimeTask.ability;
+  const normalizedAbility = normalizedRuntimeTask.ability;
   const abilityNormalization = runtimeTask.ability_normalization || runtimeTaskAbilityNormalization({ requestedAbility, normalizedAbility });
   if (abilityNormalization) {
     normalizedRuntimeTask.ability_normalization = abilityNormalization;
@@ -1593,7 +1433,6 @@ function runtimeTaskAbilityNormalization({ requestedAbility, normalizedAbility }
     return null;
   }
   const runtimePackage = normalizedAbility === WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY;
-  const legacyDeprecation = legacyRuntimePackageAbilityDeprecation(requestedAbility, normalizedAbility);
   return {
     schema: 'wp-codebox/runtime-task-ability-normalization/v1',
     requested_ability: requestedAbility || normalizedAbility,
@@ -1601,20 +1440,6 @@ function runtimeTaskAbilityNormalization({ requestedAbility, normalizedAbility }
     bridge_ability: runtimePackage ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : normalizedAbility,
     runtime_ability: normalizedAbility,
     owning_components: ['wp-codebox'],
-    ...(legacyDeprecation ? { deprecated_compatibility_alias: legacyDeprecation } : {}),
-  };
-}
-
-function legacyRuntimePackageAbilityDeprecation(requestedAbility, normalizedAbility) {
-  if (!LEGACY_RUNTIME_PACKAGE_ABILITIES.has(requestedAbility) || normalizedAbility !== WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY) {
-    return null;
-  }
-  return {
-    schema: 'wp-codebox/deprecated-compatibility-alias/v1',
-    alias: requestedAbility,
-    replacement: WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY,
-    quarantine: LEGACY_RUNTIME_PACKAGE_ABILITY_QUARANTINE,
-    status: 'deprecated',
   };
 }
 

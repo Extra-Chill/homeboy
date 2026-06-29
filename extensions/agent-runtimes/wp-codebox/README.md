@@ -50,20 +50,10 @@ Codebox owns these primitives:
 - `wp-codebox/evidence-artifact-envelope/v1` for typed artifacts, evidence refs, and run summaries.
 
 `lib/codebox-run-agent-task-contract.js` is the adapter contract for launching
-Codebox agent tasks. It builds the preferred `wp-codebox/run-agent-task/v1`
-request shape and selects the stable `run-agent-task` CLI when the installed
-Codebox package advertises it. Older packages continue through the legacy
-`agent-task-run` / `wp-codebox/task-input/v1` path, and that compatibility lives
-in this adapter so the follow-up swap can remove the fallback while preserving
-Homeboy caller contracts.
+Codebox agent tasks. It builds the `wp-codebox/run-agent-task/v1` request shape
+and invokes the stable `run-agent-task` CLI.
 
-Runtime-package ability aliases are quarantined compatibility only. New callers
-should invoke `wp-codebox/run-runtime-package`; generic callers may use
-`homeboy/run-runtime-package`. The provider contract no longer advertises legacy
-`agents/run-runtime-package` or `runtime-package/run` aliases, but explicit legacy
-requests still normalize to the Codebox-owned ability and include
-`deprecated_compatibility_alias` metadata so controllers can warn and migrate
-without breaking active callers.
+Runtime-package callers should invoke `wp-codebox/run-runtime-package`.
 
 Provider credentials stay outside adapter payloads. The adapter forwards
 `secret_env` names and a `provider_credential_boundary` descriptor, and rejects

@@ -49,7 +49,6 @@ const cliDescriptor = wpCodeboxCliDescriptor();
 assert.equal(cliDescriptor.schema, 'wp-codebox/cli-descriptor/v1');
 assert.deepEqual(cliDescriptor.commands, {
 	run_agent_task: 'run-agent-task',
-	legacy_agent_task_run: 'agent-task-run',
 	recipe_run: 'recipe-run',
 });
 assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_BIN: '/usr/local/bin/wp-codebox' } }), '/usr/local/bin/wp-codebox');
@@ -165,13 +164,8 @@ assert.equal(request.schema, WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA);
 assert.equal(request.task_id, 'task-123');
 assert.equal(request.task_input, taskInput);
 
-assert.throws(
-	() => codeboxRunAgentTaskInvocation({
-		taskInput,
-		allowLegacyAgentTaskRunCompatibility: true,
-		runtimeProfile: { id: 'production' },
-	}),
-	/Production WP Codebox profiles require stable run-agent-task/
-);
+const invocation = codeboxRunAgentTaskInvocation({ taskInput });
+assert.equal(invocation.implementation, 'stable-run-agent-task');
+assert.deepEqual(invocation.args, ['run-agent-task', '--input-file={{input_file}}', '--json']);
 
 console.log('wp-codebox adapter contract smoke passed');
