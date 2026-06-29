@@ -1,0 +1,22 @@
+{
+  "id": "core-wordpress-fixture-inventory",
+  "surfaces": [
+    { "id": "rest:wp-v2-posts", "type": "rest-route", "route": "/wp/v2/posts", "methods": ["GET", "POST"] },
+    { "id": "crud:post", "type": "post-type", "post_type": "post" },
+    { "id": "admin:posts", "type": "admin-page", "path": "/wp-admin/edit.php" },
+    { "id": "ajax:heartbeat", "type": "ajax-action", "action": "heartbeat" },
+    { "id": "front:home", "type": "frontend-url", "path": "/" },
+    { "id": "block:paragraph", "type": "block", "block_name": "core/paragraph" },
+    { "id": "db:posts", "type": "database-table", "table": "wp_posts", "mutations": [{ "operation": "insert" }] },
+    { "id": "db-query:posts", "type": "db-query", "query": "SELECT ID FROM wp_posts" },
+    { "id": "wp-cli:option-list", "type": "wp-cli-command", "command": "wp option list" },
+    { "id": "hook:init", "type": "hook", "hook": "init" },
+    { "id": "cron:wp_version_check", "type": "cron-event", "event": "wp_version_check" },
+    { "id": "option:blogname", "type": "option", "option": "blogname" },
+    { "id": "setting:timezone_string", "type": "setting", "setting": "timezone_string" },
+    { "id": "user:subscriber", "type": "user", "role": "subscriber" },
+    { "id": "role:editor", "type": "role", "role": "editor" },
+    { "id": "media:attachment", "type": "media", "name": "attachment" },
+    { "id": "taxonomy:category", "type": "taxonomy", "taxonomy": "category" }
+  ]
+}

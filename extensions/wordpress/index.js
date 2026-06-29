@@ -51,6 +51,7 @@ module.exports = {
 	...require('./lib/wordpress-fuzz-command-manifest'),
 	...require('./lib/wordpress-fuzz-runtime-capabilities'),
 	...require('./lib/wordpress-surface-types'),
+	...require('./lib/wordpress-surface-family-contracts'),
 	...require('./lib/wordpress-hook-surface-discovery'),
 	...require('./lib/wordpress-fuzz-schemas'),
 	...require('./lib/wordpress-generic-fuzz-primitives'),
