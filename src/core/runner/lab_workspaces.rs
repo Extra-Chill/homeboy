@@ -148,6 +148,10 @@ pub(super) struct SyncedRuntimeOverlay {
     pub(super) install_ran: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) expose_remote_path_env: Option<String>,
+    /// Build-freshness provenance for the synced artifact: the source SHA the
+    /// built dist reflects vs the current source checkout HEAD, so a stale build
+    /// is auditable from `homeboy runs` (#6965).
+    pub(super) build_provenance: super::runtime_overlay_freshness::RuntimeOverlayBuildProvenance,
 }
 
 pub(super) fn sync_extra_lab_workspaces(
@@ -431,6 +435,32 @@ pub(super) fn sync_lab_runtime_overlays(
             "runtime_overlay",
         )?;
         let already_synced = !seen.insert(local_path.clone());
+
+        // Detect a stale runner-side component build before snapshotting it:
+        // compare the source checkout HEAD against the SHA the built artifact
+        // reflects (derived from its on-disk build time). A stale dist would
+        // silently ship old code to the runner (#6965). Computed on the
+        // controller-local artifact dir, where mtimes are authoritative.
+        let build_provenance =
+            super::runtime_overlay_freshness::assess_runtime_overlay_build_freshness(&local_path);
+        if let Some(warning) = super::runtime_overlay_freshness::stale_runtime_overlay_warning(
+            &overlay.workspace.role,
+            &local_path.display().to_string(),
+            &build_provenance,
+        ) {
+            if super::runtime_overlay_freshness::require_fresh_runtime_overlay() {
+                return Err(Error::validation_invalid_argument(
+                    "runtime_overlay",
+                    warning,
+                    Some(local_path.display().to_string()),
+                    Some(vec![
+                        "Rebuild the overlay artifact (re-run its build step) so the dist reflects the current source HEAD before retrying.".to_string(),
+                    ]),
+                ));
+            }
+            eprintln!("{warning}");
+        }
+
         let synced = sync_workspace(
             runner_id,
             RunnerWorkspaceSyncOptions {
@@ -467,6 +497,7 @@ pub(super) fn sync_lab_runtime_overlays(
             install_workdir,
             install_ran,
             expose_remote_path_env: overlay.expose_remote_path_env.clone(),
+            build_provenance,
         });
     }
 
@@ -2379,6 +2410,8 @@ mod runtime_overlay_tests {
             install_workdir: None,
             install_ran: false,
             expose_remote_path_env: env.map(str::to_string),
+            build_provenance:
+                crate::core::runner::runtime_overlay_freshness::RuntimeOverlayBuildProvenance::unverifiable(),
         }
     }
 
