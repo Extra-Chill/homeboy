@@ -9,7 +9,7 @@ use super::execution::{
     persist_fuzz_run_evidence, run_fuzz_artifact_postprocess, FuzzRunEvidenceInput,
 };
 use super::planning::plan_inventory_selection;
-use super::replay::run_replay;
+use super::replay::{run_minimize, run_replay};
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
     fuzz_observation_hotspots, fuzz_performance_hotspots, gate_status, run_report, run_validate,
@@ -17,8 +17,9 @@ use super::report::{
 };
 use super::types::{
     FuzzCommand, FuzzDiscoverArgs, FuzzExecutionOutput, FuzzGateProfileArg, FuzzIsolationArg,
-    FuzzListOutput, FuzzOutput, FuzzPlanArgs, FuzzPlanStrategy, FuzzReplayArgs, FuzzReportArgs,
-    FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzValidateArgs, FuzzWorkloadOutput,
+    FuzzListOutput, FuzzMinimizeArgs, FuzzOutput, FuzzPlanArgs, FuzzPlanStrategy, FuzzReplayArgs,
+    FuzzReportArgs, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzValidateArgs,
+    FuzzWorkloadOutput,
 };
 use super::workloads::{
     fuzz_workloads, resolve_component_id, rig_component_for_fuzz, select_workload, FuzzRigContext,

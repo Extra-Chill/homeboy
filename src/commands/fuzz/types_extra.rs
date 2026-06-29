@@ -21,6 +21,7 @@ pub enum FuzzOutput {
     Report(FuzzReportOutput),
     Compare(FuzzCompareOutput),
     Replay(FuzzReplayOutput),
+    Minimize(FuzzReplayOutput),
     Inspect(FuzzInspectOutput),
 }
 

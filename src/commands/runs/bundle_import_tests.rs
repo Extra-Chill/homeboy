@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use super::bundle::{export_runs, import_runs, RunsExportArgs, RunsImportArgs};
 use super::dead_owned_run;
+use super::RunsOutput;
 
 struct XdgGuard(Option<String>);
 
@@ -176,6 +177,83 @@ fn lab_bundle_run_id_conflicts_are_remapped_idempotently() {
                 .len(),
             1
         );
+    });
+}
+
+#[test]
+fn runs_export_import_preserves_file_artifact_bytes_with_checksum_refs() {
+    let bundle_root = tempfile::tempdir().expect("bundle root");
+    let bundle = bundle_root.path().join("fuzz-bundle");
+    let mut exported_run_id = String::new();
+    let mut bundled_bytes = std::path::PathBuf::new();
+    let mut exported_sha256 = None;
+    let mut exported_size_bytes = None;
+
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("fuzz", "homeboy", "rig-a", Value::Null))
+            .expect("run");
+        exported_run_id = run.id.clone();
+        let artifact_path = home.path().join("fuzz-result-envelope.json");
+        std::fs::write(
+            &artifact_path,
+            br#"{"schema":"homeboy/fuzz-result-envelope/v1"}"#,
+        )
+        .expect("artifact file");
+        store
+            .record_artifact(&run.id, "fuzz_result_envelope", &artifact_path)
+            .expect("artifact");
+
+        let (output, exit) = export_runs(RunsExportArgs {
+            run: Some(run.id.clone()),
+            since: None,
+            output: bundle.clone(),
+        })
+        .expect("export");
+        assert_eq!(exit, 0);
+        let RunsOutput::Export(exported) = output else {
+            panic!("expected export output");
+        };
+        assert_eq!(exported.artifact_count, 1);
+        assert_eq!(exported.artifact_byte_count, 1);
+
+        let artifact_bytes: Vec<Value> = read_bundle_test_json(&bundle.join("artifact_bytes.json"));
+        assert_eq!(artifact_bytes.len(), 1);
+        let byte_ref = artifact_bytes[0]["path"].as_str().expect("byte path");
+        bundled_bytes = bundle.join(byte_ref);
+        assert_eq!(
+            std::fs::read(&bundled_bytes).expect("bundled bytes"),
+            br#"{"schema":"homeboy/fuzz-result-envelope/v1"}"#
+        );
+        assert!(artifact_bytes[0]["sha256"].as_str().is_some());
+        exported_sha256 = artifact_bytes[0]["sha256"].as_str().map(str::to_string);
+        exported_size_bytes = artifact_bytes[0]["size_bytes"].as_i64();
+        assert_eq!(
+            exported_size_bytes,
+            Some(br#"{"schema":"homeboy/fuzz-result-envelope/v1"}"#.len() as i64)
+        );
+    });
+
+    with_isolated_home(|_| {
+        let _xdg = XdgGuard::unset();
+        import_runs(RunsImportArgs {
+            input: Some(bundle.clone()),
+            ..RunsImportArgs::default()
+        })
+        .expect("import");
+        let store = ObservationStore::open_initialized().expect("store");
+        let imported_artifact = store
+            .list_artifacts(&exported_run_id)
+            .expect("artifacts")
+            .into_iter()
+            .next()
+            .expect("artifact");
+        assert_eq!(imported_artifact.artifact_type, "file");
+        assert_eq!(imported_artifact.path, bundled_bytes.to_string_lossy());
+        assert_eq!(imported_artifact.sha256, exported_sha256);
+        assert_eq!(imported_artifact.size_bytes, exported_size_bytes);
     });
 }
 

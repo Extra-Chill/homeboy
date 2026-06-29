@@ -8,10 +8,28 @@ use homeboy::core::fuzz::{
 };
 
 use super::super::utils::args::PositionalComponentArgs;
-use super::types::{FuzzReplayArgs, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput};
+use super::types::{
+    FuzzMinimizeArgs, FuzzReplayArgs, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput,
+};
 use super::workloads::{load_rig, resolve_component_id, resolve_fuzz_context};
 
 pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
+    run_replay_like(ReplayLikeArgs::from_replay(args), ReplayLikeMode::Replay)
+}
+
+pub(super) fn run_minimize(
+    args: FuzzMinimizeArgs,
+) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
+    run_replay_like(
+        ReplayLikeArgs::from_minimize(args),
+        ReplayLikeMode::Minimize,
+    )
+}
+
+fn run_replay_like(
+    args: ReplayLikeArgs,
+    mode: ReplayLikeMode,
+) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
     let artifact_file = replay_artifact_path(&args);
     let positional_case = args.artifact_or_case.as_ref().and_then(|value| {
         if artifact_file.is_some() && !Path::new(value).exists() {
@@ -40,10 +58,10 @@ pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzRep
         replay.as_ref(),
         args.run_id.as_ref(),
     );
-    let replay_context = resolve_replay_context(&args)?;
+    let replay_context = resolve_replay_context(&args, mode)?;
     let replay_command = replay_context
         .as_ref()
-        .and_then(|context| context.replay_command.clone())
+        .and_then(|context| context.command.clone())
         .map(|command| render_replay_command(&command, &env, args.args.as_slice()));
 
     if args.dry_run {
@@ -55,9 +73,9 @@ pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzRep
 
         return Ok((
             FuzzReplayOutput {
-                command: "fuzz.replay".to_string(),
+                command: mode.command_name().to_string(),
                 status: status.to_string(),
-                message: replay_message(replay_command.as_ref(), true),
+                message: replay_message(replay_command.as_ref(), true, mode),
                 artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
                 campaign_id: resolved
                     .as_ref()
@@ -80,10 +98,9 @@ pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzRep
 
     let Some(context) = replay_context else {
         return Ok((FuzzReplayOutput {
-            command: "fuzz.replay".to_string(),
+            command: mode.command_name().to_string(),
             status: "unsupported".to_string(),
-            message: "Generic fuzz replay execution requires a component/rig extension context with fuzz.replay_command; use --dry-run to inspect metadata only."
-                .to_string(),
+            message: format!("Generic fuzz {} execution requires a component/rig extension context with fuzz.{}; use --dry-run to inspect metadata only.", mode.label(), mode.manifest_key()),
             artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
             campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
             envelope_id: resolved.as_ref().and_then(|resolved| resolved.envelope_id.clone()),
@@ -100,11 +117,13 @@ pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzRep
 
     let Some(command) = replay_command.clone() else {
         return Ok((FuzzReplayOutput {
-            command: "fuzz.replay".to_string(),
+            command: mode.command_name().to_string(),
             status: "unsupported".to_string(),
             message: format!(
-                "Extension '{}' does not declare fuzz.replay_command; replay execution is unsupported for this context.",
-                context.execution_context.extension_id
+                "Extension '{}' does not declare fuzz.{}; {} execution is unsupported for this context.",
+                context.execution_context.extension_id,
+                mode.manifest_key(),
+                mode.label()
             ),
             artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
             campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
@@ -137,9 +156,9 @@ pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzRep
 
     Ok((
         FuzzReplayOutput {
-            command: "fuzz.replay".to_string(),
+            command: mode.command_name().to_string(),
             status: if output.success { "passed" } else { "failed" }.to_string(),
-            message: replay_message(Some(&command), false),
+            message: replay_message(Some(&command), false, mode),
             artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
             campaign_id: resolved
                 .as_ref()
@@ -153,7 +172,7 @@ pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzRep
             env,
             replay_command: Some(command),
             execution: Some(FuzzReplayExecution {
-                kind: "fuzz_replay".to_string(),
+                kind: mode.execution_kind().to_string(),
                 extension_id: context.execution_context.extension_id,
                 exit_code: output.exit_code,
                 success: output.success,
@@ -169,14 +188,100 @@ pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzRep
 }
 
 #[derive(Clone)]
+struct ReplayLikeArgs {
+    component: Option<String>,
+    path: Option<String>,
+    rig: Option<String>,
+    extension_override: super::super::utils::args::ExtensionOverrideArgs,
+    setting_args: super::super::utils::args::SettingArgs,
+    artifact_or_case: Option<String>,
+    artifact: Option<PathBuf>,
+    case_id: Option<String>,
+    run_id: Option<String>,
+    dry_run: bool,
+    args: Vec<String>,
+}
+
+impl ReplayLikeArgs {
+    fn from_replay(args: FuzzReplayArgs) -> Self {
+        Self {
+            component: args.component,
+            path: args.path,
+            rig: args.rig,
+            extension_override: args.extension_override,
+            setting_args: args.setting_args,
+            artifact_or_case: args.artifact_or_case,
+            artifact: args.artifact,
+            case_id: args.case_id,
+            run_id: args.run_id,
+            dry_run: args.dry_run,
+            args: args.args,
+        }
+    }
+
+    fn from_minimize(args: FuzzMinimizeArgs) -> Self {
+        Self {
+            component: args.component,
+            path: args.path,
+            rig: args.rig,
+            extension_override: args.extension_override,
+            setting_args: args.setting_args,
+            artifact_or_case: args.artifact_or_case,
+            artifact: args.artifact,
+            case_id: args.case_id,
+            run_id: args.run_id,
+            dry_run: args.dry_run,
+            args: args.args,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReplayLikeMode {
+    Replay,
+    Minimize,
+}
+
+impl ReplayLikeMode {
+    fn command_name(self) -> &'static str {
+        match self {
+            Self::Replay => "fuzz.replay",
+            Self::Minimize => "fuzz.minimize",
+        }
+    }
+
+    fn manifest_key(self) -> &'static str {
+        match self {
+            Self::Replay => "replay_command",
+            Self::Minimize => "minimize_command",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Replay => "replay",
+            Self::Minimize => "minimize",
+        }
+    }
+
+    fn execution_kind(self) -> &'static str {
+        match self {
+            Self::Replay => "fuzz_replay",
+            Self::Minimize => "fuzz_minimize",
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ResolvedReplayContext {
     execution_context: homeboy::core::extension::ExtensionExecutionContext,
     component: homeboy::core::component::Component,
-    replay_command: Option<String>,
+    command: Option<String>,
 }
 
 fn resolve_replay_context(
-    args: &FuzzReplayArgs,
+    args: &ReplayLikeArgs,
+    mode: ReplayLikeMode,
 ) -> homeboy::core::Result<Option<ResolvedReplayContext>> {
     let comp = replay_component_args(args);
     if comp.id().is_none() && args.rig.is_none() {
@@ -196,30 +301,33 @@ fn resolve_replay_context(
     )?;
     let execution_context =
         extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
-    let replay_command = extension::load_extension(&execution_context.extension_id)
+    let command = extension::load_extension(&execution_context.extension_id)
         .ok()
         .and_then(|manifest| manifest.fuzz)
-        .and_then(|fuzz| fuzz.replay_command);
+        .and_then(|fuzz| match mode {
+            ReplayLikeMode::Replay => fuzz.replay_command,
+            ReplayLikeMode::Minimize => fuzz.minimize_command,
+        });
 
     Ok(Some(ResolvedReplayContext {
         execution_context,
         component: ctx.component,
-        replay_command,
+        command,
     }))
 }
 
-fn replay_component_args(args: &FuzzReplayArgs) -> PositionalComponentArgs {
+fn replay_component_args(args: &ReplayLikeArgs) -> PositionalComponentArgs {
     PositionalComponentArgs {
         component: args.component.clone(),
         path: args.path.clone(),
     }
 }
 
-fn replay_message(command: Option<&String>, dry_run: bool) -> String {
+fn replay_message(command: Option<&String>, dry_run: bool, mode: ReplayLikeMode) -> String {
     match (command, dry_run) {
-        (Some(_), true) => "Generic fuzz replay resolved an extension replay_command and printed the execution environment without running it.".to_string(),
-        (Some(_), false) => "Generic fuzz replay executed the extension replay_command with canonical Homeboy fuzz replay environment.".to_string(),
-        (None, _) => "Generic fuzz replay resolved replay metadata and printed the extension-owned execution contract; no replay_command is available to execute.".to_string(),
+        (Some(_), true) => format!("Generic fuzz {} resolved an extension {} and printed the execution environment without running it.", mode.label(), mode.manifest_key()),
+        (Some(_), false) => format!("Generic fuzz {} executed the extension {} with canonical Homeboy fuzz replay environment.", mode.label(), mode.manifest_key()),
+        (None, _) => format!("Generic fuzz {} resolved replay metadata and printed the extension-owned execution contract; no {} is available to execute.", mode.label(), mode.manifest_key()),
     }
 }
 
@@ -249,6 +357,8 @@ fn render_replay_command(command: &str, env: &[FuzzReplayEnv], args: &[String]) 
         ("replay_id", "HOMEBOY_FUZZ_REPLAY_ID"),
         ("seed", "HOMEBOY_FUZZ_REPLAY_SEED"),
         ("replay_seed", "HOMEBOY_FUZZ_REPLAY_SEED"),
+        ("artifact_id", "HOMEBOY_FUZZ_REPLAY_ARTIFACT_ID"),
+        ("case_artifact", "HOMEBOY_FUZZ_REPLAY_ARTIFACT_ID"),
         ("replay_artifact_id", "HOMEBOY_FUZZ_REPLAY_ARTIFACT_ID"),
     ] {
         if let Some(value) = env_value(env, env_name) {
@@ -281,7 +391,7 @@ struct ResolvedReplayArtifact {
     replay: Option<FuzzReplayMetadata>,
 }
 
-fn replay_artifact_path(args: &FuzzReplayArgs) -> Option<PathBuf> {
+fn replay_artifact_path(args: &ReplayLikeArgs) -> Option<PathBuf> {
     args.artifact.clone().or_else(|| {
         args.artifact_or_case.as_ref().and_then(|value| {
             let path = PathBuf::from(value);
