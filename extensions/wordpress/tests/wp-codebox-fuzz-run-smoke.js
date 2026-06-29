@@ -344,10 +344,10 @@ const preflightReadinessOnlyPassed = preflightWpCodeboxFuzzCapabilityContract({
 		? { status: 0, stdout: JSON.stringify(readinessContract) }
 		: { status: 1, stderr: 'unexpected command' },
 });
-assert.equal(preflightReadinessOnlyPassed.ok, true);
+assert.equal(preflightReadinessOnlyPassed.ok, false);
 assert.equal(
 	preflightReadinessOnlyPassed.missing_contracts.some((contract) => contract.type === 'runtime_contract_manifest' || contract.type === 'ability'),
-	false,
+	true,
 );
 
 const unsupportedReadiness = {
