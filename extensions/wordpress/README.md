@@ -724,6 +724,13 @@ failure classifications, capability list, and metadata redaction keys so Lab
 offload and runner transport consumers can select providers without importing
 Codebox-specific request or recipe details.
 
+WordPress fuzz runtime actions use
+`homeboy/wordpress-fuzz-runtime-workload-operation/v1` descriptors. Mapping those
+actions to WP Codebox requires a public WP Codebox runtime action contract; the
+extension emits explicit blockers instead of guessing Codebox commands or ability
+names when that contract is absent. See
+[`docs/WP_CODEBOX_RUNTIME_ACTION_CONTRACTS.md`](docs/WP_CODEBOX_RUNTIME_ACTION_CONTRACTS.md).
+
 Discovery also exposes `secret_env_requirements`: generic env-name requirements
 activated by request/config selectors. Codex-backed requests declare the required
 `AI_PROVIDER_OPENAI_CODEX_*` names there, which lets Homeboy preflight runner
