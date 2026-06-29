@@ -16,19 +16,46 @@ const WORDPRESS_RUNTIME_SURFACE_COVERAGE_MANIFEST_SCHEMA = 'homeboy/wordpress-fu
 const WORDPRESS_UNSUPPORTED_RUNTIME_DISCOVERY_TYPES = new Set([
 	'capability',
 	'cron_event',
-	'crud_resource',
 	'db_query',
 	'external_http',
 	'hook',
 	'media',
-	'option',
-	'post_type',
 	'role',
 	'setting',
-	'taxonomy',
-	'user',
 	'wp_cli_command',
 ]);
+
+const WP_CODEBOX_RUNTIME_ACTION_CONTRACTS = Object.freeze({
+	crud_operation: Object.freeze({
+		schema: 'wp-codebox/wordpress-crud-operation/v1',
+		command: 'wordpress.crud-operation',
+		result_schema: 'wp-codebox/wordpress-crud-result/v1',
+	}),
+	rest_request: Object.freeze({
+		schema: 'wp-codebox/wordpress-runtime-action/v1',
+		command: 'wordpress.rest-request',
+	}),
+	admin_page: Object.freeze({
+		schema: 'wp-codebox/wordpress-runtime-action/v1',
+		command: 'wordpress.admin-page-load',
+		result_schema: 'wp-codebox/wordpress-page-load-result/v1',
+	}),
+	page: Object.freeze({
+		schema: 'wp-codebox/wordpress-runtime-action/v1',
+		command: 'wordpress.frontend-page-load',
+		result_schema: 'wp-codebox/wordpress-page-load-result/v1',
+	}),
+	editor_open: Object.freeze({
+		schema: 'wp-codebox/wordpress-runtime-action/v1',
+		command: 'wordpress.editor-open',
+	}),
+});
+
+const WORDPRESS_MISSING_RUNTIME_CONTRACTS = Object.freeze({
+	block: Object.freeze(['actions.block_render', 'actions.block_editor']),
+	db_query: Object.freeze(['actions.db_query', 'commands.wordpress.db-query']),
+	wp_cli_command: Object.freeze(['actions.wp_cli', 'commands.wordpress.wp-cli']),
+});
 
 function normalizeWordPressRuntimeSurfaceDiscovery(input = {}, options = {}) {
 	const inputs = collectRuntimeSurfaceInputs(input, options);
@@ -44,9 +71,10 @@ function normalizeWordPressRuntimeSurfaceDiscovery(input = {}, options = {}) {
 		surfaces: dedupeRuntimeSurfaces(surfaces),
 		unsupported_surfaces: dedupeUnsupportedSurfaces(unsupportedSurfaces),
 		diagnostics: unsupportedSurfaces.map((surface) => ({
-			severity: 'info',
-			code: 'wordpress_surface_discovered_without_executable_runtime_collector',
-			message: `${surface.type} surface \`${surface.id}\` was discovered for diagnostics but is not counted as executable runtime coverage.`,
+			severity: surface.blocker ? 'warning' : 'info',
+			code: surface.blocker?.code || 'wordpress_surface_discovered_without_executable_runtime_collector',
+			message: surface.blocker?.message || `${surface.type} surface \`${surface.id}\` was discovered for diagnostics but is not counted as executable runtime coverage.`,
+			missing_contract_fields: surface.blocker?.missing_contract_fields,
 			surface,
 		})),
 		metadata: isPlainObject(input.metadata) ? input.metadata : {},
@@ -66,6 +94,7 @@ function buildWordPressRuntimeSurfaceCoverageManifest(input = {}, options = {}) 
 			label: surface.label,
 			required: surface.required !== false,
 			execution_tier: surface.execution_tier || 'read_only_executable',
+			workload: surface.workload || undefined,
 			metadata: surface.metadata || {},
 		})),
 	};
@@ -195,6 +224,7 @@ function normalizeRuntimeSurface(surface, index) {
 	}
 	const value = runtimeSurfaceValue(surface, type, index);
 	const id = runtimeSurfaceId(surface, type, value);
+	const workload = runtimeWorkloadDescriptor(surface, type, id, value);
 	return {
 		id,
 		type,
@@ -202,13 +232,31 @@ function normalizeRuntimeSurface(surface, index) {
 		required: surface.required !== false,
 		executable: true,
 		execution_tier: 'read_only_executable',
+		coverage_counted: true,
+		workload,
+		...runtimeSurfaceExecutableFields(surface, type, value),
 		metadata: {
 			...(isPlainObject(surface.metadata) ? surface.metadata : {}),
 			source: stringValue(surface.source || surface.artifact, 'input'),
+			source_type: normalizeWordPressCoverageSurfaceType(surface.type || surface.kind || surface.category),
 			execution_tier: 'read_only_executable',
 			value,
 		},
 	};
+}
+
+function runtimeSurfaceExecutableFields(surface, type, value) {
+	if (type !== 'crud_resource') {
+		return {};
+	}
+	const resource = crudResourceRef(surface, value);
+	return stripUndefined({
+		resource_type: resource.kind,
+		post_type: surface.post_type || surface.postType || (resource.kind === 'post' ? resource.type : undefined),
+		taxonomy: surface.taxonomy || (resource.kind === 'term' ? resource.type : undefined),
+		option: surface.option || (resource.kind === 'option' ? resource.id : undefined),
+		role: surface.role,
+	});
 }
 
 function normalizeUnsupportedSurface(surface, index) {
@@ -233,12 +281,104 @@ function normalizeUnsupportedSurface(surface, index) {
 		executable: false,
 		execution_tier: 'discovered',
 		coverage_counted: false,
+		blocker: missingRuntimeContractBlocker(coverageType),
 		metadata: {
 			...(isPlainObject(surface.metadata) ? surface.metadata : {}),
 			source: stringValue(surface.source || surface.artifact, 'input'),
 			execution_tier: 'discovered',
 			value,
 		},
+	};
+}
+
+function runtimeWorkloadDescriptor(surface, type, id, value) {
+	const action = runtimeActionForSurface(surface, type);
+	const contract = WP_CODEBOX_RUNTIME_ACTION_CONTRACTS[action];
+	return stripUndefined({
+		schema: 'homeboy/wordpress-runtime-workload-descriptor/v1',
+		id: `${id}:runtime-workload`,
+		surface_id: id,
+		surface_type: type,
+		status: contract ? 'ready' : 'blocked',
+		target: action ? { kind: 'runtime-action', id: `runtime-action:${action}`, entrypoint: action } : undefined,
+		action,
+		command: contract?.command,
+		wp_codebox_contract_schema: contract?.schema,
+		wp_codebox_output_schema: contract?.result_schema,
+		input: runtimeWorkloadInput(surface, type, action, value),
+		blocker: contract ? undefined : missingRuntimeContractBlocker(type),
+	});
+}
+
+function runtimeActionForSurface(surface, type) {
+	if (type === 'rest_route') {
+		return 'rest_request';
+	}
+	if (type === 'admin_page') {
+		return 'admin_page';
+	}
+	if (type === 'frontend_url') {
+		return 'page';
+	}
+	if (type === 'crud_resource') {
+		return 'crud_operation';
+	}
+	if (type === 'block' && (surface.editor_url || surface.editorUrl || surface.url)) {
+		return 'editor_open';
+	}
+	return undefined;
+}
+
+function runtimeWorkloadInput(surface, type, action, value) {
+	if (action === 'crud_operation') {
+		return {
+			type: action,
+			operation: 'read',
+			resource: crudResourceRef(surface, value),
+		};
+	}
+	if (action === 'rest_request') {
+		return stripUndefined({ type: action, route: surface.route || value, method: surface.method || firstArrayValue(surface.methods) || 'GET' });
+	}
+	if (action === 'admin_page') {
+		return stripUndefined({ type: action, path: surface.path || surface.url || value });
+	}
+	if (action === 'page') {
+		return stripUndefined({ type: action, path: surface.path || undefined, url: surface.url || undefined });
+	}
+	if (action === 'editor_open') {
+		return stripUndefined({ type: action, url: surface.editor_url || surface.editorUrl || surface.url });
+	}
+	return stripUndefined({ type: action, value });
+}
+
+function crudResourceRef(surface, value) {
+	const coverageType = normalizeWordPressCoverageSurfaceType(surface.type || surface.kind || surface.category);
+	if (coverageType === 'post_type') {
+		return { kind: 'post', type: surface.post_type || surface.postType || surface.name || value };
+	}
+	if (coverageType === 'taxonomy') {
+		return { kind: 'term', type: surface.taxonomy || surface.name || value };
+	}
+	if (coverageType === 'option') {
+		return { kind: 'option', id: surface.option || surface.name || value };
+	}
+	if (coverageType === 'user') {
+		return { kind: 'user', identifiers: stripUndefined({ role: surface.role || surface.name || value }) };
+	}
+	return { kind: surface.resource_type || surface.resourceType || surface.resource || surface.name || value };
+}
+
+function missingRuntimeContractBlocker(type) {
+	const missingFields = WORDPRESS_MISSING_RUNTIME_CONTRACTS[type];
+	if (!missingFields) {
+		return undefined;
+	}
+	return {
+		code: 'wp_codebox_runtime_contract_missing',
+		message: `WP Codebox origin/main public contracts do not declare executable runtime workload support for ${type}.`,
+		missing_contract_fields: [...missingFields],
+		blocking: true,
 	};
 }
 
@@ -258,6 +398,9 @@ function runtimeSurfaceValue(surface, type, index) {
 		|| surface.event
 		|| surface.option
 		|| surface.setting
+		|| surface.post_type
+		|| surface.postType
+		|| surface.taxonomy
 		|| surface.role
 		|| surface.capability
 		|| surface.user
@@ -273,6 +416,14 @@ function runtimeSurfaceValue(surface, type, index) {
 		|| surface.value,
 		`${type}-${index + 1}`
 	);
+}
+
+function firstArrayValue(value) {
+	return Array.isArray(value) && value.length > 0 ? value[0] : undefined;
+}
+
+function stripUndefined(value) {
+	return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
 function runtimeSurfaceId(surface, type, value) {

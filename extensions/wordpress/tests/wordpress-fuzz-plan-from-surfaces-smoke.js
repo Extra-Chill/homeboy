@@ -217,16 +217,19 @@ const runtimeDiscovery = normalizeWordPressRuntimeSurfaceDiscovery({
 		{ type: 'wp_cli_command', command: 'wp option list' },
 	],
 });
-assert.deepEqual(runtimeDiscovery.surfaces.map((surface) => surface.type), ['admin_page', 'ajax_action', 'db_table', 'rest_route']);
-assert.deepEqual(runtimeDiscovery.unsupported_surfaces.map((surface) => surface.type), ['cron_event', 'db_query', 'hook', 'media', 'option', 'role', 'wp_cli_command']);
+assert.deepEqual(runtimeDiscovery.surfaces.map((surface) => surface.type), ['admin_page', 'ajax_action', 'crud_resource', 'db_table', 'rest_route']);
+assert.deepEqual(runtimeDiscovery.unsupported_surfaces.map((surface) => surface.type), ['cron_event', 'db_query', 'hook', 'media', 'role', 'wp_cli_command']);
 assert.equal(runtimeDiscovery.unsupported_surfaces.every((surface) => surface.executable === false && surface.coverage_counted === false), true);
 assert.equal(runtimeDiscovery.unsupported_surfaces.every((surface) => surface.execution_tier === 'discovered'), true);
-assert.equal(runtimeDiscovery.diagnostics.every((diagnostic) => diagnostic.code === 'wordpress_surface_discovered_without_executable_runtime_collector'), true);
+assert.equal(runtimeDiscovery.diagnostics.find((diagnostic) => diagnostic.surface.type === 'db_query').code, 'wp_codebox_runtime_contract_missing');
 const runtimePlan = buildWordPressFuzzPlanFromSurfaces(runtimeDiscovery);
-assert.deepEqual(runtimePlan.targets.map((target) => target.type), ['admin-page', 'ajax-action', 'database-table', 'rest-route']);
+assert.deepEqual(runtimePlan.targets.map((target) => target.type), ['admin-page', 'ajax-action', 'crud-resource', 'database-table', 'rest-route']);
 assert.equal(runtimePlan.targets.find((target) => target.type === 'ajax-action').cases[0].intent, 'exercise-ajax-action');
 assert.equal(runtimePlan.targets.find((target) => target.type === 'ajax-action').cases[0].runtime_operation.action, 'ajax_action');
 assert.equal(runtimePlan.targets.find((target) => target.type === 'ajax-action').cases[0].runtime_operation.wp_codebox_contract_schema, 'wp-codebox/wordpress-runtime-action/v1');
+assert.equal(runtimePlan.targets.find((target) => target.type === 'crud-resource').cases[0].intent, 'read-option');
+assert.equal(runtimePlan.targets.find((target) => target.type === 'crud-resource').cases[0].runtime_operation.action, 'crud_operation');
+assert.equal(runtimePlan.targets.find((target) => target.type === 'crud-resource').cases[0].runtime_operation.command, 'wordpress.crud-operation');
 
 const wpCliRuntimeDiscovery = normalizeWordPressRuntimeSurfaceDiscovery({ wp_cli_commands: [{ command: 'wp cron event list' }] });
 assert.equal(wpCliRuntimeDiscovery.unsupported_surfaces[0].id, 'wp-cli:wp cron event list');
