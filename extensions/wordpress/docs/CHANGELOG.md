@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.17] - 2026-06-29
+
+### Changed
+- Map generic WordPress admin form surfaces
+
 ## [3.21.16] - 2026-06-29
 
 ### Changed
