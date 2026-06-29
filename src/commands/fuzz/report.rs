@@ -156,6 +156,7 @@ pub(super) fn fuzz_result_envelope_from_campaign(
                 },
                 ..Default::default()
             },
+            sequence_plan: None,
             isolation_proof: None,
             metadata: serde_json::Value::Null,
             extra: std::collections::BTreeMap::new(),

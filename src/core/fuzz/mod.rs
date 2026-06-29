@@ -55,7 +55,7 @@ pub use observations::{
 pub use parse::{
     merge_fuzz_target_inventory, parse_fuzz_action_model_file, parse_fuzz_case_log_contents,
     parse_fuzz_case_log_file, parse_fuzz_exploration_policy_file, parse_fuzz_result_envelope_file,
-    parse_fuzz_results_file, parse_fuzz_target_inventory_file,
+    parse_fuzz_results_file, parse_fuzz_sequence_plan_file, parse_fuzz_target_inventory_file,
 };
 pub use schemas::{
     standardized_fuzz_skip_reason_codes, FUZZ_ACTION_MODEL_SCHEMA, FUZZ_ARTIFACT_SCHEMA,

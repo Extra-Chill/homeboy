@@ -25,6 +25,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             }],
             seed: Some("1234".to_string()),
             inventory: None,
+            sequence_plan: None,
             require_case_log: false,
             require_coverage_summary: false,
             require_result_envelope: false,
@@ -52,6 +53,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             success: true,
             args: &args,
             execution_request_path: None,
+            sequence_plan_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
@@ -140,6 +142,7 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
             &results_path,
             &run_dir,
             Some(&request_path),
+            None,
         )
         .expect("runner env");
 
@@ -195,6 +198,7 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
             success: true,
             args: &args,
             execution_request_path: Some(&request_path),
+            sequence_plan_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
@@ -244,6 +248,141 @@ fn fuzz_execution_request_rejects_destructive_without_isolation_proof() {
     .expect_err("missing isolation proof should fail");
 
     assert!(error.to_string().contains("homeboy/isolation-proof/v1"));
+}
+
+#[test]
+fn fuzz_sequence_plan_flag_records_request_env_and_artifact() {
+    with_isolated_home(|_| {
+        let run_dir = RunDir::create().expect("run dir");
+        let sequence_plan_path = run_dir.step_file("caller-sequence-plan.json");
+        std::fs::write(
+            &sequence_plan_path,
+            serde_json::json!({
+                "schema": "homeboy/fuzz-sequence-plan/v1",
+                "version": 1,
+                "id": "plan-123",
+                "cases": [{
+                    "id": "case-1",
+                    "target_id": "target-1",
+                    "operation_id": "operation-1",
+                    "steps": [{
+                        "id": "step-1",
+                        "kind": "exercise",
+                        "operation_id": "operation-1",
+                        "input": { "value": 1 }
+                    }]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("sequence plan file");
+        let parsed = FuzzCli::try_parse_from([
+            "fuzz",
+            "run",
+            "component-a",
+            "--run-id",
+            "proof-sequence",
+            "--sequence-plan",
+            sequence_plan_path.to_str().expect("utf8 path"),
+        ])
+        .expect("parse fuzz run cli");
+        let Some(FuzzCommand::Run(mut args)) = parsed.args.command else {
+            panic!("expected fuzz run args");
+        };
+        args.rig = Some("package-fuzz".to_string());
+        args.workload_id = Some("parser".to_string());
+
+        let request = build_fuzz_execution_request(
+            &args,
+            "component-a",
+            args.rig.as_deref(),
+            args.workload_id.clone(),
+            &planner_inventory(),
+        )
+        .expect("execution request");
+        assert_eq!(
+            request.sequence_plan.as_ref().expect("sequence plan").id,
+            "plan-123"
+        );
+        assert_eq!(
+            request.metadata["sequence_plan_ref"]["schema"],
+            "homeboy/fuzz-sequence-plan/v1"
+        );
+        assert_eq!(request.metadata["sequence_plan_ref"]["case_count"], 1);
+
+        let request_path = persist_fuzz_execution_request(&run_dir, &request).expect("request");
+        let persisted_plan_path =
+            persist_fuzz_sequence_plan(&run_dir, request.sequence_plan.as_ref())
+                .expect("persist sequence plan")
+                .expect("sequence plan path");
+        let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+        let artifacts_dir =
+            run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
+        std::fs::write(&results_path, "{}").expect("results file");
+        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
+
+        let env = fuzz_runner_env(
+            &args,
+            None,
+            None,
+            &results_path,
+            &run_dir,
+            Some(&request_path),
+            Some(&persisted_plan_path),
+        )
+        .expect("runner env");
+        assert!(env.contains(&(
+            "HOMEBOY_FUZZ_SEQUENCE_PLAN_FILE".to_string(),
+            persisted_plan_path.to_string_lossy().to_string()
+        )));
+
+        persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+            run_id: args.run_id.as_deref(),
+            component_id: "component-a",
+            rig_id: args.rig.as_deref(),
+            workload_id: args.workload_id.as_deref(),
+            workload_path: Some("/tmp/fuzz/parser.json"),
+            status: "passed",
+            exit_code: 0,
+            success: true,
+            args: &args,
+            execution_request_path: Some(&request_path),
+            sequence_plan_path: Some(&persisted_plan_path),
+            results_path: &results_path,
+            artifacts_dir: &artifacts_dir,
+            results: None,
+            expected_metric_gates: &[],
+            results_error: None,
+            missing_artifact_refs: &[],
+            postprocess: &[],
+        })
+        .expect("persist fuzz run");
+
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run("proof-sequence")
+            .expect("get run")
+            .expect("run record");
+        assert_eq!(
+            run.metadata_json["sequence_plan_file"],
+            persisted_plan_path.to_string_lossy().to_string()
+        );
+        let artifacts = store.list_artifacts("proof-sequence").expect("artifacts");
+        let sequence_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "fuzz_sequence_plan")
+            .expect("sequence plan artifact");
+        assert_eq!(sequence_artifact.artifact_type, "file");
+        assert_eq!(
+            sequence_artifact.metadata_json["schema"],
+            "homeboy/fuzz-sequence-plan/v1"
+        );
+        let persisted_plan: FuzzSequencePlan = serde_json::from_str(
+            &std::fs::read_to_string(&sequence_artifact.path).expect("read sequence artifact"),
+        )
+        .expect("parse persisted plan");
+        assert_eq!(persisted_plan.id, "plan-123");
+    });
 }
 
 #[test]
@@ -308,6 +447,7 @@ fn fuzz_run_persists_coverage_reconciliation_artifact() {
             success: true,
             args: &args,
             execution_request_path: Some(&request_path),
+            sequence_plan_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: Some(&campaign),
@@ -382,6 +522,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             success: true,
             args: &args,
             execution_request_path: None,
+            sequence_plan_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,
@@ -432,6 +573,7 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
             success: true,
             args: &args,
             execution_request_path: None,
+            sequence_plan_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: Some(&campaign),
@@ -951,6 +1093,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             tracker_refs: vec![],
             seed: None,
             inventory: None,
+            sequence_plan: None,
             require_case_log: false,
             require_coverage_summary: false,
             require_result_envelope: false,
@@ -982,6 +1125,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             success: false,
             args: &args,
             execution_request_path: None,
+            sequence_plan_path: None,
             results_path: &results_path,
             artifacts_dir: &artifacts_dir,
             results: None,

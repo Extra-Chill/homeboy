@@ -5,10 +5,10 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ## Synopsis
 
 ```bash
-homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
-homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
+homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
+homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
-homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>]
+homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>]
 homeboy fuzz validate <results-file>
 homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--output-envelope <path>]
 homeboy fuzz compare <baseline-envelope> <candidate-envelope> [--hotspot-policy <advisory|blocking|off>]
@@ -189,6 +189,38 @@ validates and embeds the policy without implementing downstream exploration.
   "replay_seed_ref": "seed:stable-1",
   "corpus_refs": ["corpus:generic-fixture"],
   "invariants": ["resource.integrity"]
+}
+```
+
+`homeboy fuzz plan --sequence-plan <path>` and `homeboy fuzz run --sequence-plan
+<path>` accept a `homeboy/fuzz-sequence-plan/v1` JSON contract. This is an
+explicit handoff for the exact generated sequence identity produced by an
+extension or external generator. Homeboy validates the schema/version and embeds
+the plan in the `homeboy/fuzz-execution-request/v1` request; `fuzz run` also
+exposes the normalized run-directory copy to runners as
+`HOMEBOY_FUZZ_SEQUENCE_PLAN_FILE` and persists it as a `fuzz_sequence_plan` run artifact. Homeboy core
+does not generate product actions or interpret product-specific step semantics.
+
+```json
+{
+  "schema": "homeboy/fuzz-sequence-plan/v1",
+  "version": 1,
+  "id": "sequence-plan-123",
+  "cases": [
+    {
+      "id": "case-1",
+      "target_id": "target-1",
+      "operation_id": "operation-1",
+      "steps": [
+        {
+          "id": "step-1",
+          "kind": "exercise",
+          "operation_id": "operation-1",
+          "input": { "value": 1 }
+        }
+      ]
+    }
+  ]
 }
 ```
 

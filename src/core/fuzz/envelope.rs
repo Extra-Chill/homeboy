@@ -13,7 +13,9 @@ use super::schema_defaults::{
     fuzz_target_inventory_schema, isolation_proof_schema,
 };
 use super::schemas::{FUZZ_CONTRACT_VERSION, FUZZ_TARGET_INVENTORY_SCHEMA, ISOLATION_PROOF_SCHEMA};
-use super::types::{FuzzCampaign, FuzzSeed, FuzzSurface, FuzzTarget, FuzzWorkload};
+use super::types::{
+    FuzzCampaign, FuzzSeed, FuzzSequencePlan, FuzzSurface, FuzzTarget, FuzzWorkload,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FuzzTargetInventory {
@@ -100,6 +102,8 @@ pub struct FuzzExecutionRequest {
     pub gates: Vec<FuzzGate>,
     #[serde(default)]
     pub sampling: FuzzSamplingRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_plan: Option<FuzzSequencePlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation_proof: Option<IsolationProof>,
     #[serde(default, skip_serializing_if = "Value::is_null")]

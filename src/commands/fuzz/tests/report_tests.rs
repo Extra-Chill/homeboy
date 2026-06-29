@@ -35,6 +35,7 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
         run_id: None,
         seed: None,
         inventory_file: None,
+        sequence_plan_file: None,
         max_duration: None,
         passthrough_args: Vec::new(),
         requested_settings: serde_json::Value::Null,

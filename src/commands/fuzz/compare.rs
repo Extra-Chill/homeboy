@@ -1018,6 +1018,7 @@ mod tests {
                 required_artifacts: default_fuzz_required_artifacts(),
                 gates: default_fuzz_gates(),
                 sampling: Default::default(),
+                sequence_plan: None,
                 isolation_proof: None,
                 metadata: serde_json::Value::Null,
                 extra: BTreeMap::new(),

@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::core::fuzz::{
     fuzz_gate_profile_contract, parse_fuzz_action_model_file, parse_fuzz_exploration_policy_file,
-    FuzzExecutionRequest, FuzzOperation, FuzzOperationFamily, FuzzSafetyClass,
-    FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism, FuzzSamplingRequest, FuzzSamplingStratum,
-    FuzzTargetInventory, IsolationProof, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
-    FUZZ_SAMPLING_REQUEST_SCHEMA,
+    parse_fuzz_sequence_plan_file, FuzzExecutionRequest, FuzzOperation, FuzzOperationFamily,
+    FuzzSafetyClass, FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism, FuzzSamplingRequest,
+    FuzzSamplingStratum, FuzzTargetInventory, IsolationProof, FUZZ_CONTRACT_VERSION,
+    FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
 };
 
 use super::execution::fuzz_runner_contract;
@@ -61,8 +61,14 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         args.run.inventory.as_deref(),
     )?;
     let isolation_proof = load_isolation_proof(args.run.isolation_proof.as_deref())?;
+    let sequence_plan = load_sequence_plan(args.run.sequence_plan.as_deref())?;
     let planning_metadata =
         plan_inventory_selection(&args, &target_inventory, isolation_proof.as_ref())?;
+    let planning_metadata = with_sequence_plan_metadata(
+        planning_metadata,
+        args.run.sequence_plan.as_deref(),
+        sequence_plan.as_ref(),
+    )?;
     let sampling: FuzzSamplingRequest = serde_json::from_value(
         planning_metadata
             .get("sampling")
@@ -97,6 +103,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
             required_artifacts,
             gates,
             sampling,
+            sequence_plan,
             isolation_proof,
             metadata: planning_metadata,
             extra: std::collections::BTreeMap::new(),
@@ -104,6 +111,39 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         runner_contract: fuzz_runner_contract(fuzz_config.as_ref()),
     })
 }
+
+pub(super) fn load_sequence_plan(
+    path: Option<&std::path::Path>,
+) -> homeboy::core::Result<Option<homeboy::core::fuzz::FuzzSequencePlan>> {
+    path.map(parse_fuzz_sequence_plan_file).transpose()
+}
+
+pub(super) fn with_sequence_plan_metadata(
+    mut metadata: serde_json::Value,
+    path: Option<&std::path::Path>,
+    plan: Option<&homeboy::core::fuzz::FuzzSequencePlan>,
+) -> homeboy::core::Result<serde_json::Value> {
+    let Some(plan) = plan else {
+        return Ok(metadata);
+    };
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "sequence_plan_ref".to_string(),
+            serde_json::json!({
+                "schema": FUZZ_SEQUENCE_PLAN_SCHEMA,
+                "id": plan.id,
+                "path": path.map(|path| path.to_string_lossy().to_string()),
+                "case_count": plan.cases.len(),
+                "source": "--sequence-plan"
+            }),
+        );
+    }
+    Ok(metadata)
+}
+
 pub(super) fn plan_inventory_selection(
     args: &FuzzPlanArgs,
     inventory: &FuzzTargetInventory,

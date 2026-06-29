@@ -12,15 +12,15 @@ use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzC
 use homeboy::core::fuzz::{
     fuzz_gate_profile_contract, parse_fuzz_results_file, FuzzArtifact, FuzzCampaign,
     FuzzCoverageReconciliation, FuzzExecutionRequest, FuzzFindingStatus, FuzzGateProfile,
-    FuzzSamplingRequest, FuzzTargetInventory, FUZZ_CONTRACT_VERSION,
-    FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    FuzzSamplingRequest, FuzzSequencePlan, FuzzTargetInventory, FUZZ_CONTRACT_VERSION,
+    FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
 };
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
-use super::planning::plan_inventory_selection;
+use super::planning::{load_sequence_plan, plan_inventory_selection, with_sequence_plan_metadata};
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates_for_profile, fuzz_coverage_completeness,
     fuzz_result_envelope_evidence_ref, fuzz_result_envelope_from_campaign, gate_status,
@@ -101,6 +101,8 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         workload_id.clone(),
         &target_inventory,
     )?;
+    let sequence_plan_path =
+        persist_fuzz_sequence_plan(&run_dir, execution_request.sequence_plan.as_ref())?;
     let execution_request_path = persist_fuzz_execution_request(&run_dir, &execution_request)?;
     let runner_output = run_fuzz_extension_script(
         &ctx,
@@ -110,6 +112,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         invocation_requirements,
         &run_dir,
         &execution_request_path,
+        sequence_plan_path.as_deref(),
     )?;
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let artifacts_dir =
@@ -164,6 +167,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         success,
         args: &args,
         execution_request_path: Some(&execution_request_path),
+        sequence_plan_path: sequence_plan_path.as_deref(),
         results_path: &results_path,
         artifacts_dir: &artifacts_dir,
         results: results.as_ref(),
@@ -192,6 +196,10 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             seed: args.seed.clone(),
             inventory_file: args
                 .inventory
+                .clone()
+                .map(|path| path.to_string_lossy().to_string()),
+            sequence_plan_file: args
+                .sequence_plan
                 .clone()
                 .map(|path| path.to_string_lossy().to_string()),
             max_duration: args.max_duration.clone(),
@@ -726,6 +734,7 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) success: bool,
     pub(super) args: &'a FuzzRunArgs,
     pub(super) execution_request_path: Option<&'a Path>,
+    pub(super) sequence_plan_path: Option<&'a Path>,
     pub(super) results_path: &'a Path,
     pub(super) artifacts_dir: &'a Path,
     pub(super) results: Option<&'a FuzzCampaign>,
@@ -759,6 +768,7 @@ pub(super) fn persist_fuzz_run_evidence(
         "max_duration": input.args.max_duration.clone(),
         "passthrough_args": input.args.args.clone(),
         "execution_request_file": input.execution_request_path.map(|path| path.to_string_lossy().to_string()),
+        "sequence_plan_file": input.sequence_plan_path.map(|path| path.to_string_lossy().to_string()),
         "tracker_refs": input.args.tracker_refs,
         "exit_code": input.exit_code,
         "success": input.success,
@@ -818,6 +828,19 @@ pub(super) fn persist_fuzz_run_evidence(
                 serde_json::json!({
                     "schema": FUZZ_EXECUTION_REQUEST_SCHEMA,
                     "source": "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",
+                }),
+            )?;
+        }
+    }
+    if let Some(sequence_plan_path) = input.sequence_plan_path {
+        if sequence_plan_path.is_file() {
+            store.record_artifact_with_metadata(
+                &run_id,
+                "fuzz_sequence_plan",
+                sequence_plan_path,
+                serde_json::json!({
+                    "schema": FUZZ_SEQUENCE_PLAN_SCHEMA,
+                    "source": "--sequence-plan",
                 }),
             )?;
         }
@@ -1097,6 +1120,12 @@ fn fuzz_run_command(
     if let Some(seed) = args.seed.as_ref() {
         parts.extend(["--seed".to_string(), seed.clone()]);
     }
+    if let Some(sequence_plan) = args.sequence_plan.as_ref() {
+        parts.extend([
+            "--sequence-plan".to_string(),
+            sequence_plan.to_string_lossy().to_string(),
+        ]);
+    }
     if let Some(max_duration) = args.max_duration.as_ref() {
         parts.extend(["--max-duration".to_string(), max_duration.clone()]);
     }
@@ -1157,6 +1186,7 @@ pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerCon
     let mut env: Vec<String> = [
         "HOMEBOY_FUZZ_RESULTS_FILE",
         "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",
+        "HOMEBOY_FUZZ_SEQUENCE_PLAN_FILE",
         "HOMEBOY_FUZZ_ARTIFACTS_DIR",
         "HOMEBOY_FUZZ_WORKLOAD_ID",
         "HOMEBOY_FUZZ_WORKLOAD_PATH",
@@ -1204,6 +1234,7 @@ fn run_fuzz_extension_script(
     invocation_requirements: InvocationRequirements,
     run_dir: &RunDir,
     execution_request_path: &Path,
+    sequence_plan_path: Option<&Path>,
 ) -> homeboy::core::Result<homeboy::core::extension::RunnerOutput> {
     let execution_context =
         extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
@@ -1239,6 +1270,7 @@ fn run_fuzz_extension_script(
         &results_path,
         run_dir,
         Some(execution_request_path),
+        sequence_plan_path,
     )?;
     for (key, value) in env {
         runner = runner.env(&key, &value);
@@ -1301,6 +1333,7 @@ pub(super) fn fuzz_runner_env(
     results_path: &Path,
     run_dir: &RunDir,
     execution_request_path: Option<&Path>,
+    sequence_plan_path: Option<&Path>,
 ) -> homeboy::core::Result<Vec<(String, String)>> {
     let mut env = vec![(
         "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
@@ -1344,6 +1377,12 @@ pub(super) fn fuzz_runner_env(
             path.to_string_lossy().to_string(),
         ));
     }
+    if let Some(path) = sequence_plan_path.or(args.sequence_plan.as_deref()) {
+        env.push((
+            "HOMEBOY_FUZZ_SEQUENCE_PLAN_FILE".to_string(),
+            path.to_string_lossy().to_string(),
+        ));
+    }
     push_opt_env(
         &mut env,
         "HOMEBOY_FUZZ_MAX_DURATION",
@@ -1381,6 +1420,26 @@ pub(super) fn persist_fuzz_execution_request(
     Ok(path)
 }
 
+pub(super) fn persist_fuzz_sequence_plan(
+    run_dir: &RunDir,
+    plan: Option<&FuzzSequencePlan>,
+) -> homeboy::core::Result<Option<PathBuf>> {
+    let Some(plan) = plan else {
+        return Ok(None);
+    };
+    let path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_SEQUENCE_PLAN);
+    let raw = serde_json::to_vec_pretty(plan).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("serialize fuzz sequence plan".to_string()),
+        )
+    })?;
+    std::fs::write(&path, raw).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?;
+    Ok(Some(path))
+}
+
 pub(super) fn build_fuzz_execution_request(
     args: &FuzzRunArgs,
     component_id: &str,
@@ -1400,8 +1459,14 @@ pub(super) fn build_fuzz_execution_request(
         exploration_policy: None,
     };
     let isolation_proof = super::planning::load_isolation_proof(args.isolation_proof.as_deref())?;
+    let sequence_plan = load_sequence_plan(args.sequence_plan.as_deref())?;
     let mut metadata =
         plan_inventory_selection(&plan_args, target_inventory, isolation_proof.as_ref())?;
+    metadata = with_sequence_plan_metadata(
+        metadata,
+        args.sequence_plan.as_deref(),
+        sequence_plan.as_ref(),
+    )?;
     if let Some(object) = metadata.as_object_mut() {
         object.insert(
             "target_inventory".to_string(),
@@ -1446,6 +1511,7 @@ pub(super) fn build_fuzz_execution_request(
         required_artifacts,
         gates,
         sampling,
+        sequence_plan,
         isolation_proof,
         metadata,
         extra: std::collections::BTreeMap::new(),

@@ -176,6 +176,10 @@ pub struct FuzzRunArgs {
     #[arg(long = "inventory", value_name = "PATH")]
     pub(crate) inventory: Option<PathBuf>,
 
+    /// Exact generated generic sequence plan JSON (`homeboy/fuzz-sequence-plan/v1`) to hand to the runner.
+    #[arg(long = "sequence-plan", value_name = "PATH")]
+    pub(crate) sequence_plan: Option<PathBuf>,
+
     /// Fail the run unless the campaign links case-level execution evidence.
     #[arg(long = "require-case-log")]
     pub(crate) require_case_log: bool,
