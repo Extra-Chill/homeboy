@@ -1396,6 +1396,8 @@ pub(super) fn build_fuzz_execution_request(
         operation_families: Vec::new(),
         case_budget: None,
         duration_budget_seconds: None,
+        action_model: None,
+        exploration_policy: None,
     };
     let mut metadata = plan_inventory_selection(&plan_args, target_inventory)?;
     if let Some(object) = metadata.as_object_mut() {
