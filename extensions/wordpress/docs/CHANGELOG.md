@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.15] - 2026-06-29
+
+### Changed
+- Map Codebox observations to fuzz hotspots
+
 ## [3.21.14] - 2026-06-29
 
 ### Changed
