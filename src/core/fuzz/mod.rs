@@ -25,8 +25,8 @@ pub use artifact_envelope::{
     FuzzResultEnvelopeArtifactSummary,
 };
 pub use cohorts::{
-    compare_fuzz_hotspot_cohorts, FuzzHotspotCohortComparison, FuzzHotspotCohortDelta,
-    FuzzHotspotCohortItem,
+    compare_fuzz_hotspot_cohorts, compare_fuzz_hotspot_sets, FuzzHotspotCohortBaselineDrift,
+    FuzzHotspotCohortComparison, FuzzHotspotCohortDelta, FuzzHotspotCohortItem,
 };
 pub use contract::{
     canonical_operation_family, fuzz_core_contract, FuzzContractSchemas, FuzzCoreContract,
