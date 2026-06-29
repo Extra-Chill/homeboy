@@ -36,6 +36,19 @@
       "export": "scenarioResultsFromOutcome"
     }
   },
+  "component_path_defaults": {
+    "discovery": {
+      "agents_api": [
+        { "env": ["WP_CODEBOX_AGENTS_API_PATH", "HOMEBOY_WP_CODEBOX_AGENTS_API_PATH"] },
+        { "settings": ["wp_codebox_agents_api_path", "agents_api_path"] },
+        { "active_plugin": "agents-api" },
+        { "sibling": "agents-api" }
+      ]
+    },
+    "contract_slug_map": {
+      "agents-api": "agents_api"
+    }
+  },
   "workflow_input_projection": {
     "adapter": {
       "module": "agent-runtimes/wp-codebox/lib/runtime-workflow-input-projection.js",

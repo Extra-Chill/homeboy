@@ -1702,6 +1702,11 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     options.agentRuntimeTools,
     ...componentDiscoveryCandidates('agent_runtime_tools', discovery, settings, workspaceBase),
   );
+  const agentsApiPath = firstExistingPath(
+    options.agentsApi,
+    options.agents_api,
+    ...componentDiscoveryCandidates('agents_api', discovery, settings, workspaceBase),
+  );
   const providerPluginPath = firstExistingPath(
     settings.wp_codebox_provider_plugin_path,
     process.env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH,
@@ -1722,7 +1727,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     wpCodeboxBin: wpCodeboxBin({ settings, executable: '' }),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
     runtimeOverlays: defaultRuntimeOverlays(settings),
-    runtimeRequirements: defaultRuntimeRequirements(),
+    runtimeRequirements: defaultRuntimeRequirements({ agentsApiPath }),
     runtimeEnv: defaultRuntimeEnv(settings),
     runtimeStateMounts: defaultRuntimeStateMounts(settings),
     runtimeConfigMounts: defaultRuntimeConfigMounts(settings),
@@ -1762,8 +1767,19 @@ function defaultRuntimeOverlays(settings) {
   return [];
 }
 
-function defaultRuntimeRequirements() {
-  return {};
+function defaultRuntimeRequirements({ agentsApiPath = '' } = {}) {
+  const componentContracts = [];
+  if (agentsApiPath) {
+    componentContracts.push({
+      slug: 'agents-api',
+      path: agentsApiPath,
+      pluginFile: 'agents-api/agents-api.php',
+      loadAs: 'mu-plugin',
+      activate: false,
+      metadata: { source: 'wp-codebox-agent-runtime-default' },
+    });
+  }
+  return componentContracts.length > 0 ? { component_contracts: componentContracts } : {};
 }
 
 function defaultChatHandlerPluginContracts(settings = {}, options = {}, providerConfig = {}) {
