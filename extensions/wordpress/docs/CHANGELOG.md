@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.7] - 2026-06-29
+
+### Changed
+- add release.update_dependency composer custom-package repin
+
 ## [3.21.6] - 2026-06-29
 
 ### Changed
