@@ -1,8 +1,52 @@
 use crate::core::component::Component;
 use crate::core::engine::run_dir::{self, RunDir};
-use crate::core::error::{Error, Result};
+use crate::core::error::{CommandEvidence, Error, Result};
 use crate::core::extension::{self, ExtensionCapability};
 use std::path::Path;
+
+/// Maximum captured stdout/stderr bytes retained per stream in command
+/// evidence. Bounds the structured error payload while keeping the tail (where
+/// the failing assertion / stack trace almost always lives) visible.
+const COMMAND_EVIDENCE_MAX_BYTES: usize = 16 * 1024;
+
+/// Bound a captured stream to its last [`COMMAND_EVIDENCE_MAX_BYTES`], keeping
+/// the most recent (tail) output. Returns the bounded string and whether it was
+/// truncated. Splits on a UTF-8 boundary so the result is always valid.
+fn bound_evidence_stream(stream: &str) -> (String, bool) {
+    if stream.len() <= COMMAND_EVIDENCE_MAX_BYTES {
+        return (stream.to_string(), false);
+    }
+
+    let mut start = stream.len() - COMMAND_EVIDENCE_MAX_BYTES;
+    while start < stream.len() && !stream.is_char_boundary(start) {
+        start += 1;
+    }
+    (stream[start..].to_string(), true)
+}
+
+/// Build [`CommandEvidence`] from a resolved command description and captured
+/// runner output, bounding each stream for the structured error payload.
+fn command_evidence(
+    command: String,
+    cwd: Option<String>,
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> CommandEvidence {
+    let (stdout, stdout_truncated) = bound_evidence_stream(stdout);
+    let (stderr, stderr_truncated) = bound_evidence_stream(stderr);
+    CommandEvidence {
+        command,
+        cwd,
+        // The release quality gates run on the local controller. Offloaded
+        // runner execution carries its own evidence path.
+        location: Some("local".to_string()),
+        exit_code,
+        stdout,
+        stderr,
+        truncated: stdout_truncated || stderr_truncated,
+    }
+}
 
 /// Outcome of a release lint preflight.
 ///
@@ -168,9 +212,26 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
             return Ok(true);
         }
 
-        return Err(quality_error(
+        // Surface the self-check command and its captured output (the workflow
+        // already retains a bounded tail on failure) so the gate failure is
+        // actionable instead of an opaque exit code.
+        let (stdout, stderr) = workflow
+            .raw_output
+            .as_ref()
+            .map(|raw| (raw.stdout_tail.clone(), raw.stderr_tail.clone()))
+            .unwrap_or_default();
+        let evidence = command_evidence(
+            format!("{} self-check scripts.test", component.id),
+            Some(component.local_path.clone()),
+            workflow.exit_code,
+            &stdout,
+            &stderr,
+        );
+
+        return Err(quality_error_with_evidence(
             "test",
             format!("Tests failed (exit code {})", workflow.exit_code),
+            evidence,
         ));
     }
 
@@ -184,6 +245,10 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
         "release",
         "Running tests ({})...",
         test_context.extension_id
+    );
+    let resolved_command = format!(
+        "{} ({})",
+        test_context.extension_id, test_context.script_path
     );
     let test_run_dir = RunDir::create()?;
     let output = extension::test::build_test_runner(
@@ -203,9 +268,17 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
         log_status!("release", "Tests passed");
         Ok(true)
     } else {
-        Err(quality_error(
+        let evidence = command_evidence(
+            resolved_command,
+            Some(component.local_path.clone()),
+            output.exit_code,
+            &output.stdout,
+            &output.stderr,
+        );
+        Err(quality_error_with_evidence(
             "test",
             code_quality_failure_message("Tests", &output),
+            evidence,
         ))
     }
 }
@@ -235,6 +308,32 @@ fn quality_error(field: &str, message: String) -> Error {
             "Fix the issue above before releasing".to_string(),
             "To bypass: homeboy release <component> --skip-checks".to_string(),
         ]),
+    )
+}
+
+/// Like [`quality_error`] but attaches captured [`CommandEvidence`] so the
+/// failing command and its stdout/stderr surface in the structured error's
+/// `error_details.command_evidence`. The `tried` hints point operators at that
+/// evidence instead of a phantom "issue above".
+fn quality_error_with_evidence(field: &str, message: String, evidence: CommandEvidence) -> Error {
+    log_status!("release", "Code quality check failed: {}", message);
+    log_status!(
+        "release",
+        "Failing command: {} (exit code {})",
+        evidence.command,
+        evidence.exit_code
+    );
+
+    Error::validation_invalid_argument_with_evidence(
+        field,
+        message,
+        None,
+        Some(vec![
+            "Inspect error_details.command_evidence for the failing command, cwd, exit code, and captured stdout/stderr".to_string(),
+            "Reproduce in isolation: homeboy test <component>".to_string(),
+            "To bypass: homeboy release <component> --skip-checks".to_string(),
+        ]),
+        Some(evidence),
     )
 }
 
@@ -406,6 +505,93 @@ mod tests {
         );
 
         assert!(validate_test_quality(&component).expect("test script should pass"));
+    }
+
+    #[test]
+    fn validate_test_quality_failure_carries_command_and_captured_output() {
+        // Reproduces issue #6937: a failing release test gate must surface the
+        // resolved command, exit code, and captured stdout/stderr in the
+        // structured error's `command_evidence`, so the failure is actionable
+        // instead of an opaque "Tests failed (exit code 1)".
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_script(
+            dir.path(),
+            "test.sh",
+            "printf 'running release tests\\n'\nprintf 'assertion failed: expected 1 got 2\\n' >&2\nexit 1\n",
+        );
+
+        let component = script_component(
+            dir.path(),
+            ComponentScriptsConfig {
+                test: vec!["sh scripts/test.sh".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let err = validate_test_quality(&component)
+            .expect_err("failing test script must block the release");
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.to_string().contains("Tests failed (exit code 1)"));
+
+        // The captured command evidence is what `failed_result` serializes into
+        // the release step's `error_details.command_evidence`.
+        let evidence = err
+            .details
+            .get("command_evidence")
+            .expect("failing test gate must attach command_evidence");
+
+        assert_eq!(
+            evidence.get("exit_code").and_then(|v| v.as_i64()),
+            Some(1),
+            "evidence must carry the command exit code"
+        );
+        assert!(
+            evidence
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .contains(&component.id),
+            "evidence command should describe what ran: {:?}",
+            evidence.get("command")
+        );
+        assert_eq!(
+            evidence.get("cwd").and_then(|v| v.as_str()),
+            Some(component.local_path.as_str()),
+            "evidence must record the working directory"
+        );
+        assert_eq!(
+            evidence.get("location").and_then(|v| v.as_str()),
+            Some("local"),
+            "release quality gates run on the local controller"
+        );
+        let stderr = evidence
+            .get("stderr")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            stderr.contains("assertion failed: expected 1 got 2"),
+            "evidence must surface the failing command's stderr: {stderr:?}"
+        );
+    }
+
+    #[test]
+    fn bound_evidence_stream_keeps_tail_and_marks_truncation() {
+        let short = "only a little output";
+        let (bounded, truncated) = super::bound_evidence_stream(short);
+        assert_eq!(bounded, short);
+        assert!(!truncated);
+
+        let long = "x".repeat(super::COMMAND_EVIDENCE_MAX_BYTES + 64) + "TAIL_MARKER";
+        let (bounded, truncated) = super::bound_evidence_stream(&long);
+        assert!(truncated, "oversized streams must be marked truncated");
+        assert!(
+            bounded.len() <= super::COMMAND_EVIDENCE_MAX_BYTES,
+            "bounded stream must respect the byte cap"
+        );
+        assert!(
+            bounded.ends_with("TAIL_MARKER"),
+            "bounding must retain the tail of the stream"
+        );
     }
 
     #[test]
