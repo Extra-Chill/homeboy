@@ -653,8 +653,8 @@
           "id": "run-agent-task",
           "schema": "wp-codebox/run-agent-task/v1",
           "owner": "wp-codebox",
-          "adapter_behavior": "stable_run_agent_task_default_with_explicit_legacy_agent_task_run_compatibility",
-          "requirement": "Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns the stable agent_task_run_result envelope. Older agent-task-run compatibility is available only when the caller explicitly enables useLegacyAgentTaskRunCompatibility."
+          "adapter_behavior": "stable_run_agent_task",
+          "requirement": "Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns the stable agent_task_run_result envelope."
         },
         {
           "id": "provider-credential-boundary",
@@ -715,7 +715,7 @@
         },
         {
           "gap": "typed-artifact-dto-normalizer",
-          "needed_primitive": "WP Codebox should export a stable typed-artifact DTO normalizer compatible with Homeboy agent-task typed artifact declarations, including file_refs/fileRefs and artifact_schema/artifactSchema aliases while allowing caller-owned metadata redaction policy."
+          "needed_primitive": "WP Codebox should export a stable typed-artifact DTO normalizer compatible with Homeboy agent-task typed artifact declarations while allowing caller-owned metadata redaction policy."
         }
       ]
     }

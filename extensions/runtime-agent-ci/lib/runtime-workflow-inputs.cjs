@@ -11,12 +11,12 @@ const {
 const RUNTIME_WORKFLOW_INPUTS_SCHEMA = 'homeboy/runtime-workflow-inputs/v1';
 
 function renderRuntimeWorkflowInputs(options = {}) {
-	const runtimeInput = options.runtimeId || options.runtime_id || options.runtimeProviderConfig?.id || options.runtime_provider_config?.id || options.runtime?.id || options.runtime;
+	const runtimeInput = options.runtime_id || options.runtime?.id || options.runtime;
 	const runtimeId = normalizeRuntimeId(runtimeInput);
-	const runtime = options.runtimeProviderConfig || options.runtime_provider_config || resolveRuntimeProvider(runtimeId, options);
+	const runtime = options.runtime || resolveRuntimeProvider(runtimeId, options);
 	const workloadProfile = namedProfile(options.workloadProfile || options.workload_profile, workloadProfiles(runtime));
-	const profileSelection = normalizeRuntimeProfileSelection(options.runtimeProfile || options.runtime_profile || workloadProfile.runtime_profile || options.profile);
-	const runtimeProfiles = plainObject(options.runtimeProfiles || options.runtime_profiles);
+	const profileSelection = normalizeRuntimeProfileSelection(options.runtime_profile || workloadProfile.runtime_profile);
+	const runtimeProfiles = plainObject(options.runtime_profiles);
 	const selectedProfile = selectedRuntimeProfile(profileSelection, runtimeProfiles, runtimeRequirementFields({ ...workloadProfile, ...options }));
 	const toolProfile = resolveToolProfile({ ...workloadProfile, ...options, toolProfileName: options.toolProfileName || options.tool_profile_name || workloadProfile.tool_profile }, runtime, workloadProfile);
 	const adapter = runtimeWorkflowInputAdapter(runtime, options);

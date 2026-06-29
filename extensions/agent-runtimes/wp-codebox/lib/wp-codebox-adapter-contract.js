@@ -118,8 +118,8 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
     id: 'run-agent-task',
     schema: 'wp-codebox/run-agent-task/v1',
     owner: 'wp-codebox',
-    adapter_behavior: 'stable_run_agent_task_default_with_explicit_legacy_agent_task_run_compatibility',
-    requirement: 'Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns the stable agent_task_run_result envelope. Older agent-task-run compatibility is available only when the caller explicitly enables useLegacyAgentTaskRunCompatibility.',
+    adapter_behavior: 'stable_run_agent_task',
+    requirement: 'Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns the stable agent_task_run_result envelope.',
   },
   {
     id: 'provider-credential-boundary',

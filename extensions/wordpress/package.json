@@ -166,6 +166,7 @@
     "test:codebox-runtime-overlay-defaults": "node tests/codebox-runtime-overlay-defaults.test.js",
     "test:provider-outcome-normalizer": "node tests/provider-outcome-normalizer.test.js",
     "test:codebox-agent-task-executor": "node tests/codebox-agent-task-executor-smoke.js",
+    "test:codebox-native-run-agent-task": "node tests/codebox-native-run-agent-task-smoke.js",
     "test:codebox-agent-task-matrix": "node tests/codebox-agent-task-matrix-smoke.js",
     "test:wordpress-runtime-task-planner": "node tests/wordpress-runtime-task-planner-smoke.js",
     "test:wordpress-hook-surface-discovery": "node tests/wordpress-hook-surface-discovery-smoke.js",

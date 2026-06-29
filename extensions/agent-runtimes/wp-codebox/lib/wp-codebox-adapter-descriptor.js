@@ -6,7 +6,6 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const {
-  WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
   WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
 } = require('./codebox-run-agent-task-contract');
 const {
@@ -23,11 +22,7 @@ const DEFAULT_WP_CODEBOX_CLI_DESCRIPTOR = {
   executable: 'wp-codebox',
   commands: {
     run_agent_task: WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
-    legacy_agent_task_run: WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
     recipe_run: WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
-  },
-  path_aliases: {
-    runtime_bin: ['wp_codebox_bin', 'wpCodeboxBin'],
   },
 };
 
@@ -40,10 +35,6 @@ function wpCodeboxCliDescriptor(overrides = {}) {
     commands: {
       ...DEFAULT_WP_CODEBOX_CLI_DESCRIPTOR.commands,
       ...(overrides.commands || {}),
-    },
-    path_aliases: {
-      ...DEFAULT_WP_CODEBOX_CLI_DESCRIPTOR.path_aliases,
-      ...(overrides.path_aliases || overrides.pathAliases || {}),
     },
   };
 }
@@ -147,11 +138,7 @@ function wpCodeboxSupportsRunAgentTaskCommand(options = {}) {
 	if (/^(1|true|stable)$/i.test(mode)) {
 		return true;
 	}
-	if (/^(0|false|legacy)$/i.test(mode)) {
-		return false;
-	}
-
-	const descriptor = firstObject(options.runtimeDescriptor, options.runtime_descriptor)
+  const descriptor = firstObject(options.runtimeDescriptor, options.runtime_descriptor)
 		|| wpCodeboxRuntimeDescriptor(options);
 	if (!descriptor) {
 		return false;

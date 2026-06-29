@@ -11,10 +11,8 @@ const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
 
 const WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.agentTask.runRequest;
 const WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.agentTask.runResult;
-const WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.agentTask.legacyRunResponse;
 const WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA = WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA;
 const WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND = 'run-agent-task';
-const WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND = 'agent-task-run';
 
 function codeboxRunAgentTaskRequestFromTaskInput(taskInput, options = {}) {
   if (!taskInput || taskInput.schema !== WP_CODEBOX_TASK_REQUEST_SCHEMA) {
@@ -27,27 +25,17 @@ function codeboxRunAgentTaskRequestFromTaskInput(taskInput, options = {}) {
     task_input: taskInput,
     artifacts_path: firstValue(options.artifactsPath, options.artifacts_path, taskInput.artifacts_path),
     callback_data: firstValue(options.callbackData, options.callback_data, taskInput.callback_data),
-    compatibility: {
-      legacy_input_schema: WP_CODEBOX_TASK_REQUEST_SCHEMA,
-      legacy_cli_command: WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
-    },
   });
 }
 
 function codeboxRunAgentTaskInvocation(options = {}) {
-  const useLegacyAgentTaskRunCompatibility = legacyAgentTaskRunCompatibilityEnabled(options);
-  if (useLegacyAgentTaskRunCompatibility && isProductionRuntimeProfile(options)) {
-    throw new Error('Production WP Codebox profiles require stable run-agent-task; legacy agent-task-run compatibility is limited to explicit legacy fixture profiles.');
-  }
-  const input = useLegacyAgentTaskRunCompatibility
-    ? options.taskInput
-    : codeboxRunAgentTaskRequestFromTaskInput(options.taskInput, options);
+  const input = codeboxRunAgentTaskRequestFromTaskInput(options.taskInput, options);
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('Codebox run-agent-task invocation requires taskInput.');
   }
 
   const args = [
-    useLegacyAgentTaskRunCompatibility ? WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND : WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
+    WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
     `--input-file=${options.inputFilePlaceholder || '{{input_file}}'}`,
     '--json',
   ];
@@ -62,37 +50,12 @@ function codeboxRunAgentTaskInvocation(options = {}) {
 
   return {
     contract: WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
-    implementation: useLegacyAgentTaskRunCompatibility ? 'legacy-agent-task-run-compat' : 'stable-run-agent-task',
+    implementation: 'stable-run-agent-task',
     input,
     args,
-    result_schema: useLegacyAgentTaskRunCompatibility ? WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA : WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA,
+    result_schema: WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA,
     result_key: 'agent_task_run_result',
   };
-}
-
-function legacyAgentTaskRunCompatibilityEnabled(options = {}) {
-  return Boolean(
-    options.useLegacyAgentTaskRunCompatibility
-      || options.use_legacy_agent_task_run_compatibility
-      || options.allowLegacyAgentTaskRunCompatibility
-      || options.allow_legacy_agent_task_run_compatibility
-  );
-}
-
-function isProductionRuntimeProfile(options = {}) {
-  const profile = firstObject(options.runtimeProfile, options.runtime_profile, options.profile) || {};
-  const profileId = String(profile.id || options.profileId || options.profile_id || '').toLowerCase();
-  const profileKind = String(profile.kind || profile.type || profile.profile || profile.environment || options.profileKind || options.profile_kind || '').toLowerCase();
-  return profile.production === true
-    || profile.is_production === true
-    || profile.isProduction === true
-    || profileId === 'production'
-    || profileId.endsWith('-production')
-    || profileKind === 'production';
-}
-
-function firstObject(...values) {
-  return values.find((value) => value && typeof value === 'object' && !Array.isArray(value));
 }
 
 function firstValue(...values) {
@@ -104,14 +67,10 @@ function withoutUndefinedValues(value) {
 }
 
 module.exports = {
-  WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA,
   WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA,
-  WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
   WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
   WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
   WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA,
   codeboxRunAgentTaskInvocation,
   codeboxRunAgentTaskRequestFromTaskInput,
-  isProductionRuntimeProfile,
-  legacyAgentTaskRunCompatibilityEnabled,
 };
