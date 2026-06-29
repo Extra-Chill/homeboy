@@ -15,8 +15,6 @@ const {
 } = require('./full-run-inputs.cjs');
 const { resolveRuntimeProvider, runtimeIdFromOptions } = require('./runtime-provider-resolver.cjs');
 const {
-  runtimeAgentCiFirstNonEmptyArray,
-  runtimeAgentCiFirstNonEmptyObject,
   runtimeAgentCiTaskFromRequest,
 } = require('./runtime-agent-ci-plan');
 const {
@@ -78,14 +76,8 @@ function buildConfig(env) {
   const runtimeExecution = parseJsonInput('runtime_execution', env.RUNTIME_EXECUTION || '{}', 'object', {});
   const workload = runtimeWorkloadFromEnv(env, workloadId);
   const toolProfile = parseJsonInput('tool_profile', env.TOOL_PROFILE || env.TOOL_POLICY || '{}', 'object', {});
-  const runtimeOutputProjections = runtimeAgentCiFirstNonEmptyObject(
-    parseJsonInput('runtime_output_projections', env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {}),
-    parseJsonInput('engine_data_outputs', env.ENGINE_DATA_OUTPUTS || '{}', 'object', {})
-  );
-  const evidenceProjections = runtimeAgentCiFirstNonEmptyArray(
-    parseJsonInput('evidence_projections', env.EVIDENCE_PROJECTIONS || '[]', 'array', []),
-    parseJsonInput('tool_recorders', env.TOOL_RECORDERS || '[]', 'array', [])
-  );
+  const runtimeOutputProjections = parseJsonInput('runtime_output_projections', env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {});
+  const evidenceProjections = parseJsonInput('evidence_projections', env.EVIDENCE_PROJECTIONS || '[]', 'array', []);
   const runtimeComponents = parseJsonInput('runtime_components', env.RUNTIME_COMPONENTS || '{}', 'object', {});
   const runtimeOverlays = normalizePathSources(parseJsonInput('runtime_overlays', env.RUNTIME_OVERLAYS || '[]', 'array', []), workspace);
   const runtimeMounts = normalizePathSources(parseJsonInput('runtime_mounts', env.RUNTIME_MOUNTS || '[]', 'array', []), workspace);

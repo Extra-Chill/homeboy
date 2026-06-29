@@ -47,7 +47,7 @@ try {
 					provider_plugins: [{ path: staleProviderPath }],
 				},
 				runtime_task: {
-					ability: 'homeboy/run-runtime-package',
+					ability: 'wp-codebox/run-runtime-package',
 					input: {
 						runtime_package: {
 							slug: 'proof-loop',

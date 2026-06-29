@@ -3,16 +3,16 @@
 const AGENT_TASK_RUNNER_SPEC_SCHEMA = 'homeboy/agent-task-runner-spec/v1';
 
 function agentTaskRunnerSpec(options = {}) {
-  const executorConfig = options.config || options.executorConfig || options.executor_config;
+  const executorConfig = options.config || options.executor_config;
   if (!executorConfig || typeof executorConfig !== 'object' || Array.isArray(executorConfig)) {
     throw new Error('config is required.');
   }
 
   const backend = requiredString(options.backend, 'backend');
-  const runtime = options.runtime || options.runtimeId || options.runtime_id;
-  const taskTimeoutSeconds = options.taskTimeoutSeconds || options.task_timeout_seconds;
-  const timeoutMs = options.timeoutMs || options.timeout_ms || secondsToMs(taskTimeoutSeconds);
-  const maxRuntimeMs = options.maxRuntimeMs || options.max_runtime_ms;
+  const runtime = options.runtime || options.runtime_id;
+  const taskTimeoutSeconds = options.task_timeout_seconds;
+  const timeoutMs = options.timeout_ms || secondsToMs(taskTimeoutSeconds);
+  const maxRuntimeMs = options.max_runtime_ms;
   const limits = stripUndefined({
     ...(options.limits || {}),
     ...(timeoutMs ? { timeout_ms: timeoutMs } : {}),
@@ -20,16 +20,16 @@ function agentTaskRunnerSpec(options = {}) {
     // Compatibility for existing runtime adapters that still read seconds.
     ...(taskTimeoutSeconds ? { task_timeout_seconds: taskTimeoutSeconds } : {}),
   });
-  const artifactDeclarations = normalizeArray(options.artifactDeclarations || options.artifact_declarations);
-  const expectedArtifacts = normalizeArray(options.expectedArtifacts || options.expected_artifacts);
+  const artifactDeclarations = normalizeArray(options.artifact_declarations);
+  const expectedArtifacts = normalizeArray(options.expected_artifacts);
 
   const spec = stripUndefined({
     schema: AGENT_TASK_RUNNER_SPEC_SCHEMA,
     executor: stripUndefined({
       backend,
       ...(runtime ? { runtime } : {}),
-      ...(normalizeArray(options.secretEnv || options.secret_env).length > 0
-        ? { secret_env: normalizeArray(options.secretEnv || options.secret_env) }
+      ...(normalizeArray(options.secret_env).length > 0
+        ? { secret_env: normalizeArray(options.secret_env) }
         : {}),
       config: executorConfig,
     }),

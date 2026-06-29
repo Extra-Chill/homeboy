@@ -10,21 +10,21 @@ const GENERIC_AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const GENERIC_RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 
 function genericAgentTaskRunnerSpec(options = {}) {
-  const config = options.config || options.executorConfig || options.executor_config;
+  const config = options.config || options.executor_config;
   return agentTaskRunnerSpec({
     backend: options.backend,
-    runtime: options.runtime || options.runtimeId || options.runtime_id,
+    runtime: options.runtime || options.runtime_id,
     config,
-    secret_env: normalizeArray(options.secretEnv || options.secret_env),
-    task_timeout_seconds: options.taskTimeoutSeconds || options.task_timeout_seconds,
-    artifact_declarations: options.artifactDeclarations || options.artifact_declarations,
+    secret_env: normalizeArray(options.secret_env),
+    task_timeout_seconds: options.task_timeout_seconds,
+    artifact_declarations: options.artifact_declarations,
     limits: options.limits,
-    expected_artifacts: options.expectedArtifacts || options.expected_artifacts,
+    expected_artifacts: options.expected_artifacts,
   });
 }
 
 function genericAgentTaskRequest(options = {}) {
-  const taskId = requiredString(options.taskId || options.task_id, 'taskId');
+  const taskId = requiredString(options.task_id, 'task_id');
   const runnerRequest = agentTaskRequestFromRunnerSpec({
     runnerSpec: options.runnerSpec || options.runner_spec || genericAgentTaskRunnerSpec(options),
   });
@@ -34,8 +34,8 @@ function genericAgentTaskRequest(options = {}) {
   return stripUndefined({
     schema: options.schema || GENERIC_AGENT_TASK_REQUEST_SCHEMA,
     task_id: taskId,
-    group_key: options.groupKey || options.group_key,
-    parent_plan_id: options.parentPlanId || options.parent_plan_id,
+    group_key: options.group_key,
+    parent_plan_id: options.parent_plan_id,
     cwd: options.cwd,
     repo: options.repo,
     workspace: options.workspace,
@@ -46,14 +46,14 @@ function genericAgentTaskRequest(options = {}) {
     source_refs: sourceRefs === undefined ? undefined : normalizeArray(sourceRefs),
     policy: options.policy,
     limits: runnerRequest.limits,
-    artifact_declarations: options.includeArtifactDeclarations === false ? undefined : runnerRequest.artifact_declarations,
+    artifact_declarations: runnerRequest.artifact_declarations,
     expected_artifacts: runnerRequest.expected_artifacts,
     metadata: options.metadata,
   });
 }
 
 function genericAgentTaskPlan(options = {}) {
-  const planId = requiredString(options.planId || options.plan_id, 'planId');
+  const planId = requiredString(options.plan_id, 'plan_id');
   const tasks = normalizeArray(options.tasks);
   if (tasks.length === 0) {
     throw new Error('tasks must contain at least one task request.');
@@ -101,7 +101,7 @@ function abilityForRuntimeExecutionKind(kind, runtimeProfile = {}) {
 }
 
 function abilityFromRuntimeExecutionContract(contract, runtimeProfile = {}) {
-  const field = contract?.ability_field || contract?.abilityField;
+  const field = contract?.ability_field;
   if (typeof field !== 'string' || field.trim() === '') {
     return '';
   }
@@ -109,11 +109,11 @@ function abilityFromRuntimeExecutionContract(contract, runtimeProfile = {}) {
 }
 
 function assertRuntimeExecutionContractCapabilities(kind, contract, runtimeProfile) {
-  const requiredCapabilities = normalizeArray(contract.required_capabilities || contract.requiredCapabilities || contract.capabilities);
+  const requiredCapabilities = normalizeArray(contract.required_capabilities || contract.capabilities);
   if (requiredCapabilities.length === 0) {
     return;
   }
-  const capabilities = normalizeArray(runtimeProfile.capabilities || runtimeProfile.provider_capabilities || runtimeProfile.providerCapabilities);
+  const capabilities = normalizeArray(runtimeProfile.capabilities || runtimeProfile.provider_capabilities);
   const missing = requiredCapabilities.filter((capability) => !capabilities.includes(capability));
   if (missing.length > 0) {
     throw new Error(`runtime_execution kind ${kind} requires unsupported provider capabilities: ${missing.join(', ')}.`);
@@ -125,7 +125,7 @@ function runtimeExecutionContract(kind, runtimeProfile = {}) {
   if (!normalizedKind) {
     return null;
   }
-  const contracts = runtimeProfile.execution_contracts || runtimeProfile.runtime_execution_contracts || runtimeProfile.runtime_execution_kinds || {};
+  const contracts = runtimeProfile.runtime_execution_contracts || {};
   const contract = contracts[normalizedKind];
   if (typeof contract === 'string') {
     return { kind: normalizedKind, ability: contract };
