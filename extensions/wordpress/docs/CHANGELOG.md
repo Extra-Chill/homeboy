@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.16] - 2026-06-29
+
+### Changed
+- Map runtime discovery CRUD surfaces to Codebox workloads
+
 ## [3.21.15] - 2026-06-29
 
 ### Changed
