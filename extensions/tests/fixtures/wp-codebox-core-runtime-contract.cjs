@@ -52,6 +52,27 @@ const manifest = {
       runFuzzSuite: 'wp-codebox/run-fuzz-suite',
     },
   },
+  commands: {
+    wordpressRuntime: {
+      runWorkload: 'run-wordpress-workload',
+      runFuzzSuite: 'run-fuzz-suite',
+    },
+  },
+  capabilities: {
+    wordpressRuntime: {
+      commands: ['run-fuzz-suite', 'run-wordpress-workload'],
+      capabilities: ['rest', 'disposable-runtime', 'runtime-isolation', 'artifact-export'],
+      runner_modes: { 'runtime-backed': true },
+    },
+  },
+  readiness: {
+    wordpressRuntime: {
+      schema: 'wp-codebox/fuzz-runner-readiness/v1',
+      status: 'ready',
+      mode: 'runtime-backed',
+      command_available: true,
+    },
+  },
   providerRuntime: {
     schema: 'wp-codebox/provider-runtime-invocation-contract/v1',
     version: 1,

@@ -197,10 +197,6 @@ function buildWordPressFuzzRunnerSummary({
 }
 
 async function resolveCodeboxResult(context, options = {}) {
-	if (hasPrecomputedCodeboxResult(context.workload)) {
-		return normalizeCodeboxResult(context.workload, { runId: context.runId, fixtureOnly: precomputedCodeboxResultIsFixtureOnly(context.workload) });
-	}
-
 	const runner = options.runFuzzSuite || options.runRuntimeTask || options.runTask;
 	return runWpCodeboxFuzzSuite({
 		...options,
@@ -487,10 +483,6 @@ function normalizeCodeboxResult(workload, context = {}) {
 			},
 		],
 	});
-}
-
-function hasPrecomputedCodeboxResult(workload = {}) {
-	return Boolean(precomputedCodeboxResult(workload));
 }
 
 function precomputedCodeboxResult(workload = {}) {

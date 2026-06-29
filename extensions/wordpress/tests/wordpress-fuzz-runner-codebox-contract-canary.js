@@ -55,6 +55,9 @@ fs.writeFileSync(fakeCodeboxCoreModule, `module.exports.runtimeContractManifest 
   schema: 'wp-codebox/runtime-contract-manifest/v1',
   version: 1,
   abilities: { wordpressRuntime: { runFuzzSuite: 'wp-codebox/run-fuzz-suite', runWorkload: 'wp-codebox/run-wordpress-workload' } },
+  commands: { wordpressRuntime: { runFuzzSuite: 'run-fuzz-suite', runWorkload: 'run-wordpress-workload' } },
+  capabilities: { wordpressRuntime: { commands: ['run-fuzz-suite', 'run-wordpress-workload'], capabilities: ['rest', 'disposable-runtime', 'runtime-isolation', 'artifact-export'], runner_modes: { 'runtime-backed': true } } },
+  readiness: { wordpressRuntime: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', mode: 'runtime-backed', command_available: true } },
   schemas: { wordpressRuntime: { fuzzSuite: 'wp-codebox/fuzz-suite/v1', fuzzSuiteResult: 'wp-codebox/fuzz-suite-result/v1', workloadRun: 'wp-codebox/wordpress-workload-run/v1' } }
 });\n`);
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
@@ -63,30 +66,16 @@ const fs = require('node:fs');
 const command = process.argv[2];
 const inputFileIndex = process.argv.indexOf('--input-file');
 if (command === 'fuzz' && process.argv[3] === 'readiness' && process.argv.includes('--format=json')) {
-  process.stdout.write(JSON.stringify({
-    schema: 'wp-codebox/fuzz-runner-readiness/v1',
-    status: 'ready',
-    mode: 'runtime-backed',
-    commands: ['run-fuzz-suite', 'run-wordpress-workload'],
-    capabilities: {
-      commands: ['wordpress.rest-request', 'wordpress.run-workload'],
-      runtimeActionTypes: ['rest_request'],
-      capabilities: ['rest', 'disposable-runtime', 'runtime-isolation', 'artifact-export']
-    },
-    disposable: true,
-    isolation: { runtime_backed: true, disposable: true },
-    artifacts: { export: true },
-    unsupportedRequiredCapabilities: []
-  }));
-  process.exit(0);
+  process.stderr.write('production dispatch must not probe fuzz readiness');
+  process.exit(2);
 }
 if (command === 'run-fuzz-suite' && process.argv.includes('--help')) {
-	process.stdout.write('usage: wp-codebox run-fuzz-suite');
-	process.exit(0);
+	process.stderr.write('production dispatch must not probe run-fuzz-suite help');
+	process.exit(2);
 }
 if (command === 'run-wordpress-workload' && process.argv.includes('--help')) {
-	process.stdout.write('usage: wp-codebox run-wordpress-workload');
-	process.exit(0);
+	process.stderr.write('production dispatch must not probe run-wordpress-workload help');
+	process.exit(2);
 }
 if (command !== 'run-fuzz-suite' || inputFileIndex < 0 || !process.argv.includes('--format=json')) {
 	process.stderr.write('expected public run-fuzz-suite --input-file <file> --format=json invocation');

@@ -45,6 +45,12 @@ const runtimeContractManifest = {
 			runFuzzSuite: 'wp-codebox/run-fuzz-suite',
 		},
 	},
+	commands: {
+		wordpressRuntime: {
+			runWorkload: 'run-wordpress-workload',
+			runFuzzSuite: 'run-fuzz-suite',
+		},
+	},
 };
 
 const destructivePlan = {
@@ -114,17 +120,16 @@ const missingReadinessPreflight = preflightWpCodeboxFuzzCapabilityContract({
 	runtimeContractManifest,
 	runPublicCli: ({ args }) => {
 		missingReadinessCliCalls.push(args);
-		assert.deepEqual(args, ['fuzz', 'readiness', '--format=json']);
-		return { status: 1, stdout: '', stderr: 'readiness unavailable' };
+		throw new Error('production dispatch must not probe fuzz readiness');
 	},
 });
 
 assert.equal(missingReadinessPreflight.ok, false);
-assert.deepEqual(missingReadinessCliCalls, [['fuzz', 'readiness', '--format=json']]);
+assert.deepEqual(missingReadinessCliCalls, []);
 assert.equal(missingReadinessPreflight.capabilities.commands['run-fuzz-suite'], false);
 assert.equal(missingReadinessPreflight.capabilities.commands['run-wordpress-workload'], false);
-assert.equal(missingReadinessPreflight.missing_contracts.some((contract) => contract.type === 'public_cli_readiness_command'), true);
-assert.equal(missingReadinessPreflight.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_public_cli_readiness_command'), true);
+assert.equal(missingReadinessPreflight.missing_contracts.some((contract) => contract.type === 'explicit_public_descriptor'), true);
+assert.equal(missingReadinessPreflight.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_explicit_public_descriptor'), true);
 
 const missingManifestPreflight = preflightWpCodeboxFuzzCapabilityContract({
 	request: destructiveRequest,
@@ -246,6 +251,7 @@ assert.deepEqual(normalizeWpCodeboxDestructiveReadiness(completeReadiness, {
 	assert.equal(result.homeboy_fuzz_campaign.metadata.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_destructive_readiness'), true);
 	assert.equal(result.homeboy_fuzz_result_envelope.gates.failures.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_destructive_readiness'), true);
 
+	let precomputedDispatchCalls = 0;
 	const blockedPrecomputed = await runWordPressFuzzRunnerResult({
 		env: {
 			workloadPath: '/unused/precomputed-destructive-workload.json',
@@ -261,33 +267,21 @@ assert.deepEqual(normalizeWpCodeboxDestructiveReadiness(completeReadiness, {
 				status: 'succeeded',
 			},
 		},
-	});
-
-	assert.equal(blockedPrecomputed.status, 'unsupported');
-	assert.equal(blockedPrecomputed.succeeded, false);
-	assert.equal(blockedPrecomputed.wp_codebox_result.metadata.precomputed_result_blocked, true);
-	assert.equal(blockedPrecomputed.wp_codebox_result.failures.some((diagnostic) => diagnostic.code === 'wp_codebox_precomputed_fuzz_result_not_fixture_only'), true);
-
-	const fixturePrecomputed = await runWordPressFuzzRunnerResult({
-		env: {
-			workloadPath: '/unused/fixture-only-destructive-workload.json',
-			workloadId: 'fixture-only-destructive-workload',
-			runId: 'fixture-only-destructive-run',
-		},
-		workload: {
-			id: 'fixture-only-destructive-workload',
-			fixture_only: true,
-			plan: destructivePlan,
-			wp_codebox_suite_result: {
+		runFuzzSuite: async () => {
+			precomputedDispatchCalls += 1;
+			return {
 				schema: 'wp-codebox/fuzz-suite-result/v1',
-				request_id: 'fixture-only-destructive-run',
-				status: 'succeeded',
-			},
+				request_id: 'precomputed-destructive-run',
+				status: 'skipped',
+				diagnostics: [{ severity: 'error', code: 'runner-called', message: 'production dispatch called Codebox' }],
+			};
 		},
 	});
 
-	assert.equal(fixturePrecomputed.status, 'succeeded');
-	assert.equal(fixturePrecomputed.succeeded, true);
+	assert.equal(blockedPrecomputed.status, 'skipped');
+	assert.equal(blockedPrecomputed.succeeded, false);
+	assert.equal(precomputedDispatchCalls, 1);
+	assert.equal(blockedPrecomputed.wp_codebox_result.failures.some((diagnostic) => diagnostic.code === 'runner-called'), true);
 })().catch((error) => {
 	process.nextTick(() => {
 		throw error;

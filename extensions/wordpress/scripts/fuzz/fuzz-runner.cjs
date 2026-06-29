@@ -23,7 +23,10 @@ const { loadWpCodeboxCoreFunction } = require('../../lib/wp-codebox-core-loader'
 const {
 	publicFuzzCliRunnerModeForRequest,
 	wpCodeboxFuzzSuiteAbility,
+	wpCodeboxFuzzSuiteCommand,
 	wpCodeboxRuntimeContractManifest,
+	wpCodeboxWordPressWorkloadRunAbility,
+	wpCodeboxWordPressWorkloadRunCommand,
 } = require('../../lib/wp-codebox-fuzz-run');
 
 const WP_CODEBOX_FUZZ_EXECUTION_SCHEMA = 'homeboy/wp-codebox-fuzz-execution/v1';
@@ -199,16 +202,13 @@ function requiresCodeboxTaskAdapter(request) {
 
 function wpCodeboxCommandFromPublicAbility(ability, options = {}) {
 	const contracts = wpCodeboxRuntimeContractManifest(options)?.abilities?.wordpressRuntime || {};
-	const publicAbilities = new Set([
-		contracts.runWorkload,
-		contracts.runFuzzSuite,
-		'wp-codebox/run-wordpress-workload',
-		'wp-codebox/run-fuzz-suite',
-	].filter(Boolean));
-	if (!publicAbilities.has(ability)) {
-		return '';
+	if (ability === contracts.runFuzzSuite || ability === wpCodeboxFuzzSuiteAbility(options)) {
+		return wpCodeboxFuzzSuiteCommand(options) || '';
 	}
-	return String(ability).replace(/^wp-codebox\//, '');
+	if (ability === contracts.runWorkload || ability === wpCodeboxWordPressWorkloadRunAbility(options)) {
+		return wpCodeboxWordPressWorkloadRunCommand(options) || '';
+	}
+	return '';
 }
 
 async function runWpCodeboxPublicRuntimeCommand(command, invocation, tempDir, options = {}) {

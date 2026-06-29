@@ -162,6 +162,43 @@ assert.deepEqual(executedResult.homeboy_fuzz_result_envelope.dispatch_identity, 
 });
 assert.equal(executedResult.observation.status, 'succeeded');
 
+let productionCodeboxCalls = 0;
+runWordPressFuzzRunnerResult({
+	env: {
+		workloadPath: '/unused/in-unit-test.json',
+		runId: 'production-dispatch-run',
+	},
+	workload: {
+		...workload,
+		fixture_only: true,
+		wp_codebox_suite_result: {
+			schema: 'wp-codebox/fuzz-suite-result/v1',
+			request_id: 'embedded-result-that-must-not-run',
+			status: 'succeeded',
+		},
+	},
+	runFuzzSuite: async () => {
+		productionCodeboxCalls += 1;
+		return {
+			schema: 'wp-codebox/fuzz-suite-result/v1',
+			request_id: 'production-dispatch-run',
+			status: 'succeeded',
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			artifactRefs: [{ name: 'result-envelope', content: { status: 'succeeded' } }],
+			wordpress_fuzz_result: {
+				schema: 'wordpress-fuzz-result/v1',
+				id: 'production-dispatch-result',
+				status: 'passed',
+				cases: [{ id: 'get-posts', status: 'passed' }],
+			},
+		};
+	},
+}).then((productionDispatchResult) => {
+	assert.equal(productionCodeboxCalls, 1);
+	assert.equal(productionDispatchResult.wp_codebox_result.request_id, 'production-dispatch-run');
+	assert.equal(productionDispatchResult.wp_codebox_result.wordpress_fuzz_result.id, 'production-dispatch-result');
+});
+
 const mutatingPlanResult = buildWordPressFuzzRunnerResult({
 	env: {
 		workloadPath: '/unused/in-unit-test.json',
@@ -613,31 +650,16 @@ fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 const subcommand = process.argv[2];
 if (subcommand === 'fuzz' && process.argv[3] === 'readiness' && process.argv.includes('--format=json')) {
-  process.stdout.write(JSON.stringify({
-    schema: 'wp-codebox/fuzz-runner-readiness/v1',
-    status: 'ready',
-    mode: 'runtime-backed',
-    entrypoint: 'run-fuzz-suite --runner-mode=runtime-backed',
-    capabilities: {
-      schema: 'wp-codebox/fuzz-runner-capabilities/v1',
-      mode: 'runtime-backed',
-      capabilities: ['target:runtime', 'runtime'],
-      targetKinds: ['runtime'],
-      operationKinds: ['read'],
-      commands: ['run-fuzz-suite', 'wordpress.run-workload'],
-      unsupportedRequiredCapabilities: []
-    },
-    unsupportedRequiredCapabilities: []
-  }));
-  process.exit(0);
+	process.stderr.write('production dispatch must not probe fuzz readiness');
+	process.exit(2);
 }
 if (subcommand === 'run-fuzz-suite' && process.argv.includes('--help')) {
-  process.stdout.write('usage: wp-codebox run-fuzz-suite');
-  process.exit(0);
+	process.stderr.write('production dispatch must not probe run-fuzz-suite help');
+	process.exit(2);
 }
 if (subcommand === 'run-wordpress-workload' && process.argv.includes('--help')) {
-  process.stderr.write('unknown command');
-  process.exit(1);
+	process.stderr.write('production dispatch must not probe run-wordpress-workload help');
+	process.exit(2);
 }
 const inputFileIndex = process.argv.indexOf('--input-file');
 const request = inputFileIndex === -1 ? undefined : JSON.parse(fs.readFileSync(process.argv[inputFileIndex + 1], 'utf8'));
@@ -727,12 +749,12 @@ fs.writeFileSync(taskAdapterCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 const command = process.argv[2];
 if (command === 'run-fuzz-suite' && process.argv.includes('--help')) {
-  process.stdout.write('usage: wp-codebox run-fuzz-suite');
-  process.exit(0);
+	process.stderr.write('production dispatch must not probe run-fuzz-suite help');
+	process.exit(2);
 }
 if (command === 'run-wordpress-workload' && process.argv.includes('--help')) {
-  process.stdout.write('usage: wp-codebox run-wordpress-workload');
-  process.exit(0);
+	process.stderr.write('production dispatch must not probe run-wordpress-workload help');
+	process.exit(2);
 }
 const inputFile = process.argv[process.argv.indexOf('--input-file') + 1];
 const request = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
