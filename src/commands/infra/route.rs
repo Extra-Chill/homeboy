@@ -8,7 +8,7 @@ use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runners::{self, RunnerExecOptions};
 use homeboy::core::Error;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::commands::utils::output::write_output_file;
 
@@ -397,11 +397,38 @@ fn run_rig_source_management_on_runner(
         }
     }
 
+    // `rig install <source>` forwards the controller-local rig package path. When
+    // that package lives outside the synced working directory the runner cannot
+    // see it and fails with `Path does not exist: /Users/...`, so the documented
+    // one-command `rig install --runner` offload is broken without a local
+    // pre-install + `--skip-install` (#6964). Materialize the source's containing
+    // checkout on the runner and translate the forwarded path through the same
+    // sync+translate seam the working directory already uses. Syncing the
+    // containing checkout (not just the package directory) keeps rigs that
+    // declare `package_dependencies` — which resolve against the repo root — and
+    // package-level `extends` templates working on the runner.
+    let rig_install_source_root = rig_install_source_sync_root(&command);
+    if let Some(source_root) = rig_install_source_root.as_deref() {
+        let (synced, sync_exit_code) = runners::sync_workspace(
+            runner_id,
+            runners::RunnerWorkspaceSyncOptions {
+                path: source_root.display().to_string(),
+                mode: runners::RunnerWorkspaceSyncMode::Snapshot,
+                ..Default::default()
+            },
+        )?;
+        if sync_exit_code == 0 {
+            command = translate_command_path_prefix(&command, source_root, &synced.remote_path);
+            translated_remote_root = synced.remote_path;
+        }
+    }
+
     // Remote-execution preflight before dispatching caller-derived argv to the
     // runner (#5093):
     // 1. Path-translation: reject any forwarded argument that still embeds the
-    //    controller-local working directory instead of the runner-resident
-    //    workspace, so a controller-only path never reaches the remote runtime.
+    //    controller-local working directory or rig-install source path instead of
+    //    the runner-resident workspace, so a controller-only path never reaches
+    //    the remote runtime.
     // 2. Capability parity: validate the runner can run the forwarded `homeboy`
     //    binary before execution starts (enforced by `runners::exec` against the
     //    supplied `RunnerCapabilityPreflight`).
@@ -411,6 +438,15 @@ fn run_rig_source_management_on_runner(
             runner_id,
             &command,
             local_cwd,
+            &translated_remote_root,
+        )?;
+    }
+    if let Some(source_root) = rig_install_source_root.as_deref() {
+        runners::preflight_remote_argv_path_translation(
+            "Rig source management",
+            runner_id,
+            &command,
+            source_root,
             &translated_remote_root,
         )?;
     }
@@ -479,6 +515,53 @@ fn translate_command_path_prefix(
             }
         })
         .collect()
+}
+
+/// Resolve the controller-local sync root for a `rig install <source>` argument
+/// that still references a path on this controller after working-directory
+/// translation. Returns the source's containing git checkout (or the path
+/// itself when it is not inside a git repo) so the caller can materialize it on
+/// the runner and translate the forwarded argument (#6964).
+///
+/// Returns `None` for git-URL sources, paths already translated to the runner,
+/// and any source that does not exist on this controller — leaving non-path and
+/// already-remote arguments untouched.
+fn rig_install_source_sync_root(command: &[String]) -> Option<PathBuf> {
+    let source = rig_install_source_arg(command)?;
+    let expanded = shellexpand::tilde(&source).to_string();
+    let path = Path::new(&expanded);
+    if !path.exists() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    Some(homeboy::core::git::repo_root(&canonical).unwrap_or(canonical))
+}
+
+/// Return the positional `<source>` of a `rig install` command, skipping the
+/// flags the subcommand accepts (`--id <value>`, `--id=<value>`, `--all`,
+/// `--reinstall`/`--force`). The command argv is `[homeboy, rig, install, ...]`
+/// with controller-only globals already stripped by
+/// [`runner_rig_source_management_command`].
+fn rig_install_source_arg(command: &[String]) -> Option<String> {
+    let install_index = command
+        .windows(2)
+        .position(|window| window[0] == "rig" && window[1] == "install")?
+        + 2;
+    let mut iter = command[install_index..].iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            return iter.next().cloned();
+        }
+        if arg == "--id" {
+            iter.next();
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        return Some(arg.clone());
+    }
+    None
 }
 
 fn runner_rig_source_management_command(
@@ -1115,6 +1198,110 @@ mod tests {
         assert_eq!(
             translated[3],
             "/home/chubes/Developer/_lab_workspaces/homeboy-rigs-run-abc/WordPress/static-site-importer"
+        );
+    }
+
+    #[test]
+    fn rig_install_source_arg_finds_positional_source_after_flags() {
+        let command = vec![
+            "/runner/bin/homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            "--id".to_string(),
+            "static-site-importer".to_string(),
+            "--reinstall".to_string(),
+            "/Users/chubes/Developer/homeboy-rigs@run/WordPress/static-site-importer".to_string(),
+            "--all".to_string(),
+        ];
+
+        assert_eq!(
+            rig_install_source_arg(&command).as_deref(),
+            Some("/Users/chubes/Developer/homeboy-rigs@run/WordPress/static-site-importer")
+        );
+    }
+
+    #[test]
+    fn rig_install_source_arg_ignores_non_install_commands() {
+        let command = vec![
+            "/runner/bin/homeboy".to_string(),
+            "rig".to_string(),
+            "sources".to_string(),
+            "list".to_string(),
+        ];
+
+        assert_eq!(rig_install_source_arg(&command), None);
+    }
+
+    #[test]
+    fn rig_install_source_sync_root_resolves_existing_local_package() {
+        let source_dir = tempdir().expect("source dir");
+        let source_path = source_dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp dir")
+            .join("static-site-importer");
+        fs::create_dir_all(&source_path).expect("create source package");
+        let command = vec![
+            "/runner/bin/homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            source_path.to_string_lossy().to_string(),
+        ];
+
+        let sync_root = rig_install_source_sync_root(&command).expect("sync root");
+
+        // The temp dir is not a git repo, so the package directory itself is the
+        // materialization root.
+        assert_eq!(sync_root, source_path);
+    }
+
+    #[test]
+    fn rig_install_source_sync_root_skips_git_url_and_missing_paths() {
+        let git_url = vec![
+            "/runner/bin/homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            "https://github.com/Extra-Chill/homeboy-rigs.git".to_string(),
+        ];
+        assert_eq!(rig_install_source_sync_root(&git_url), None);
+
+        let missing = vec![
+            "/runner/bin/homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            "/Users/chubes/Developer/does-not-exist-rig-package-6964".to_string(),
+        ];
+        assert_eq!(rig_install_source_sync_root(&missing), None);
+    }
+
+    #[test]
+    fn rig_install_offload_translates_source_path_instead_of_forwarding_it() {
+        let source_dir = tempdir().expect("source dir");
+        let source_path = source_dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp dir")
+            .join("static-site-importer");
+        fs::create_dir_all(&source_path).expect("create source package");
+        let local_source = source_path.to_string_lossy().to_string();
+        let command = vec![
+            "/runner/bin/homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            local_source.clone(),
+            "--reinstall".to_string(),
+        ];
+
+        let sync_root = rig_install_source_sync_root(&command).expect("sync root");
+        let remote_root = "/home/runner/Developer/_lab_workspaces/static-site-importer-abc";
+        let translated = translate_command_path_prefix(&command, &sync_root, remote_root);
+
+        // The forwarded source must be the runner-side path, never the
+        // controller-local path that broke `rig install --runner` (#6964).
+        assert_eq!(translated[3], remote_root);
+        assert!(
+            !translated.iter().any(|arg| arg.contains(&local_source)),
+            "controller-local source path must not be forwarded: {translated:?}"
         );
     }
 
