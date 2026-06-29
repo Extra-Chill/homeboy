@@ -32,6 +32,37 @@ fn fuzz_replay_parses_artifact_and_case_id_flags() {
 }
 
 #[test]
+fn fuzz_minimize_parses_artifact_and_case_id_flags() {
+    let cli = FuzzCli::parse_from([
+        "fuzz",
+        "minimize",
+        "/tmp/fuzz-results.json",
+        "--component",
+        "component-a",
+        "--case-id",
+        "case-1",
+        "--run-id",
+        "proof-1",
+        "--",
+        "--runner-flag",
+    ]);
+
+    match cli.args.command {
+        Some(FuzzCommand::Minimize(minimize)) => {
+            assert_eq!(minimize.component.as_deref(), Some("component-a"));
+            assert_eq!(
+                minimize.artifact_or_case.as_deref(),
+                Some("/tmp/fuzz-results.json")
+            );
+            assert_eq!(minimize.case_id.as_deref(), Some("case-1"));
+            assert_eq!(minimize.run_id.as_deref(), Some("proof-1"));
+            assert_eq!(minimize.args, vec!["--runner-flag"]);
+        }
+        _ => panic!("expected fuzz minimize command"),
+    }
+}
+
+#[test]
 fn fuzz_replay_resolves_campaign_metadata_without_executing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("fuzz-results.json");
@@ -104,6 +135,7 @@ fn fuzz_replay_executes_manifest_replay_command_with_env() {
             Some(
                 r#"sh -c 'printf %s:%s:%s "$HOMEBOY_FUZZ_REPLAY_CASE_ID" "$HOMEBOY_FUZZ_REPLAY_SEED" "$1"' replay-runner {case}"#,
             ),
+            None,
         );
         write_fuzz_rig(
             home,
@@ -145,7 +177,7 @@ fn fuzz_replay_executes_manifest_replay_command_with_env() {
 fn fuzz_replay_reports_unsupported_when_manifest_has_no_replay_command() {
     with_isolated_home(|home| {
         let component_dir = tempfile::tempdir().expect("component dir");
-        write_fuzz_extension(home.path(), "fixture-fuzz", None);
+        write_fuzz_extension(home.path(), "fixture-fuzz", None, None);
         write_fuzz_rig(
             home,
             "fixture-rig",
@@ -179,7 +211,97 @@ fn fuzz_replay_reports_unsupported_when_manifest_has_no_replay_command() {
     });
 }
 
-fn write_fuzz_extension(home: &Path, id: &str, replay_command: Option<&str>) {
+#[test]
+fn fuzz_minimize_executes_manifest_minimize_command_with_replay_env() {
+    with_isolated_home(|home| {
+        let component_dir = tempfile::tempdir().expect("component dir");
+        write_fuzz_extension(
+            home.path(),
+            "fixture-fuzz",
+            None,
+            Some(
+                r#"sh -c 'printf min:%s:%s:%s "$HOMEBOY_FUZZ_REPLAY_CASE_ID" "$HOMEBOY_FUZZ_REPLAY_SEED" "$1"' minimize-runner {case}"#,
+            ),
+        );
+        write_fuzz_rig(
+            home,
+            "fixture-rig",
+            "component-a",
+            component_dir.path(),
+            "fixture-fuzz",
+        );
+        let path = write_replay_campaign(component_dir.path());
+
+        let (output, exit) = run_minimize(FuzzMinimizeArgs {
+            component: Some("component-a".to_string()),
+            path: None,
+            rig: Some("fixture-rig".to_string()),
+            extension_override: ExtensionOverrideArgs::default(),
+            setting_args: SettingArgs::default(),
+            artifact_or_case: Some(path.to_string_lossy().to_string()),
+            artifact: None,
+            case_id: Some("case-1".to_string()),
+            run_id: Some("proof-1".to_string()),
+            dry_run: false,
+            args: vec!["--extra".to_string()],
+        })
+        .expect("execute minimize");
+
+        assert_eq!(exit, 0);
+        assert_eq!(output.command, "fuzz.minimize");
+        assert_eq!(output.status, "passed");
+        assert!(output.replay_command.as_deref().unwrap().contains("case-1"));
+        let execution = output.execution.expect("execution");
+        assert_eq!(execution.kind, "fuzz_minimize");
+        assert_eq!(execution.stdout, "min:case-1:1234:case-1");
+    });
+}
+
+#[test]
+fn fuzz_minimize_reports_unsupported_without_minimize_command() {
+    with_isolated_home(|home| {
+        let component_dir = tempfile::tempdir().expect("component dir");
+        write_fuzz_extension(home.path(), "fixture-fuzz", Some("true"), None);
+        write_fuzz_rig(
+            home,
+            "fixture-rig",
+            "component-a",
+            component_dir.path(),
+            "fixture-fuzz",
+        );
+        let path = write_replay_campaign(component_dir.path());
+
+        let (output, exit) = run_minimize(FuzzMinimizeArgs {
+            component: Some("component-a".to_string()),
+            path: None,
+            rig: Some("fixture-rig".to_string()),
+            extension_override: ExtensionOverrideArgs::default(),
+            setting_args: SettingArgs::default(),
+            artifact_or_case: Some(path.to_string_lossy().to_string()),
+            artifact: None,
+            case_id: Some("case-1".to_string()),
+            run_id: Some("proof-1".to_string()),
+            dry_run: false,
+            args: Vec::new(),
+        })
+        .expect("resolve unsupported minimize");
+
+        assert_eq!(exit, 1);
+        assert_eq!(output.command, "fuzz.minimize");
+        assert_eq!(output.status, "unsupported");
+        assert!(output
+            .message
+            .contains("does not declare fuzz.minimize_command"));
+        assert!(output.execution.is_none());
+    });
+}
+
+fn write_fuzz_extension(
+    home: &Path,
+    id: &str,
+    replay_command: Option<&str>,
+    minimize_command: Option<&str>,
+) {
     let extension_dir = home.join(".config/homeboy/extensions").join(id);
     fs::create_dir_all(&extension_dir).expect("extension dir");
     let mut fuzz = serde_json::json!({
@@ -187,6 +309,9 @@ fn write_fuzz_extension(home: &Path, id: &str, replay_command: Option<&str>) {
     });
     if let Some(command) = replay_command {
         fuzz["replay_command"] = serde_json::Value::String(command.to_string());
+    }
+    if let Some(command) = minimize_command {
+        fuzz["minimize_command"] = serde_json::Value::String(command.to_string());
     }
     fs::write(
         extension_dir.join(format!("{id}.json")),

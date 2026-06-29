@@ -35,11 +35,13 @@ rig package / local spec
 | `show <id>` | Print one rig spec as JSON. |
 | `up <id>` | Run the rig's `up` pipeline and materialize the environment. |
 | `check <id>` | Run the rig's `check` pipeline and report all failures. |
+| `lint <target>` | Lint a rig ID, package path, or `rig.json` without touching the environment. |
 | `down <id>` | Run the rig's `down` pipeline and stop managed services. |
 | `repair <id>` | Repair safe declared drift without running the full `up` pipeline. |
 | `sync <id>` | Sync every stack declared by the rig's components. |
 | `status <id>` | Show running services and last `up` / `check` state. |
 | `runs <id>` | List persisted observation runs for the rig. |
+| `release-lock <id>` | Release a stuck active-run rig lease after verifying no owner is active. |
 | `install <source>` | Install rigs from a local package path or git URL. |
 | `update [id]` | Pull and refresh git-backed installed rig packages. |
 | `sources ...` | Inspect, refresh, or remove installed rig source packages. |
@@ -101,6 +103,19 @@ homeboy rig check studio
 ```
 
 Runs the `check` pipeline and reports every failing step instead of stopping at the first failure. Use this as the preflight for a local environment.
+
+### `lint`
+
+```sh
+homeboy rig lint studio
+homeboy rig lint ./packages/studio --id studio
+homeboy rig lint ./packages/studio/rigs/studio/rig.json
+```
+
+Runs env-independent rig package lint only: conflict markers, JSON validity, and
+`extends` template materialization. It does not run requirements, component
+checkout probes, services, or live `check` steps, so CI can validate rig packages
+before a full environment exists.
 
 ### `down`
 
@@ -208,6 +223,16 @@ homeboy rig sync studio --dry-run
   }
 }
 ```
+
+## Active-Run Locks
+
+```sh
+homeboy rig release-lock studio
+```
+
+Releases a stuck active-run lock for a rig lease so a new local run can proceed.
+Use it only after verifying the recorded owner process or runner is no longer
+active; normal `up`, `check`, `down`, and `repair` flows release their own locks.
 
 ## App Launchers
 

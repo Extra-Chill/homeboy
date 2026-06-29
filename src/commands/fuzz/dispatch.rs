@@ -14,7 +14,7 @@ use super::doctor::run_doctor;
 use super::execution::run_run;
 use super::inspect::run_inspect;
 use super::planning::run_plan;
-use super::replay::run_replay;
+use super::replay::{run_minimize, run_replay};
 use super::report::{run_report, run_validate};
 use super::types::{
     FuzzArgs, FuzzCommand, FuzzContractOutput, FuzzDiscoverArgs, FuzzDiscoverOutput,
@@ -49,6 +49,10 @@ pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
         Some(FuzzCommand::Replay(replay_args)) => {
             let (output, exit) = run_replay(replay_args)?;
             Ok((FuzzOutput::Replay(output), exit))
+        }
+        Some(FuzzCommand::Minimize(minimize_args)) => {
+            let (output, exit) = run_minimize(minimize_args)?;
+            Ok((FuzzOutput::Minimize(output), exit))
         }
         Some(FuzzCommand::Inspect(inspect_args)) => {
             let output = run_inspect(inspect_args)?;

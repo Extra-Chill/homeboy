@@ -79,6 +79,8 @@ pub(crate) enum FuzzCommand {
     Compare(FuzzCompareArgs),
     /// Resolve replay metadata for persisted fuzz cases
     Replay(FuzzReplayArgs),
+    /// Resolve minimization metadata for persisted fuzz cases
+    Minimize(FuzzMinimizeArgs),
     /// Print the raw fuzz runner result for a run without spelunking runner logs
     Inspect(FuzzInspectArgs),
 }
@@ -453,6 +455,51 @@ pub(crate) struct FuzzReplayArgs {
     pub(crate) dry_run: bool,
 
     /// Additional arguments passed to the extension replay command.
+    #[arg(last = true)]
+    pub(crate) args: Vec<String>,
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct FuzzMinimizeArgs {
+    /// Component ID used to resolve the extension minimize_command.
+    #[arg(long = "component", value_name = "ID")]
+    pub(crate) component: Option<String>,
+
+    /// Override the component checkout path for minimize command execution.
+    #[arg(long)]
+    pub(crate) path: Option<String>,
+
+    /// Resolve minimization through a rig's component path and extension config.
+    #[arg(long, value_name = "RIG_ID")]
+    pub(crate) rig: Option<String>,
+
+    #[command(flatten)]
+    pub(crate) extension_override: ExtensionOverrideArgs,
+
+    #[command(flatten)]
+    pub(crate) setting_args: SettingArgs,
+
+    /// Fuzz campaign/result envelope path, or a case id when --artifact is used.
+    #[arg(value_name = "ARTIFACT_OR_CASE")]
+    pub(crate) artifact_or_case: Option<String>,
+
+    /// Fuzz campaign or result envelope artifact to inspect for minimization metadata.
+    #[arg(long = "artifact", value_name = "PATH")]
+    pub(crate) artifact: Option<PathBuf>,
+
+    /// Case id to minimize from the campaign/envelope artifact.
+    #[arg(long = "case-id", value_name = "ID")]
+    pub(crate) case_id: Option<String>,
+
+    /// Stable Homeboy run id associated with the persisted fuzz evidence.
+    #[arg(long = "run-id", value_name = "ID")]
+    pub(crate) run_id: Option<String>,
+
+    /// Resolve minimization metadata and command environment without executing minimize_command.
+    #[arg(long = "dry-run")]
+    pub(crate) dry_run: bool,
+
+    /// Additional arguments passed to the extension minimize command.
     #[arg(last = true)]
     pub(crate) args: Vec<String>,
 }

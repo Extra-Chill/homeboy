@@ -13,6 +13,7 @@ homeboy fuzz validate <results-file>
 homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--output-envelope <path>]
 homeboy fuzz compare <baseline-envelope> <candidate-envelope> [--hotspot-policy <advisory|blocking|off>]
 homeboy fuzz replay [<artifact-or-case>] [--artifact <path>] [--case-id <id>] [--run-id <id>] [-- <runner-args>]
+homeboy fuzz minimize [<artifact-or-case>] [--artifact <path>] [--case-id <id>] [--run-id <id>] [--dry-run] [-- <runner-args>]
 ```
 
 ## Description
@@ -330,10 +331,10 @@ homeboy fuzz replay fuzz-results.json --case-id case-1
 homeboy fuzz replay case-1 --artifact fuzz-results.json
 ```
 
-Replay currently returns a validated `dry_run` contract rather than executing a
-runner. The output includes the campaign/envelope ids, selected case id, matching
-`replay` metadata when present, passthrough args, and environment variables for
-the originating extension-owned replay runner:
+Replay and minimize resolve a validated contract before execution. The output
+includes the campaign/envelope ids, selected case id, matching `replay` metadata
+when present, passthrough args, and environment variables for the originating
+extension-owned replay or minimization runner:
 
 ```text
 HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE
@@ -342,10 +343,40 @@ HOMEBOY_FUZZ_REPLAY_ID
 HOMEBOY_FUZZ_REPLAY_SEED
 HOMEBOY_FUZZ_REPLAY_ARTIFACT_ID
 HOMEBOY_FUZZ_RUN_ID
+HOMEBOY_FUZZ_REPLAY_RUN_ID
 ```
 
-Homeboy does not fake replay execution without a resolved component/extension
-context. Extension scripts own concrete replay execution.
+`homeboy fuzz replay` executes extension-owned `fuzz.replay_command` when a
+component/rig extension context declares one. `homeboy fuzz minimize` executes
+extension-owned `fuzz.minimize_command` using the same artifact, case, replay
+metadata, env, placeholder, and passthrough-argument contract. Both commands
+support `--dry-run` to inspect metadata and command generation without execution.
+
+Homeboy does not fake replay or minimization without a resolved
+component/extension context. If the extension manifest omits the relevant command,
+the CLI returns `unsupported` and prints the resolved contract. Concrete replay
+and minimization behavior belongs to extension scripts.
+
+Manifest commands support placeholders that Homeboy shell-quotes before
+execution: `{artifact}`, `{artifact_file}`, `{case}`, `{case_id}`, `{run_id}`,
+`{replay}`, `{replay_id}`, `{seed}`, `{replay_seed}`, `{artifact_id}`,
+`{case_artifact}`, and `{replay_artifact_id}`. Additional CLI args after `--`
+are appended to the rendered extension command.
+
+## Portable Fuzz Evidence Bundles
+
+`homeboy runs export --run <run-id> --output <dir>` exports runs, artifacts,
+trace spans, findings, and test failures as a portable observation bundle. When a
+file artifact is available locally, the bundle includes its bytes under
+`artifact-bytes/`, records refs/checksums/sizes in `artifact_bytes.json`, and
+stamps the exported artifact with `bundle://...`, SHA-256, size, and
+`metadata_json.portable_bundle`. Missing local files and directories remain
+metadata-only refs.
+
+`homeboy runs import <dir>` validates bundled artifact byte checksums and sizes
+before importing. Imported artifacts with valid bundle bytes point at the bundled
+file path, preserving bytes for downstream inspection without relying on the
+producer machine's original local path.
 
 Full-coverage claims need persisted proof artifacts. A neutral coverage summary
 can report declared, executable, and proven counts; operation totals; skipped
@@ -501,8 +532,8 @@ Rigs can add private fuzz workloads keyed by extension id:
 
 ## Output
 
-`contract`, `list`, `plan`, `run`, `validate`, `report`, and `replay` return
-JSON envelopes with stable `variant` values.
+`contract`, `list`, `plan`, `run`, `validate`, `report`, `replay`, and
+`minimize` return JSON envelopes with stable `variant` values.
 
 `run.execution.results_file` is the path advertised to the runner through
 `HOMEBOY_FUZZ_RESULTS_FILE`. `run.results` is present only when the runner wrote

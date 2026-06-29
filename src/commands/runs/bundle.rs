@@ -76,6 +76,8 @@ pub struct ObservationBundleManifest {
     pub homeboy_version: String,
     pub run_count: usize,
     pub artifact_count: usize,
+    #[serde(default)]
+    pub artifact_byte_count: usize,
     pub trace_span_count: usize,
     #[serde(default)]
     pub finding_count: usize,
@@ -88,9 +90,21 @@ struct ObservationBundle {
     manifest: ObservationBundleManifest,
     runs: Vec<RunRecord>,
     artifacts: Vec<ArtifactRecord>,
+    #[serde(default)]
+    artifact_bytes: Vec<ObservationBundleArtifactBytes>,
     trace_spans: Vec<TraceSpanRecord>,
     findings: Vec<RecordedHomeboyFinding>,
     test_failures: Vec<RecordedHomeboyFinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ObservationBundleArtifactBytes {
+    artifact_id: String,
+    path: String,
+    sha256: String,
+    size_bytes: i64,
+    #[serde(skip)]
+    source_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -110,6 +124,7 @@ pub struct RunsExportOutput {
     pub manifest: ObservationBundleManifest,
     pub run_count: usize,
     pub artifact_count: usize,
+    pub artifact_byte_count: usize,
     pub trace_span_count: usize,
     pub finding_count: usize,
     pub test_failure_count: usize,
@@ -158,6 +173,7 @@ pub(super) fn export_runs(args: RunsExportArgs) -> CmdResult<RunsOutput> {
             output: args.output.to_string_lossy().to_string(),
             run_count: bundle.runs.len(),
             artifact_count: bundle.artifacts.len(),
+            artifact_byte_count: bundle.artifact_bytes.len(),
             trace_span_count: bundle.trace_spans.len(),
             finding_count: bundle.findings.len(),
             test_failure_count: bundle.test_failures.len(),
@@ -188,7 +204,7 @@ pub(super) fn import_runs(args: RunsImportArgs) -> CmdResult<RunsOutput> {
     let mut artifacts = 0usize;
     let mut artifact_metadata_only = 0usize;
     for artifact in &bundle.artifacts {
-        let artifact = imported_artifact_record(artifact);
+        let artifact = imported_artifact_record(artifact, &bundle, &input);
         if artifact.artifact_type == "metadata-only" {
             artifact_metadata_only += 1;
         } else {
@@ -239,8 +255,14 @@ fn import_bundle_run(
 fn rewrite_bundle_run_references(bundle: &mut ObservationBundle, from: &str, to: &str) {
     for artifact in &mut bundle.artifacts {
         if artifact.run_id == from {
+            let original_artifact_id = artifact.id.clone();
             artifact.id = remapped_child_record_id(&artifact.id, to);
             artifact.run_id = to.to_string();
+            for bytes in &mut bundle.artifact_bytes {
+                if bytes.artifact_id == original_artifact_id {
+                    bytes.artifact_id = artifact.id.clone();
+                }
+            }
         }
     }
     for span in &mut bundle.trace_spans {
@@ -283,7 +305,23 @@ fn remapped_lab_run_id(run: &RunRecord) -> homeboy::core::Result<String> {
     Ok(format!("{}-imported-{}", run.id, &hex[..16]))
 }
 
-fn imported_artifact_record(artifact: &ArtifactRecord) -> ArtifactRecord {
+fn imported_artifact_record(
+    artifact: &ArtifactRecord,
+    bundle: &ObservationBundle,
+    input: &Path,
+) -> ArtifactRecord {
+    if artifact.artifact_type == "file" {
+        if let Some(bytes) = bundle.artifact_bytes.iter().find(|bytes| {
+            bytes.artifact_id == artifact.id && artifact.path == bundle_artifact_uri(&bytes.path)
+        }) {
+            let mut imported = artifact.clone();
+            imported.path = input.join(&bytes.path).to_string_lossy().to_string();
+            imported.sha256 = Some(bytes.sha256.clone());
+            imported.size_bytes = Some(bytes.size_bytes);
+            return imported;
+        }
+    }
+
     if !matches!(artifact.artifact_type.as_str(), "file" | "directory") {
         return artifact.clone();
     }
@@ -334,15 +372,17 @@ fn build_bundle(
     runs: Vec<RunRecord>,
 ) -> homeboy::core::Result<ObservationBundle> {
     let mut artifacts = Vec::new();
+    let mut artifact_bytes = Vec::new();
     let mut trace_spans = Vec::new();
     let mut findings = Vec::new();
     for run in &runs {
-        artifacts.extend(
-            store
-                .list_artifacts(&run.id)?
-                .into_iter()
-                .map(portable_bundle_artifact_record),
-        );
+        for artifact in store.list_artifacts(&run.id)? {
+            let (artifact, bytes) = portable_bundle_artifact_record(artifact)?;
+            artifacts.push(artifact);
+            if let Some(bytes) = bytes {
+                artifact_bytes.push(bytes);
+            }
+        }
         trace_spans.extend(store.list_trace_spans(&run.id)?);
         findings.extend(
             store
@@ -363,6 +403,7 @@ fn build_bundle(
         homeboy_version: env!("CARGO_PKG_VERSION").to_string(),
         run_count: runs.len(),
         artifact_count: artifacts.len(),
+        artifact_byte_count: artifact_bytes.len(),
         trace_span_count: trace_spans.len(),
         finding_count: findings.len(),
         test_failure_count: test_failures.len(),
@@ -371,17 +412,59 @@ fn build_bundle(
         manifest,
         runs,
         artifacts,
+        artifact_bytes,
         trace_spans,
         findings,
         test_failures,
     })
 }
 
-fn portable_bundle_artifact_record(artifact: ArtifactRecord) -> ArtifactRecord {
-    if !matches!(artifact.artifact_type.as_str(), "file" | "directory")
-        || is_reportable_artifact_evidence_path(&artifact.path)
-    {
-        return artifact;
+fn portable_bundle_artifact_record(
+    artifact: ArtifactRecord,
+) -> homeboy::core::Result<(ArtifactRecord, Option<ObservationBundleArtifactBytes>)> {
+    if !matches!(artifact.artifact_type.as_str(), "file" | "directory") {
+        return Ok((artifact, None));
+    }
+
+    if artifact.artifact_type == "file" {
+        let source_path = PathBuf::from(&artifact.path);
+        if source_path.is_file() {
+            let bytes = fs::read(&source_path).map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some(format!("read artifact bytes {}", source_path.display())),
+                )
+            })?;
+            let sha256 = format!("{:x}", Sha256::digest(&bytes));
+            let size_bytes = i64::try_from(bytes.len()).map_err(|_| {
+                Error::internal_unexpected(format!(
+                    "artifact {} is too large to record a portable size",
+                    artifact.id
+                ))
+            })?;
+            let path = format!("artifact-bytes/{}", portable_artifact_file_name(&artifact));
+            let mut portable = artifact;
+            portable.path = bundle_artifact_uri(&path);
+            portable.sha256 = Some(sha256.clone());
+            portable.size_bytes = Some(size_bytes);
+            portable.metadata_json =
+                with_bundle_byte_metadata(portable.metadata_json, &path, &sha256, size_bytes);
+            let artifact_id = portable.id.clone();
+            return Ok((
+                portable,
+                Some(ObservationBundleArtifactBytes {
+                    artifact_id,
+                    path,
+                    sha256,
+                    size_bytes,
+                    source_path: Some(source_path),
+                }),
+            ));
+        }
+    }
+
+    if is_reportable_artifact_evidence_path(&artifact.path) {
+        return Ok((artifact, None));
     }
 
     let mut portable = artifact;
@@ -389,7 +472,60 @@ fn portable_bundle_artifact_record(artifact: ArtifactRecord) -> ArtifactRecord {
     portable.path = EXECUTION_CONTRACT
         .artifacts
         .metadata_only_ref(&portable_artifact_label(&portable.path, &portable.id));
-    portable
+    Ok((portable, None))
+}
+
+fn portable_artifact_file_name(artifact: &ArtifactRecord) -> String {
+    let label = portable_artifact_label(&artifact.path, &artifact.id);
+    format!(
+        "{}-{}",
+        safe_bundle_segment(&artifact.id),
+        safe_bundle_segment(&label)
+    )
+}
+
+fn safe_bundle_segment(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    sanitized.trim_matches('-').to_string()
+}
+
+fn bundle_artifact_uri(path: &str) -> String {
+    format!("bundle://{path}")
+}
+
+fn with_bundle_byte_metadata(
+    metadata: serde_json::Value,
+    path: &str,
+    sha256: &str,
+    size_bytes: i64,
+) -> serde_json::Value {
+    let mut object = match metadata {
+        serde_json::Value::Object(object) => object,
+        other if other.is_null() => serde_json::Map::new(),
+        other => {
+            let mut object = serde_json::Map::new();
+            object.insert("original_metadata".to_string(), other);
+            object
+        }
+    };
+    object.insert(
+        "portable_bundle".to_string(),
+        serde_json::json!({
+            "byte_ref": path,
+            "sha256": sha256,
+            "size_bytes": size_bytes,
+        }),
+    );
+    serde_json::Value::Object(object)
 }
 
 fn write_bundle_dir(path: &Path, bundle: &ObservationBundle) -> homeboy::core::Result<()> {
@@ -410,6 +546,8 @@ fn write_bundle_dir(path: &Path, bundle: &ObservationBundle) -> homeboy::core::R
     write_json(path.join("manifest.json"), &bundle.manifest)?;
     write_json(path.join("runs.json"), &bundle.runs)?;
     write_json(path.join("artifacts.json"), &bundle.artifacts)?;
+    write_json(path.join("artifact_bytes.json"), &bundle.artifact_bytes)?;
+    write_artifact_bytes(path, &bundle.artifact_bytes)?;
     write_json(path.join("trace_spans.json"), &bundle.trace_spans)?;
     write_json(path.join("findings.json"), &bundle.findings)?;
     write_json(path.join("test_failures.json"), &bundle.test_failures)?;
@@ -448,6 +586,9 @@ fn read_bundle_dir(path: &Path) -> homeboy::core::Result<ObservationBundle> {
 
     let runs: Vec<RunRecord> = read_json(path.join("runs.json"))?;
     let artifacts: Vec<ArtifactRecord> = read_json(path.join("artifacts.json"))?;
+    let artifact_bytes: Vec<ObservationBundleArtifactBytes> =
+        read_optional_json(path.join("artifact_bytes.json"))?;
+    validate_artifact_bytes(path, &artifact_bytes)?;
     let trace_spans: Vec<TraceSpanRecord> = read_json(path.join("trace_spans.json"))?;
     let mut findings: Vec<RecordedHomeboyFinding> = read_optional_json(path.join("findings.json"))?;
     let test_failures: Vec<RecordedHomeboyFinding> =
@@ -459,6 +600,7 @@ fn read_bundle_dir(path: &Path) -> homeboy::core::Result<ObservationBundle> {
     }
     if manifest.run_count != runs.len()
         || manifest.artifact_count != artifacts.len()
+        || manifest.artifact_byte_count != artifact_bytes.len()
         || manifest.trace_span_count != trace_spans.len()
         || manifest.finding_count != findings.len()
         || manifest.test_failure_count != test_failures.len()
@@ -474,10 +616,76 @@ fn read_bundle_dir(path: &Path) -> homeboy::core::Result<ObservationBundle> {
         manifest,
         runs,
         artifacts,
+        artifact_bytes,
         trace_spans,
         findings,
         test_failures,
     })
+}
+
+fn write_artifact_bytes(
+    bundle_dir: &Path,
+    artifact_bytes: &[ObservationBundleArtifactBytes],
+) -> homeboy::core::Result<()> {
+    for bytes in artifact_bytes {
+        let Some(source_path) = bytes.source_path.as_ref() else {
+            continue;
+        };
+        let output = bundle_dir.join(&bytes.path);
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some(format!("create artifact byte dir {}", parent.display())),
+                )
+            })?;
+        }
+        fs::copy(source_path, &output).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!(
+                    "copy artifact bytes {} to {}",
+                    source_path.display(),
+                    output.display()
+                )),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_artifact_bytes(
+    bundle_dir: &Path,
+    artifact_bytes: &[ObservationBundleArtifactBytes],
+) -> homeboy::core::Result<()> {
+    for bytes in artifact_bytes {
+        let path = bundle_dir.join(&bytes.path);
+        let raw = fs::read(&path).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("read bundled artifact bytes {}", path.display())),
+            )
+        })?;
+        let sha256 = format!("{:x}", Sha256::digest(&raw));
+        let size_bytes = i64::try_from(raw.len()).map_err(|_| {
+            Error::internal_unexpected(format!(
+                "bundled artifact {} is too large to record a portable size",
+                bytes.artifact_id
+            ))
+        })?;
+        if sha256 != bytes.sha256 || size_bytes != bytes.size_bytes {
+            return Err(Error::validation_invalid_argument(
+                "artifact_bytes",
+                format!(
+                    "bundled artifact bytes for {} do not match recorded checksum/size",
+                    bytes.artifact_id
+                ),
+                Some(path.to_string_lossy().to_string()),
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn is_test_failure_finding(finding: &RecordedHomeboyFinding) -> bool {
