@@ -20,6 +20,7 @@ const WORDPRESS_SURFACE_TYPES = Object.freeze([
 	'setting',
 	'taxonomy',
 	'user',
+	'workload-scale',
 	'wp-cli-command',
 ]);
 
@@ -63,6 +64,8 @@ const WORDPRESS_SURFACE_TYPE_ALIASES = new Map([
 	['taxonomy-term', 'taxonomy'],
 	['taxonomy_term', 'taxonomy'],
 	['users', 'user'],
+	['workload_scale', 'workload-scale'],
+	['scale_dimension', 'workload-scale'],
 	['wp-cli', 'wp-cli-command'],
 ]);
 
@@ -92,6 +95,7 @@ const WORDPRESS_COVERAGE_SURFACE_TYPES = Object.freeze({
 	setting: 'setting',
 	taxonomy: 'taxonomy',
 	user: 'user',
+	'workload-scale': 'workload_scale',
 	'wp-cli-command': 'wp_cli_command',
 });
 
@@ -117,6 +121,10 @@ const WORDPRESS_SURFACE_COLLECTION_TYPE_BY_KEY = Object.freeze({
 	taxonomies: 'taxonomy',
 	media: 'media',
 	users: 'user',
+	workloadScale: 'workload-scale',
+	workload_scale: 'workload-scale',
+	scaleDimensions: 'workload-scale',
+	scale_dimensions: 'workload-scale',
 	roles: 'role',
 	blocks: 'block',
 	frontend: 'frontend-url',
@@ -164,6 +172,7 @@ const WORDPRESS_RUNTIME_SURFACE_ID_PREFIXES = Object.freeze({
 	setting: 'setting',
 	taxonomy: 'taxonomy',
 	user: 'user',
+	workload_scale: 'workload-scale',
 	wp_cli_command: 'wp-cli',
 });
 
