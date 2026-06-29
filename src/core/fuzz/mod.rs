@@ -47,7 +47,8 @@ pub use envelope::{
     FuzzTargetInventory, IsolationProof,
 };
 pub use hotspots::{
-    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot, FuzzHotspotSet,
+    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot,
+    FuzzHotspotDimension, FuzzHotspotMetric, FuzzHotspotSet,
 };
 pub use observations::{
     parse_fuzz_observation_set_value, FuzzObservation, FuzzObservationFamily, FuzzObservationSet,

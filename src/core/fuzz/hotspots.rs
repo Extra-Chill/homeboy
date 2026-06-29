@@ -58,11 +58,15 @@ impl FuzzHotspotSet {
 pub struct FuzzHotspot {
     pub id: String,
     pub dimension: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimensions: Vec<FuzzHotspotDimension>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub metric: String,
     pub value: f64,
     pub unit: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<FuzzHotspotMetric>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basis: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,12 +97,18 @@ impl FuzzHotspot {
     fn normalize(&mut self) -> std::result::Result<(), String> {
         self.id = required_trimmed("hotspot.id", &self.id)?;
         self.dimension = required_trimmed("hotspot.dimension", &self.dimension)?;
+        for dimension in &mut self.dimensions {
+            dimension.normalize(&self.id)?;
+        }
         self.kind = normalize_optional_string(self.kind.take());
         self.metric = required_trimmed("hotspot.metric", &self.metric)?;
         if !self.value.is_finite() {
             return Err(format!("hotspot.value must be finite for `{}`", self.id));
         }
         self.unit = required_trimmed("hotspot.unit", &self.unit)?;
+        for metric in &mut self.metrics {
+            metric.normalize(&self.id)?;
+        }
         self.basis = normalize_optional_string(self.basis.take());
         if let Some(relative_score) = self.relative_score {
             if !relative_score.is_finite() {
@@ -113,6 +123,80 @@ impl FuzzHotspot {
         self.evidence_refs = normalize_string_vec(std::mem::take(&mut self.evidence_refs));
         self.artifact_refs = normalize_string_vec(std::mem::take(&mut self.artifact_refs));
         self.source_refs = normalize_string_vec(std::mem::take(&mut self.source_refs));
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzHotspotDimension {
+    pub name: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzHotspotDimension {
+    fn normalize(&mut self, hotspot_id: &str) -> std::result::Result<(), String> {
+        self.name = required_trimmed("hotspot.dimension.name", &self.name)
+            .map_err(|err| format!("{err} for `{hotspot_id}`"))?;
+        self.value = required_trimmed("hotspot.dimension.value", &self.value)
+            .map_err(|err| format!("{err} for `{hotspot_id}`"))?;
+        self.kind = normalize_optional_string(self.kind.take());
+        self.label = normalize_optional_string(self.label.take());
+        self.labels = normalize_string_vec(std::mem::take(&mut self.labels));
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzHotspotMetric {
+    pub name: String,
+    pub value: f64,
+    pub unit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzHotspotMetric {
+    fn normalize(&mut self, hotspot_id: &str) -> std::result::Result<(), String> {
+        self.name = required_trimmed("hotspot.metric.name", &self.name)
+            .map_err(|err| format!("{err} for `{hotspot_id}`"))?;
+        if !self.value.is_finite() {
+            return Err(format!(
+                "hotspot.metric.value must be finite for `{hotspot_id}`"
+            ));
+        }
+        self.unit = required_trimmed("hotspot.metric.unit", &self.unit)
+            .map_err(|err| format!("{err} for `{hotspot_id}`"))?;
+        self.basis = normalize_optional_string(self.basis.take());
+        if let Some(relative_score) = self.relative_score {
+            if !relative_score.is_finite() {
+                return Err(format!(
+                    "hotspot.metric.relative_score must be finite for `{hotspot_id}`"
+                ));
+            }
+        }
+        self.labels = normalize_string_vec(std::mem::take(&mut self.labels));
         Ok(())
     }
 }
@@ -194,10 +278,12 @@ fn hotspot_from_observation(observation: &FuzzObservation) -> FuzzHotspot {
             .join(":")
         }),
         dimension,
+        dimensions: observation_dimensions(observation),
         kind: Some("observation".to_string()),
         metric: observation.metric.clone(),
         value: observation.value,
         unit: observation.unit.clone(),
+        metrics: Vec::new(),
         basis: Some("fuzz_observation_set".to_string()),
         sample_count: observation.sample_count,
         rank: None,
@@ -211,6 +297,34 @@ fn hotspot_from_observation(observation: &FuzzObservation) -> FuzzHotspot {
         metadata: observation.metadata.clone(),
         extra: observation.extra.clone(),
     }
+}
+
+fn observation_dimensions(observation: &FuzzObservation) -> Vec<FuzzHotspotDimension> {
+    [
+        (
+            "family",
+            Some(observation_family_dimension(observation.family)),
+        ),
+        ("subject", Some(observation.subject.as_str())),
+        ("case", observation.case_id.as_deref()),
+        ("target", observation.target_id.as_deref()),
+        ("operation", observation.operation_id.as_deref()),
+        ("phase", observation.phase.as_deref()),
+        ("fingerprint", observation.fingerprint.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| {
+        value.map(|value| FuzzHotspotDimension {
+            name: name.to_string(),
+            value: value.to_string(),
+            kind: None,
+            label: None,
+            labels: Vec::new(),
+            metadata: Value::Null,
+            extra: BTreeMap::new(),
+        })
+    })
+    .collect()
 }
 
 fn observation_family_dimension(family: FuzzObservationFamily) -> &'static str {
