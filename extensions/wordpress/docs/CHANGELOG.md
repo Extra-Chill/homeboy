@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.21.13] - 2026-06-29
+
+### Changed
+- Map WordPress fuzz workloads to Codebox mutation contracts
+
 ## [3.21.12] - 2026-06-29
 
 ### Changed
