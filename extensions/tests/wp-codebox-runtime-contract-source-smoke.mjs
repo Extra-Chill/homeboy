@@ -23,7 +23,6 @@ const canonicalManifest = {
     agentTask: {
       runRequest: 'canonical/run-agent-task/v1',
       runResult: 'canonical/agent-task-run-result/v1',
-      legacyRunResponse: 'canonical/agent-task-run/v1',
     },
     runtimeBoundary: {
       profile: 'canonical/runtime-profile/v1',
@@ -115,6 +114,17 @@ const {
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox'));
 
 assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('schemas.runtimeBoundary.profile'), true);
+// The canonical wp-codebox runtime contract dropped the legacy run-response alias
+// (Automattic/wp-codebox#1637). The loader must not require a manifest path the
+// canonical contract no longer publishes, or every real run fails validation.
+assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('schemas.agentTask.legacyRunResponse'), false);
+for (const requiredPath of REQUIRED_RUNTIME_CONTRACT_PATHS) {
+  assert.equal(
+    typeof requiredPath.split('.').reduce((value, key) => (value == null ? value : value[key]), canonicalManifest),
+    'string',
+    `Required runtime contract path ${requiredPath} must resolve in the canonical manifest`
+  );
+}
 assert.deepEqual(runtimeContractManifest(), canonicalManifest);
 assert.deepEqual(providerRuntimeInvocationContract(), canonicalManifest.providerRuntime);
 

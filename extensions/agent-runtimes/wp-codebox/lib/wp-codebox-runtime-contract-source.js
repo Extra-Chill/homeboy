@@ -14,7 +14,6 @@ const REQUIRED_RUNTIME_CONTRACT_PATHS = [
   'schemas.providerRuntime.credentialResolution',
   'schemas.agentTask.runRequest',
   'schemas.agentTask.runResult',
-  'schemas.agentTask.legacyRunResponse',
   'schemas.runtimeBoundary.profile',
   'schemas.runtimeBoundary.previewLease',
   'schemas.runtimeBoundary.browserContainedSiteStatus',
