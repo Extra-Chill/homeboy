@@ -145,7 +145,18 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::FuzzCompare(args) => fuzz_compare::fuzz_compare_from_args(args),
         RunsCommand::Hotspots(args) => hotspots::runs_hotspots(args),
         RunsCommand::Reconcile(args) => reconcile::reconcile_runs(args),
-        RunsCommand::Show { run_id, json: _ } => handlers::show_run(&run_id),
+        RunsCommand::Show {
+            run_id,
+            json: _,
+            field,
+        } => {
+            let (output, exit_code) = handlers::show_run(&run_id)?;
+            if field.is_empty() {
+                Ok((output, exit_code))
+            } else {
+                handlers::apply_field_selection(output, &field)
+            }
+        }
         RunsCommand::Proof { run_id, json: _ } => proof::proof(&run_id),
         RunsCommand::Dossier { run_id, json: _ } => dossier::runs_dossier(&run_id),
         RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&run_id),

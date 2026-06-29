@@ -84,6 +84,12 @@ pub(super) enum RunsCommand {
         /// always available with this flag or via `--output <file>`.
         #[arg(long)]
         json: bool,
+        /// JSONPath selector(s) projected over the run detail so callers
+        /// extract only specific fields instead of the whole structure.
+        /// Repeat or comma-separate. Rooted at the run detail, e.g.
+        /// `-q '$.status'`, `-q '$.metadata.run_dir'`.
+        #[arg(long = "field", short = 'q', value_delimiter = ',')]
+        field: Vec<String>,
     },
     /// Show only the compact proof signals for one run: verdict, gate
     /// failures, and declared proof/scorecard signal fields. Full evidence
@@ -169,6 +175,7 @@ pub enum RunsOutput {
     Compare(RunsCompareOutput),
     Show(RunsShowOutput),
     Proof(RunsProofOutput),
+    FieldSelection(RunsFieldSelectionOutput),
     Dossier(RunsDossierOutput),
     ResumePlan(RunsResumePlanOutput),
     Evidence(RunsEvidenceOutput),
@@ -206,6 +213,28 @@ pub struct RunsListOutput {
 pub struct RunsShowOutput {
     pub command: &'static str,
     pub run: RunDetail,
+}
+
+/// Field-projection result for `runs show -q` / `runs artifact get -q`.
+///
+/// Carries only the selected fields so callers extract a few values without
+/// fetching and grepping the entire run/artifact structure.
+#[derive(Serialize)]
+pub struct RunsFieldSelectionOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    pub fields: Vec<RunsSelectedField>,
+}
+
+/// One projected `(selector, value)` pair. `value` is the JSON matched at the
+/// selector: `null` when nothing matched, the single match, or an array when
+/// the selector matched multiple nodes.
+#[derive(Serialize)]
+pub struct RunsSelectedField {
+    pub field: String,
+    pub value: Value,
 }
 
 #[derive(Serialize)]
@@ -426,6 +455,13 @@ pub struct RunsArtifactGetArgs {
     /// Destination file path. Defaults to the recorded artifact filename.
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
+    /// JSONPath selector(s) projected over the artifact-get result so callers
+    /// extract only specific fields (e.g. `sha256`, `output_path`) instead of
+    /// the whole structure. Repeat or comma-separate. Field selection still
+    /// writes the artifact bytes when `--output` is set. Example:
+    /// `-q '$.sha256'`, `-q '$.output_path'`.
+    #[arg(long = "field", short = 'q', value_delimiter = ',')]
+    pub field: Vec<String>,
 }
 
 #[derive(Serialize)]

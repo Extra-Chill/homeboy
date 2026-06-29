@@ -309,6 +309,7 @@ fn bundle_import_marks_file_artifacts_metadata_only_and_query_reports_skip() {
             artifact_id: artifacts[0].id.clone(),
             runner: None,
             output: None,
+            field: Vec::new(),
         })
         .err()
         .expect("metadata-only artifact get must fail");

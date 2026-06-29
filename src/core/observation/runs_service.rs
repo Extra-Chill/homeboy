@@ -17,7 +17,7 @@
 //! into `RunsOutput` variants.
 
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use chrono::{Duration, Utc};
@@ -324,16 +324,12 @@ mod artifact_resolve {
     ) -> Result<ArtifactRecord> {
         require_run(store, run_id)?;
         crate::core::artifacts::index_remote_published_artifact_refs_for_run(store, run_id)?;
-        let artifact = store
-            .get_artifact_for_run_token(run_id, artifact_id)?
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "artifact_id",
-                    format!("artifact record not found: {artifact_id}"),
-                    Some(artifact_id.to_string()),
-                    None,
-                )
-            })?;
+        let artifact = match store.get_artifact_for_run_token(run_id, artifact_id)? {
+            Some(artifact) => artifact,
+            None => {
+                return Err(unknown_artifact_error(store, run_id, artifact_id));
+            }
+        };
 
         if artifact.run_id != run_id {
             return Err(Error::validation_invalid_argument(
@@ -344,6 +340,45 @@ mod artifact_resolve {
             ));
         }
         Ok(artifact)
+    }
+
+    /// Build a clear "artifact not found" error that lists the artifact names
+    /// (kinds and ids) actually recorded for the run, so callers fix the token
+    /// instead of guessing which name matches.
+    fn unknown_artifact_error(store: &ObservationStore, run_id: &str, artifact_id: &str) -> Error {
+        let available = store.list_artifacts(run_id).unwrap_or_default();
+        let mut names: Vec<String> = Vec::new();
+        for artifact in &available {
+            for token in [artifact.kind.as_str(), artifact.id.as_str()] {
+                if !token.is_empty() && !names.iter().any(|name| name == token) {
+                    names.push(token.to_string());
+                }
+            }
+        }
+        let (problem, hints) = if names.is_empty() {
+            (
+                format!("artifact record not found: {artifact_id}; run `{run_id}` has no recorded artifacts yet"),
+                vec!["Run `homeboy runs artifacts <run-id>` after the source command records artifacts.".to_string()],
+            )
+        } else {
+            (
+                format!(
+                    "artifact record not found: {artifact_id}; available artifact names for run `{run_id}`: {}",
+                    names.join(", ")
+                ),
+                vec![
+                    "Pass an artifact id, kind, or name from the available list.".to_string(),
+                    "Run `homeboy runs artifacts <run-id>` to inspect all recorded artifacts."
+                        .to_string(),
+                ],
+            )
+        };
+        Error::validation_invalid_argument(
+            "artifact_id",
+            problem,
+            Some(artifact_id.to_string()),
+            Some(hints),
+        )
     }
 
     /// Copy a recorded file artifact's bytes to `output`.
@@ -415,6 +450,26 @@ mod artifact_resolve {
                 )),
             )
         })?;
+        // Flush and fsync so the reported `output_path` is durably on disk
+        // before we return success — never print fetch metadata for a write
+        // that did not actually land.
+        writer.flush().map_err(|e| {
+            Error::internal_io(e.to_string(), Some(format!("flush {}", output.display())))
+        })?;
+        writer.sync_all().map_err(|e| {
+            Error::internal_io(e.to_string(), Some(format!("sync {}", output.display())))
+        })?;
+        drop(writer);
+        if !output.is_file() {
+            return Err(Error::internal_io(
+                format!(
+                    "artifact {} copy reported success but no file exists at {}",
+                    artifact.id,
+                    output.display()
+                ),
+                Some(format!("verify artifact output {}", output.display())),
+            ));
+        }
 
         Ok(ArtifactFetchOutcome {
             run_id: artifact.run_id,
@@ -1134,6 +1189,33 @@ mod tests {
                 .expect_err("missing artifact");
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("artifact record not found"));
+            // With no artifacts recorded, the error is explicit rather than
+            // listing phantom names.
+            assert!(err.message.contains("no recorded artifacts"));
+        });
+    }
+
+    #[test]
+    fn resolve_artifact_for_run_unknown_id_lists_available_names() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store.start_run(sample_run("bench")).expect("run");
+            let source = home.path().join("bench-results.json");
+            std::fs::write(&source, br#"{"ok":true}"#).expect("source");
+            store
+                .record_artifact(&run.id, "bench_results", &source)
+                .expect("record");
+
+            let err = resolve_artifact_for_run(&store, &run.id, "does-not-exist")
+                .expect_err("unknown artifact");
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(
+                err.message.contains("available artifact names")
+                    && err.message.contains("bench_results"),
+                "expected available names listing the recorded kind, got: {}",
+                err.message
+            );
         });
     }
 

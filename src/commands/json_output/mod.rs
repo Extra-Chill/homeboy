@@ -116,7 +116,9 @@ pub fn run_command_output(
             let summarize_proof = runs_proof_summary_eligible(&args);
             let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
             let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
-                if summarize_show {
+                if let Some(rendered) = super::runs_summary::render_runs_field_selection(payload) {
+                    Some(rendered)
+                } else if summarize_show {
                     super::runs_summary::render_runs_show_summary(payload)
                 } else if summarize_dossier {
                     super::runs_dossier_summary::render_runs_dossier_summary(payload)

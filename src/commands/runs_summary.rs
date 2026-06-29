@@ -27,6 +27,31 @@ pub(crate) fn render_runs_show_summary(payload: &Value) -> Option<String> {
     Some(render_run_detail(run))
 }
 
+/// Render a `runs show -q` / `runs artifact get -q` field projection as plain
+/// lines so the selectors work as a grep replacement. One value per selector,
+/// in selector order; strings print raw, other JSON prints compactly. The full
+/// labeled `{field, value}` structure stays available in the JSON output and in
+/// `--output <file>`. Returns `None` for any other variant.
+pub(crate) fn render_runs_field_selection(payload: &Value) -> Option<String> {
+    if payload.get("variant").and_then(Value::as_str)? != "field_selection" {
+        return None;
+    }
+    let fields = value_at(payload, &["payload", "fields"])?.as_array()?;
+    let lines = fields
+        .iter()
+        .map(|field| field_value_line(field.get("value").unwrap_or(&Value::Null)))
+        .collect::<Vec<_>>();
+    Some(format!("{}\n", lines.join("\n")))
+}
+
+fn field_value_line(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => "null".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn render_run_detail(run: &Value) -> String {
     let run_id = string_value(run, &["id"]).unwrap_or("<unknown>");
     let kind = string_value(run, &["kind"]).unwrap_or("run");
