@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use crate::core::fuzz::{
-    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot,
-    FuzzHotspotDimension, FuzzHotspotMetric, FuzzHotspotSet, FuzzObservationSet,
+    compare_fuzz_hotspot_sets, parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots,
+    FuzzHotspot, FuzzHotspotDimension, FuzzHotspotMetric, FuzzHotspotSet, FuzzObservationSet,
     FUZZ_CONTRACT_VERSION, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,
 };
 
@@ -330,4 +330,121 @@ fn assert_no_nested_gate_fields(value: &serde_json::Value) {
         }
         _ => {}
     }
+}
+
+#[test]
+fn compares_fixture_hotspot_sets_for_relative_convergence() {
+    let baseline = FuzzHotspotSet::from_value(json!({
+        "schema": FUZZ_HOTSPOT_SET_SCHEMA,
+        "version": 1,
+        "id": "baseline-hotspots",
+        "items": [
+            {
+                "id": "route:checkout",
+                "dimension": "route",
+                "metric": "duration",
+                "value": 900.0,
+                "unit": "ms",
+                "rank": 1,
+                "relative_score": 1.0,
+                "label": "Checkout route"
+            },
+            {
+                "id": "route:search",
+                "dimension": "route",
+                "metric": "duration",
+                "value": 450.0,
+                "unit": "ms",
+                "rank": 2,
+                "relative_score": 0.5,
+                "label": "Search route"
+            },
+            {
+                "id": "route:account",
+                "dimension": "route",
+                "metric": "duration",
+                "value": 225.0,
+                "unit": "ms",
+                "rank": 3,
+                "relative_score": 0.25,
+                "label": "Account route"
+            }
+        ]
+    }))
+    .expect("baseline hotspot set");
+    let candidate = FuzzHotspotSet::from_value(json!({
+        "schema": FUZZ_HOTSPOT_SET_SCHEMA,
+        "version": 1,
+        "id": "candidate-hotspots",
+        "items": [
+            {
+                "id": "route:search",
+                "dimension": "route",
+                "metric": "duration",
+                "value": 400.0,
+                "unit": "ms",
+                "rank": 1,
+                "relative_score": 1.0,
+                "label": "Search route"
+            },
+            {
+                "id": "route:checkout",
+                "dimension": "route",
+                "metric": "duration",
+                "value": 120.0,
+                "unit": "ms",
+                "rank": 2,
+                "relative_score": 0.3,
+                "label": "Checkout route"
+            },
+            {
+                "id": "route:feed",
+                "dimension": "route",
+                "metric": "duration",
+                "value": 100.0,
+                "unit": "ms",
+                "rank": 3,
+                "relative_score": 0.25,
+                "label": "Feed route"
+            }
+        ]
+    }))
+    .expect("candidate hotspot set");
+
+    let comparison = compare_fuzz_hotspot_sets(&baseline, &candidate);
+
+    assert_eq!(comparison.baseline_drift.baseline_score_total, 1.75);
+    assert_eq!(comparison.baseline_drift.candidate_score_total, 1.55);
+    assert!((comparison.baseline_drift.score_total_delta + 0.2).abs() < f64::EPSILON);
+    assert_eq!(comparison.new_items, 1);
+    assert_eq!(comparison.resolved_items, 1);
+    assert_eq!(
+        comparison.collapsed_top_items,
+        vec!["route:account", "route:checkout"]
+    );
+    assert_eq!(
+        comparison.emerging_top_items,
+        vec!["route:feed", "route:search"]
+    );
+
+    let checkout = comparison
+        .items
+        .iter()
+        .find(|item| item.key == "route:checkout")
+        .expect("checkout delta");
+    assert_eq!(checkout.change_kind, "decreased");
+    assert_eq!(checkout.rank_movement, Some(-1));
+    assert_eq!(checkout.relative_score_delta, Some(-0.7));
+
+    let feed = comparison
+        .items
+        .iter()
+        .find(|item| item.key == "route:feed")
+        .expect("emerging delta");
+    assert_eq!(feed.change_kind, "new");
+    assert_eq!(feed.candidate_rank, Some(3));
+
+    let serialized = serde_json::to_value(&comparison).expect("serialize comparison");
+    assert!(serialized.get("threshold").is_none());
+    assert!(serialized.get("status").is_none());
 }

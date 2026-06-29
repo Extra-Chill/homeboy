@@ -2,6 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+use super::FuzzHotspotSet;
+
+const CONVERGENCE_TOP_WINDOW: usize = 3;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuzzHotspotCohortItem {
     pub key: String,
@@ -17,12 +21,24 @@ pub struct FuzzHotspotCohortComparison {
     pub baseline_id: String,
     pub candidate_id: String,
     pub item_count: usize,
+    pub baseline_drift: FuzzHotspotCohortBaselineDrift,
     pub new_items: usize,
     pub resolved_items: usize,
     pub increased_items: usize,
     pub decreased_items: usize,
     pub unchanged_items: usize,
+    pub collapsed_top_items: Vec<String>,
+    pub emerging_top_items: Vec<String>,
     pub items: Vec<FuzzHotspotCohortDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FuzzHotspotCohortBaselineDrift {
+    pub baseline_score_total: f64,
+    pub candidate_score_total: f64,
+    pub score_total_delta: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_total_relative_delta: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -37,6 +53,8 @@ pub struct FuzzHotspotCohortDelta {
     pub candidate_score: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relative_score_delta: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relative_lift: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,6 +71,18 @@ pub struct FuzzHotspotCohortDelta {
     pub baseline_run_count: usize,
     pub candidate_run_count: usize,
     pub run_count_delta: i64,
+}
+
+pub fn compare_fuzz_hotspot_sets(
+    baseline: &FuzzHotspotSet,
+    candidate: &FuzzHotspotSet,
+) -> FuzzHotspotCohortComparison {
+    compare_fuzz_hotspot_cohorts(
+        baseline.id.clone(),
+        candidate.id.clone(),
+        &cohort_items_from_hotspot_set(baseline),
+        &cohort_items_from_hotspot_set(candidate),
+    )
 }
 
 pub fn compare_fuzz_hotspot_cohorts(
@@ -107,10 +137,40 @@ pub fn compare_fuzz_hotspot_cohorts(
             .then_with(|| a.key.cmp(&b.key))
     });
 
+    let baseline_score_total = baseline.iter().map(|item| item.score).sum::<f64>();
+    let candidate_score_total = candidate.iter().map(|item| item.score).sum::<f64>();
+    let score_total_delta = candidate_score_total - baseline_score_total;
+    let score_total_relative_delta =
+        (baseline_score_total != 0.0).then_some(score_total_delta / baseline_score_total.abs());
+    let collapsed_top_items = items
+        .iter()
+        .filter(|item| {
+            item.baseline_rank
+                .is_some_and(|rank| rank <= CONVERGENCE_TOP_WINDOW)
+        })
+        .filter(|item| item.change_kind == "resolved" || item.change_kind == "decreased")
+        .map(|item| item.key.clone())
+        .collect::<Vec<_>>();
+    let emerging_top_items = items
+        .iter()
+        .filter(|item| {
+            item.candidate_rank
+                .is_some_and(|rank| rank <= CONVERGENCE_TOP_WINDOW)
+        })
+        .filter(|item| item.change_kind == "new" || item.change_kind == "increased")
+        .map(|item| item.key.clone())
+        .collect::<Vec<_>>();
+
     FuzzHotspotCohortComparison {
         baseline_id: baseline_id.into(),
         candidate_id: candidate_id.into(),
         item_count: items.len(),
+        baseline_drift: FuzzHotspotCohortBaselineDrift {
+            baseline_score_total,
+            candidate_score_total,
+            score_total_delta,
+            score_total_relative_delta,
+        },
         new_items: items
             .iter()
             .filter(|item| item.change_kind == "new")
@@ -131,8 +191,25 @@ pub fn compare_fuzz_hotspot_cohorts(
             .iter()
             .filter(|item| item.change_kind == "unchanged")
             .count(),
+        collapsed_top_items,
+        emerging_top_items,
         items,
     }
+}
+
+fn cohort_items_from_hotspot_set(set: &FuzzHotspotSet) -> Vec<FuzzHotspotCohortItem> {
+    set.items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| FuzzHotspotCohortItem {
+            key: item.id.clone(),
+            label: item.label.clone(),
+            score: item.relative_score.unwrap_or(item.value),
+            occurrences: item.sample_count.unwrap_or(1),
+            run_count: 1,
+            rank: item.rank.unwrap_or(index as u64 + 1) as usize,
+        })
+        .collect()
 }
 
 fn cohort_delta(
@@ -177,6 +254,7 @@ fn cohort_delta(
         baseline_score,
         candidate_score,
         score_delta,
+        relative_score_delta: score_delta,
         relative_lift,
         normalized_score_delta,
         baseline_rank: before.map(|item| item.rank),
