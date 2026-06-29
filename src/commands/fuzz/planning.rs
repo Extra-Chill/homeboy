@@ -5,7 +5,7 @@ use homeboy::core::fuzz::{
     fuzz_gate_profile_contract, parse_fuzz_action_model_file, parse_fuzz_exploration_policy_file,
     FuzzExecutionRequest, FuzzOperation, FuzzOperationFamily, FuzzSafetyClass,
     FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism, FuzzSamplingRequest, FuzzSamplingStratum,
-    FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    FuzzTargetInventory, IsolationProof, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
     FUZZ_SAMPLING_REQUEST_SCHEMA,
 };
 
@@ -16,10 +16,6 @@ use super::workloads::{
     select_workload,
 };
 use homeboy::core::extension::ExtensionCapability;
-
-#[cfg(test)]
-pub(super) const TEST_VERIFIED_FUZZ_ISOLATION_ENV: &str = "HOMEBOY_TEST_VERIFIED_FUZZ_ISOLATION";
-pub(super) const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
 
 pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
     let rig_context = load_rig(args.run.rig.as_deref(), &args.run.setting_args)?;
@@ -64,7 +60,9 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         args.run.run_id.clone(),
         args.run.inventory.as_deref(),
     )?;
-    let planning_metadata = plan_inventory_selection(&args, &target_inventory)?;
+    let isolation_proof = load_isolation_proof(args.run.isolation_proof.as_deref())?;
+    let planning_metadata =
+        plan_inventory_selection(&args, &target_inventory, isolation_proof.as_ref())?;
     let sampling: FuzzSamplingRequest = serde_json::from_value(
         planning_metadata
             .get("sampling")
@@ -99,6 +97,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
             required_artifacts,
             gates,
             sampling,
+            isolation_proof,
             metadata: planning_metadata,
             extra: std::collections::BTreeMap::new(),
         },
@@ -108,6 +107,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
 pub(super) fn plan_inventory_selection(
     args: &FuzzPlanArgs,
     inventory: &FuzzTargetInventory,
+    isolation_proof: Option<&IsolationProof>,
 ) -> homeboy::core::Result<serde_json::Value> {
     let filters = operation_filters(args)?;
     let workload = args.run.workload_id.as_deref().and_then(|id| {
@@ -133,10 +133,18 @@ pub(super) fn plan_inventory_selection(
         .unwrap_or_default();
     let workload_safety_class = workload.map(|workload| workload.safety_class);
     let surface_safety = inventory_surface_safety(inventory);
-    let isolation_proof = verified_fuzz_isolation_proof();
+    if args.run.allow_destructive && isolation_proof.is_none() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "isolation-proof",
+            "destructive fuzz requires explicit homeboy/isolation-proof/v1 via --isolation-proof"
+                .to_string(),
+            None,
+            None,
+        ));
+    }
     let destructive_allowed = args.run.allow_destructive
         && args.run.isolation.requests_isolation()
-        && isolation_proof.verified;
+        && isolation_proof.is_some();
 
     let mut selected_target_ids = BTreeSet::new();
     let mut selected_families = BTreeSet::new();
@@ -199,7 +207,7 @@ pub(super) fn plan_inventory_selection(
                     "operation_id": operation.id,
                     "operation_kind": operation.kind,
                     "reason": reason,
-                    "detail": skip_reason_detail(reason, args, &isolation_proof),
+                    "detail": skip_reason_detail(reason, args, isolation_proof),
                 }));
                 continue;
             }
@@ -344,8 +352,8 @@ pub(super) fn plan_inventory_selection(
             "allow_destructive": args.run.allow_destructive,
             "isolation": args.run.isolation.as_str(),
             "destructive_allowed": destructive_allowed,
-            "verified_isolation": isolation_proof.verified,
-            "isolation_proof_source": isolation_proof.source,
+            "verified_isolation": isolation_proof.is_some(),
+            "isolation_proof_schema": isolation_proof.map(|proof| proof.schema.as_str()),
         }),
         extra: BTreeMap::new(),
     };
@@ -359,8 +367,8 @@ pub(super) fn plan_inventory_selection(
             "allow_destructive": args.run.allow_destructive,
             "isolation": args.run.isolation.as_str(),
             "destructive_allowed": destructive_allowed,
-            "verified_isolation": isolation_proof.verified,
-            "isolation_proof_source": isolation_proof.source,
+            "verified_isolation": isolation_proof.is_some(),
+            "isolation_proof_schema": isolation_proof.map(|proof| proof.schema.as_str()),
         },
         "selection": {
             "target_ids": target_ids,
@@ -380,8 +388,11 @@ pub(super) fn plan_inventory_selection(
             "mode": args.run.isolation.as_str(),
             "allow_destructive": args.run.allow_destructive,
             "destructive_allowed": destructive_allowed,
-            "verified": isolation_proof.verified,
-            "proof_source": isolation_proof.source,
+            "verified": isolation_proof.is_some(),
+            "proof_schema": isolation_proof.map(|proof| proof.schema.as_str()),
+            "runtime_kind": isolation_proof.map(|proof| proof.runtime_kind.as_str()),
+            "mutation_boundary": isolation_proof.map(|proof| proof.mutation_boundary.as_str()),
+            "verified_by": isolation_proof.map(|proof| proof.verified_by.as_str()),
             "requirements": if isolation_required { vec!["isolated_mutation"] } else { Vec::<&str>::new() },
         },
         "required_artifact_ids": profile_artifacts.into_iter().map(|artifact| artifact.id).collect::<Vec<_>>(),
@@ -422,54 +433,38 @@ pub(super) fn plan_inventory_selection(
     Ok(metadata)
 }
 
-#[derive(Clone, Copy)]
-struct FuzzIsolationProof {
-    verified: bool,
-    source: &'static str,
-}
-
-fn verified_fuzz_isolation_proof() -> FuzzIsolationProof {
-    if lab_offload_metadata_verifies_isolation() {
-        return FuzzIsolationProof {
-            verified: true,
-            source: "lab_offload_metadata",
-        };
-    }
-    if std::env::var_os(RUNNER_HOSTED_EXEC_ENV).is_some() {
-        return FuzzIsolationProof {
-            verified: true,
-            source: "runner_hosted_exec",
-        };
-    }
-    #[cfg(test)]
-    if std::env::var(TEST_VERIFIED_FUZZ_ISOLATION_ENV)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
-    {
-        return FuzzIsolationProof {
-            verified: true,
-            source: "test_env",
-        };
-    }
-    FuzzIsolationProof {
-        verified: false,
-        source: "none",
-    }
-}
-
-fn lab_offload_metadata_verifies_isolation() -> bool {
-    let Ok(raw) = std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV) else {
-        return false;
+pub(super) fn load_isolation_proof(
+    path: Option<&std::path::Path>,
+) -> homeboy::core::Result<Option<IsolationProof>> {
+    let Some(path) = path else {
+        return Ok(None);
     };
-    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-    let status = metadata.get("status").and_then(serde_json::Value::as_str);
-    let remote_workspace = metadata
-        .get("remote_workspace")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    matches!(status, Some("offloaded" | "success" | "completed")) || remote_workspace
+    let raw = std::fs::read_to_string(path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "isolation-proof",
+            format!("failed to read isolation proof: {error}"),
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "isolation-proof",
+            format!("invalid isolation proof JSON: {error}"),
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    IsolationProof::from_value(value)
+        .map(Some)
+        .map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "isolation-proof",
+                error,
+                Some(path.display().to_string()),
+                None,
+            )
+        })
 }
 
 fn effective_safety_class(
@@ -501,7 +496,7 @@ fn safety_rank(class: FuzzSafetyClass) -> u8 {
 fn skip_reason_detail(
     reason: &str,
     args: &FuzzPlanArgs,
-    isolation_proof: &FuzzIsolationProof,
+    isolation_proof: Option<&IsolationProof>,
 ) -> &'static str {
     if reason != "destructive" {
         return "operation is outside the selected strategy, filters, or supported operation families";
@@ -512,8 +507,8 @@ fn skip_reason_detail(
     if !args.run.isolation.requests_isolation() {
         return "destructive fuzz requires --isolation isolated";
     }
-    if !isolation_proof.verified {
-        return "destructive fuzz requires verified generic isolation proof from Lab/offloaded runner metadata";
+    if isolation_proof.is_none() {
+        return "destructive fuzz requires explicit homeboy/isolation-proof/v1 via --isolation-proof";
     }
     "destructive fuzz is not allowed for this operation"
 }

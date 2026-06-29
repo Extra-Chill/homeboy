@@ -5,10 +5,10 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ## Synopsis
 
 ```bash
-homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
-homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
+homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
+homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
-homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>]
+homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>]
 homeboy fuzz validate <results-file>
 homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--output-envelope <path>]
 homeboy fuzz compare <baseline-envelope> <candidate-envelope> [--hotspot-policy <advisory|blocking|off>]
@@ -202,12 +202,47 @@ operation families are preserved in the inventory and reported under skipped
 operations with reason `unsupported`; destructive surfaces are skipped with
 reason `destructive`.
 
+Destructive fuzz is an explicit contract. `--allow-destructive` enables
+destructive selection only when `--isolation isolated` and `--isolation-proof`
+point at a complete `homeboy/isolation-proof/v1` JSON document. Homeboy does not
+infer destructive support from runner environment variables, Lab placement, or
+provider features. Missing or incomplete proof fails planning/request validation;
+it is not downgraded to a compatibility fallback.
+
+The proof contract is product-neutral. Provider-specific identifiers can appear
+only as opaque `provider_ref` or artifact refs; Homeboy core interprets the
+generic safety fields:
+
+```json
+{
+  "schema": "homeboy/isolation-proof/v1",
+  "version": 1,
+  "runtime_kind": "ephemeral-runner",
+  "provider_ref": { "id": "opaque-provider-owned-ref" },
+  "disposable": true,
+  "snapshot_ref": "snapshot://baseline-1",
+  "reset_supported": true,
+  "teardown_required": true,
+  "mutation_boundary": "runner-workspace",
+  "proof_artifacts": [
+    { "kind": "log", "ref": "artifact://isolation-proof" }
+  ],
+  "verified_by": "lab-controller"
+}
+```
+
+For destructive planning or execution, `disposable`, `reset_supported`, and
+`teardown_required` must be `true`; `runtime_kind`, `snapshot_ref`,
+`mutation_boundary`, `verified_by`, and at least one `proof_artifacts` entry must
+be present. `homeboy fuzz plan` and `homeboy fuzz run` embed the accepted proof in
+the `homeboy/fuzz-execution-request/v1` request as `isolation_proof`.
+
 Operations keep the free-form `kind` string for product-owned semantics and can
 also carry a canonical `family` for cross-runner coverage reporting. When
 `family` is omitted, Homeboy normalizes known neutral kinds and HTTP-style verbs
 to families such as `read`, `create`, `update`, `delete`, `list`, `search`,
 `navigate`, `render`, `query`, `load`, `submit`, and `performance_probe`.
-Product-specific render kinds, such as WordPress block rendering, should keep
+Product-specific render kinds, such as template rendering, should keep
 their precise meaning in `kind`, `target.kind`, tags, or metadata while using
 the generic `render` family for cross-runner reporting. Unknown `kind` values
 remain valid and are preserved without a canonical family.

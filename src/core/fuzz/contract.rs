@@ -17,6 +17,7 @@ use super::schemas::{
     FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEED_SCHEMA,
     FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SURFACE_SCHEMA,
     FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
+    ISOLATION_PROOF_SCHEMA,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,6 +79,8 @@ pub struct FuzzContractSchemas {
     pub lifecycle_result: String,
     #[serde(default = "lifecycle_snapshot_ref_schema")]
     pub lifecycle_snapshot_ref: String,
+    #[serde(default = "super::schema_defaults::isolation_proof_schema")]
+    pub isolation_proof: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -223,6 +226,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             lifecycle_result: crate::core::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string(),
             lifecycle_snapshot_ref: crate::core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA
                 .to_string(),
+            isolation_proof: ISOLATION_PROOF_SCHEMA.to_string(),
         },
         safety_classes: vec![
             FuzzSafetyClass::ReadOnly,

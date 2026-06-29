@@ -56,6 +56,7 @@ fn core_contract_lists_product_neutral_schema_ids() {
         contract.schemas.lifecycle_contract,
         crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
     );
+    assert_eq!(contract.schemas.isolation_proof, ISOLATION_PROOF_SCHEMA);
     assert!(contract
         .safety_classes
         .contains(&FuzzSafetyClass::IsolatedMutation));
@@ -159,6 +160,49 @@ fn core_contract_deserializes_without_operation_families() {
         contract.schemas.coverage_reconciliation,
         FUZZ_COVERAGE_RECONCILIATION_SCHEMA
     );
+    assert_eq!(contract.schemas.isolation_proof, ISOLATION_PROOF_SCHEMA);
+}
+
+#[test]
+fn isolation_proof_requires_explicit_destructive_safety_fields() {
+    let proof = IsolationProof::from_value(json!({
+        "schema": ISOLATION_PROOF_SCHEMA,
+        "version": FUZZ_CONTRACT_VERSION,
+        "runtime_kind": "ephemeral-runner",
+        "provider_ref": { "opaque": "provider-owned" },
+        "disposable": true,
+        "snapshot_ref": "snapshot://baseline-1",
+        "reset_supported": true,
+        "teardown_required": true,
+        "mutation_boundary": "runner-workspace",
+        "proof_artifacts": [{ "kind": "log", "ref": "artifact://proof" }],
+        "verified_by": "test-suite"
+    }))
+    .expect("valid proof");
+
+    assert_eq!(proof.schema, ISOLATION_PROOF_SCHEMA);
+    assert_eq!(proof.runtime_kind, "ephemeral-runner");
+    assert!(proof.disposable);
+    assert!(proof.reset_supported);
+    assert!(proof.teardown_required);
+}
+
+#[test]
+fn isolation_proof_rejects_missing_required_proof_artifacts() {
+    let error = IsolationProof::from_value(json!({
+        "schema": ISOLATION_PROOF_SCHEMA,
+        "version": FUZZ_CONTRACT_VERSION,
+        "runtime_kind": "ephemeral-runner",
+        "disposable": true,
+        "snapshot_ref": "snapshot://baseline-1",
+        "reset_supported": true,
+        "teardown_required": true,
+        "mutation_boundary": "runner-workspace",
+        "verified_by": "test-suite"
+    }))
+    .expect_err("proof artifacts are required");
+
+    assert!(error.contains("proof_artifacts"));
 }
 
 #[test]

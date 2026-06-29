@@ -29,6 +29,7 @@ pub const FUZZ_REQUIRED_ARTIFACT_SCHEMA: &str = "homeboy/fuzz-required-artifact/
 pub const FUZZ_GATE_SCHEMA: &str = "homeboy/fuzz-gate/v1";
 pub const FUZZ_HOTSPOT_SET_SCHEMA: &str = "homeboy/fuzz-hotspot-set/v1";
 pub const FUZZ_OBSERVATION_SET_SCHEMA: &str = "homeboy/fuzz-observation-set/v1";
+pub const ISOLATION_PROOF_SCHEMA: &str = "homeboy/isolation-proof/v1";
 pub const FUZZ_SKIP_REASON_UNSAFE: &str = "unsafe";
 pub const FUZZ_SKIP_REASON_DESTRUCTIVE: &str = "destructive";
 pub const FUZZ_SKIP_REASON_AUTH_REQUIRED: &str = "auth_required";

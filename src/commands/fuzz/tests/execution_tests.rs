@@ -32,6 +32,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             gate_profile: FuzzGateProfileArg::Measurement,
             allow_destructive: false,
             isolation: FuzzIsolationArg::Shared,
+            isolation_proof: None,
             expect_metric: vec![],
             args: vec![],
         };
@@ -108,11 +109,13 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
 #[test]
 fn fuzz_execution_request_artifact_records_runner_intent() {
     with_isolated_home(|_| {
-        let _guard = test_isolation_env_guard(Some("1"));
         let run_dir = RunDir::create().expect("run dir");
         let mut args = fuzz_run_args_with_run_id("proof-destructive");
         args.allow_destructive = true;
         args.isolation = FuzzIsolationArg::Isolated;
+        let proof_path = run_dir.step_file("isolation-proof.json");
+        write_isolation_proof(&proof_path);
+        args.isolation_proof = Some(proof_path.clone());
         args.max_duration = Some("90s".to_string());
         args.args = vec!["--runner-flag".to_string()];
         let inventory = destructive_inventory();
@@ -166,6 +169,15 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
         );
         assert_eq!(persisted["metadata"]["isolation"]["mode"], "isolated");
         assert_eq!(
+            persisted["isolation_proof"]["schema"],
+            "homeboy/isolation-proof/v1"
+        );
+        assert_eq!(persisted["isolation_proof"]["disposable"], true);
+        assert_eq!(
+            persisted["isolation_proof"]["mutation_boundary"],
+            "runner-workspace"
+        );
+        assert_eq!(
             persisted["metadata"]["target_inventory"]["id"],
             "component-a-inventory"
         );
@@ -214,6 +226,24 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
             "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE"
         );
     });
+}
+
+#[test]
+fn fuzz_execution_request_rejects_destructive_without_isolation_proof() {
+    let mut args = fuzz_run_args_with_run_id("proof-destructive-missing");
+    args.allow_destructive = true;
+    args.isolation = FuzzIsolationArg::Isolated;
+
+    let error = build_fuzz_execution_request(
+        &args,
+        "component-a",
+        args.rig.as_deref(),
+        args.workload_id.clone(),
+        &destructive_inventory(),
+    )
+    .expect_err("missing isolation proof should fail");
+
+    assert!(error.to_string().contains("homeboy/isolation-proof/v1"));
 }
 
 #[test]
@@ -928,6 +958,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             gate_profile: FuzzGateProfileArg::Measurement,
             allow_destructive: false,
             isolation: FuzzIsolationArg::Shared,
+            isolation_proof: None,
             expect_metric: vec![],
             args: vec![],
         };

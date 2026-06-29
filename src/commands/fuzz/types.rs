@@ -202,6 +202,10 @@ pub struct FuzzRunArgs {
     #[arg(long = "isolation", value_enum, default_value_t = FuzzIsolationArg::Shared)]
     pub(crate) isolation: FuzzIsolationArg,
 
+    /// Explicit homeboy/isolation-proof/v1 JSON proving destructive fuzz can run safely.
+    #[arg(long = "isolation-proof", value_name = "PATH")]
+    pub(crate) isolation_proof: Option<PathBuf>,
+
     /// Require a numeric metric emitted by the fuzz campaign to equal this value.
     /// Repeatable. Format: `--expect-metric metric_name=2`.
     #[arg(long = "expect-metric", value_name = "METRIC=VALUE", value_parser = crate::commands::parse_key_val)]

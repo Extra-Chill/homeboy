@@ -125,6 +125,7 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         gate_profile: FuzzGateProfileArg::Measurement,
         allow_destructive: false,
         isolation: FuzzIsolationArg::Shared,
+        isolation_proof: None,
         expect_metric: vec![],
         args: vec![],
     };
@@ -255,7 +256,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
           "schema": "homeboy/fuzz-workload/v1",
           "id": "parser",
           "target": { "component": "package" },
-          "workload": { "path": "${package.root}/bench/parser.php" },
+          "workload": { "path": "${package.root}/bench/parser.input" },
           "metadata": { "fixture": { "component": "package" } }
         }"#,
     )
@@ -297,6 +298,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         gate_profile: FuzzGateProfileArg::Measurement,
         allow_destructive: false,
         isolation: FuzzIsolationArg::Shared,
+        isolation_proof: None,
         expect_metric: vec![],
         args: vec![],
     };
@@ -339,7 +341,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
 
     assert_eq!(
         expanded["workload"]["path"].as_str(),
-        Some(format!("{}/bench/parser.php", temp.path().display()).as_str())
+        Some(format!("{}/bench/parser.input", temp.path().display()).as_str())
     );
     assert_eq!(
         expanded["metadata"]["homeboy_runtime_context"]["components"]["package"]["path"].as_str(),
