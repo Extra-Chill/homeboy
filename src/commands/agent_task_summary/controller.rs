@@ -29,6 +29,16 @@ pub(super) fn render_controller_summary(payload: &Value) -> Option<String> {
         format!("Artifacts: {}", totals.artifacts),
     ];
 
+    if let Some(state) = string_value(payload, &["diagnostics", "controller_state", "label"]) {
+        let reason = string_value(payload, &["diagnostics", "controller_state", "reason"])
+            .unwrap_or("no diagnostic reason recorded");
+        lines.push(format!("Controller state: {state} ({reason})"));
+    }
+
+    if let Some(executor) = controller_selected_executor(payload) {
+        lines.push(format!("Selected executor: {executor}"));
+    }
+
     if let Some(failure) = controller_last_failure(payload, controller) {
         lines.push(format!("Last failure: {failure}"));
     }
@@ -287,6 +297,13 @@ fn collect_controller_artifact_lines(value: &Value, path: &[&str], artifacts: &m
 }
 
 fn first_controller_recovery_command(payload: &Value) -> Option<&str> {
+    if let Some(command) = first_string(
+        value_at(payload, &["diagnostics"]).unwrap_or(payload),
+        &["next_commands"],
+    ) {
+        return Some(command);
+    }
+
     if let Some(command) = first_failed_child_action(payload)
         .and_then(|action| string_value(action, &["next_command"]))
     {
@@ -301,4 +318,22 @@ fn first_controller_recovery_command(payload: &Value) -> Option<&str> {
         })?
         .iter()
         .find_map(|action| first_string(action, &["recovery_commands"]))
+}
+
+fn controller_selected_executor(payload: &Value) -> Option<String> {
+    let executor = value_at(
+        payload,
+        &["diagnostics", "relevant_action", "selected_executor"],
+    )?;
+    let mut parts = Vec::new();
+    if let Some(value) = string_value(executor, &["backend"]) {
+        parts.push(format!("backend={value}"));
+    }
+    if let Some(value) = string_value(executor, &["selector"]) {
+        parts.push(format!("selector={value}"));
+    }
+    if let Some(value) = string_value(executor, &["model"]) {
+        parts.push(format!("model={value}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" / "))
 }

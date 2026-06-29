@@ -1030,6 +1030,56 @@ mod tests {
     }
 
     #[test]
+    fn controller_status_summary_surfaces_blocked_state_and_selected_executor() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-loop-controller-status/v1",
+            "controller": {
+                "loop_id": "loop-123",
+                "phase": "triage",
+                "state": "running",
+                "entities": {},
+                "task_lineage": [],
+                "next_actions": [{
+                    "action_id": "action-1",
+                    "action": { "action": "spawn_task" },
+                    "status": "failed"
+                }]
+            },
+            "diagnostics": {
+                "controller_state": {
+                    "state": "running_blocked_failed_action",
+                    "label": "running but blocked on failed action",
+                    "actionable": true,
+                    "reason": "controller is marked running, but a failed or blocked action must be resolved before ordinary progress is safe"
+                },
+                "relevant_action": {
+                    "action_id": "action-1",
+                    "action": "spawn_task",
+                    "status": "failed",
+                    "selected_executor": {
+                        "backend": "old-backend",
+                        "selector": "old-selector",
+                        "model": "old-model"
+                    }
+                },
+                "next_commands": ["homeboy agent-task controller diagnose loop-123  # inspect failed action evidence"]
+            }
+        });
+
+        let summary =
+            render_agent_task_summary(AgentTaskSummaryKind::Controller, &payload).unwrap();
+
+        assert!(summary.contains("State: running\n"));
+        assert!(summary.contains("Controller state: running but blocked on failed action"));
+        assert!(summary.contains(
+            "Selected executor: backend=old-backend / selector=old-selector / model=old-model\n"
+        ));
+        assert!(summary.contains(
+            "Next: homeboy agent-task controller diagnose loop-123  # inspect failed action evidence\n"
+        ));
+    }
+
+    #[test]
     fn controller_resume_summary_surfaces_last_failure_and_generic_resume_command() {
         let payload = json!({
             "schema": "homeboy/agent-task-loop-controller-resume-result/v1",

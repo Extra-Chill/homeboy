@@ -176,6 +176,87 @@ fn status_diagnostics_resume_commands_use_action_executor_selector() {
 }
 
 #[test]
+fn status_diagnostics_classify_paused_active_and_blocked_controller_states() {
+    let mut paused = AgentTaskLoopControllerRecord::new("paused-loop", "repair", "v1");
+    paused.metadata = json!({ "runtime": { "on": false, "state": "off" } });
+    let paused_diagnostics = controller_status_diagnostics_with(&paused, Utc::now(), |_| Ok(true))
+        .expect("paused diagnostics");
+    assert_eq!(paused_diagnostics.controller_state.state, "paused_off");
+    assert_eq!(paused_diagnostics.controller_state.label, "paused/off");
+    assert!(paused_diagnostics.next_commands[0].contains("agent-task loop resume paused-loop"));
+
+    let mut active = AgentTaskLoopControllerRecord::new("active-loop", "repair", "v1");
+    active.record_action(
+        AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key: "finding:active:repair".to_string(),
+            entity_id: None,
+            request: json!({ "task": "repair" }),
+        },
+        "finding emitted",
+    );
+    active.next_actions[0].status = AgentTaskLoopActionStatus::Running;
+    let active_diagnostics = controller_status_diagnostics_with(&active, Utc::now(), |_| Ok(true))
+        .expect("active diagnostics");
+    assert_eq!(
+        active_diagnostics.controller_state.state,
+        "running_active_work"
+    );
+    assert!(!active_diagnostics.controller_state.actionable);
+
+    let mut blocked = AgentTaskLoopControllerRecord::new("blocked-loop", "repair", "v1");
+    blocked.record_action(
+        AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key: "finding:blocked:repair".to_string(),
+            entity_id: None,
+            request: json!({
+                "mode": "run_plan",
+                "plan": {
+                    "tasks": [{
+                        "executor": {
+                            "backend": "old-backend",
+                            "selector": "old-selector",
+                            "model": "old-model"
+                        }
+                    }]
+                }
+            }),
+        },
+        "finding emitted",
+    );
+    blocked.next_actions[0].status = AgentTaskLoopActionStatus::Failed;
+    let blocked_diagnostics =
+        controller_status_diagnostics_with(&blocked, Utc::now(), |_| Ok(true))
+            .expect("blocked diagnostics");
+
+    assert_eq!(
+        blocked_diagnostics.controller_state.state,
+        "running_blocked_failed_action"
+    );
+    assert!(blocked_diagnostics.controller_state.actionable);
+    let relevant = blocked_diagnostics
+        .relevant_action
+        .expect("blocked action surfaced");
+    assert_eq!(relevant.action_id, "action-1");
+    assert_eq!(relevant.status, AgentTaskLoopActionStatus::Failed);
+    let executor = relevant.selected_executor.expect("selected executor");
+    assert_eq!(executor.backend.as_deref(), Some("old-backend"));
+    assert_eq!(executor.selector.as_deref(), Some("old-selector"));
+    assert_eq!(executor.model.as_deref(), Some("old-model"));
+    assert!(blocked_diagnostics
+        .next_commands
+        .iter()
+        .any(|command| command.contains("--fork")));
+    assert!(blocked_diagnostics
+        .next_commands
+        .iter()
+        .any(|command| command.contains("--replace")));
+    assert!(blocked_diagnostics
+        .next_commands
+        .iter()
+        .any(|command| command.contains("--resume-existing")));
+}
+
+#[test]
 fn status_diagnostics_flag_missing_referenced_run_records() {
     let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
     record.record_action(

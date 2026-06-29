@@ -247,6 +247,18 @@ pub fn init_from_spec_for_resume(
     init_from_spec_for_resume_with_resolution(request, ControllerResumeStateResolution::default())
 }
 
+/// Compute the stable repo-loop spec fingerprint for operator diagnostics.
+pub fn spec_fingerprint_for_status(spec: &AgentTaskRepoLoopSpec) -> Result<String> {
+    repo_loop_spec_fingerprint(spec)
+}
+
+/// Read the persisted repo-loop spec fingerprint from a controller record.
+pub fn controller_spec_fingerprint_for_status(
+    record: &AgentTaskLoopControllerRecord,
+) -> Option<String> {
+    repo_loop_spec_fingerprint_from_metadata(record)
+}
+
 /// Initialize a controller for resume, applying an explicit stale-state resolution.
 ///
 /// When the supplied spec fingerprint matches the persisted controller (or no

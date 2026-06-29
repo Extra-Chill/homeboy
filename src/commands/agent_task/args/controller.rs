@@ -215,6 +215,13 @@ pub struct AgentTaskControllerPlanArgs {
 pub struct AgentTaskControllerStatusArgs {
     /// Durable loop id returned by `agent-task controller init`.
     pub loop_id: String,
+
+    /// Optional repo loop spec JSON, @file, or - to compare against persisted controller state.
+    #[arg(long, value_name = "SPEC")]
+    pub spec: Option<String>,
+
+    #[command(flatten)]
+    pub dispatch: AgentTaskControllerDispatchArgs,
 }
 
 #[derive(Args, Debug)]
