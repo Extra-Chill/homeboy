@@ -224,6 +224,7 @@ pub mod review;
 pub mod rig;
 pub mod runner;
 pub mod runs;
+pub(crate) mod runs_proof_summary;
 pub(crate) mod runs_summary;
 pub mod self_cmd;
 pub mod server;

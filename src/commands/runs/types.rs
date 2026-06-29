@@ -32,6 +32,7 @@ use super::gh_actions::GhActionsImportOutput;
 use super::hotspots::{RunsHotspotsArgs, RunsHotspotsOutput};
 use super::latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
 use super::loop_sync::{RunsLoopSyncArgs, RunsLoopSyncOutput};
+use super::proof::RunsProofOutput;
 use super::query::{RunsQueryArgs, RunsQueryOutput};
 use super::reconcile::{RunsReconcileArgs, RunsReconcileOutput};
 use super::refs::{RunsRefsArgs, RunsRefsOutput};
@@ -81,6 +82,15 @@ pub(super) enum RunsCommand {
         /// The compact summary surfaces status, key metadata, and artifact
         /// pointers with inspect commands; the full payload is unchanged and
         /// always available with this flag or via `--output <file>`.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show only the compact proof signals for one run: verdict, gate
+    /// failures, and declared proof/scorecard signal fields. Full evidence
+    /// stays behind `runs show --json` / `runs evidence`.
+    Proof {
+        run_id: String,
+        /// Print the full JSON output instead of the compact human summary.
         #[arg(long)]
         json: bool,
     },
@@ -158,6 +168,7 @@ pub enum RunsOutput {
     LatestRun(RunsLatestRunOutput),
     Compare(RunsCompareOutput),
     Show(RunsShowOutput),
+    Proof(RunsProofOutput),
     Dossier(RunsDossierOutput),
     ResumePlan(RunsResumePlanOutput),
     Evidence(RunsEvidenceOutput),

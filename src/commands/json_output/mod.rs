@@ -113,12 +113,15 @@ pub fn run_command_output(
         Commands::Runs(args) => {
             let summarize_show = runs_show_summary_eligible(&args);
             let summarize_dossier = runs_dossier_summary_eligible(&args);
+            let summarize_proof = runs_proof_summary_eligible(&args);
             let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
             let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
                 if summarize_show {
                     super::runs_summary::render_runs_show_summary(payload)
                 } else if summarize_dossier {
                     super::runs_dossier_summary::render_runs_dossier_summary(payload)
+                } else if summarize_proof {
+                    super::runs_proof_summary::render_runs_proof_summary(payload)
                 } else {
                     None
                 }
@@ -254,6 +257,10 @@ fn runs_show_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
 
 fn runs_dossier_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
     args.dossier_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
+}
+
+fn runs_proof_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
+    args.proof_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
 fn ci_triage_summary_eligible(args: &crate::commands::ci::CiArgs) -> bool {
