@@ -19,7 +19,9 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
             job_id,
             follow,
             poll_ms,
-        } => job_logs(&runner_id, &job_id, follow, poll_ms).map_job_daemon(),
+            compact,
+            tail_kb,
+        } => job_logs(&runner_id, &job_id, follow, poll_ms, compact, tail_kb).map_job_daemon(),
         RunnerJobCommand::Cancel { runner_id, job_id } => {
             job_cancel(&runner_id, &job_id).map_job_daemon()
         }
@@ -91,9 +93,13 @@ fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
             runner_id: runner_id.to_string(),
             job_id: job_id.to_string(),
             follow: false,
+            compact: false,
             job,
             runner_job,
             events,
+            exit_code: None,
+            stdout: None,
+            stderr: None,
         },
         0,
     ))
@@ -104,6 +110,8 @@ fn job_logs(
     job_id: &str,
     follow: bool,
     poll_ms: u64,
+    compact: bool,
+    tail_kb: Option<usize>,
 ) -> CmdResult<RunnerJobOutput> {
     let poll_interval = Duration::from_millis(poll_ms.max(100));
     let mut emitted_sequence = 0;
@@ -123,6 +131,9 @@ fn job_logs(
         &snapshot.job,
     );
 
+    let tail_bytes = tail_kb.map(|kb| kb.saturating_mul(1024));
+    let projection = super::log_projection::project_job_log(snapshot.events, compact, tail_bytes);
+
     Ok((
         RunnerJobOutput {
             variant: "job_logs",
@@ -130,9 +141,13 @@ fn job_logs(
             runner_id: runner_id.to_string(),
             job_id: job_id.to_string(),
             follow,
+            compact,
             job: snapshot.job,
             runner_job,
-            events: snapshot.events,
+            events: projection.events,
+            exit_code: projection.exit_code,
+            stdout: projection.stdout,
+            stderr: projection.stderr,
         },
         0,
     ))

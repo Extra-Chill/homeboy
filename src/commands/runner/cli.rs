@@ -424,6 +424,14 @@ pub(super) enum RunnerJobCommand {
         /// Poll interval in milliseconds when --follow is set
         #[arg(long = "poll-ms", default_value_t = 1000)]
         poll_ms: u64,
+
+        /// Return only lifecycle events, exit code, and a bounded stdout/stderr tail
+        #[arg(long)]
+        compact: bool,
+
+        /// Bound embedded stdout/stderr to the last N kilobytes, surfaced as a tail
+        #[arg(long = "tail", value_name = "KB")]
+        tail_kb: Option<usize>,
     },
     /// Cancel a queued or running durable runner daemon job
     Cancel {

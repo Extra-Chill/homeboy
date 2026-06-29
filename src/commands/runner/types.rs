@@ -310,9 +310,35 @@ pub struct RunnerJobOutput {
     pub runner_id: String,
     pub job_id: String,
     pub follow: bool,
+    /// True when the payload was projected to lifecycle events + exit code +
+    /// bounded stdout/stderr tails rather than the full job record.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub compact: bool,
     pub job: Job,
     pub runner_job: homeboy::core::runners::RunnerJob,
     pub events: Vec<JobEvent>,
+    /// Exit code lifted out of the structured result event. Surfaced only in
+    /// compact/tail projections so callers can read "exit N" without the blob.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Bounded stdout view. Present only when the raw stdout was stripped from
+    /// `events` (compact or `--tail`); otherwise stdout lives once in the
+    /// structured result event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<RunnerJobLogStream>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<RunnerJobLogStream>,
+}
+
+/// A bounded view of a captured output stream. `tail` holds at most
+/// `returned_bytes` of the trailing output; `total_bytes` is the full size so
+/// callers know how much was elided.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerJobLogStream {
+    pub total_bytes: usize,
+    pub returned_bytes: usize,
+    pub truncated: bool,
+    pub tail: String,
 }
 
 #[derive(Debug, Serialize)]
