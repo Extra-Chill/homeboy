@@ -309,6 +309,7 @@ assert.equal(missingMutationEvidenceResult.status, 'failed');
 assert.equal(missingMutationEvidenceResult.cases[0].status, 'failed');
 assert.equal(missingMutationEvidenceResult.cases[0].diagnostics[0].code, 'wordpress_fuzz_mutation_lifecycle_evidence_missing');
 assert(missingMutationEvidenceResult.cases[0].diagnostics[0].missing_evidence.some((entry) => entry.kind === 'delete-boundary'));
+assert(missingMutationEvidenceResult.cases[0].diagnostics[0].missing_evidence.some((entry) => entry.kind === 'sandbox-isolation-proof'));
 
 const evidencedMutationResult = normalizeWordPressFuzzResult({
 	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
@@ -319,9 +320,9 @@ const evidencedMutationResult = normalizeWordPressFuzzResult({
 		metadata: {
 			mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'admin' }),
 			evidence: [
-				{ kind: 'snapshot', path: 'artifacts/snapshot.json' },
-				{ kind: 'restore', path: 'artifacts/restore.json' },
-				{ kind: 'reset', path: 'artifacts/reset.json' },
+				{ kind: 'sandbox-boundary', semantic_key: 'fuzz.disposable.sandbox_boundary', path: 'artifacts/sandbox-boundary.json' },
+				{ kind: 'destructive-permission', semantic_key: 'fuzz.disposable.destructive_permission', path: 'artifacts/destructive-permission.json' },
+				{ kind: 'sandbox-isolation-proof', semantic_key: 'fuzz.disposable.sandbox_isolation_proof', schema: 'wp-codebox/sandbox-isolation-proof/v1', path: 'artifacts/sandbox-isolation-proof.json' },
 			],
 		},
 	}],

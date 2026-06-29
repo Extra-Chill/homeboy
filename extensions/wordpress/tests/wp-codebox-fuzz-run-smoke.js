@@ -198,7 +198,9 @@ assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name 
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'wordpress-hotspots').schema, WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA);
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'wp-codebox-fuzz-suite-result').role, 'codebox_result');
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'case-log').role, 'case_log');
-assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'rollback-lifecycle').required, false);
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'sandbox-isolation-proof').required, false);
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'mutation-isolation-artifact').required, false);
+assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'delete-boundary-artifact').required, false);
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'external-http-guardrail').semantic_key, 'fuzz.external_http.guardrail');
 assert.equal(taskRequest.artifact_declarations.find((artifact) => artifact.name === 'runtime-access').semantic_key, 'fuzz.runtime.access');
 assert.deepEqual(
@@ -216,8 +218,12 @@ const destructiveTaskRequest = wpCodeboxFuzzSuiteTaskRequest({
 		cases: [{ id: 'delete-post-case', destructive: true }],
 	},
 });
-assert.equal(destructiveTaskRequest.artifact_declarations.find((artifact) => artifact.name === 'rollback-lifecycle').required, true);
-assert(destructiveTaskRequest.expected_artifacts.includes('rollback-lifecycle'));
+assert.equal(destructiveTaskRequest.artifact_declarations.find((artifact) => artifact.name === 'sandbox-isolation-proof').required, true);
+assert.equal(destructiveTaskRequest.artifact_declarations.find((artifact) => artifact.name === 'mutation-isolation-artifact').required, true);
+assert.equal(destructiveTaskRequest.artifact_declarations.find((artifact) => artifact.name === 'delete-boundary-artifact').required, true);
+assert(destructiveTaskRequest.expected_artifacts.includes('sandbox-isolation-proof'));
+assert(destructiveTaskRequest.expected_artifacts.includes('mutation-isolation-artifact'));
+assert(destructiveTaskRequest.expected_artifacts.includes('delete-boundary-artifact'));
 
 const executionRequest = wpCodeboxFuzzExecutionRequest({ taskId: 'direct-suite-task', input, wpCodeboxBin: '/custom/wp-codebox' });
 assert.equal(executionRequest.schema, WP_CODEBOX_FUZZ_EXECUTION_SCHEMA);
@@ -551,31 +557,25 @@ assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name 
 assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'coverage-summary'), true);
 assert.equal(structuredResultSummary.artifacts.some((artifact) => artifact.name === 'result-envelope' && artifact.role === 'result_envelope'), true);
 
-const deleteBoundaryRollbackSummary = normalizeWpCodeboxFuzzSuiteResult({
+const deleteBoundaryArtifactSummary = normalizeWpCodeboxFuzzSuiteResult({
 	schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
-	request_id: 'delete-boundary-rollbacks',
+	request_id: 'delete-boundary-artifacts',
 	status: 'passed',
 	cases: [{ id: 'delete-case', status: 'passed' }],
-	delete_boundary_rollback_artifacts: [{
-		name: 'delete-boundary-rollback',
-		path: 'rollback/delete-boundary.json',
+	delete_boundary_artifacts: [{
+		name: 'delete-boundary-artifact',
+		path: 'artifacts/delete-boundary.json',
 		content_type: 'application/json',
-		schema: 'wp-codebox/delete-boundary-rollback-artifact/v1',
+		schema: 'wp-codebox/delete-boundary-artifact/v1',
 		case_id: 'delete-case',
 		operation_id: 'rest:posts:delete',
 		status: 'passed',
 	}],
 });
-const rollbackArtifact = deleteBoundaryRollbackSummary.artifacts.find((artifact) => artifact.role === 'rollback_boundary');
-assert.equal(rollbackArtifact.semantic_key, 'fuzz.rollback.delete_boundary');
-assert.equal(rollbackArtifact.path, 'rollback/delete-boundary.json');
-assert.equal(rollbackArtifact.metadata.schema, 'wp-codebox/delete-boundary-rollback-artifact/v1');
-const rollbackObservation = deleteBoundaryRollbackSummary.observation_set.observations.find((observation) => observation.family === 'rollback');
-assert.equal(rollbackObservation.subject, 'delete_boundary');
-assert.equal(rollbackObservation.case_id, 'delete-case');
-assert.equal(rollbackObservation.metric, 'rollback_artifact');
-assert.equal(rollbackObservation.value, 1);
-
+const deleteBoundaryArtifact = deleteBoundaryArtifactSummary.artifacts.find((artifact) => artifact.role === 'delete_boundary_artifact');
+assert.equal(deleteBoundaryArtifact.semantic_key, 'fuzz.delete.boundary');
+assert.equal(deleteBoundaryArtifact.path, 'artifacts/delete-boundary.json');
+assert.equal(deleteBoundaryArtifact.metadata.schema, 'wp-codebox/delete-boundary-artifact/v1');
 const genericPrimitiveManifest = {
 	schema: 'homeboy/fuzz-workload/v1',
 	id: 'generic-primitive-smoke',

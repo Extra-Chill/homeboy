@@ -20,6 +20,7 @@ process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(
  */
 const {
 	WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA,
+	normalizeWpCodeboxFuzzSuiteResult,
 	normalizeWpCodeboxDestructiveReadiness,
 	preflightWpCodeboxFuzzCapabilityContract,
 	wpCodeboxFuzzSuiteTaskRequest,
@@ -101,11 +102,11 @@ assert.equal(blockedPreflight.ok, false);
 assert.equal(blockedPreflight.destructive_readiness.required, true);
 assert.deepEqual(
 	blockedPreflight.destructive_readiness.missing_primitives.map((primitive) => primitive.key),
-	['disposable_runtime', 'external_http_guardrail', 'artifact_export']
+	['disposable_runtime', 'disposable_sandbox_boundary', 'destructive_permission', 'mutation_boundary', 'external_side_effect_guardrail', 'artifact_export', 'teardown_discard']
 );
 assert.equal(blockedPreflight.missing_contracts.some((contract) => contract.type === 'destructive_readiness'), true);
 assert.equal(blockedPreflight.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_destructive_readiness'), true);
-assert.match(blockedPreflight.diagnostics.find((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_destructive_readiness').message, /external HTTP guardrail/);
+assert.match(blockedPreflight.diagnostics.find((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_destructive_readiness').message, /disposable sandbox boundary identity/);
 
 const missingReadinessCliCalls = [];
 const missingReadinessPreflight = preflightWpCodeboxFuzzCapabilityContract({
@@ -138,11 +139,19 @@ const completeReadiness = {
 	...incompleteReadiness,
 	disposable: true,
 	isolation: { runtime_backed: true, disposable: true },
-	guardrails: { external_http_guardrail: true },
+	guardrails: { external_side_effect_guardrail: true },
 	artifacts: { export: true },
+	destructiveModeRequirements: {
+		supported: true,
+		destructiveMutationIntent: 'destructive',
+		requiredSandboxBoundary: { disposable: true, destructivePermission: true, teardown: 'discard' },
+		requiredArtifacts: ['mutation-isolation-artifact', 'delete-boundary-artifact'],
+		deleteBoundaryCapability: 'delete-boundary-artifact',
+		rawDeleteCapability: null,
+	},
 	capabilities: {
 		...incompleteReadiness.capabilities,
-		capabilities: ['disposable-runtime', 'runtime-backed-isolation', 'external-http-guardrail', 'artifact-export'],
+		capabilities: ['disposable-runtime', 'runtime-backed-isolation', 'external-side-effect-guardrail', 'artifact-export', 'wordpress-runtime:sandbox-isolation-proof'],
 	},
 };
 
@@ -155,12 +164,58 @@ const passedPreflight = preflightWpCodeboxFuzzCapabilityContract({
 assert.equal(passedPreflight.ok, true);
 assert.equal(passedPreflight.destructive_readiness.ok, true);
 assert.equal(passedPreflight.destructive_readiness.facts.disposable_runtime, true);
-assert.equal(passedPreflight.destructive_readiness.facts.external_http_guardrail, true);
+assert.equal(passedPreflight.destructive_readiness.facts.disposable_sandbox_boundary, true);
+assert.equal(passedPreflight.destructive_readiness.facts.destructive_permission, true);
+assert.equal(passedPreflight.destructive_readiness.facts.mutation_boundary, true);
+assert.equal(passedPreflight.destructive_readiness.facts.external_side_effect_guardrail, true);
 assert.equal(passedPreflight.destructive_readiness.facts.artifact_export, true);
+assert.equal(passedPreflight.destructive_readiness.facts.teardown_discard, true);
 assert.equal(passedPreflight.capabilities.capabilities.includes('disposable-runtime'), true);
 assert.equal(passedPreflight.capabilities.capabilities.includes('runtime-isolation'), true);
-assert.equal(passedPreflight.capabilities.capabilities.includes('external-http-guardrail'), true);
+assert.equal(passedPreflight.capabilities.capabilities.includes('disposable-sandbox-boundary'), true);
+assert.equal(passedPreflight.capabilities.capabilities.includes('destructive-permission'), true);
+assert.equal(passedPreflight.capabilities.capabilities.includes('mutation-isolation-artifact'), true);
+assert.equal(passedPreflight.capabilities.capabilities.includes('delete-boundary-artifact'), true);
+assert.equal(passedPreflight.capabilities.capabilities.includes('sandbox-isolation-proof'), true);
+assert.equal(passedPreflight.capabilities.capabilities.includes('external-side-effect-guardrail'), true);
 assert.equal(passedPreflight.capabilities.capabilities.includes('artifact-export'), true);
+assert.deepEqual(
+	destructiveRequest.executor.config.runtime_task.input.metadata.disposableSandboxBoundary,
+	{ disposable: true, destructivePermission: true, teardown: 'discard', backend: 'wordpress-playground', environment: 'wordpress', hostAccess: 'declared-mounts-only' }
+);
+
+const missingDisposableArtifacts = normalizeWpCodeboxFuzzSuiteResult({
+	schema: 'wp-codebox/fuzz-suite-result/v1',
+	request_id: 'destructive-artifact-missing',
+	status: 'succeeded',
+	wordpress_fuzz_result: {
+		schema: 'wordpress-fuzz-result/v1',
+		status: 'succeeded',
+		cases: [{ id: 'delete-post', status: 'passed' }],
+	},
+	artifacts: [{ name: 'case-log', path: 'files/case-log.jsonl' }],
+}, { request: destructiveRequest });
+
+assert.equal(missingDisposableArtifacts.status, 'failed');
+assert.equal(missingDisposableArtifacts.failures.some((failure) => failure.code === 'wp_codebox_fuzz_disposable_lifecycle_artifacts_missing'), true);
+
+const passedDisposableArtifacts = normalizeWpCodeboxFuzzSuiteResult({
+	schema: 'wp-codebox/fuzz-suite-result/v1',
+	request_id: 'destructive-artifact-passed',
+	status: 'succeeded',
+	wordpress_fuzz_result: {
+		schema: 'wordpress-fuzz-result/v1',
+		status: 'succeeded',
+		cases: [{ id: 'delete-post', status: 'passed' }],
+	},
+	artifacts: [
+		{ name: 'sandbox-isolation-proof', kind: 'sandbox-isolation-proof', schema: 'wp-codebox/sandbox-isolation-proof/v1', path: 'files/sandbox-isolation/delete-post-proof.json' },
+		{ name: 'delete-boundary-artifact', kind: 'delete-boundary-artifact', schema: 'wp-codebox/delete-boundary-artifact/v1', path: 'files/delete-boundaries/delete-post.json' },
+	],
+}, { request: destructiveRequest });
+
+assert.equal(passedDisposableArtifacts.status, 'succeeded');
+assert.equal(passedDisposableArtifacts.failures.some((failure) => failure.code === 'wp_codebox_fuzz_disposable_lifecycle_artifacts_missing'), false);
 
 assert.deepEqual(normalizeWpCodeboxDestructiveReadiness(completeReadiness, {
 	request: destructiveRequest,

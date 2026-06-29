@@ -158,9 +158,26 @@ const DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS = [
 		required: false,
 	},
 	{
-		role: 'rollback_lifecycle',
-		name: 'rollback-lifecycle',
-		semantic_key: 'fuzz.rollback.lifecycle',
+		role: 'sandbox_isolation_proof',
+		name: 'sandbox-isolation-proof',
+		semantic_key: 'fuzz.disposable.sandbox_isolation_proof',
+		schema: 'wp-codebox/sandbox-isolation-proof/v1',
+		content_type: 'application/json',
+		required: false,
+	},
+	{
+		role: 'mutation_isolation_artifact',
+		name: 'mutation-isolation-artifact',
+		semantic_key: 'fuzz.mutation.isolation',
+		schema: 'wp-codebox/mutation-isolation-artifact/v1',
+		content_type: 'application/json',
+		required: false,
+	},
+	{
+		role: 'delete_boundary_artifact',
+		name: 'delete-boundary-artifact',
+		semantic_key: 'fuzz.delete.boundary',
+		schema: 'wp-codebox/delete-boundary-artifact/v1',
 		content_type: 'application/json',
 		required: false,
 	},
@@ -181,8 +198,12 @@ const DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS = [
 ];
 const WP_CODEBOX_DESTRUCTIVE_READINESS_REQUIREMENTS = [
 	{ key: 'disposable_runtime', label: 'disposable runtime isolation' },
-	{ key: 'external_http_guardrail', label: 'external HTTP guardrail' },
+	{ key: 'disposable_sandbox_boundary', label: 'disposable sandbox boundary identity' },
+	{ key: 'destructive_permission', label: 'destructive permission' },
+	{ key: 'mutation_boundary', label: 'mutation boundary artifact contract' },
+	{ key: 'external_side_effect_guardrail', label: 'external side-effect guardrail' },
 	{ key: 'artifact_export', label: 'artifact export' },
+	{ key: 'teardown_discard', label: 'teardown/discard evidence' },
 ];
 const WORDPRESS_FUZZ_POSTPROCESS_BINDING_SCHEMA = 'homeboy/wordpress-fuzz-postprocess-binding/v1';
 const WORDPRESS_FUZZ_POSTPROCESS_OUTPUTS = [
@@ -214,8 +235,14 @@ const FUZZ_ARTIFACT_SEMANTIC_KEYS = {
 	coverage_gap_report: 'fuzz.coverage.gap_report',
 	observation_set: 'fuzz.observation_set',
 	hotspot_summary: 'fuzz.hotspot.summary',
-	rollback_boundary: 'fuzz.rollback.delete_boundary',
-	rollback_lifecycle: 'fuzz.rollback.lifecycle',
+	disposable_sandbox_boundary: 'fuzz.disposable.sandbox_boundary',
+	destructive_permission: 'fuzz.disposable.destructive_permission',
+	mutation_isolation: 'fuzz.mutation.isolation',
+	mutation_isolation_artifact: 'fuzz.mutation.isolation',
+	delete_boundary: 'fuzz.delete.boundary',
+	delete_boundary_artifact: 'fuzz.delete.boundary',
+	sandbox_isolation_proof: 'fuzz.disposable.sandbox_isolation_proof',
+	teardown_discard: 'fuzz.disposable.teardown_discard',
 	external_http_guardrail: 'fuzz.external_http.guardrail',
 	runtime_access: 'fuzz.runtime.access',
 	result_envelope: 'fuzz.result.envelope',
@@ -315,6 +342,7 @@ function wpCodeboxFuzzSuiteInput(options = {}) {
 		steps: normalizeWordPressWorkloadSteps(source?.steps || options.steps),
 		metadata: stripUndefined({
 			...(objectOrUndefined(options.metadata) || {}),
+			disposableSandboxBoundary: suiteInputRequiresDisposableLifecycleArtifacts({ cases, metadata: options.metadata }) ? disposableSandboxBoundaryEvidence(options) : undefined,
 			workload: objectOrUndefined(options.workload),
 			seeds: normalizeArray(options.seeds).length > 0 ? normalizeArray(options.seeds) : undefined,
 			fixture_plan: fixturePlan,
@@ -341,6 +369,19 @@ function normalizeFuzzFixturePlan(value) {
 		refs: refs.length > 0 ? refs : undefined,
 		data,
 		metadata: objectOrUndefined(plan.metadata),
+	});
+}
+
+function disposableSandboxBoundaryEvidence(options = {}) {
+	const explicit = objectOrUndefined(options.disposableSandboxBoundary || options.disposable_sandbox_boundary || options.metadata?.disposableSandboxBoundary || options.metadata?.disposable_sandbox_boundary) || {};
+	return stripUndefined({
+		disposable: true,
+		destructivePermission: true,
+		teardown: explicit.teardown === 'destroy' ? 'destroy' : 'discard',
+		backend: explicit.backend || 'wordpress-playground',
+		environment: explicit.environment || 'wordpress',
+		hostAccess: explicit.hostAccess || explicit.host_access || 'declared-mounts-only',
+		metadata: objectOrUndefined(explicit.metadata),
 	});
 }
 
@@ -441,7 +482,7 @@ function normalizeWpCodeboxFuzzSuiteCases(source = {}, context = {}) {
 	}
 	const planCases = homeboyFuzzWorkloadPlanCases(source);
 	if (planCases.length > 0) {
-		return planCases.map((entry, index) => homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry, source, index, context));
+		return planCases.map((entry, index) => homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry, source, index));
 	}
 	if (directCases.length === 0) {
 		const defaultCase = homeboyFuzzWorkloadDefaultCase(source);
@@ -502,7 +543,7 @@ function homeboyFuzzWorkloadPlanCases(manifest = {}) {
 	));
 }
 
-function homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry = {}, manifest = {}, index = 0, context = {}) {
+function homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry = {}, manifest = {}, index = 0) {
 	const caseId = entry.case_id || entry.caseId || entry.id || `${manifest.id || 'fuzz-workload'}:${index}`;
 	const artifacts = normalizeHomeboyFuzzCaseArtifacts(entry, manifest);
 	const target = homeboyFuzzPlanCaseTarget(entry);
@@ -939,26 +980,26 @@ function wpCodeboxFuzzSuiteTaskRequest(options = {}) {
 }
 
 function wpCodeboxFuzzArtifactDeclarationsForInput(input = {}) {
-	if (!suiteInputRequiresRollbackLifecycleArtifact(input)) {
+	if (!suiteInputRequiresDisposableLifecycleArtifacts(input)) {
 		return DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS;
 	}
 	return DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS.map((artifact) => (
-		artifact.name === 'rollback-lifecycle' ? { ...artifact, required: true } : artifact
+		['sandbox-isolation-proof', 'mutation-isolation-artifact', 'delete-boundary-artifact'].includes(artifact.name) ? { ...artifact, required: true } : artifact
 	));
 }
 
 function wpCodeboxFuzzExpectedArtifactsForInput(input = {}) {
-	if (!suiteInputRequiresRollbackLifecycleArtifact(input)) {
+	if (!suiteInputRequiresDisposableLifecycleArtifacts(input)) {
 		return DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS;
 	}
-	return [...new Set([...DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS, 'rollback-lifecycle'])];
+	return [...new Set([...DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS, 'sandbox-isolation-proof', 'mutation-isolation-artifact', 'delete-boundary-artifact'])];
 }
 
-function suiteInputRequiresRollbackLifecycleArtifact(input = {}) {
+function suiteInputRequiresDisposableLifecycleArtifacts(input = {}) {
 	const metadata = objectOrUndefined(input.metadata) || {};
 	return metadata.aggressive === true
 		|| String(metadata.mode || metadata.fuzz_mode || metadata.fuzzMode || '').toLowerCase() === 'aggressive'
-		|| normalizeArray(input.cases).some((testCase) => fuzzCaseRequiresRollbackLifecycle(testCase, testCase));
+		|| normalizeArray(input.cases).some((testCase) => fuzzCaseRequiresDisposableLifecycle(testCase, testCase));
 }
 
 function wpCodeboxFuzzRuntimeTaskRequest(options = {}) {
@@ -1521,10 +1562,16 @@ function normalizeWpCodeboxDestructiveReadiness(readiness = {}, { request = {}, 
 	const required = wpCodeboxRequestRequiresDestructiveReadiness({ request, suiteInput, plan });
 	const source = objectOrUndefined(readiness) || {};
 	const capabilities = new Set(wordpressRuntimeCapabilitiesFromFuzzReadiness(source));
+	const destructiveRequirements = objectOrUndefined(source.destructiveModeRequirements || source.destructive_mode_requirements) || {};
+	const requiredBoundary = objectOrUndefined(destructiveRequirements.requiredSandboxBoundary || destructiveRequirements.required_sandbox_boundary) || {};
 	const facts = {
 		disposable_runtime: wpCodeboxReadinessDisposableRuntime(source, capabilities),
-		external_http_guardrail: wpCodeboxReadinessHasAny(source, capabilities, ['external-http-guardrail'], ['external_http_guardrail', 'externalHttpGuardrail', 'external_http', 'externalHttp', 'http_guardrail', 'httpGuardrail']),
+		disposable_sandbox_boundary: wpCodeboxReadinessDisposableSandboxBoundary(source, requiredBoundary, capabilities),
+		destructive_permission: wpCodeboxReadinessDestructivePermission(source, requiredBoundary, capabilities),
+		mutation_boundary: wpCodeboxReadinessMutationBoundary(source, destructiveRequirements, capabilities),
+		external_side_effect_guardrail: wpCodeboxReadinessHasAny(source, capabilities, ['external-http-guardrail', 'external-side-effect-guardrail'], ['external_side_effect_guardrail', 'externalSideEffectGuardrail', 'external_http_guardrail', 'externalHttpGuardrail', 'external_http', 'externalHttp', 'http_guardrail', 'httpGuardrail']),
 		artifact_export: wpCodeboxReadinessHasAny(source, capabilities, ['artifact-export'], ['artifact_export', 'artifactExport', 'artifacts_export', 'artifactsExport', 'export_artifacts', 'exportArtifacts']),
+		teardown_discard: wpCodeboxReadinessTeardownDiscard(source, requiredBoundary, capabilities),
 	};
 	const missingPrimitives = required
 		? WP_CODEBOX_DESTRUCTIVE_READINESS_REQUIREMENTS.filter((requirement) => facts[requirement.key] !== true)
@@ -1541,9 +1588,39 @@ function normalizeWpCodeboxDestructiveReadiness(readiness = {}, { request = {}, 
 		policy: required ? {
 			mutation_mode: destructiveMutationModeFromRequest({ request, suiteInput, plan }),
 			safety_class: strongestCodeboxReadinessSafetyClass({ request, suiteInput, plan }),
+			required_sandbox_boundary: { disposable: true, destructivePermission: true, teardown: 'discard' },
 			requirements: WP_CODEBOX_DESTRUCTIVE_READINESS_REQUIREMENTS,
 		} : undefined,
 	});
+}
+
+function wpCodeboxReadinessDisposableSandboxBoundary(readiness = {}, requiredBoundary = {}, capabilities = new Set()) {
+	return (requiredBoundary.disposable === true && requiredBoundary.destructivePermission === true)
+		|| capabilities.has('disposable-sandbox-boundary')
+		|| booleanAtAnyPath(readiness, ['disposableSandboxBoundary.disposable', 'disposable_sandbox_boundary.disposable', 'sandboxBoundary.disposable', 'sandbox_boundary.disposable']);
+}
+
+function wpCodeboxReadinessDestructivePermission(readiness = {}, requiredBoundary = {}, capabilities = new Set()) {
+	return requiredBoundary.destructivePermission === true
+		|| requiredBoundary.destructive_permission === true
+		|| capabilities.has('destructive-permission')
+		|| booleanAtAnyPath(readiness, ['destructivePermission', 'destructive_permission', 'disposableSandboxBoundary.destructivePermission', 'disposable_sandbox_boundary.destructive_permission', 'sandboxBoundary.destructivePermission', 'sandbox_boundary.destructive_permission']);
+}
+
+function wpCodeboxReadinessMutationBoundary(readiness = {}, destructiveRequirements = {}, capabilities = new Set()) {
+	const requiredArtifacts = new Set(normalizeArray(destructiveRequirements.requiredArtifacts || destructiveRequirements.required_artifacts));
+	return capabilities.has('mutation-isolation-artifact')
+		|| capabilities.has('delete-boundary-artifact')
+		|| requiredArtifacts.has('mutation-isolation-artifact')
+		|| requiredArtifacts.has('delete-boundary-artifact')
+		|| booleanAtAnyPath(readiness, ['mutationBoundary', 'mutation_boundary', 'artifacts.mutation_isolation_artifact', 'artifacts.delete_boundary_artifact']);
+}
+
+function wpCodeboxReadinessTeardownDiscard(readiness = {}, requiredBoundary = {}, capabilities = new Set()) {
+	return requiredBoundary.teardown === 'discard'
+		|| requiredBoundary.teardown === 'destroy'
+		|| capabilities.has('sandbox-isolation-proof')
+		|| ['discard', 'destroy'].includes(String(readiness.disposableSandboxBoundary?.teardown || readiness.disposable_sandbox_boundary?.teardown || readiness.sandboxBoundary?.teardown || readiness.sandbox_boundary?.teardown || readiness.teardown || '').toLowerCase());
 }
 
 function wpCodeboxRequestRequiresDestructiveReadiness({ request = {}, suiteInput = {}, plan = {} } = {}) {
@@ -1713,6 +1790,9 @@ function normalizeWpCodeboxPublicFuzzCapabilitiesFromReadiness(readiness = {}) {
 
 function wordpressRuntimeCapabilitiesFromFuzzReadiness(readiness = {}) {
 	const capabilities = objectOrUndefined(readiness.capabilities) || {};
+	const destructiveRequirements = objectOrUndefined(readiness.destructiveModeRequirements || readiness.destructive_mode_requirements) || {};
+	const requiredBoundary = objectOrUndefined(destructiveRequirements.requiredSandboxBoundary || destructiveRequirements.required_sandbox_boundary) || {};
+	const requiredArtifacts = new Set(normalizeArray(destructiveRequirements.requiredArtifacts || destructiveRequirements.required_artifacts));
 	const runtimeActions = new Set(normalizeArray(capabilities.runtimeActionTypes || capabilities.runtime_action_types));
 	const commands = new Set(normalizeArray(capabilities.commands));
 	const declaredCapabilities = normalizeWordPressFuzzRuntimeCapabilities([
@@ -1730,7 +1810,13 @@ function wordpressRuntimeCapabilitiesFromFuzzReadiness(readiness = {}) {
 		...(runtimeActions.has('editor_open') ? ['block-editor'] : []),
 		...(runtimeActions.has('php') || runtimeActions.has('wp_cli') || commands.has('wordpress.run-php') || commands.has('wordpress.wp-cli') ? ['database', 'query-observation', 'sequence'] : []),
 		...(readiness.mode === 'runtime-backed' && booleanAtAnyPath(readiness, ['disposable', 'sandbox.disposable', 'runtime.disposable', 'isolation.disposable', 'isolation.runtime_backed', 'isolation.runtimeBacked', 'isolation.sandboxed', 'runtime_isolation', 'runtimeIsolation', 'sandbox.isolated']) ? ['disposable-runtime', 'runtime-isolation'] : []),
+		...(requiredBoundary.disposable === true ? ['disposable-sandbox-boundary'] : []),
+		...(requiredBoundary.destructivePermission === true || requiredBoundary.destructive_permission === true ? ['destructive-permission'] : []),
+		...(requiredArtifacts.has('mutation-isolation-artifact') ? ['mutation-isolation-artifact'] : []),
+		...(requiredArtifacts.has('delete-boundary-artifact') ? ['delete-boundary-artifact'] : []),
+		...(capabilities.capabilities?.includes?.('wordpress-runtime:sandbox-isolation-proof') || declaredCapabilities.includes('sandbox-isolation-proof') || requiredArtifacts.has('sandbox-isolation-proof') ? ['sandbox-isolation-proof'] : []),
 		...(wpCodeboxReadinessHasAny(readiness, new Set(declaredCapabilities), [], ['external_http_guardrail', 'externalHttpGuardrail', 'external_http', 'externalHttp', 'http_guardrail', 'httpGuardrail']) ? ['external-http-guardrail'] : []),
+		...(wpCodeboxReadinessHasAny(readiness, new Set(declaredCapabilities), [], ['external_side_effect_guardrail', 'externalSideEffectGuardrail']) ? ['external-side-effect-guardrail'] : []),
 		...(wpCodeboxReadinessHasAny(readiness, new Set(declaredCapabilities), [], ['artifact_export', 'artifactExport', 'artifacts_export', 'artifactsExport', 'export_artifacts', 'exportArtifacts']) ? ['artifact-export'] : []),
 	]);
 }
@@ -1847,7 +1933,7 @@ function normalizeWpCodeboxFuzzSuiteResult(result = {}, context = {}) {
 		...normalizeArray(source?.coverage_gaps || source?.coverageGaps || source?.coverage?.gaps),
 		...normalizeArray(derivedArtifacts.coverage_gap_reports).flatMap((report) => normalizeArray(report.coverage_gaps)),
 	]);
-	const hotspotSummary = normalizeFuzzHotspotSummary(source?.hotspot_summary || source?.hotspotSummary || source?.hotspots || source?.performance_hotspots || source?.performanceHotspots || source?.delete_boundary_rollback_hotspots || source?.deleteBoundaryRollbackHotspots || derivedArtifacts.hotspot_summary || fuzzHotspotSummaryFromObservationSet(observationSet, { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id }), { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id });
+	const hotspotSummary = normalizeFuzzHotspotSummary(source?.hotspot_summary || source?.hotspotSummary || source?.hotspots || source?.performance_hotspots || source?.performanceHotspots || derivedArtifacts.hotspot_summary || fuzzHotspotSummaryFromObservationSet(observationSet, { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id }), { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id });
 	const normalizedResult = normalizeEmbeddedWordPressFuzzResult(source);
 	const contractFailures = wpCodeboxFuzzContractFailures({ source, result, context, artifacts, coverageSummary, normalizedResult, hotspotSummary, derivedArtifacts });
 	if (contractFailures.length > 0 && ['succeeded', 'success', 'passed', 'ok'].includes(String(status).toLowerCase())) {
@@ -1912,7 +1998,7 @@ function normalizeCodeboxFuzzObservationSet(source = {}, context = {}) {
 			...normalizeArray(source?.resources || source?.resource_measurements || source?.resourceMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'resource', ...entry } : entry),
 			...normalizeArray(source?.timings || source?.timing_measurements || source?.timingMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'timing', ...entry } : entry),
 			...normalizeArray(source?.counters || source?.counter_measurements || source?.counterMeasurements).map((entry) => objectOrUndefined(entry) ? { family: 'counter', ...entry } : entry),
-			...deleteBoundaryRollbackObservations(source),
+			...deleteBoundaryArtifactObservations(source),
 			...wordpressFuzzResultCaseObservations(source?.wordpress_fuzz_result || source?.wordpressFuzzResult || source?.normalized_result || source?.normalizedResult),
 		],
 		metadata: stripUndefined({
@@ -1921,16 +2007,16 @@ function normalizeCodeboxFuzzObservationSet(source = {}, context = {}) {
 	}, { provider: 'wp-codebox', taskId: source?.request_id || source?.requestId || context.request?.task_id });
 }
 
-function deleteBoundaryRollbackObservations(source = {}) {
-	return normalizeArray(source?.delete_boundary_rollback_artifacts || source?.deleteBoundaryRollbackArtifacts || source?.rollback_artifacts || source?.rollbackArtifacts)
+function deleteBoundaryArtifactObservations(source = {}) {
+	return normalizeArray(source?.delete_boundary_artifacts || source?.deleteBoundaryArtifacts)
 		.map((artifact) => {
 			if (!objectOrUndefined(artifact)) {
 				return undefined;
 			}
 			return stripUndefined({
-				family: 'rollback',
+				family: 'mutation-boundary',
 				subject: 'delete_boundary',
-				metric: 'rollback_artifact',
+				metric: 'delete_boundary_artifact',
 				value: ['failed', 'error', 'missing'].includes(String(artifact.status || '').toLowerCase()) ? 0 : 1,
 				case_id: artifact.case_id || artifact.caseId,
 				operation_id: artifact.operation_id || artifact.operationId,
@@ -1999,29 +2085,29 @@ function wpCodeboxFuzzContractFailures({ source = {}, result = {}, context = {},
 	const requiredOutputFailures = requiredFuzzOutputFailures({ source, context, artifacts, normalizedResult, hotspotSummary });
 	failures.push(...requiredOutputFailures);
 	failures.push(...mutationLifecycleContractFailures({ source, context, artifacts, normalizedResult }));
-	failures.push(...destructiveRollbackLifecycleFailures({ source, context, artifacts, normalizedResult }));
+	failures.push(...destructiveDisposableLifecycleFailures({ source, context, artifacts, normalizedResult }));
 	failures.push(...validateWordPressFuzzPostprocessOutputs({ source, context, artifacts, derivedArtifacts, hotspotSummary, normalizedResult }));
 
 	return failures;
 }
 
-function destructiveRollbackLifecycleFailures({ source = {}, context = {}, artifacts = [], normalizedResult } = {}) {
+function destructiveDisposableLifecycleFailures({ source = {}, context = {}, artifacts = [], normalizedResult } = {}) {
 	const planCases = requestPlanCases(context.request || context.taskRequest || {});
 	const resultCases = new Map(normalizeArray(normalizedResult?.cases || source.cases || source.fuzz_cases || source.fuzzCases).map((testCase) => [testCase.id || testCase.case_id || testCase.caseId, testCase]));
-	const destructiveCases = planCases.filter((planCase) => fuzzCaseRequiresRollbackLifecycle(planCase, resultCases.get(planCase.id || planCase.case_id || planCase.caseId)));
-	if (destructiveCases.length === 0 || hasSuccessfulRollbackLifecycleArtifact(artifacts)) {
+	const destructiveCases = planCases.filter((planCase) => fuzzCaseRequiresDisposableLifecycle(planCase, resultCases.get(planCase.id || planCase.case_id || planCase.caseId)));
+	if (destructiveCases.length === 0 || hasSuccessfulDisposableLifecycleArtifacts({ artifacts, source, normalizedResult })) {
 		return [];
 	}
 	return [{
 		severity: 'error',
-		code: 'wp_codebox_fuzz_rollback_lifecycle_artifacts_missing',
-		message: 'Aggressive/destructive WP Codebox fuzz success is missing required rollback lifecycle artifacts.',
-		missing_artifact_keys: ['fuzz.rollback.lifecycle'],
+		code: 'wp_codebox_fuzz_disposable_lifecycle_artifacts_missing',
+		message: 'Aggressive/destructive WP Codebox fuzz success is missing required disposable sandbox lifecycle artifacts.',
+		missing_artifact_keys: ['fuzz.disposable.sandbox_isolation_proof', 'fuzz.mutation.isolation', 'fuzz.delete.boundary'],
 		case_ids: destructiveCases.map((testCase) => testCase.id || testCase.case_id || testCase.caseId).filter(Boolean),
 	}];
 }
 
-function fuzzCaseRequiresRollbackLifecycle(planCase = {}, resultCase = {}) {
+function fuzzCaseRequiresDisposableLifecycle(planCase = {}, resultCase = {}) {
 	const status = String(resultCase?.status || '').toLowerCase();
 	if (['skipped', 'skip', 'planned', 'plan_only'].includes(status)) {
 		return false;
@@ -2031,7 +2117,7 @@ function fuzzCaseRequiresRollbackLifecycle(planCase = {}, resultCase = {}) {
 	const lifecycle = normalizeWordPressFuzzMutationLifecycleContract(metadata.mutation_lifecycle || metadata.mutationLifecycle || planCase.mutation_lifecycle || planCase.mutationLifecycle);
 	return Boolean(
 		lifecycle?.delete_boundary_required
-		|| lifecycle?.required_evidence?.some((entry) => entry.semantic_key === 'fuzz.rollback.delete_boundary' || entry.kind === 'delete-boundary')
+		|| lifecycle?.required_evidence?.some((entry) => entry.semantic_key === 'fuzz.delete.boundary' || entry.kind === 'delete-boundary' || entry.kind === 'sandbox-isolation-proof')
 		|| planCase.destructive === true
 		|| metadata.destructive === true
 		|| safety.destructive === true
@@ -2042,15 +2128,41 @@ function fuzzCaseRequiresRollbackLifecycle(planCase = {}, resultCase = {}) {
 	);
 }
 
-function hasSuccessfulRollbackLifecycleArtifact(artifacts = []) {
-	return normalizeArray(artifacts).some((artifact) => {
-		const role = artifact.role || normalizeFuzzArtifactRole(artifact.name || artifact.semantic_key || artifact.semanticKey || artifact.path);
-		const semanticKey = artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey;
-		const status = String(artifact.status || artifact.metadata?.status || '').toLowerCase();
-		return ['rollback_lifecycle', 'rollback_boundary'].includes(role)
-			&& ['failed', 'errored', 'error', 'missing'].includes(status) === false
-			&& (semanticKey === 'fuzz.rollback.lifecycle' || semanticKey === 'fuzz.rollback.delete_boundary' || role === 'rollback_lifecycle');
-	});
+function hasSuccessfulDisposableLifecycleArtifacts({ artifacts = [], source = {}, normalizedResult = {} } = {}) {
+	const candidates = [
+		...normalizeArray(artifacts),
+		...normalizeArray(source.sandboxIsolationProof || source.sandbox_isolation_proof),
+		...normalizeArray(source.mutationIsolationArtifact || source.mutation_isolation_artifact),
+		...normalizeArray(source.deleteBoundaryArtifact || source.delete_boundary_artifact),
+		...normalizeArray(normalizedResult?.cases).flatMap((testCase) => [
+			testCase.metadata?.sandboxIsolationProof,
+			testCase.metadata?.sandbox_isolation_proof,
+			testCase.metadata?.mutationIsolationArtifact,
+			testCase.metadata?.mutation_isolation_artifact,
+			testCase.metadata?.deleteBoundaryArtifact,
+			testCase.metadata?.delete_boundary_artifact,
+		]),
+	].filter(Boolean);
+	const hasSandboxProof = candidates.some((artifact) => disposableLifecycleArtifactMatches(artifact, ['sandbox_isolation_proof']));
+	const hasMutationBoundary = candidates.some((artifact) => disposableLifecycleArtifactMatches(artifact, ['mutation_isolation_artifact', 'delete_boundary_artifact']));
+	return hasSandboxProof && hasMutationBoundary;
+}
+
+function disposableLifecycleArtifactMatches(artifact = {}, allowedRoles = []) {
+	if (!objectOrUndefined(artifact)) {
+		return false;
+	}
+	const allowed = new Set(allowedRoles);
+	const role = artifact.role || normalizeFuzzArtifactRole(artifact.name || artifact.semantic_key || artifact.semanticKey || artifact.path);
+	const semanticKey = artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey;
+	const schema = artifact.schema || artifact.metadata?.schema;
+	const kind = artifact.kind || artifact.artifactKind || artifact.artifact_kind || artifact.metadata?.kind;
+	const status = String(artifact.status || artifact.metadata?.status || '').toLowerCase();
+	return ['failed', 'errored', 'error', 'missing'].includes(status) === false
+		&& ((allowed.has(role))
+			|| (allowed.has('sandbox_isolation_proof') && (schema === 'wp-codebox/sandbox-isolation-proof/v1' || kind === 'sandbox-isolation-proof' || semanticKey === 'fuzz.disposable.sandbox_isolation_proof'))
+			|| (allowed.has('mutation_isolation_artifact') && (schema === 'wp-codebox/mutation-isolation-artifact/v1' || kind === 'mutation-isolation-artifact' || semanticKey === 'fuzz.mutation.isolation'))
+			|| (allowed.has('delete_boundary_artifact') && (schema === 'wp-codebox/delete-boundary-artifact/v1' || kind === 'delete-boundary-artifact' || semanticKey === 'fuzz.delete.boundary')));
 }
 
 function mutationLifecycleContractFailures({ source = {}, context = {}, artifacts = [], normalizedResult } = {}) {
@@ -2075,7 +2187,7 @@ function mutationLifecycleContractFailures({ source = {}, context = {}, artifact
 		}, artifacts).map((diagnostic) => ({
 			...diagnostic,
 			code: 'wp_codebox_fuzz_mutation_lifecycle_evidence_missing',
-			message: 'WP Codebox fuzz result claimed WordPress mutation execution without required sandbox rollback lifecycle evidence.',
+			message: 'WP Codebox fuzz result claimed WordPress mutation execution without required disposable sandbox lifecycle evidence.',
 		}));
 	});
 }
@@ -2517,8 +2629,8 @@ function fuzzArtifactRefsFromSource(source = {}, result = {}) {
 		{ coverage: source?.coverage_artifact || source?.coverageArtifact || source?.wordpress_fuzz_coverage || source?.wordpressFuzzCoverage },
 		{ normalized_fuzz_result: source?.wordpress_fuzz_result_artifact || source?.wordpressFuzzResultArtifact || source?.normalized_fuzz_result || source?.normalizedFuzzResult },
 		{ hotspot_summary: source?.hotspot_summary_artifact || source?.hotspotSummaryArtifact || source?.hotspot_summary || source?.hotspotSummary },
-		{ rollback_boundary: source?.delete_boundary_rollback_artifacts || source?.deleteBoundaryRollbackArtifacts || source?.rollback_artifacts || source?.rollbackArtifacts },
-		{ rollback_lifecycle: source?.rollback_lifecycle_artifacts || source?.rollbackLifecycleArtifacts || source?.rollback_lifecycle || source?.rollbackLifecycle },
+		{ delete_boundary_artifact: source?.delete_boundary_artifacts || source?.deleteBoundaryArtifacts },
+		{ sandbox_isolation_proof: source?.sandbox_isolation_proof || source?.sandboxIsolationProof || source?.sandbox_isolation_artifacts || source?.sandboxIsolationArtifacts },
 		{ external_http_guardrail: source?.external_http_guardrail || source?.externalHttpGuardrail || source?.http_guardrail || source?.httpGuardrail },
 		{ runtime_access: source?.runtime_access || source?.runtimeAccess || source?.runtime_access_artifact || source?.runtimeAccessArtifact },
 	];
@@ -2847,11 +2959,14 @@ function normalizeFuzzArtifactRole(value) {
 	if (['hotspot_summary', 'fuzz_hotspot_summary', 'hotspots', 'performance_hotspots'].includes(label)) {
 		return 'hotspot_summary';
 	}
-	if (['rollback_lifecycle', 'rollback_lifecycle_artifact', 'rollback_lifecycle_artifacts', 'sandbox_rollback_lifecycle'].includes(label)) {
-		return 'rollback_lifecycle';
+	if (['sandbox_isolation_proof', 'sandbox_isolation', 'disposable_sandbox_proof', 'disposable_lifecycle', 'sandbox_lifecycle'].includes(label)) {
+		return 'sandbox_isolation_proof';
 	}
-	if (['rollback_boundary', 'delete_boundary_rollback', 'delete_boundary_rollback_artifact', 'rollback_artifact', 'rollback_artifacts'].includes(label)) {
-		return 'rollback_boundary';
+	if (['mutation_isolation', 'mutation_isolation_artifact', 'mutation_boundary', 'mutation_boundary_artifact'].includes(label)) {
+		return 'mutation_isolation_artifact';
+	}
+	if (['delete_boundary', 'delete_boundary_artifact'].includes(label)) {
+		return 'delete_boundary_artifact';
 	}
 	if (['external_http_guardrail', 'http_guardrail', 'homeboy_external_http', 'network_guardrail'].includes(label)) {
 		return 'external_http_guardrail';
@@ -2910,11 +3025,8 @@ function normalizeFuzzArtifactRole(value) {
 	if (/runtime.*access|access.*runtime|runtime.*readiness/.test(label)) {
 		return 'runtime_access';
 	}
-	if (/rollback.*lifecycle|lifecycle.*rollback/.test(label)) {
-		return 'rollback_lifecycle';
-	}
-	if (/rollback/.test(label) || /delete.*boundary|boundary.*delete/.test(label)) {
-		return 'rollback_boundary';
+	if (/delete.*boundary|boundary.*delete/.test(label)) {
+		return 'delete_boundary_artifact';
 	}
 	if (/report|summary|result/.test(label)) {
 		return 'fuzz_report';

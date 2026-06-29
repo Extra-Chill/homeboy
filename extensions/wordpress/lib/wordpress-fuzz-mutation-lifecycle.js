@@ -3,16 +3,14 @@
 const WORDPRESS_FUZZ_MUTATION_LIFECYCLE_SCHEMA = 'homeboy/wordpress-fuzz-mutation-lifecycle/v1';
 
 const LIFECYCLE_REQUIRED_CAPABILITIES = Object.freeze({
-	crud: Object.freeze(['crud', 'snapshot', 'restore', 'reset']),
-	rest: Object.freeze(['rest', 'checkpoint', 'rest-rollback']),
-	rest_crud: Object.freeze(['crud', 'rest', 'checkpoint', 'rest-rollback']),
-	admin: Object.freeze(['admin', 'snapshot', 'restore', 'reset']),
-	database: Object.freeze(['database', 'snapshot', 'transaction', 'reset']),
+	crud: Object.freeze(['crud', 'disposable-runtime', 'disposable-sandbox-boundary', 'destructive-permission', 'mutation-isolation-artifact', 'sandbox-isolation-proof']),
+	rest: Object.freeze(['rest', 'disposable-runtime', 'disposable-sandbox-boundary', 'destructive-permission', 'mutation-isolation-artifact', 'sandbox-isolation-proof']),
+	rest_crud: Object.freeze(['crud', 'rest', 'disposable-runtime', 'disposable-sandbox-boundary', 'destructive-permission', 'mutation-isolation-artifact', 'sandbox-isolation-proof']),
+	admin: Object.freeze(['admin', 'disposable-runtime', 'disposable-sandbox-boundary', 'destructive-permission', 'sandbox-isolation-proof']),
+	database: Object.freeze(['database', 'disposable-runtime', 'disposable-sandbox-boundary', 'destructive-permission', 'mutation-isolation-artifact', 'sandbox-isolation-proof']),
 });
 
 const LIFECYCLE_REQUIRED_ANY_CAPABILITIES = Object.freeze({
-	rest: Object.freeze([Object.freeze(['restore', 'reset'])]),
-	rest_crud: Object.freeze([Object.freeze(['restore', 'reset'])]),
 });
 
 function buildWordPressFuzzMutationLifecycleContract(input = {}) {
@@ -25,7 +23,7 @@ function buildWordPressFuzzMutationLifecycleContract(input = {}) {
 		kind,
 		action,
 		method,
-		rollback_boundary: input.rollback_boundary || input.rollbackBoundary || 'after_each_case',
+		disposable_boundary: input.disposable_boundary || input.disposableBoundary || 'suite.metadata.disposableSandboxBoundary',
 		required_capabilities: input.required_capabilities || input.requiredCapabilities || LIFECYCLE_REQUIRED_CAPABILITIES[kind],
 		required_any_capabilities: input.required_any_capabilities || input.requiredAnyCapabilities || LIFECYCLE_REQUIRED_ANY_CAPABILITIES[kind],
 		required_evidence: input.required_evidence || input.requiredEvidence || defaultLifecycleEvidence(kind, { deleteBoundary }),
@@ -49,7 +47,7 @@ function normalizeWordPressFuzzMutationLifecycleContract(contract) {
 		kind,
 		action: stringOrUndefined(contract.action),
 		method: stringOrUndefined(contract.method),
-		rollback_boundary: stringOrUndefined(contract.rollback_boundary || contract.rollbackBoundary) || 'after_each_case',
+		disposable_boundary: stringOrUndefined(contract.disposable_boundary || contract.disposableBoundary) || 'suite.metadata.disposableSandboxBoundary',
 		required_capabilities: uniqueStrings(contract.required_capabilities || contract.requiredCapabilities),
 		required_any_capabilities: normalizeCapabilityGroups(contract.required_any_capabilities || contract.requiredAnyCapabilities),
 		required_evidence: normalizeLifecycleEvidence(contract.required_evidence || contract.requiredEvidence),
@@ -74,7 +72,7 @@ function wordpressFuzzMutationLifecycleDiagnosticsForCase(testCase = {}, artifac
 	return [{
 		severity: 'error',
 		code: 'wordpress_fuzz_mutation_lifecycle_evidence_missing',
-		message: 'Executed WordPress mutation case is missing required sandbox rollback lifecycle evidence.',
+		message: 'Executed WordPress mutation case is missing required disposable sandbox lifecycle evidence.',
 		case_id: testCase.id || testCase.case_id || testCase.caseId,
 		missing_evidence: missing,
 		contract,
@@ -137,24 +135,21 @@ function evidenceMatchesRequirement(candidate, requirement = {}, testCase = {}) 
 function defaultLifecycleEvidence(kind, { deleteBoundary = false } = {}) {
 	const evidence = [];
 	if (['crud', 'admin'].includes(kind)) {
-		evidence.push(lifecycleEvidence('snapshot'), lifecycleEvidence('restore'), lifecycleEvidence('reset'));
+		evidence.push(lifecycleEvidence('sandbox-boundary', 'fuzz.disposable.sandbox_boundary'), lifecycleEvidence('destructive-permission', 'fuzz.disposable.destructive_permission'), lifecycleEvidence('sandbox-isolation-proof', 'fuzz.disposable.sandbox_isolation_proof'));
 	}
 	if (['rest', 'rest_crud'].includes(kind)) {
-		evidence.push(lifecycleEvidence('checkpoint'));
+		evidence.push(lifecycleEvidence('sandbox-boundary', 'fuzz.disposable.sandbox_boundary'), lifecycleEvidence('destructive-permission', 'fuzz.disposable.destructive_permission'), lifecycleEvidence('mutation-isolation', 'fuzz.mutation.isolation'), lifecycleEvidence('sandbox-isolation-proof', 'fuzz.disposable.sandbox_isolation_proof'));
 	}
 	if (kind === 'database') {
-		evidence.push(lifecycleEvidence('snapshot'), lifecycleEvidence('transaction'), lifecycleEvidence('reset'));
+		evidence.push(lifecycleEvidence('sandbox-boundary', 'fuzz.disposable.sandbox_boundary'), lifecycleEvidence('destructive-permission', 'fuzz.disposable.destructive_permission'), lifecycleEvidence('mutation-isolation', 'fuzz.mutation.isolation'), lifecycleEvidence('sandbox-isolation-proof', 'fuzz.disposable.sandbox_isolation_proof'));
 	}
 	if (deleteBoundary) {
-		evidence.push(lifecycleEvidence('delete-boundary', 'fuzz.rollback.delete_boundary'));
+		evidence.push(lifecycleEvidence('delete-boundary', 'fuzz.delete.boundary'));
 	}
 	return evidence;
 }
 
-function defaultLifecycleAnyEvidence(kind) {
-	if (['rest', 'rest_crud'].includes(kind)) {
-		return [[lifecycleEvidence('restore'), lifecycleEvidence('reset')]];
-	}
+function defaultLifecycleAnyEvidence() {
 	return [];
 }
 
