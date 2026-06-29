@@ -221,8 +221,6 @@ generic safety fields:
   "runtime_kind": "ephemeral-runner",
   "provider_ref": { "id": "opaque-provider-owned-ref" },
   "disposable": true,
-  "snapshot_ref": "snapshot://baseline-1",
-  "reset_supported": true,
   "teardown_required": true,
   "mutation_boundary": "runner-workspace",
   "proof_artifacts": [
@@ -232,11 +230,15 @@ generic safety fields:
 }
 ```
 
-For destructive planning or execution, `disposable`, `reset_supported`, and
-`teardown_required` must be `true`; `runtime_kind`, `snapshot_ref`,
-`mutation_boundary`, `verified_by`, and at least one `proof_artifacts` entry must
-be present. `homeboy fuzz plan` and `homeboy fuzz run` embed the accepted proof in
-the `homeboy/fuzz-execution-request/v1` request as `isolation_proof`.
+For destructive planning or execution, `disposable` and `teardown_required` must
+be `true`; `runtime_kind`, `mutation_boundary`, `verified_by`, and at least one
+`proof_artifacts` entry must be present. The teardown proof represents discard of
+the disposable mutation boundary, not restoration of a durable environment.
+Existing runner/provider capabilities such as `snapshot_ref` or `reset_supported`
+can be included as optional evidence, but Homeboy does not require rollback,
+restore, reset, or checkpoint support for destructive fuzzing inside an explicit
+disposable boundary. `homeboy fuzz plan` and `homeboy fuzz run` embed the accepted
+proof in the `homeboy/fuzz-execution-request/v1` request as `isolation_proof`.
 
 Operations keep the free-form `kind` string for product-owned semantics and can
 also carry a canonical `family` for cross-runner coverage reporting. When

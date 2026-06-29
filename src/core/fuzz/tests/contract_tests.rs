@@ -171,8 +171,6 @@ fn isolation_proof_requires_explicit_destructive_safety_fields() {
         "runtime_kind": "ephemeral-runner",
         "provider_ref": { "opaque": "provider-owned" },
         "disposable": true,
-        "snapshot_ref": "snapshot://baseline-1",
-        "reset_supported": true,
         "teardown_required": true,
         "mutation_boundary": "runner-workspace",
         "proof_artifacts": [{ "kind": "log", "ref": "artifact://proof" }],
@@ -183,8 +181,30 @@ fn isolation_proof_requires_explicit_destructive_safety_fields() {
     assert_eq!(proof.schema, ISOLATION_PROOF_SCHEMA);
     assert_eq!(proof.runtime_kind, "ephemeral-runner");
     assert!(proof.disposable);
-    assert!(proof.reset_supported);
     assert!(proof.teardown_required);
+    assert_eq!(proof.snapshot_ref, None);
+    assert_eq!(proof.reset_supported, None);
+}
+
+#[test]
+fn isolation_proof_preserves_optional_reset_evidence_when_present() {
+    let proof = IsolationProof::from_value(json!({
+        "schema": ISOLATION_PROOF_SCHEMA,
+        "version": FUZZ_CONTRACT_VERSION,
+        "runtime_kind": "ephemeral-runner",
+        "provider_ref": { "opaque": "provider-owned" },
+        "disposable": true,
+        "snapshot_ref": "snapshot://baseline-1",
+        "reset_supported": false,
+        "teardown_required": true,
+        "mutation_boundary": "runner-workspace",
+        "proof_artifacts": [{ "kind": "log", "ref": "artifact://proof" }],
+        "verified_by": "test-suite"
+    }))
+    .expect("valid proof with optional reset evidence");
+
+    assert_eq!(proof.snapshot_ref.as_deref(), Some("snapshot://baseline-1"));
+    assert_eq!(proof.reset_supported, Some(false));
 }
 
 #[test]
@@ -194,8 +214,6 @@ fn isolation_proof_rejects_missing_required_proof_artifacts() {
         "version": FUZZ_CONTRACT_VERSION,
         "runtime_kind": "ephemeral-runner",
         "disposable": true,
-        "snapshot_ref": "snapshot://baseline-1",
-        "reset_supported": true,
         "teardown_required": true,
         "mutation_boundary": "runner-workspace",
         "verified_by": "test-suite"
