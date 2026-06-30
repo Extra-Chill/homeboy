@@ -44,6 +44,21 @@ finalization per cook. Provider adapters still receive one normalized
 `AgentTaskRequest` at a time and return one normalized `AgentTaskOutcome` at a
 time.
 
+Durable batch fanout (`agent-task fanout submit-batch`) is the generic queue and
+reconcile surface for independent agent-task plans. It persists one child run
+per task and exposes stable read-side reports:
+
+- `homeboy/agent-task-batch-status/v1` reports the batch record, child run
+  states, per-state totals, and follow-up commands.
+- `homeboy/agent-task-batch-artifacts/v1` collates child run artifacts into a
+  provider-neutral `summary` and `manifest` keyed by `task_id`, `run_id`, and
+  child run state while preserving each child run's normal
+  `AgentTaskRunArtifacts` payload under `child_runs[]`.
+
+The artifact manifest contains Homeboy `AgentTaskArtifact` and
+`AgentTaskEvidenceRef` records only. Providers keep backend-native worker,
+session, and artifact namespace details in evidence refs or opaque metadata.
+
 The provider returns a normalized `AgentTaskOutcome`:
 
 - `status`, `summary`, and `failure_classification` use Homeboy outcome values.

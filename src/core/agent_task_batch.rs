@@ -6,6 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::core::agent_task::{AgentTaskArtifact, AgentTaskEvidenceRef};
 use crate::core::agent_task_lifecycle::{self, AgentTaskRunArtifacts, AgentTaskRunState};
 use crate::core::agent_task_schedule::AgentTaskPlan;
 use crate::core::{paths, Error, Result};
@@ -76,7 +77,38 @@ pub struct AgentTaskBatchCommands {
 pub struct AgentTaskBatchArtifactsReport {
     pub schema: &'static str,
     pub batch_id: String,
+    pub summary: AgentTaskBatchArtifactsSummary,
+    pub manifest: AgentTaskBatchArtifactsManifest,
     pub child_runs: Vec<AgentTaskBatchChildArtifacts>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct AgentTaskBatchArtifactsSummary {
+    pub child_runs: usize,
+    pub artifacts: usize,
+    pub evidence_refs: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct AgentTaskBatchArtifactsManifest {
+    pub artifacts: Vec<AgentTaskBatchArtifactEntry>,
+    pub evidence_refs: Vec<AgentTaskBatchEvidenceRefEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AgentTaskBatchArtifactEntry {
+    pub task_id: String,
+    pub run_id: String,
+    pub state: AgentTaskRunState,
+    pub artifact: AgentTaskArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AgentTaskBatchEvidenceRefEntry {
+    pub task_id: String,
+    pub run_id: String,
+    pub state: AgentTaskRunState,
+    pub evidence_ref: AgentTaskEvidenceRef,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -84,6 +116,8 @@ pub struct AgentTaskBatchChildArtifacts {
     pub task_id: String,
     pub run_id: String,
     pub state: AgentTaskRunState,
+    pub artifact_count: usize,
+    pub evidence_ref_count: usize,
     pub artifacts: AgentTaskRunArtifacts,
 }
 
@@ -207,20 +241,57 @@ pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
         .into_iter()
         .map(|child| {
             let artifacts = agent_task_lifecycle::artifacts(&child.run_id)?;
+            let artifact_count = artifacts.artifacts.len();
+            let evidence_ref_count = artifacts.evidence_refs.len();
             Ok(AgentTaskBatchChildArtifacts {
                 task_id: child.task_id,
                 run_id: child.run_id,
                 state: child.state,
+                artifact_count,
+                evidence_ref_count,
                 artifacts,
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let manifest = artifacts_manifest(&child_runs);
+    let summary = AgentTaskBatchArtifactsSummary {
+        child_runs: child_runs.len(),
+        artifacts: manifest.artifacts.len(),
+        evidence_refs: manifest.evidence_refs.len(),
+    };
 
     Ok(AgentTaskBatchArtifactsReport {
         schema: AGENT_TASK_BATCH_ARTIFACTS_SCHEMA,
         batch_id: report.batch.batch_id,
+        summary,
+        manifest,
         child_runs,
     })
+}
+
+fn artifacts_manifest(
+    children: &[AgentTaskBatchChildArtifacts],
+) -> AgentTaskBatchArtifactsManifest {
+    let mut manifest = AgentTaskBatchArtifactsManifest::default();
+    for child in children {
+        for artifact in &child.artifacts.artifacts {
+            manifest.artifacts.push(AgentTaskBatchArtifactEntry {
+                task_id: child.task_id.clone(),
+                run_id: child.run_id.clone(),
+                state: child.state,
+                artifact: artifact.clone(),
+            });
+        }
+        for evidence_ref in &child.artifacts.evidence_refs {
+            manifest.evidence_refs.push(AgentTaskBatchEvidenceRefEntry {
+                task_id: child.task_id.clone(),
+                run_id: child.run_id.clone(),
+                state: child.state,
+                evidence_ref: evidence_ref.clone(),
+            });
+        }
+    }
+    manifest
 }
 
 fn child_plan(
@@ -365,14 +436,22 @@ fn read_batch(batch_id: &str) -> Result<AgentTaskBatchRecord> {
 mod tests {
     use super::*;
     use crate::core::agent_task::{
-        AgentTaskExecutor, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
-        AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskExecutor, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy,
+        AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA,
+        AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
+    use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
+    use crate::core::agent_task_service;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn batch_submit_persists_parent_and_child_durable_runs() {
+        let _lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = isolated_homeboy_data();
         let plan = AgentTaskPlan::new("fanout/audit", vec![request("a"), request("b")]);
 
@@ -391,7 +470,41 @@ mod tests {
     }
 
     #[test]
+    fn batch_artifacts_report_exposes_stable_manifest_and_counts() {
+        let _lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = isolated_homeboy_data();
+        let plan = AgentTaskPlan::new("fanout/artifacts", vec![request("a"), request("b")]);
+        submit_plan_batch(&plan, Some("batch/artifacts")).expect("batch submitted");
+        agent_task_service::run_submitted("batch_artifacts-a".to_string(), ArtifactExecutor)
+            .expect("first child run");
+        agent_task_service::run_submitted("batch_artifacts-b".to_string(), ArtifactExecutor)
+            .expect("second child run");
+
+        let report = artifacts("batch/artifacts").expect("batch artifacts");
+
+        assert_eq!(report.schema, AGENT_TASK_BATCH_ARTIFACTS_SCHEMA);
+        assert_eq!(report.summary.child_runs, 2);
+        assert_eq!(report.summary.artifacts, 2);
+        assert_eq!(report.summary.evidence_refs, 8);
+        assert_eq!(report.child_runs[0].artifact_count, 1);
+        assert_eq!(report.child_runs[0].evidence_ref_count, 4);
+        assert_eq!(report.manifest.artifacts[0].task_id, "a");
+        assert_eq!(report.manifest.artifacts[0].run_id, "batch_artifacts-a");
+        assert_eq!(report.manifest.artifacts[0].artifact.id, "artifact-a");
+        assert_eq!(report.manifest.evidence_refs[4].task_id, "b");
+        assert_eq!(
+            report.manifest.evidence_refs[4].evidence_ref.kind,
+            "executor-log"
+        );
+    }
+
+    #[test]
     fn batch_submit_rejects_dependent_workflow_plans() {
+        let _lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = isolated_homeboy_data();
         let mut plan = AgentTaskPlan::new("workflow", vec![request("a"), request("b")]);
         plan.output_dependencies.insert(
@@ -432,6 +545,50 @@ mod tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             metadata: Value::Null,
+        }
+    }
+
+    struct ArtifactExecutor;
+
+    impl AgentTaskExecutorAdapter for ArtifactExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id.clone(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("ok".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: format!("artifact-{}", request.task_id),
+                    kind: "report".to_string(),
+                    name: Some("report.json".to_string()),
+                    label: Some("Report".to_string()),
+                    role: Some("report".to_string()),
+                    semantic_key: Some("agent_task.report".to_string()),
+                    path: Some(format!("artifacts/{}/report.json", request.task_id)),
+                    url: None,
+                    mime: Some("application/json".to_string()),
+                    size_bytes: Some(12),
+                    sha256: None,
+                    metadata: Value::Null,
+                }],
+                typed_artifacts: Vec::new(),
+                evidence_refs: vec![AgentTaskEvidenceRef {
+                    kind: "executor-log".to_string(),
+                    uri: format!("homeboy://agent-task/evidence/{}", request.task_id),
+                    label: Some("Executor log".to_string()),
+                }],
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
         }
     }
 
