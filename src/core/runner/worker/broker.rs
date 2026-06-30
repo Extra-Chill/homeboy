@@ -64,6 +64,31 @@ pub(super) fn append_progress(
     Ok(())
 }
 
+pub(super) fn append_progress_data(
+    client: &Client,
+    broker_url: &str,
+    token: Option<&str>,
+    runner_id: &str,
+    job: &Job,
+    data: serde_json::Value,
+) -> Result<()> {
+    let claim_id = remote_runner_claim_id(job)?;
+    broker_http::post_json(
+        client,
+        broker_url,
+        &format!("/runner/jobs/{}/events", job.id),
+        json!({
+            "runner_id": runner_id,
+            "claim_id": claim_id,
+            "kind": "progress",
+            "data": data,
+        }),
+        "append reverse runner progress event",
+        token,
+    )?;
+    Ok(())
+}
+
 pub(super) fn finish_job(
     client: &Client,
     broker_url: &str,

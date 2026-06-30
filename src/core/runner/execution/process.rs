@@ -9,7 +9,8 @@ use crate::core::source_snapshot::SourceSnapshot;
 
 use super::super::normalize_runner_command_env;
 use super::super::resource_metrics::{
-    measured_command_output, measured_command_output_until_cancelled,
+    measured_command_output, measured_command_output_until_cancelled_with_progress,
+    RunnerCommandProgressSink,
 };
 use super::super::{load, Runner, RunnerKind};
 
@@ -302,15 +303,16 @@ pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<Pro
     command_output(&mut command)
 }
 
-pub(crate) fn execute_runner_process_until_cancelled(
+pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     plan: &PreparedRunnerProcess,
     is_cancelled: impl FnMut() -> bool,
+    progress_sink: Option<RunnerCommandProgressSink>,
 ) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
     apply_runner_process_env(&mut command, plan);
 
-    command_output_until_cancelled(&mut command, is_cancelled)
+    command_output_until_cancelled_with_progress(&mut command, is_cancelled, progress_sink)
 }
 
 pub(super) fn apply_runner_process_env(
@@ -347,11 +349,16 @@ pub(super) fn command_output(command: &mut std::process::Command) -> Result<Proc
     })
 }
 
-pub(super) fn command_output_until_cancelled(
+pub(super) fn command_output_until_cancelled_with_progress(
     command: &mut std::process::Command,
     is_cancelled: impl FnMut() -> bool,
+    progress_sink: Option<RunnerCommandProgressSink>,
 ) -> Result<ProcessOutput> {
-    let measured = measured_command_output_until_cancelled(command, is_cancelled)?;
+    let measured = measured_command_output_until_cancelled_with_progress(
+        command,
+        is_cancelled,
+        progress_sink,
+    )?;
     let output = measured.output;
     Ok(ProcessOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),

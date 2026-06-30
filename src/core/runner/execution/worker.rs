@@ -13,14 +13,15 @@ use super::policy::{validate_runner_policy, RunnerPolicyRequest};
 #[allow(unused_imports)]
 use super::*;
 
-pub(crate) fn exec_worker_local_until_cancelled(
+pub(crate) fn exec_worker_local_until_cancelled_with_progress(
     runner_id: &str,
     options: RunnerExecOptions,
     is_cancelled: impl FnMut() -> bool,
+    progress_sink: Option<super::super::RunnerCommandProgressSink>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let mut is_cancelled = is_cancelled;
     exec_worker_local_with_process_output(runner_id, options, |plan| {
-        execute_runner_process_until_cancelled(plan, &mut is_cancelled)
+        execute_runner_process_until_cancelled_with_progress(plan, &mut is_cancelled, progress_sink)
     })
 }
 

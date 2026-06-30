@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use crate::command_contract::RunnerWorkload;
@@ -16,7 +16,7 @@ use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnal
 use crate::core::paths;
 use crate::core::process::pid_is_running;
 use crate::core::runner::{
-    execute_runner_process_until_cancelled, prepare_daemon_local_process, Runner,
+    execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process, Runner,
     RunnerProcessRequest,
 };
 use crate::core::source_snapshot::SourceSnapshot;
@@ -538,8 +538,15 @@ fn enqueue_exec_job(
             } else {
                 None
             };
-            let process_output =
-                execute_runner_process_until_cancelled(&plan, || job.is_cancelled())?;
+            let progress_job = job.clone();
+            let progress_sink = Arc::new(move |data| {
+                let _ = progress_job.progress(data);
+            });
+            let process_output = execute_runner_process_until_cancelled_with_progress(
+                &plan,
+                || job.is_cancelled(),
+                Some(progress_sink),
+            )?;
             let stdout = process_output.stdout.clone();
             let stderr = process_output.stderr.clone();
             let exit_code = process_output.exit_code;
