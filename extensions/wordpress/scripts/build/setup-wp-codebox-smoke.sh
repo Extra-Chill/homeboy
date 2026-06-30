@@ -12,6 +12,7 @@ EXTENSION_DIR="${TMPDIR}/extension"
 GITHUB_ENV_FILE="${TMPDIR}/github-env"
 SOURCE_GITHUB_ENV_FILE="${TMPDIR}/source-github-env"
 MISSING_RELEASE_GITHUB_ENV_FILE="${TMPDIR}/missing-release-github-env"
+OVERRIDE_GITHUB_ENV_FILE="${TMPDIR}/override-github-env"
 ARTIFACT_ROOT="${TMPDIR}/artifact-root"
 ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
 
@@ -227,6 +228,61 @@ fi
 if grep -qi 'Installing WP Codebox CLI' "${TMPDIR}/cold-setup.out"; then
     echo "Cold-cache path must not reinstall the CLI when a cached bin and module exist" >&2
     cat "${TMPDIR}/cold-setup.out" >&2
+    exit 1
+fi
+
+STALE_ROOT="${TMPDIR}/stale-wp-codebox"
+CURRENT_ROOT="${TMPDIR}/wp-codebox-main-current"
+mkdir -p \
+    "${STALE_ROOT}/packages/cli/dist" \
+    "${STALE_ROOT}/packages/runtime-core/dist" \
+    "${CURRENT_ROOT}/packages/cli/dist" \
+    "${CURRENT_ROOT}/packages/runtime-core/dist"
+
+cat > "${STALE_ROOT}/packages/cli/dist/index.js" <<'NODE'
+#!/usr/bin/env node
+console.log('stale wp-codebox');
+NODE
+chmod +x "${STALE_ROOT}/packages/cli/dist/index.js"
+printf '%s\n' 'export const fixture = "stale";' > "${STALE_ROOT}/packages/runtime-core/dist/index.js"
+
+cat > "${CURRENT_ROOT}/packages/cli/dist/index.js" <<'NODE'
+#!/usr/bin/env node
+console.log('current wp-codebox');
+NODE
+chmod +x "${CURRENT_ROOT}/packages/cli/dist/index.js"
+printf '%s\n' 'export const fixture = "current";' > "${CURRENT_ROOT}/packages/runtime-core/dist/index.js"
+
+(
+    cd "${EXTENSION_DIR}"
+    HOME="${HOME_DIR}" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${OVERRIDE_GITHUB_ENV_FILE}" \
+    HOMEBOY_WP_CODEBOX_BIN="${STALE_ROOT}/packages/cli/dist/index.js" \
+    HOMEBOY_WP_CODEBOX_CORE_MODULE="${STALE_ROOT}/packages/runtime-core/dist/index.js" \
+    WP_CODEBOX_CLI="${CURRENT_ROOT}/packages/cli/dist/index.js" \
+    WP_CODEBOX_CORE_MODULE="${CURRENT_ROOT}/packages/runtime-core/dist/index.js" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/override-setup.out"
+)
+
+override_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${OVERRIDE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+override_wp_codebox_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${OVERRIDE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+
+if [ "${override_wp_codebox_bin}" != "${CURRENT_ROOT}/packages/cli/dist/index.js" ]; then
+    echo "Expected explicit WP_CODEBOX_CLI to replace stale configured CLI, got: ${override_wp_codebox_bin}" >&2
+    cat "${TMPDIR}/override-setup.out" >&2
+    exit 1
+fi
+
+if [ "${override_wp_codebox_core_module}" != "${CURRENT_ROOT}/packages/runtime-core/dist/index.js" ]; then
+    echo "Expected explicit WP_CODEBOX_CORE_MODULE to replace stale configured core module, got: ${override_wp_codebox_core_module}" >&2
+    cat "${TMPDIR}/override-setup.out" >&2
+    exit 1
+fi
+
+if grep -q "${STALE_ROOT}" "${OVERRIDE_GITHUB_ENV_FILE}"; then
+    echo "Explicit override reinstall must not export stale WP Codebox paths" >&2
+    cat "${OVERRIDE_GITHUB_ENV_FILE}" >&2
     exit 1
 fi
 

@@ -35,6 +35,51 @@ install_wp_codebox() {
         return 0
     }
 
+    first_non_empty_env() {
+        local name
+        for name in "$@"; do
+            if [ -n "${!name:-}" ]; then
+                printf '%s' "${!name}"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    configure_explicit_overrides() {
+        local explicit_bin=""
+        local explicit_core_module=""
+        local configured_bin=0
+        local configured_core_module=0
+
+        explicit_bin="$(first_non_empty_env HOMEBOY_WP_CODEBOX_CLI WP_CODEBOX_CLI WP_CODEBOX_BIN || true)"
+        if [ -n "${explicit_bin}" ]; then
+            if [ ! -x "${explicit_bin}" ]; then
+                echo "Explicit WP Codebox CLI override is not executable: ${explicit_bin}" >&2
+                exit 1
+            fi
+            export HOMEBOY_WP_CODEBOX_BIN="${explicit_bin}"
+            write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${explicit_bin}"
+            echo "WP Codebox CLI override configured: ${explicit_bin}"
+            configured_bin=1
+        fi
+
+        explicit_core_module="$(first_non_empty_env WP_CODEBOX_CORE_MODULE HOMEBOY_WP_CODEBOX_CORE_MODULE || true)"
+        if [ -n "${explicit_core_module}" ]; then
+            configure_core_module "${explicit_core_module}" || {
+                echo "Explicit WP Codebox core module override is not a file: ${explicit_core_module}" >&2
+                exit 1
+            }
+            configured_core_module=1
+        fi
+
+        if [ "${configured_bin}" -eq 1 ] && { [ "${configured_core_module}" -eq 1 ] || resolve_core_module_from_known_locations; }; then
+            return 0
+        fi
+
+        return 1
+    }
+
     # Re-derive the core runtime module from the deterministic install
     # locations on disk. The CLI binary is persisted across GitHub Actions
     # steps via GITHUB_ENV, but HOMEBOY_WP_CODEBOX_CORE_MODULE does not always
@@ -46,6 +91,7 @@ install_wp_codebox() {
         local probe_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
         local candidate
         for candidate in \
+            "${WP_CODEBOX_CORE_MODULE:-}" \
             "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" \
             "${probe_root}/source/node_modules/@automattic/wp-codebox-core/dist/index.js" \
             "${probe_root}/release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"; do
@@ -55,6 +101,10 @@ install_wp_codebox() {
         done
         return 1
     }
+
+    if configure_explicit_overrides; then
+        return 0
+    fi
 
     if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && [ -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
         echo "WP Codebox already configured: ${HOMEBOY_WP_CODEBOX_BIN}"
