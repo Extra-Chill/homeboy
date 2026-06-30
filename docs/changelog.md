@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.274.0] - 2026-06-30
+
+### Added
+- export homeboy contract schemas
+
+### Changed
+- Define agent runtime contract handshake
+- Add extension contract producer manifest surface
+- Add rig run bench primitive
+
 ## [0.273.3] - 2026-06-30
 
 ### Changed
