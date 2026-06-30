@@ -32,7 +32,10 @@ pub(crate) use snapshot::{
     materialize_snapshot, materialize_snapshot_git, snapshot_identity,
 };
 pub(crate) use types::{canonical_workspace_path, DEFAULT_EXCLUDES};
-pub(crate) use util::{git_output, parent_remote_path, sanitize_path_segment};
+pub(crate) use util::{
+    git_output, parent_remote_path, run_shell_capture, run_shell_command, sanitize_path_segment,
+    shell_command_for_runner,
+};
 
 #[cfg(test)]
 mod tests;

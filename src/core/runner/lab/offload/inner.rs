@@ -467,6 +467,7 @@ pub(crate) fn run_lab_offload_inner(
         remote_output_file,
         synced_rigs,
         rig_component_path_overrides,
+        dependency_cache_saves,
         runtime_overlay_env,
         runtime_overlay_metadata,
     } = workspace_stage;
@@ -833,6 +834,19 @@ pub(crate) fn run_lab_offload_inner(
         )
     };
     plan = add_success_step(plan, "lab.exec");
+    let dependency_cache_save_outputs = save_dependency_caches(runner_id, &dependency_cache_saves)?;
+    if !dependency_cache_save_outputs.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.save_dependency_caches", "lab.save_dependency_caches")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", dependency_cache_save_outputs.len())
+                        .json("caches", &dependency_cache_save_outputs),
+                )
+                .build(),
+        );
+    }
     if exec_output.mirror_run_id.is_some() {
         plan = add_success_step(plan, "lab.mirror_evidence");
     }
@@ -1018,6 +1032,20 @@ pub(crate) fn ensure_lab_offload_streams_not_truncated(
     error.details["capture"] =
         serde_json::to_value(capture).unwrap_or_else(|_| serde_json::json!({}));
     Err(error)
+}
+
+fn save_dependency_caches(
+    runner_id: &str,
+    requests: &[RunnerDependencyCacheSaveRequest],
+) -> Result<Vec<RunnerDependencyCacheSaveOutput>> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let runner = load(runner_id)?;
+    requests
+        .iter()
+        .map(|request| dependency_cache_save(&runner, request))
+        .collect()
 }
 
 fn has_recoverable_fuzz_result_artifact(

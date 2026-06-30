@@ -22,6 +22,7 @@ fn component(path: &str, stack: Option<&str>) -> ComponentSpec {
         r#ref: None,
         default_ref: None,
         extensions: None,
+        dependency_cache: None,
     }
 }
 

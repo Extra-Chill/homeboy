@@ -149,6 +149,7 @@ fn rig_component_path_and_trace_env_are_threaded() {
             r#ref: None,
             default_ref: None,
             extensions: Some(extensions),
+            dependency_cache: None,
         },
     );
     let spec = RigSpec {

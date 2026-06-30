@@ -1111,6 +1111,27 @@ pub struct ComponentSpec {
     /// components or repo-owned `homeboy.json` files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<HashMap<String, ScopedExtensionConfig>>,
+
+    /// Optional generic runner-side dependency cache declaration. Rigs declare
+    /// inputs and cache paths; Homeboy owns key computation, restore, and save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_cache: Option<DependencyCacheSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependencyCacheSpec {
+    /// Stable dependency materialization step ID supplied by the rig/extension.
+    pub step_id: String,
+    /// Relative paths inside the materialized checkout to restore/save.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Relative lockfile paths whose contents participate in the cache key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lockfiles: Vec<String>,
+    /// Relative package/dependency metadata paths whose contents participate in
+    /// the cache key. The name is generic: Homeboy does not interpret contents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_metadata: Vec<String>,
 }
 
 /// A background service the rig manages.
