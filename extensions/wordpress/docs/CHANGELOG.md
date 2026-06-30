@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.15] - 2026-06-30
+
+### Changed
+- Honor explicit WP Codebox setup overrides
+
 ## [3.22.14] - 2026-06-30
 
 ### Changed
