@@ -212,6 +212,35 @@ const privateReplyWithPublicEnvelopeOutcome = agentTaskOutcomeFromCodeboxResult(
 });
 assert.equal(privateReplyWithPublicEnvelopeOutcome.status, 'succeeded');
 assert.equal(privateReplyWithPublicEnvelopeOutcome.outputs.reply, undefined);
+const replayContextOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...privateRuntimeShapeRequest,
+  task_id: 'replay context task',
+}, {
+  success: false,
+  status: 'failed',
+  generated_recipe_path: '/tmp/generated recipe.json',
+  metadata: {
+    codebox_binary_path: '/opt/wp-codebox/bin/wp-codebox',
+    codebox_version: '0.9.1',
+    codebox_fingerprint: 'sha256:codebox',
+    supported_recipe_commands: ['wordpress.load', 'wordpress.editor-validate-blocks'],
+  },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'failed',
+    result: { outputs: {} },
+  },
+});
+assert.equal(replayContextOutcome.metadata.runtime_context.schema, 'homeboy/provider-runtime-context/v1');
+assert.equal(replayContextOutcome.metadata.runtime_context.provider, 'wp-codebox');
+assert.equal(replayContextOutcome.metadata.runtime_context.binary_path, '/opt/wp-codebox/bin/wp-codebox');
+assert.equal(replayContextOutcome.metadata.runtime_context.version, '0.9.1');
+assert.equal(replayContextOutcome.metadata.runtime_context.fingerprint, 'sha256:codebox');
+assert.deepEqual(replayContextOutcome.metadata.runtime_context.capabilities, ['wordpress.load', 'wordpress.editor-validate-blocks']);
+assert.equal(
+  replayContextOutcome.metadata.replay_command,
+  "/opt/wp-codebox/bin/wp-codebox recipe-run --recipe '/tmp/generated recipe.json' --artifacts /tmp/homeboy-codebox-replay/replay-context-task --json"
+);
 const reconciledRunSummary = reconcileRunSummaryWithPublicEnvelope({
   status: 'failed',
   success: false,

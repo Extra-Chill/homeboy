@@ -3255,6 +3255,8 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const fallbackRecipeSummary = recipeRunFailureSummary(recipeRun);
   const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
   const providerDiagnostic = providerNotRegisteredDiagnostic(request, result);
+  const runtimeContext = homeboyRuntimeContext(result, runSummary, recipeSummary);
+  const replayCommand = homeboyReplayCommand(request, result, runSummary, recipeSummary, runtimeContext);
   const outcome = normalizeAgentTaskOutcome(request, result, {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     provider: 'wordpress.codebox-agent-task-executor',
@@ -3284,6 +3286,8 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
         sandbox_tool_policy: result.task_input?.sandbox_tool_policy,
       }),
       recipe_failed_phase: recipeFailedPhase || undefined,
+      runtime_context: runtimeContext,
+      replay_command: replayCommand,
     },
     failureClassification,
   });
@@ -3293,6 +3297,70 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     outcome.failure_classification = 'execution_failed';
   }
   return outcomeWithOutputTypedArtifacts(outcomeWithNormalizedEvents(outcome, normalizedEventEnvelope.events), outputs);
+}
+
+function homeboyRuntimeContext(result = {}, runSummary = {}, recipeSummary = {}) {
+  const metadata = firstObject(result.metadata, result.codebox, runSummary?.metadata, recipeSummary?.metadata) || {};
+  const scoped = firstObject(metadata.codebox, result.codebox, runSummary?.codebox, recipeSummary?.codebox, metadata) || {};
+  const capabilities = uniqueStrings(
+    scoped.supported_recipe_commands,
+    scoped.recipe_commands,
+    scoped.supported_commands,
+    scoped.capabilities,
+    metadata.supported_recipe_commands,
+    metadata.capabilities,
+  ).slice(0, 40);
+  const context = withoutUndefinedValues({
+    schema: 'homeboy/provider-runtime-context/v1',
+    provider: 'wp-codebox',
+    binary_path: firstValue(scoped.binary_path, scoped.executable_path, scoped.path, metadata.codebox_binary_path, metadata.wp_codebox_binary_path),
+    version: firstValue(scoped.version, metadata.codebox_version, metadata.wp_codebox_version),
+    commit: firstValue(scoped.commit, scoped.git_commit, scoped.revision, metadata.codebox_commit, metadata.wp_codebox_commit),
+    fingerprint: firstValue(scoped.fingerprint, metadata.codebox_fingerprint, metadata.wp_codebox_fingerprint),
+    capabilities: capabilities.length > 0 ? capabilities : undefined,
+  });
+  return Object.keys(context).length > 2 ? sanitizePublicMetadata(context) : undefined;
+}
+
+function homeboyReplayCommand(request = {}, result = {}, runSummary = {}, recipeSummary = {}, runtimeContext = {}) {
+  const recipePath = firstValue(
+    result.generated_recipe_path,
+    result.recipe_path,
+    result.recipe_file,
+    result.recipe,
+    result.metadata?.generated_recipe_path,
+    result.metadata?.recipe_path,
+    runSummary?.generated_recipe_path,
+    runSummary?.metadata?.generated_recipe_path,
+    recipeSummary?.generated_recipe_path,
+    recipeSummary?.metadata?.generated_recipe_path,
+  );
+  if (!recipePath || typeof recipePath !== 'string') {
+    return undefined;
+  }
+  const binary = runtimeContext?.binary_path || result.metadata?.codebox_binary_path || 'wp-codebox';
+  const replayId = safeShellPathSegment(firstValue(request.task_id, runSummary?.run_id, result.run_id, 'failed-task'));
+  return `${shellQuote(binary)} recipe-run --recipe ${shellQuote(recipePath)} --artifacts ${shellQuote(`/tmp/homeboy-codebox-replay/${replayId}`)} --json`;
+}
+
+function uniqueStrings(...values) {
+  const out = [];
+  for (const value of values.flat(Infinity)) {
+    const candidate = typeof value === 'string' ? value : firstValue(value?.id, value?.name, value?.command);
+    if (candidate && typeof candidate === 'string' && !out.includes(candidate)) {
+      out.push(candidate);
+    }
+  }
+  return out;
+}
+
+function safeShellPathSegment(value) {
+  return String(value).replace(/[^A-Za-z0-9_.-]/g, '-');
+}
+
+function shellQuote(value) {
+  const text = String(value);
+  return /^[A-Za-z0-9/._:=-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`;
 }
 
 function agentTaskDispatchIdentityPassthrough(request = {}, result = {}) {
