@@ -22,6 +22,7 @@ function makeCodeboxRoot(name, version = '1.2.3') {
 	fs.mkdirSync(runtimeDist, { recursive: true });
 	fs.writeFileSync(path.join(sourceRoot, 'package.json'), JSON.stringify({ version }));
 	fs.writeFileSync(path.join(cliDist, 'index.js'), '#!/usr/bin/env node\n');
+	fs.writeFileSync(path.join(coreDist, 'contracts.js'), 'export const contracts = true;\n');
 	fs.writeFileSync(path.join(coreDist, 'index.js'), 'export const ok = true;\n');
 	fs.writeFileSync(path.join(runtimeDist, 'index.js'), 'export const runtime = true;\n');
 	return sourceRoot;
@@ -49,7 +50,7 @@ try {
 	assert.equal(envIdentity.selectionSource, 'env');
 	assert.equal(envIdentity.bin, envBin);
 	assert.equal(envIdentity.sourceRoot, envRoot);
-	assert.equal(envIdentity.coreModulePath, path.join(envRoot, 'packages', 'runtime-core', 'dist', 'index.js'));
+	assert.equal(envIdentity.coreModulePath, path.join(envRoot, 'packages', 'runtime-core', 'dist', 'contracts.js'));
 	assert.equal(envIdentity.runtimePackagePath, path.join(envRoot, 'packages', 'runtime-playground', 'dist', 'index.js'));
 	assert.equal(envIdentity.fingerprint.version, '1.0.0');
 	assert.deepEqual(envIdentity.invocation, { command: process.execPath, args: [envBin] });
@@ -79,7 +80,7 @@ try {
 	});
 	assert.equal(staleEnvWithCacheIdentity.selectionSource, 'cache');
 	assert.equal(staleEnvWithCacheIdentity.bin, path.join(cacheSourceRoot, 'packages', 'cli', 'dist', 'index.js'));
-	assert.equal(staleEnvWithCacheIdentity.coreModulePath, path.join(cacheSourceRoot, 'packages', 'runtime-core', 'dist', 'index.js'));
+	assert.equal(staleEnvWithCacheIdentity.coreModulePath, path.join(cacheSourceRoot, 'packages', 'runtime-core', 'dist', 'contracts.js'));
 
 	const explicitBinWithCacheIdentity = resolveWpCodeboxIdentity({
 		wpCodeboxBin: envBin,
