@@ -147,7 +147,7 @@ try {
 	const cacheRoot = path.join(contractSourceRoot, 'cache', 'wp-codebox');
 	const cacheSourceRoot = path.join(cacheRoot, 'source');
 	const staleSourceRoot = path.join(contractSourceRoot, 'wp-codebox@stale');
-	const cacheCoreModule = path.join(cacheSourceRoot, 'packages', 'runtime-core', 'dist', 'index.js');
+	const cacheCoreModule = path.join(cacheSourceRoot, 'packages', 'runtime-core', 'dist', 'contracts.js');
 	fs.mkdirSync(path.join(cacheSourceRoot, 'packages', 'cli', 'dist'), { recursive: true });
 	fs.mkdirSync(path.dirname(cacheCoreModule), { recursive: true });
 	fs.mkdirSync(path.join(cacheSourceRoot, 'packages', 'runtime-playground', 'dist'), { recursive: true });

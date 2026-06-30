@@ -11,7 +11,8 @@ const path = require('node:path');
 const DEFAULT_WP_CODEBOX_BIN = 'wp-codebox';
 const DEFAULT_WP_CLI_BIN = 'wp';
 const DEFAULT_CORE_MODULE = '@automattic/wp-codebox-core';
-const DEFAULT_RUNTIME_CORE_ENTRY = 'packages/runtime-core/dist/index.js';
+const DEFAULT_RUNTIME_CORE_ENTRY = 'packages/runtime-core/dist/contracts.js';
+const DEFAULT_RUNTIME_CORE_FALLBACK_ENTRY = 'packages/runtime-core/dist/index.js';
 const DEFAULT_RUNTIME_PLAYGROUND_ENTRY = 'packages/runtime-playground/dist/index.js';
 const DEFAULT_CLI_ENTRY = 'packages/cli/dist/index.js';
 
@@ -180,9 +181,14 @@ function resolveCoreModulePath(sourceRoot, installRoot, options, env) {
 	}
 	const discovered = firstExistingFile([
 		sourceRoot && path.resolve(sourceRoot, options.runtimeCoreEntry || DEFAULT_RUNTIME_CORE_ENTRY),
+		sourceRoot && path.resolve(sourceRoot, DEFAULT_RUNTIME_CORE_FALLBACK_ENTRY),
 		installRoot && path.resolve(installRoot, 'source', options.runtimeCoreEntry || DEFAULT_RUNTIME_CORE_ENTRY),
+		installRoot && path.resolve(installRoot, 'source', DEFAULT_RUNTIME_CORE_FALLBACK_ENTRY),
 		installRoot && path.resolve(installRoot, 'release', 'wp-codebox-cli', options.runtimeCoreEntry || DEFAULT_RUNTIME_CORE_ENTRY),
+		installRoot && path.resolve(installRoot, 'release', 'wp-codebox-cli', DEFAULT_RUNTIME_CORE_FALLBACK_ENTRY),
+		installRoot && path.resolve(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'contracts.js'),
 		installRoot && path.resolve(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js'),
+		installRoot && path.resolve(installRoot, 'release', 'wp-codebox-cli', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'contracts.js'),
 		installRoot && path.resolve(installRoot, 'release', 'wp-codebox-cli', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js'),
 	]);
 	const envExplicit = firstString(env.HOMEBOY_WP_CODEBOX_CORE_MODULE, env.WP_CODEBOX_CORE_MODULE);
