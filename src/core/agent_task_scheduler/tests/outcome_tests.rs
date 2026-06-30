@@ -113,15 +113,42 @@ fn missing_required_typed_artifacts_fails_succeeded_outcome() {
 }
 
 #[test]
-fn empty_required_typed_artifact_fails_with_operator_pointer() {
+fn empty_required_patch_artifact_is_valid_no_diff_evidence() {
     let temp = tempfile::tempdir().expect("tempdir");
     let patch_path = temp.path().join("patch.diff");
     fs::write(&patch_path, "").expect("empty patch");
     let scheduler = AgentTaskScheduler::new(SuccessEmptyRequiredTypedArtifactExecutor {
         artifact_path: patch_path.clone(),
+        artifact_name: "patch",
+        artifact_kind: "patch",
     });
 
     let aggregate = scheduler.run(plan_with_required_artifacts(&["patch"]));
+
+    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(aggregate.totals.succeeded, 1);
+    assert_eq!(
+        aggregate.outcomes[0].status,
+        AgentTaskOutcomeStatus::Succeeded
+    );
+    assert!(aggregate.outcomes[0]
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.class != "agent_task.required_typed_artifacts_invalid"));
+}
+
+#[test]
+fn empty_required_non_patch_typed_artifact_fails_with_operator_pointer() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let report_path = temp.path().join("report.json");
+    fs::write(&report_path, "").expect("empty report");
+    let scheduler = AgentTaskScheduler::new(SuccessEmptyRequiredTypedArtifactExecutor {
+        artifact_path: report_path.clone(),
+        artifact_name: "agent_result",
+        artifact_kind: "json",
+    });
+
+    let aggregate = scheduler.run(plan_with_required_artifacts(&["agent_result"]));
 
     assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
     assert_eq!(aggregate.totals.failed, 1);
@@ -136,14 +163,14 @@ fn empty_required_typed_artifact_fails_with_operator_pointer() {
         .find(|diagnostic| diagnostic.class == "agent_task.required_typed_artifacts_invalid")
         .expect("invalid required typed artifact diagnostic");
     assert_eq!(diagnostic.data["invalid"][0]["task_id"], json!("task-1"));
-    assert_eq!(diagnostic.data["invalid"][0]["name"], json!("patch"));
+    assert_eq!(diagnostic.data["invalid"][0]["name"], json!("agent_result"));
     assert_eq!(
         diagnostic.data["invalid"][0]["artifact_id"],
-        json!("empty-patch")
+        json!("empty-agent_result")
     );
     assert_eq!(
         diagnostic.data["invalid"][0]["path"],
-        json!(patch_path.display().to_string())
+        json!(report_path.display().to_string())
     );
     assert_eq!(diagnostic.data["invalid"][0]["size_bytes"], json!(0));
     assert_eq!(

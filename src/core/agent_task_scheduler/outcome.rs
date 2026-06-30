@@ -110,6 +110,10 @@ fn invalid_typed_artifact_reason(
     path: Option<&str>,
     size_bytes: Option<u64>,
 ) -> Option<String> {
+    if is_empty_patch_artifact(typed_artifact) {
+        return None;
+    }
+
     if size_bytes == Some(0) {
         return Some("declared artifact size is zero bytes".to_string());
     }
@@ -127,6 +131,25 @@ fn invalid_typed_artifact_reason(
     }
 
     None
+}
+
+fn is_empty_patch_artifact(typed_artifact: &AgentTaskTypedArtifact) -> bool {
+    let is_patch = typed_artifact.name == "patch"
+        || typed_artifact.artifact_type.as_deref() == Some("patch")
+        || string_field(&typed_artifact.payload, "kind").as_deref() == Some("patch")
+        || typed_artifact
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.kind == "patch")
+            .unwrap_or(false);
+    let has_reference = typed_artifact
+        .artifact
+        .as_ref()
+        .and_then(|artifact| artifact.path.as_ref().or(artifact.url.as_ref()))
+        .is_some()
+        || string_field(&typed_artifact.payload, "path").is_some()
+        || string_field(&typed_artifact.payload, "url").is_some();
+    is_patch && has_reference
 }
 
 fn string_field(value: &Value, field: &str) -> Option<String> {
