@@ -754,7 +754,17 @@ mod tests {
             )
             .expect_err("failed dependency build should fail sync");
 
-            assert!(err.message.contains("build lifecycle failed"));
+            assert_eq!(err.code.as_str(), "dependency_step_failed");
+            assert_eq!(
+                err.details.get("step_id").and_then(|value| value.as_str()),
+                Some("dependency.build")
+            );
+            assert_eq!(
+                err.details
+                    .get("component_id")
+                    .and_then(|value| value.as_str()),
+                Some("shared-runtime")
+            );
             assert!(!dependency.join(".homeboy-build").exists());
             let output = Command::new("git")
                 .args(["status", "--porcelain=v1"])
@@ -901,7 +911,8 @@ mod tests {
                 .map(|entries| entries.filter_map(|entry| entry.ok()).count())
                 .unwrap_or(0);
             assert_eq!(
-                leftovers, 0,
+                leftovers,
+                0,
                 "partial sync must not leave an orphaned remote checkout under {}",
                 lab_workspaces.display()
             );
