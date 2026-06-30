@@ -9,7 +9,7 @@ use super::super::spec::{PipelineStep, RigSpec};
 use super::super::toolchain;
 use crate::core::error::{Error, Result};
 
-pub(super) fn run_command_step(
+pub(in crate::core::rig) fn run_command_step(
     rig: &RigSpec,
     cmd: &str,
     cwd: Option<&str>,

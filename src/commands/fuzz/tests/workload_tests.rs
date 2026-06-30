@@ -191,6 +191,41 @@ fn fuzz_list_materializes_prepare_dependencies_before_workload_validation() {
 }
 
 #[test]
+fn fuzz_list_runs_declared_dependency_materialization_before_prepare_validation() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_dependency_materialization_fuzz_rig(home.path(), &component_dir);
+
+        let output = run_list(fuzz_list_args()).expect("fuzz list");
+
+        assert_eq!(output.count, 1);
+        assert!(component_dir.join("runtime/ready.txt").is_file());
+    });
+}
+
+#[test]
+fn fuzz_list_reports_structured_dependency_materialization_failure() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_dependency_materialization_failure_rig(home.path(), &component_dir);
+
+        let error = match run_list(fuzz_list_args()) {
+            Ok(_) => panic!("dependency materialization should fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("fuzz_prepare"));
+        assert!(message.contains("dependency materialization runtime-dependencies"));
+        assert!(message.contains("did not produce required outputs"));
+    });
+}
+
+#[test]
 fn fuzz_list_reports_structured_prepare_step_failure() {
     with_isolated_home(|home| {
         let component_dir = home.path().join("component");
@@ -281,6 +316,69 @@ fn write_fuzz_prepare_rig(
                         "prepare_command": prepare_command,
                         "prepare_phases": ["fuzz_prepare"],
                         "label": label
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .expect("rig config");
+}
+
+fn write_dependency_materialization_fuzz_rig(home: &Path, component_dir: &Path) {
+    write_dependency_materialization_rig(
+        home,
+        component_dir,
+        r#"mkdir -p runtime && printf ready > runtime/ready.txt"#,
+    );
+}
+
+fn write_dependency_materialization_failure_rig(home: &Path, component_dir: &Path) {
+    write_dependency_materialization_rig(home, component_dir, "true");
+}
+
+fn write_dependency_materialization_rig(home: &Path, component_dir: &Path, command: &str) {
+    let rig_dir = home.join(".config/homeboy/rigs");
+    fs::create_dir_all(&rig_dir).expect("rig dir");
+    fs::write(
+        rig_dir.join("package-fuzz.json"),
+        serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": component_dir.to_string_lossy(),
+                    "extensions": {
+                        "generic": {
+                            "settings": {}
+                        }
+                    }
+                }
+            },
+            "requirements": {
+                "dependency_materialization": [
+                    {
+                        "id": "runtime-dependencies",
+                        "command": command,
+                        "component": "package",
+                        "cwd": "${components.package.path}",
+                        "expected_outputs": [
+                            { "path": "runtime/ready.txt", "kind": "file" }
+                        ],
+                        "safety": "writes_working_tree"
+                    }
+                ]
+            },
+            "fuzz": {
+                "default_component": "package"
+            },
+            "pipeline": {
+                "fuzz_prepare": [
+                    {
+                        "kind": "requirement",
+                        "id": "runtime-ready",
+                        "file": "runtime/ready.txt",
+                        "cwd": component_dir.to_string_lossy(),
+                        "label": "runtime dependency is present"
                     }
                 ]
             }
