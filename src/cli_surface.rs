@@ -120,7 +120,7 @@ pub enum Commands {
     Component(component::ComponentArgs),
     /// Manage global Homeboy configuration
     Config(config::ConfigArgs),
-    /// Inspect and export machine-consumable Homeboy contract metadata
+    /// Inspect, export, validate, and normalize Homeboy contract metadata
     Contract(contract::ContractArgs),
     /// Run the local-only HTTP API daemon
     Daemon(daemon::DaemonArgs),
