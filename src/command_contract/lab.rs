@@ -614,7 +614,7 @@ impl Commands {
             Commands::Bench(args) => return args.portability_contract(),
             Commands::Fuzz(args) => return CommandPortabilityContract::lab_optional(args.lab_contract()),
             Commands::Extension(args) if args.is_update_command() => {
-                LabCommandContract::explicit_runner_simple("extension update")
+                LabCommandContract::explicit_runner_simple(args.update_command_label())
             }
             Commands::Fleet(args) => {
                 let contract = crate::commands::fleet::adapter(CommandOutputFileMode::None)
