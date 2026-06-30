@@ -71,9 +71,14 @@ pub use source::{
     SkippedRigSourceStack, SkippedRigSourceUpdate,
 };
 pub use spec::{
+    normalize_dependency_materialization_steps, validate_dependency_materialization_steps,
     AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, ArtifactPostprocessSpec, BenchSpec,
-    CheckSpec, ComponentSpec, DiscoverSpec, ExecutableRequirementSpec, FilesystemAssertionKind,
-    FilesystemAssertionSpec, NewerThanSpec, PatchOp, PipelineStep, RigRequirementsSpec,
+    CheckSpec, ComponentSpec, DependencyMaterializationArtifactSpec,
+    DependencyMaterializationLogSpec, DependencyMaterializationOutputKind,
+    DependencyMaterializationOutputSpec, DependencyMaterializationSafety,
+    DependencyMaterializationStepSpec, DiscoverSpec, ExecutableRequirementSpec,
+    FilesystemAssertionKind, FilesystemAssertionSpec, NewerThanSpec,
+    NormalizedDependencyMaterializationStep, PatchOp, PipelineStep, RigRequirementsSpec,
     RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp,
     SymlinkSpec, TimeSource, TraceConfig, TraceDependencySpec, TraceExperimentArtifactSpec,
     TraceExperimentCommandSpec, TraceExperimentSpec, TraceGuardrailSpec,
