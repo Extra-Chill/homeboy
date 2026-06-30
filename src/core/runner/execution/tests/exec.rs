@@ -463,7 +463,10 @@ fn test_exec_runs_local_runner_command() {
         }
         let source_snapshot = output.source_snapshot.expect("source snapshot");
         assert_eq!(source_snapshot.runner_id, "lab-local");
-        assert_eq!(source_snapshot.sync_mode, "existing_remote");
+        assert_eq!(
+            source_snapshot.sync_mode,
+            crate::core::runner_execution_envelope::PATH_MATERIALIZATION_MODE_EXISTING_REMOTE
+        );
         assert!(source_snapshot.snapshot_hash.starts_with("sha256:"));
         assert!(output.job_id.is_none());
     });
