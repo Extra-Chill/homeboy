@@ -15,6 +15,8 @@ use super::super::{Runner, RunnerCapabilityPreflight};
 #[allow(unused_imports)]
 use super::*;
 
+pub(super) const RUNTIME_SECRET_ENV_ALLOWLIST_ENV: &str = "HOMEBOY_AGENT_RUNTIME_SECRET_ENV";
+
 pub(super) fn resolve_runner_secret_env_for_plan(
     secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
     plan: &SecretEnvPlan,
@@ -347,7 +349,9 @@ pub(crate) fn runner_exec_secret_env_plan(
         command,
     ));
     names.extend(declared_runtime_provider_secret_env(env));
-    SecretEnvPlan::from_secret_env_names(names)
+    let mut plan = SecretEnvPlan::from_secret_env_names(names);
+    plan.allow_inherited_env_names([RUNTIME_SECRET_ENV_ALLOWLIST_ENV.to_string()]);
+    plan
 }
 
 /// Runtime/extension-declared secret env names for a hosted agent run.
@@ -360,7 +364,7 @@ pub(crate) fn runner_exec_secret_env_plan(
 /// working by exporting the same allowlist it already owns, and any new provider
 /// is supported without a core change (generic-core rule, #6676).
 fn declared_runtime_provider_secret_env(env: &HashMap<String, String>) -> Vec<String> {
-    env.get("HOMEBOY_AGENT_RUNTIME_SECRET_ENV")
+    env.get(RUNTIME_SECRET_ENV_ALLOWLIST_ENV)
         .into_iter()
         .flat_map(|value| value.split(','))
         .map(str::trim)
