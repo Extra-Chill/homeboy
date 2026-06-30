@@ -29,7 +29,15 @@ const ACTION_COMMANDS = Object.freeze({
 	block_render: 'wordpress.block-render',
 	block_editor: 'wordpress.block-editor',
 	db_query: 'wordpress.db-query',
+	query_observation: 'wordpress.query-observation',
+	cache_observation: 'wordpress.cache-observation',
+	write_observation: 'wordpress.write-observation',
+	resource_crud: 'wordpress.resource-crud',
 	wp_cli: 'wordpress.wp-cli',
+	hook_run: 'wordpress.hook-run',
+	cron_event: 'wordpress.cron-event',
+	rest_fixture: 'wordpress.rest-fixture',
+	browser_corpus: 'wordpress.browser-corpus',
 	action_auth: undefined,
 	login_as: 'wordpress.login-as',
 	nonce_for: 'wordpress.nonce-for',
@@ -63,8 +71,16 @@ const ACTION_REQUIRED_CAPABILITIES = Object.freeze({
 	block_render: Object.freeze(['block']),
 	block_editor: Object.freeze(['block', 'block-editor', 'browser']),
 	db_query: Object.freeze(['database']),
+	query_observation: Object.freeze(['database', 'query-observation']),
+	cache_observation: Object.freeze(['cache-observation']),
+	write_observation: Object.freeze(['write-observation']),
+	resource_crud: Object.freeze(['crud']),
 	db_operation: Object.freeze(['database']),
 	wp_cli: Object.freeze(['wp-cli']),
+	hook_run: Object.freeze(['hook']),
+	cron_event: Object.freeze(['cron']),
+	rest_fixture: Object.freeze(['rest', 'fixture-generation']),
+	browser_corpus: Object.freeze(['browser', 'browser-corpus']),
 	action_auth: Object.freeze(['admin']),
 	login_as: Object.freeze(['admin']),
 	nonce_for: Object.freeze(['admin']),
@@ -290,6 +306,7 @@ function mutationContractFieldsForAction(action) {
 	return {
 		rest_request: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.restMutation', 'mutationContracts.rest_request'],
 		crud_operation: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.crudMutation', 'mutationContracts.crud_operation'],
+		resource_crud: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.resourceCrudMutation', 'schemas.wordpressRuntime.resourceCRUDMutation', 'mutationContracts.resource_crud'],
 		db_operation: ['schemas.wordpressDb.mutation', 'schemas.wordpressRuntime.disposableMutation', 'mutationContracts.db_operation'],
 		admin_action: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.adminActionMutation', 'mutationContracts.admin_action'],
 		ajax_action: ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.ajaxActionMutation', 'mutationContracts.ajax_action'],
@@ -298,7 +315,7 @@ function mutationContractFieldsForAction(action) {
 }
 
 function runtimeActionMutates(action, testCase = {}, input = {}) {
-	if (action === 'crud_operation') {
+	if (action === 'crud_operation' || action === 'resource_crud') {
 		return ['create', 'update', 'delete'].includes(String(input.action || testCase.operation?.action || '').toLowerCase());
 	}
 	if (action === 'db_operation') {
@@ -522,8 +539,32 @@ function requiredInputFieldsForAction(action, input = {}) {
 	if (action === 'db_query') {
 		return input.table || input.query || input.statement ? [] : ['query'];
 	}
+	if (action === 'query_observation') {
+		return input.query || input.table || input.route || input.operation_id ? [] : ['query'];
+	}
+	if (action === 'cache_observation') {
+		return input.cache_key || input.cache_group || input.group || input.key ? [] : ['cache_key'];
+	}
+	if (action === 'write_observation') {
+		return input.table || input.option || input.write_family || input.operation ? [] : ['operation'];
+	}
+	if (action === 'resource_crud') {
+		return ['action', 'resource_type'];
+	}
 	if (action === 'wp_cli') {
 		return ['args'];
+	}
+	if (action === 'hook_run') {
+		return ['hook'];
+	}
+	if (action === 'cron_event') {
+		return ['hook'];
+	}
+	if (action === 'rest_fixture') {
+		return input.route || input.routes ? [] : ['route'];
+	}
+	if (action === 'browser_corpus') {
+		return input.urls || input.routes || input.corpus ? [] : ['urls'];
 	}
 	if (action === 'login_as') {
 		return ['user'];
@@ -639,22 +680,22 @@ function normalizeRuntimeAction(value) {
 }
 
 function familyForRuntimeOperationAction(action) {
-	if (action === 'rest_request') {
+	if (action === 'rest_request' || action === 'rest_fixture') {
 		return 'rest';
 	}
-	if (action === 'crud_operation') {
+	if (action === 'crud_operation' || action === 'resource_crud') {
 		return 'crud';
 	}
 	if (['admin_page_load', 'admin_action', 'ajax_action', 'admin_post', 'action_auth', 'login_as', 'nonce_for', 'nonce', 'session'].includes(action)) {
 		return 'admin_page';
 	}
-	if (action === 'frontend_page_load') {
+	if (action === 'frontend_page_load' || action === 'browser_corpus') {
 		return 'frontend_page';
 	}
 	if (action === 'block_render' || action === 'block_editor') {
 		return 'block';
 	}
-	if (action === 'db_query' || action === 'db_operation' || action === 'wp_cli') {
+	if (['db_query', 'db_operation', 'query_observation', 'cache_observation', 'write_observation', 'wp_cli', 'hook_run', 'cron_event'].includes(action)) {
 		return 'database';
 	}
 	if (['checkpoint', 'restore', 'reset_state', 'replay_case', 'minimize_case'].includes(action)) {
@@ -708,6 +749,30 @@ function runtimeOperationInput(testCase = {}, { family, action } = {}) {
 	const surface = objectOrUndefined(testCase.metadata?.surface || testCase.target_metadata?.surface || testCase.target_metadata) || {};
 	if (action === 'wp_cli') {
 		return stripUndefined({ args: operation.args || testCase.input?.args, env: operation.env || testCase.input?.env });
+	}
+	if (action === 'hook_run') {
+		return stripUndefined({ hook: operation.hook || operation.action || testCase.input?.hook, args: operation.args || testCase.input?.args, context: operation.context || testCase.input?.context });
+	}
+	if (action === 'cron_event') {
+		return stripUndefined({ hook: operation.hook || operation.event || operation.action || testCase.input?.hook, args: operation.args || testCase.input?.args, schedule: operation.schedule || testCase.input?.schedule, timestamp: operation.timestamp || testCase.input?.timestamp });
+	}
+	if (action === 'rest_fixture') {
+		return stripUndefined({ route: operation.route || operation.path || testCase.input?.route, method: operation.method || testCase.input?.method, routes: operation.routes || testCase.input?.routes, schema: operation.fixture_schema || operation.fixtureSchema || testCase.input?.schema, fixtures: operation.fixtures || testCase.input?.fixtures });
+	}
+	if (action === 'browser_corpus') {
+		return stripUndefined({ urls: operation.urls || testCase.input?.urls, routes: operation.routes || testCase.input?.routes, corpus: operation.corpus || testCase.input?.corpus, options: operation.options || testCase.input?.options });
+	}
+	if (action === 'query_observation') {
+		return stripUndefined({ query: operation.query || operation.statement || testCase.input?.query, table: operation.table || testCase.input?.table, route: operation.route || testCase.input?.route, operation_id: operation.operation_id || operation.operationId || testCase.input?.operation_id, observation: operation.observation || operation.profile || testCase.input?.observation });
+	}
+	if (action === 'cache_observation') {
+		return stripUndefined({ cache_key: operation.cache_key || operation.cacheKey || operation.key || testCase.input?.cache_key, cache_group: operation.cache_group || operation.cacheGroup || operation.group || testCase.input?.cache_group, operation: operation.operation || testCase.input?.operation, observation: operation.observation || operation.profile || testCase.input?.observation });
+	}
+	if (action === 'write_observation') {
+		return stripUndefined({ operation: operation.operation || operation.write_family || operation.writeFamily || testCase.input?.operation, table: operation.table || testCase.input?.table, option: operation.option || operation.option_name || operation.optionName || testCase.input?.option, write_family: operation.write_family || operation.writeFamily || testCase.input?.write_family, observation: operation.observation || operation.profile || testCase.input?.observation });
+	}
+	if (action === 'resource_crud') {
+		return stripUndefined({ action: operation.action || testCase.input?.action, resource_type: operation.resource_type || operation.resourceType || operation.type || testCase.input?.resource_type, id: operation.id || testCase.input?.id, input: operation.input || testCase.input?.input });
 	}
 	if (action === 'login_as') {
 		return stripUndefined({ user: operation.user || operation.user_id || operation.userId || testCase.input?.user });

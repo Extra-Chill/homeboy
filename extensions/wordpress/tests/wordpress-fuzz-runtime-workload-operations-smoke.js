@@ -31,12 +31,23 @@ const runtimeActionContracts = {
 	schemas: {
 		wordpressRuntime: {
 			disposableMutation: 'wp-codebox/wordpress-disposable-mutation/v1',
+			resourceCrudMutation: 'wp-codebox/wordpress-resource-crud-mutation/v1',
 			actionAuth: 'wp-codebox/wordpress-action-auth/v1',
 			adminAction: 'wp-codebox/wordpress-admin-action/v1',
 			ajaxAction: 'wp-codebox/wordpress-ajax-action/v1',
 			adminPost: 'wp-codebox/wordpress-admin-post/v1',
+			hookRun: 'wp-codebox/wordpress-hook-run/v1',
+			cronEvent: 'wp-codebox/wordpress-cron-event/v1',
+			wpCli: 'wp-codebox/wordpress-wp-cli/v1',
+			restFixture: 'wp-codebox/wordpress-rest-fixture/v1',
+			browserCorpus: 'wp-codebox/wordpress-browser-corpus/v1',
 			nonce: 'wp-codebox/wordpress-nonce/v1',
 			session: 'wp-codebox/wordpress-session/v1',
+		},
+		wordpressObservability: {
+			queryObservation: 'wp-codebox/wordpress-query-observation/v1',
+			cacheObservation: 'wp-codebox/wordpress-cache-observation/v1',
+			writeObservation: 'wp-codebox/wordpress-write-observation/v1',
 		},
 		wordpressDb: {
 			operation: 'wp-codebox/wordpress-db-operation/v1',
@@ -55,7 +66,15 @@ const runtimeActionContracts = {
 		'block_editor',
 		'db_query',
 		'db_operation',
+		'query_observation',
+		'cache_observation',
+		'write_observation',
+		'resource_crud',
 		'wp_cli',
+		'hook_run',
+		'cron_event',
+		'rest_fixture',
+		'browser_corpus',
 		'action_auth',
 		'login_as',
 		'nonce_for',
@@ -134,6 +153,34 @@ assert.deepEqual(mapWordPressRuntimeActionToCodeboxContract('rest_request', runt
 	contract_schema: 'wp-codebox/wordpress-runtime-action/v1',
 	target: { kind: 'runtime-action', id: 'runtime-action:rest_request', entrypoint: 'rest_request' },
 });
+
+const explicitPrimitiveContract = {
+	schema: 'wp-codebox/wordpress-runtime-action-contracts/v1',
+	schemas: {
+		wordpressRuntime: {
+			resourceCrud: 'wp-codebox/wordpress-resource-crud/v1',
+			hookRun: 'wp-codebox/wordpress-hook-run/v1',
+			cronEvent: 'wp-codebox/wordpress-cron-event/v1',
+			wpCli: 'wp-codebox/wordpress-wp-cli/v1',
+			restFixture: 'wp-codebox/wordpress-rest-fixture/v1',
+			browserCorpus: 'wp-codebox/wordpress-browser-corpus/v1',
+		},
+		wordpressObservability: {
+			queryObservation: 'wp-codebox/wordpress-query-observation/v1',
+			cacheObservation: 'wp-codebox/wordpress-cache-observation/v1',
+			writeObservation: 'wp-codebox/wordpress-write-observation/v1',
+		},
+	},
+};
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('query_observation', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-query-observation/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('cache_observation', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-cache-observation/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('write_observation', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-write-observation/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('resource_crud', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-resource-crud/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('hook_run', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-hook-run/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('cron_event', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-cron-event/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('wp_cli', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-wp-cli/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('rest_fixture', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-rest-fixture/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('browser_corpus', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-browser-corpus/v1');
 
 const restDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
 	id: 'case:rest',
@@ -293,6 +340,14 @@ assert.equal(readyMutationDescriptor.status, 'ready');
 
 const runtimeActionCases = [
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'wp_cli', args: ['plugin', 'list'] } }, 'wp_cli', { args: ['plugin', 'list'] }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'query_observation', query: 'SELECT ID FROM wp_posts' } }, 'query_observation', { query: 'SELECT ID FROM wp_posts' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'cache_observation', cache_key: 'products', cache_group: 'fixture' } }, 'cache_observation', { cache_key: 'products', cache_group: 'fixture' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'write_observation', operation: 'option-update', option: 'fixture_option' } }, 'write_observation', { operation: 'option-update', option: 'fixture_option' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'resource_crud', action: 'read', resource_type: 'post', id: 1 } }, 'resource_crud', { action: 'read', resource_type: 'post', id: 1 }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'hook_run', hook: 'init', args: [] } }, 'hook_run', { hook: 'init', args: [] }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'cron_event', hook: 'fixture_cron', schedule: 'now' } }, 'cron_event', { hook: 'fixture_cron', schedule: 'now' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'rest_fixture', route: '/wp/v2/posts', method: 'GET' } }, 'rest_fixture', { route: '/wp/v2/posts', method: 'GET' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'browser_corpus', urls: ['/'] } }, 'browser_corpus', { urls: ['/'] }],
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'login_as', user: 1 } }, 'login_as', { user: 1 }],
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'nonce_for', action: 'bulk-posts' } }, 'nonce_for', { action: 'bulk-posts' }],
 	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'action_auth', action: 'bulk-posts', nonce: 'abc' } }, 'action_auth', { action: 'bulk-posts', nonce: 'abc' }],
@@ -311,6 +366,13 @@ for (const [testCase, expectedAction, expectedInput] of runtimeActionCases) {
 	assert.equal(descriptor.wp_codebox_ability, `wp-codebox/runtime-action/${expectedAction}`);
 	assert.deepEqual(descriptor.input, expectedInput);
 }
+
+const missingPrimitiveContractDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ target: { kind: 'runtime-action' }, operation: { runtime_action: 'browser_corpus', urls: ['/'] } }, {
+	codeboxRuntimeContracts: { schema: 'wp-codebox/wordpress-runtime-action-contracts/v1', actions: { rest_request: actionContract('rest_request') } },
+});
+assert.equal(missingPrimitiveContractDescriptor.status, 'blocked');
+assert.equal(missingPrimitiveContractDescriptor.skip_reason, 'unsupported-wordpress-runtime-action');
+assert.deepEqual(missingPrimitiveContractDescriptor.blockers[0].missing_contract_fields, ['actions.browser_corpus', 'runtime_actions.browser_corpus', 'wordpress_runtime_actions.browser_corpus', 'schemas.wordpressRuntime.browserCorpus']);
 
 const skipped = attachWordPressFuzzRuntimeWorkloadOperationDescriptor({
 	id: 'case:block',
