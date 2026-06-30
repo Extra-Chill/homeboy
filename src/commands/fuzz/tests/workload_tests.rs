@@ -206,6 +206,23 @@ fn fuzz_list_runs_declared_dependency_materialization_before_prepare_validation(
 }
 
 #[test]
+fn fuzz_list_materializes_declared_plugin_subpath_dependency_before_prepare_validation() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("woocommerce");
+        fs::create_dir_all(component_dir.join("plugins/woocommerce")).expect("plugin dir");
+        write_generic_fuzz_extension(home.path());
+        write_plugin_subpath_dependency_materialization_fuzz_rig(home.path(), &component_dir);
+
+        let output = run_list(fuzz_list_args()).expect("fuzz list");
+
+        assert_eq!(output.count, 1);
+        assert!(component_dir
+            .join("plugins/woocommerce/vendor/autoload_packages.php")
+            .is_file());
+    });
+}
+
+#[test]
 fn fuzz_list_reports_structured_dependency_materialization_failure() {
     with_isolated_home(|home| {
         let component_dir = home.path().join("component");
@@ -379,6 +396,68 @@ fn write_dependency_materialization_rig(home: &Path, component_dir: &Path, comma
                         "file": "runtime/ready.txt",
                         "cwd": component_dir.to_string_lossy(),
                         "label": "runtime dependency is present"
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .expect("rig config");
+}
+
+fn write_plugin_subpath_dependency_materialization_fuzz_rig(home: &Path, component_dir: &Path) {
+    let rig_dir = home.join(".config/homeboy/rigs");
+    fs::create_dir_all(&rig_dir).expect("rig dir");
+    fs::write(
+        rig_dir.join("package-fuzz.json"),
+        serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": component_dir.to_string_lossy(),
+                    "extensions": {
+                        "generic": {
+                            "settings": {}
+                        }
+                    }
+                }
+            },
+            "requirements": {
+                "dependency_materialization": [
+                    {
+                        "id": "woocommerce-php-package-dependencies",
+                        "command": "mkdir -p plugins/woocommerce/vendor && printf ready > plugins/woocommerce/vendor/autoload_packages.php",
+                        "component": "package",
+                        "cwd": "${components.package.path}",
+                        "inputs": {
+                            "recipe": "wordpress-plugin-php-package-dependencies",
+                            "manifest": "${components.package.path}/plugins/woocommerce/composer.json",
+                            "lockfile": "${components.package.path}/plugins/woocommerce/composer.lock"
+                        },
+                        "expected_outputs": [
+                            {
+                                "path": "${components.package.path}/plugins/woocommerce/vendor/autoload_packages.php",
+                                "kind": "file"
+                            }
+                        ],
+                        "cache_key_inputs": [
+                            "${components.package.path}/plugins/woocommerce/composer.json",
+                            "${components.package.path}/plugins/woocommerce/composer.lock"
+                        ],
+                        "safety": "writes_working_tree"
+                    }
+                ]
+            },
+            "fuzz": {
+                "default_component": "package"
+            },
+            "pipeline": {
+                "fuzz_prepare": [
+                    {
+                        "kind": "requirement",
+                        "id": "woocommerce-autoloader-ready",
+                        "file": "${components.package.path}/plugins/woocommerce/vendor/autoload_packages.php",
+                        "label": "WooCommerce Composer package autoloader exists or can be prepared"
                     }
                 ]
             }
