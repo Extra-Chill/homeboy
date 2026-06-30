@@ -943,7 +943,7 @@ fn rig_component_path_env_extra_workspaces_from_entries(
 }
 
 pub(super) fn is_rig_component_path_env_name(name: &str) -> bool {
-    name.starts_with("HOMEBOY_") && name.ends_with("_COMPONENT_PATH")
+    name.starts_with("HOMEBOY_RIG_COMPONENT_PATH__")
 }
 
 pub(super) fn preflight_provider_config_source_cli_dependencies(
@@ -2179,7 +2179,7 @@ mod provider_config_candidate_paths_tests {
             let workspaces = rig_component_path_env_extra_workspaces_from_entries(
                 &source,
                 [(
-                    "HOMEBOY_TEST_COMPONENT_PATH".to_string(),
+                    "HOMEBOY_RIG_COMPONENT_PATH__TEST_RIG__PLUGIN".to_string(),
                     component_path.display().to_string(),
                 )],
             )
@@ -2199,13 +2199,16 @@ mod provider_config_candidate_paths_tests {
             let err = rig_component_path_env_extra_workspaces_from_entries(
                 home.path(),
                 [(
-                    "HOMEBOY_MISSING_COMPONENT_PATH".to_string(),
+                    "HOMEBOY_RIG_COMPONENT_PATH__TEST_RIG__PLUGIN".to_string(),
                     missing.display().to_string(),
                 )],
             )
             .expect_err("missing path");
 
-            assert_eq!(err.details["field"], "HOMEBOY_MISSING_COMPONENT_PATH");
+            assert_eq!(
+                err.details["field"],
+                "HOMEBOY_RIG_COMPONENT_PATH__TEST_RIG__PLUGIN"
+            );
             assert!(err.message.contains("controller-side path does not exist"));
         });
     }

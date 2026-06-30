@@ -485,14 +485,15 @@ mod tests {
             &mut env,
             &mapping,
             [(
-                "HOMEBOY_TEST_COMPONENT_PATH".to_string(),
+                "HOMEBOY_RIG_COMPONENT_PATH__TEST_RIG__COMPONENT".to_string(),
                 "/Users/user/Developer/example-component/includes".to_string(),
             )],
         )
         .expect("forward env");
 
         assert_eq!(
-            env.get("HOMEBOY_TEST_COMPONENT_PATH").map(String::as_str),
+            env.get("HOMEBOY_RIG_COMPONENT_PATH__TEST_RIG__COMPONENT")
+                .map(String::as_str),
             Some("/home/user/Developer/example-component/includes")
         );
         assert_eq!(
@@ -509,15 +510,18 @@ mod tests {
             &mut env,
             &[],
             [(
-                "HOMEBOY_UNSYNCED_COMPONENT_PATH".to_string(),
+                "HOMEBOY_RIG_COMPONENT_PATH__TEST_RIG__COMPONENT".to_string(),
                 "/Users/user/Developer/unsynced-component".to_string(),
             )],
         )
         .expect_err("unsynced path");
 
-        assert_eq!(err.details["field"], "HOMEBOY_UNSYNCED_COMPONENT_PATH");
+        assert_eq!(
+            err.details["field"],
+            "HOMEBOY_RIG_COMPONENT_PATH__TEST_RIG__COMPONENT"
+        );
         assert!(err.message.contains("was not synced to the runner"));
-        assert!(!env.contains_key("HOMEBOY_UNSYNCED_COMPONENT_PATH"));
+        assert!(!env.contains_key("HOMEBOY_RIG_COMPONENT_PATH__TEST_RIG__COMPONENT"));
     }
 
     #[test]

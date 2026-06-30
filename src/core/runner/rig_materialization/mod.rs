@@ -546,17 +546,8 @@ pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result
     let Some((component_id, component)) = spec.components.iter().next() else {
         return Ok(None);
     };
-    let resolved_component_path = rig::resolve_component_path(&spec, component_id)?;
-    let declared_checkout_root = component
-        .checkout_root
-        .as_deref()
-        .unwrap_or(resolved_component_path.as_str());
-    let declared_required_subpath = required_component_subpath(
-        Path::new(&expanded_local_path(&spec, declared_checkout_root)),
-        Path::new(&resolved_component_path),
-        &rig_ids[0],
-        component_id,
-    )?;
+    let declared_required_subpath =
+        declared_required_component_subpath(&spec, component_id, component)?;
     Ok(Some(PathBuf::from(
         checkout_root_for_component_path_override(
             &expanded_local_path(&spec, &path_override),
@@ -576,21 +567,10 @@ pub(super) fn lab_offload_rig_component_dependencies(
         let spec = rig::load(&rig_id)?;
         let single_component = spec.components.len() == 1;
         for (component_id, component) in &spec.components {
-            let resolved_component_path = rig::resolve_component_path(&spec, component_id)?;
-            let declared_checkout_root = component
-                .checkout_root
-                .clone()
-                .unwrap_or_else(|| resolved_component_path.clone());
-            let declared_local_checkout_root = expanded_local_path(&spec, &declared_checkout_root);
-            let declared_local_component_path = resolved_component_path;
-            let declared_required_subpath = required_component_subpath(
-                Path::new(&declared_local_checkout_root),
-                Path::new(&declared_local_component_path),
-                &rig_id,
-                component_id,
-            )?;
             let (checkout_root, local_checkout_root, local_component_path) = if single_component {
                 if let Some(path_override) = component_path_override.as_deref() {
+                    let declared_required_subpath =
+                        declared_required_component_subpath(&spec, component_id, component)?;
                     let local_component_path = expanded_local_path(&spec, path_override);
                     let local_checkout_root = checkout_root_for_component_path_override(
                         &local_component_path,
@@ -602,17 +582,31 @@ pub(super) fn lab_offload_rig_component_dependencies(
                         local_component_path,
                     )
                 } else {
+                    let resolved_component_path = rig::resolve_component_path(&spec, component_id)?;
+                    let declared_checkout_root = component
+                        .checkout_root
+                        .clone()
+                        .unwrap_or_else(|| resolved_component_path.clone());
+                    let declared_local_checkout_root =
+                        expanded_local_path(&spec, &declared_checkout_root);
                     (
                         declared_checkout_root.to_string(),
                         declared_local_checkout_root,
-                        declared_local_component_path,
+                        resolved_component_path,
                     )
                 }
             } else {
+                let resolved_component_path = rig::resolve_component_path(&spec, component_id)?;
+                let declared_checkout_root = component
+                    .checkout_root
+                    .clone()
+                    .unwrap_or_else(|| resolved_component_path.clone());
+                let declared_local_checkout_root =
+                    expanded_local_path(&spec, &declared_checkout_root);
                 (
                     declared_checkout_root,
                     declared_local_checkout_root,
-                    declared_local_component_path,
+                    resolved_component_path,
                 )
             };
             let required_subpath = required_component_subpath(
@@ -639,6 +633,25 @@ pub(super) fn lab_offload_rig_component_dependencies(
         }
     }
     Ok(dependencies)
+}
+
+fn declared_required_component_subpath(
+    spec: &rig::RigSpec,
+    component_id: &str,
+    component: &rig::ComponentSpec,
+) -> Result<Option<String>> {
+    let Some(declared_checkout_root) = component.checkout_root.as_deref() else {
+        return Ok(None);
+    };
+    let Ok(resolved_component_path) = rig::resolve_component_path(spec, component_id) else {
+        return Ok(None);
+    };
+    required_component_subpath(
+        Path::new(&expanded_local_path(spec, declared_checkout_root)),
+        Path::new(&resolved_component_path),
+        &spec.id,
+        component_id,
+    )
 }
 
 fn component_path_override(args: &[String]) -> Option<String> {
@@ -1320,6 +1333,61 @@ mod tests {
             remap_bench_rig_default_component_to_primary_snapshot(&args, "/snapshot"),
             args
         );
+    }
+
+    #[test]
+    fn explicit_single_component_rig_path_materializes_without_declared_path() {
+        crate::test_support::with_isolated_home(|home| {
+            let component_path = home.path().join("Developer/component/plugins/package");
+            std::fs::create_dir_all(&component_path).expect("component path");
+            let rig_dir = home.path().join(".config/homeboy/rigs");
+            std::fs::create_dir_all(&rig_dir).expect("rig dir");
+            std::fs::write(
+                rig_dir.join("proof-rig.json"),
+                serde_json::json!({
+                    "id": "proof-rig",
+                    "components": {
+                        "package": {
+                            "component_id": "registered-package",
+                            "default_ref": "origin/main"
+                        }
+                    },
+                    "fuzz": { "default_component": "package" }
+                })
+                .to_string(),
+            )
+            .expect("rig spec");
+
+            let dependencies = lab_offload_rig_component_dependencies(
+                &[
+                    "homeboy".to_string(),
+                    "fuzz".to_string(),
+                    "run".to_string(),
+                    "--rig".to_string(),
+                    "proof-rig".to_string(),
+                    "--path".to_string(),
+                    component_path.display().to_string(),
+                ],
+                Some((
+                    &component_path.display().to_string(),
+                    "/home/runner/Developer/_lab_workspaces/package-proof",
+                )),
+                Some("/home/runner/Developer"),
+            )
+            .expect("explicit path should satisfy rig component materialization");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(dependencies[0].component_id, "package");
+            assert_eq!(
+                dependencies[0].local_checkout_root,
+                component_path.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].remote_checkout_root,
+                "/home/runner/Developer/_lab_workspaces/package-proof"
+            );
+            assert_eq!(dependencies[0].required_subpath, None);
+        });
     }
 
     #[test]
