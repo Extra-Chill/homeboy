@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
+use super::dispatch::run_list;
 use super::execution::{
     build_fuzz_execution_request, default_runner_contract, fuzz_artifact_ref_validation,
     fuzz_campaign_contract, fuzz_evidence_followups, fuzz_expected_metric_error, fuzz_max_duration,
@@ -18,9 +19,9 @@ use super::report::{
 };
 use super::types::{
     FuzzCommand, FuzzDiscoverArgs, FuzzExecutionOutput, FuzzGateProfileArg, FuzzIsolationArg,
-    FuzzListOutput, FuzzMinimizeArgs, FuzzOutput, FuzzPlanArgs, FuzzPlanStrategy, FuzzReplayArgs,
-    FuzzReportArgs, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract, FuzzValidateArgs,
-    FuzzWorkloadOutput,
+    FuzzListArgs, FuzzListOutput, FuzzMinimizeArgs, FuzzOutput, FuzzPlanArgs, FuzzPlanStrategy,
+    FuzzReplayArgs, FuzzReportArgs, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract,
+    FuzzValidateArgs, FuzzWorkloadOutput,
 };
 use super::workloads::{
     fuzz_workloads, resolve_component_id, resolve_fuzz_context, rig_component_for_fuzz,
