@@ -124,6 +124,7 @@ pub mod refactor;
 pub mod release;
 pub mod report_compare;
 pub(crate) mod report_compare_render;
+pub mod resource_cleanup_intent;
 pub mod resources;
 pub mod review;
 pub mod rig;
