@@ -42,6 +42,13 @@ uses metric names such as `duration`, `elapsed`, `*_ms`, `*_ms_per_item`,
 `*_queries_per_*`, and grouped count metrics rather than product-specific
 scenario names.
 
+Runners that need a portable typed artifact for downstream ranking can emit
+`homeboy/performance-hotspots-summary/v1`. The contract records generic
+dimensions, metrics, ranked hotspot rows, source artifact refs, and aggregation
+method metadata. Product-specific labels belong in producer-owned dimensions or
+metadata; Homeboy core only validates and persists the generic summary as a
+`performance_hotspots_summary` artifact.
+
 When bench/fuzzer runners provide coverage metadata, the compact summary also
 renders a schema-blind coverage block. Homeboy reads generic fields such as
 `coverage_summary`, `coverage_gaps`, `surface_count`, `exercised_count`,

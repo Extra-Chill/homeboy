@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub const PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA: &str = "homeboy/performance-hotspots-summary/v1";
+pub const PERFORMANCE_HOTSPOTS_SUMMARY_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PerformanceMetricPoint {
@@ -20,6 +24,233 @@ pub struct PerformanceMetricFamilyHotspot {
 pub struct PerformanceHotspotSummary {
     pub slowest_timing_metrics: Vec<PerformanceMetricPoint>,
     pub hottest_metric_families: Vec<PerformanceMetricFamilyHotspot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceHotspotsSummaryContract {
+    #[serde(default = "performance_hotspots_summary_schema")]
+    pub schema: String,
+    #[serde(default = "performance_hotspots_summary_version")]
+    pub version: u32,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimensions: Vec<PerformanceHotspotDimension>,
+    pub aggregation: PerformanceHotspotAggregation,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rankings: Vec<PerformanceHotspotRanking>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_artifact_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl PerformanceHotspotsSummaryContract {
+    pub fn from_value(value: Value) -> Result<Self, String> {
+        let mut summary: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
+        summary.normalize()?;
+        Ok(summary)
+    }
+
+    pub fn normalize(&mut self) -> Result<(), String> {
+        self.schema = trim_or_default(&self.schema, PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA);
+        if self.schema != PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA {
+            return Err(format!(
+                "performance hotspots summary schema must be {PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA}"
+            ));
+        }
+        if self.version != PERFORMANCE_HOTSPOTS_SUMMARY_VERSION {
+            return Err(format!(
+                "performance hotspots summary version must be {PERFORMANCE_HOTSPOTS_SUMMARY_VERSION}"
+            ));
+        }
+        self.id = required_trimmed("performance_hotspots_summary.id", &self.id)?;
+        self.label = normalize_optional_string(self.label.take());
+        for dimension in &mut self.dimensions {
+            dimension.normalize("summary")?;
+        }
+        self.aggregation.normalize()?;
+        for ranking in &mut self.rankings {
+            ranking.normalize()?;
+        }
+        self.source_artifact_refs =
+            normalize_string_vec(std::mem::take(&mut self.source_artifact_refs));
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceHotspotAggregation {
+    pub method: String,
+    pub score_metric: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl PerformanceHotspotAggregation {
+    fn normalize(&mut self) -> Result<(), String> {
+        self.method = required_trimmed("performance_hotspot_aggregation.method", &self.method)?;
+        self.score_metric = required_trimmed(
+            "performance_hotspot_aggregation.score_metric",
+            &self.score_metric,
+        )?;
+        self.score_unit = normalize_optional_string(self.score_unit.take());
+        self.dimensions = normalize_string_vec(std::mem::take(&mut self.dimensions));
+        self.metrics = normalize_string_vec(std::mem::take(&mut self.metrics));
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceHotspotRanking {
+    pub id: String,
+    pub rank: u64,
+    pub score: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimensions: Vec<PerformanceHotspotDimension>,
+    pub primary_metric: PerformanceHotspotMetric,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<PerformanceHotspotMetric>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_artifact_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl PerformanceHotspotRanking {
+    fn normalize(&mut self) -> Result<(), String> {
+        self.id = required_trimmed("performance_hotspot_ranking.id", &self.id)?;
+        if self.rank == 0 {
+            return Err(format!(
+                "performance_hotspot_ranking.rank must be greater than zero for `{}`",
+                self.id
+            ));
+        }
+        if !self.score.is_finite() {
+            return Err(format!(
+                "performance_hotspot_ranking.score must be finite for `{}`",
+                self.id
+            ));
+        }
+        if let Some(relative_score) = self.relative_score {
+            if !relative_score.is_finite() {
+                return Err(format!(
+                    "performance_hotspot_ranking.relative_score must be finite for `{}`",
+                    self.id
+                ));
+            }
+        }
+        self.label = normalize_optional_string(self.label.take());
+        for dimension in &mut self.dimensions {
+            dimension.normalize(&self.id)?;
+        }
+        self.primary_metric.normalize(&self.id)?;
+        for metric in &mut self.metrics {
+            metric.normalize(&self.id)?;
+        }
+        self.source_artifact_refs =
+            normalize_string_vec(std::mem::take(&mut self.source_artifact_refs));
+        self.source_refs = normalize_string_vec(std::mem::take(&mut self.source_refs));
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceHotspotDimension {
+    pub name: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl PerformanceHotspotDimension {
+    fn normalize(&mut self, ranking_id: &str) -> Result<(), String> {
+        self.name = required_trimmed("performance_hotspot_dimension.name", &self.name)
+            .map_err(|err| format!("{err} for `{ranking_id}`"))?;
+        self.value = required_trimmed("performance_hotspot_dimension.value", &self.value)
+            .map_err(|err| format!("{err} for `{ranking_id}`"))?;
+        self.kind = normalize_optional_string(self.kind.take());
+        self.label = normalize_optional_string(self.label.take());
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceHotspotMetric {
+    pub name: String,
+    pub value: f64,
+    pub unit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl PerformanceHotspotMetric {
+    fn normalize(&mut self, ranking_id: &str) -> Result<(), String> {
+        self.name = required_trimmed("performance_hotspot_metric.name", &self.name)
+            .map_err(|err| format!("{err} for `{ranking_id}`"))?;
+        if !self.value.is_finite() {
+            return Err(format!(
+                "performance_hotspot_metric.value must be finite for `{ranking_id}`"
+            ));
+        }
+        self.unit = required_trimmed("performance_hotspot_metric.unit", &self.unit)
+            .map_err(|err| format!("{err} for `{ranking_id}`"))?;
+        self.aggregation = normalize_optional_string(self.aggregation.take());
+        if let Some(rank) = self.rank {
+            if rank == 0 {
+                return Err(format!(
+                    "performance_hotspot_metric.rank must be greater than zero for `{ranking_id}`"
+                ));
+            }
+        }
+        if let Some(relative_score) = self.relative_score {
+            if !relative_score.is_finite() {
+                return Err(format!(
+                    "performance_hotspot_metric.relative_score must be finite for `{ranking_id}`"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn summarize_performance_hotspots(
@@ -129,6 +360,60 @@ fn metric_family(metric: &str) -> String {
     metric.to_string()
 }
 
+fn performance_hotspots_summary_schema() -> String {
+    PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA.to_string()
+}
+
+fn performance_hotspots_summary_version() -> u32 {
+    PERFORMANCE_HOTSPOTS_SUMMARY_VERSION
+}
+
+fn trim_or_default(value: &str, default: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        default.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn required_trimmed(field: &str, value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Err(format!("{field} is required"))
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn normalize_string_vec(values: Vec<String>) -> Vec<String> {
+    let mut normalized = values
+        .into_iter()
+        .filter_map(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +424,111 @@ mod tests {
             metric: metric.to_string(),
             value,
         }
+    }
+
+    #[test]
+    fn parses_generic_performance_hotspot_summary_contract() {
+        let summary = PerformanceHotspotsSummaryContract::from_value(serde_json::json!({
+            "schema": PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA,
+            "version": PERFORMANCE_HOTSPOTS_SUMMARY_VERSION,
+            "id": "component-hotspots",
+            "label": "Component hotspots",
+            "dimensions": [
+                { "name": "component", "value": "example-component", "kind": "component" }
+            ],
+            "aggregation": {
+                "method": "sum_by_dimension",
+                "score_metric": "duration_ms",
+                "score_unit": "ms",
+                "dimensions": ["scenario", "operation"],
+                "metrics": ["duration_ms", "query_count"],
+                "limit": 20,
+                "source_count": 2,
+                "metadata": { "window": "candidate" }
+            },
+            "rankings": [
+                {
+                    "id": "scenario:checkout",
+                    "rank": 1,
+                    "score": 481.5,
+                    "relative_score": 1.0,
+                    "label": "Checkout",
+                    "dimensions": [
+                        { "name": "scenario", "value": "checkout" },
+                        { "name": "operation", "value": "submit" },
+                        { "name": "product_dimension", "value": "runtime-owned-label" }
+                    ],
+                    "primary_metric": {
+                        "name": "duration_ms",
+                        "value": 481.5,
+                        "unit": "ms",
+                        "aggregation": "p95",
+                        "sample_count": 144,
+                        "rank": 1,
+                        "relative_score": 1.0
+                    },
+                    "metrics": [
+                        { "name": "query_count", "value": 27, "unit": "count", "aggregation": "sum" }
+                    ],
+                    "source_artifact_refs": ["bench-summary.json", "bench-summary.json"],
+                    "source_refs": ["scenario:checkout", ""]
+                }
+            ],
+            "source_artifact_refs": ["bench-summary.json"],
+            "metadata": { "producer": "rig" }
+        }))
+        .expect("valid generic hotspot summary");
+
+        assert_eq!(summary.schema, PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA);
+        assert_eq!(summary.rankings[0].dimensions[2].name, "product_dimension");
+        assert_eq!(
+            summary.rankings[0].primary_metric.aggregation.as_deref(),
+            Some("p95")
+        );
+        assert_eq!(
+            summary.rankings[0].source_artifact_refs,
+            vec!["bench-summary.json"]
+        );
+        assert_eq!(summary.rankings[0].source_refs, vec!["scenario:checkout"]);
+    }
+
+    #[test]
+    fn rejects_invalid_performance_hotspot_summary_values() {
+        let invalid_score = serde_json::json!({
+            "schema": PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA,
+            "id": "component-hotspots",
+            "aggregation": {
+                "method": "sum_by_dimension",
+                "score_metric": "duration_ms"
+            },
+            "rankings": [
+                {
+                    "id": "scenario:checkout",
+                    "rank": 1,
+                    "score": "slow",
+                    "primary_metric": { "name": "duration_ms", "value": 481.5, "unit": "ms" }
+                }
+            ]
+        });
+        assert!(PerformanceHotspotsSummaryContract::from_value(invalid_score).is_err());
+
+        let invalid_rank = serde_json::json!({
+            "schema": PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA,
+            "id": "component-hotspots",
+            "aggregation": {
+                "method": "sum_by_dimension",
+                "score_metric": "duration_ms"
+            },
+            "rankings": [
+                {
+                    "id": "scenario:checkout",
+                    "rank": 0,
+                    "score": 481.5,
+                    "primary_metric": { "name": "duration_ms", "value": 481.5, "unit": "ms" }
+                }
+            ]
+        });
+        assert!(PerformanceHotspotsSummaryContract::from_value(invalid_rank).is_err());
     }
 
     #[test]
