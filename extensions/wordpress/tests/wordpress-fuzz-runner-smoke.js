@@ -303,6 +303,9 @@ assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].artifacts[0].required,
 assert.equal(jsonWorkloadResult.wp_codebox_input.metadata.artifacts.expected[0].semantic_key, 'fuzz.suite_result');
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.extra_plugins, [{
 	slug: 'sample-plugin',
+	sourcePath: '/runner/components/sample-plugin',
+	sourceSubdir: 'plugins/sample-plugin',
+	mountSlug: 'sample-plugin',
 	source: '/runner/components/sample-plugin/plugins/sample-plugin',
 	sourceRoot: '/runner/components/sample-plugin',
 	sourceSubpath: 'plugins/sample-plugin',
@@ -316,7 +319,9 @@ assert.equal(
 	jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].source,
 	'/runner/components/sample-plugin/plugins/sample-plugin'
 );
+assert.equal(jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].sourcePath, '/runner/components/sample-plugin');
 assert.equal(jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].sourceRoot, '/runner/components/sample-plugin');
+assert.equal(jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceSubdir, 'plugins/sample-plugin');
 assert.equal(jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceSubpath, 'plugins/sample-plugin');
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_mounts, [{ source: '/runner/workloads', target: '/runner/workloads', mode: 'readonly' }]);
 assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.runtime_env, { WP_CODEBOX_FUZZ_WORKLOAD_ROOT: '/runner/workloads' });
@@ -363,9 +368,14 @@ const remappedPluginRootResult = buildWordPressFuzzRunnerResult({
 });
 const remappedPlugin = remappedPluginRootResult.wp_codebox_runtime_requirements.extra_plugins[0];
 assert.equal(remappedPlugin.source, '/home/chubes/Developer/_lab_workspaces/jetpack-1234');
+assert.equal(remappedPlugin.sourcePath, undefined);
+assert.equal(remappedPlugin.sourceSubdir, undefined);
 assert.equal(remappedPlugin.sourceRoot, undefined);
 assert.equal(remappedPlugin.sourceSubpath, undefined);
+assert.equal(remappedPlugin.mountSlug, 'jetpack');
 assert.equal(remappedPlugin.pluginFile, 'jetpack/jetpack.php');
+assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourcePath, undefined);
+assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourceSubdir, undefined);
 assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourceRoot, undefined);
 assert.equal(remappedPluginRootResult.wp_codebox_runtime_requirements.component_contracts[0].sourceSubpath, undefined);
 
@@ -389,6 +399,9 @@ const envMountedPluginResult = buildWordPressFuzzRunnerResult({
 });
 assert.deepEqual(envMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0], {
 	slug: 'sample-plugin',
+	sourcePath: envMountedPluginRoot,
+	sourceSubdir: 'plugins/sample-plugin',
+	mountSlug: 'sample-plugin',
 	source: envMountedPluginPath,
 	sourceRoot: envMountedPluginRoot,
 	sourceSubpath: 'plugins/sample-plugin',
@@ -397,6 +410,8 @@ assert.deepEqual(envMountedPluginResult.wp_codebox_runtime_requirements.extra_pl
 	loadAs: 'plugin',
 	metadata: { component: 'sample-plugin', activation: 'fuzz-suite-setup-step' },
 });
+assert.equal(envMountedPluginResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourcePath, envMountedPluginRoot);
+assert.equal(envMountedPluginResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceSubdir, 'plugins/sample-plugin');
 assert.equal(envMountedPluginResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceRoot, envMountedPluginRoot);
 assert.equal(envMountedPluginResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceSubpath, 'plugins/sample-plugin');
 
@@ -427,6 +442,9 @@ const rigQualifiedEnvMountedPluginResult = buildWordPressFuzzRunnerResult({
 	},
 });
 assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].source, rigQualifiedPluginPath);
+assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].sourcePath, rigQualifiedPluginRoot);
+assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].sourceSubdir, 'plugins/woocommerce');
+assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].mountSlug, 'woocommerce');
 assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].sourceRoot, rigQualifiedPluginRoot);
 assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].sourceSubpath, 'plugins/woocommerce');
 

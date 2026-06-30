@@ -1298,7 +1298,7 @@ function validateWpCodeboxRuntimeRequirementMounts(runtimeRequirements = {}, opt
 			if (!requirement) {
 				continue;
 			}
-			const source = requirement.sourceRoot || requirement.source || requirement.path;
+			const source = requirement.sourcePath || requirement.sourceRoot || requirement.source || requirement.path;
 			if (!isLocalAbsolutePath(source) || fs.existsSync(source)) {
 				continue;
 			}

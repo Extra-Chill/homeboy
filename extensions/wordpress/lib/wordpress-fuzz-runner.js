@@ -350,12 +350,21 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 	const slug = workload.target?.slug || componentId;
 	const component = componentFromContext(context.components, componentId);
 	const wordpressExtension = objectOrUndefined(component?.extensions?.wordpress);
-	const sourceSubpath = nonEmptyString(wordpressExtension?.wp_codebox_source_subpath || wordpressExtension?.wpCodeboxSourceSubpath);
+	const sourceSubpath = nonEmptyString(
+		wordpressExtension?.wp_codebox_source_subdir
+		|| wordpressExtension?.wpCodeboxSourceSubdir
+		|| wordpressExtension?.wp_codebox_source_subpath
+		|| wordpressExtension?.wpCodeboxSourceSubpath
+	);
 	const sourceLayout = wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension, checkoutRoot });
-	const pluginFile = wpCodeboxPluginFile({ activation, sourceLayout, wordpressExtension });
+	const mountSlug = nonEmptyString(wordpressExtension?.wp_codebox_mount_slug || wordpressExtension?.wpCodeboxMountSlug) || slug;
+	const pluginFile = wpCodeboxPluginFile({ activation, sourceLayout, wordpressExtension, mountSlug });
 	return {
 		extraPlugin: stripUndefined({
 			slug,
+			sourcePath: sourceLayout.sourcePath,
+			sourceSubdir: sourceLayout.sourceSubpath,
+			mountSlug,
 			source,
 			sourceRoot: sourceLayout.sourceRoot,
 			sourceSubpath: sourceLayout.sourceSubpath,
@@ -370,6 +379,9 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 		}),
 		componentContract: stripUndefined({
 			slug,
+			sourcePath: sourceLayout.sourcePath,
+			sourceSubdir: sourceLayout.sourceSubpath,
+			mountSlug,
 			path: source,
 			sourceRoot: sourceLayout.sourceRoot,
 			sourceSubpath: sourceLayout.sourceSubpath,
@@ -379,11 +391,11 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 	};
 }
 
-function wpCodeboxPluginFile({ activation, sourceLayout = {}, wordpressExtension = {} } = {}) {
+function wpCodeboxPluginFile({ activation, sourceLayout = {}, wordpressExtension = {}, mountSlug } = {}) {
 	const configured = nonEmptyString(wordpressExtension?.wp_codebox_plugin_file || wordpressExtension?.wpCodeboxPluginFile);
 	if (configured) {
 		if (sourceLayout.sourceIsPluginRoot && sourceLayout.sourceSubpath && configured.startsWith(`${sourceLayout.sourceSubpath}/`)) {
-			return joinRelativePath(path.basename(sourceLayout.sourceSubpath), configured.slice(sourceLayout.sourceSubpath.length + 1));
+			return joinRelativePath(mountSlug || path.basename(sourceLayout.sourceSubpath), configured.slice(sourceLayout.sourceSubpath.length + 1));
 		}
 		return configured.includes('/') || configured.includes('\\') || !sourceLayout.sourceSubpath
 			? normalizePathSeparators(configured)
@@ -413,8 +425,18 @@ function normalizePathSeparators(value) {
 
 function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension, checkoutRoot } = {}) {
 	const normalizedSubpath = nonEmptyString(sourceSubpath);
+	const configuredSourcePath = nonEmptyString(wordpressExtension?.wp_codebox_source_path || wordpressExtension?.wpCodeboxSourcePath);
+	if (configuredSourcePath && !configuredSourcePath.startsWith('~/')) {
+		return {
+			sourcePath: configuredSourcePath,
+			sourceRoot: configuredSourcePath,
+			sourceSubpath: normalizedSubpath,
+			sourceIsPluginRoot: normalizedSubpath ? source.endsWith(`/${normalizedSubpath}`) : false,
+		};
+	}
 	if (normalizedSubpath && source.endsWith(`/${normalizedSubpath}`)) {
 		return {
+			sourcePath: source.slice(0, -normalizedSubpath.length - 1),
 			sourceRoot: source.slice(0, -normalizedSubpath.length - 1),
 			sourceSubpath: normalizedSubpath,
 			sourceIsPluginRoot: true,
@@ -423,6 +445,7 @@ function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension, chec
 	const normalizedCheckoutRoot = nonEmptyString(checkoutRoot);
 	if (normalizedCheckoutRoot && source.startsWith(`${normalizedCheckoutRoot}/`)) {
 		return {
+			sourcePath: normalizedCheckoutRoot,
 			sourceRoot: normalizedCheckoutRoot,
 			sourceSubpath: source.slice(normalizedCheckoutRoot.length + 1),
 			sourceIsPluginRoot: true,
@@ -436,6 +459,7 @@ function wpCodeboxSourceLayout({ source, sourceSubpath, wordpressExtension, chec
 
 	if (configured && !configured.startsWith('~/')) {
 		return {
+			sourcePath: configured,
 			sourceRoot: configured,
 			sourceSubpath: normalizedSubpath,
 		};
