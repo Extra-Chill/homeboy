@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use crate::core::agent_task::{
     AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
-    AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
-    AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskRequest, AgentTaskRuntimeSelection, AgentTaskSourceRef, AgentTaskWorkspace,
+    AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
 use crate::core::agent_task_prompts;
@@ -127,7 +127,14 @@ pub fn build_dispatch_plan_with_provider_requirements(
             executor: AgentTaskExecutor {
                 backend: request.backend.clone(),
                 selector: request.selector.clone(),
-                runtime_selection: None,
+                runtime_selection: Some(AgentTaskRuntimeSelection {
+                    runtime_id: None,
+                    executor_backend: Some(request.backend.clone()),
+                    executor_provider_id: request.selector.clone(),
+                    ai_provider_id: config_string(&provider_config, "provider"),
+                    model: request.model.clone(),
+                    substrate_ref: None,
+                }),
                 required_capabilities: request.required_capabilities.clone(),
                 secret_env: secret_env.clone(),
                 model: request.model.clone(),
@@ -242,6 +249,10 @@ fn validate_dispatch_workspace_target(
             "Use a provider without a git-checkout materialization requirement only if it has an explicit non-git apply-back artifact contract.".to_string(),
         ]),
     ))
+}
+
+fn config_string(config: &Value, key: &str) -> Option<String> {
+    config.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 fn is_git_checkout(path: &std::path::Path) -> bool {
@@ -857,6 +868,54 @@ mod tests {
         assert!(!serialized.contains("kimaki"));
         assert!(!serialized.contains("channel"));
         assert!(!serialized.contains("thread"));
+    }
+
+    #[test]
+    fn dispatch_plan_records_executor_and_ai_provider_vocabulary_separately() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let request = dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook the issue cleanly.".to_string()),
+            cwd: Some(workspace.path().display().to_string()),
+            backend: Some("opencode".to_string()),
+            selector: Some("opencode.agent-task-executor".to_string()),
+            model: Some("gpt-5.5".to_string()),
+            core: DispatchCoreInputs {
+                provider_config: Some(r#"{"provider":"openai"}"#.to_string()),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        });
+        let plan =
+            build_dispatch_plan_with_provider_requirements(&request, |_backend, _selector| false)
+                .expect("dispatch plan");
+
+        let executor = &plan.tasks[0].executor;
+        let selection = executor
+            .runtime_selection
+            .as_ref()
+            .expect("runtime selection");
+        assert_eq!(executor.backend, "opencode");
+        assert_eq!(
+            executor.selector.as_deref(),
+            Some("opencode.agent-task-executor")
+        );
+        assert_eq!(selection.executor_backend.as_deref(), Some("opencode"));
+        assert_eq!(
+            selection.executor_provider_id.as_deref(),
+            Some("opencode.agent-task-executor")
+        );
+        assert_eq!(selection.ai_provider_id.as_deref(), Some("openai"));
+        assert_eq!(selection.model.as_deref(), Some("gpt-5.5"));
+
+        let serialized = serde_json::to_value(&plan).expect("serialize plan");
+        assert_eq!(
+            serialized["tasks"][0]["executor"]["runtime_selection"]["executor_provider_id"],
+            "opencode.agent-task-executor"
+        );
+        assert_eq!(
+            serialized["tasks"][0]["executor"]["runtime_selection"]["ai_provider_id"],
+            "openai"
+        );
     }
 
     #[test]
@@ -1494,6 +1553,8 @@ mod tests {
         run_id: Option<String>,
         task_id: Option<String>,
         backend: Option<String>,
+        selector: Option<String>,
+        model: Option<String>,
         core: DispatchCoreInputs,
     }
 
@@ -1506,8 +1567,8 @@ mod tests {
             repo: overrides.repo,
             task_url: overrides.task_url,
             backend: overrides.backend.unwrap_or_else(|| "fixture".to_string()),
-            selector: None,
-            model: None,
+            selector: overrides.selector,
+            model: overrides.model,
             required_capabilities: overrides.required_capabilities,
             secret_env: overrides.secret_env,
             concurrency: if overrides.concurrency == 0 {

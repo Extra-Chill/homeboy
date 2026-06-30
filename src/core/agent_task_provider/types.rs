@@ -98,6 +98,8 @@ pub struct AgentTaskExecutorProvider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_package_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
