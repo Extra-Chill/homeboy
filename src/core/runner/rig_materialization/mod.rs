@@ -588,7 +588,8 @@ pub(super) fn lab_offload_rig_component_dependencies(
                         local_component_path,
                     )
                 } else {
-                    let resolved_component_path = rig::resolve_component_path(&spec, component_id)?;
+                    let resolved_component_path = rig::resolve_component_path(&spec, component_id)
+                        .or_else(|error| primary_component_path(primary_workspace).ok_or(error))?;
                     let declared_checkout_root = component
                         .checkout_root
                         .clone()
@@ -725,6 +726,13 @@ fn remote_checkout_root_for_local(
         parent_remote_path(primary_remote_path),
         sanitize_path_segment(name)
     )
+}
+
+fn primary_component_path(primary_workspace: Option<(&str, &str)>) -> Option<String> {
+    primary_workspace
+        .map(|(primary_local_path, _)| primary_local_path.trim())
+        .filter(|primary_local_path| !primary_local_path.is_empty())
+        .map(str::to_string)
 }
 
 fn is_portable_runner_path(path: &str) -> bool {
@@ -1027,6 +1035,59 @@ mod tests {
                 dependencies[0].required_subpath.as_deref(),
                 Some("packages/example-component")
             );
+        });
+    }
+
+    #[test]
+    fn fuzz_list_single_component_dependency_uses_primary_checkout_when_rig_path_is_unresolved() {
+        crate::test_support::with_isolated_home(|home| {
+            let checkout = home.path().join("Developer/example-component");
+            std::fs::create_dir_all(&checkout).expect("checkout");
+            let rig_dir = crate::core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("example-fuzz.json"),
+                serde_json::json!({
+                    "id": "example-fuzz",
+                    "components": {
+                        "example-component": {
+                            "path": "${env.HOMEBOY_TEST_UNSET_COMPONENT_PATH}",
+                            "remote_url": "https://example.test/example/component.git"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+            std::env::remove_var("HOMEBOY_TEST_UNSET_COMPONENT_PATH");
+
+            let checkout_string = checkout.display().to_string();
+            let dependencies = lab_offload_rig_component_dependencies(
+                &[
+                    "homeboy".to_string(),
+                    "fuzz".to_string(),
+                    "list".to_string(),
+                    "example-component".to_string(),
+                    "--rig".to_string(),
+                    "example-fuzz".to_string(),
+                ],
+                Some((&checkout_string, "/runner/work/example-component")),
+                None,
+            )
+            .expect("dependencies");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(dependencies[0].component_id, "example-component");
+            assert_eq!(dependencies[0].local_checkout_root, checkout_string);
+            assert_eq!(
+                dependencies[0].declared_checkout_root,
+                checkout.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].remote_checkout_root,
+                "/runner/work/example-component"
+            );
+            assert_eq!(dependencies[0].required_subpath, None);
         });
     }
 
