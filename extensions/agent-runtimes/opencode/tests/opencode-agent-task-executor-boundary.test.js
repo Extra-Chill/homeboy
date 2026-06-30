@@ -198,6 +198,8 @@ process.exit(0);
 	assert.equal(transcript.includes('refresh-token-must-not-leak'), false);
 	assert.match(transcript, /\[redacted\]/);
 	assert.equal(artifactResult.artifacts.some((artifact) => artifact.name === 'opencode-runtime-stdout'), true);
+	assert.equal(artifactResult.evidence_refs.every((ref) => ref.uri.startsWith('file://')), true);
+	assert.equal(artifactResult.evidence_refs.some((ref) => Object.hasOwn(ref, 'path')), false);
 	const runtimeStdout = fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'opencode-runtime-stdout').path, 'utf8');
 	assert.match(runtimeStdout, /transcript output/);
 	assert.equal(runtimeStdout.includes('refresh-token-must-not-leak'), false);

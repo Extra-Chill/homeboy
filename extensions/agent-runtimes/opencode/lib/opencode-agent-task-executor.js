@@ -330,7 +330,7 @@ function collectOpenCodeArtifacts(context = {}) {
 			bytes: Buffer.byteLength(artifactContent),
 		};
 		artifacts.push(artifact);
-		evidence_refs.push({ kind: artifact.kind, label: requirement.name, path: filePath });
+		evidence_refs.push({ kind: artifact.kind, label: requirement.name, uri: fileUri(filePath) });
 	};
 
 	const spawnResult = context.spawnResult || {};
@@ -391,9 +391,13 @@ function collectOpenCodeRuntimeLogs(context = {}) {
 			bytes,
 		};
 		artifacts.push(artifact);
-		evidence_refs.push({ kind: artifact.kind, label: `OpenCode ${stream}`, path: filePath });
+		evidence_refs.push({ kind: artifact.kind, label: `OpenCode ${stream}`, uri: fileUri(filePath) });
 	}
 	return { artifacts, evidence_refs };
+}
+
+function fileUri(filePath) {
+	return `file://${filePath}`;
 }
 
 function mergeEvidence(primary = {}, secondary = {}) {
