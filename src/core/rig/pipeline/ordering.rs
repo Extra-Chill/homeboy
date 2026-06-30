@@ -51,6 +51,8 @@ pub(super) fn order_pipeline_steps(
         }
     }
 
+    add_capability_provider_edges(rig, pipeline_name, steps, &mut indegree, &mut dependents)?;
+
     for child_indices in &mut dependents {
         child_indices.sort_unstable();
     }
@@ -94,6 +96,68 @@ pub(super) fn order_pipeline_steps(
     Ok(ordered)
 }
 
+fn add_capability_provider_edges(
+    rig: &RigSpec,
+    pipeline_name: &str,
+    steps: &[PipelineStep],
+    indegree: &mut [usize],
+    dependents: &mut [Vec<usize>],
+) -> Result<()> {
+    let mut capability_providers = HashMap::<&str, usize>::new();
+    let mut provider_providers = HashMap::<&str, usize>::new();
+
+    for (idx, step) in steps.iter().enumerate() {
+        for capability in provided_capabilities(step) {
+            if let Some(previous_idx) = capability_providers.insert(capability.as_str(), idx) {
+                return Err(Error::rig_pipeline_failed(
+                    &rig.id,
+                    pipeline_name,
+                    format!(
+                        "duplicate provider for capability '{}' at positions {} and {}",
+                        capability, previous_idx, idx
+                    ),
+                ));
+            }
+        }
+        for provider in provided_providers(step) {
+            if let Some(previous_idx) = provider_providers.insert(provider.as_str(), idx) {
+                return Err(Error::rig_pipeline_failed(
+                    &rig.id,
+                    pipeline_name,
+                    format!(
+                        "duplicate provider for runner provider '{}' at positions {} and {}",
+                        provider, previous_idx, idx
+                    ),
+                ));
+            }
+        }
+    }
+
+    for (consumer_idx, step) in steps.iter().enumerate() {
+        let mut provider_indices = BTreeSet::new();
+        for capability in required_capabilities(step) {
+            if let Some(provider_idx) = capability_providers.get(capability.as_str()) {
+                if *provider_idx != consumer_idx {
+                    provider_indices.insert(*provider_idx);
+                }
+            }
+        }
+        for provider in required_providers(step) {
+            if let Some(provider_idx) = provider_providers.get(provider.as_str()) {
+                if *provider_idx != consumer_idx {
+                    provider_indices.insert(*provider_idx);
+                }
+            }
+        }
+        for provider_idx in provider_indices {
+            indegree[consumer_idx] += 1;
+            dependents[provider_idx].push(consumer_idx);
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn step_matches_groups(step: &PipelineStep, wanted: &BTreeSet<&str>) -> bool {
     match step {
         PipelineStep::Check { groups, .. } => {
@@ -134,6 +198,72 @@ fn step_dependencies(step: &PipelineStep) -> &[String] {
         | PipelineStep::SharedPath { depends_on, .. }
         | PipelineStep::Patch { depends_on, .. }
         | PipelineStep::Check { depends_on, .. } => depends_on,
+    }
+}
+
+pub(super) fn required_capabilities(step: &PipelineStep) -> &[String] {
+    match step {
+        PipelineStep::Command {
+            requires_capabilities,
+            ..
+        }
+        | PipelineStep::CommandIfMissing {
+            requires_capabilities,
+            ..
+        }
+        | PipelineStep::Requirement {
+            requires_capabilities,
+            ..
+        } => requires_capabilities,
+        _ => &[],
+    }
+}
+
+pub(super) fn required_providers(step: &PipelineStep) -> &[String] {
+    match step {
+        PipelineStep::Command {
+            requires_providers, ..
+        }
+        | PipelineStep::CommandIfMissing {
+            requires_providers, ..
+        }
+        | PipelineStep::Requirement {
+            requires_providers, ..
+        } => requires_providers,
+        _ => &[],
+    }
+}
+
+pub(super) fn provided_capabilities(step: &PipelineStep) -> &[String] {
+    match step {
+        PipelineStep::Command {
+            provides_capabilities,
+            ..
+        }
+        | PipelineStep::CommandIfMissing {
+            provides_capabilities,
+            ..
+        }
+        | PipelineStep::Requirement {
+            provides_capabilities,
+            ..
+        } => provides_capabilities,
+        _ => &[],
+    }
+}
+
+pub(super) fn provided_providers(step: &PipelineStep) -> &[String] {
+    match step {
+        PipelineStep::Command {
+            provides_providers, ..
+        }
+        | PipelineStep::CommandIfMissing {
+            provides_providers, ..
+        }
+        | PipelineStep::Requirement {
+            provides_providers, ..
+        } => provides_providers,
+        _ => &[],
     }
 }
 
