@@ -452,7 +452,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec_with_output_notes(
         "contract",
         CommandJsonFamily::Workspace,
-        "lists, shows, exports, validates, and normalizes Homeboy-owned contract metadata through the central contract surface",
+        "lists, shows, exports constants, exports schemas, validates, and normalizes Homeboy-owned contract metadata through the central contract surface",
     ),
     command_spec("daemon", CommandJsonFamily::Ops),
     command_spec("extension", CommandJsonFamily::Workspace),

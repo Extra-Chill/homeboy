@@ -17,6 +17,7 @@
 //!   [`PUBLIC_OUTPUT_VARIANT_CONTRACTS`] table that anchors public output
 //!   variants to discriminators and golden fixtures.
 
+mod constants;
 mod lab;
 mod output;
 mod public_variants;
@@ -26,6 +27,13 @@ mod spec;
 
 pub use crate::core::artifact_ref::{
     validate_reviewer_facing_artifact_ref, ArtifactReference, ReviewerFacingArtifactRefError,
+};
+pub use constants::{
+    artifact_manifest_constants, contract_constants, loop_constants, reviewer_facing_ref_constants,
+    run_location_index_constants, secret_env_plan_constants, AllContractConstants,
+    ArtifactManifestConstants, ContractConstants, ContractConstantsOutput, LoopConstants,
+    ReviewerFacingRefConstants, RunLocationIndexConstants, SecretEnvPlanConstants,
+    CONTRACT_CONSTANTS_SCHEMA,
 };
 pub use lab::{
     lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
