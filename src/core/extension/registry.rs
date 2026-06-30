@@ -218,24 +218,23 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let extensions_dir = paths::extensions().unwrap();
             std::fs::create_dir_all(&extensions_dir).unwrap();
-            let link = extensions_dir.join("wordpress");
-            let target = extensions_dir.join("missing-wordpress");
+            let link = extensions_dir.join("sample-runtime");
+            let target = extensions_dir.join("missing-sample-runtime");
             std::os::unix::fs::symlink(&target, &link).unwrap();
 
-            let broken = broken_extension_link("wordpress").expect("broken link");
-            assert_eq!(broken.id, "wordpress");
+            let broken = broken_extension_link("sample-runtime").expect("broken link");
+            assert_eq!(broken.id, "sample-runtime");
             assert_eq!(broken.path, link);
             assert_eq!(broken.target, target);
-            assert!(is_extension_linked("wordpress"));
+            assert!(is_extension_linked("sample-runtime"));
 
-            let err = load_extension("wordpress").expect_err("broken link error");
+            let err = load_extension("sample-runtime").expect_err("broken link error");
             assert_eq!(err.code, ErrorCode::ExtensionNotFound);
             assert_eq!(err.details["error"], "target_missing");
             assert!(err.message.contains("target is missing"));
-            assert!(err
-                .hints
-                .iter()
-                .any(|hint| hint.message.contains("homeboy extension relink wordpress")));
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains("homeboy extension relink sample-runtime")));
         });
     }
 
@@ -245,13 +244,13 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let extensions_dir = paths::extensions().unwrap();
             std::fs::create_dir_all(&extensions_dir).unwrap();
-            let link = extensions_dir.join("wordpress");
-            let target = extensions_dir.join("missing-wordpress");
+            let link = extensions_dir.join("sample-runtime");
+            let target = extensions_dir.join("missing-sample-runtime");
             std::os::unix::fs::symlink(&target, &link).unwrap();
 
             let broken = broken_extension_links();
             assert_eq!(broken.len(), 1);
-            assert_eq!(broken[0].id, "wordpress");
+            assert_eq!(broken[0].id, "sample-runtime");
             assert_eq!(broken[0].target, target);
         });
     }

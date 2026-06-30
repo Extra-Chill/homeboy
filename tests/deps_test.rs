@@ -198,7 +198,7 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
                 update: None,
                 rebuild: false,
                 post_update: vec!["composer build".to_string()],
-                test: vec!["homeboy test --path . --extension wordpress".to_string()],
+                test: vec!["homeboy test --path . --extension sample-runtime".to_string()],
             }],
         ),
         stack_component(
@@ -211,7 +211,7 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
                 update: Some("composer update example-org/block-format-bridge".to_string()),
                 rebuild: false,
                 post_update: Vec::new(),
-                test: vec!["homeboy test --path . --extension wordpress".to_string()],
+                test: vec!["homeboy test --path . --extension sample-runtime".to_string()],
             }],
         ),
     ];

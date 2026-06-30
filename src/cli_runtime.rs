@@ -820,11 +820,11 @@ mod tests {
         std::fs::write(
             extension_dir.join(format!("{id}.json")),
             serde_json::json!({
-                "name": "WordPress Extension",
+                "name": "Sample Runtime Extension",
                 "version": "0.0.0",
                 "cli": {
                     "tool": tool,
-                    "display_name": "WordPress CLI",
+                    "display_name": "Sample CLI",
                     "command_template": "{{cliPath}} {{args}}"
                 }
             })
@@ -886,19 +886,22 @@ mod tests {
             startup_fast_path(&args(&["homeboy", "status", "--help"])),
             None
         );
-        assert_eq!(startup_fast_path(&args(&["homeboy", "wp", "--help"])), None);
+        assert_eq!(
+            startup_fast_path(&args(&["homeboy", "sample-cli", "--help"])),
+            None
+        );
     }
 
     #[test]
     fn root_help_lists_extension_provided_commands() {
         let mut command = build_augmented_command(
-            &[sample_extension_info("wp")],
+            &[sample_extension_info("sample-cli")],
             &ExtensionCliHealth::default(),
         );
 
         let help = command.render_help().to_string();
 
-        assert!(help.contains("Extension-provided commands: wp"));
+        assert!(help.contains("Extension-provided commands: sample-cli"));
     }
 
     #[cfg(unix)]
@@ -906,16 +909,18 @@ mod tests {
     fn root_help_warns_about_broken_extension_links_without_paths() {
         let health = ExtensionCliHealth {
             load_error: None,
-            broken_link_ids: vec!["wordpress".to_string()],
+            broken_link_ids: vec!["sample-runtime".to_string()],
         };
         let mut command = build_augmented_command(&[], &health);
 
         let help = command.render_help().to_string();
 
-        assert!(help.contains("Extension health warning: 1 broken extension link(s): wordpress"));
+        assert!(
+            help.contains("Extension health warning: 1 broken extension link(s): sample-runtime")
+        );
         assert!(help.contains("homeboy extension list"));
         assert!(help.contains("homeboy extension relink <id> <path>"));
-        assert!(!help.contains("/missing-wordpress"));
+        assert!(!help.contains("/missing-sample-runtime"));
     }
 
     #[cfg(unix)]
@@ -923,17 +928,17 @@ mod tests {
     fn invalid_dynamic_command_points_to_extension_health_when_links_are_broken() {
         let command = build_augmented_command(&[], &ExtensionCliHealth::default());
         let err = command
-            .try_get_matches_from(["homeboy", "wp"])
-            .expect_err("wp should not parse without extension command metadata");
+            .try_get_matches_from(["homeboy", "sample-cli"])
+            .expect_err("sample-cli should not parse without extension command metadata");
         let health = ExtensionCliHealth {
             load_error: None,
-            broken_link_ids: vec!["wordpress".to_string()],
+            broken_link_ids: vec!["sample-runtime".to_string()],
         };
 
         let output = try_augment_clap_error(&err, &health).expect("extension health hint");
 
         assert!(output.contains("extension-provided commands may be unavailable"));
-        assert!(output.contains("broken extension link(s): wordpress"));
+        assert!(output.contains("broken extension link(s): sample-runtime"));
         assert!(output.contains("homeboy extension list"));
     }
 
@@ -941,41 +946,48 @@ mod tests {
     #[test]
     fn extension_discovery_reports_dynamic_commands_and_broken_links() {
         crate::test_support::with_isolated_home(|home| {
-            write_cli_extension(home.path(), "wordpress", "wp");
+            write_cli_extension(home.path(), "sample-runtime", "sample-cli");
             let extensions_dir = home.path().join(".config/homeboy/extensions");
-            let link = extensions_dir.join("nodejs");
-            let target = extensions_dir.join("missing-nodejs");
+            let link = extensions_dir.join("stale-runtime");
+            let target = extensions_dir.join("missing-stale-runtime");
             std::os::unix::fs::symlink(&target, &link).unwrap();
 
             let discovery = collect_extension_cli_info();
 
             assert_eq!(discovery.info.len(), 1);
-            assert_eq!(discovery.info[0].tool, "wp");
-            assert_eq!(discovery.health.broken_link_ids, vec!["nodejs"]);
+            assert_eq!(discovery.info[0].tool, "sample-cli");
+            assert_eq!(discovery.health.broken_link_ids, vec!["stale-runtime"]);
         });
     }
 
     #[test]
     fn augmented_manifest_includes_extension_command_contract_and_health() {
         crate::test_support::with_isolated_home(|home| {
-            write_cli_extension(home.path(), "wordpress", "wp");
-            write_extension_command_docs(home.path(), "wordpress", "wp");
+            write_cli_extension(home.path(), "sample-runtime", "sample-cli");
+            write_extension_command_docs(home.path(), "sample-runtime", "sample-cli");
 
             let manifest = current_augmented_command_safety_manifest();
-            let wp = manifest.find_path(&["wp"]).expect("wp command manifest");
+            let sample_cli = manifest
+                .find_path(&["sample-cli"])
+                .expect("sample-cli command manifest");
 
-            assert!(wp.mutates);
-            assert!(wp.operator);
-            assert_eq!(wp.docs.path.as_deref(), Some("docs/commands/wp.md"));
-            assert!(wp.dangerous_flags.contains(&"passthrough args".to_string()));
-            assert!(wp
+            assert!(sample_cli.mutates);
+            assert!(sample_cli.operator);
+            assert_eq!(
+                sample_cli.docs.path.as_deref(),
+                Some("docs/commands/sample-cli.md")
+            );
+            assert!(sample_cli
+                .dangerous_flags
+                .contains(&"passthrough args".to_string()));
+            assert!(sample_cli
                 .output
                 .notes
                 .contains("extension-provided CLI passthrough"));
 
-            let extension = wp.extension.as_ref().expect("extension metadata");
-            assert_eq!(extension.extension_id, "wordpress");
-            assert_eq!(extension.tool_name, "wp");
+            let extension = sample_cli.extension.as_ref().expect("extension metadata");
+            assert_eq!(extension.extension_id, "sample-runtime");
+            assert_eq!(extension.tool_name, "sample-cli");
             assert_eq!(extension.args_contract.project_id.name, "project_id");
             assert!(extension.args_contract.project_id.required);
             assert_eq!(extension.args_contract.args.name, "args");
