@@ -17,6 +17,7 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) remote_output_file: Option<String>,
     pub(crate) synced_rigs: Vec<rig_materialization::LabOffloadRigSync>,
     pub(crate) rig_component_path_overrides: Vec<(String, String)>,
+    pub(crate) dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
     /// Env-var overrides surfacing synced runtime-overlay remote paths to the
     /// hot command. Empty when no overlay declared `expose_remote_path_env`.
     pub(crate) runtime_overlay_env: Vec<(String, String)>,
@@ -333,6 +334,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         request.allow_dirty_lab_workspace,
     )?;
     let synced_rig_dependencies = rig_component_sync.materializations;
+    let dependency_cache_saves = rig_component_sync.dependency_cache_saves;
     let rig_component_path_overrides = rig_component_sync.component_path_env;
     if !synced_rig_dependencies.is_empty() {
         for dependency in &synced_rig_dependencies {
@@ -454,6 +456,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         remote_output_file,
         synced_rigs,
         rig_component_path_overrides,
+        dependency_cache_saves,
         runtime_overlay_env,
         runtime_overlay_metadata,
     })

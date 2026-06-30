@@ -63,6 +63,7 @@ fn test_expand_vars_component_path() {
             r#ref: None,
             default_ref: None,
             extensions: None,
+            dependency_cache: None,
         },
     );
     let rig = rig_with("t", components);
@@ -107,6 +108,7 @@ fn test_expand_vars_package_root_from_installed_source_metadata() {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
+                dependency_cache: None,
             },
         );
         let rig = rig_with("studio-web-product-matrix", components);
@@ -166,6 +168,7 @@ fn test_expand_resources_expands_string_entries() {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
+                dependency_cache: None,
             },
         );
         let mut rig = rig_with("t", components);

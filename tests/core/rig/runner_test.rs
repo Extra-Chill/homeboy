@@ -771,6 +771,7 @@ fn test_snapshot_state() {
             r#ref: None,
             default_ref: None,
             extensions: None,
+            dependency_cache: None,
         },
     );
     components.insert(
@@ -787,6 +788,7 @@ fn test_snapshot_state() {
             r#ref: None,
             default_ref: None,
             extensions: None,
+            dependency_cache: None,
         },
     );
     let rig = RigSpec {

@@ -98,7 +98,7 @@ pub(crate) fn ssh_client_for_runner(runner: &Runner) -> Result<(Server, SshClien
 /// spawn failure or non-zero exit. Used for advisory provenance reads (e.g.
 /// reading a synthetic snapshot checkout's HEAD over SSH) where a failure must
 /// not abort the surrounding operation.
-pub(super) fn run_shell_capture(command: &str) -> Option<String> {
+pub(crate) fn run_shell_capture(command: &str) -> Option<String> {
     let output = Command::new("sh").args(["-c", command]).output().ok()?;
     if !output.status.success() {
         return None;
@@ -111,7 +111,7 @@ pub(super) fn run_shell_capture(command: &str) -> Option<String> {
     }
 }
 
-pub(super) fn run_shell_command(command: &str, action: &str) -> Result<()> {
+pub(crate) fn run_shell_command(command: &str, action: &str) -> Result<()> {
     let output = Command::new("sh")
         .args(["-c", command])
         .output()
@@ -123,6 +123,25 @@ pub(super) fn run_shell_command(command: &str, action: &str) -> Result<()> {
         "{action} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     )))
+}
+
+pub(crate) fn shell_command_for_runner(runner: &Runner, command: &str) -> Result<String> {
+    match runner.kind {
+        super::super::RunnerKind::Local => Ok(command.to_string()),
+        super::super::RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            if client.is_local {
+                return Ok(command.to_string());
+            }
+            let remote = format!("{}@{}", client.user, client.host);
+            Ok(format!(
+                "ssh {ssh_args} {remote} {command}",
+                ssh_args = ssh_args(&client),
+                remote = shell::quote_arg(&remote),
+                command = shell::quote_arg(command),
+            ))
+        }
+    }
 }
 
 pub(super) fn tar_exclude_args(excludes: &[String]) -> String {

@@ -2291,6 +2291,7 @@ mod provider_config_candidate_paths_tests {
             used_pinned_ref: false,
             dirty_overlay: false,
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            dependency_cache: None,
             counts: ByteFileCounts {
                 files: 7,
                 bytes: 42,
