@@ -333,6 +333,7 @@ mod tests {
                     r#ref: None,
                     default_ref: None,
                     extensions: None,
+                    dependency_cache: None,
                 },
             )]),
             requirements: crate::core::rig::spec::RigRequirementsSpec {

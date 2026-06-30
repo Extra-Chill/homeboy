@@ -147,7 +147,6 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::RigServiceFailed
         | ErrorCode::RigResourceConflict
         | ErrorCode::RunnerLabTransportFailure
-        | ErrorCode::RunnerCapabilityMissing
         | ErrorCode::RunnerControllerDisconnected
         | ErrorCode::StackApplyConflict
         | ErrorCode::DependencyStepFailed
