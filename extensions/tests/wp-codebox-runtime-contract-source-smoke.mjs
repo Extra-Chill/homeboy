@@ -49,6 +49,38 @@ const canonicalManifest = {
       input: 'canonical/fanout-aggregation-input/v1',
       output: 'canonical/fanout-aggregation-output/v1',
     },
+    wordpressRuntime: {
+      fuzzSuite: 'canonical/fuzz-suite/v1',
+      fuzzSuiteResult: 'canonical/fuzz-suite-result/v1',
+      workloadRun: 'canonical/wordpress-workload-run/v1',
+    },
+  },
+  abilities: {
+    wordpressRuntime: {
+      runFuzzSuite: 'wp-codebox/run-fuzz-suite',
+      runWorkload: 'wp-codebox/run-wordpress-workload',
+    },
+  },
+  commands: {
+    wordpressRuntime: {
+      runFuzzSuite: 'run-fuzz-suite',
+      runWorkload: 'run-wordpress-workload',
+    },
+  },
+  capabilities: {
+    wordpressRuntime: {
+      commands: {
+        runFuzzSuite: 'run-fuzz-suite',
+        runWorkload: 'run-wordpress-workload',
+      },
+    },
+  },
+  readiness: {
+    wordpressRuntime: {
+      schema: 'wp-codebox/fuzz-runner-readiness/v1',
+      entrypoint: 'run-fuzz-suite --runner-mode=runtime-backed',
+      mode: 'runtime-backed',
+    },
   },
   providerRuntime: {
     schema: 'canonical/provider-runtime-invocation-contract/v1',
@@ -114,6 +146,8 @@ const {
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox'));
 
 assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('schemas.runtimeBoundary.profile'), true);
+assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('commands.wordpressRuntime.runFuzzSuite'), true);
+assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('readiness.wordpressRuntime.schema'), true);
 // The canonical wp-codebox runtime contract dropped the legacy run-response alias
 // (Automattic/wp-codebox#1637). The loader must not require a manifest path the
 // canonical contract no longer publishes, or every real run fails validation.

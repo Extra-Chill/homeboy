@@ -30,6 +30,15 @@ const sync = loadCanonicalRuntimeContractSourceSync({ required: true });
 assert.equal(sync.canonical, true, 'Sync loader must resolve the canonical runtime contract manifest from the built module.');
 assert.equal(sync.manifest.schema, RUNTIME_CONTRACT_MANIFEST_SCHEMA);
 assert.equal(typeof sync.manifest.schemas.agentTask.runResult, 'string', 'Canonical manifest must publish schemas.agentTask.runResult.');
+assert.equal(sync.manifest.abilities.wordpressRuntime.runFuzzSuite, 'wp-codebox/run-fuzz-suite');
+assert.equal(sync.manifest.abilities.wordpressRuntime.runWorkload, 'wp-codebox/run-wordpress-workload');
+assert.equal(sync.manifest.commands.wordpressRuntime.runFuzzSuite, 'run-fuzz-suite');
+assert.equal(sync.manifest.commands.wordpressRuntime.runWorkload, 'run-wordpress-workload');
+assert.equal(sync.manifest.schemas.wordpressRuntime.fuzzSuite, 'wp-codebox/fuzz-suite/v1');
+assert.equal(sync.manifest.schemas.wordpressRuntime.fuzzSuiteResult, 'wp-codebox/fuzz-suite-result/v1');
+assert.equal(sync.manifest.schemas.wordpressRuntime.workloadRun, 'wp-codebox/wordpress-workload-run/v1');
+assert.equal(sync.manifest.readiness.wordpressRuntime.schema, 'wp-codebox/fuzz-runner-readiness/v1');
+assert.equal(sync.manifest.readiness.wordpressRuntime.mode, 'runtime-backed');
 
 // Async path mirrors the providerRuntime consumers.
 const asyncResult = await loadCanonicalRuntimeContractSource({ required: true });

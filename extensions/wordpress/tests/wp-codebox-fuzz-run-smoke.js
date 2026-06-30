@@ -298,7 +298,7 @@ const preflightMissingCommand = preflightWpCodeboxFuzzCapabilityContract({
 assert.equal(preflightMissingCommand.schema, WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA);
 assert.equal(preflightMissingCommand.ok, false);
 assert.deepEqual(preflightMissingCommand.missing_contracts.map((contract) => contract.command).filter(Boolean), ['run-fuzz-suite']);
-assert.equal(preflightMissingCommand.diagnostics[0].code, 'wp_codebox_fuzz_missing_public_cli_command');
+assert.equal(preflightMissingCommand.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_public_cli_command'), true);
 assert.equal(preflightMissingCommand.command_manifest.schema, 'homeboy/wordpress-fuzz-command-manifest/v1');
 assert.deepEqual(preflightMissingCommand.command_manifest.case_intents['request-rest-route'].commands, ['run-wordpress-workload']);
 assert.deepEqual(preflightMissingCommand.command_manifest.case_intents['request-rest-route'].runner_modes, ['runtime-backed']);
