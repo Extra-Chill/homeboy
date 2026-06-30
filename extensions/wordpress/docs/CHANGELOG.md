@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.2] - 2026-06-30
+
+### Fixed
+- emit codebox replay summary metadata
+
 ## [3.22.1] - 2026-06-30
 
 ### Changed
