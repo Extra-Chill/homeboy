@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
@@ -101,18 +102,17 @@ assert.deepEqual(
 	request,
 	genericAgentTaskRequest({
 		schema: contract.schemas.request,
-		taskId: 'single-runtime-task-smoke',
-		parentPlanId: undefined,
+		task_id: 'single-runtime-task-smoke',
+		parent_plan_id: undefined,
 		goal: 'Run WordPress runtime ability example/materialize-artifact and return the declared artifacts.',
 		instructions: 'Run WordPress runtime ability example/materialize-artifact and return the declared artifacts.',
 		inputs: {
 			ability: 'example/materialize-artifact',
 			ability_input: { slug: 'example' },
 		},
-		sourceRefs: [],
+		source_refs: [],
 		policy: { read: 'sandbox', write: 'sandbox', apply: 'review' },
 		metadata: {},
-		includeArtifactDeclarations: false,
 		runnerSpec: wordpressRuntimeTaskRunnerSpec({
 			taskId: 'single-runtime-task-smoke',
 			ability: 'example/materialize-artifact',
@@ -174,5 +174,22 @@ assert.equal(cliPlan.tasks[0].executor.config.runtime_id, 'wp-codebox');
 assert.equal(cliPlan.tasks[0].executor.config.runtime_task.input.dla_url, 'https://dla.example/export/123');
 assert.deepEqual(cliPlan.tasks[0].expected_artifacts, ['validation-report']);
 assert.equal(cliPlan.tasks[0].limits.task_timeout_seconds, 60);
+
+const installCopy = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'homeboy-wordpress-extension-install-'));
+try {
+	const installedExtension = path.join(installCopy, 'wordpress');
+	fs.cpSync(path.join(__dirname, '..'), installedExtension, {
+		recursive: true,
+		filter: (source) => !source.split(path.sep).includes('node_modules'),
+	});
+	const installedRequire = spawnSync(process.execPath, [
+		'-e',
+		"require(process.argv[1]); process.stdout.write('installed planner require passed\\n');",
+		path.join(installedExtension, 'lib', 'wordpress-runtime-task-planner.js'),
+	], { encoding: 'utf8' });
+	assert.equal(installedRequire.status, 0, installedRequire.stderr || installedRequire.stdout);
+} finally {
+	fs.rmSync(installCopy, { recursive: true, force: true });
+}
 
 process.stdout.write('WordPress runtime task planner smoke passed\n');
