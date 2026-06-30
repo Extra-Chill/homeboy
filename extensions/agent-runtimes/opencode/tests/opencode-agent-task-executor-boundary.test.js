@@ -33,6 +33,7 @@ function secretEnvRequirementForProvider(contract, provider) {
 	));
 }
 
+(async () => {
 const provider = providerContract();
 assert.equal(provider.id, 'opencode.agent-task-executor');
 assert.equal(provider.backend, 'opencode');
@@ -131,11 +132,11 @@ process.exit(0);
 		AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-must-not-leak',
 		UNDECLARED_SECRET: 'must-not-reach-opencode',
 	};
-	assert.deepEqual(JSON.parse(runResult.stdout), executeOpenCodeAgentTask(request, { env: fixtureEnv }));
+	assert.deepEqual(JSON.parse(runResult.stdout), await executeOpenCodeAgentTask(request, { env: fixtureEnv }));
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('refresh-token-must-not-leak'), false);
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('access-token-must-not-leak'), false);
 
-	const missingArtifactResult = executeOpenCodeAgentTask({
+	const missingArtifactResult = await executeOpenCodeAgentTask({
 		...request,
 		task_id: 'opencode-missing-artifact',
 		expected_artifacts: ['opencode-report'],
@@ -170,7 +171,7 @@ fs.writeFileSync('README.md', 'after\\n');
 process.stdout.write('transcript output ' + process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN);
 process.exit(0);
 `);
-	const artifactResult = executeOpenCodeAgentTask({
+	const artifactResult = await executeOpenCodeAgentTask({
 		...request,
 		task_id: 'opencode-artifacts',
 		workspace_path: workspace,
@@ -185,15 +186,27 @@ process.exit(0);
 		},
 	}, { env: fixtureEnv });
 	assert.equal(artifactResult.status, 'succeeded');
-	assert.deepEqual(artifactResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'patch', 'transcript']);
+	assert.deepEqual(artifactResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stdout', 'patch', 'transcript']);
 	assert.match(fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8'), /after/);
 	const transcript = fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'transcript').path, 'utf8');
 	assert.match(transcript, /transcript output/);
 	assert.equal(transcript.includes('refresh-token-must-not-leak'), false);
 	assert.match(transcript, /\[redacted\]/);
+	assert.equal(artifactResult.artifacts.some((artifact) => artifact.name === 'opencode-runtime-stdout'), true);
+	const runtimeStdout = fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'opencode-runtime-stdout').path, 'utf8');
+	assert.match(runtimeStdout, /transcript output/);
+	assert.equal(runtimeStdout.includes('refresh-token-must-not-leak'), false);
+	assert.match(runtimeStdout, /\[redacted\]/);
+	assert.equal(artifactResult.metadata.opencode_session.status, 'not_discovered');
+	const agentResult = JSON.parse(fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
+	assert.equal(agentResult.opencode_session.status, 'not_discovered');
 	assert.equal(artifactResult.metadata.missing_declared_artifacts, undefined);
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }
 
 process.stdout.write('OpenCode agent task executor boundary passed\n');
+})().catch((error) => {
+	process.stderr.write(`${error.stack || error.message}\n`);
+	process.exit(1);
+});

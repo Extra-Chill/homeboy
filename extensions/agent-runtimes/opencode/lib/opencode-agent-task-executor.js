@@ -11,9 +11,10 @@ const {
 } = require('../../../agent-task-contracts/agent-task-provider-contract');
 const {
 	createCliAgentTaskExecutor,
+	timeoutSecondsFromLimits,
 } = require('../../lib/cli-agent-task-executor');
 
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -154,6 +155,11 @@ const OPENCODE_PROVIDER_DEFAULTS = {
 	},
 };
 
+const OPENCODE_SESSION_METADATA_ABSENT = {
+	status: 'not_discovered',
+	reason: 'OpenCode did not expose stable session or transcript metadata through the executor process contract.',
+};
+
 const OPENCODE_PROVIDER_PREFLIGHT = {
 	codex: {
 		label: 'Codex',
@@ -280,7 +286,26 @@ function opencodeSuccessOutcome(context) {
 		status: 'succeeded',
 		summary: 'OpenCode completed successfully.',
 		diagnostics: [{ classification: 'provider', message: 'OpenCode CLI exited with status 0.' }],
-		metadata: { exit_code: 0 },
+		metadata: {
+			exit_code: 0,
+			opencode_session: sessionMetadata(context),
+		},
+		...collectOpenCodeArtifacts(context),
+	};
+}
+
+function opencodeFailureOutcome(context) {
+	return {
+		status: 'failed',
+		failure_classification: 'execution_failed',
+		failure_code: 'agent_task.opencode_failed',
+		summary: 'OpenCode execution failed.',
+		diagnostics: [{ classification: 'execution_failed', message: `OpenCode CLI exited with status ${context.spawnResult.status}.` }],
+		metadata: {
+			exit_code: context.spawnResult.status,
+			...(context.spawnResult.signal ? { signal: context.spawnResult.signal } : {}),
+			opencode_session: sessionMetadata(context),
+		},
 		...collectOpenCodeArtifacts(context),
 	};
 }
@@ -334,6 +359,7 @@ function collectOpenCodeArtifacts(context = {}) {
 			patch: patch !== '',
 			transcript: transcript !== '',
 		},
+		opencode_session: sessionMetadata(context),
 	}, null, 2);
 
 	for (const requirement of requirements) {
@@ -347,6 +373,51 @@ function collectOpenCodeArtifacts(context = {}) {
 	}
 
 	return { artifacts, evidence_refs };
+}
+
+function collectOpenCodeRuntimeLogs(context = {}) {
+	const request = context.request || {};
+	const config = context.config || {};
+	const artifactDir = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
+	if (!artifactDir) {
+		return {};
+	}
+
+	const artifacts = [];
+	const evidence_refs = [];
+	for (const stream of ['stdout', 'stderr']) {
+		const filePath = context.runtimeLogPaths?.[stream];
+		if (!filePath || !fs.existsSync(filePath)) {
+			continue;
+		}
+		const bytes = fs.statSync(filePath).size;
+		if (bytes === 0) {
+			continue;
+		}
+		const artifact = {
+			id: `opencode-runtime-${stream}`,
+			name: `opencode-runtime-${stream}`,
+			kind: 'opencode-runtime-log',
+			stream,
+			path: filePath,
+			bytes,
+		};
+		artifacts.push(artifact);
+		evidence_refs.push({ kind: artifact.kind, label: `OpenCode ${stream}`, path: filePath });
+	}
+	return { artifacts, evidence_refs };
+}
+
+function mergeEvidence(primary = {}, secondary = {}) {
+	return {
+		artifacts: [...arrayValue(primary.artifacts), ...arrayValue(secondary.artifacts)],
+		evidence_refs: [...arrayValue(primary.evidence_refs), ...arrayValue(secondary.evidence_refs)],
+	};
+}
+
+function sessionMetadata(context = {}) {
+	const explicit = context.spawnResult?.opencode_session || context.spawnResult?.opencodeSession;
+	return explicit && typeof explicit === 'object' && !Array.isArray(explicit) ? explicit : OPENCODE_SESSION_METADATA_ABSENT;
 }
 
 function gitDiff(cwd) {
@@ -407,6 +478,173 @@ function resolveCommandSpec(config = {}, options = {}) {
 	return { command: configuredCommand.trim(), args: configuredArgs };
 }
 
+async function executeOpenCodeAgentTask(request = {}, options = {}) {
+	const validationError = validateOpenCodeRequest(request);
+	if (validationError) {
+		return validationFailure(request, validationError);
+	}
+
+	const config = request.executor.config || {};
+	const commandSpec = resolveCommandSpec(config, options);
+	if (commandSpec.error) {
+		return outcome(request, {
+			status: 'provider_error',
+			failure_classification: commandSpec.classification || 'provider',
+			failure_code: commandSpec.code || 'agent_task.invalid_opencode_command',
+			summary: commandSpec.summary || 'OpenCode command configuration is invalid.',
+			diagnostics: [{ classification: 'provider_setup', message: commandSpec.error }],
+		});
+	}
+
+	const cwd = config.cwd || request.workspace_path || request.workspace?.path || process.cwd();
+	const args = [
+		...commandSpec.args,
+		'run',
+		...(config.model ? ['--model', config.model] : []),
+		...(config.agent ? ['--agent', config.agent] : []),
+		...(config.variant ? ['--variant', config.variant] : []),
+		...(config.title ? ['--title', config.title] : []),
+		request.instructions,
+	];
+	const spawnExtra = { env: opencodeSpawnEnv(request, options) };
+	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
+	const runtimeLogPaths = openCodeRuntimeLogPaths(request, config);
+	const spawnResult = await spawnOpenCodeStreaming(commandSpec.command, args, {
+		cwd,
+		env: spawnExtra.env,
+		timeoutMs: timeoutSeconds > 0 ? timeoutSeconds * 1000 : 0,
+		runtimeLogPaths,
+	});
+	const context = { request, config, commandSpec, cwd, spawnResult, spawnExtra, runtimeLogPaths };
+	const runtimeLogs = collectOpenCodeRuntimeLogs(context);
+
+	if (spawnResult.error?.code === 'ENOENT') {
+		return outcome(request, {
+			status: 'provider_error',
+			failure_classification: 'provider',
+			failure_code: 'agent_task.opencode_command_not_found',
+			summary: 'OpenCode command was not found.',
+			diagnostics: [{ classification: 'provider_setup', message: 'Install opencode or configure executor.config.command.' }],
+			...runtimeLogs,
+		});
+	}
+
+	if (spawnResult.error) {
+		const timedOut = spawnResult.error.code === 'ETIMEDOUT';
+		return outcome(request, {
+			status: timedOut ? 'timeout' : 'provider_error',
+			failure_classification: timedOut ? 'timeout' : 'provider',
+			failure_code: timedOut ? 'agent_task.opencode_timeout' : 'agent_task.opencode_spawn_failed',
+			summary: timedOut ? 'OpenCode execution timed out.' : 'OpenCode process failed to start or complete.',
+			diagnostics: [{ classification: timedOut ? 'timeout' : 'provider_setup', message: spawnResult.error.message }],
+			metadata: { opencode_session: sessionMetadata(context) },
+			...runtimeLogs,
+		});
+	}
+
+	const terminal = spawnResult.status === 0 ? opencodeSuccessOutcome(context) : opencodeFailureOutcome(context);
+	return outcome(request, { ...terminal, ...mergeEvidence(terminal, runtimeLogs) });
+}
+
+function validateOpenCodeRequest(request) {
+	if (!request || typeof request !== 'object' || Array.isArray(request)) {
+		return 'Request must be a JSON object.';
+	}
+	if (request.schema !== 'homeboy/agent-task-request/v1') {
+		return 'Request schema must be homeboy/agent-task-request/v1.';
+	}
+	if (!request.task_id || typeof request.task_id !== 'string') {
+		return 'Request task_id is required.';
+	}
+	if (request.executor?.backend !== 'opencode') {
+		return 'Request executor.backend must be opencode.';
+	}
+	if (!request.executor.config || typeof request.executor.config !== 'object' || Array.isArray(request.executor.config)) {
+		return 'Request executor.config is required.';
+	}
+	if (!request.instructions || typeof request.instructions !== 'string') {
+		return 'Request instructions are required.';
+	}
+	return null;
+}
+
+function openCodeRuntimeLogPaths(request = {}, config = {}) {
+	const artifactDir = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
+	if (!artifactDir) {
+		return {};
+	}
+	return {
+		stdout: path.join(artifactDir, `${safeFileSegment(request.task_id)}-opencode-runtime-stdout.log`),
+		stderr: path.join(artifactDir, `${safeFileSegment(request.task_id)}-opencode-runtime-stderr.log`),
+	};
+}
+
+function spawnOpenCodeStreaming(command, args, options = {}) {
+	return new Promise((resolve) => {
+		const stdoutChunks = [];
+		const stderrChunks = [];
+		let settled = false;
+		let timedOut = false;
+		let child;
+
+		for (const filePath of Object.values(options.runtimeLogPaths || {})) {
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, '');
+		}
+
+		const append = (stream, chunk) => {
+			const content = redactKnownSecrets(chunk.toString('utf8'), options.env);
+			if (stream === 'stdout') {
+				stdoutChunks.push(content);
+			} else {
+				stderrChunks.push(content);
+			}
+			const filePath = options.runtimeLogPaths?.[stream];
+			if (filePath) {
+				fs.appendFileSync(filePath, content);
+			}
+		};
+
+		const finish = (result) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			resolve({
+				stdout: stdoutChunks.join(''),
+				stderr: stderrChunks.join(''),
+				...result,
+			});
+		};
+
+		try {
+			child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
+		} catch (error) {
+			finish({ error });
+			return;
+		}
+
+		const timer = options.timeoutMs > 0 ? setTimeout(() => {
+			timedOut = true;
+			child.kill('SIGTERM');
+		}, options.timeoutMs) : null;
+
+		child.stdout.on('data', (chunk) => append('stdout', chunk));
+		child.stderr.on('data', (chunk) => append('stderr', chunk));
+		child.on('error', (error) => finish({ error }));
+		child.on('close', (status, signal) => {
+			if (timer) {
+				clearTimeout(timer);
+			}
+			finish({
+				status,
+				signal,
+				...(timedOut ? { error: Object.assign(new Error('OpenCode execution timed out.'), { code: 'ETIMEDOUT' }) } : {}),
+			});
+		});
+	});
+}
+
 function parseEnvCommandArgs() {
 	if (!process.env.HOMEBOY_OPENCODE_COMMAND_ARGS) {
 		return [];
@@ -419,7 +657,7 @@ function parseEnvCommandArgs() {
 	}
 }
 
-const { execute: executeOpenCodeAgentTask, outcome, validationFailure } = createCliAgentTaskExecutor({
+const { outcome, validationFailure } = createCliAgentTaskExecutor({
 	backend: 'opencode',
 	providerId: OPENCODE_PROVIDER_ID,
 	providerLabel: 'OpenCode agent',
@@ -428,6 +666,7 @@ const { execute: executeOpenCodeAgentTask, outcome, validationFailure } = create
 	finalizeOutcome: withDeclaredArtifactDiagnostics,
 	resolveCommandSpec,
 	successOutcome: opencodeSuccessOutcome,
+	failureOutcome: opencodeFailureOutcome,
 	buildArgs: (request, config, commandSpec) => [
 		...commandSpec.args,
 		'run',
