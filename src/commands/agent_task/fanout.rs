@@ -254,7 +254,6 @@ fn queue_or_reuse_worktrees(
             task_ref: None,
             dry_run,
             retry_after_seconds: 30,
-            dmc_bin: args.dmc_bin.clone(),
         })
     };
 
@@ -277,7 +276,7 @@ fn queue_or_reuse_worktrees(
                     branch: branch.clone(),
                     handle: handle.clone(),
                     status: worktree::WorktreeQueueCreateStatus::Created,
-                    command: dmc_add_command(args, branch),
+                    command: worktree_create_command(args, branch),
                     retry_after_seconds: None,
                     active_lock_holder: None,
                     path: Some(status.record.worktree_path),
@@ -775,17 +774,15 @@ fn provider_readiness_command(args: &AgentTaskFanoutCookBatchArgs) -> Vec<String
     command
 }
 
-fn dmc_add_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) -> Vec<String> {
+fn worktree_create_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) -> Vec<String> {
     vec![
-        args.dmc_bin.clone(),
-        "wp".to_string(),
-        "workspace-registry".to_string(),
-        "workspace".to_string(),
         "worktree".to_string(),
-        "add".to_string(),
+        "create".to_string(),
         args.repo.clone(),
+        "--branch".to_string(),
         branch.to_string(),
-        format!("--from={}", args.from),
+        "--from".to_string(),
+        args.from.clone(),
     ]
 }
 
@@ -1032,7 +1029,6 @@ mod tests {
             },
             dry_run: true,
             run_plan: false,
-            dmc_bin: "studio".to_string(),
         }
     }
 
