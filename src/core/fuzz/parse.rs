@@ -10,6 +10,7 @@ use super::envelope::{FuzzResultEnvelope, FuzzTargetInventory};
 use super::schemas::{FUZZ_CAMPAIGN_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA};
 use super::types::{
     FuzzActionModel, FuzzCampaign, FuzzCaseLogEntry, FuzzExplorationPolicy, FuzzSequencePlan,
+    FuzzWorkload,
 };
 
 pub fn parse_fuzz_results_file(path: &Path) -> Result<FuzzCampaign> {
@@ -166,6 +167,26 @@ pub fn parse_fuzz_action_model_file(path: &Path) -> Result<FuzzActionModel> {
     FuzzActionModel::from_value(value).map_err(|message| {
         Error::validation_invalid_argument(
             "action_model",
+            message,
+            Some(path.display().to_string()),
+            None,
+        )
+    })
+}
+
+pub fn parse_fuzz_workload_file(path: &Path) -> Result<FuzzWorkload> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+    let value: Value = serde_json::from_str(&contents).map_err(|err| {
+        Error::validation_invalid_json(
+            err,
+            Some(format!("parse fuzz workload file {}", path.display())),
+            Some(contents.clone()),
+        )
+    })?;
+    FuzzWorkload::from_value(value).map_err(|message| {
+        Error::validation_invalid_argument(
+            "workload",
             message,
             Some(path.display().to_string()),
             None,
