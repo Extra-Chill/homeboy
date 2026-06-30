@@ -274,6 +274,10 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "mutates installed extension files or extension manifest metadata";
             metadata.dangerous_flags = vec!["--force"];
         }
+        ["runtime", "refresh"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "mutates installed runtime package files";
+        }
         ["extension", "uninstall"] => {
             metadata.mutates = true;
             metadata.output_notes =

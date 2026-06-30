@@ -208,6 +208,19 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
         (
             parsed_command(&[
                 "homeboy",
+                "runtime",
+                "refresh",
+                "neutral-runtime",
+                "--source",
+                "https://example.test/runtime.git",
+                "--ref",
+                "main",
+            ]),
+            "runtime refresh",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
                 "tunnel",
                 "preview-consumer",
                 "run",
