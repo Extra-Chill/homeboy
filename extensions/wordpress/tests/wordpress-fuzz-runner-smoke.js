@@ -400,6 +400,36 @@ assert.deepEqual(envMountedPluginResult.wp_codebox_runtime_requirements.extra_pl
 assert.equal(envMountedPluginResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceRoot, envMountedPluginRoot);
 assert.equal(envMountedPluginResult.wp_codebox_task_request.executor.config.runtime_requirements.component_contracts[0].sourceSubpath, 'plugins/sample-plugin');
 
+const rigQualifiedPluginRoot = path.join(os.tmpdir(), 'homeboy-wordpress-rig-qualified-checkout');
+const rigQualifiedPluginPath = path.join(rigQualifiedPluginRoot, 'plugins', 'woocommerce');
+const generatedWorkloadPackageRoot = path.join(os.tmpdir(), 'homeboy-wordpress-generated-workload-package');
+const rigQualifiedEnvMountedPluginResult = buildWordPressFuzzRunnerResult({
+	env: readWordPressFuzzRunnerEnv({
+		HOMEBOY_FUZZ_WORKLOAD_PATH: '/unused/in-unit-test.json',
+		HOMEBOY_FUZZ_WORKLOAD_ID: 'rig-qualified-env-mounted-plugin',
+		HOMEBOY_FUZZ_RUN_ID: 'rig-qualified-env-mounted-plugin-run',
+		HOMEBOY_RIG_COMPONENT_PATH__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE: rigQualifiedPluginPath,
+		HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE: rigQualifiedPluginRoot,
+	}),
+	workload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'rig-qualified-env-mounted-plugin',
+		target: { type: 'wordpress-plugin', slug: 'woocommerce', component: 'woocommerce' },
+		metadata: {
+			fixture: { component: 'woocommerce', activation: 'woocommerce/woocommerce.php' },
+			homeboy_runtime_context: {
+				schema: 'homeboy/fuzz-workload-runtime-context/v1',
+				rig_id: 'woocommerce-performance',
+				components: { woocommerce: { path: generatedWorkloadPackageRoot } },
+			},
+		},
+		cases: [{ id: 'rig-qualified-env-mounted-plugin:default', intent: { plugin: { activation: 'woocommerce/woocommerce.php' } } }],
+	},
+});
+assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].source, rigQualifiedPluginPath);
+assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].sourceRoot, rigQualifiedPluginRoot);
+assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].sourceSubpath, 'plugins/woocommerce');
+
 const genericPrimitiveResult = buildWordPressFuzzRunnerResult({
 	env: {
 		workloadPath: '/unused/in-unit-test.json',

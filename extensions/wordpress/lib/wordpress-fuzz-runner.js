@@ -318,12 +318,18 @@ function buildWpCodeboxFuzzRuntimeRequirements({ workload = {}, env = {} } = {})
 		|| workload.metadata?.fixture?.plugin
 		|| workload.target?.slug;
 	const component = componentId && components ? componentFromContext(components, componentId) : undefined;
-	const source = component?.path || component?.source || componentPathOverride(env.componentPathOverrides, componentId);
+	const source = componentPathOverride(env.componentPathOverrides, componentId, context?.rig_id)
+		|| component?.path
+		|| component?.source;
 	if ((!componentId || typeof source !== 'string' || source.trim() === '') && !workloadRoot) {
 		return undefined;
 	}
 	const activation = workload.metadata?.fixture?.activation || firstCasePluginActivation(workload);
-	const checkoutRoot = component?.checkout_root || component?.checkoutRoot || component?.extensions?.wordpress?.checkout_root || component?.extensions?.wordpress?.checkoutRoot || componentPathOverride(env.componentCheckoutRootOverrides, componentId);
+	const checkoutRoot = componentPathOverride(env.componentCheckoutRootOverrides, componentId, context?.rig_id)
+		|| component?.checkout_root
+		|| component?.checkoutRoot
+		|| component?.extensions?.wordpress?.checkout_root
+		|| component?.extensions?.wordpress?.checkoutRoot;
 	const pluginRequirement = buildWpCodeboxFuzzPluginRequirement({ workload, componentId, source, activation, context, checkoutRoot });
 	return {
 		extra_plugins: pluginRequirement ? [pluginRequirement.extraPlugin] : undefined,
@@ -429,8 +435,12 @@ function componentFromContext(components = {}, componentId) {
 	return undefined;
 }
 
-function componentPathOverride(overrides = {}, componentId) {
-	return objectOrUndefined(overrides)?.[normalizedComponentId(componentId)];
+function componentPathOverride(overrides = {}, componentId, rigId) {
+	const normalizedOverrides = objectOrUndefined(overrides) || {};
+	const componentKey = normalizedComponentId(componentId);
+	const rigKey = normalizedComponentId(rigId);
+	return normalizedOverrides[componentKey]
+		|| (rigKey ? normalizedOverrides[`${rigKey}-${componentKey}`] : undefined);
 }
 
 function normalizedComponentId(value) {
