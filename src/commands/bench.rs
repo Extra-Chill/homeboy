@@ -309,6 +309,124 @@ pub struct BenchRunArgs {
     ignore_default_baseline: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RigRunBenchPlan {
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RigRunBenchOptions {
+    pub rig_id: String,
+    pub profile: String,
+    pub component: Option<String>,
+    pub path: Option<String>,
+    pub iterations: u64,
+    pub warmup: Option<u64>,
+    pub runs: u64,
+    pub run_id: Option<String>,
+    pub shared_state: Option<PathBuf>,
+    pub concurrency: u32,
+    pub settings: SettingArgs,
+    pub json_summary: bool,
+    pub passthrough_args: Vec<String>,
+}
+
+impl RigRunBenchOptions {
+    pub(crate) fn bench_plan(&self) -> RigRunBenchPlan {
+        let mut command = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--rig".to_string(),
+            self.rig_id.clone(),
+            "--profile".to_string(),
+            self.profile.clone(),
+            "--iterations".to_string(),
+            self.iterations.to_string(),
+        ];
+        if let Some(component) = &self.component {
+            command.push(component.clone());
+        }
+        if let Some(path) = &self.path {
+            command.extend(["--path".to_string(), path.clone()]);
+        }
+        if let Some(warmup) = self.warmup {
+            command.extend(["--warmup".to_string(), warmup.to_string()]);
+        }
+        if self.runs != 1 {
+            command.extend(["--runs".to_string(), self.runs.to_string()]);
+        }
+        if let Some(run_id) = &self.run_id {
+            command.extend(["--run-id".to_string(), run_id.clone()]);
+        }
+        if let Some(shared_state) = &self.shared_state {
+            command.extend([
+                "--shared-state".to_string(),
+                shared_state.to_string_lossy().to_string(),
+            ]);
+        }
+        if self.concurrency != 1 {
+            command.extend(["--concurrency".to_string(), self.concurrency.to_string()]);
+        }
+        for (key, value) in &self.settings.setting {
+            command.extend(["--setting".to_string(), format!("{key}={value}")]);
+        }
+        for (key, value) in &self.settings.setting_json {
+            command.extend(["--setting-json".to_string(), format!("{key}={value}")]);
+        }
+        if self.json_summary {
+            command.push("--json-summary".to_string());
+        }
+        if !self.passthrough_args.is_empty() {
+            command.push("--".to_string());
+            command.extend(self.passthrough_args.iter().cloned());
+        }
+        RigRunBenchPlan { command }
+    }
+
+    fn into_bench_args(self) -> BenchArgs {
+        BenchArgs {
+            command: None,
+            json: false,
+            run: BenchRunArgs {
+                comp: PositionalComponentArgs {
+                    component: self.component,
+                    path: self.path,
+                },
+                extension_override: ExtensionOverrideArgs::default(),
+                iterations: self.iterations,
+                warmup: self.warmup,
+                runs: self.runs,
+                run_id: self.run_id,
+                shared_state: self.shared_state,
+                concurrency: self.concurrency,
+                matrix: Vec::new(),
+                runner_pool: None,
+                matrix_max_tasks: None,
+                matrix_max_queue_depth: None,
+                expected_artifact: Vec::new(),
+                baseline_args: BaselineArgs::default(),
+                regression_threshold: DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+                setting_args: self.settings,
+                args: self.passthrough_args,
+                json_summary: self.json_summary,
+                status_file: None,
+                report: Vec::new(),
+                rig: vec![self.rig_id],
+                rig_order: BenchRigOrder::Input,
+                rig_concurrency: 1,
+                scenario_ids: Vec::new(),
+                profile: Some(self.profile),
+                ci_profile: None,
+                ignore_default_baseline: false,
+            },
+        }
+    }
+}
+
+pub(crate) fn run_rig_profile(options: RigRunBenchOptions) -> CmdResult<BenchOutput> {
+    run(options.into_bench_args(), &GlobalArgs {})
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum BenchRigOrder {
     Input,
@@ -694,10 +812,8 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
             })
         })
         .unwrap_or_default();
-    let extra_workloads = filter_component_conventional_bench_workloads(
-        extra_workloads,
-        path_override.as_deref(),
-    );
+    let extra_workloads =
+        filter_component_conventional_bench_workloads(extra_workloads, path_override.as_deref());
 
     let run_dir = RunDir::create()?;
     let resource_run = homeboy::core::engine::resource::ResourceSummaryRun::start(Some(format!(
@@ -759,7 +875,11 @@ fn is_component_conventional_bench_workload(path: &Path, component_root: &Path) 
         return false;
     };
     let mut components = relative.components();
-    if components.next().and_then(|component| component.as_os_str().to_str()) != Some("bench") {
+    if components
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        != Some("bench")
+    {
         return false;
     }
     relative

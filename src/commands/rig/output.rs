@@ -5,6 +5,7 @@
 
 use serde::Serialize;
 
+use crate::commands::bench::{BenchOutput, RigRunBenchPlan};
 use crate::commands::runs::RunsOutput;
 use homeboy::core::rig::{self, RigResourcesSpec, RigSpec};
 
@@ -27,6 +28,20 @@ pub enum RigCommandOutput {
     App(RigAppOutput),
     Runs(RunsOutput),
     ReleaseLock(RigReleaseLockOutput),
+    Run(RigRunOutput),
+}
+
+#[derive(Serialize)]
+pub struct RigRunOutput {
+    pub command: &'static str,
+    pub rig_id: String,
+    pub profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_update: Option<rig::RigSourceUpdateResult>,
+    pub sync: rig::RigStackSyncReport,
+    pub bench_invocation: RigRunBenchPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bench: Option<BenchOutput>,
 }
 
 #[derive(Serialize)]
