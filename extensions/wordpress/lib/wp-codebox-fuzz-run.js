@@ -284,16 +284,45 @@ function wpCodeboxCanonicalRuntimeContractSource(options = {}) {
 		return options.loadRuntimeContractSource(resolvedOptions);
 	}
 	if (typeof options.loadCanonicalRuntimeContractSourceSync === 'function') {
-		return options.loadCanonicalRuntimeContractSourceSync({ ...resolvedOptions, required: false });
+		return options.loadCanonicalRuntimeContractSourceSync({ ...resolvedOptions, required: false })
+			|| loadWpCodeboxRuntimeContractSourceDirect(resolvedOptions);
 	}
 	if (!loadCanonicalRuntimeContractSourceSync) {
+		return loadWpCodeboxRuntimeContractSourceDirect(resolvedOptions);
+	}
+	try {
+		return loadCanonicalRuntimeContractSourceSync({ ...resolvedOptions, required: false })
+			|| loadWpCodeboxRuntimeContractSourceDirect(resolvedOptions);
+	} catch {
+		return loadWpCodeboxRuntimeContractSourceDirect(resolvedOptions);
+	}
+}
+
+function loadWpCodeboxRuntimeContractSourceDirect(options = {}) {
+	const specifier = options.wpCodeboxCoreModule || options.coreModule;
+	if (!specifier) {
 		return null;
 	}
 	try {
-		return loadCanonicalRuntimeContractSourceSync({ ...resolvedOptions, required: false });
+		const core = require(isPathSpecifier(specifier) ? path.resolve(specifier) : specifier);
+		const manifest = typeof core?.runtimeContractManifest === 'function'
+			? core.runtimeContractManifest()
+			: typeof core?.default?.runtimeContractManifest === 'function'
+				? core.default.runtimeContractManifest()
+				: null;
+		return objectOrUndefined(manifest) ? {
+			source: specifier,
+			manifest,
+			normalizers: core.RUNTIME_CONTRACT_NORMALIZERS || core.default?.RUNTIME_CONTRACT_NORMALIZERS || {},
+			canonical: true,
+		} : null;
 	} catch {
 		return null;
 	}
+}
+
+function isPathSpecifier(value) {
+	return typeof value === 'string' && (value.startsWith('.') || path.isAbsolute(value) || value.startsWith('~') || value.includes('\\'));
 }
 
 function wpCodeboxRuntimeContractSourceOptions(options = {}) {

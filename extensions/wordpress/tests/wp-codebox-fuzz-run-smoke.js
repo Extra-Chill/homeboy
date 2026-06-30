@@ -142,6 +142,17 @@ assert.deepEqual(REQUIRED_WP_CODEBOX_FUZZ_CONTRACT_PATHS, [
 	'schemas.wordpressRuntime.workloadRun',
 ]);
 assert.equal(wpCodeboxRuntimeContractManifest({ loadRuntimeContractSource: () => ({ manifest }) }), manifest);
+const directContractSourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-direct-contract-source-'));
+try {
+	const directCoreModule = path.join(directContractSourceRoot, 'contracts.cjs');
+	fs.writeFileSync(directCoreModule, `module.exports.runtimeContractManifest = () => (${JSON.stringify(manifest)});\n`);
+	assert.deepEqual(wpCodeboxRuntimeContractManifest({
+		wpCodeboxCoreModule: directCoreModule,
+		loadCanonicalRuntimeContractSourceSync: () => null,
+	}), manifest);
+} finally {
+	fs.rmSync(directContractSourceRoot, { recursive: true, force: true });
+}
 const contractSourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-contract-source-'));
 try {
 	const cacheRoot = path.join(contractSourceRoot, 'cache', 'wp-codebox');
