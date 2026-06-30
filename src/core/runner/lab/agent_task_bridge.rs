@@ -24,6 +24,7 @@ use crate::core::agent_tasks::scheduler::{
 use crate::core::api_jobs::JobEvent;
 #[cfg(test)]
 use crate::core::api_jobs::JobEventKind;
+use crate::core::artifact_manifest::ArtifactManifest;
 use crate::core::runner::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,
     parse_offloaded_run_plan_envelope,
@@ -170,13 +171,13 @@ pub(super) fn parse_offloaded_agent_task_handoff(
     output: &str,
 ) -> Result<Option<AgentTaskLabHandoff>> {
     if let Ok(value) = serde_json::from_str::<Value>(output) {
-        return Ok(agent_task_handoff_value(&value));
+        return agent_task_handoff_value(&value);
     }
 
     for (index, _) in output.match_indices('{') {
         let mut stream = serde_json::Deserializer::from_str(&output[index..]).into_iter();
         if let Some(Ok(value)) = stream.next() {
-            if let Some(handoff) = agent_task_handoff_value(&value) {
+            if let Some(handoff) = agent_task_handoff_value(&value)? {
                 return Ok(Some(handoff));
             }
         }
@@ -199,6 +200,8 @@ pub(super) struct AgentTaskLabHandoff {
     pub aggregate_summary: Option<AgentTaskAggregateHandoffSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<AgentTaskArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_manifest: Option<ArtifactManifest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<AgentTaskEvidenceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,16 +236,22 @@ fn agent_task_lab_handoff_schema() -> String {
     AGENT_TASK_LAB_HANDOFF_SCHEMA.to_string()
 }
 
-fn agent_task_handoff_value(value: &Value) -> Option<AgentTaskLabHandoff> {
+fn agent_task_handoff_value(value: &Value) -> Result<Option<AgentTaskLabHandoff>> {
     if let Some(handoff_value) = typed_agent_task_handoff_value(value) {
-        let mut handoff =
-            serde_json::from_value::<AgentTaskLabHandoff>(handoff_value.clone()).ok()?;
+        let mut handoff = serde_json::from_value::<AgentTaskLabHandoff>(handoff_value.clone())
+            .map_err(|err| {
+                Error::internal_json(
+                    err.to_string(),
+                    Some("parse typed agent-task Lab handoff".to_string()),
+                )
+            })?;
+        finalize_typed_agent_task_handoff(&mut handoff)?;
         if handoff.envelope.is_null() {
             handoff.envelope = handoff_envelope_from_typed_handoff(&handoff);
         }
-        return Some(handoff);
+        return Ok(Some(handoff));
     }
-    agent_task_dispatch_envelope_value(value).map(AgentTaskLabHandoff::from_dispatch_envelope)
+    Ok(agent_task_dispatch_envelope_value(value).map(AgentTaskLabHandoff::from_dispatch_envelope))
 }
 
 fn typed_agent_task_handoff_value(value: &Value) -> Option<&Value> {
@@ -273,7 +282,23 @@ fn handoff_envelope_from_typed_handoff(handoff: &AgentTaskLabHandoff) -> Value {
             envelope.insert("aggregate".to_string(), value);
         }
     }
+    if let Some(manifest) = handoff.artifact_manifest.as_ref() {
+        if let Ok(value) = serde_json::to_value(manifest) {
+            envelope.insert("artifact_manifest".to_string(), value);
+        }
+    }
     Value::Object(envelope)
+}
+
+fn finalize_typed_agent_task_handoff(handoff: &mut AgentTaskLabHandoff) -> Result<()> {
+    let Some(manifest) = handoff.artifact_manifest.as_ref() else {
+        return Ok(());
+    };
+    manifest.validate_shape()?;
+    let run_id = handoff.run_id.as_deref().unwrap_or("lab-offload");
+    let manifest_refs = collect_manifest_artifact_refs(manifest, run_id);
+    append_unique_artifact_refs(&mut handoff.artifact_refs, manifest_refs);
+    Ok(())
 }
 
 impl AgentTaskLabHandoff {
@@ -297,6 +322,7 @@ impl AgentTaskLabHandoff {
                 .as_ref()
                 .map(AgentTaskAggregateHandoffSummary::from_aggregate),
             artifact_refs: collect_handoff_artifact_refs(record.as_ref(), aggregate.as_ref()),
+            artifact_manifest: None,
             evidence_refs: collect_handoff_evidence_refs(aggregate.as_ref()),
             record,
             aggregate,
@@ -356,6 +382,51 @@ fn collect_handoff_artifact_refs(
         }
     }
     refs
+}
+
+fn collect_manifest_artifact_refs(
+    manifest: &ArtifactManifest,
+    run_id: &str,
+) -> Vec<AgentTaskArtifactRef> {
+    manifest
+        .artifacts
+        .iter()
+        .map(|entry| AgentTaskArtifactRef {
+            task_id: entry
+                .metadata
+                .get("task_id")
+                .or_else(|| entry.metadata.get("taskId"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(run_id)
+                .to_string(),
+            kind: entry.kind.clone(),
+            uri: entry
+                .public_url
+                .as_deref()
+                .unwrap_or(&entry.path)
+                .to_string(),
+            role: entry.role.clone(),
+            label: entry.label.clone(),
+            semantic_key: entry.semantic_key.clone(),
+            size_bytes: entry.size_bytes,
+        })
+        .collect()
+}
+
+fn append_unique_artifact_refs(
+    artifact_refs: &mut Vec<AgentTaskArtifactRef>,
+    incoming: Vec<AgentTaskArtifactRef>,
+) {
+    for artifact_ref in incoming {
+        if artifact_refs
+            .iter()
+            .any(|existing| existing == &artifact_ref)
+        {
+            continue;
+        }
+        artifact_refs.push(artifact_ref);
+    }
 }
 
 fn collect_handoff_evidence_refs(
@@ -744,6 +815,61 @@ mod tests {
         );
         assert_eq!(handoff.envelope["run_id"], "run-typed");
         assert!(handoff.envelope.get("aggregate").is_none());
+    }
+
+    #[test]
+    fn typed_handoff_imports_valid_artifact_manifest_refs() {
+        let stdout = concat!(
+            "runner chatter\n",
+            "{\"schema\":\"homeboy/agent-task-lab-handoff/v1\",",
+            "\"run_id\":\"run-manifest\",",
+            "\"artifact_manifest\":{",
+            "\"schema\":\"homeboy/artifact-manifest/v1\",",
+            "\"artifacts\":[{",
+            "\"path\":\"logs/output.log\",",
+            "\"kind\":\"log\",",
+            "\"role\":\"execution-log\",",
+            "\"label\":\"Runner output\",",
+            "\"semantic_key\":\"runner.output\",",
+            "\"size_bytes\":42,",
+            "\"metadata\":{\"task_id\":\"task-from-manifest\"}",
+            "}]}}\n"
+        );
+
+        let handoff = parse_offloaded_agent_task_handoff(stdout)
+            .expect("parse handoff")
+            .expect("handoff found");
+
+        assert_eq!(handoff.artifact_refs.len(), 1);
+        let artifact_ref = &handoff.artifact_refs[0];
+        assert_eq!(artifact_ref.task_id, "task-from-manifest");
+        assert_eq!(artifact_ref.kind, "log");
+        assert_eq!(artifact_ref.uri, "logs/output.log");
+        assert_eq!(artifact_ref.role.as_deref(), Some("execution-log"));
+        assert_eq!(artifact_ref.label.as_deref(), Some("Runner output"));
+        assert_eq!(artifact_ref.semantic_key.as_deref(), Some("runner.output"));
+        assert_eq!(artifact_ref.size_bytes, Some(42));
+        assert_eq!(
+            handoff.envelope["artifact_manifest"]["schema"],
+            "homeboy/artifact-manifest/v1"
+        );
+    }
+
+    #[test]
+    fn typed_handoff_rejects_malformed_artifact_manifest() {
+        let stdout = concat!(
+            "{\"schema\":\"homeboy/agent-task-lab-handoff/v1\",",
+            "\"run_id\":\"run-bad-manifest\",",
+            "\"artifact_manifest\":{",
+            "\"schema\":\"homeboy/artifact-manifest/v1\",",
+            "\"artifacts\":[{\"path\":\"../secret.log\",\"kind\":\"log\"}]",
+            "}}\n"
+        );
+
+        let err = parse_offloaded_agent_task_handoff(stdout).expect_err("invalid manifest");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("artifact path must be relative"));
     }
 
     #[test]

@@ -30,11 +30,12 @@ pub use lab::{
     LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabCommandRouteContract,
     LabLocalExecutionPolicy, LabLocalHotPolicy, LabRoutingPolicy, LabRunnerSupportSummary,
     LabSelectedRunnerFallbackPolicy, LabSourcePathMode, LabWorkspaceModePolicy,
-    RunnerHandoffEnvelope, RunnerHandoffFollowCommands, RunnerWorkload, RunnerWorkloadArtifactRef,
-    RunnerWorkloadAssignment, RunnerWorkloadCapability, RunnerWorkloadCommandFamily,
-    RunnerWorkloadExtensionRevision, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
-    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
-    RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS, RUNNER_HANDOFF_ENVELOPE_SCHEMA,
+    RunnerHandoffArtifactManifestRef, RunnerHandoffEnvelope, RunnerHandoffFollowCommands,
+    RunnerWorkload, RunnerWorkloadArtifactRef, RunnerWorkloadAssignment, RunnerWorkloadCapability,
+    RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision, RunnerWorkloadKind,
+    RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
+    RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS,
+    RUNNER_ARTIFACT_MANIFEST_FILE, RUNNER_ARTIFACT_MANIFEST_SCHEMA, RUNNER_HANDOFF_ENVELOPE_SCHEMA,
     RUNNER_WORKLOAD_SCHEMA,
 };
 pub(crate) use lab::{LAB_NO_EXTRA_TOOLS, RIG_UP_LAB_UNSUPPORTED_REASON};
