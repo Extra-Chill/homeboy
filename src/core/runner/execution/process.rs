@@ -177,6 +177,7 @@ pub(crate) fn prepare_runner_process(
     let mut secret_env_plan =
         SecretEnvPlan::from_secret_env_names(request.secret_env_names.iter().cloned());
     secret_env_plan.allow_inherited_env_names([RUNTIME_SECRET_ENV_ALLOWLIST_ENV.to_string()]);
+    secret_env_plan.remove_undeclared_inherited_secret_env(&mut env);
 
     if runner.kind == RunnerKind::Local {
         env.extend(resolve_runner_secret_env_for_plan(
@@ -281,6 +282,7 @@ pub(crate) fn prepare_daemon_local_process(
     let mut secret_env_plan =
         SecretEnvPlan::from_secret_env_names(request.secret_env_names.iter().cloned());
     secret_env_plan.allow_inherited_env_names([RUNTIME_SECRET_ENV_ALLOWLIST_ENV.to_string()]);
+    secret_env_plan.remove_undeclared_inherited_secret_env(&mut env);
     env.extend(resolve_runner_secret_env_for_plan(
         &runner.secret_env,
         &secret_env_plan,
