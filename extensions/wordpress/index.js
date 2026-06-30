@@ -63,6 +63,7 @@ module.exports = {
 	...require('./lib/wordpress-live-surface-discovery'),
 	...require('./lib/wordpress-fuzz-plan-from-surfaces'),
 	...require('./lib/wordpress-fuzz-campaign'),
+	...require('./lib/wordpress-dependency-materialization-recipes'),
 	...require('./lib/wordpress-fuzz-runner'),
 	...require('./lib/wordpress-fuzz-runtime-task'),
 	...require('./lib/wordpress-fuzz-runtime-workload-operations'),

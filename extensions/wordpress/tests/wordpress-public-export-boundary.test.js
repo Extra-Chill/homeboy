@@ -43,6 +43,8 @@ assert.equal(typeof wordpress.detectWordPressFuzzPlanResultGaps, 'function');
 assert.equal(typeof wordpress.buildWordPressFuzzRunnerResult, 'function');
 assert.equal(typeof wordpress.buildWordPressFuzzRuntimeTaskRequest, 'function');
 assert.equal(typeof wordpress.normalizeFuzzHotspotSummary, 'function');
+assert.equal(wordpress.WORDPRESS_DEPENDENCY_MATERIALIZATION_RECIPES_SCHEMA, 'homeboy-extension-wordpress/dependency-materialization-recipes/v1');
+assert.equal(wordpress.WORDPRESS_REQUIRED_OUTPUT_DECLARATIONS_SCHEMA, 'homeboy-extension-wordpress/required-output-declarations/v1');
 assert.equal(typeof wordpress.wpCodebox, 'object');
 assert.equal(typeof wordpress.wpCodebox.resolveWpCodeboxArtifactPath, 'function');
 assert.equal(typeof wordpress.wpCodebox.runWpCodeboxRecipe, 'function');
