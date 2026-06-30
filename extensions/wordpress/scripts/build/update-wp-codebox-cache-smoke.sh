@@ -92,7 +92,23 @@ case "$OUTPUT" in
         ;;
 esac
 
-DRY_RUN_OUTPUT="$("$SCRIPT" --runner example-runner --source "$REMOTE_REPO" --ref fixture-ref --dry-run)"
+cat > "${FAKE_BIN}/homeboy" <<'HOMEBOY'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*"
+cat
+HOMEBOY
+chmod +x "${FAKE_BIN}/homeboy"
+
+DRY_RUN_OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --runner example-runner --source "$REMOTE_REPO" --ref fixture-ref --dry-run)"
+case "$DRY_RUN_OUTPUT" in
+    "runner exec --script-file - --raw --env SOURCE="*) ;;
+    *)
+        echo "Dry-run did not pass runner exec options before runner id" >&2
+        echo "$DRY_RUN_OUTPUT" >&2
+        exit 1
+        ;;
+esac
 case "$DRY_RUN_OUTPUT" in
     *"Fetching WP Codebox ref"*) ;;
     *)

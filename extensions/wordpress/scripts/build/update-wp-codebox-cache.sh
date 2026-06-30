@@ -84,7 +84,7 @@ if [ -z "$NPM_BIN" ]; then
 fi
 
 RUNNER_ID="${TARGET:-local}"
-RUNNER_ARGS=(runner exec "$RUNNER_ID" --script-file - --raw --env "SOURCE=$SOURCE" --env "REQUESTED_REF=$REF" --env "CACHE_DIR=$CACHE_DIR" --env "NPM_BIN=$NPM_BIN")
+RUNNER_ARGS=(runner exec --script-file - --raw --env "SOURCE=$SOURCE" --env "REQUESTED_REF=$REF" --env "CACHE_DIR=$CACHE_DIR" --env "NPM_BIN=$NPM_BIN")
 
 if [ -n "$TARGET" ]; then
     RUNNER_ARGS+=(--ssh)
@@ -93,6 +93,8 @@ fi
 if [ "$DRY_RUN" -eq 1 ]; then
     RUNNER_ARGS+=(--dry-run)
 fi
+
+RUNNER_ARGS+=("$RUNNER_ID")
 
 homeboy "${RUNNER_ARGS[@]}" <<'REMOTE_SCRIPT'
 set -euo pipefail
