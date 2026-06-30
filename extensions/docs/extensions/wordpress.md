@@ -47,6 +47,14 @@ WP Codebox contract discovery uses public modules such as
 provided by the runner. Homeboy does not scan WP Codebox source/cache package
 layouts to discover private core files.
 
+WordPress extension setup accepts explicit WP Codebox runtime overrides through
+`WP_CODEBOX_CLI` or `HOMEBOY_WP_CODEBOX_CLI` for the built CLI entrypoint and
+`WP_CODEBOX_CORE_MODULE` or `HOMEBOY_WP_CODEBOX_CORE_MODULE` for the built
+runtime-core module. Explicit overrides replace previously persisted
+`HOMEBOY_WP_CODEBOX_BIN` and `HOMEBOY_WP_CODEBOX_CORE_MODULE` values during
+reinstall; persisted values are reused only when no explicit override is
+provided.
+
 ## WP Codebox Artifact Lookup
 
 WordPress helpers that consume WP Codebox browser or recipe artifacts should use
