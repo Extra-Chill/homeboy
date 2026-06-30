@@ -55,3 +55,9 @@ pub(crate) use spec::{
     RIG_CHECK_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL, TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
     TUNNEL_SERVICE_EXPOSE_LAB_LABEL, TUNNEL_SERVICE_START_LAB_LABEL,
 };
+
+pub use crate::core::artifacts::{
+    ArtifactPostprocessAction, ArtifactPostprocessPlan, ArtifactPostprocessPlanDescription,
+    ArtifactPostprocessResult, ArtifactPostprocessReviewerRef, ArtifactPostprocessRoot,
+    ARTIFACT_POSTPROCESS_PLAN_SCHEMA, ARTIFACT_POSTPROCESS_RESULT_SCHEMA,
+};

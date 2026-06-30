@@ -32,8 +32,12 @@ pub use super::artifact_origin::{
     ArtifactOriginStatus,
 };
 pub use super::artifact_postprocess::{
-    record_artifact_postprocess_outputs, run_artifact_postprocess_steps,
-    ArtifactPostprocessContext, ArtifactPostprocessOutput, ArtifactPostprocessProducedArtifact,
+    describe_artifact_postprocess_plan, record_artifact_postprocess_outputs,
+    run_artifact_postprocess_plan, run_artifact_postprocess_steps,
+    validate_artifact_postprocess_plan, ArtifactPostprocessAction, ArtifactPostprocessContext,
+    ArtifactPostprocessOutput, ArtifactPostprocessPlan, ArtifactPostprocessPlanDescription,
+    ArtifactPostprocessProducedArtifact, ArtifactPostprocessResult, ArtifactPostprocessReviewerRef,
+    ArtifactPostprocessRoot, ARTIFACT_POSTPROCESS_PLAN_SCHEMA, ARTIFACT_POSTPROCESS_RESULT_SCHEMA,
 };
 pub use super::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 pub use super::artifact_ref::{
