@@ -11,9 +11,10 @@ use serde_json::json;
 use crate::core::api_jobs::{RemoteRunnerJobRequest, RemoteRunnerJobResult};
 use crate::core::error::{Error, Result};
 
-use super::super::execution::{exec_worker_local_until_cancelled, RunnerExecOptions};
+use super::super::execution::{exec_worker_local_until_cancelled_with_progress, RunnerExecOptions};
 use super::broker::{
-    append_progress, cancelled_job_snapshot, claim_job, finish_job, start_claim_heartbeat,
+    append_progress, append_progress_data, cancelled_job_snapshot, claim_job, finish_job,
+    start_claim_heartbeat,
 };
 use super::result::{
     cancelled_output, claimed_output, log_worker_event, remote_runner_result_from_exec_output,
@@ -278,7 +279,20 @@ fn run_once_output(
     let mut cancel_seen = false;
     let mut last_cancel_poll = Instant::now();
     let claimed_run_id = claimed_job_run_id(&claim.request);
-    let exec_result = exec_worker_local_until_cancelled(
+    let progress_client = client.clone();
+    let progress_options = options.clone();
+    let progress_job = claim.job.clone();
+    let progress_sink = Arc::new(move |data| {
+        let _ = append_progress_data(
+            &progress_client,
+            &progress_options.broker_url,
+            progress_options.broker_token.as_deref(),
+            &progress_options.runner_id,
+            &progress_job,
+            data,
+        );
+    });
+    let exec_result = exec_worker_local_until_cancelled_with_progress(
         &options.runner_id,
         RunnerExecOptions {
             cwd: claim.request.cwd.clone(),
@@ -307,6 +321,7 @@ fn run_once_output(
                 .unwrap_or(false);
             cancel_seen
         },
+        Some(progress_sink),
     );
     let (exec_output, exit_code) = match exec_result {
         Ok(result) => result,

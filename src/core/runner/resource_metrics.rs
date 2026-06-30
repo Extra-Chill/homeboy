@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::core::engine::command::{
     isolate_process_tree, wait_with_bounded_output, wait_with_bounded_output_until_cancelled,
@@ -12,6 +13,7 @@ use crate::core::engine::command::{
 use crate::core::error::{Error, Result};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerResourceMetrics {
@@ -35,6 +37,8 @@ pub(crate) struct MeasuredOutput {
     pub metrics: RunnerResourceMetrics,
 }
 
+pub(crate) type RunnerCommandProgressSink = Arc<dyn Fn(Value) + Send + Sync + 'static>;
+
 #[derive(Debug, Default)]
 struct MetricsState {
     sample_count: u64,
@@ -51,7 +55,7 @@ pub(crate) fn measured_command_output(command: &mut Command) -> Result<MeasuredO
         Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
     })?;
     let pid = child.id();
-    let collector = ResourceMetricsCollector::start(pid);
+    let collector = ResourceMetricsCollector::start(pid, started, None);
     let bounded_output =
         wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).map_err(|err| {
             Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
@@ -66,9 +70,10 @@ pub(crate) fn measured_command_output(command: &mut Command) -> Result<MeasuredO
     })
 }
 
-pub(crate) fn measured_command_output_until_cancelled(
+pub(crate) fn measured_command_output_until_cancelled_with_progress(
     command: &mut Command,
     is_cancelled: impl FnMut() -> bool,
+    progress_sink: Option<RunnerCommandProgressSink>,
 ) -> Result<MeasuredOutput> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_process_tree(command);
@@ -77,7 +82,7 @@ pub(crate) fn measured_command_output_until_cancelled(
         Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
     })?;
     let pid = child.id();
-    let collector = ResourceMetricsCollector::start(pid);
+    let collector = ResourceMetricsCollector::start(pid, started, progress_sink);
     let bounded_output = wait_with_bounded_output_until_cancelled(
         &mut child,
         DEFAULT_CAPTURE_LIMIT_BYTES,
@@ -104,10 +109,14 @@ struct ResourceMetricsCollector {
 }
 
 impl ResourceMetricsCollector {
-    fn start(root_pid: u32) -> Self {
+    fn start(
+        root_pid: u32,
+        started: Instant,
+        progress_sink: Option<RunnerCommandProgressSink>,
+    ) -> Self {
         let supported = cfg!(target_os = "linux") && std::path::Path::new("/proc").exists();
         let state = Arc::new(Mutex::new(MetricsState::default()));
-        if !supported {
+        if !supported && progress_sink.is_none() {
             return Self {
                 supported,
                 stop: None,
@@ -119,8 +128,19 @@ impl ResourceMetricsCollector {
         let (stop, stop_rx) = mpsc::channel();
         sample(root_pid, &state);
         let thread_state = Arc::clone(&state);
+        let mut last_heartbeat = Instant::now();
         let handle = thread::spawn(move || loop {
             sample(root_pid, &thread_state);
+            if let Some(progress) = progress_sink.as_ref() {
+                if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                    progress(runner_command_heartbeat_data(
+                        started.elapsed(),
+                        root_pid,
+                        process_tree_resource_summary(root_pid),
+                    ));
+                    last_heartbeat = Instant::now();
+                }
+            }
             if stop_rx.recv_timeout(SAMPLE_INTERVAL).is_ok() {
                 break;
             }
@@ -157,6 +177,39 @@ impl ResourceMetricsCollector {
             },
         }
     }
+}
+
+pub(crate) fn runner_command_heartbeat_data(
+    elapsed: Duration,
+    root_pid: u32,
+    resources: Option<Value>,
+) -> Value {
+    json!({
+        "phase": "heartbeat",
+        "elapsed_ms": elapsed.as_millis(),
+        "process": {
+            "root_pid": root_pid,
+            "resources": resources,
+        },
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn process_tree_resource_summary(root_pid: u32) -> Option<Value> {
+    let snapshot = process_tree_snapshot(root_pid)?;
+    Some(json!({
+        "source": "linux_procfs_process_tree",
+        "process_count": snapshot.process_count,
+        "child_process_count": snapshot.process_count.saturating_sub(1),
+        "rss_bytes": snapshot.rss_bytes,
+        "cpu_user_ms": snapshot.cpu_user_ms,
+        "cpu_system_ms": snapshot.cpu_system_ms,
+    }))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_tree_resource_summary(_root_pid: u32) -> Option<Value> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -281,6 +334,40 @@ fn clock_ticks_per_second() -> u64 {
     static CLOCK_TICKS_PER_SECOND: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
     *CLOCK_TICKS_PER_SECOND.get_or_init(|| command_u64("getconf", &["CLK_TCK"]).unwrap_or(100))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_payload_includes_elapsed_pid_and_optional_resources() {
+        let payload = runner_command_heartbeat_data(
+            Duration::from_millis(42_000),
+            1234,
+            Some(json!({
+                "source": "fixture",
+                "process_count": 3,
+                "child_process_count": 2,
+            })),
+        );
+
+        assert_eq!(payload["phase"], "heartbeat");
+        assert_eq!(payload["elapsed_ms"], 42_000);
+        assert_eq!(payload["process"]["root_pid"], 1234);
+        assert_eq!(payload["process"]["resources"]["process_count"], 3);
+        assert_eq!(payload["process"]["resources"]["child_process_count"], 2);
+    }
+
+    #[test]
+    fn heartbeat_payload_allows_missing_resource_summary() {
+        let payload = runner_command_heartbeat_data(Duration::from_millis(5), 9, None);
+
+        assert_eq!(payload["phase"], "heartbeat");
+        assert_eq!(payload["elapsed_ms"], 5);
+        assert_eq!(payload["process"]["root_pid"], 9);
+        assert!(payload["process"]["resources"].is_null());
+    }
 }
 
 #[cfg(target_os = "linux")]

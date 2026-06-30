@@ -87,8 +87,9 @@ pub use evidence::{
     RemoteArtifactDownload, RunnerJobLogSnapshot,
 };
 pub(crate) use execution::{
-    daemon_api_get, execute_runner_process_until_cancelled, prepare_daemon_local_process,
-    runner_exec_secret_env_names, RunnerProcessRequest, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
+    daemon_api_get, execute_runner_process_until_cancelled_with_progress,
+    prepare_daemon_local_process, runner_exec_secret_env_names, RunnerProcessRequest,
+    RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
 };
 pub use execution::{
     daemon_api_post, exec, runner_exec_failure_error, runner_job_cancel, RunnerExecDiagnostics,
@@ -117,6 +118,7 @@ pub use offload_metadata::{
     lab_offload_metadata_with_workspace_mapping,
     lab_offload_metadata_with_workspace_mapping_and_runner_workload,
 };
+pub(crate) use resource_metrics::RunnerCommandProgressSink;
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
