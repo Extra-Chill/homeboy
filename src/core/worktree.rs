@@ -352,24 +352,7 @@ mod store_ops {
             accept_bare_directory: false,
             ..TargetSpec::default()
         })?;
-        let source_checkout = target
-            .git_root
-            .clone()
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "component",
-                    "Component local_path is not inside a git checkout",
-                    Some(options.component_id.clone()),
-                    Some(vec!["Register a git-backed component checkout".to_string()]),
-                )
-            })?
-            .canonicalize()
-            .map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some(target.source_path.display().to_string()),
-                )
-            })?;
+        let source_checkout = source_checkout_for_worktree(&target)?;
 
         let parent = source_checkout.parent().ok_or_else(|| {
             Error::internal_unexpected(format!(
@@ -764,6 +747,64 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
 mod queue_ops {
     use super::*;
 
+    pub(super) fn source_checkout_for_worktree(
+        target: &component::ResolvedTarget,
+    ) -> Result<PathBuf> {
+        if let Some(git_root) = &target.git_root {
+            return git_root.canonicalize().map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(target.source_path.display().to_string()),
+                )
+            });
+        }
+
+        if let Some(checkout) = lab_runner_workspace_checkout(&target.component_id)? {
+            return Ok(checkout);
+        }
+
+        Err(Error::validation_invalid_argument(
+            "component",
+            "Component local_path is not inside a git checkout",
+            Some(target.component_id.clone()),
+            Some(vec!["Register a git-backed component checkout".to_string()]),
+        ))
+    }
+
+    fn lab_runner_workspace_checkout(component_id: &str) -> Result<Option<PathBuf>> {
+        let cwd = std::env::current_dir()
+            .map_err(|err| Error::internal_io(err.to_string(), Some("current_dir".to_string())))?;
+        let Some(runner_root) = runner_workspace_root_from_lab_snapshot(&cwd) else {
+            return Ok(None);
+        };
+        let candidate = runner_root.join(component_id);
+        let Some(git_root) = component::resolution::detect_git_root(&candidate) else {
+            return Ok(None);
+        };
+        if git_root != candidate.canonicalize().unwrap_or_else(|_| candidate.clone()) {
+            return Ok(None);
+        }
+        let Some(discovered) = component::discover_from_portable(&git_root) else {
+            return Ok(None);
+        };
+        if discovered.id != component_id {
+            return Ok(None);
+        }
+        git_root
+            .canonicalize()
+            .map(Some)
+            .map_err(|err| Error::internal_io(err.to_string(), Some(candidate.display().to_string())))
+    }
+
+    fn runner_workspace_root_from_lab_snapshot(cwd: &Path) -> Option<PathBuf> {
+        for ancestor in cwd.ancestors() {
+            if ancestor.file_name().and_then(|name| name.to_str()) == Some("_lab_workspaces") {
+                return ancestor.parent().map(Path::to_path_buf);
+            }
+        }
+        None
+    }
+
     pub(super) fn queue_row(
         branch: &str,
         handle: String,
@@ -1101,5 +1142,71 @@ mod tests {
                 Some("https://github.com/Extra-Chill/homeboy/issues/5924")
             );
         });
+    }
+
+    #[test]
+    fn queue_create_uses_runner_checkout_when_lab_snapshot_is_not_git_backed() {
+        use crate::test_support::with_isolated_home;
+
+        with_isolated_home(|home| {
+            let runner_root = home.path().join("Developer");
+            let source = runner_root.join("lab-fixture");
+            let snapshot = runner_root.join("_lab_workspaces/job-123");
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir_all(&snapshot).unwrap();
+            run_git(&source, &["init", "-q"]);
+            run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+            run_git(&source, &["config", "user.name", "Homeboy Test"]);
+            fs::write(source.join("README.md"), "initial\n").unwrap();
+            fs::write(source.join("homeboy.json"), r#"{"id":"lab-fixture"}"#).unwrap();
+            fs::write(
+                snapshot.join("homeboy.json"),
+                r#"{"id":"lab-fixture"}"#,
+            )
+            .unwrap();
+            run_git(&source, &["add", "."]);
+            run_git(&source, &["commit", "-q", "-m", "initial"]);
+            write_component_registration(home.path(), "lab-fixture", &snapshot);
+            let _cwd = CurrentDirGuard::set(&snapshot);
+
+            let output = queue_create(WorktreeQueueCreateOptions {
+                repo: "lab-fixture".to_string(),
+                branches: vec!["cook/lab".to_string()],
+                from: "HEAD".to_string(),
+                task_url: None,
+                task_ref: None,
+                dry_run: false,
+                retry_after_seconds: 30,
+            })
+            .unwrap();
+
+            assert_eq!(
+                output.rows[0].status,
+                WorktreeQueueCreateStatus::Created,
+                "queue row failed: {:?}",
+                output.rows[0].error
+            );
+            let record = resolve("lab-fixture@cook-lab").expect("queued worktree record");
+            assert_eq!(PathBuf::from(record.source_checkout), source.canonicalize().unwrap());
+            assert!(runner_root.join("lab-fixture@cook-lab").exists());
+        });
+    }
+
+    struct CurrentDirGuard {
+        prior: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &Path) -> Self {
+            let prior = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self { prior }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.prior).unwrap();
+        }
     }
 }
