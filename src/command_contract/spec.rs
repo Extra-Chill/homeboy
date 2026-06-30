@@ -73,6 +73,7 @@ pub(crate) const FUZZ_LAB_LABEL: &str = "fuzz";
 pub(crate) const TRACE_LAB_LABEL: &str = "trace";
 pub(crate) const REFACTOR_LAB_LABEL: &str = "refactor";
 pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
+pub(crate) const RIG_RUN_LAB_LABEL: &str = "rig run";
 pub(crate) const RUNTIME_REFRESH_LAB_LABEL: &str = "runtime refresh";
 pub(crate) const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
 pub(crate) const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
@@ -291,11 +292,18 @@ const REFACTOR_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSum
     hint_label: "refactor source runs",
 }];
 
-const RIG_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
-    contract_labels: &[RIG_CHECK_LAB_LABEL],
-    message_label: RIG_CHECK_LAB_LABEL,
-    hint_label: RIG_CHECK_LAB_LABEL,
-}];
+const RIG_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
+    CommandLabSupportSummary {
+        contract_labels: &[RIG_CHECK_LAB_LABEL],
+        message_label: RIG_CHECK_LAB_LABEL,
+        hint_label: RIG_CHECK_LAB_LABEL,
+    },
+    CommandLabSupportSummary {
+        contract_labels: &[RIG_RUN_LAB_LABEL],
+        message_label: RIG_RUN_LAB_LABEL,
+        hint_label: RIG_RUN_LAB_LABEL,
+    },
+];
 
 const RUNTIME_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
     contract_labels: &[RUNTIME_REFRESH_LAB_LABEL],

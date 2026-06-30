@@ -19,8 +19,8 @@ use super::bench::RigRunBenchOptions;
 use super::utils::args::SettingArgs;
 use super::CmdResult;
 use crate::command_contract::{
-    CommandPortabilityContract, LabCommandContract, BENCH_LAB_LABEL, LAB_NO_EXTRA_TOOLS,
-    RIG_CHECK_LAB_LABEL, RIG_UP_LAB_UNSUPPORTED_REASON,
+    CommandPortabilityContract, LabCommandContract, LAB_NO_EXTRA_TOOLS, RIG_CHECK_LAB_LABEL,
+    RIG_RUN_LAB_LABEL, RIG_UP_LAB_UNSUPPORTED_REASON,
 };
 
 #[derive(Args)]
@@ -79,7 +79,7 @@ impl RigArgs {
         }
         if matches!(self.command, RigCommand::Run(_)) {
             return CommandPortabilityContract::lab(LabCommandContract::portable(
-                BENCH_LAB_LABEL,
+                RIG_RUN_LAB_LABEL,
                 None,
                 true,
                 LAB_NO_EXTRA_TOOLS,
