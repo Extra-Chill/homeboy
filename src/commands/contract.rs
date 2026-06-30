@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -15,7 +16,16 @@ use crate::command_contract::{
 };
 use crate::commands::{CmdResult, GlobalArgs};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
+use crate::core::fuzz::{FuzzWorkload, FUZZ_WORKLOAD_SCHEMA};
+use crate::core::loop_lifecycle::{
+    LoopEvidenceRecord, LoopIterationRecord, LoopRunRecord, LOOP_EVIDENCE_SCHEMA,
+    LOOP_ITERATION_SCHEMA, LOOP_RUN_SCHEMA,
+};
+use crate::core::resource_cleanup_intent::{
+    ResourceCleanupIntentContract, RESOURCE_CLEANUP_INTENT_SCHEMA,
+};
 use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
+use crate::core::secret_env_plan::{SecretEnvPlan, SECRET_ENV_PLAN_SCHEMA};
 use crate::core::{Error, Result};
 
 const CONTRACT_EXPORT_INDEX_SCHEMA: &str = "homeboy/contract-export-index/v1";
@@ -37,6 +47,8 @@ pub enum ContractCommand {
     Show(ContractShowArgs),
     /// Export machine-consumable Homeboy contract JSON files.
     Export(ContractExportArgs),
+    /// Validate a JSON file against a registered generic Homeboy contract.
+    Validate(ContractValidateArgs),
     /// Validate and normalize generic contract values.
     Normalize(ContractNormalizeArgs),
 }
@@ -53,7 +65,19 @@ pub enum ContractOutput {
     Export(ContractExportOutput),
     List(ContractListOutput),
     Show(ContractShowOutput),
+    Validate(ContractValidateOutput),
     Normalize(ContractNormalizeOutput),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ContractValidateArgs {
+    /// Contract schema id to validate against.
+    #[arg(value_name = "SCHEMA_ID")]
+    pub schema_id: String,
+
+    /// JSON file to validate.
+    #[arg(long, value_name = "PATH")]
+    pub file: PathBuf,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -105,6 +129,13 @@ pub struct ContractDetail {
     pub owner: &'static str,
     pub summary: &'static str,
     pub rust_type: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ContractValidateOutput {
+    pub schema: &'static str,
+    pub file: String,
+    pub valid: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -313,8 +344,27 @@ pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput
         ContractCommand::Export(args) => {
             export_contracts(args).map(|(output, code)| (ContractOutput::Export(output), code))
         }
+        ContractCommand::Validate(args) => Ok((ContractOutput::Validate(validate(args)?), 0)),
         ContractCommand::Normalize(args) => Ok((ContractOutput::Normalize(normalize(args)?), 0)),
     }
+}
+
+fn validate(args: ContractValidateArgs) -> Result<ContractValidateOutput> {
+    let schema = resolve_schema(&args.schema_id)?;
+    let raw = fs::read_to_string(&args.file).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("read contract file {}", args.file.display())),
+        )
+    })?;
+
+    schema.validate_json(&raw)?;
+
+    Ok(ContractValidateOutput {
+        schema: schema.id,
+        file: display_path(&args.file),
+        valid: true,
+    })
 }
 
 fn normalize(args: ContractNormalizeArgs) -> Result<ContractNormalizeOutput> {
@@ -909,12 +959,164 @@ fn json_error(error: serde_json::Error) -> homeboy::core::Error {
     homeboy::core::Error::internal_json(error.to_string(), Some("export contracts".to_string()))
 }
 
+#[derive(Debug)]
+struct ContractSchema {
+    id: &'static str,
+    validate_json: fn(&str) -> homeboy::core::Result<()>,
+}
+
+impl ContractSchema {
+    fn validate_json(&self, raw: &str) -> homeboy::core::Result<()> {
+        (self.validate_json)(raw)
+    }
+}
+
+fn resolve_schema(schema_id: &str) -> homeboy::core::Result<&'static ContractSchema> {
+    CONTRACT_SCHEMAS
+        .iter()
+        .find(|schema| schema.id == schema_id)
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "schema_id",
+                format!("unknown contract schema id `{schema_id}`"),
+                Some(schema_id.to_string()),
+                Some(
+                    CONTRACT_SCHEMAS
+                        .iter()
+                        .map(|schema| schema.id.to_string())
+                        .collect(),
+                ),
+            )
+        })
+}
+
+static CONTRACT_SCHEMAS: &[ContractSchema] = &[
+    ContractSchema {
+        id: SECRET_ENV_PLAN_SCHEMA,
+        validate_json: validate_secret_env_plan,
+    },
+    ContractSchema {
+        id: FUZZ_WORKLOAD_SCHEMA,
+        validate_json: validate_fuzz_workload,
+    },
+    ContractSchema {
+        id: RESOURCE_CLEANUP_INTENT_SCHEMA,
+        validate_json: validate_resource_cleanup_intent,
+    },
+    ContractSchema {
+        id: LOOP_RUN_SCHEMA,
+        validate_json: validate_loop_run,
+    },
+    ContractSchema {
+        id: LOOP_ITERATION_SCHEMA,
+        validate_json: validate_loop_iteration,
+    },
+    ContractSchema {
+        id: LOOP_EVIDENCE_SCHEMA,
+        validate_json: validate_loop_evidence,
+    },
+];
+
+fn validate_secret_env_plan(raw: &str) -> homeboy::core::Result<()> {
+    let plan: SecretEnvPlan = deserialize_contract(raw, SECRET_ENV_PLAN_SCHEMA)?;
+    validate_schema_field(SECRET_ENV_PLAN_SCHEMA, &plan.schema)
+}
+
+fn validate_fuzz_workload(raw: &str) -> homeboy::core::Result<()> {
+    let value: Value = deserialize_contract(raw, FUZZ_WORKLOAD_SCHEMA)?;
+    FuzzWorkload::from_value(value).map_err(|message| {
+        homeboy::core::Error::new(
+            homeboy::core::ErrorCode::ValidationInvalidArgument,
+            "Contract validation failed",
+            serde_json::json!({
+                "schema": FUZZ_WORKLOAD_SCHEMA,
+                "valid": false,
+                "error": message,
+            }),
+        )
+    })?;
+    Ok(())
+}
+
+fn validate_resource_cleanup_intent(raw: &str) -> homeboy::core::Result<()> {
+    let contract: ResourceCleanupIntentContract =
+        deserialize_contract(raw, RESOURCE_CLEANUP_INTENT_SCHEMA)?;
+    contract.validate()
+}
+
+fn validate_loop_run(raw: &str) -> homeboy::core::Result<()> {
+    let record: LoopRunRecord = deserialize_contract(raw, LOOP_RUN_SCHEMA)?;
+    validate_schema_field(LOOP_RUN_SCHEMA, &record.schema)
+}
+
+fn validate_loop_iteration(raw: &str) -> homeboy::core::Result<()> {
+    let record: LoopIterationRecord = deserialize_contract(raw, LOOP_ITERATION_SCHEMA)?;
+    validate_schema_field(LOOP_ITERATION_SCHEMA, &record.schema)
+}
+
+fn validate_loop_evidence(raw: &str) -> homeboy::core::Result<()> {
+    let record: LoopEvidenceRecord = deserialize_contract(raw, LOOP_EVIDENCE_SCHEMA)?;
+    validate_schema_field(LOOP_EVIDENCE_SCHEMA, &record.schema)
+}
+
+fn deserialize_contract<T: DeserializeOwned>(
+    raw: &str,
+    schema_id: &'static str,
+) -> homeboy::core::Result<T> {
+    let mut deserializer = serde_json::Deserializer::from_str(raw);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|err| {
+        homeboy::core::Error::new(
+            homeboy::core::ErrorCode::ValidationInvalidJson,
+            "Contract validation failed",
+            serde_json::json!({
+                "schema": schema_id,
+                "valid": false,
+                "error": err.inner().to_string(),
+                "path": err.path().to_string(),
+            }),
+        )
+    })
+}
+
+fn validate_schema_field(expected: &'static str, actual: &str) -> homeboy::core::Result<()> {
+    if actual == expected {
+        return Ok(());
+    }
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "schema",
+        format!("expected {expected}, received {actual}"),
+        Some(actual.to_string()),
+        Some(vec![expected.to_string()]),
+    ))
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
     use crate::cli_surface::{current_command_surface, Commands};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn write_json(dir: &TempDir, name: &str, value: Value) -> PathBuf {
+        let path = dir.path().join(name);
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        path
+    }
+
+    fn validate_file(
+        schema_id: &str,
+        file: PathBuf,
+    ) -> homeboy::core::Result<ContractValidateOutput> {
+        validate(ContractValidateArgs {
+            schema_id: schema_id.to_string(),
+            file,
+        })
+    }
 
     #[test]
     fn command_registry_export_covers_contract_command() {
@@ -1074,5 +1276,123 @@ mod tests {
             .expect_err("domain-specific statuses should be rejected");
 
         assert!(err.message.contains("run-lifecycle-status"));
+    }
+
+    #[test]
+    fn validates_secret_env_plan_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "secret-env-plan.json",
+            json!({
+                "schema": SECRET_ENV_PLAN_SCHEMA,
+                "secret_env_names": ["API_TOKEN"]
+            }),
+        );
+
+        let output = validate_file(SECRET_ENV_PLAN_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, SECRET_ENV_PLAN_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_fuzz_workload_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "fuzz-workload.json",
+            json!({
+                "schema": FUZZ_WORKLOAD_SCHEMA,
+                "id": "http-corpus",
+                "label": "HTTP corpus",
+                "safety_class": "read_only",
+                "surface_ids": ["http-api"],
+                "operations": ["parse"]
+            }),
+        );
+
+        let output = validate_file(FUZZ_WORKLOAD_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, FUZZ_WORKLOAD_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_resource_cleanup_intent_with_semantic_hook() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "resource-cleanup-intent.json",
+            json!({
+                "schema": RESOURCE_CLEANUP_INTENT_SCHEMA,
+                "intent": "apply",
+                "ownership": {
+                    "dry_run": {"owner": "rig", "declared_by": "test"},
+                    "apply": {"owner": "rig", "declared_by": "test"}
+                }
+            }),
+        );
+
+        let output = validate_file(RESOURCE_CLEANUP_INTENT_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, RESOURCE_CLEANUP_INTENT_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_loop_lifecycle_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "loop-run.json",
+            json!({
+                "schema": LOOP_RUN_SCHEMA,
+                "id": "loop-1",
+                "status": "running"
+            }),
+        );
+
+        let output = validate_file(LOOP_RUN_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, LOOP_RUN_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn invalid_json_returns_path_aware_validation_error() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "bad-loop-run.json",
+            json!({
+                "schema": LOOP_RUN_SCHEMA,
+                "id": "loop-1",
+                "status": "not-a-status"
+            }),
+        );
+
+        let error = validate_file(LOOP_RUN_SCHEMA, file).unwrap_err();
+
+        assert_eq!(error.code, homeboy::core::ErrorCode::ValidationInvalidJson);
+        assert_eq!(error.details["valid"], false);
+        assert_eq!(error.details["schema"], LOOP_RUN_SCHEMA);
+        assert_eq!(error.details["path"], "status");
+    }
+
+    #[test]
+    fn unknown_schema_reports_supported_contracts() {
+        let error = resolve_schema("homeboy/unknown/v1").unwrap_err();
+
+        assert_eq!(
+            error.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(error.details["field"], "schema_id");
+        assert!(error.details["tried"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == SECRET_ENV_PLAN_SCHEMA));
     }
 }
