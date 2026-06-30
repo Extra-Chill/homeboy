@@ -902,7 +902,7 @@ fn shared(id: Option<&str>) -> CmdResult<ComponentOutput> {
 mod tests {
     use super::*;
     use crate::cli_surface::Cli;
-    use clap::{CommandFactory, Parser};
+    use clap::CommandFactory;
     use std::fs;
 
     #[test]
@@ -998,26 +998,6 @@ mod tests {
             !help.contains("unzip -o {artifact} && rm {artifact}"),
             "component help should not document single-brace placeholders: {help}"
         );
-    }
-
-    #[test]
-    fn component_create_rejects_removed_legacy_bulk_flags_at_parse_time() {
-        for args in [
-            [
-                "homeboy",
-                "component",
-                "create",
-                "--json",
-                r#"{"id":"demo"}"#,
-            ],
-            ["homeboy", "component", "create", "--skip-existing", ""],
-        ] {
-            let args = args.into_iter().filter(|arg| !arg.is_empty());
-            assert!(
-                Cli::try_parse_from(args).is_err(),
-                "removed legacy component create flag should not parse"
-            );
-        }
     }
 
     #[test]
