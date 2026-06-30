@@ -205,6 +205,7 @@ pub(crate) fn lab_runner_homeboy_metadata(
         format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
         format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
     ];
+    let primary_remediation_command = runner_homeboy_primary_remediation_command(runner_id, status);
     let stale_daemon = status.stale_daemon.as_ref();
     serde_json::json!({
         "schema": "homeboy/lab-runner-homeboy/v1",
@@ -220,7 +221,9 @@ pub(crate) fn lab_runner_homeboy_metadata(
         "stale_daemon_refresh_command": stale_daemon.map(|warning| warning.refresh_command.clone()),
         "stale_daemon": status.stale_daemon,
         "version_drift": lab_runner_homeboy_version_drift(status),
+        "primary_remediation_command": primary_remediation_command,
         "refresh_commands": refresh_commands,
+        "local_upgrade_command": "homeboy upgrade",
         "upgrade_command": format!("homeboy upgrade --force --upgrade-runner {}", shell::quote_arg(runner_id)),
     })
 }
@@ -253,9 +256,7 @@ pub(crate) enum RunnerHomeboyVersionDrift {
 /// opt into strict exact-match either per-runner (the
 /// `require_exact_homeboy_version` runner setting) or for a single run via the
 /// `HOMEBOY_REQUIRE_EXACT_RUNNER_VERSION` env var.
-pub(crate) fn require_exact_runner_version(
-    settings: &crate::core::server::RunnerSettings,
-) -> bool {
+pub(crate) fn require_exact_runner_version(settings: &crate::core::server::RunnerSettings) -> bool {
     if std::env::var(REQUIRE_EXACT_RUNNER_VERSION_ENV)
         .ok()
         .is_some_and(|value| {
@@ -274,21 +275,26 @@ pub(crate) fn require_exact_runner_version(
 /// leading label (e.g. `homeboy 0.266.1`) and trailing build/prerelease
 /// metadata (e.g. `0.266.1+abc`). Mirrors the lenient parsing already used by
 /// the runner version probe so the gate accepts the same shapes.
-fn parse_major_minor(version: &str) -> Option<(u64, u64)> {
+fn parse_version_triplet(version: &str) -> Option<(u64, u64, u64)> {
     let candidate = version
         .split_whitespace()
         .find(|token| token.chars().next().is_some_and(|c| c.is_ascii_digit()))
         .unwrap_or_else(|| version.trim());
     let mut parts = candidate.split('.');
-    let major = parts.next()?.parse::<u64>().ok()?;
-    let minor: u64 = parts
-        .next()?
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse()
-        .ok()?;
-    Some((major, minor))
+    let mut parse_part = || {
+        parts
+            .next()?
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .ok()
+    };
+    Some((parse_part()?, parse_part()?, parse_part()?))
+}
+
+fn parse_major_minor(version: &str) -> Option<(u64, u64)> {
+    parse_version_triplet(version).map(|(major, minor, _patch)| (major, minor))
 }
 
 /// Classify controller↔runner Homeboy version drift using the same drift
@@ -375,6 +381,44 @@ pub(crate) fn lab_runner_homeboy_compatible_drift_warning(
 
 fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
     classify_runner_homeboy_version_drift(status) != RunnerHomeboyVersionDrift::None
+}
+
+fn runner_daemon_newer_than_controller(status: &RunnerStatusReport) -> bool {
+    let Some(controller) = parse_version_triplet(env!("CARGO_PKG_VERSION")) else {
+        return false;
+    };
+    status
+        .stale_daemon
+        .as_ref()
+        .map(|warning| warning.active_daemon_control_plane_version.as_str())
+        .into_iter()
+        .chain(
+            status
+                .session
+                .as_ref()
+                .map(|session| session.homeboy_version.as_str()),
+        )
+        .filter_map(parse_version_triplet)
+        .any(|runner| runner > controller)
+}
+
+fn runner_homeboy_primary_remediation_command(
+    runner_id: &str,
+    status: &RunnerStatusReport,
+) -> String {
+    if runner_daemon_newer_than_controller(status) {
+        return "homeboy upgrade".to_string();
+    }
+
+    runner_homeboy_refresh_commands(runner_id, status)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            format!(
+                "homeboy runner refresh-homeboy {} --ref main --reconnect",
+                shell::quote_arg(runner_id)
+            )
+        })
 }
 
 pub(crate) fn lab_source_checkout_metadata(source_path: &Path) -> serde_json::Value {
@@ -514,17 +558,25 @@ pub(crate) fn stale_runner_homeboy_error(
             )
         });
     let refresh = refresh_commands.join(" && ");
+    let mut tried = Vec::new();
+    if runner_daemon_newer_than_controller(status) {
+        tried.push(format!(
+            "Upgrade this local Homeboy controller before retrying Lab offload: {}",
+            runner_homeboy_primary_remediation_command(runner_id, status)
+        ));
+    }
+    tried.extend([
+        format!("Reconnect runner `{runner_id}` before retrying Lab offload: {refresh}"),
+        format!("If the runner binary itself is stale, refresh or select a clean runner binary with `homeboy runner refresh-homeboy {} --ref main --reconnect`.", shell::quote_arg(runner_id)),
+        "Use --force-hot --allow-local-hot only if you intentionally want to bypass Lab offload and run locally.".to_string(),
+    ]);
     Error::validation_invalid_argument(
         "runner",
         format!(
-            "Lab offload refused runner `{runner_id}` because its active daemon control plane differs from the configured job command binary `{configured_executable}`. Active daemon control plane: {active_daemon}; job command binary: {current_homeboy}. {drift_message} Stale runner runtimes can return malformed or misleading provider output; reconnect the runner before retrying."
+            "Lab offload refused runner `{runner_id}` because its active daemon control plane differs from the configured job command binary `{configured_executable}`. Active daemon control plane: {active_daemon}; job command binary: {current_homeboy}. {drift_message} Stale runner runtimes can return malformed or misleading provider output; follow the first remediation hint before retrying."
         ),
         Some(runner_id.to_string()),
-        Some(vec![
-            format!("Reconnect runner `{runner_id}` before retrying Lab offload: {refresh}"),
-            format!("If the runner binary itself is stale, refresh or select a clean runner binary with `homeboy runner refresh-homeboy {} --ref main --reconnect`.", shell::quote_arg(runner_id)),
-            "Use --force-hot --allow-local-hot only if you intentionally want to bypass Lab offload and run locally.".to_string(),
-        ]),
+        Some(tried),
     )
 }
 

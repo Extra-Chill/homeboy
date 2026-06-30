@@ -338,10 +338,8 @@ fn same_minor_patch_drift_version(prefix: &str) -> String {
 
 #[test]
 fn same_minor_patch_drift_is_compatible_and_proceeds_with_warning() {
-    let status = status_with_runner_version(
-        "homeboy-lab",
-        &same_minor_patch_drift_version("homeboy "),
-    );
+    let status =
+        status_with_runner_version("homeboy-lab", &same_minor_patch_drift_version("homeboy "));
 
     assert_eq!(
         classify_runner_homeboy_version_drift(&status),
@@ -357,8 +355,7 @@ fn same_minor_patch_drift_is_compatible_and_proceeds_with_warning() {
 
 #[test]
 fn same_minor_patch_drift_is_refused_under_strict_mode() {
-    let status =
-        status_with_runner_version("homeboy-lab", &same_minor_patch_drift_version(""));
+    let status = status_with_runner_version("homeboy-lab", &same_minor_patch_drift_version(""));
 
     // Strict override restores exact-match: patch drift now refuses.
     assert!(lab_runner_homeboy_has_blocking_drift(&status, true));
@@ -372,10 +369,7 @@ fn minor_version_drift_is_incompatible_and_refused() {
     let controller = env!("CARGO_PKG_VERSION");
     let mut parts = controller.split('.');
     let major = parts.next().unwrap_or("0");
-    let minor: u64 = parts
-        .next()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let minor: u64 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
     let drifted = format!("{major}.{}.0", minor.wrapping_add(1));
     let status = status_with_runner_version("homeboy-lab", &drifted);
 
@@ -386,6 +380,64 @@ fn minor_version_drift_is_incompatible_and_refused() {
     assert!(lab_runner_homeboy_has_blocking_drift(&status, false));
     assert!(lab_runner_homeboy_has_blocking_drift(&status, true));
     assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
+}
+
+#[test]
+fn newer_runner_than_controller_points_to_local_upgrade_first() {
+    let status = status_with_runner_version("homeboy-lab", &higher_minor_version());
+
+    let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
+    assert_eq!(metadata["primary_remediation_command"], "homeboy upgrade");
+    assert_eq!(metadata["local_upgrade_command"], "homeboy upgrade");
+
+    let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
+    let tried = err.details["tried"].as_array().expect("tried hints");
+    assert!(tried
+        .first()
+        .and_then(|hint| hint.as_str())
+        .is_some_and(|hint| hint.contains("homeboy upgrade")));
+}
+
+#[test]
+fn newer_stale_daemon_control_plane_points_to_local_upgrade_first() {
+    let mut status = status_with_runner_version("homeboy-lab", env!("CARGO_PKG_VERSION"));
+    let runner_version = higher_minor_version();
+    status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        runner_version,
+        env!("CARGO_PKG_VERSION").to_string(),
+        None,
+        None,
+    ));
+
+    let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
+    assert_eq!(metadata["primary_remediation_command"], "homeboy upgrade");
+
+    let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
+    let tried = err.details["tried"].as_array().expect("tried hints");
+    assert!(tried
+        .first()
+        .and_then(|hint| hint.as_str())
+        .is_some_and(|hint| hint.contains("homeboy upgrade")));
+}
+
+#[test]
+fn older_runner_than_controller_points_to_runner_refresh_first() {
+    let status = status_with_runner_version("homeboy-lab", "0.0.0");
+
+    let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
+    assert_eq!(
+        metadata["primary_remediation_command"],
+        "homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect"
+    );
+
+    let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
+    let tried = err.details["tried"].as_array().expect("tried hints");
+    assert!(tried
+        .first()
+        .and_then(|hint| hint.as_str())
+        .is_some_and(|hint| hint
+            .contains("homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect")));
 }
 
 #[test]
@@ -501,12 +553,25 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
         .contains("malformed or misleading provider output"));
     let tried = err.details["tried"].as_array().expect("tried hints");
     assert!(tried
+        .first()
+        .and_then(|hint| hint.as_str())
+        .is_some_and(|hint| hint
+            .contains("homeboy runner refresh-homeboy 'homeboy lab' --ref main --reconnect")));
+    assert!(tried
         .iter()
         .any(|hint| hint.as_str().is_some_and(|hint| hint
             .contains("homeboy runner refresh-homeboy 'homeboy lab' --ref main --reconnect"))));
     assert!(tried.iter().any(|hint| hint
         .as_str()
         .is_some_and(|hint| hint.contains("refresh or select a clean runner binary"))));
+}
+
+fn higher_minor_version() -> String {
+    let controller = env!("CARGO_PKG_VERSION");
+    let mut parts = controller.split('.');
+    let major = parts.next().unwrap_or("0");
+    let minor: u64 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    format!("{major}.{}.0", minor + 1)
 }
 
 #[test]
