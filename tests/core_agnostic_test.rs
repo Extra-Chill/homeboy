@@ -40,10 +40,20 @@ const CORE_EXTENSION_BOUNDARY_ROOTS: &[&str] =
 // Concrete extension IDs belong in extension-owned fixtures/config, not in
 // Homeboy core or core-owned tests. Keep this list to IDs provided by external
 // extensions so the guard stays independent of any one regression site.
-const CONCRETE_EXTENSION_IDS: &[Term] = &[Term {
-    name: "nodejs",
-    kind: MatchKind::Token,
-}];
+const CONCRETE_EXTENSION_IDS: &[Term] = &[
+    Term {
+        name: "nodejs",
+        kind: MatchKind::Token,
+    },
+    Term {
+        name: "codebox",
+        kind: MatchKind::Token,
+    },
+    Term {
+        name: "wp-codebox",
+        kind: MatchKind::Literal,
+    },
+];
 
 const TERMS: &[Term] = &[
     Term {

@@ -265,13 +265,13 @@ fn replay_provider_boundary_projects_latest_executor_input() {
             serde_json::to_string(&json!({
                 "task_id": "task-a",
                 "executor": {
-                    "backend": "codebox",
+                    "backend": "sample-runtime",
                     "config": {
                         "runtime_component_paths": {
                             "agent_runtime": "/runner/data-machine-patched"
                         },
                         "runtime_env": {
-                            "WP_CODEBOX_DATA_MACHINE_PATH": "/runner/data-machine-patched"
+                            "SAMPLE_RUNTIME_DATA_MACHINE_PATH": "/runner/data-machine-patched"
                         }
                     }
                 },

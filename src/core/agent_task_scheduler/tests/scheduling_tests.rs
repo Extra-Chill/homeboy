@@ -856,20 +856,14 @@ mod artifact_binding_tests {
         child_runs.sort_by(|left, right| left.task_id.cmp(&right.task_id));
         assert_eq!(child_runs[0].task_id, "case-a");
         assert_eq!(child_runs[0].run_id, "child-case-a");
-        assert_eq!(
-            child_runs[0].provider.as_deref(),
-            Some("generic-fuzz")
-        );
+        assert_eq!(child_runs[0].provider.as_deref(), Some("generic-fuzz"));
         assert_eq!(child_runs[0].state, AgentTaskState::Succeeded);
         assert_eq!(aggregate.artifact_bindings.len(), 2);
         let mut artifact_bindings = aggregate.artifact_bindings.clone();
         artifact_bindings.sort_by(|left, right| left.task_id.cmp(&right.task_id));
         assert_eq!(artifact_bindings[0].task_id, "case-a");
         assert_eq!(artifact_bindings[0].run_id, "child-case-a");
-        assert_eq!(
-            artifact_bindings[0].artifact_id,
-            "artifact-case-a"
-        );
+        assert_eq!(artifact_bindings[0].artifact_id, "artifact-case-a");
         assert_eq!(artifact_bindings[0].kind, "fuzz-report");
         assert_eq!(
             artifact_bindings[0].path.as_deref(),
@@ -1425,7 +1419,7 @@ impl AgentTaskExecutorAdapter for ConceptPacketExecutor {
                     artifact_schema: Some("wp-site-generator/ConceptPacket/v1".to_string()),
                     payload: json!({ "title": "Typed concept" }),
                     artifact: None,
-                    metadata: json!({ "source": "wp-codebox/artifact-result-envelope/v1" }),
+                    metadata: json!({ "source": "sample-runtime/artifact-result-envelope/v1" }),
                 }]
             } else {
                 Vec::new()
