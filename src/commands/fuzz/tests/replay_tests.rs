@@ -206,11 +206,35 @@ fn fuzz_replay_dry_run_resolves_persisted_homeboy_artifact_ref_without_local_byt
                 created_at: chrono::Utc::now().to_rfc3339(),
             })
             .expect("import artifact ref");
+        let rig_dir = home.path().join(".config/homeboy/rigs");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("fixture-rig.json"),
+            serde_json::json!({
+                "id": "fixture-rig",
+                "components": {
+                    "component-a": {
+                        "path": "${env.HOMEBOY_EMPTY_COMPONENT_PATH}",
+                        "extensions": {
+                            "fixture-fuzz": { "settings": {} }
+                        }
+                    }
+                },
+                "fuzz": {
+                    "default_component": "component-a"
+                }
+            })
+            .to_string(),
+        )
+        .expect("rig spec");
+        unsafe {
+            std::env::remove_var("HOMEBOY_EMPTY_COMPONENT_PATH");
+        }
 
         let (output, exit) = run_replay(FuzzReplayArgs {
-            component: None,
+            component: Some("component-a".to_string()),
             path: None,
-            rig: None,
+            rig: Some("fixture-rig".to_string()),
             extension_override: ExtensionOverrideArgs::default(),
             setting_args: SettingArgs::default(),
             artifact_or_case: None,
