@@ -7,7 +7,7 @@ use homeboy::core::fuzz::{
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
-use homeboy::core::Error;
+use homeboy::core::{Error, ErrorCode};
 
 use super::super::utils::args::PositionalComponentArgs;
 use super::types::{
@@ -83,7 +83,13 @@ fn run_replay_like(
         args.run_id.as_ref(),
         artifact_ref.as_deref(),
     );
-    let replay_context = resolve_replay_context(&args, mode)?;
+    let replay_context = match resolve_replay_context(&args, mode) {
+        Ok(context) => context,
+        Err(error) if args.dry_run && artifact_ref.is_some() && replay_context_optional(&error) => {
+            None
+        }
+        Err(error) => return Err(error),
+    };
     let replay_command = replay_context
         .as_ref()
         .and_then(|context| context.command.clone())
@@ -354,6 +360,13 @@ fn replay_component_args(args: &ReplayLikeArgs) -> PositionalComponentArgs {
         component: args.component.clone(),
         path: args.path.clone(),
     }
+}
+
+fn replay_context_optional(error: &Error) -> bool {
+    matches!(
+        error.code,
+        ErrorCode::ComponentNotFound | ErrorCode::ExtensionNotFound
+    )
 }
 
 fn replay_message(command: Option<&String>, dry_run: bool, mode: ReplayLikeMode) -> String {
