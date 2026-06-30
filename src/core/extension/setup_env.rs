@@ -134,7 +134,7 @@ mod tests {
         // rather than racing under a private lock (#6804).
         with_isolated_home(|_| {
             persist(
-                "wordpress",
+                "sample-runtime",
                 &[
                     (
                         "HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE".to_string(),
@@ -145,7 +145,7 @@ mod tests {
             )
             .expect("persist");
 
-            let loaded = load("wordpress");
+            let loaded = load("sample-runtime");
             assert_eq!(
                 loaded,
                 vec![
@@ -169,20 +169,24 @@ mod tests {
     #[test]
     fn persist_empty_clears_previous_document() {
         with_isolated_home(|_| {
-            persist("wordpress", &[("KEY".to_string(), "value".to_string())]).expect("persist");
-            assert!(!load("wordpress").is_empty());
+            persist(
+                "sample-runtime",
+                &[("KEY".to_string(), "value".to_string())],
+            )
+            .expect("persist");
+            assert!(!load("sample-runtime").is_empty());
 
-            persist("wordpress", &[]).expect("clear");
-            assert!(load("wordpress").is_empty());
+            persist("sample-runtime", &[]).expect("clear");
+            assert!(load("sample-runtime").is_empty());
         });
     }
 
     #[test]
     fn sanitizes_extension_id_for_filesystem_safety() {
         // The sanitizer maps every filesystem-unsafe character (here `/`) to
-        // `_`; `wp/sandbox` therefore becomes `wp_sandbox`. (#6705's mechanical
+        // `_`; `sample/runtime` therefore becomes `sample_runtime`. (#6705's mechanical
         // term rename left a stale expected literal here.)
-        assert_eq!(sanitize_extension_id("wp/sandbox"), "wp_sandbox");
-        assert_eq!(sanitize_extension_id("wordpress"), "wordpress");
+        assert_eq!(sanitize_extension_id("sample/runtime"), "sample_runtime");
+        assert_eq!(sanitize_extension_id("sample-runtime"), "sample-runtime");
     }
 }

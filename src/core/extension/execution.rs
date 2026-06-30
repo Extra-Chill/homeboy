@@ -1124,7 +1124,7 @@ mod tests {
             "id": "roadie",
             "local_path": "/tmp/roadie",
             "extensions": {
-                "wordpress": {
+                "sample-runtime": {
                     "settings": {
                         "test_backend": "host-smoke"
                     }
@@ -1137,7 +1137,7 @@ mod tests {
                 { "id": "test_backend", "default": "custom-provider" }
             ]
         });
-        let extension_settings = extract_component_extension_settings(&component, "wordpress");
+        let extension_settings = extract_component_extension_settings(&component, "sample-runtime");
 
         let json = build_settings_json_from_manifest(&manifest, &extension_settings, &[], &[])
             .expect("settings json");

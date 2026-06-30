@@ -162,14 +162,14 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let extensions_dir = paths::extensions().unwrap();
             std::fs::create_dir_all(&extensions_dir).unwrap();
-            let link = extensions_dir.join("wordpress");
-            let target = extensions_dir.join("missing-wordpress");
+            let link = extensions_dir.join("sample-runtime");
+            let target = extensions_dir.join("missing-sample-runtime");
             std::os::unix::fs::symlink(&target, &link).unwrap();
 
             let summaries = list_summaries(None);
 
             assert_eq!(summaries.len(), 1);
-            assert_eq!(summaries[0].id, "wordpress");
+            assert_eq!(summaries[0].id, "sample-runtime");
             assert!(!summaries[0].ready);
             assert!(summaries[0].linked);
             assert_eq!(summaries[0].error.as_deref(), Some("target_missing"));
