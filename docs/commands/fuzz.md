@@ -97,9 +97,11 @@ When a runner or extension promotes an artifact directory through `runner exec
 run artifact. A child JSON file with a Homeboy fuzz schema is recognized as typed
 evidence: `homeboy/fuzz-result-envelope/v1` becomes `fuzz_result_envelope`,
 `homeboy/fuzz-observation-set/v1` becomes `fuzz_observation_set`, and
-`homeboy/fuzz-hotspot-set/v1` becomes `fuzz_hotspot_set`. Result envelopes with
-an embedded observation set also derive persisted observation and hotspot
-artifacts for `runs hotspots` and `runs fuzz-compare`.
+`homeboy/fuzz-hotspot-set/v1` becomes `fuzz_hotspot_set`. Generic performance
+summaries using `homeboy/performance-hotspots-summary/v1` are recorded as
+`performance_hotspots_summary`. Result envelopes with an embedded observation set
+also derive persisted observation and hotspot artifacts for `runs hotspots` and
+`runs fuzz-compare`.
 
 Runner-specific schemas such as mutation-isolation or delete-boundary reports are
 not Homeboy core schemas. Store them as generic artifacts, or wrap their neutral

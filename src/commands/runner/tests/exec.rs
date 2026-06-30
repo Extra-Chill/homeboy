@@ -605,7 +605,7 @@ fn runner_exec_promotes_fuzz_envelope_observations_and_hotspots_as_typed_artifac
 }
 
 #[test]
-fn runner_exec_promotes_artifact_dir_typed_fuzz_children() {
+fn runner_exec_promotes_artifact_dir_typed_schema_children() {
     homeboy::test_support::with_isolated_home(|home| {
         let artifact_root = home.path().join("artifacts");
         homeboy::core::set_artifact_root_override(Some(artifact_root));
@@ -632,6 +632,27 @@ fn runner_exec_promotes_artifact_dir_typed_fuzz_children() {
         )
         .expect("write observations");
         std::fs::write(
+            outputs.join("performance-hotspots.json"),
+            r#"{
+                "schema": "homeboy/performance-hotspots-summary/v1",
+                "version": 1,
+                "id": "bench-hotspots",
+                "aggregation": {
+                    "method": "sum_by_dimension",
+                    "score_metric": "duration_ms"
+                },
+                "rankings": [
+                    {
+                        "id": "scenario:route-a",
+                        "rank": 1,
+                        "score": 40.0,
+                        "primary_metric": { "name": "duration_ms", "value": 40.0, "unit": "ms" }
+                    }
+                ]
+            }"#,
+        )
+        .expect("write performance hotspots");
+        std::fs::write(
             outputs.join("runner-specific-report.json"),
             r#"{"schema":"runner/mutation-isolation/v1","passed":true}"#,
         )
@@ -656,9 +677,9 @@ fn runner_exec_promotes_artifact_dir_typed_fuzz_children() {
             promote_runner_exec_artifact_dirs(&run.id, &output, &["outputs".to_string()])
                 .expect("promote artifact dir children");
 
-        assert_eq!(promoted.len(), 2);
+        assert_eq!(promoted.len(), 3);
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
-        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts.len(), 3);
         assert_eq!(artifacts[0].kind, "fuzz_observation_set");
         assert_eq!(
             artifacts[0].metadata_json["schema"],
@@ -669,9 +690,22 @@ fn runner_exec_promotes_artifact_dir_typed_fuzz_children() {
             artifacts[0].metadata_json["promoted_kind"],
             "fuzz-observations_json"
         );
-        assert_eq!(artifacts[1].kind, "runner-specific-report_json");
-        assert_eq!(artifacts[1].metadata_json["artifact_dir"], "outputs");
-        assert!(artifacts[1]
+        assert_eq!(artifacts[1].kind, "performance_hotspots_summary");
+        assert_eq!(
+            artifacts[1].metadata_json["schema"],
+            "homeboy/performance-hotspots-summary/v1"
+        );
+        assert_eq!(
+            artifacts[1].metadata_json["typed_artifact_kind"],
+            "performance_hotspots_summary"
+        );
+        assert_eq!(
+            artifacts[1].metadata_json["promoted_kind"],
+            "performance-hotspots_json"
+        );
+        assert_eq!(artifacts[2].kind, "runner-specific-report_json");
+        assert_eq!(artifacts[2].metadata_json["artifact_dir"], "outputs");
+        assert!(artifacts[2]
             .metadata_json
             .get("typed_artifact_kind")
             .is_none());
