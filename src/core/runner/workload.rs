@@ -806,6 +806,47 @@ mod tests {
     }
 
     #[test]
+    fn runner_workload_validation_accepts_fanout_cook_batch_command_label() {
+        let plan = plan();
+        let mut command = command();
+        command.hot_label = "agent-task fanout cook-batch";
+        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+
+        validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &[
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "agent-task".to_string(),
+                "fanout".to_string(),
+                "cook-batch".to_string(),
+                "--repo".to_string(),
+                "homeboy".to_string(),
+                "--run-plan".to_string(),
+            ],
+            &["HOMEBODY_TRACE_SECRET".to_string()],
+            true,
+        )
+        .expect("matching fanout cook-batch argv is valid");
+    }
+
+    #[test]
     fn runner_workload_validation_rejects_required_secret_categories_without_named_handoff() {
         let plan = plan();
         let command = command();

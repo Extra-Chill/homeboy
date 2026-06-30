@@ -59,6 +59,7 @@ pub(crate) const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task cont
 pub(crate) const AGENT_TASK_STATUS_LAB_LABEL: &str =
     "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
 pub(crate) const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
+pub(crate) const AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL: &str = "agent-task fanout cook-batch";
 pub(crate) const AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL: &str = "agent-task fanout run-plan";
 pub(crate) const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
 pub(crate) const AGENT_TASK_FANOUT_STATUS_LAB_LABEL: &str = "agent-task fanout status/artifacts";
@@ -227,12 +228,13 @@ const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     },
     CommandLabSupportSummary {
         contract_labels: &[
+            AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
             AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
             AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
             AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
         ],
-        message_label: "agent-task fanout run-plan/submit-batch/status/artifacts",
-        hint_label: "agent-task fanout run-plan/submit-batch/status/artifacts",
+        message_label: "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
+        hint_label: "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_AUTH_STATUS_LAB_LABEL],

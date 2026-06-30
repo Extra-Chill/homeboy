@@ -19,11 +19,12 @@ use std::collections::BTreeSet;
 use super::spec::{
     CommandLabSupportSummary, AGENT_TASK_AUTH_STATUS_LAB_LABEL,
     AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL, AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
-    AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL, AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
-    AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL,
-    AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL, AUDIT_LAB_LABEL, BENCH_LAB_LABEL,
-    COMMAND_SPECS, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL,
-    RIG_CHECK_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
+    AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL, AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
+    AGENT_TASK_FANOUT_STATUS_LAB_LABEL, AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
+    AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL,
+    AUDIT_LAB_LABEL, BENCH_LAB_LABEL, COMMAND_SPECS, FUZZ_LAB_LABEL, LINT_LAB_LABEL,
+    REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL,
+    TEST_LAB_LABEL, TRACE_LAB_LABEL,
 };
 
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
@@ -563,12 +564,21 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command:
-                            agent_task::AgentTaskFanoutCommand::RunPlan(_)
-                            | agent_task::AgentTaskFanoutCommand::CookBatch(_),
+                        command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
                     }),
             }) => LabCommandContract::portable(
                 AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
+                None,
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
+                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                        command: agent_task::AgentTaskFanoutCommand::CookBatch(_),
+                    }),
+            }) => LabCommandContract::portable(
+                AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 None,
                 true,
                 LAB_NO_EXTRA_TOOLS,
