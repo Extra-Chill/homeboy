@@ -58,6 +58,7 @@ pub enum AgentTaskPromotionStatus {
     DryRun,
     Applied,
     GateFailed,
+    NoChanges,
 }
 
 impl AgentTaskPromotionStatus {
@@ -78,6 +79,7 @@ impl AgentTaskPromotionStatus {
             Self::Applied => "patch_promoted_no_pr",
             Self::GateFailed => "patch_promoted_gates_failed",
             Self::DryRun => "patch_not_promoted_dry_run",
+            Self::NoChanges => "patch_not_promoted_no_changes",
         }
     }
 }

@@ -19,6 +19,7 @@ use crate::core::agent_task_promotion::AGENT_TASK_PROMOTION_REPORT_SCHEMA;
 use crate::core::agent_task_provider::{
     provider_capability_contract, ProviderSchemaContract, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
+    RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA,
 };
 use crate::core::agent_task_schedule::{
     AgentTaskAggregateStatus, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
@@ -85,6 +86,7 @@ pub struct AgentTaskCoreContractSchemas {
     pub secret_env_plan: String,
     pub secret_env_requirement: String,
     pub command_invocation: String,
+    pub resolved_agent_runtime_execution_contract: String,
     pub batch_cook_fanout_plan: String,
     pub batch_cook_fanout_run: String,
     pub batch_cook_fanout_submit: String,
@@ -165,6 +167,8 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             secret_env_plan: SECRET_ENV_PLAN_SCHEMA.to_string(),
             secret_env_requirement: SECRET_ENV_REQUIREMENT_SCHEMA.to_string(),
             command_invocation: COMMAND_INVOCATION_SCHEMA.to_string(),
+            resolved_agent_runtime_execution_contract:
+                RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA.to_string(),
             batch_cook_fanout_plan: AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA.to_string(),
             batch_cook_fanout_run: AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA.to_string(),
             batch_cook_fanout_submit: AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA.to_string(),
@@ -395,6 +399,10 @@ mod tests {
         assert_eq!(
             contract.schemas.command_invocation,
             COMMAND_INVOCATION_SCHEMA
+        );
+        assert_eq!(
+            contract.schemas.resolved_agent_runtime_execution_contract,
+            RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA
         );
         assert_eq!(
             contract.schemas.batch_cook_fanout_plan,

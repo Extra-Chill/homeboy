@@ -12,7 +12,9 @@ use crate::core::agent_task_gate::{
     AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
 };
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
-use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
+use crate::core::agent_task_timeout_artifacts::{
+    is_actionable_patch_artifact, is_empty_patch_artifact,
+};
 use crate::core::gate::HomeboyGateResult;
 use crate::core::{Error, Result};
 
@@ -66,6 +68,44 @@ pub(crate) fn promote_with_provider(
         )
     })?;
     validate_artifact_content(&artifact, &patch)?;
+    if patch.trim().is_empty() {
+        let status = AgentTaskPromotionStatus::NoChanges;
+        let target = AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), None);
+        let operator_notification = promotion_notification(status, &target);
+
+        return Ok(AgentTaskPromotionReport {
+            schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
+            status,
+            source: AgentTaskPromotionSource {
+                kind: source_kind,
+                task_id: outcome.task_id.clone(),
+                run_id: options.source_run_id,
+                path: options
+                    .source_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            },
+            to_worktree: options.to_worktree,
+            target,
+            patch_artifact: AgentTaskPromotionArtifactRef {
+                id: artifact.id,
+                kind: artifact.kind,
+                path: patch_path.display().to_string(),
+                sha256: artifact.sha256,
+            },
+            changed_files: Vec::new(),
+            command_evidence: Vec::new(),
+            deterministic_gates: Vec::new(),
+            gate_results: Vec::new(),
+            provenance: json!({
+                "source_schema": outcome.schema,
+                "artifact_metadata": artifact.metadata,
+                "worktree_path": null,
+                "dependencies_materialized": false,
+            }),
+            operator_notification,
+        });
+    }
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
     let changed_files = normalized_patch.changed_files.clone();
 
@@ -223,6 +263,12 @@ fn promotion_notification(
                 target.worktree
             )),
         },
+        AgentTaskPromotionStatus::NoChanges => AgentTaskPromotionNotification {
+            status: "completed".to_string(),
+            message: "provider completed successfully but produced an empty patch; nothing was promoted".to_string(),
+            resumable_blocker: None,
+            next_command: None,
+        },
     }
 }
 
@@ -292,15 +338,34 @@ pub(crate) fn select_patch_artifact(
         .artifacts
         .iter()
         .filter(|artifact| artifact_id.is_none_or(|expected| artifact.id == expected))
+        .filter(|artifact| {
+            is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact)
+        })
+        .cloned()
+        .collect();
+
+    let actionable_artifacts: Vec<AgentTaskArtifact> = artifacts
+        .iter()
         .filter(|artifact| is_actionable_patch_artifact(artifact))
         .cloned()
         .collect();
+    if !actionable_artifacts.is_empty() {
+        return match actionable_artifacts.len() {
+            1 => Ok(actionable_artifacts.into_iter().next().unwrap()),
+            _ => Err(Error::validation_invalid_argument(
+                "artifact_id",
+                "multiple patch artifacts were found; pass --artifact-id to select one",
+                None,
+                None,
+            )),
+        };
+    }
 
     match artifacts.len() {
         1 => Ok(artifacts.into_iter().next().unwrap()),
         0 => Err(Error::validation_invalid_argument(
             "artifact_id",
-            "no matching non-empty patch artifact was found; inspect the agent result or transcript for diagnosis",
+            "no matching patch artifact was found; inspect the agent result or transcript for diagnosis",
             None,
             None,
         )),

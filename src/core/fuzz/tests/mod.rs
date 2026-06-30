@@ -8,3 +8,4 @@ mod observation_tests;
 mod parse_tests;
 mod sequence_tests;
 mod surface_tests;
+mod workload_tests;
