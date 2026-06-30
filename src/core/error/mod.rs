@@ -41,7 +41,6 @@ pub enum ErrorCode {
     RigResourceConflict,
     RigSchemaUnsupported,
     RunnerLabTransportFailure,
-    RunnerCapabilityMissing,
     StackNotFound,
     StackApplyConflict,
     RunnerControllerDisconnected,
@@ -100,7 +99,6 @@ impl ErrorCode {
             ErrorCode::RigResourceConflict => "rig.resource_conflict",
             ErrorCode::RigSchemaUnsupported => "rig.schema_unsupported",
             ErrorCode::RunnerLabTransportFailure => "runner.lab_transport_failure",
-            ErrorCode::RunnerCapabilityMissing => "runner_capability_missing",
             ErrorCode::StackNotFound => "stack.not_found",
             ErrorCode::StackApplyConflict => "stack.apply_conflict",
             ErrorCode::RunnerControllerDisconnected => "runner.controller_disconnected",
@@ -508,29 +506,6 @@ impl Error {
                 status: None,
                 logs: Vec::new(),
                 artifact_refs,
-                next_machine_action,
-                cause: None,
-            }),
-        )
-    }
-
-    pub fn runner_capability_missing(
-        step_id: impl Into<String>,
-        component_id: impl Into<String>,
-        next_machine_action: Option<String>,
-    ) -> Self {
-        let step_id = step_id.into();
-        let component_id = component_id.into();
-        Self::new(
-            ErrorCode::RunnerCapabilityMissing,
-            format!("Runner capability '{step_id}' is missing for component '{component_id}'"),
-            to_details(DependencyFailureDetails {
-                step_id,
-                component_id,
-                output_path_ref: None,
-                status: None,
-                logs: Vec::new(),
-                artifact_refs: Vec::new(),
                 next_machine_action,
                 cause: None,
             }),
