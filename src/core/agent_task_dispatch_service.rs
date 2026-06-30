@@ -20,6 +20,7 @@ use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskScheduler,
 };
 use crate::core::agent_task_service::{aggregate_exit_code, AgentTaskRunResult};
+use crate::core::recipe_command_preflight::preflight_plan_recipe_commands;
 use crate::core::{Error, Result};
 
 pub const DISPATCH_RESULT_SCHEMA: &str = "homeboy/agent-task-dispatch/v1";
@@ -145,6 +146,7 @@ where
     // error instead of a raw runtime fatal. Lab and local share this gate (#6223).
     catalog.reconcile_staged_runtime_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
+    preflight_plan_recipe_commands(&plan)?;
     let submitted = lifecycle::submit_plan(&plan, request.run_id.as_deref())?;
     let run_id = submitted.run_id.clone();
 
@@ -184,6 +186,7 @@ where
     // `dispatch_with_provider_catalog` for rationale. Shared with Lab dispatch.
     reconcile_staged_runtime_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
+    preflight_plan_recipe_commands(&plan)?;
     let submitted = lifecycle::submit_plan(&plan, request.run_id.as_deref())?;
     let run_id = submitted.run_id.clone();
 

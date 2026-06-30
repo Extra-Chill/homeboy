@@ -117,6 +117,7 @@ pub mod project;
 pub mod proof;
 pub mod publication_artifacts;
 pub mod quality;
+pub(crate) mod recipe_command_preflight;
 pub mod redaction;
 pub mod refactor;
 pub mod release;
