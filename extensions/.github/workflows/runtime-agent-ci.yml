@@ -4,17 +4,17 @@ on:
   workflow_call:
     inputs:
       runtime:
-        description: Agent runtime id. Preferred alias for runtime_provider.
+        description: Agent runtime id.
         required: false
         type: string
         default: ''
       backend:
-        description: Compatibility alias for runtime_provider; use runtime for new callers.
+        description: Deprecated compatibility alias for runtime. Existing callers only.
         required: false
         type: string
         default: ''
       runtime_provider:
-        description: Runtime provider identifier. Prefer runtime for new callers.
+        description: Deprecated compatibility alias for runtime. Existing callers only.
         required: false
         type: string
         default: ''
@@ -29,12 +29,12 @@ on:
         type: string
         default: ''
       runtime_profile:
-        description: Runtime profile id to select from runtime_profiles.
+        description: Deprecated compatibility alias for profile. Existing callers only.
         required: false
         type: string
         default: ''
       profile:
-        description: Preferred alias for runtime_profile.
+        description: Runtime profile id to select from runtime_profiles.
         required: false
         type: string
         default: ''
@@ -68,7 +68,7 @@ on:
         type: string
         default: '{}'
       tool_policy:
-        description: JSON runtime tool-policy DTO forwarded to the runtime config.
+        description: Deprecated runtime tool-policy DTO. New full-run callers should use tool_profile.
         required: false
         type: string
         default: '{}'

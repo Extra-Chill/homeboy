@@ -12,7 +12,7 @@ name: Runtime Agent Full Run (reusable)
         type: boolean
         default: true
       runtime_provider:
-        description: Compatibility alias for runtime; new callers should use runtime. Empty selects the neutral local-shell runtime.
+        description: Deprecated compatibility alias for runtime. Existing callers only; empty selects the neutral local-shell runtime.
         type: string
         default: ''
       runtime:
@@ -20,7 +20,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: ''
       backend:
-        description: Compatibility alias for runtime_provider; use runtime for new callers.
+        description: Deprecated compatibility alias for runtime. Existing callers only.
         type: string
         default: ''
       runtime_ref:
@@ -32,11 +32,11 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: '7.0'
       runtime_profile:
-        description: Runtime profile id selected from runtime_profiles.
+        description: Deprecated compatibility alias for profile. Existing callers only.
         type: string
         default: ''
       profile:
-        description: Preferred alias for runtime_profile.
+        description: Runtime profile id selected from runtime_profiles.
         type: string
         default: ''
       runtime_profiles:
@@ -100,7 +100,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: '{}'
       tool_policy:
-        description: Compatibility alias for tool_profile.
+        description: Deprecated compatibility alias for tool_profile. Existing callers only.
         type: string
         default: '{}'
       tool_profile:
@@ -188,7 +188,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: '[]'
       tool_recorders:
-        description: Legacy JSON array of tool recorder configs.
+        description: Deprecated compatibility alias for evidence_projections with forced parameters. Existing callers only.
         type: string
         default: '[]'
       expected_artifacts:

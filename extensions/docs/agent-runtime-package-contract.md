@@ -66,6 +66,8 @@ Runtime ids are canonical package ids. Compatibility aliases may resolve for
 existing callers, but resolvers should return explicit deprecation metadata with a
 replacement id and quarantine name. New callers should select canonical runtime
 ids directly, for example `wp-codebox` instead of the legacy `codebox` alias.
+Compatibility aliases are not extension points; new runtime packages and docs
+should publish canonical ids only.
 
 ## `runtime_path` Interpolation
 

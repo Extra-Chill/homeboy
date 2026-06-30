@@ -97,11 +97,11 @@ Use this mapping when updating old wrapper workflow bodies:
 
 | Old wrapper concept | Generic `runtime-agent-full-run.yml` input |
 | --- | --- |
-| Runtime selection | `runtime` (`runtime_provider` compatibility alias), `runtime_ref`; `runtime_wordpress_version` only applies to WordPress-capable runtimes |
+| Runtime selection | `runtime`, `runtime_ref`; `runtime_wordpress_version` only applies to WordPress-capable runtimes. Deprecated compatibility alias: `runtime_provider`. |
 | Flow identity | `workload_id`, `workload_label`, `callback_data` |
 | Bundle execution | `runtime_execution: {"kind":"bundle","source":"..."}` |
 | Direct ability execution | `runtime_task` or `ability_request` / `ability_input` |
-| Runtime stack | `runtime_dependencies`, `runtime_components`, `runtime_profile`, `runtime_profiles` |
+| Runtime stack | `runtime_dependencies`, `runtime_components`, `profile`, `runtime_profiles`. Deprecated compatibility alias: `runtime_profile`. |
 | Required abilities | `required_abilities` |
 | Output projection | `runtime_output_projections`, `evidence_projections` |
 | Artifacts | `expected_artifacts`, `artifact_declarations`, `artifact_export_config` |
@@ -120,10 +120,11 @@ Callers that compose workflow inputs before invoking `runtime-agent-full-run.yml
 can use the `homeboy-runtime-agent-ci/runtime-workflow-inputs` package export,
 the `homeboy-render-runtime-workflow-inputs` CLI, or
 `.github/actions/render-runtime-workflow-inputs`. These surfaces accept
-`runtime`, `runtime_profile` as either an id or JSON object, `runtime_profiles`,
-`tool_profile`, and runtime mount arrays, then emit selected-runtime workflow
-input JSON without exposing WP Codebox ability names, CLI paths, or schemas to
-the downstream workflow.
+`runtime`, `runtime_profile` as either an id or JSON object,
+`runtime_profiles`, `tool_profile`, and runtime mount arrays, then emit
+selected-runtime workflow input JSON with a canonical `profile` output without
+exposing WP Codebox ability names, CLI paths, or schemas to the downstream
+workflow.
 
 ## GitHub auth modes
 
@@ -153,9 +154,9 @@ jobs:
   run-example-agent:
     uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      runtime_provider: wp-codebox
+      runtime: wp-codebox
       runtime_ref: main
-      runtime_profile: example-agent-ci
+      profile: example-agent-ci
       runtime_profiles: >-
         {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-task","runtime_bundle_ability":"example/run-agent-bundle","capabilities":["ability_execution","agent_bundle_execution"],"runtime_execution_contracts":{"bundle":{"ability_field":"runtime_bundle_ability","required_capabilities":["agent_bundle_execution"]}},"ability_requirements":["example/run-agent-bundle"]}}
       runtime_dependencies: '["Example/runtime-plugin@main"]'
@@ -192,8 +193,8 @@ jobs:
 
 ## Inputs worth calling out
 
-- Agent CI runs through the selected `runtime`. Empty runtime input selects `local-shell`, `runtime_provider` remains a compatibility alias, and `codebox` resolves to `wp-codebox` for older callers. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
-- `profile` is the preferred runtime profile selector. `runtime_profile` remains supported for existing callers.
+- Agent CI runs through the selected `runtime`. Empty runtime input selects `local-shell`. Deprecated compatibility aliases remain available only for existing callers: `runtime_provider` maps to `runtime`, and the legacy `codebox` runtime id maps to canonical `wp-codebox`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
+- `profile` is the runtime profile selector. Deprecated compatibility alias: `runtime_profile`.
 - `runtime_ref` controls the selected runtime ref.
 - `runtime_execution` declares bundle, workflow, or ability execution. When `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
 - `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.
@@ -203,8 +204,8 @@ jobs:
 - `component_contracts` forwards explicit runtime component/plugin contracts to the selected runtime adapter. WP Codebox maps them through its `wp-codebox/runtime-profile/v1` payload.
 - WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, tool profiles, and declarative runtime requirements through the generic runtime workflow input renderer. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
 - `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to the selected runtime adapter.
-- `tool_profile` is the runtime-neutral tool policy input. The selected runtime adapter maps it into runtime-owned workflow fields; for WP Codebox that becomes the sandbox tool policy. `tool_policy` remains accepted as a compatibility alias.
-- `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. The generic workflow does not choose a provider plugin or secret for callers; provider dependencies and credential mappings are explicit caller inputs, and runtime manifests advertise provider-specific defaults/capabilities. The legacy `credentials` key is still accepted by the normalizer as an input alias, but generated config uses `provider_secret_env_mapping`.
+- `tool_profile` is the runtime-neutral tool policy input. The selected runtime adapter maps it into runtime-owned workflow fields; for WP Codebox that becomes the sandbox tool policy. Deprecated compatibility alias: `tool_policy`.
+- `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. The generic workflow does not choose a provider plugin or secret for callers; provider dependencies and credential mappings are explicit caller inputs, and runtime manifests advertise provider-specific defaults/capabilities. Deprecated compatibility alias: `credentials`; generated config uses `provider_secret_env_mapping`.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - Bundle sources in `runtime_execution` are resolved relative to the consumer checkout unless the caller materializes external bundle sources through dependencies or validation checkouts.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`. Use it when the workflow needs app-token access to more than the target repository.
@@ -220,7 +221,7 @@ jobs:
 - `proof_profile` controls controller-loop proof evidence. `artifact_only` is the generic default and does not require preview or PR/publication evidence, `cook_to_pr` requires durable preview plus pull-request evidence, and `none` declares no extra proof requirements. Explicit `controller_loop_proof` / `controller_loop_proof_policy` config still overrides profile fields.
 - `workload_run_after` runs post-agent verifier hooks in the same WordPress scenario, so consumers can assert the agent left WordPress in a valid state.
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
-- `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. `tool_recorders` remains a legacy alias for callers that also need forced parameters.
+- `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. Deprecated compatibility alias: `tool_recorders`, only for existing callers that also need forced parameters.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
 - `runner_workspace` provisions a selected-runtime runner workspace before the agent runs. WP Codebox uses its runner workspace API for this path. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner publishes captured workspace changes through the selected runtime after completion.
 - `runner_workspace.capture_changes` defaults to `true` only when `expose_to_agent: false`; set it explicitly to disable hidden-mode publication or to enable runner-owned capture while still exposing the workspace handle.
@@ -238,9 +239,9 @@ jobs:
   run-external-agent:
     uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      runtime_provider: wp-codebox
+      runtime: wp-codebox
       runtime_ref: main
-      runtime_profile: example-agent-ci
+      profile: example-agent-ci
       runtime_profiles: >-
         {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-task","runtime_bundle_ability":"example/run-agent-bundle","capabilities":["ability_execution","agent_bundle_execution"],"runtime_execution_contracts":{"bundle":{"ability_field":"runtime_bundle_ability","required_capabilities":["agent_bundle_execution"]}},"ability_requirements":["example/run-agent-bundle"]}}
       runtime_dependencies: '["Example/runtime-plugin@main"]'
@@ -282,8 +283,8 @@ jobs:
   run-agent:
     uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      runtime_provider: wp-codebox
-      runtime_profile: example-agent
+      runtime: wp-codebox
+      profile: example-agent
       runtime_profiles: >-
         {"example-agent":{"id":"example-agent","runtime_task_ability":"example/run-task","ability_requirements":["example/run-task"]}}
       workload_id: example-flow

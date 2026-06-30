@@ -139,9 +139,11 @@ artifacts with `runtime_mounts`, and enforce typed outputs with
 
 New callers should select runtimes with `runtime` and `profile`. Omitting
 `runtime` selects the neutral `local-shell` runtime for generic contract smokes;
-WordPress callers must pass `runtime: wp-codebox` explicitly. Existing
-`runtime_provider` / `runtime_profile` callers remain supported, and the legacy
-`codebox` runtime value resolves to `wp-codebox`.
+WordPress callers must pass `runtime: wp-codebox` explicitly. Deprecated
+compatibility aliases remain available only for existing callers:
+`runtime_provider` maps to `runtime`, `runtime_profile` maps to `profile`, and
+the legacy `codebox` runtime value maps to `wp-codebox`. Do not add new callers
+or examples that depend on those aliases.
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
 agent runs. Former domain-specific reusable workflow wrappers have been removed
