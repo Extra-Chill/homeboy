@@ -1,4 +1,38 @@
 use super::*;
+use std::fmt;
+use std::str::FromStr;
+
+pub const AGENT_TASK_APPLY_BACK_STRATEGY_MUTATION_ARTIFACTS: &str = "mutation_artifacts";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTaskApplyBackStrategy {
+    MutationArtifacts,
+}
+
+impl AgentTaskApplyBackStrategy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MutationArtifacts => AGENT_TASK_APPLY_BACK_STRATEGY_MUTATION_ARTIFACTS,
+        }
+    }
+}
+
+impl fmt::Display for AgentTaskApplyBackStrategy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for AgentTaskApplyBackStrategy {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            AGENT_TASK_APPLY_BACK_STRATEGY_MUTATION_ARTIFACTS => Ok(Self::MutationArtifacts),
+            _ => Err(()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentTaskRuntimeContract {
@@ -147,6 +181,40 @@ impl AgentTaskRuntimeApplyBack {
         self.mutation_artifacts.is_empty()
             && self.requires_git_checkout.is_none()
             && self.strategy.is_none()
+    }
+
+    pub fn strategy(&self) -> Option<AgentTaskApplyBackStrategy> {
+        self.strategy
+            .as_deref()
+            .and_then(|value| AgentTaskApplyBackStrategy::from_str(value).ok())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_back_strategy_parses_known_contract_value() {
+        let apply_back = AgentTaskRuntimeApplyBack {
+            strategy: Some(AgentTaskApplyBackStrategy::MutationArtifacts.to_string()),
+            ..AgentTaskRuntimeApplyBack::default()
+        };
+
+        assert_eq!(
+            apply_back.strategy(),
+            Some(AgentTaskApplyBackStrategy::MutationArtifacts)
+        );
+    }
+
+    #[test]
+    fn apply_back_strategy_keeps_unknown_strings_non_breaking() {
+        let apply_back = AgentTaskRuntimeApplyBack {
+            strategy: Some("provider_owned_strategy".to_string()),
+            ..AgentTaskRuntimeApplyBack::default()
+        };
+
+        assert_eq!(apply_back.strategy(), None);
     }
 }
 

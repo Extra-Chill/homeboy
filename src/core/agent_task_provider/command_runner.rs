@@ -611,6 +611,7 @@ pub(super) fn provider_command_env(
         .clone()
         .or_else(|| provider.extension_path.clone())
         .unwrap_or_default();
+    let secret_env_plan = provider_secret_env_plan_with_status(provider, request);
     let mut env = vec![
         (
             "HOMEBOY_AGENT_TASK_PROVIDER_ID".to_string(),
@@ -620,11 +621,7 @@ pub(super) fn provider_command_env(
             "HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON".to_string(),
             serde_json::to_string(&request.executor.config).unwrap_or_else(|_| "null".to_string()),
         ),
-        (
-            "HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON".to_string(),
-            serde_json::to_string(&provider_secret_env_plan_with_status(provider, request))
-                .unwrap_or_else(|_| "null".to_string()),
-        ),
+        secret_env_plan.json_env_pair(),
         (
             "HOMEBOY_AGENT_TOOL_POLICY_JSON".to_string(),
             serde_json::to_string(&request.policy.tools).unwrap_or_else(|_| "null".to_string()),

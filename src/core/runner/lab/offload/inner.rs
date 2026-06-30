@@ -2,6 +2,7 @@
 //! output-file download, and stream-truncation guard.
 
 use super::*;
+use crate::core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 
 /// Homeboy-owned Lab artifact directory for a given runner checkout root.
 ///
@@ -652,7 +653,7 @@ pub(crate) fn run_lab_offload_inner(
             secret_names: Vec::new(),
         },
         LabEnvResolutionLayer {
-            source: "secret_env_plan_env_delta",
+            source: SECRET_ENV_PLAN_ENV_DELTA_SOURCE,
             env: secret_env_delta,
             secret_names: secret_env_handoff.secret_env_names.clone(),
         },

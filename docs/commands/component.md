@@ -31,9 +31,8 @@ Options:
 - `--extension <extension>`: extension this component uses (repeatable)
 - `--project <project>`: attach the component to a project after creation
 
-Legacy JSON bulk create flags are rejected. `component create` now initializes
-repo-owned `homeboy.json` from explicit flags, then registers the component for
-ID-based discovery.
+`component create` initializes repo-owned `homeboy.json` from explicit flags,
+then registers the component for ID-based discovery.
 
 #### Extract Command Execution Context
 

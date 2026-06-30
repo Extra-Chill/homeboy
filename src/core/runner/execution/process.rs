@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::redaction::{redact_argv, RedactionPolicy};
+use crate::core::runner_execution_envelope::PATH_MATERIALIZATION_MODE_EXISTING_REMOTE;
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
@@ -233,7 +234,7 @@ pub(crate) fn prepare_runner_process(
                 &runner.id,
                 Path::new(&cwd),
                 Some(&cwd),
-                "existing_remote",
+                PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
             ),
             RunnerKind::Ssh => {
                 SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
@@ -335,7 +336,12 @@ pub(crate) fn prepare_daemon_local_process(
     )?);
     normalize_runner_command_env(&mut env);
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
-        SourceSnapshot::collect_local(&runner.id, Path::new(&cwd), Some(&cwd), "existing_remote")
+        SourceSnapshot::collect_local(
+            &runner.id,
+            Path::new(&cwd),
+            Some(&cwd),
+            PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+        )
     });
 
     Ok(PreparedRunnerProcess {

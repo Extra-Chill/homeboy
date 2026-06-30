@@ -2,6 +2,8 @@
 //! rig component path overrides, and the stale-runner-homeboy error.
 
 use super::*;
+#[cfg(test)]
+use crate::core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 
 const ENV_RESOLUTION_SCHEMA: &str = "homeboy/env-resolution/v1";
 const REDACTED_ENV_VALUE: &str = "<redacted>";
@@ -690,7 +692,7 @@ mod tests {
                 secret_names: Vec::new(),
             },
             LabEnvResolutionLayer {
-                source: "secret_env_plan_env_delta",
+                source: SECRET_ENV_PLAN_ENV_DELTA_SOURCE,
                 env: std::collections::HashMap::from([
                     ("SHARED".to_string(), "from-secret-plan".to_string()),
                     ("API_TOKEN".to_string(), "super-secret".to_string()),
@@ -717,7 +719,11 @@ mod tests {
         assert_eq!(shared["winning_source_layer"], "job_override");
         assert_eq!(
             shared["shadowed_source_layers"],
-            serde_json::json!(["env_delta", "runtime_overlay", "secret_env_plan_env_delta"])
+            serde_json::json!([
+                "env_delta",
+                "runtime_overlay",
+                SECRET_ENV_PLAN_ENV_DELTA_SOURCE
+            ])
         );
         assert_eq!(shared["classification"], "public");
         assert_eq!(shared["value_preview"], REDACTED_ENV_VALUE);
@@ -728,7 +734,7 @@ mod tests {
             .expect("api token entry");
         assert_eq!(
             api_token["winning_source_layer"],
-            "secret_env_plan_env_delta"
+            SECRET_ENV_PLAN_ENV_DELTA_SOURCE
         );
         assert_eq!(api_token["classification"], "secret");
         assert_eq!(api_token["value_status"], "secret_redacted");

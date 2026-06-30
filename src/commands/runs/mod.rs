@@ -53,8 +53,6 @@ pub use types::{RunsArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER};
 // `use` (still reachable by descendant submodules) so the re-export never
 // widens their visibility.
 pub(crate) use common::RunSummary;
-#[cfg(test)]
-pub(crate) use handlers::artifact_get;
 use handlers::require_run;
 pub(crate) use handlers::run_summary;
 pub(crate) use hotspots::fuzz_hotspot_lines;
