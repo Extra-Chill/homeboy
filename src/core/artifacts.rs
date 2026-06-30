@@ -22,10 +22,11 @@ pub use super::artifact_links::{
     PublicArtifactUrlValidation, PUBLIC_ARTIFACT_BASE_URL_ENV,
 };
 pub use super::artifact_manifest::{
-    manifest_for_existing_files, read_manifest_from_root, write_manifest_to_root, ArtifactManifest,
-    ArtifactManifestEntry, ArtifactManifestProvenance, ArtifactManifestPublicUrlState,
-    ArtifactManifestViewer, ArtifactManifestViewerLink, ArtifactRedactionState,
-    ValidatedArtifactManifestEntry, ARTIFACT_MANIFEST_FILE, ARTIFACT_MANIFEST_SCHEMA,
+    manifest_for_existing_files, manifest_path, normalize_relative_artifact_path,
+    read_manifest_from_root, write_manifest_to_root, ArtifactManifest, ArtifactManifestEntry,
+    ArtifactManifestProvenance, ArtifactManifestPublicUrlState, ArtifactManifestViewer,
+    ArtifactManifestViewerLink, ArtifactRedactionState, ValidatedArtifactManifestEntry,
+    ARTIFACT_MANIFEST_FILE, ARTIFACT_MANIFEST_SCHEMA,
 };
 pub use super::artifact_origin::{
     inspect, serve, status, status_with_command, ArtifactOriginInspect, ArtifactOriginServeSpec,

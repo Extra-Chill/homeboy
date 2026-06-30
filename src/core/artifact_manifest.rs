@@ -317,8 +317,24 @@ fn serialize_extra_field<T: Serialize>(value: &T, context: &str) -> Result<Value
         .map_err(|e| Error::internal_json(e.to_string(), Some(format!("serialize {context}"))))
 }
 
-fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
+pub fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
     root.as_ref().join(ARTIFACT_MANIFEST_FILE)
+}
+
+pub fn normalize_relative_artifact_path(relative: impl AsRef<Path>) -> Result<String> {
+    let relative = relative.as_ref();
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(disallowed_component)
+    {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "artifact path must be relative and stay within the artifact root",
+            Some(relative.to_string_lossy().to_string()),
+            None,
+        ));
+    }
+    Ok(slash_path(relative))
 }
 
 pub fn read_manifest_from_root(root: impl AsRef<Path>) -> Result<ArtifactManifest> {
@@ -468,15 +484,7 @@ fn validate_entry_shape(entry: &ArtifactManifestEntry) -> Result<()> {
 }
 
 fn validate_relative_artifact_path(relative: &str) -> Result<()> {
-    let relative_path = Path::new(relative);
-    if relative_path.is_absolute() || relative_path.components().any(disallowed_component) {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "artifact path must be relative and stay within the artifact root",
-            Some(relative.to_string()),
-            None,
-        ));
-    }
+    normalize_relative_artifact_path(relative)?;
     Ok(())
 }
 
@@ -729,6 +737,33 @@ mod tests {
             manifest.artifacts[0].content_type.as_deref(),
             Some("application/json")
         );
+    }
+
+    #[test]
+    fn exposes_manifest_path_from_canonical_filename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            manifest_path(dir.path()),
+            dir.path().join(ARTIFACT_MANIFEST_FILE)
+        );
+    }
+
+    #[test]
+    fn normalizes_safe_relative_artifact_paths_to_slashes() {
+        assert_eq!(
+            normalize_relative_artifact_path(Path::new("logs").join("output.txt"))
+                .expect("normalized path"),
+            "logs/output.txt"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_relative_artifact_paths() {
+        for path in ["", ".", "logs/../secret.txt", "/tmp/output.txt"] {
+            let err = normalize_relative_artifact_path(path).expect_err("unsafe path");
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        }
     }
 
     #[test]
