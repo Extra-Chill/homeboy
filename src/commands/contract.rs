@@ -6,10 +6,11 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::command_contract::{
-    CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
-    CommandRawOutputMode, CommandResponseMode, CommandStdoutMode, COMMAND_REGISTRY,
-    PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
-    RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA, RUN_LOCATION_INDEX_SCHEMA,
+    registered_contract, registered_contracts, CommandDispatchFamily, CommandJsonFamily,
+    CommandOutputContractKind, CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode,
+    CommandStdoutMode, ContractRegistryEntry, COMMAND_REGISTRY, PUBLIC_OUTPUT_VARIANT_CONTRACTS,
+    RUNNER_ARTIFACT_MANIFEST_SCHEMA, RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA,
+    RUN_LOCATION_INDEX_SCHEMA,
 };
 use crate::commands::{CmdResult, GlobalArgs};
 
@@ -26,8 +27,78 @@ pub struct ContractArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ContractCommand {
+    /// List core-owned data contracts.
+    List,
+    /// Show one core-owned data contract by schema id or registry name.
+    Show(ContractShowArgs),
     /// Export machine-consumable Homeboy contract JSON files.
     Export(ContractExportArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ContractShowArgs {
+    /// Schema id or short registry name.
+    pub schema_id_or_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum ContractOutput {
+    Export(ContractExportOutput),
+    List(ContractListOutput),
+    Show(ContractShowOutput),
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ContractListOutput {
+    pub kind: &'static str,
+    pub contracts: Vec<ContractListEntry>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ContractShowOutput {
+    pub kind: &'static str,
+    pub contract: ContractDetail,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ContractListEntry {
+    pub schema_id: &'static str,
+    pub name: &'static str,
+    pub title: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ContractDetail {
+    pub schema_id: &'static str,
+    pub name: &'static str,
+    pub title: &'static str,
+    pub owner: &'static str,
+    pub summary: &'static str,
+    pub rust_type: &'static str,
+}
+
+impl From<&'static ContractRegistryEntry> for ContractListEntry {
+    fn from(entry: &'static ContractRegistryEntry) -> Self {
+        Self {
+            schema_id: entry.schema_id,
+            name: entry.name,
+            title: entry.title,
+        }
+    }
+}
+
+impl From<&'static ContractRegistryEntry> for ContractDetail {
+    fn from(entry: &'static ContractRegistryEntry) -> Self {
+        Self {
+            schema_id: entry.schema_id,
+            name: entry.name,
+            title: entry.title,
+            owner: entry.owner,
+            summary: entry.summary,
+            rust_type: entry.rust_type,
+        }
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -153,9 +224,41 @@ struct FieldMetadata {
     required: bool,
 }
 
-pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractExportOutput> {
+pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput> {
     match args.command {
-        ContractCommand::Export(args) => export_contracts(args),
+        ContractCommand::List => Ok((
+            ContractOutput::List(ContractListOutput {
+                kind: "list",
+                contracts: registered_contracts()
+                    .iter()
+                    .map(ContractListEntry::from)
+                    .collect(),
+            }),
+            0,
+        )),
+        ContractCommand::Show(args) => {
+            let contract = registered_contract(&args.schema_id_or_name).ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "schema_id_or_name",
+                    format!("unknown Homeboy core contract `{}`", args.schema_id_or_name),
+                    Some(args.schema_id_or_name.clone()),
+                    Some(vec![
+                        "Run `homeboy contract list` to inspect registered contracts.".to_string(),
+                    ]),
+                )
+            })?;
+
+            Ok((
+                ContractOutput::Show(ContractShowOutput {
+                    kind: "show",
+                    contract: contract.into(),
+                }),
+                0,
+            ))
+        }
+        ContractCommand::Export(args) => {
+            export_contracts(args).map(|(output, code)| (ContractOutput::Export(output), code))
+        }
     }
 }
 
@@ -647,6 +750,9 @@ mod tests {
         let (output, exit_code) = run(args, &GlobalArgs {}).expect("contract export");
 
         assert_eq!(exit_code, 0);
+        let ContractOutput::Export(output) = output else {
+            panic!("expected export output");
+        };
         assert_eq!(output.schema, CONTRACT_EXPORT_INDEX_SCHEMA);
         assert_eq!(output.files.len(), 3);
 
@@ -682,5 +788,64 @@ mod tests {
         });
 
         assert_eq!(command.top_level_name(), "contract");
+    }
+
+    #[test]
+    fn list_returns_registered_contracts() {
+        let (output, exit_code) = run(
+            ContractArgs {
+                command: ContractCommand::List,
+            },
+            &GlobalArgs {},
+        )
+        .expect("list contracts");
+
+        assert_eq!(exit_code, 0);
+        let ContractOutput::List(output) = output else {
+            panic!("expected list output");
+        };
+        assert_eq!(output.kind, "list");
+        assert!(output
+            .contracts
+            .iter()
+            .any(|contract| contract.name == "secret-env-plan"));
+    }
+
+    #[test]
+    fn show_resolves_by_name() {
+        let (output, exit_code) = run(
+            ContractArgs {
+                command: ContractCommand::Show(ContractShowArgs {
+                    schema_id_or_name: "secret-env-plan".to_string(),
+                }),
+            },
+            &GlobalArgs {},
+        )
+        .expect("show contract");
+
+        assert_eq!(exit_code, 0);
+        let ContractOutput::Show(output) = output else {
+            panic!("expected show output");
+        };
+        assert_eq!(output.kind, "show");
+        assert_eq!(
+            output.contract.schema_id,
+            crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA
+        );
+    }
+
+    #[test]
+    fn show_rejects_unknown_contract() {
+        let err = run(
+            ContractArgs {
+                command: ContractCommand::Show(ContractShowArgs {
+                    schema_id_or_name: "missing-contract".to_string(),
+                }),
+            },
+            &GlobalArgs {},
+        )
+        .expect_err("unknown contract should fail");
+
+        assert!(err.to_string().contains("missing-contract"));
     }
 }

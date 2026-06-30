@@ -20,6 +20,7 @@
 mod lab;
 mod output;
 mod public_variants;
+mod registry;
 pub mod safety_manifest;
 mod spec;
 
@@ -45,6 +46,9 @@ pub use output::{
     CommandResponsePlan, CommandStdoutMode,
 };
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};
+pub use registry::{
+    registered_contract, registered_contracts, ContractRegistryEntry, ContractRegistrySummary,
+};
 pub use spec::{
     registered_command, registered_command_dispatch_family, registered_command_json_family,
     CommandLabSupportSummary, CommandRegistryEntry, CommandSafetySpec, CommandSpec,
