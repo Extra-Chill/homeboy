@@ -646,6 +646,10 @@ fn run_component_with_rig_context(
 
     let (extra_workloads, env_provider_extensions, invocation_requirements) =
         rig_workload_runtime_inputs(rig_context, rig_spec, ctx.extension_id.as_deref());
+    let extra_workloads = super::filter_component_conventional_bench_workloads(
+        extra_workloads,
+        path_override.as_deref(),
+    );
 
     let selected_scenarios = selected_scenario_ids(args, rig_spec)?;
     let observation = observation::start(BenchObservationStart {
