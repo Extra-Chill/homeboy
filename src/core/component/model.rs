@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use super::audit::AuditConfig;
 use super::config::{
     is_default_github_config, ArtifactInput, CleanupArtifactDeclaration, ComponentDeployConfig,
-    ComponentScriptsConfig, DependencyStackEdge, GitDeployConfig, GithubConfig, ScopeConfig,
-    ScopedExtensionConfig, VersionTarget,
+    ComponentReleaseConfig, ComponentScriptsConfig, DependencyStackEdge, GitDeployConfig,
+    GithubConfig, ScopeConfig, ScopedExtensionConfig, VersionTarget,
 };
 
 /// Lifecycle state of a component.
@@ -90,6 +90,9 @@ pub struct Component {
     /// Host-scoped GitHub CLI/API environment used by release automation.
     #[serde(default, skip_serializing_if = "is_default_github_config")]
     pub github: GithubConfig,
+    /// Release ownership metadata used to guard sharp release execution modes.
+    #[serde(default, skip_serializing_if = "ComponentReleaseConfig::is_default")]
+    pub release: ComponentReleaseConfig,
     /// Reporting-only GitHub remote override for `homeboy triage`.
     /// Does not affect git, deploy, or release operations.
     pub triage_remote_url: Option<String>,
@@ -189,6 +192,8 @@ struct RawComponent {
     remote_url: Option<String>,
     #[serde(default, skip_serializing_if = "is_default_github_config")]
     github: GithubConfig,
+    #[serde(default, skip_serializing_if = "ComponentReleaseConfig::is_default")]
+    release: ComponentReleaseConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     triage_remote_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -246,6 +251,7 @@ impl From<RawComponent> for Component {
             git_deploy: raw.git_deploy,
             remote_url: raw.remote_url,
             github: raw.github,
+            release: raw.release,
             triage_remote_url: raw.triage_remote_url,
             priority_labels: raw.priority_labels,
             auto_cleanup: raw.auto_cleanup,
@@ -289,6 +295,7 @@ impl From<Component> for RawComponent {
             git_deploy: c.git_deploy,
             remote_url: c.remote_url,
             github: c.github,
+            release: c.release,
             triage_remote_url: c.triage_remote_url,
             priority_labels: c.priority_labels,
             auto_cleanup: c.auto_cleanup,
@@ -337,6 +344,7 @@ impl Component {
             git_deploy: None,
             remote_url: None,
             github: GithubConfig::default(),
+            release: ComponentReleaseConfig::default(),
             triage_remote_url: None,
             priority_labels: None,
             auto_cleanup: false,

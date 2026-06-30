@@ -152,10 +152,10 @@ fn release_test_gate_exposes_release_blocking_policy_to_rust_tests() {
 }
 
 #[test]
-fn release_finish_head_pipeline_confirms_apply_boundary() {
+fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
     let host = job_section(release_workflow(), "host");
 
-    assert!(host.contains(
-        "./target/release/homeboy release homeboy --head --from-artifacts artifacts --skip-checks --apply"
-    ));
+    assert!(host.contains("uses: Extra-Chill/homeboy-action@v2"));
+    assert!(host.contains("release-head: 'true'"));
+    assert!(host.contains("release-from-artifacts: artifacts"));
 }
