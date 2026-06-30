@@ -207,11 +207,6 @@ pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRu
     })
 }
 
-#[cfg(test)]
-pub(crate) fn write_run_record_for_test(record: &AgentTaskRunRecord) -> Result<()> {
-    store::write_record(record)
-}
-
 pub fn list_records() -> Result<Vec<AgentTaskRunRecord>> {
     let mut records = Vec::new();
     for record in store::read_records()? {

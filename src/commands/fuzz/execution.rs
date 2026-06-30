@@ -1178,6 +1178,7 @@ pub(super) fn fuzz_evidence_followups(
     followups
 }
 
+#[cfg(test)]
 pub(super) fn default_runner_contract() -> FuzzRunnerContract {
     fuzz_runner_contract(None)
 }

@@ -920,7 +920,7 @@ mod evidence_index {
         )
     }
 
-    pub fn record_controller_evidence_index(
+    fn record_controller_evidence_index(
         record: &mut AgentTaskLoopControllerRecord,
         entity_id: Option<&str>,
         index: ControllerEvidenceIndex,
@@ -957,7 +957,7 @@ mod evidence_index {
         Ok(())
     }
 
-    pub fn evidence_index_entry(
+    fn evidence_index_entry(
         task_id: &str,
         artifacts: Vec<AgentTaskArtifact>,
         evidence_refs: Vec<AgentTaskEvidenceRef>,

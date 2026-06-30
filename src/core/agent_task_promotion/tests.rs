@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::apply::{
@@ -25,8 +25,7 @@ use crate::core::agent_task::{
     AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::core::agent_task_gate::{
-    AgentTaskGateEnvironment, AgentTaskGateReport, AgentTaskGateRevealPolicy,
-    AgentTaskGateVisibility, VerifyGateOptions,
+    AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::{Error, Result};

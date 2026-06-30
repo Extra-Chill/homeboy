@@ -458,16 +458,6 @@ fn secret_env_handoff_remediation(entry: &SecretEnvHandoffEntry) -> String {
     }
 }
 
-fn declared_agent_task_controller_secret_env(args: &[String]) -> Vec<String> {
-    if subcommand_index(args, "agent-task").is_none() {
-        return Vec::new();
-    }
-
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    declared_agent_task_controller_secret_env_with_providers(args, executor.providers())
-        .unwrap_or_default()
-}
-
 fn declared_agent_task_controller_secret_env_with_providers(
     args: &[String],
     providers: &[AgentTaskExecutorProvider],

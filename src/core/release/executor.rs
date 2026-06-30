@@ -415,22 +415,6 @@ mod tests {
     use crate::core::extension::ExtensionManifest;
     use crate::core::release::types::ReleaseState;
     use crate::core::release::{ReleaseArtifact, ReleaseStepStatus};
-    use std::process::Command;
-
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
     fn test_repo() -> GitHubRepo {
         GitHubRepo {
             host: "github.com".to_string(),
