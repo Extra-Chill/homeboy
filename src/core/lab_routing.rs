@@ -38,6 +38,7 @@ pub struct LabRoutingRequest<'a> {
     pub active_run_id: Option<&'a str>,
     pub detach_after_handoff: bool,
     pub output_file_requested: bool,
+    pub read_only_polling: bool,
     /// Controller-local `--output` path forwarded to the offload executor so the
     /// durable agent-task run id can be persisted before long execution (#5684).
     pub local_output_file: Option<&'a str>,
@@ -62,6 +63,7 @@ pub(crate) fn route_lab_offload(
         mutation_flag: request.mutation_flag,
         detach_after_handoff: request.detach_after_handoff,
         output_file_requested: request.output_file_requested,
+        read_only_polling: request.read_only_polling,
         local_output_file: request.local_output_file,
         job_overrides: request.job_overrides,
     })
@@ -416,6 +418,7 @@ fn execute_lab_offload_with_timeout(
     let mutation_flag = request.mutation_flag.map(str::to_string);
     let detach_after_handoff = request.detach_after_handoff;
     let output_file_requested = request.output_file_requested;
+    let read_only_polling = request.read_only_polling;
     let local_output_file = request.local_output_file.map(str::to_string);
     let job_overrides = request.job_overrides;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -431,6 +434,7 @@ fn execute_lab_offload_with_timeout(
             mutation_flag: mutation_flag.as_deref(),
             detach_after_handoff,
             output_file_requested,
+            read_only_polling,
             local_output_file: local_output_file.as_deref(),
             job_overrides,
         });
@@ -514,6 +518,7 @@ mod tests {
                 infer_source_path_tools: false,
                 release_gate: false,
                 requires_extension_parity: true,
+                read_only_polling: false,
             },
         }
     }
@@ -595,6 +600,7 @@ mod tests {
             active_run_id: None,
             detach_after_handoff: false,
             output_file_requested: false,
+            read_only_polling: false,
             local_output_file: None,
             job_overrides: runners::LabJobOverrides::default(),
         })
@@ -766,6 +772,7 @@ mod tests {
                 active_run_id: None,
                 detach_after_handoff: false,
                 output_file_requested: false,
+                read_only_polling: false,
                 local_output_file: None,
                 job_overrides: runners::LabJobOverrides::default(),
             },

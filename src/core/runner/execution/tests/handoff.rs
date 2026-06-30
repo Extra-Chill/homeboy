@@ -128,10 +128,7 @@ fn opt_in_cancels_remote_job_on_wait_timeout() {
 
         // The opt-in cancel primitive fired exactly once, targeting this job.
         assert_eq!(calls.borrow().len(), 1);
-        assert_eq!(
-            calls.borrow()[0],
-            ("lab".to_string(), job_id.to_string())
-        );
+        assert_eq!(calls.borrow()[0], ("lab".to_string(), job_id.to_string()));
         // The timeout still surfaces, but no longer claims the job was left running.
         assert!(!err.message.contains("was not cancelled"));
         assert!(err.message.contains("remote cancellation was requested"));
@@ -208,9 +205,10 @@ fn opt_in_surfaces_remote_cancel_failure_on_wait_timeout() {
         assert!(err.message.contains("but failed"));
         assert!(err.message.contains("runner is not connected"));
         assert_eq!(err.details["cancel_on_wait_timeout"], "failed");
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("remote cancellation failed")));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("remote cancellation failed")));
     });
 }
 
@@ -388,6 +386,8 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
             Vec::new(),
             None,
             Some(stable_run_id.to_string()),
+            true,
+            true,
             true,
         )
         .expect("reverse broker detached exec");
@@ -662,6 +662,8 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
             None,
             None,
             false,
+            true,
+            true,
         )
         .expect("reverse broker exec");
         worker.join().expect("worker joins");
@@ -777,6 +779,8 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
         None,
         None,
         false,
+        true,
+        true,
     )
     .expect_err("daemon exec failure");
 
@@ -937,6 +941,8 @@ fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
         None,
         None,
         false,
+        true,
+        true,
     )
     .expect_err("daemon exec failure");
 

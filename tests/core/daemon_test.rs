@@ -1194,6 +1194,8 @@ fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatc
             runner_workload: None,
             run_id: None,
             detach_after_handoff: false,
+            mirror_evidence: true,
+            print_handoff: true,
         },
     )
     .expect_err("policy denied");

@@ -20,6 +20,7 @@ pub struct LabOffloadRequest<'a> {
     pub mutation_flag: Option<&'a str>,
     pub detach_after_handoff: bool,
     pub output_file_requested: bool,
+    pub read_only_polling: bool,
     /// Controller-local `--output` path, when the operator requested the global
     /// JSON envelope be written to a file. Used to persist the durable agent-task
     /// run id immediately (before long-running provider execution starts) so the

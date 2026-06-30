@@ -109,6 +109,10 @@ pub fn route_after_parse(
             active_run_id: active_run_id.as_deref(),
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
+            read_only_polling: cli
+                .command
+                .lab_route_contract()?
+                .is_some_and(|contract| contract.command.routing_policy.read_only_polling),
             local_output_file: output_file,
             job_overrides,
         },
@@ -481,6 +485,8 @@ fn run_rig_source_management_on_runner(
             runner_workload: None,
             run_id: None,
             detach_after_handoff: false,
+            mirror_evidence: true,
+            print_handoff: true,
         },
     )?;
 

@@ -490,6 +490,8 @@ pub(super) fn bootstrap_source_cli_node_dependencies(
             runner_workload: None,
             run_id: None,
             detach_after_handoff: false,
+            mirror_evidence: true,
+            print_handoff: true,
         },
     )?;
     if exit_code == 0 {

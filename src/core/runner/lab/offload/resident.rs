@@ -98,12 +98,14 @@ pub(crate) fn run_runner_resident_lab_offload(
         runner_workspace_root,
     )?;
 
-    eprintln!(
-        "Lab offload: running runner-resident `{}` on runner `{}` in `{}`.",
-        redact_argv_display(&command),
-        runner_id,
-        runner_workspace_root
-    );
+    if !request.read_only_polling {
+        eprintln!(
+            "Lab offload: running runner-resident `{}` on runner `{}` in `{}`.",
+            redact_argv_display(&command),
+            runner_id,
+            runner_workspace_root
+        );
+    }
     let mut lab_metadata = lab_offload_metadata(
         &plan,
         selection.source.metadata_value(),
@@ -152,6 +154,8 @@ pub(crate) fn run_runner_resident_lab_offload(
     secret_env_names.dedup();
     preflight_lab_secret_env_handoff(runner_id, None, &env, &secret_env_handoff)?;
 
+    let (mirror_evidence, print_handoff) =
+        runner_resident_exec_noise_policy(request.read_only_polling);
     let exec_timer = overhead.phase(LabOffloadPhase::RemoteExec);
     let (exec_output, exit_code) = exec(
         runner_id,
@@ -171,6 +175,8 @@ pub(crate) fn run_runner_resident_lab_offload(
             runner_workload: None,
             run_id: agent_task_run_id,
             detach_after_handoff: false,
+            mirror_evidence,
+            print_handoff,
         },
     )?;
     exec_timer.finish();
@@ -188,7 +194,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         .inputs(PlanValues::new().json("exit_code", exit_code))
         .build(),
     );
-    if !exec_output.stderr.is_empty() {
+    if !request.read_only_polling && !exec_output.stderr.is_empty() {
         messages.push(format!(
             "Lab offload: runner-resident command wrote {} stderr bytes.",
             exec_output.stderr.len()
@@ -196,9 +202,11 @@ pub(crate) fn run_runner_resident_lab_offload(
     }
 
     let mut stderr = String::new();
-    for message in messages {
-        stderr.push_str(&message);
-        stderr.push('\n');
+    if !request.read_only_polling {
+        for message in messages {
+            stderr.push_str(&message);
+            stderr.push('\n');
+        }
     }
     stderr.push_str(&exec_output.stderr);
     if exit_code != 0 {
@@ -225,6 +233,25 @@ pub(crate) fn run_runner_resident_lab_offload(
         exit_code,
         output_file_content,
     })
+}
+
+fn runner_resident_exec_noise_policy(read_only_polling: bool) -> (bool, bool) {
+    (!read_only_polling, !read_only_polling)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runner_resident_exec_noise_policy;
+
+    #[test]
+    fn read_only_polling_skips_runner_exec_mirror_and_handoff_output() {
+        assert_eq!(runner_resident_exec_noise_policy(true), (false, false));
+    }
+
+    #[test]
+    fn runner_resident_execution_preserves_runner_exec_evidence() {
+        assert_eq!(runner_resident_exec_noise_policy(false), (true, true));
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -266,6 +293,8 @@ pub(crate) fn refresh_managed_runner_sources(
                 runner_workload: None,
                 run_id: None,
                 detach_after_handoff: false,
+                mirror_evidence: true,
+                print_handoff: true,
             },
         )?;
         if exit_code != 0 {

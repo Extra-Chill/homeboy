@@ -396,6 +396,8 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
                 runner_workload: Some(workload),
                 run_id: None,
                 detach_after_handoff: false,
+                mirror_evidence: true,
+                print_handoff: true,
             },
             |_plan| {
                 Ok(ProcessOutput {
@@ -437,6 +439,8 @@ fn test_exec_runs_local_runner_command() {
                 runner_workload: None,
                 run_id: None,
                 detach_after_handoff: false,
+                mirror_evidence: true,
+                print_handoff: true,
             },
         )
         .expect("exec local runner");
@@ -494,6 +498,8 @@ fn test_exec_does_not_leak_ambient_process_env() {
                 runner_workload: None,
                 run_id: None,
                 detach_after_handoff: false,
+                mirror_evidence: true,
+                print_handoff: true,
             },
         )
         .expect("exec local runner");
@@ -531,6 +537,8 @@ fn test_exec_preserves_explicit_request_env() {
                 runner_workload: None,
                 run_id: None,
                 detach_after_handoff: false,
+                mirror_evidence: true,
+                print_handoff: true,
             },
         )
         .expect("exec local runner");
@@ -582,6 +590,8 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
                 runner_workload: None,
                 run_id: Some("explicit-run".to_string()),
                 detach_after_handoff: false,
+                mirror_evidence: true,
+                print_handoff: true,
             },
         )
         .expect("exec local runner");
@@ -640,6 +650,8 @@ fn test_exec_rejects_missing_required_local_runner_path() {
                 runner_workload: None,
                 run_id: None,
                 detach_after_handoff: false,
+                mirror_evidence: true,
+                print_handoff: true,
             },
         )
         .expect_err("missing required path rejects before command");
@@ -684,6 +696,8 @@ fn test_exec_reports_required_path_diagnostics() {
                 runner_workload: None,
                 run_id: None,
                 detach_after_handoff: false,
+                mirror_evidence: true,
+                print_handoff: true,
             },
         )
         .expect("exec with required path");
@@ -739,6 +753,8 @@ fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
                 runner_workload: None,
                 run_id: None,
                 detach_after_handoff: false,
+                mirror_evidence: true,
+                print_handoff: true,
             },
         )
         .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
@@ -778,6 +794,8 @@ fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
         runner_workload: None,
         run_id: None,
         detach_after_handoff: false,
+        mirror_evidence: true,
+        print_handoff: true,
     };
 
     assert!(should_force_diagnostic_ssh(&ssh_runner(), &options));
