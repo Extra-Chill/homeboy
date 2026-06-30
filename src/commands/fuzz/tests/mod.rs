@@ -23,7 +23,8 @@ use super::types::{
     FuzzWorkloadOutput,
 };
 use super::workloads::{
-    fuzz_workloads, resolve_component_id, rig_component_for_fuzz, select_workload, FuzzRigContext,
+    fuzz_workloads, resolve_component_id, resolve_fuzz_context, rig_component_for_fuzz,
+    select_workload, FuzzRigContext,
 };
 use super::{run_contract, run_discover, FuzzArgs};
 use clap::Parser;

@@ -32,11 +32,20 @@ fn run_replay_like(
     args: ReplayLikeArgs,
     mode: ReplayLikeMode,
 ) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
-    let artifact_ref = replay_artifact_ref(&args);
+    let mut artifact_ref = replay_artifact_ref(&args);
     let artifact_file = match replay_artifact_path(&args) {
         Some(path) => Some(path),
         None if artifact_ref.is_none() => {
-            resolve_run_replay_artifact_path(args.run_id.as_deref()).transpose()?
+            match resolve_run_replay_artifact_source(args.run_id.as_deref(), args.dry_run)
+                .transpose()?
+            {
+                Some(ReplayArtifactSource::Local(path)) => Some(path),
+                Some(ReplayArtifactSource::Reference(reference)) => {
+                    artifact_ref = Some(reference);
+                    None
+                }
+                None => None,
+            }
         }
         None => None,
     };
@@ -418,7 +427,7 @@ struct ResolvedReplayArtifact {
 fn replay_artifact_path(args: &ReplayLikeArgs) -> Option<PathBuf> {
     args.artifact.clone().or_else(|| {
         args.artifact_or_case.as_ref().and_then(|value| {
-            if value.starts_with("runner-artifact://") {
+            if is_replay_artifact_ref(value) {
                 return None;
             }
             let path = PathBuf::from(value);
@@ -431,8 +440,12 @@ fn replay_artifact_path(args: &ReplayLikeArgs) -> Option<PathBuf> {
 fn replay_artifact_ref(args: &ReplayLikeArgs) -> Option<String> {
     args.artifact_or_case
         .as_deref()
-        .filter(|value| value.starts_with("runner-artifact://"))
+        .filter(|value| is_replay_artifact_ref(value))
         .map(str::to_string)
+}
+
+fn is_replay_artifact_ref(value: &str) -> bool {
+    value.starts_with("runner-artifact://") || value.starts_with("homeboy://run/")
 }
 
 fn runner_artifact_replay_requires_local_bytes(reference: &str) -> homeboy::core::Error {
@@ -448,14 +461,26 @@ fn runner_artifact_replay_requires_local_bytes(reference: &str) -> homeboy::core
     )
 }
 
-fn resolve_run_replay_artifact_path(
-    run_id: Option<&str>,
-) -> Option<homeboy::core::Result<PathBuf>> {
-    let run_id = run_id.filter(|run_id| !run_id.trim().is_empty())?;
-    Some(resolve_run_replay_artifact_path_inner(run_id))
+enum ReplayArtifactSource {
+    Local(PathBuf),
+    Reference(String),
 }
 
-fn resolve_run_replay_artifact_path_inner(run_id: &str) -> homeboy::core::Result<PathBuf> {
+fn resolve_run_replay_artifact_source(
+    run_id: Option<&str>,
+    allow_ref_without_bytes: bool,
+) -> Option<homeboy::core::Result<ReplayArtifactSource>> {
+    let run_id = run_id.filter(|run_id| !run_id.trim().is_empty())?;
+    Some(resolve_run_replay_artifact_source_inner(
+        run_id,
+        allow_ref_without_bytes,
+    ))
+}
+
+fn resolve_run_replay_artifact_source_inner(
+    run_id: &str,
+    allow_ref_without_bytes: bool,
+) -> homeboy::core::Result<ReplayArtifactSource> {
     let store = ObservationStore::open_initialized()?;
     let _run = runs_service::require_run(&store, run_id)?;
     let mut candidates = runs_service::list_artifacts_for_run(&store, run_id)?
@@ -465,22 +490,32 @@ fn resolve_run_replay_artifact_path_inner(run_id: &str) -> homeboy::core::Result
         .collect::<Vec<_>>();
     candidates.sort_by_key(run_replay_artifact_rank);
 
-    candidates
-        .into_iter()
-        .map(|artifact| PathBuf::from(artifact.path))
-        .find(|path| path.is_file())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "run-id",
-                format!("fuzz replay artifact not found for run: {run_id}"),
-                Some(run_id.to_string()),
-                Some(vec![
-                    format!("Run `homeboy runs artifacts {run_id}` to inspect recorded artifacts."),
-                    "Persist a fuzz campaign/result envelope artifact before replaying by run id."
-                        .to_string(),
-                ]),
-            )
-        })
+    for artifact in &candidates {
+        let path = PathBuf::from(&artifact.path);
+        if path.is_file() {
+            return Ok(ReplayArtifactSource::Local(path));
+        }
+    }
+
+    if allow_ref_without_bytes {
+        if let Some(artifact) = candidates.first() {
+            return Ok(ReplayArtifactSource::Reference(format!(
+                "homeboy://run/{run_id}/artifact/{}",
+                artifact.id
+            )));
+        }
+    }
+
+    Err(Error::validation_invalid_argument(
+        "run-id",
+        format!("fuzz replay artifact not found for run: {run_id}"),
+        Some(run_id.to_string()),
+        Some(vec![
+            format!("Run `homeboy runs artifacts {run_id}` to inspect recorded artifacts."),
+            "Persist a fuzz campaign/result envelope artifact before replaying by run id."
+                .to_string(),
+        ]),
+    ))
 }
 
 fn is_run_replay_artifact_candidate(artifact: &ArtifactRecord) -> bool {

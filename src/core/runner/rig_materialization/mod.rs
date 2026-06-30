@@ -365,11 +365,11 @@ fn installed_rig_path_from_stdout(stdout: &str, rig_id: &str) -> Option<String> 
         .map(str::to_string)
 }
 
-pub(super) fn remap_bench_rig_default_component_to_primary_snapshot(
+pub(super) fn remap_rig_default_component_to_primary_snapshot(
     args: &[String],
     primary_remote_path: &str,
 ) -> Vec<String> {
-    if !is_bench_rig_run(args) || has_path_arg(args) {
+    if !is_bench_or_fuzz_rig_component_command(args) || has_path_arg(args) {
         return args.to_vec();
     }
 
@@ -405,9 +405,15 @@ fn primary_source_rig_ids(primary_local_path: &str) -> Result<HashSet<String>> {
         .collect())
 }
 
-fn is_bench_rig_run(args: &[String]) -> bool {
-    matches!(args.get(1).map(String::as_str), Some("bench"))
-        && !lab_offload_rig_ids(args).is_empty()
+fn is_bench_or_fuzz_rig_component_command(args: &[String]) -> bool {
+    match args.get(1).map(String::as_str) {
+        Some("bench") => !lab_offload_rig_ids(args).is_empty(),
+        Some("fuzz") => {
+            matches!(args.get(2).map(String::as_str), Some("list" | "run"))
+                && !lab_offload_rig_ids(args).is_empty()
+        }
+        _ => false,
+    }
 }
 
 fn has_path_arg(args: &[String]) -> bool {
@@ -1242,7 +1248,7 @@ mod tests {
             "editable_preview_ready".to_string(),
         ];
 
-        let rewritten = remap_bench_rig_default_component_to_primary_snapshot(
+        let rewritten = remap_rig_default_component_to_primary_snapshot(
             &args,
             "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
         );
@@ -1258,6 +1264,37 @@ mod tests {
                 "editable_preview_ready",
                 "--path",
                 "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
+            ]
+        );
+    }
+
+    #[test]
+    fn fuzz_rig_list_args_receive_primary_snapshot_path() {
+        let args = vec![
+            "homeboy".to_string(),
+            "fuzz".to_string(),
+            "list".to_string(),
+            "woocommerce".to_string(),
+            "--rig".to_string(),
+            "woocommerce-performance".to_string(),
+        ];
+
+        let rewritten = remap_rig_default_component_to_primary_snapshot(
+            &args,
+            "/home/user/Developer/_lab_workspaces/woocommerce-abc",
+        );
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy",
+                "fuzz",
+                "list",
+                "woocommerce",
+                "--rig",
+                "woocommerce-performance",
+                "--path",
+                "/home/user/Developer/_lab_workspaces/woocommerce-abc",
             ]
         );
     }
@@ -1299,7 +1336,7 @@ mod tests {
             "--runner-owned".to_string(),
         ];
 
-        let rewritten = remap_bench_rig_default_component_to_primary_snapshot(
+        let rewritten = remap_rig_default_component_to_primary_snapshot(
             &args,
             "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
         );
@@ -1330,7 +1367,7 @@ mod tests {
         ];
 
         assert_eq!(
-            remap_bench_rig_default_component_to_primary_snapshot(&args, "/snapshot"),
+            remap_rig_default_component_to_primary_snapshot(&args, "/snapshot"),
             args
         );
     }

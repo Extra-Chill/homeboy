@@ -131,7 +131,13 @@ pub(super) fn resolve_fuzz_context(
         .path
         .clone()
         .or_else(|| rig_spec.and_then(|spec| rig_component_path(spec, component_id)));
-    let component_override = rig_spec.and_then(|spec| rig_component_for_fuzz(spec, component_id));
+    let component_override = rig_spec.and_then(|spec| {
+        rig_component_for_fuzz(spec, component_id).or_else(|| {
+            path_override
+                .as_ref()
+                .and_then(|path| rig_component_for_fuzz_with_path(spec, component_id, path))
+        })
+    });
 
     let mut resolve_options = ResolveOptions::with_capability_and_json(
         component_id,
@@ -156,6 +162,31 @@ pub(super) fn rig_component_for_fuzz(spec: &RigSpec, component_id: &str) -> Opti
     let mut component = rig::resolve_component(spec, component_id).ok()?;
     component.remote_url = rig_component.remote_url.clone().or(component.remote_url);
     component.extensions = Some(extensions);
+    component.resolve_remote_path();
+    Some(component)
+}
+
+fn rig_component_for_fuzz_with_path(
+    spec: &RigSpec,
+    component_id: &str,
+    path: &str,
+) -> Option<Component> {
+    let rig_component = spec.components.get(component_id)?;
+    let mut extensions = rig_component.extensions.clone()?;
+    expand_rig_extension_settings(spec, &mut extensions);
+    let mut component = Component {
+        id: rig_component
+            .component_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(component_id)
+            .to_string(),
+        local_path: path.to_string(),
+        remote_url: rig_component.remote_url.clone(),
+        triage_remote_url: rig_component.triage_remote_url.clone(),
+        extensions: Some(extensions),
+        ..Component::default()
+    };
     component.resolve_remote_path();
     Some(component)
 }
