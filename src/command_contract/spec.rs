@@ -441,6 +441,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     command_spec("component", CommandJsonFamily::Workspace),
     command_spec("config", CommandJsonFamily::Workspace),
+    command_spec_with_output_notes(
+        "contract",
+        CommandJsonFamily::Workspace,
+        "exports stable machine-consumable contract JSON files for downstream non-Rust consumers",
+    ),
     command_spec("daemon", CommandJsonFamily::Ops),
     command_spec("extension", CommandJsonFamily::Workspace),
     command_spec("status", CommandJsonFamily::Ops),
