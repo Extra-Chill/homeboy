@@ -97,6 +97,7 @@ pub mod issues;
 pub mod keychain;
 pub mod lab_routing;
 pub mod lifecycle;
+pub mod loop_lifecycle;
 pub(crate) mod markdown;
 pub mod matrix_artifact_summary;
 pub mod notify;
