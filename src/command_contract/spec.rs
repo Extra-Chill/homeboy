@@ -444,7 +444,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec_with_output_notes(
         "contract",
         CommandJsonFamily::Workspace,
-        "exports stable machine-consumable contract JSON files for downstream non-Rust consumers",
+        "lists, shows, and exports Homeboy-owned contract metadata for downstream consumers",
     ),
     command_spec("daemon", CommandJsonFamily::Ops),
     command_spec("extension", CommandJsonFamily::Workspace),
