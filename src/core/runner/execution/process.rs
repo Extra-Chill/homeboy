@@ -133,7 +133,7 @@ pub(crate) fn prepare_runner_process(
         ));
     }
 
-    let runner = request
+    let mut runner = request
         .runner
         .map(|mut runner| {
             if runner.id.is_empty() {
@@ -168,32 +168,62 @@ pub(crate) fn prepare_runner_process(
         },
     )?;
 
-    let mut env = runner.env.clone();
-    env.extend(request.env);
+    let raw_runner_env = runner.env.clone();
+    let request_env = request.env.clone();
+    let mut env = raw_runner_env.clone();
+    env.extend(request_env.clone());
     if runner.kind != RunnerKind::Local {
         env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
         env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
     }
-    let mut secret_env_plan =
-        SecretEnvPlan::from_secret_env_names(request.secret_env_names.iter().cloned());
-    secret_env_plan.allow_inherited_env_names([RUNTIME_SECRET_ENV_ALLOWLIST_ENV.to_string()]);
-    secret_env_plan.remove_undeclared_inherited_secret_env(&mut env);
+    let secret_env_plan =
+        runner_exec_secret_env_plan(&request.command, None, &request.secret_env_names, &env);
 
     if runner.kind == RunnerKind::Local {
+        validate_runner_inherited_secret_env(
+            &secret_env_plan,
+            &request_env,
+            "local controller env",
+            true,
+        )?;
+        let runner_env = validated_runner_inherited_env(
+            &secret_env_plan,
+            raw_runner_env,
+            "local controller runner.env",
+            false,
+        )?;
+        runner.env = runner_env.clone();
+        env = runner_env;
+        env.extend(request_env.clone());
         env.extend(resolve_runner_secret_env_for_plan(
             &runner.secret_env,
             &secret_env_plan,
             &env,
         )?);
-        validate_runner_inherited_secret_env(&secret_env_plan, &env)?;
         normalize_runner_command_env(&mut env);
     } else {
+        validate_runner_inherited_secret_env(
+            &secret_env_plan,
+            &request_env,
+            "local controller env",
+            true,
+        )?;
+        let runner_env = validated_runner_inherited_env(
+            &secret_env_plan,
+            raw_runner_env,
+            "local controller runner.env",
+            false,
+        )?;
+        runner.env = runner_env.clone();
+        env = runner_env;
+        env.extend(request_env.clone());
+        env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
+        env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
         env.extend(resolve_controller_secret_env_for_command(
             &runner.secret_env,
             &request.secret_env_names,
             &env,
         )?);
-        validate_runner_inherited_secret_env(&secret_env_plan, &env)?;
     }
 
     let source_snapshot = request
@@ -248,7 +278,7 @@ pub(crate) fn prepare_daemon_local_process(
             ]),
         )
     })?;
-    let runner = request
+    let mut runner = request
         .runner
         .map(|mut runner| {
             if runner.id.is_empty() {
@@ -277,18 +307,32 @@ pub(crate) fn prepare_daemon_local_process(
         request.validate_require_paths_on_host,
     )?;
 
-    let mut env = runner.env.clone();
-    env.extend(request.env);
-    let mut secret_env_plan =
-        SecretEnvPlan::from_secret_env_names(request.secret_env_names.iter().cloned());
-    secret_env_plan.allow_inherited_env_names([RUNTIME_SECRET_ENV_ALLOWLIST_ENV.to_string()]);
-    secret_env_plan.remove_undeclared_inherited_secret_env(&mut env);
+    let raw_runner_env = runner.env.clone();
+    let request_env = request.env.clone();
+    let mut env = raw_runner_env.clone();
+    env.extend(request_env.clone());
+    let secret_env_plan =
+        runner_exec_secret_env_plan(&request.command, None, &request.secret_env_names, &env);
+    validate_runner_inherited_secret_env(
+        &secret_env_plan,
+        &request_env,
+        "local controller env",
+        true,
+    )?;
+    let runner_env = validated_runner_inherited_env(
+        &secret_env_plan,
+        raw_runner_env,
+        "remote runner daemon env",
+        false,
+    )?;
+    runner.env = runner_env.clone();
+    env = runner_env;
+    env.extend(request_env.clone());
     env.extend(resolve_runner_secret_env_for_plan(
         &runner.secret_env,
         &secret_env_plan,
         &env,
     )?);
-    validate_runner_inherited_secret_env(&secret_env_plan, &env)?;
     normalize_runner_command_env(&mut env);
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
         SourceSnapshot::collect_local(&runner.id, Path::new(&cwd), Some(&cwd), "existing_remote")
@@ -345,17 +389,22 @@ pub(super) fn apply_runner_process_env(
 fn validate_runner_inherited_secret_env(
     plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
+    source: &str,
+    enforce_without_secret_contract: bool,
 ) -> Result<()> {
+    if env.is_empty() || (!enforce_without_secret_contract && plan.secret_env_names().is_empty()) {
+        return Ok(());
+    }
     let env = env
         .iter()
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<BTreeMap<_, _>>();
-    plan.diagnose_inherited_env(&env, "runner.env")
+    plan.diagnose_inherited_env(&env, source)
         .map(|_| ())
         .map_err(|error| {
             Error::validation_invalid_argument(
                 "env",
-                error.message,
+                format!("{} in {source}", error.message),
                 None,
                 Some(vec![
                     "Declare secret-bearing runtime env names in secret_env or HOMEBOY_AGENT_RUNTIME_SECRET_ENV before runner execution.".to_string(),
@@ -363,6 +412,24 @@ fn validate_runner_inherited_secret_env(
                 ]),
             )
         })
+}
+
+fn validated_runner_inherited_env(
+    plan: &SecretEnvPlan,
+    env: HashMap<String, String>,
+    source: &str,
+    enforce_without_secret_contract: bool,
+) -> Result<HashMap<String, String>> {
+    validate_runner_inherited_secret_env(plan, &env, source, enforce_without_secret_contract)?;
+    if enforce_without_secret_contract || !plan.secret_env_names().is_empty() {
+        return Ok(env);
+    }
+
+    let policy = RedactionPolicy::default();
+    Ok(env
+        .into_iter()
+        .filter(|(name, _)| !policy.is_sensitive_key(name))
+        .collect())
 }
 
 pub(super) fn inherited_runner_process_env_keys() -> &'static [&'static str] {
