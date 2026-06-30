@@ -74,6 +74,7 @@ fn run_ordered_steps(
     let mut failed = 0;
     let mut passed = 0;
     let mut aborted = false;
+    let mut runner_capabilities = RunnerDependencyCapabilities::from_environment();
 
     for idx in ordered_indices {
         let step = &steps[idx];
@@ -90,7 +91,9 @@ fn run_ordered_steps(
         let label = labels::step_label(rig, step, idx);
         crate::log_status!("rig", "{}: {}", name, label);
 
-        let result = run_step(rig, name, step, settings);
+        let result = runner_capabilities
+            .validate_step(&rig.id, &label, step)
+            .and_then(|()| run_step(rig, name, step, settings));
 
         let outcome = match &result {
             Ok(()) => PipelineStepOutcome {
@@ -108,7 +111,10 @@ fn run_ordered_steps(
         };
 
         match &result {
-            Ok(()) => passed += 1,
+            Ok(()) => {
+                passed += 1;
+                runner_capabilities.record_step(step);
+            }
             Err(_) => {
                 failed += 1;
                 if fail_fast {
@@ -126,6 +132,77 @@ fn run_ordered_steps(
         passed,
         failed,
     })
+}
+
+#[derive(Debug, Clone, Default)]
+struct RunnerDependencyCapabilities {
+    capabilities: BTreeSet<String>,
+    providers: BTreeSet<String>,
+}
+
+impl RunnerDependencyCapabilities {
+    fn from_environment() -> Self {
+        Self {
+            capabilities: split_env_list("HOMEBOY_RUNNER_CAPABILITIES"),
+            providers: split_env_list("HOMEBOY_RUNNER_PROVIDERS"),
+        }
+    }
+
+    fn validate_step(&self, rig_id: &str, label: &str, step: &PipelineStep) -> Result<()> {
+        let missing_capabilities = ordering::required_capabilities(step)
+            .iter()
+            .filter(|capability| !self.capabilities.contains(capability.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let missing_providers = ordering::required_providers(step)
+            .iter()
+            .filter(|provider| !self.providers.contains(provider.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if missing_capabilities.is_empty() && missing_providers.is_empty() {
+            return Ok(());
+        }
+
+        Err(crate::core::error::Error::runner_capability_missing(
+            runner_id(),
+            format!("{}:{}", rig_id, label),
+            missing_capabilities,
+            missing_providers,
+        ))
+    }
+
+    fn record_step(&mut self, step: &PipelineStep) {
+        self.capabilities.extend(
+            ordering::provided_capabilities(step)
+                .iter()
+                .filter(|value| !value.trim().is_empty())
+                .cloned(),
+        );
+        self.providers.extend(
+            ordering::provided_providers(step)
+                .iter()
+                .filter(|value| !value.trim().is_empty())
+                .cloned(),
+        );
+    }
+}
+
+fn split_env_list(name: &str) -> BTreeSet<String> {
+    std::env::var(name)
+        .unwrap_or_default()
+        .split([',', ' ', '\n', '\t'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn runner_id() -> String {
+    std::env::var("HOMEBOY_RUNNER_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "local".to_string())
 }
 
 fn run_step(

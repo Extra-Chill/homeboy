@@ -33,6 +33,7 @@ pub enum ErrorCode {
     RigNotFound,
     RunnerNotFound,
     RunnerPolicyDenied,
+    RunnerCapabilityMissing,
     BrokerAuthDenied,
     ServiceTunnelNotFound,
     RigPipelineFailed,
@@ -88,6 +89,7 @@ impl ErrorCode {
             ErrorCode::RigNotFound => "rig.not_found",
             ErrorCode::RunnerNotFound => "runner.not_found",
             ErrorCode::RunnerPolicyDenied => "runner.policy_denied",
+            ErrorCode::RunnerCapabilityMissing => "runner.capability_missing",
             ErrorCode::BrokerAuthDenied => "broker.auth_denied",
             ErrorCode::ServiceTunnelNotFound => "service_tunnel.not_found",
             ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
@@ -568,6 +570,38 @@ impl Error {
 
     pub fn runner_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
         Self::entity_not_found(ErrorCode::RunnerNotFound, "Runner", id, suggestions)
+    }
+
+    pub fn runner_capability_missing(
+        runner_id: impl Into<String>,
+        step: impl Into<String>,
+        missing_capabilities: Vec<String>,
+        missing_providers: Vec<String>,
+    ) -> Self {
+        let runner_id = runner_id.into();
+        let step = step.into();
+        let mut parts = Vec::new();
+        if !missing_capabilities.is_empty() {
+            parts.push(format!("capabilities: {}", missing_capabilities.join(", ")));
+        }
+        if !missing_providers.is_empty() {
+            parts.push(format!("providers: {}", missing_providers.join(", ")));
+        }
+        Self::new(
+            ErrorCode::RunnerCapabilityMissing,
+            format!(
+                "Runner '{}' is missing required capabilities for '{}': {}",
+                runner_id,
+                step,
+                parts.join("; ")
+            ),
+            serde_json::json!({
+                "runner_id": runner_id,
+                "step": step,
+                "missing_capabilities": missing_capabilities,
+                "missing_providers": missing_providers,
+            }),
+        )
     }
 
     /// Reverse runner broker authentication/authorization rejection.

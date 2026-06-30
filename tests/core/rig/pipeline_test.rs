@@ -187,6 +187,118 @@ fn test_command_step_exposes_pipeline_settings_env() {
 }
 
 #[test]
+fn test_command_step_fails_with_structured_runner_capability_missing() {
+    let _env_lock = capability_env_lock();
+    let _guard = EnvRestore::set("HOMEBOY_RUNNER_ID", Some("fixture-runner"));
+    let _capabilities = EnvRestore::set("HOMEBOY_RUNNER_CAPABILITIES", None);
+    let _providers = EnvRestore::set("HOMEBOY_RUNNER_PROVIDERS", None);
+    let rig: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "capability-missing",
+            "pipeline": {
+                "bench_prepare": [{
+                    "kind": "command",
+                    "command": "true",
+                    "requires_capabilities": ["fixture.workspace.prepared"],
+                    "requires_providers": ["fixture.runtime"]
+                }]
+            }
+        }"#,
+    )
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline reports failure");
+
+    assert!(!out.is_success());
+    let error = out.steps[0].error.as_deref().unwrap_or_default();
+    assert!(error.contains("fixture-runner"), "error: {error}");
+    assert!(
+        error.contains("fixture.workspace.prepared"),
+        "error: {error}"
+    );
+    assert!(error.contains("fixture.runtime"), "error: {error}");
+}
+
+#[test]
+fn test_bootstrap_step_provides_required_runner_capability_before_consumer() {
+    let _env_lock = capability_env_lock();
+    let _runner = EnvRestore::set("HOMEBOY_RUNNER_ID", None);
+    let _capabilities = EnvRestore::set("HOMEBOY_RUNNER_CAPABILITIES", None);
+    let _providers = EnvRestore::set("HOMEBOY_RUNNER_PROVIDERS", None);
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let marker = tmp.path().join("order.txt");
+    let marker_arg = marker.to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "capability-bootstrap",
+            "pipeline": {{
+                "bench_prepare": [
+                    {{
+                        "kind": "command",
+                        "id": "consumer",
+                        "label": "consumer",
+                        "command": "printf consumer >> {0}",
+                        "requires_capabilities": ["fixture.workspace.prepared"],
+                        "requires_providers": ["fixture.runtime"]
+                    }},
+                    {{
+                        "kind": "command",
+                        "id": "bootstrap",
+                        "label": "bootstrap",
+                        "command": "printf bootstrap: > {0}",
+                        "provides_capabilities": ["fixture.workspace.prepared"],
+                        "provides_providers": ["fixture.runtime"]
+                    }}
+                ]
+            }}
+        }}"#,
+        marker_arg
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
+
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+    assert_eq!(out.steps[0].label, "bootstrap");
+    assert_eq!(
+        std::fs::read_to_string(marker).expect("marker"),
+        "bootstrap:consumer"
+    );
+}
+
+struct EnvRestore {
+    name: &'static str,
+    previous: Option<String>,
+}
+
+fn capability_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("capability env lock")
+}
+
+impl EnvRestore {
+    fn set(name: &'static str, value: Option<&str>) -> Self {
+        let previous = std::env::var(name).ok();
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
+#[test]
 fn test_requirement_passes_when_declared_file_exists() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let marker = tmp.path().join("marker.txt");
@@ -487,6 +599,10 @@ mod dag {
             cmd,
             cwd,
             env: HashMap::new(),
+            requires_capabilities: Vec::new(),
+            requires_providers: Vec::new(),
+            provides_capabilities: Vec::new(),
+            provides_providers: Vec::new(),
             label: Some(id.to_string()),
         }
     }
@@ -1062,6 +1178,10 @@ mod command_env {
                 cmd,
                 cwd: None,
                 env,
+                requires_capabilities: Vec::new(),
+                requires_providers: Vec::new(),
+                provides_capabilities: Vec::new(),
+                provides_providers: Vec::new(),
                 label: Some("command".to_string()),
             }],
         );

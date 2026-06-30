@@ -141,6 +141,18 @@ pub enum PipelineStep {
         /// Env vars (merged over inherited environment).
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         env: HashMap<String, String>,
+        /// Generic capability IDs required before this dependency step runs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requires_capabilities: Vec<String>,
+        /// Generic provider IDs required before this dependency step runs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requires_providers: Vec<String>,
+        /// Generic capability IDs this step makes available after success.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provides_capabilities: Vec<String>,
+        /// Generic provider IDs this step makes available after success.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provides_providers: Vec<String>,
         /// Human-readable label shown during execution. If absent, `cmd` is used.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
@@ -169,6 +181,18 @@ pub enum PipelineStep {
         /// Env vars (merged over inherited environment).
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         env: HashMap<String, String>,
+        /// Generic capability IDs required before this dependency step runs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requires_capabilities: Vec<String>,
+        /// Generic provider IDs required before this dependency step runs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requires_providers: Vec<String>,
+        /// Generic capability IDs this step makes available after success.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provides_capabilities: Vec<String>,
+        /// Generic provider IDs this step makes available after success.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provides_providers: Vec<String>,
         /// Human-readable label shown during execution. If absent, `cmd` is used.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
@@ -224,6 +248,18 @@ pub enum PipelineStep {
         /// Env vars (merged over inherited environment) for `prepare_command`.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         env: HashMap<String, String>,
+        /// Generic capability IDs required before this dependency step runs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requires_capabilities: Vec<String>,
+        /// Generic provider IDs required before this dependency step runs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requires_providers: Vec<String>,
+        /// Generic capability IDs this step makes available after success.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provides_capabilities: Vec<String>,
+        /// Generic provider IDs this step makes available after success.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provides_providers: Vec<String>,
         /// Human remediation shown when the requirement is not satisfied.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remediation: Option<String>,

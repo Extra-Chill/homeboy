@@ -206,6 +206,10 @@ fn test_failed_run_up_does_not_write_materialized_ownership() {
                 cmd: "false".to_string(),
                 cwd: None,
                 env: HashMap::new(),
+                requires_capabilities: Vec::new(),
+                requires_providers: Vec::new(),
+                provides_capabilities: Vec::new(),
+                provides_providers: Vec::new(),
                 label: Some("intentional failure".to_string()),
             }],
         );
@@ -499,6 +503,10 @@ fn test_run_repair_does_not_run_pipeline_commands() {
                 cmd: format!("printf ran > {}", command_marker.to_string_lossy()),
                 cwd: None,
                 env: HashMap::new(),
+                requires_capabilities: Vec::new(),
+                requires_providers: Vec::new(),
+                provides_capabilities: Vec::new(),
+                provides_providers: Vec::new(),
                 label: Some("must-not-run".to_string()),
             }],
         );
