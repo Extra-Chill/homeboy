@@ -23,8 +23,8 @@ use super::spec::{
     AGENT_TASK_FANOUT_STATUS_LAB_LABEL, AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
     AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL,
     AUDIT_LAB_LABEL, BENCH_LAB_LABEL, COMMAND_SPECS, FUZZ_LAB_LABEL, LINT_LAB_LABEL,
-    REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL,
-    TEST_LAB_LABEL, TRACE_LAB_LABEL,
+    REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL,
+    RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
 };
 
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
@@ -959,7 +959,9 @@ impl RunnerWorkloadCommandFamily {
         match label {
             label if label.starts_with("agent-task") => Self::AgentTask,
             LINT_LAB_LABEL | TEST_LAB_LABEL | AUDIT_LAB_LABEL | REVIEW_LAB_LABEL
-            | BENCH_LAB_LABEL | FUZZ_LAB_LABEL | TRACE_LAB_LABEL => Self::Quality,
+            | BENCH_LAB_LABEL | FUZZ_LAB_LABEL | TRACE_LAB_LABEL | RIG_RUN_LAB_LABEL => {
+                Self::Quality
+            }
             REFACTOR_LAB_LABEL | RIG_CHECK_LAB_LABEL | RUNTIME_REFRESH_LAB_LABEL => Self::Workspace,
             label if label.starts_with("tunnel") => Self::Service,
             _ => Self::Unknown,
