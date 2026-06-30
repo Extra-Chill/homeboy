@@ -249,7 +249,7 @@ function withDeclaredArtifactDiagnostics(request = {}, normalized = {}) {
 }
 
 function missingDeclaredArtifacts(request = {}, artifacts = []) {
-	return declaredArtifactRequirements(request).filter((declaration) => !findArtifact(artifacts, declaration));
+	return uniqueDeclaredArtifactRequirements(request).filter((declaration) => !findArtifact(artifacts, declaration));
 }
 
 function declaredArtifactRequirements(request = {}) {
@@ -302,8 +302,7 @@ function opencodeFailureOutcome(context) {
 
 function collectOpenCodeArtifacts(context = {}) {
 	const request = context.request || {};
-	const config = context.config || {};
-	const artifactDir = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
+	const artifactDir = resolveArtifactDir(context);
 	if (!artifactDir) {
 		return {};
 	}
@@ -367,9 +366,7 @@ function collectOpenCodeArtifacts(context = {}) {
 }
 
 function collectOpenCodeRuntimeLogs(context = {}) {
-	const request = context.request || {};
-	const config = context.config || {};
-	const artifactDir = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
+	const artifactDir = resolveArtifactDir(context);
 	if (!artifactDir) {
 		return {};
 	}
@@ -563,7 +560,7 @@ function validateOpenCodeRequest(request) {
 }
 
 function openCodeRuntimeLogPaths(request = {}, config = {}) {
-	const artifactDir = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
+	const artifactDir = resolveArtifactDir({ request, config });
 	if (!artifactDir) {
 		return {};
 	}
@@ -571,6 +568,17 @@ function openCodeRuntimeLogPaths(request = {}, config = {}) {
 		stdout: path.join(artifactDir, `${safeFileSegment(request.task_id)}-opencode-runtime-stdout.log`),
 		stderr: path.join(artifactDir, `${safeFileSegment(request.task_id)}-opencode-runtime-stderr.log`),
 	};
+}
+
+function resolveArtifactDir(context = {}) {
+	const request = context.request || {};
+	const config = context.config || {};
+	const configured = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
+	if (configured) {
+		return configured;
+	}
+	const workspacePath = request.workspace_path || request.workspace?.path || '';
+	return workspacePath ? path.join(workspacePath, '.homeboy', 'opencode') : '';
 }
 
 function spawnOpenCodeStreaming(command, args, options = {}) {
