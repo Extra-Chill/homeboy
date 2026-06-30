@@ -99,6 +99,8 @@ pub(super) fn exec(
             runner_workload: None,
             run_id: validated_run_id.clone(),
             detach_after_handoff: false,
+            mirror_evidence: true,
+            print_handoff: true,
         },
     )?;
     if let Some(run_id) = validated_run_id.as_deref() {

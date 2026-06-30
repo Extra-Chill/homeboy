@@ -41,6 +41,8 @@ fn test_runner_policy_denies_raw_ssh_exec_by_default() {
         runner_workload: None,
         run_id: None,
         detach_after_handoff: false,
+        mirror_evidence: true,
+        print_handoff: true,
     };
 
     let err = validate_runner_policy(&runner, "/srv/homeboy/project", policy_request(&options))
@@ -78,6 +80,8 @@ fn test_runner_policy_enforces_projects_commands_workspace_and_artifacts() {
         runner_workload: None,
         run_id: None,
         detach_after_handoff: false,
+        mirror_evidence: true,
+        print_handoff: true,
     };
     validate_runner_policy(
         &runner,

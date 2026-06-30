@@ -579,6 +579,55 @@ fn test_lab_command_contracts_cover_hot_commands() {
         assert!(!contract.routing_policy.default_lab_offload);
     }
 
+    for args in [
+        ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
+        ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
+        ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
+        ["homeboy", "agent-task", "list"].as_slice(),
+        ["homeboy", "agent-task", "active"].as_slice(),
+        ["homeboy", "agent-task", "latest"].as_slice(),
+        [
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "status",
+            "fanout-batch-123",
+        ]
+        .as_slice(),
+        [
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "artifacts",
+            "fanout-batch-123",
+        ]
+        .as_slice(),
+    ] {
+        assert!(
+            parsed_command(args)
+                .lab_contract()
+                .expect("runner-resident read polling contract")
+                .routing_policy
+                .read_only_polling,
+            "{args:?} should use low-noise read polling"
+        );
+    }
+
+    for args in [
+        ["homeboy", "agent-task", "run", "agent-task-123"].as_slice(),
+        ["homeboy", "agent-task", "run-next"].as_slice(),
+        ["homeboy", "agent-task", "controller", "resume", "loop-123"].as_slice(),
+    ] {
+        assert!(
+            !parsed_command(args)
+                .lab_contract()
+                .expect("runner-resident execution contract")
+                .routing_policy
+                .read_only_polling,
+            "{args:?} should preserve full runner execution evidence"
+        );
+    }
+
     let fanout_submit_batch = parsed_command(&[
         "homeboy",
         "agent-task",

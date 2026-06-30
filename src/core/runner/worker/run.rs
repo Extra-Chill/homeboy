@@ -296,6 +296,8 @@ fn run_once_output(
             runner_workload: claim.request.runner_workload.clone(),
             run_id: claimed_run_id,
             detach_after_handoff: false,
+            mirror_evidence: true,
+            print_handoff: true,
         },
         || {
             if cancel_seen || last_cancel_poll.elapsed() < BROKER_CANCEL_POLL_INTERVAL {

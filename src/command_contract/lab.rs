@@ -51,6 +51,9 @@ pub struct LabRoutingPolicy {
     /// Whether the command requires extension parity between controller and
     /// runner before offloading.
     pub requires_extension_parity: bool,
+    /// Whether runner-resident reads should avoid durable mirror runs and
+    /// handoff boilerplate unless the command itself emits them.
+    pub read_only_polling: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -561,7 +564,9 @@ impl Commands {
                             agent_task::AgentTaskFanoutCommand::Status(_)
                             | agent_task::AgentTaskFanoutCommand::Artifacts(_),
                     }),
-            }) => LabCommandContract::runner_resident(AGENT_TASK_FANOUT_STATUS_LAB_LABEL),
+            }) => LabCommandContract::runner_resident_read_polling(
+                AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
+            ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
@@ -588,9 +593,12 @@ impl Commands {
             }) => LabCommandContract::runner_resident(AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
+                    agent_task::AgentTaskCommand::Run(_)
+                    | agent_task::AgentTaskCommand::RunNext,
+            }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
                     agent_task::AgentTaskCommand::Status(_)
-                    | agent_task::AgentTaskCommand::Run(_)
-                    | agent_task::AgentTaskCommand::RunNext
                     | agent_task::AgentTaskCommand::Logs(_)
                     | agent_task::AgentTaskCommand::Artifacts(_)
                     | agent_task::AgentTaskCommand::Evidence(_)
@@ -603,7 +611,7 @@ impl Commands {
                     | agent_task::AgentTaskCommand::List(_)
                     | agent_task::AgentTaskCommand::Active(_)
                     | agent_task::AgentTaskCommand::Latest(_),
-            }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
+            }) => LabCommandContract::runner_resident_read_polling(AGENT_TASK_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Auth(agent_task::AgentTaskAuthArgs {
@@ -789,6 +797,7 @@ impl LabCommandContract {
                 infer_source_path_tools: true,
                 release_gate: false,
                 requires_extension_parity,
+                read_only_polling: false,
             },
         }
     }
@@ -857,6 +866,17 @@ impl LabCommandContract {
         }
     }
 
+    pub(crate) fn runner_resident_read_polling(hot_label: &'static str) -> Self {
+        let base = Self::runner_resident(hot_label);
+        Self {
+            routing_policy: LabRoutingPolicy {
+                read_only_polling: true,
+                ..base.routing_policy
+            },
+            ..base
+        }
+    }
+
     pub(crate) fn local_only(hot_label: &'static str, reason: &'static str) -> Self {
         Self {
             hot_label,
@@ -871,6 +891,7 @@ impl LabCommandContract {
                 infer_source_path_tools: false,
                 release_gate: false,
                 requires_extension_parity: false,
+                read_only_polling: false,
             },
         }
     }
@@ -1042,6 +1063,56 @@ mod extension_ids {
         let context = resolve_for(Some(ExtensionCapability::Test))?;
 
         Ok(context.extension_id.into_iter().collect())
+    }
+}
+
+#[cfg(test)]
+mod low_noise_polling_tests {
+    use super::*;
+    use crate::cli_surface::Cli;
+    use clap::Parser;
+
+    fn parsed_command(args: &[&str]) -> Commands {
+        Cli::try_parse_from(args)
+            .expect("CLI args should parse")
+            .command
+    }
+
+    #[test]
+    fn runner_resident_agent_task_reads_are_low_noise_polling() {
+        for args in [
+            ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "list"].as_slice(),
+            ["homeboy", "agent-task", "active"].as_slice(),
+            ["homeboy", "agent-task", "latest"].as_slice(),
+        ] {
+            let contract = parsed_command(args)
+                .lab_contract()
+                .expect("runner-resident read polling contract");
+            assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
+            assert_eq!(
+                contract.workspace_mode_policy,
+                LabWorkspaceModePolicy::RunnerResident
+            );
+            assert!(contract.routing_policy.read_only_polling);
+        }
+    }
+
+    #[test]
+    fn runner_resident_agent_task_execution_keeps_full_runner_evidence() {
+        for args in [
+            ["homeboy", "agent-task", "run", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "run-next"].as_slice(),
+            ["homeboy", "agent-task", "controller", "resume", "loop-123"].as_slice(),
+        ] {
+            let contract = parsed_command(args)
+                .lab_contract()
+                .expect("runner-resident execution contract");
+            assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
+            assert!(!contract.routing_policy.read_only_polling);
+        }
     }
 }
 pub(crate) use extension_ids::*;

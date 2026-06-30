@@ -39,6 +39,7 @@ pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
             infer_source_path_tools: true,
             release_gate: false,
             requires_extension_parity: true,
+            read_only_polling: false,
         },
     }
 }

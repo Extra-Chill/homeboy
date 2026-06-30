@@ -159,6 +159,8 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
         runner_workload: None,
         run_id: None,
         detach_after_handoff: false,
+        mirror_evidence: true,
+        print_handoff: true,
     }
 }
 

@@ -547,6 +547,8 @@ fn run_runtime_overlay_install_step(
             runner_workload: None,
             run_id: None,
             detach_after_handoff: false,
+            mirror_evidence: true,
+            print_handoff: true,
         },
     )?;
     if exit_code == 0 {

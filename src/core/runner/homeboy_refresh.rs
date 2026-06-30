@@ -173,6 +173,8 @@ pub fn refresh_homeboy_binary(
             runner_workload: None,
             run_id: None,
             detach_after_handoff: false,
+            mirror_evidence: true,
+            print_handoff: true,
         },
     )?;
     if exit_code != 0 {

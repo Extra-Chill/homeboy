@@ -104,6 +104,8 @@ pub struct RunnerExecOptions {
     pub runner_workload: Option<RunnerWorkload>,
     pub run_id: Option<String>,
     pub detach_after_handoff: bool,
+    pub mirror_evidence: bool,
+    pub print_handoff: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -555,6 +557,8 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.runner_workload,
                 options.run_id,
                 options.detach_after_handoff,
+                options.mirror_evidence,
+                options.print_handoff,
             )
         }
         RunnerTransport::ReverseBroker(handle) => {
@@ -573,6 +577,8 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.runner_workload,
                 options.run_id,
                 options.detach_after_handoff,
+                options.mirror_evidence,
+                options.print_handoff,
             )
         }
         RunnerTransport::Local => exec_local(plan),

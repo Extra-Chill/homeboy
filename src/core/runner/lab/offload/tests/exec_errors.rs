@@ -343,6 +343,7 @@ fn plan_records_skipped_auto_offload() {
         mutation_flag: None,
         detach_after_handoff: false,
         output_file_requested: false,
+        read_only_polling: false,
         local_output_file: None,
         job_overrides: LabJobOverrides::default(),
     })
@@ -370,6 +371,7 @@ fn lab_only_refuses_local_execution_without_lab_contract() {
         mutation_flag: None,
         detach_after_handoff: false,
         output_file_requested: false,
+        read_only_polling: false,
         local_output_file: None,
         job_overrides: LabJobOverrides::default(),
     });
@@ -398,6 +400,7 @@ fn build_runner_error_gives_managed_runner_replacement() {
         mutation_flag: None,
         detach_after_handoff: false,
         output_file_requested: false,
+        read_only_polling: false,
         local_output_file: None,
         job_overrides: LabJobOverrides::default(),
     });
@@ -439,6 +442,7 @@ fn build_lab_only_error_gives_managed_runner_replacement() {
         mutation_flag: None,
         detach_after_handoff: false,
         output_file_requested: false,
+        read_only_polling: false,
         local_output_file: None,
         job_overrides: LabJobOverrides::default(),
     });
@@ -482,6 +486,7 @@ fn unsupported_runner_error_guides_tunnel_service_inspection() {
         mutation_flag: None,
         detach_after_handoff: false,
         output_file_requested: false,
+        read_only_polling: false,
         local_output_file: None,
         job_overrides: LabJobOverrides::default(),
     });

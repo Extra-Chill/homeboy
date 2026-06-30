@@ -30,6 +30,8 @@ pub(super) fn exec_via_reverse_broker(
     runner_workload: Option<RunnerWorkload>,
     run_id: Option<String>,
     detach_after_handoff: bool,
+    mirror_evidence: bool,
+    print_handoff_output: bool,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -87,8 +89,9 @@ pub(super) fn exec_via_reverse_broker(
             Some("parse reverse broker job".to_string()),
         )
     })?;
-    let persisted_run_id =
-        persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref());
+    let persisted_run_id = mirror_evidence
+        .then(|| persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref()))
+        .flatten();
     if detach_after_handoff {
         return Ok(detached_handoff_output(
             runner,
@@ -148,28 +151,34 @@ pub(super) fn exec_via_reverse_broker(
         &redaction_secret_env_names,
     );
 
-    let mirror = mirror_reverse_broker_evidence(
-        runner,
-        broker_url,
-        &cwd,
-        &command,
-        &job,
-        &events,
-        &result,
-        run_id.as_deref(),
-    )?;
+    let mirror = if mirror_evidence {
+        mirror_reverse_broker_evidence(
+            runner,
+            broker_url,
+            &cwd,
+            &command,
+            &job,
+            &events,
+            &result,
+            run_id.as_deref(),
+        )?
+    } else {
+        None
+    };
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
     let artifacts = job.artifacts.clone();
     let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
 
-    print_lab_offload_handoff(
-        &runner.id,
-        Some(&cwd),
-        &job.id.to_string(),
-        mirror_run_id.as_deref(),
-        DaemonJobHandoffState::Terminal(job.status),
-    );
+    if print_handoff_output {
+        print_lab_offload_handoff(
+            &runner.id,
+            Some(&cwd),
+            &job.id.to_string(),
+            mirror_run_id.as_deref(),
+            DaemonJobHandoffState::Terminal(job.status),
+        );
+    }
 
     let runner_job = RunnerJob::from_job(&runner.id, "broker", &command, Some(cwd.clone()), &job);
     let runner_result = runner_result(
