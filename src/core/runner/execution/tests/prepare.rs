@@ -237,6 +237,146 @@ fn runner_prep_allows_declared_sensitive_env() {
 }
 
 #[test]
+fn daemon_prep_allows_unrelated_runner_side_secret_for_non_secret_command() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let mut runner = ssh_runner();
+        runner.workspace_root = Some(workspace.display().to_string());
+        runner.env.insert(
+            "OPENAI_API_KEY".to_string(),
+            "runner-side-secret".to_string(),
+        );
+
+        let plan = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "lab".to_string(),
+            runner: Some(runner),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec![
+                "homeboy".to_string(),
+                "refactor".to_string(),
+                "--help".to_string(),
+            ],
+            env: Default::default(),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect("unrelated runner-side secret should not block non-secret command");
+
+        assert!(!plan.env.contains_key("OPENAI_API_KEY"));
+    });
+}
+
+#[test]
+fn runner_prep_runtime_secret_env_allowlist_declares_sensitive_env() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let plan = prepare_runner_process(RunnerProcessRequest {
+            runner_id: "local".to_string(),
+            runner: Some(local_runner(workspace.display().to_string())),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec!["node".to_string(), "run-headless-loop.cjs".to_string()],
+            env: HashMap::from([
+                (
+                    "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
+                    "OPENAI_API_KEY".to_string(),
+                ),
+                ("OPENAI_API_KEY".to_string(), "secret-value".to_string()),
+            ]),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect("runtime secret env allowlist should satisfy preflight declaration");
+
+        assert_eq!(
+            plan.env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("secret-value")
+        );
+    });
+}
+
+#[test]
+fn runner_prep_diagnostic_identifies_local_controller_secret_source() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let err = prepare_runner_process(RunnerProcessRequest {
+            runner_id: "local".to_string(),
+            runner: Some(local_runner(workspace.display().to_string())),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec!["env".to_string()],
+            env: HashMap::from([("OPENAI_API_KEY".to_string(), "secret-value".to_string())]),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect_err("undeclared local controller secret should fail closed");
+
+        assert!(err.message.contains("OPENAI_API_KEY"));
+        assert!(err.message.contains("local controller env"));
+    });
+}
+
+#[test]
+fn daemon_prep_diagnostic_identifies_remote_runner_daemon_secret_source() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let mut runner = ssh_runner();
+        runner.workspace_root = Some(workspace.display().to_string());
+        runner.env.insert(
+            "OPENAI_API_KEY".to_string(),
+            "runner-side-secret".to_string(),
+        );
+
+        let err = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "lab".to_string(),
+            runner: Some(runner),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec!["node".to_string(), "run-headless-loop.cjs".to_string()],
+            env: HashMap::from([(
+                "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
+                "AI_PROVIDER_TOKEN".to_string(),
+            )]),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect_err("undeclared runner daemon secret should identify source");
+
+        assert!(err.message.contains("OPENAI_API_KEY"));
+        assert!(err.message.contains("remote runner daemon env"));
+    });
+}
+
+#[test]
 fn daemon_local_prep_normalizes_default_path_on_runner_side() {
     crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
