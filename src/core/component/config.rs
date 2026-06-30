@@ -162,6 +162,31 @@ pub struct GithubHostConfig {
     pub env: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ComponentReleaseConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_release: Option<ComponentGithubReleaseConfig>,
+}
+
+impl ComponentReleaseConfig {
+    pub fn is_default(value: &Self) -> bool {
+        value == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ComponentGithubReleaseConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<GithubReleaseOwner>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubReleaseOwner {
+    Homeboy,
+    Ci,
+}
+
 pub(super) fn is_default_github_config(config: &GithubConfig) -> bool {
     config.hosts.is_empty()
 }
