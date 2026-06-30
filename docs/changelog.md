@@ -4,6 +4,33 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.272.0] - 2026-06-30
+
+### Added
+- add generic worktree cleanup providers
+
+### Changed
+- remove legacy component create flags
+- centralize runner materialization contracts
+- align release blockers with current contracts
+
+### Fixed
+- allow empty patch artifacts
+- pass fanout worktree to provider dispatch
+- materialize rig dependencies before fuzz prepare
+- centralize release package scope
+- ignore unrelated runner secret env
+- require CI release evidence for tag-only releases
+- run lint autofix after semantic lint refactors
+- point stale local runner diagnostics at upgrade
+- clarify agent task provider identity
+- drop undeclared inherited secret env
+- preserve monorepo package paths in worktrees
+- keep runtime replay summaries provider-owned
+- resolve lab worktree source checkout
+- Fix fanout worktree creation without DMC
+- preflight recipe command compatibility
+
 ## [0.271.0] - 2026-06-30
 
 ### Added
