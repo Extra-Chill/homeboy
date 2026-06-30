@@ -1413,7 +1413,7 @@ mod tests {
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-        assert_eq!(command.hot_label, "extension update");
+        assert_eq!(command.hot_label, "extension refresh");
         assert!(command.portable);
         assert!(!command.routing_policy.default_lab_offload);
         assert!(command.unsupported_reason.is_none());

@@ -251,6 +251,13 @@ impl ExtensionArgs {
             ExtensionCommand::Update { .. } | ExtensionCommand::Refresh { .. }
         )
     }
+
+    pub(crate) fn update_command_label(&self) -> &'static str {
+        match self.command {
+            ExtensionCommand::Refresh { .. } => "extension refresh",
+            _ => "extension update",
+        }
+    }
 }
 
 #[derive(Serialize)]
