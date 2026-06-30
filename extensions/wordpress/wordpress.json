@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.21.18",
+  "version": "3.22.0",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -35,6 +35,69 @@
       ],
       "integration_contract": "homeboy-wordpress-agent-task/v1"
     }
+  },
+  "dependency_materialization_recipes": {
+    "schema": "homeboy-extension-wordpress/dependency-materialization-recipes/v1",
+    "recipes": [
+      {
+        "id": "wordpress-php-package-dependencies",
+        "kind": "php-package-dependency-materialization",
+        "ecosystem": "php",
+        "package_manager": "composer",
+        "declaration": {
+          "manifest": "composer.json",
+          "lockfile": "composer.lock"
+        },
+        "materializes": [
+          { "kind": "directory", "path": "vendor" }
+        ],
+        "required_outputs": [
+          { "id": "composer-vendor-directory", "kind": "directory", "path": "vendor" }
+        ]
+      },
+      {
+        "id": "wordpress-js-asset-dependencies",
+        "kind": "js-asset-dependency-materialization",
+        "ecosystem": "javascript",
+        "package_manager": "npm",
+        "declaration": {
+          "manifest": "package.json",
+          "lockfile": "package-lock.json"
+        },
+        "materializes": [
+          { "kind": "directory", "path": "node_modules" }
+        ],
+        "required_outputs": [
+          { "id": "npm-node-modules-directory", "kind": "directory", "path": "node_modules" }
+        ]
+      }
+    ]
+  },
+  "required_output_declarations": {
+    "schema": "homeboy-extension-wordpress/required-output-declarations/v1",
+    "declaration_shape": {
+      "id": "string",
+      "kind": "file|directory|glob",
+      "path": "component-relative path or glob",
+      "producer": "dependency-materialization|build|runtime-prepare",
+      "required": "boolean"
+    },
+    "examples": [
+      {
+        "id": "built-php-autoloader",
+        "kind": "file",
+        "path": "vendor/autoload.php",
+        "producer": "dependency-materialization",
+        "required": true
+      },
+      {
+        "id": "built-js-assets",
+        "kind": "glob",
+        "path": "build/**/*",
+        "producer": "build",
+        "required": true
+      }
+    ]
   },
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
