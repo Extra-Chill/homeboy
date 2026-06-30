@@ -217,7 +217,7 @@ function createCliAgentTaskExecutor(spec) {
 		});
 
 		const processEvidence = collectArtifacts ? processArtifacts(request, config, spawnResult) : {};
-		const context = { request, config, commandSpec, cwd, spawnResult };
+		const context = { request, config, commandSpec, cwd, spawnResult, spawnExtra };
 
 		if (spawnResult.error?.code === 'ENOENT') {
 			return outcome(request, buildNotFound(context));
