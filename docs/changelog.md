@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.270.3] - 2026-06-30
+
+### Fixed
+- resolve rig fuzz paths for lab replay
+- label extension refresh lab offloads
+- materialize rig component paths for fuzz lab runs
+
 ## [0.270.2] - 2026-06-30
 
 ### Fixed
