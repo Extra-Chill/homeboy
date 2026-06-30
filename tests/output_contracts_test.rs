@@ -360,6 +360,7 @@ fn extension_show_output_contracts_use_top_level_structured_sidecars() {
                 producer: Some("lint".to_string()),
             }],
             materialization_source: None,
+            contract_producers: Vec::new(),
             requires: None,
         },
     });
