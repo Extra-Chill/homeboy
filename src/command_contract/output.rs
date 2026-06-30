@@ -230,6 +230,7 @@ impl Commands {
             | Commands::Project(_)
             | Commands::Component(_)
             | Commands::Config(_)
+            | Commands::Contract(_)
             | Commands::Extension(_)
             | Commands::Manifest(_)
             | Commands::Changelog(_)
