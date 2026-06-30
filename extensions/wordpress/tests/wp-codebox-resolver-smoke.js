@@ -70,6 +70,21 @@ try {
 	assert.equal(cacheIdentity.sourceRoot, cacheSourceRoot);
 	assert.equal(cacheIdentity.bin, path.join(cacheSourceRoot, 'packages', 'cli', 'dist', 'index.js'));
 
+	const staleEnvWithCacheIdentity = resolveWpCodeboxIdentity({
+		wpCodeboxInstallDir: cacheRoot,
+		env: { HOMEBOY_WP_CODEBOX_BIN: envBin },
+	});
+	assert.equal(staleEnvWithCacheIdentity.selectionSource, 'cache');
+	assert.equal(staleEnvWithCacheIdentity.bin, path.join(cacheSourceRoot, 'packages', 'cli', 'dist', 'index.js'));
+
+	const explicitBinWithCacheIdentity = resolveWpCodeboxIdentity({
+		wpCodeboxBin: envBin,
+		wpCodeboxInstallDir: cacheRoot,
+		env: {},
+	});
+	assert.equal(explicitBinWithCacheIdentity.selectionSource, 'explicit');
+	assert.equal(explicitBinWithCacheIdentity.bin, envBin);
+
 	const workspaceIdentity = resolveWpCodeboxIdentity({
 		workspaceRoot,
 		wpCodeboxInstallDir: path.join(root, 'missing-cache'),

@@ -600,8 +600,8 @@ assert.equal(
 		HOMEBOY_WP_CODEBOX_BIN: '/explicit/wp-codebox',
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: codeboxInstallRoot,
 	}),
-	'/explicit/wp-codebox',
-	'Explicit WP Codebox env should override the Homeboy-managed cache'
+	cachedCodeboxBin,
+	'Stale WP Codebox env outside the configured install root should not override the Homeboy-managed cache'
 );
 assert.equal(
 	wpCodeboxCommand({

@@ -60,7 +60,10 @@ const manifest = {
   },
   capabilities: {
     wordpressRuntime: {
-      commands: ['run-fuzz-suite', 'run-wordpress-workload'],
+      commands: {
+        runFuzzSuite: 'run-fuzz-suite',
+        runWorkload: 'run-wordpress-workload',
+      },
       capabilities: ['rest', 'disposable-runtime', 'runtime-isolation', 'artifact-export'],
       runner_modes: { 'runtime-backed': true },
     },
@@ -69,6 +72,7 @@ const manifest = {
     wordpressRuntime: {
       schema: 'wp-codebox/fuzz-runner-readiness/v1',
       status: 'ready',
+      entrypoint: 'wp-codebox/run-fuzz-suite',
       mode: 'runtime-backed',
       command_available: true,
     },
