@@ -151,6 +151,7 @@ pub mod update_check_cache;
 pub mod upgrade;
 pub mod validation_progress;
 pub mod worktree;
+pub mod worktree_providers;
 
 // Internal path resolution helpers.
 pub(crate) mod paths;
