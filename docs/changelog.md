@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.272.2] - 2026-06-30
+
+### Changed
+- Validate dependency materialization env prefixes
+
+## [0.272.1] - 2026-06-30
+
+### Changed
+- neutralize generic extension fixtures
+- remove obsolete legacy flag rejection tests
+- Test plugin subpath dependency materialization before fuzz prepare
+
+### Fixed
+- treat empty cook patches as no changes
+
 ## [0.272.0] - 2026-06-30
 
 ### Added

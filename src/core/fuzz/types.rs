@@ -193,6 +193,12 @@ pub struct FuzzWorkload {
 }
 
 impl FuzzWorkload {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let mut workload: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
+        workload.normalize()?;
+        Ok(workload)
+    }
+
     pub(super) fn normalize(&mut self) -> std::result::Result<(), String> {
         self.schema = trim_or_default(&self.schema, FUZZ_WORKLOAD_SCHEMA);
         require_schema(&self.schema, FUZZ_WORKLOAD_SCHEMA, "fuzz workload")?;

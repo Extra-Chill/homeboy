@@ -190,6 +190,13 @@ pub fn validate_dependency_materialization_steps(rig: &RigSpec) -> Vec<String> {
             (None, None) => errors.push(format!(
                 "{context} must declare exactly one of command or provider"
             )),
+            (Some(command), None) => {
+                if command_starts_with_env_assignment(command) {
+                    errors.push(format!(
+                        "{context} command must not start with shell-style environment assignments; declare environment values in env instead"
+                    ));
+                }
+            }
             _ => {}
         }
 
@@ -253,6 +260,20 @@ fn normalized_optional_ref(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn command_starts_with_env_assignment(command: &str) -> bool {
+    let Some(first) = command.split_whitespace().next() else {
+        return false;
+    };
+    let Some((name, value)) = first.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && !value.is_empty()
+        && name.chars().enumerate().all(|(index, ch)| {
+            ch == '_' || ch.is_ascii_alphabetic() || (index > 0 && ch.is_ascii_digit())
+        })
 }
 
 #[cfg(test)]
@@ -369,6 +390,7 @@ mod tests {
                         { "id": "missing-executor", "safety": "read_only" },
                         { "id": "ambiguous", "command": "deps.prepare", "provider": "deps.provider", "safety": "network_access" },
                         { "id": "missing-safety", "command": "deps.prepare" },
+                        { "id": "env-prefix", "command": "RUNTIME_MODE=off deps.prepare", "safety": "network_access" },
                         { "id": "bad-output", "provider": "deps.provider", "safety": "writes_working_tree", "expected_outputs": [{ "path": "" }] },
                         { "id": "bad-component", "provider": "deps.provider", "safety": "writes_cache", "component": "missing" }
                     ]
@@ -387,6 +409,9 @@ mod tests {
         assert!(errors.iter().any(
             |error| error.contains("missing-safety") && error.contains("safety classification")
         ));
+        assert!(errors.iter().any(|error| error.contains("env-prefix")
+            && error.contains("environment assignments")
+            && error.contains("env instead")));
         assert!(errors
             .iter()
             .any(|error| error.contains("bad-output") && error.contains("expected output path")));

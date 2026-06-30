@@ -29,14 +29,14 @@ pub use lab::{
     lab_runner_unsupported_message, AgentTaskDispatchIdentity, CommandPortabilityContract,
     LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabCommandRouteContract,
     LabLocalExecutionPolicy, LabLocalHotPolicy, LabRoutingPolicy, LabRunnerSupportSummary,
-    LabSelectedRunnerFallbackPolicy, LabSourcePathMode, LabWorkspaceModePolicy,
+    LabSelectedRunnerFallbackPolicy, LabSourcePathMode, LabWorkspaceModePolicy, RunLocationIndex,
     RunnerHandoffArtifactManifestRef, RunnerHandoffEnvelope, RunnerHandoffFollowCommands,
     RunnerWorkload, RunnerWorkloadArtifactRef, RunnerWorkloadAssignment, RunnerWorkloadCapability,
     RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision, RunnerWorkloadKind,
     RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
     RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS,
     RUNNER_ARTIFACT_MANIFEST_FILE, RUNNER_ARTIFACT_MANIFEST_SCHEMA, RUNNER_HANDOFF_ENVELOPE_SCHEMA,
-    RUNNER_WORKLOAD_SCHEMA,
+    RUNNER_WORKLOAD_SCHEMA, RUN_LOCATION_INDEX_SCHEMA,
 };
 pub(crate) use lab::{LAB_NO_EXTRA_TOOLS, RIG_UP_LAB_UNSUPPORTED_REASON};
 pub use output::{

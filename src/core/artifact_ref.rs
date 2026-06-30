@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -10,6 +11,36 @@ pub const EVIDENCE_REF_SCHEMA: &str = "homeboy/evidence-ref/v1";
 pub const HOMEBOY_REF_SCHEME: &str = "homeboy://";
 pub const RUNNER_ARTIFACT_REF_SCHEME: &str = "runner-artifact://";
 pub const METADATA_ONLY_REF_SCHEME: &str = "metadata-only:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewerFacingArtifactRefError {
+    Empty,
+    LocalhostUrl,
+    FileUrl,
+    LocalAbsolutePath,
+    UnsupportedScheme,
+}
+
+impl fmt::Display for ReviewerFacingArtifactRefError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Empty => "reviewer-facing artifact ref cannot be empty",
+            Self::LocalhostUrl => {
+                "reviewer-facing artifact ref cannot use localhost or loopback URLs"
+            }
+            Self::FileUrl => "reviewer-facing artifact ref cannot use file URLs",
+            Self::LocalAbsolutePath => {
+                "reviewer-facing artifact ref cannot use local absolute paths"
+            }
+            Self::UnsupportedScheme => {
+                "reviewer-facing artifact ref must be http(s), homeboy://, or runner-artifact://"
+            }
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for ReviewerFacingArtifactRefError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactReference {
@@ -94,6 +125,68 @@ impl<'de> Deserialize<'de> for ArtifactReference {
 
 fn is_published_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
+}
+
+pub fn validate_reviewer_facing_artifact_ref(
+    value: &str,
+) -> Result<(), ReviewerFacingArtifactRefError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ReviewerFacingArtifactRefError::Empty);
+    }
+
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("file://") {
+        return Err(ReviewerFacingArtifactRefError::FileUrl);
+    }
+
+    if Path::new(value).is_absolute() || is_windows_absolute_path(value) {
+        return Err(ReviewerFacingArtifactRefError::LocalAbsolutePath);
+    }
+
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        if is_localhost_http_url(value) {
+            return Err(ReviewerFacingArtifactRefError::LocalhostUrl);
+        }
+        return Ok(());
+    }
+
+    if value.starts_with(HOMEBOY_REF_SCHEME) || value.starts_with(RUNNER_ARTIFACT_REF_SCHEME) {
+        return Ok(());
+    }
+
+    Err(ReviewerFacingArtifactRefError::UnsupportedScheme)
+}
+
+fn is_localhost_http_url(value: &str) -> bool {
+    let Some(authority_and_path) = value.split_once("://").map(|(_, rest)| rest) else {
+        return false;
+    };
+    let authority = authority_and_path
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let host = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority)
+        .trim_matches(['[', ']'])
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+fn is_windows_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.starts_with("\\\\")
+        || matches!(
+            bytes,
+            [drive, b':', slash, ..]
+                if drive.is_ascii_alphabetic() && (*slash == b'\\' || *slash == b'/')
+        )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -275,6 +368,55 @@ mod tests {
                 "semantic_key": "run.summary"
             })
         );
+    }
+
+    #[test]
+    fn reviewer_facing_artifact_ref_accepts_public_urls_and_declared_artifact_refs() {
+        for value in [
+            "https://artifacts.example.test/run/1/summary.json",
+            "http://artifacts.example.test/run/1/summary.json",
+            "homeboy://run/run%201/artifact/artifact%201",
+            "runner-artifact://runner-1/run-1/artifact-1",
+        ] {
+            validate_reviewer_facing_artifact_ref(value).expect(value);
+        }
+    }
+
+    #[test]
+    fn reviewer_facing_artifact_ref_rejects_local_refs() {
+        for (value, expected) in [
+            ("", ReviewerFacingArtifactRefError::Empty),
+            (
+                "http://localhost:8080/artifact.json",
+                ReviewerFacingArtifactRefError::LocalhostUrl,
+            ),
+            (
+                "https://127.0.0.1/artifact.json",
+                ReviewerFacingArtifactRefError::LocalhostUrl,
+            ),
+            (
+                "file:///tmp/artifact.json",
+                ReviewerFacingArtifactRefError::FileUrl,
+            ),
+            (
+                "/tmp/artifact.json",
+                ReviewerFacingArtifactRefError::LocalAbsolutePath,
+            ),
+            (
+                "C:\\tmp\\artifact.json",
+                ReviewerFacingArtifactRefError::LocalAbsolutePath,
+            ),
+            (
+                "artifact.json",
+                ReviewerFacingArtifactRefError::UnsupportedScheme,
+            ),
+        ] {
+            assert_eq!(
+                validate_reviewer_facing_artifact_ref(value),
+                Err(expected),
+                "{value}"
+            );
+        }
     }
 
     #[test]

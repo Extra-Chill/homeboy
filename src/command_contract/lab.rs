@@ -29,6 +29,7 @@ use super::spec::{
 
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
 pub const RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
+pub const RUN_LOCATION_INDEX_SCHEMA: &str = "homeboy/run-location-index/v1";
 pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = "homeboy/artifact-manifest/v1";
 pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = "homeboy-artifact-manifest.json";
 
@@ -285,6 +286,17 @@ pub struct RunnerHandoffFollowCommands {
     pub logs: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunLocationIndex {
+    pub schema: String,
+    pub run_id: String,
+    pub controller_location: String,
+    pub runner_id: String,
+    pub remote_job_id: String,
+    pub artifact_manifest_ref: RunnerHandoffArtifactManifestRef,
+    pub liveness_heartbeat_timestamp: String,
 }
 
 impl RunnerHandoffEnvelope {
