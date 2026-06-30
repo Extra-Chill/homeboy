@@ -330,6 +330,7 @@ fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
     apply_trace_workload_defaults(&mut spec)?;
     let declared_id = (!spec.id.is_empty() && spec.id != id).then(|| spec.id.clone());
     spec.id = id.to_string();
+    validate_rig_spec(&spec)?;
     forget_local_package_root(id);
     Ok((spec, declared_id))
 }
@@ -361,7 +362,25 @@ fn read_spec_from_path(path: &Path, id_hint: Option<&str>, package_root: &Path) 
     spec.id = crate::core::extension::slugify_id(&spec.id)?;
     remember_local_package_root(&spec.id, package_root);
     apply_trace_workload_defaults(&mut spec)?;
+    validate_rig_spec(&spec)?;
     Ok(spec)
+}
+
+fn validate_rig_spec(spec: &RigSpec) -> Result<()> {
+    let errors = validate_dependency_materialization_steps(spec);
+    if errors.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "rig",
+        format!(
+            "Rig `{}` has invalid dependency materialization configuration",
+            spec.id
+        ),
+        Some(spec.id.clone()),
+        Some(errors),
+    ))
 }
 
 fn local_package_root_for_rig_json(path: &Path) -> PathBuf {
@@ -636,6 +655,7 @@ pub fn list_ids() -> Result<Vec<String>> {
 mod schema_error_tests {
     use super::*;
     use crate::core::error::ErrorCode;
+    use std::fs;
 
     /// A rig declaring the `component_id` component schema, with one component
     /// that uses neither `path` nor `component_id` — the shape an older binary
@@ -712,5 +732,41 @@ mod schema_error_tests {
             component_with_unrecognized_schema(&value),
             Some("legacy".to_string())
         );
+    }
+
+    #[test]
+    fn local_source_load_rejects_dependency_materialization_env_prefix_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rig_dir = tmp.path().join("rigs/env-prefix");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "env-prefix",
+                "requirements": {
+                    "dependency_materialization": [
+                        {
+                            "id": "prepare-deps",
+                            "command": "RUNTIME_MODE=off deps.prepare",
+                            "safety": "network_access"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("rig spec");
+
+        let error = load_local_source(tmp.path().to_str().unwrap(), Some("env-prefix"))
+            .expect_err("env-prefix command should be rejected");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert!(error.message.contains("dependency materialization"));
+        assert!(error
+            .details
+            .get("tried")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|details| details.iter().any(|detail| detail
+                .as_str()
+                .is_some_and(|value| value.contains("env instead")))));
     }
 }
