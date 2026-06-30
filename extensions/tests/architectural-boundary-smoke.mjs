@@ -9,10 +9,6 @@ const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const boundaryTerms = /Data Machine|DataMachine|datamachine|data-machine|wp-site-generator|WPSG|site-generator|site generator/;
 const productionExtensions = new Set(['.js', '.cjs', '.mjs', '.ts', '.tsx', '.yml', '.yaml']);
-const quarantineManifestPath = 'tests/architectural-boundary-quarantine.json';
-const quarantineManifest = JSON.parse(
-  fs.readFileSync(path.join(repoRoot, quarantineManifestPath), 'utf8')
-);
 
 const scannedRoots = [
   '.github/scripts',
@@ -51,54 +47,21 @@ const files = new Set([
   ...scannedRoots.flatMap(walkProductionFiles),
   ...scannedFiles,
 ]);
-const quarantinedFiles = new Set(Object.keys(quarantineManifest));
-
-const manifestViolations = [];
-for (const [relativePath, justification] of Object.entries(quarantineManifest)) {
-  if (typeof justification !== 'string' || justification.trim() === '') {
-    manifestViolations.push(`${relativePath} is missing a file-level justification`);
-  }
-  if (!fs.existsSync(path.join(repoRoot, relativePath))) {
-    manifestViolations.push(`${relativePath} does not exist`);
-  }
-}
 
 const violations = [];
-const quarantinedTermFiles = [];
 for (const relativePath of files) {
   const absolutePath = path.join(repoRoot, relativePath);
   const content = fs.readFileSync(absolutePath, 'utf8');
   if (!boundaryTerms.test(content)) {
     continue;
   }
-  if (quarantinedFiles.has(relativePath)) {
-    quarantinedTermFiles.push(relativePath);
-    continue;
-  }
   violations.push(relativePath);
 }
-
-const staleQuarantineEntries = [...quarantinedFiles].filter((relativePath) => {
-  const absolutePath = path.join(repoRoot, relativePath);
-  return fs.existsSync(absolutePath) && !boundaryTerms.test(fs.readFileSync(absolutePath, 'utf8'));
-});
-
-assert.deepEqual(
-  manifestViolations,
-  [],
-  `Boundary quarantine manifest entries must name existing files and include file-level justifications. Violations: ${manifestViolations.join(', ')}`,
-);
 
 assert.deepEqual(
   violations,
   [],
-  `Generic Homeboy Extensions production code must not reference Data Machine or wp-site-generator terms outside ${quarantineManifestPath}. Violations: ${violations.join(', ')}`,
-);
-
-assert.deepEqual(
-  staleQuarantineEntries,
-  [],
-  `Boundary quarantine entries must be removed when the file no longer contains Data Machine or wp-site-generator terms. Stale entries: ${staleQuarantineEntries.join(', ')}`,
+  `Generic Homeboy Extensions production code must not reference Data Machine or wp-site-generator terms. Violations: ${violations.join(', ')}`,
 );
 
 const wordpressIndex = fs.readFileSync(path.join(repoRoot, 'wordpress/index.js'), 'utf8');
@@ -184,21 +147,5 @@ assert.equal(
   false,
   'Generic runtime setup must delegate runtime-specific setup through manifest adapters instead of naming WordPress or WP Codebox concerns.',
 );
-
-const quarantineCounts = quarantinedTermFiles.reduce((counts, relativePath) => {
-  const parts = relativePath.split('/');
-  const root = parts[0] === '.github'
-    ? parts.slice(0, parts[1] === 'scripts' ? 3 : 2).join('/')
-    : parts[0];
-  counts[root] = (counts[root] || 0) + 1;
-  return counts;
-}, {});
-
-console.log('architectural boundary quarantine report:', JSON.stringify({
-  quarantined_files: quarantinedFiles.size,
-  quarantined_files_with_boundary_terms: quarantinedTermFiles.length,
-  counts_by_root: quarantineCounts,
-  files: quarantinedTermFiles.sort(),
-}, null, 2));
 
 console.log('architectural boundary smoke passed');
