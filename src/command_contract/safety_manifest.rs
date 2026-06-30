@@ -350,14 +350,20 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "creates/reuses DMC worktrees and can run the generated fanout unless --dry-run is passed";
             metadata.dangerous_flags = vec!["--run-plan"];
         }
-        ["fuzz", "replay"] => {
+        ["fuzz", "replay"] | ["fuzz", "minimize"] => {
             metadata.mutates = true;
             metadata.output_notes =
-                "replays a persisted fuzz case against local code and may write run artifacts";
+                "replays or minimizes a persisted fuzz case against local code and may write run artifacts";
         }
         ["fuzz"] | ["fuzz", "run"] | ["fuzz", "plan"] => {
             metadata.output_notes = "read-only fuzz planning/execution contract by default; --allow-destructive requires explicit disposable homeboy/isolation-proof/v1 input";
             metadata.dangerous_flags = vec!["--allow-destructive"];
+        }
+        ["rig", "release-lock"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "releases a local rig active-run lease; --force can reclaim a live holder's guardrail";
+            metadata.dangerous_flags = vec!["--force"];
         }
         ["db", "delete-row"] | ["db", "drop-table"] => {
             metadata.mutates = true;

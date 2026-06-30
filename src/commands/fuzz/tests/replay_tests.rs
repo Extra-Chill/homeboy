@@ -170,6 +170,68 @@ fn fuzz_replay_resolves_persisted_run_artifact_without_path() {
 }
 
 #[test]
+fn fuzz_replay_dry_run_accepts_runner_artifact_ref_without_local_bytes() {
+    let reference = "runner-artifact://lab-runner/proof-run/fuzz-result-envelope";
+
+    let (output, exit) = run_replay(FuzzReplayArgs {
+        component: None,
+        path: None,
+        rig: None,
+        extension_override: ExtensionOverrideArgs::default(),
+        setting_args: SettingArgs::default(),
+        artifact_or_case: Some(reference.to_string()),
+        artifact: None,
+        case_id: Some("case-1".to_string()),
+        run_id: Some("proof-run".to_string()),
+        dry_run: true,
+        args: Vec::new(),
+    })
+    .expect("runner artifact dry-run");
+
+    assert_eq!(exit, 0);
+    assert_eq!(output.status, "dry_run");
+    assert_eq!(output.artifact_file.as_deref(), Some(reference));
+    assert_eq!(output.case_id.as_deref(), Some("case-1"));
+    assert!(output
+        .env
+        .iter()
+        .any(|env| { env.name == "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE" && env.value == reference }));
+}
+
+#[test]
+fn fuzz_replay_runner_artifact_ref_without_dry_run_is_actionable() {
+    let result = run_replay(FuzzReplayArgs {
+        component: None,
+        path: None,
+        rig: None,
+        extension_override: ExtensionOverrideArgs::default(),
+        setting_args: SettingArgs::default(),
+        artifact_or_case: Some(
+            "runner-artifact://lab-runner/proof-run/fuzz-result-envelope".to_string(),
+        ),
+        artifact: None,
+        case_id: Some("case-1".to_string()),
+        run_id: Some("proof-run".to_string()),
+        dry_run: false,
+        args: Vec::new(),
+    });
+    let err = match result {
+        Ok(_) => panic!("local bytes required for execution"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.details["field"], "artifact");
+    assert!(err.message.contains("requires local artifact bytes"));
+    assert!(err.details["tried"]
+        .as_array()
+        .expect("tried entries")
+        .iter()
+        .any(|entry| entry
+            .as_str()
+            .is_some_and(|value| value.contains("--dry-run"))));
+}
+
+#[test]
 fn fuzz_replay_executes_manifest_replay_command_with_env() {
     with_isolated_home(|home| {
         let component_dir = tempfile::tempdir().expect("component dir");

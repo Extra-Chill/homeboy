@@ -32,9 +32,13 @@ fn run_replay_like(
     args: ReplayLikeArgs,
     mode: ReplayLikeMode,
 ) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
+    let artifact_ref = replay_artifact_ref(&args);
     let artifact_file = match replay_artifact_path(&args) {
         Some(path) => Some(path),
-        None => resolve_run_replay_artifact_path(args.run_id.as_deref()).transpose()?,
+        None if artifact_ref.is_none() => {
+            resolve_run_replay_artifact_path(args.run_id.as_deref()).transpose()?
+        }
+        None => None,
     };
     let positional_case = args.artifact_or_case.as_ref().and_then(|value| {
         if artifact_file.is_some() && !Path::new(value).exists() {
@@ -44,6 +48,12 @@ fn run_replay_like(
         }
     });
     let requested_case_id = args.case_id.clone().or(positional_case);
+
+    if artifact_ref.is_some() && !args.dry_run {
+        return Err(runner_artifact_replay_requires_local_bytes(
+            artifact_ref.as_deref().unwrap_or_default(),
+        ));
+    }
 
     let resolved = if let Some(path) = artifact_file.as_ref() {
         Some(resolve_replay_artifact(path, requested_case_id.as_deref())?)
@@ -62,6 +72,7 @@ fn run_replay_like(
         case_id.as_deref(),
         replay.as_ref(),
         args.run_id.as_ref(),
+        artifact_ref.as_deref(),
     );
     let replay_context = resolve_replay_context(&args, mode)?;
     let replay_command = replay_context
@@ -70,7 +81,7 @@ fn run_replay_like(
         .map(|command| render_replay_command(&command, &env, args.args.as_slice()));
 
     if args.dry_run {
-        let status = if artifact_file.is_some() {
+        let status = if artifact_file.is_some() || artifact_ref.is_some() {
             "dry_run"
         } else {
             "needs_artifact"
@@ -81,7 +92,9 @@ fn run_replay_like(
                 command: mode.command_name().to_string(),
                 status: status.to_string(),
                 message: replay_message(replay_command.as_ref(), true, mode),
-                artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
+                artifact_file: artifact_file
+                    .map(|path| path.to_string_lossy().to_string())
+                    .or(artifact_ref.clone()),
                 campaign_id: resolved
                     .as_ref()
                     .and_then(|resolved| resolved.campaign_id.clone()),
@@ -106,7 +119,9 @@ fn run_replay_like(
             command: mode.command_name().to_string(),
             status: "unsupported".to_string(),
             message: format!("Generic fuzz {} execution requires a component/rig extension context with fuzz.{}; use --dry-run to inspect metadata only.", mode.label(), mode.manifest_key()),
-            artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
+            artifact_file: artifact_file
+                .map(|path| path.to_string_lossy().to_string())
+                .or(artifact_ref.clone()),
             campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
             envelope_id: resolved.as_ref().and_then(|resolved| resolved.envelope_id.clone()),
             case_id,
@@ -130,7 +145,9 @@ fn run_replay_like(
                 mode.manifest_key(),
                 mode.label()
             ),
-            artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
+            artifact_file: artifact_file
+                .map(|path| path.to_string_lossy().to_string())
+                .or(artifact_ref.clone()),
             campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
             envelope_id: resolved.as_ref().and_then(|resolved| resolved.envelope_id.clone()),
             case_id,
@@ -164,7 +181,9 @@ fn run_replay_like(
             command: mode.command_name().to_string(),
             status: if output.success { "passed" } else { "failed" }.to_string(),
             message: replay_message(Some(&command), false, mode),
-            artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
+            artifact_file: artifact_file
+                .map(|path| path.to_string_lossy().to_string())
+                .or(artifact_ref.clone()),
             campaign_id: resolved
                 .as_ref()
                 .and_then(|resolved| resolved.campaign_id.clone()),
@@ -399,11 +418,34 @@ struct ResolvedReplayArtifact {
 fn replay_artifact_path(args: &ReplayLikeArgs) -> Option<PathBuf> {
     args.artifact.clone().or_else(|| {
         args.artifact_or_case.as_ref().and_then(|value| {
+            if value.starts_with("runner-artifact://") {
+                return None;
+            }
             let path = PathBuf::from(value);
             (path.exists() || value.contains(std::path::MAIN_SEPARATOR) || value.ends_with(".json"))
                 .then_some(path)
         })
     })
+}
+
+fn replay_artifact_ref(args: &ReplayLikeArgs) -> Option<String> {
+    args.artifact_or_case
+        .as_deref()
+        .filter(|value| value.starts_with("runner-artifact://"))
+        .map(str::to_string)
+}
+
+fn runner_artifact_replay_requires_local_bytes(reference: &str) -> homeboy::core::Error {
+    Error::validation_invalid_argument(
+        "artifact",
+        "fuzz replay requires local artifact bytes unless --dry-run is used",
+        Some(reference.to_string()),
+        Some(vec![
+            format!("Runner artifact ref: {reference}"),
+            "Use `homeboy fuzz replay --dry-run <runner-artifact://...>` to inspect replay intent without local bytes.".to_string(),
+            "Download the artifact first with `homeboy runs artifact get <run-id> <artifact-id> --output <path>`, then replay that local path.".to_string(),
+        ]),
+    )
 }
 
 fn resolve_run_replay_artifact_path(
@@ -594,6 +636,7 @@ fn fuzz_replay_env(
     case_id: Option<&str>,
     replay: Option<&FuzzReplayMetadata>,
     run_id: Option<&String>,
+    artifact_ref: Option<&str>,
 ) -> Vec<FuzzReplayEnv> {
     let mut env = Vec::new();
     if let Some(path) = artifact_file {
@@ -601,6 +644,12 @@ fn fuzz_replay_env(
             &mut env,
             "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE",
             path.to_string_lossy().to_string(),
+        );
+    } else if let Some(reference) = artifact_ref {
+        push_replay_env(
+            &mut env,
+            "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE",
+            reference.to_string(),
         );
     }
     if let Some(case_id) = case_id.filter(|case_id| !case_id.trim().is_empty()) {
