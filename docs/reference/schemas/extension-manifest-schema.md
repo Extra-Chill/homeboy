@@ -17,6 +17,7 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
   "executable": {},
   "platform": {},
   "structured_sidecars": {},
+  "materialization_source": {},
   "commands": {},
   "actions": [],
   "hooks": {},
@@ -44,6 +45,7 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
 - **`executable`** (object): Standalone tool runtime, inputs, output schema
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
 - **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
+- **`materialization_source`** (object): Declares runner-resolvable source metadata for materializing this extension away from controller-local paths
 - **`fuzz`** (object): Declares fuzz workload metadata, optional runner script, and optional campaign portability metadata
 - **`commands`** (object): Additional CLI commands provided by extension
 - **`actions`** (array): Action definitions for `homeboy extension action`; release actions are normal actions whose IDs start with `release.`
@@ -209,6 +211,47 @@ Known sidecar names default to these run-directory paths when `path` is omitted:
 ### Inspection Behavior
 
 Core exposes declared sidecars through manifest inspection, including `homeboy extension show <id>` JSON output. Consumers that need machine-readable output should require the matching declaration before relying on a sidecar.
+
+## Extension Materialization Source
+
+Extensions can declare a small runner-facing source contract for rapid local iteration and runner parity workflows. The contract is additive: missing `materialization_source` means the extension has not declared a runner-resolvable materialization source.
+
+```json
+{
+  "materialization_source": {
+    "schema": "homeboy/extension-materialization-source/v1",
+    "source_kind": "git",
+    "revision": "abc1234",
+    "runner_archive_url": "https://example.com/extensions/example.tar.gz",
+    "runner_archive_sha256": "sha256-fixture",
+    "runner_ref": "refs/heads/feat/example",
+    "helper_manifest_refs": [
+      {
+        "id": "example-runtime",
+        "path": "runtime/example-runtime.json",
+        "schema": "homeboy/agent-runtime-manifest/v1",
+        "purpose": "agent runtime helper"
+      }
+    ]
+  }
+}
+```
+
+### Materialization Source Fields
+
+- **`materialization_source.schema`** (string): Contract schema. Defaults to `homeboy/extension-materialization-source/v1` when omitted.
+- **`materialization_source.source_kind`** (string): Source shape. Supported values are `git`, `archive`, `local_path`, and `generated`.
+- **`materialization_source.revision`** (string): Optional source revision/fingerprint for parity checks.
+- **`materialization_source.runner_archive_url`** (string): Optional archive URL a runner can fetch directly.
+- **`materialization_source.runner_archive_sha256`** (string): Optional checksum for `runner_archive_url`.
+- **`materialization_source.runner_ref`** (string): Optional runner-resolvable branch, tag, commit, or ref.
+- **`materialization_source.helper_manifest_refs`** (array): Optional helper manifests bundled with or referenced by the extension materialization source.
+- **`materialization_source.helper_manifest_refs[].id`** (string): Stable helper manifest identifier.
+- **`materialization_source.helper_manifest_refs[].path`** (string): Extension-relative helper manifest path or runner-resolvable path inside the materialized source.
+- **`materialization_source.helper_manifest_refs[].schema`** (string): Optional helper manifest schema identifier.
+- **`materialization_source.helper_manifest_refs[].purpose`** (string): Optional human-readable reason the helper manifest is relevant.
+
+`homeboy extension show <id>` includes `materialization_source` when the extension declares it, allowing runner parity tooling to consume the contract without reading controller-local extension files directly.
 
 ## Fuzz Capability
 

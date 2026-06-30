@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+pub const EXTENSION_MATERIALIZATION_SOURCE_SCHEMA: &str =
+    "homeboy/extension-materialization-source/v1";
+
 // Keep broad manifest wiring here while leaf config structs live in focused files.
 pub use super::manifest_action_config::{
     ActionConfig, InputConfig, OutputConfig, OutputSchema, RuntimeConfig, SelectOption,
@@ -513,6 +516,48 @@ pub struct AgentTaskPolicyConfig {
     pub default_backend: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionMaterializationSourceKind {
+    Git,
+    Archive,
+    LocalPath,
+    Generated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionMaterializationHelperManifestRef {
+    pub id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionMaterializationSourceContract {
+    #[serde(default = "default_extension_materialization_source_schema")]
+    pub schema: String,
+    pub source_kind: ExtensionMaterializationSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_archive_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_archive_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub helper_manifest_refs: Vec<ExtensionMaterializationHelperManifestRef>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+fn default_extension_materialization_source_schema() -> String {
+    EXTENSION_MATERIALIZATION_SOURCE_SCHEMA.to_string()
+}
+
 /// Unified extension manifest decomposed into capability groups.
 ///
 /// Extension JSON files use nested capability groups that map directly to these fields.
@@ -593,6 +638,11 @@ pub struct ExtensionManifest {
     /// machine-readable contract.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub structured_sidecars: BTreeMap<String, StructuredSidecarContract>,
+
+    /// Optional runner-resolvable source metadata for materializing this
+    /// extension on a runner without depending on controller-local paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialization_source: Option<ExtensionMaterializationSourceContract>,
 
     /// Release preflights supplied by this extension.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

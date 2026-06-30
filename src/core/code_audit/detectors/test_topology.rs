@@ -389,6 +389,7 @@ JSON
             fuzz: None,
             trace: None,
             structured_sidecars: std::collections::BTreeMap::new(),
+            materialization_source: None,
             release_preflights: vec![],
             agent_runtimes: vec![],
             agent_task: None,
