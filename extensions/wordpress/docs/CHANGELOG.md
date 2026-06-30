@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.3] - 2026-06-30
+
+### Changed
+- reduce boundary smoke theater
+
 ## [3.22.2] - 2026-06-30
 
 ### Fixed
