@@ -166,6 +166,10 @@ pub struct ControllerActionFailureSummary {
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_context: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_command: Option<String>,
     pub diagnostic: String,
 }
 

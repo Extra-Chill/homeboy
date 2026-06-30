@@ -114,32 +114,28 @@ fn run_failure_summary_falls_back_to_stopped_reason() {
 }
 
 #[test]
-fn run_failure_summary_surfaces_codebox_context_and_recipe_replay() {
+fn run_failure_summary_surfaces_provider_runtime_context_and_replay() {
     let results = vec![serde_json::json!({
         "schema": ACTION_RESULT_SCHEMA,
         "status": "failed",
-        "action_id": "validate-recipe",
+        "action_id": "validate-runtime-input",
         "failure_summary": {
-            "action_id": "validate-recipe",
-            "provider": "wp-codebox",
+            "action_id": "validate-runtime-input",
+            "provider": "sample-runtime",
             "failure_phase": "schema_validation",
-            "diagnostic": "unsupported recipe command `wordpress.editor-validate-blocks`",
+            "diagnostic": "unsupported runtime operation `render.preview`",
+            "runtime_context": {
+                "binary_path": "/opt/sample-runtime/bin/runtime",
+                "version": "0.9.1",
+                "fingerprint": "sha256:runtime",
+                "capabilities": ["render.preview"]
+            },
+            "replay_command": "/opt/sample-runtime/bin/runtime replay --input '/tmp/generated input.json' --json"
         },
         "execution": {
             "outputs": {
                 "provider_run_result": {
-                    "source": "wp-codebox/artifact-result-envelope/v1",
-                    "generated_recipe_path": "/tmp/generated recipe.json",
-                    "codebox": {
-                        "binary_path": "/opt/wp-codebox/bin/wp-codebox",
-                        "version": "0.9.1",
-                        "commit": "abc1234",
-                        "fingerprint": "sha256:codebox",
-                        "supported_recipe_commands": [
-                            "wordpress.load",
-                            "wordpress.editor-validate-blocks"
-                        ]
-                    }
+                    "source": "sample-runtime/result-envelope/v1"
                 }
             }
         }
@@ -148,28 +144,23 @@ fn run_failure_summary_surfaces_codebox_context_and_recipe_replay() {
 
     let summary = build_run_failure_summary("loop/9", "action_failed", &results, &status);
     let context = summary
-        .codebox_context
+        .runtime_context
         .as_ref()
-        .expect("codebox context is surfaced");
+        .expect("provider runtime context is surfaced");
 
     assert_eq!(
-        context.binary_path.as_deref(),
-        Some("/opt/wp-codebox/bin/wp-codebox")
+        context["binary_path"].as_str(),
+        Some("/opt/sample-runtime/bin/runtime")
     );
-    assert_eq!(context.version.as_deref(), Some("0.9.1"));
-    assert_eq!(context.commit.as_deref(), Some("abc1234"));
-    assert_eq!(context.fingerprint.as_deref(), Some("sha256:codebox"));
-    assert!(context
-        .capabilities
-        .iter()
-        .any(|capability| capability == "wordpress.editor-validate-blocks"));
+    assert_eq!(context["version"].as_str(), Some("0.9.1"));
+    assert_eq!(context["fingerprint"].as_str(), Some("sha256:runtime"));
 
     let replay = summary
-        .codebox_replay_command
+        .replay_command
         .as_deref()
-        .expect("codebox replay command is surfaced");
+        .expect("provider replay command is surfaced");
     assert_eq!(
         replay,
-        "/opt/wp-codebox/bin/wp-codebox recipe-run --recipe '/tmp/generated recipe.json' --artifacts /tmp/homeboy-codebox-replay/loop-9/validate-recipe --json"
+        "/opt/sample-runtime/bin/runtime replay --input '/tmp/generated input.json' --json"
     );
 }

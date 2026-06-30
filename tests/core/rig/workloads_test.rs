@@ -48,7 +48,7 @@ fn test_env_provider_extensions_for_extension_workloads_are_deduplicated() {
         r#"{
             "id": "fixture-bench",
             "bench_workloads": {
-                "nodejs": [
+                "fixture-runtime": [
                     {
                         "path": "/tmp/one.bench.mjs",
                         "env_provider_extensions": ["fixture-runtime", "fixture-runtime"]
@@ -67,7 +67,7 @@ fn test_env_provider_extensions_for_extension_workloads_are_deduplicated() {
         env_provider_extensions_for_extension_workloads(
             &rig_spec,
             RigWorkloadKind::Bench,
-            "nodejs",
+            "fixture-runtime",
         ),
         vec!["artifact-helper".to_string(), "fixture-runtime".to_string()]
     );
