@@ -492,7 +492,10 @@ impl BatchCookSpec {
             prompt: self.prompt.clone(),
             tasks: self.tasks.clone(),
             cwd: self.cwd.clone(),
-            workspace: self.workspace.clone(),
+            workspace: self
+                .workspace
+                .clone()
+                .or_else(|| self.cwd.is_none().then(|| self.to_worktree.clone())),
             repo: self.repo.clone(),
             task_url: self.task_url.clone(),
             backend: self.backend.clone(),
@@ -963,6 +966,7 @@ mod tests {
             invocation.dispatch.cwd.as_deref(),
             Some("/runner/workspaces/homeboy@5929-docs")
         );
+        assert_eq!(invocation.dispatch.workspace, None);
         assert_eq!(
             invocation.dispatch.run_id.as_deref(),
             Some("cook-5929-docs")
@@ -1056,6 +1060,14 @@ mod tests {
             .contains("https://github.com/Extra-Chill/homeboy/issues/6453"));
         assert_eq!(plan.cooks[0].verify, vec!["cargo test --lib"]);
         assert_eq!(plan.cooks[0].backend.as_deref(), Some("sandbox"));
+
+        let invocation = plan.cooks[0]
+            .to_cook_invocation(&plan)
+            .expect("cook invocation");
+        assert_eq!(
+            invocation.dispatch.workspace.as_deref(),
+            Some("homeboy@fix-issue-6453-homeboy")
+        );
     }
 
     #[test]
