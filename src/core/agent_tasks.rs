@@ -59,9 +59,11 @@ pub use super::agent_task_aggregate::{
 };
 
 pub use super::agent_task_contract::{
-    agent_task_core_contract, AgentTaskCoreContract, AgentTaskCoreContractEnums,
-    AgentTaskCoreContractSchemas, AgentTaskCoreProviderCapabilityContract,
-    AgentTaskCoreRedactionDefaults, AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+    agent_runtime_contract_handshake, agent_task_core_contract, AgentRuntimeContractHandshake,
+    AgentRuntimeContractHandshakePhase, AgentRuntimeContractHandshakeProvider,
+    AgentTaskCoreContract, AgentTaskCoreContractEnums, AgentTaskCoreContractSchemas,
+    AgentTaskCoreProviderCapabilityContract, AgentTaskCoreRedactionDefaults,
+    AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
     AGENT_TASK_CORE_CONTRACT_SCHEMA,
 };

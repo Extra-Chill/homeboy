@@ -1,4 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::core::agent_runtime_manifest::{
+    AGENT_RUNTIME_MANIFEST_SCHEMA, AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA,
+};
 
 use crate::core::agent_task::{
     AgentTaskExecutionState, AgentTaskFailureClassification, AgentTaskOutcomeStatus,
@@ -45,12 +49,15 @@ pub const AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA: &str =
     "homeboy/agent-task-batch-cook-fanout-run/v1";
 pub const AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA: &str =
     "homeboy/agent-task-batch-cook-fanout-submit/v1";
+pub const AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA: &str =
+    "homeboy/agent-runtime-contract-handshake/v1";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTaskCoreContract {
     pub schema: String,
     pub schemas: AgentTaskCoreContractSchemas,
     pub provider_capability: AgentTaskCoreProviderCapabilityContract,
+    pub agent_runtime_handshake: AgentRuntimeContractHandshake,
     pub enums: AgentTaskCoreContractEnums,
     pub redaction_defaults: AgentTaskCoreRedactionDefaults,
 }
@@ -86,10 +93,37 @@ pub struct AgentTaskCoreContractSchemas {
     pub secret_env_plan: String,
     pub secret_env_requirement: String,
     pub command_invocation: String,
+    pub agent_runtime_manifest: String,
+    pub agent_runtime_materialization_plan: String,
+    pub agent_runtime_contract_handshake: String,
     pub resolved_agent_runtime_execution_contract: String,
     pub batch_cook_fanout_plan: String,
     pub batch_cook_fanout_run: String,
     pub batch_cook_fanout_submit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimeContractHandshake {
+    pub schema: String,
+    pub purpose: String,
+    pub phases: Vec<AgentRuntimeContractHandshakePhase>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimeContractHandshakePhase {
+    pub id: String,
+    pub provider: AgentRuntimeContractHandshakeProvider,
+    pub schema_refs: Vec<String>,
+    pub required_fields: Vec<String>,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRuntimeContractHandshakeProvider {
+    Extension,
+    Homeboy,
+    ExtensionResult,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -167,6 +201,10 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             secret_env_plan: SECRET_ENV_PLAN_SCHEMA.to_string(),
             secret_env_requirement: SECRET_ENV_REQUIREMENT_SCHEMA.to_string(),
             command_invocation: COMMAND_INVOCATION_SCHEMA.to_string(),
+            agent_runtime_manifest: AGENT_RUNTIME_MANIFEST_SCHEMA.to_string(),
+            agent_runtime_materialization_plan: AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA
+                .to_string(),
+            agent_runtime_contract_handshake: AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA.to_string(),
             resolved_agent_runtime_execution_contract:
                 RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA.to_string(),
             batch_cook_fanout_plan: AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA.to_string(),
@@ -258,6 +296,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "extra",
             ]),
         },
+        agent_runtime_handshake: agent_runtime_contract_handshake(),
         enums: AgentTaskCoreContractEnums {
             execution_handle_kind: string_vec(&[
                 "queued_record",
@@ -313,6 +352,65 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             sensitive_keys: redaction.sensitive_keys().to_vec(),
             sensitive_headers: redaction.sensitive_headers().to_vec(),
         },
+    }
+}
+
+pub fn agent_runtime_contract_handshake() -> AgentRuntimeContractHandshake {
+    AgentRuntimeContractHandshake {
+        schema: AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA.to_string(),
+        purpose: "Generic extension-facing agent runtime contract handshake. Homeboy owns the protocol vocabulary and schema references; extensions supply runtime-specific declarations and results without Homeboy core branching on runtime implementation details.".to_string(),
+        phases: vec![
+            AgentRuntimeContractHandshakePhase {
+                id: "runtime_capability_manifest".to_string(),
+                provider: AgentRuntimeContractHandshakeProvider::Extension,
+                schema_refs: string_vec(&[
+                    AGENT_RUNTIME_MANIFEST_SCHEMA,
+                    AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+                ]),
+                required_fields: string_vec(&["schema", "id", "agent_task_executors[].id", "agent_task_executors[].backend"]),
+                description: "Extension declares runtime identity, executor providers, capabilities, and runtime-owned materialization/readiness declarations.".to_string(),
+            },
+            AgentRuntimeContractHandshakePhase {
+                id: "readiness_checks".to_string(),
+                provider: AgentRuntimeContractHandshakeProvider::Extension,
+                schema_refs: string_vec(&[AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA]),
+                required_fields: string_vec(&["runner_readiness[].id", "runner_readiness[].label"]),
+                description: "Extension declares generic readiness probes such as secret env names, env-path checks, executable candidates, and remediation text.".to_string(),
+            },
+            AgentRuntimeContractHandshakePhase {
+                id: "materialization_plan".to_string(),
+                provider: AgentRuntimeContractHandshakeProvider::Homeboy,
+                schema_refs: string_vec(&[AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA]),
+                required_fields: string_vec(&["schema", "runtime_id"]),
+                description: "Homeboy resolves extension declarations into the runtime materialization plan it can route, copy, mount, or diagnose.".to_string(),
+            },
+            AgentRuntimeContractHandshakePhase {
+                id: "secret_env_plan".to_string(),
+                provider: AgentRuntimeContractHandshakeProvider::Homeboy,
+                schema_refs: string_vec(&[SECRET_ENV_PLAN_SCHEMA, SECRET_ENV_REQUIREMENT_SCHEMA]),
+                required_fields: string_vec(&["schema"]),
+                description: "Homeboy resolves declared secret requirements into a redacted secret env plan and status; extensions name required env, never secret values.".to_string(),
+            },
+            AgentRuntimeContractHandshakePhase {
+                id: "resolved_execution_contract".to_string(),
+                provider: AgentRuntimeContractHandshakeProvider::Homeboy,
+                schema_refs: string_vec(&[RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA]),
+                required_fields: string_vec(&["schema", "provider_id"]),
+                description: "Homeboy binds the selected provider, runtime id/path, readiness checks, workspace materialization summary, capabilities, and secret env plan reference/object for dispatch.".to_string(),
+            },
+            AgentRuntimeContractHandshakePhase {
+                id: "result_artifact_declarations".to_string(),
+                provider: AgentRuntimeContractHandshakeProvider::ExtensionResult,
+                schema_refs: string_vec(&[
+                    AGENT_TASK_OUTCOME_SCHEMA,
+                    AGENT_TASK_ARTIFACT_SCHEMA,
+                    AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA,
+                    AGENT_TASK_PROVIDER_OUTCOME_CONTRACT_SCHEMA,
+                ]),
+                required_fields: string_vec(&["schema", "status"]),
+                description: "Provider result declares outcome status plus artifacts/evidence using Homeboy's generic artifact and outcome vocabulary.".to_string(),
+            },
+        ],
     }
 }
 
@@ -401,9 +499,37 @@ mod tests {
             COMMAND_INVOCATION_SCHEMA
         );
         assert_eq!(
+            contract.schemas.agent_runtime_manifest,
+            AGENT_RUNTIME_MANIFEST_SCHEMA
+        );
+        assert_eq!(
+            contract.schemas.agent_runtime_materialization_plan,
+            AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA
+        );
+        assert_eq!(
+            contract.schemas.agent_runtime_contract_handshake,
+            AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA
+        );
+        assert_eq!(
             contract.schemas.resolved_agent_runtime_execution_contract,
             RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA
         );
+        assert_eq!(
+            contract.agent_runtime_handshake.schema,
+            AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA
+        );
+        assert!(contract
+            .agent_runtime_handshake
+            .phases
+            .iter()
+            .any(|phase| phase.id == "runtime_capability_manifest"
+                && phase.provider == AgentRuntimeContractHandshakeProvider::Extension));
+        assert!(contract
+            .agent_runtime_handshake
+            .phases
+            .iter()
+            .any(|phase| phase.id == "resolved_execution_contract"
+                && phase.required_fields.contains(&"provider_id".to_string())));
         assert_eq!(
             contract.schemas.batch_cook_fanout_plan,
             AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA
@@ -459,5 +585,56 @@ mod tests {
             .provider_capability
             .workspace_mount_spec_fields
             .contains(&"target_path".to_string()));
+    }
+
+    #[test]
+    fn agent_runtime_contract_handshake_roundtrips_with_required_fields() {
+        let contract = agent_runtime_contract_handshake();
+        let value = serde_json::to_value(&contract).expect("serializes handshake");
+        assert_eq!(
+            value["schema"],
+            serde_json::json!(AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA)
+        );
+        assert!(value["phases"]
+            .as_array()
+            .is_some_and(|phases| phases.iter().any(|phase| phase["id"] == "secret_env_plan")));
+
+        let decoded: AgentRuntimeContractHandshake =
+            serde_json::from_value(value).expect("deserializes handshake");
+        assert_eq!(decoded, contract);
+        assert_eq!(
+            decoded
+                .phases
+                .iter()
+                .find(|phase| phase.id == "result_artifact_declarations")
+                .expect("result phase exists")
+                .provider,
+            AgentRuntimeContractHandshakeProvider::ExtensionResult
+        );
+    }
+
+    #[test]
+    fn agent_runtime_contract_handshake_rejects_missing_required_fields() {
+        let missing_phase_id = serde_json::json!({
+            "schema": AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA,
+            "purpose": "test",
+            "phases": [{
+                "provider": "extension",
+                "schema_refs": [AGENT_RUNTIME_MANIFEST_SCHEMA],
+                "required_fields": ["schema", "id"],
+                "description": "missing id"
+            }]
+        });
+
+        assert!(serde_json::from_value::<AgentRuntimeContractHandshake>(missing_phase_id).is_err());
+
+        let missing_provider_id = serde_json::json!({
+            "schema": RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA
+        });
+
+        assert!(serde_json::from_value::<
+            crate::core::agent_task_provider::ResolvedAgentRuntimeExecutionContract,
+        >(missing_provider_id)
+        .is_err());
     }
 }
