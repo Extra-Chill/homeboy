@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use homeboy::core::cleanup::{self, ArtifactCleanupOptions, ArtifactCleanupOutput};
+use homeboy::core::cleanup::{self, ArtifactCleanupOptions};
+use homeboy::core::worktree_providers::{self, WorktreeProviderCleanupOptions};
 use serde_json::Value;
 
 use super::CmdResult;
@@ -16,6 +17,9 @@ pub struct CleanupArgs {
 pub enum CleanupCommand {
     /// Inspect or remove declared reconstructable artifacts across repo worktrees
     Artifacts(CleanupArtifactsArgs),
+
+    /// Aggregate cleanup across configured external worktree providers
+    Worktrees(CleanupWorktreesArgs),
 }
 
 #[derive(Args)]
@@ -42,7 +46,22 @@ pub struct CleanupArtifactsArgs {
     pub merged_only: bool,
 }
 
-pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<ArtifactCleanupOutput> {
+#[derive(Args)]
+pub struct CleanupWorktreesArgs {
+    /// Cleanup a specific configured provider. Repeatable.
+    #[arg(long = "provider", value_name = "ID", conflicts_with = "all_providers")]
+    pub provider: Vec<String>,
+
+    /// Cleanup every enabled configured provider.
+    #[arg(long)]
+    pub all_providers: bool,
+
+    /// Apply cleanup. Omit for provider preview/dry-run output.
+    #[arg(long)]
+    pub apply: bool,
+}
+
+pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
     match args.command {
         CleanupCommand::Artifacts(args) => cleanup::cleanup_artifacts(ArtifactCleanupOptions {
             path: args.path,
@@ -51,7 +70,31 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Artifact
             temp_roots: args.temp_root,
             merged_only: args.merged_only,
         })
+        .and_then(|output| {
+            serde_json::to_value(output).map_err(|err| {
+                homeboy::core::Error::internal_json(
+                    err.to_string(),
+                    Some("serialize cleanup artifacts output".to_string()),
+                )
+            })
+        })
         .map(|output| (output, 0)),
+        CleanupCommand::Worktrees(args) => {
+            worktree_providers::cleanup_worktree_providers(WorktreeProviderCleanupOptions {
+                provider: args.provider,
+                all_providers: args.all_providers,
+                apply: args.apply,
+            })
+            .and_then(|output| {
+                serde_json::to_value(output).map_err(|err| {
+                    homeboy::core::Error::internal_json(
+                        err.to_string(),
+                        Some("serialize cleanup worktrees output".to_string()),
+                    )
+                })
+            })
+            .map(|output| (output, 0))
+        }
     }
 }
 

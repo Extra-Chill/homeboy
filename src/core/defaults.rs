@@ -40,6 +40,15 @@ pub struct HomeboyConfig {
     #[serde(default)]
     pub agent_task: AgentTaskConfig,
 
+    /// External worktree lifecycle providers keyed by provider id.
+    ///
+    /// Providers are command-backed integration points owned by the local
+    /// environment. Homeboy only selects, gates, executes argv arrays, and
+    /// captures structured output; provider-specific semantics live outside
+    /// core.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub worktree_providers: HashMap<String, WorktreeProviderConfig>,
+
     /// Extension and executor settings addressed through `/settings/...`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub settings: HashMap<String, Value>,
@@ -111,6 +120,7 @@ impl Default for HomeboyConfig {
             lab: LabConfig::default(),
             triage: TriageConfig::default(),
             agent_task: AgentTaskConfig::default(),
+            worktree_providers: HashMap::new(),
             settings: HashMap::new(),
             release_gate: ReleaseGateConfig::default(),
             artifact_root: None,
@@ -118,6 +128,44 @@ impl Default for HomeboyConfig {
             resident_services: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeProviderConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub kind: WorktreeProviderKind,
+    #[serde(default)]
+    pub apply_enabled: bool,
+    #[serde(default)]
+    pub commands: WorktreeProviderCommands,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeProviderKind {
+    Command,
+}
+
+impl Default for WorktreeProviderKind {
+    fn default() -> Self {
+        Self::Command
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeProviderCommands {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_preview: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_apply: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts_preview: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts_apply: Option<Vec<String>>,
 }
 
 pub fn default_true() -> bool {
