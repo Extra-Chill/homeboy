@@ -174,17 +174,26 @@ function resolveInstallRoot(selection, sourceRoot, options, env, settings) {
 }
 
 function resolveCoreModulePath(sourceRoot, installRoot, options, env) {
-	const explicit = firstString(options.wpCodeboxCoreModule, options.coreModule, env.HOMEBOY_WP_CODEBOX_CORE_MODULE, env.WP_CODEBOX_CORE_MODULE);
+	const explicit = firstString(options.wpCodeboxCoreModule, options.coreModule);
 	if (explicit) {
 		return isPathSpecifier(explicit) ? path.resolve(expandHome(explicit)) : explicit;
 	}
-	return firstExistingFile([
+	const discovered = firstExistingFile([
 		sourceRoot && path.resolve(sourceRoot, options.runtimeCoreEntry || DEFAULT_RUNTIME_CORE_ENTRY),
 		installRoot && path.resolve(installRoot, 'source', options.runtimeCoreEntry || DEFAULT_RUNTIME_CORE_ENTRY),
 		installRoot && path.resolve(installRoot, 'release', 'wp-codebox-cli', options.runtimeCoreEntry || DEFAULT_RUNTIME_CORE_ENTRY),
 		installRoot && path.resolve(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js'),
 		installRoot && path.resolve(installRoot, 'release', 'wp-codebox-cli', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js'),
-	]) || DEFAULT_CORE_MODULE;
+	]);
+	const envExplicit = firstString(env.HOMEBOY_WP_CODEBOX_CORE_MODULE, env.WP_CODEBOX_CORE_MODULE);
+	if (envExplicit) {
+		const resolvedEnvExplicit = isPathSpecifier(envExplicit) ? path.resolve(expandHome(envExplicit)) : envExplicit;
+		if (!discovered || !isPathSpecifier(resolvedEnvExplicit) || pathIsInside(resolvedEnvExplicit, sourceRoot) || pathIsInside(resolvedEnvExplicit, installRoot)) {
+			return resolvedEnvExplicit;
+		}
+		return discovered;
+	}
+	return discovered || DEFAULT_CORE_MODULE;
 }
 
 function resolveRuntimePackagePath(sourceRoot, installRoot, options, env) {

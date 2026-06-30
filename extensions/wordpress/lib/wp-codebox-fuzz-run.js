@@ -279,20 +279,29 @@ function wpCodeboxWordPressRuntimeContracts(options = {}) {
 }
 
 function wpCodeboxCanonicalRuntimeContractSource(options = {}) {
+	const resolvedOptions = wpCodeboxRuntimeContractSourceOptions(options);
 	if (typeof options.loadRuntimeContractSource === 'function') {
-		return options.loadRuntimeContractSource(options);
+		return options.loadRuntimeContractSource(resolvedOptions);
 	}
 	if (typeof options.loadCanonicalRuntimeContractSourceSync === 'function') {
-		return options.loadCanonicalRuntimeContractSourceSync({ ...options, required: false });
+		return options.loadCanonicalRuntimeContractSourceSync({ ...resolvedOptions, required: false });
 	}
 	if (!loadCanonicalRuntimeContractSourceSync) {
 		return null;
 	}
 	try {
-		return loadCanonicalRuntimeContractSourceSync({ ...options, required: false });
+		return loadCanonicalRuntimeContractSourceSync({ ...resolvedOptions, required: false });
 	} catch {
 		return null;
 	}
+}
+
+function wpCodeboxRuntimeContractSourceOptions(options = {}) {
+	if (options.wpCodeboxCoreModule || options.coreModule) {
+		return options;
+	}
+	const identity = createCodeboxClient(options).identity();
+	return { ...options, wpCodeboxCoreModule: identity.coreModulePath };
 }
 
 function missingWpCodeboxFuzzRuntimeContractPaths(manifest) {
