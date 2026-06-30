@@ -25,6 +25,8 @@ use crate::core::error::Result;
 
 pub use outcome::{PipelineOutcome, PipelineStepOutcome};
 
+pub(super) use command_step::run_command_step;
+
 pub fn run_pipeline(rig: &RigSpec, name: &str, fail_fast: bool) -> Result<PipelineOutcome> {
     run_pipeline_with_settings(rig, name, fail_fast, &[])
 }
