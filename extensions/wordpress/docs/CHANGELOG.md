@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.4] - 2026-06-30
+
+### Fixed
+- package wordpress agent task contracts
+
 ## [3.22.3] - 2026-06-30
 
 ### Changed
