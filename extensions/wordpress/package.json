@@ -146,6 +146,7 @@
     "test:fanout-reconcile-runner": "node tests/fanout-reconcile-runner-smoke.js",
     "test:generic-fanout-reconcile-workflow": "node tests/generic-fanout-reconcile-workflow-smoke.js",
     "test:generic-fanout-reconcile-boundary": "node ../tests/generic-fanout-reconcile-boundary.test.mjs",
+    "test:architectural-boundary-contract": "node ../tests/architectural-boundary-contract.mjs",
     "test:fixture-workload-matrix": "node tests/fixture-workload-matrix-smoke.js",
     "test:audit-fanout-runtime-provider": "node tests/audit-fanout-runtime-provider-smoke.js",
     "test:wordpress-bench-state-sampling": "php tests/wordpress-bench-state-sampling-helper-smoke.php",

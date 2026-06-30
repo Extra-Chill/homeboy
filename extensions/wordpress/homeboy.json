@@ -70,7 +70,7 @@
       "node tests/refactor-source-wp-codebox-smoke.js",
       "node tests/wordpress-hook-surface-discovery-smoke.js",
       "node ../tests/generic-fanout-reconcile-boundary.test.mjs",
-      "node ../tests/architectural-boundary-smoke.mjs"
+      "node ../tests/architectural-boundary-contract.mjs"
     ]
   }
 }
