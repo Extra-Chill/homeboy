@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.1] - 2026-06-30
+
+### Changed
+- Declare WordPress dependency materialization recipes
+
 ## [3.21.18] - 2026-06-30
 
 ### Changed
