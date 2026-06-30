@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -346,6 +346,27 @@ impl SecretEnvPlan {
                 diagnostics,
             })
         }
+    }
+
+    pub fn remove_undeclared_inherited_secret_env(
+        &self,
+        env: &mut HashMap<String, String>,
+    ) -> Vec<String> {
+        let declared = self.declared_inherited_env_names();
+        let policy = self.redaction.to_policy();
+        let mut removed = env
+            .keys()
+            .filter(|name| policy.is_sensitive_key(name) && !declared.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        removed.sort();
+        removed.dedup();
+
+        for name in &removed {
+            env.remove(name);
+        }
+
+        removed
     }
 
     fn secret_env_requirements(&self) -> Vec<SecretEnvRequirement> {

@@ -175,22 +175,25 @@ fn local_runner_prep_does_not_mark_commands_as_runner_hosted() {
 }
 
 #[test]
-fn runner_prep_rejects_undeclared_sensitive_env() {
+fn runner_prep_drops_undeclared_sensitive_env() {
     crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
 
-        let err = prepare_runner_process(RunnerProcessRequest {
+        let mut runner = local_runner(workspace.display().to_string());
+        runner.env.insert(
+            "UNDECLARED_API_TOKEN".to_string(),
+            "secret-value".to_string(),
+        );
+
+        let plan = prepare_runner_process(RunnerProcessRequest {
             runner_id: "local".to_string(),
-            runner: Some(local_runner(workspace.display().to_string())),
+            runner: Some(runner),
             cwd: Some(workspace.display().to_string()),
             project_id: None,
             command: vec!["env".to_string()],
-            env: HashMap::from([(
-                "UNDECLARED_API_TOKEN".to_string(),
-                "secret-value".to_string(),
-            )]),
+            env: HashMap::new(),
             secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: false,
@@ -198,11 +201,10 @@ fn runner_prep_rejects_undeclared_sensitive_env() {
             require_paths: Vec::new(),
             validate_require_paths_on_host: false,
         })
-        .expect_err("undeclared sensitive env should fail closed");
+        .expect("undeclared sensitive env is dropped before execution");
 
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("UNDECLARED_API_TOKEN"));
-        assert!(!format!("{err:?}").contains("secret-value"));
+        assert!(!plan.env.contains_key("UNDECLARED_API_TOKEN"));
+        assert!(!format!("{plan:?}").contains("secret-value"));
     });
 }
 

@@ -196,7 +196,7 @@ fn executor_runtime_selection_synthesizes_legacy_fields() {
         selection.executor_provider_id.as_deref(),
         Some("claude-code")
     );
-    assert_eq!(selection.provider.as_deref(), Some("claude-code"));
+    assert_eq!(selection.ai_provider_id.as_deref(), Some("claude-code"));
     assert_eq!(selection.model.as_deref(), Some("opus-4.7"));
     assert_eq!(selection.substrate_ref, None);
     assert_eq!(executor.executor_backend(), "sample-runtime");
@@ -248,6 +248,10 @@ fn executor_runtime_selection_round_trips_aliases() {
     assert_eq!(
         serialized["runtime_selection"]["executor_provider_id"],
         "runtime-selector"
+    );
+    assert_eq!(
+        serialized["runtime_selection"]["ai_provider_id"],
+        "example-oauth"
     );
     assert!(serialized.get("runtime").is_none());
 }

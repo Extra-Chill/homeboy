@@ -133,7 +133,7 @@ pub(crate) fn prepare_runner_process(
         ));
     }
 
-    let runner = request
+    let mut runner = request
         .runner
         .map(|mut runner| {
             if runner.id.is_empty() {
@@ -192,6 +192,7 @@ pub(crate) fn prepare_runner_process(
             "local controller runner.env",
             false,
         )?;
+        runner.env = runner_env.clone();
         env = runner_env;
         env.extend(request_env.clone());
         env.extend(resolve_runner_secret_env_for_plan(
@@ -213,6 +214,7 @@ pub(crate) fn prepare_runner_process(
             "local controller runner.env",
             false,
         )?;
+        runner.env = runner_env.clone();
         env = runner_env;
         env.extend(request_env.clone());
         env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
@@ -276,7 +278,7 @@ pub(crate) fn prepare_daemon_local_process(
             ]),
         )
     })?;
-    let runner = request
+    let mut runner = request
         .runner
         .map(|mut runner| {
             if runner.id.is_empty() {
@@ -323,6 +325,7 @@ pub(crate) fn prepare_daemon_local_process(
         "remote runner daemon env",
         false,
     )?;
+    runner.env = runner_env.clone();
     env = runner_env;
     env.extend(request_env.clone());
     env.extend(resolve_runner_secret_env_for_plan(

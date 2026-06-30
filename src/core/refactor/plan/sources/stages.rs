@@ -370,16 +370,14 @@ pub(super) fn run_lint_stage(
     let lint_source_result = serde_json::json!({
         "findings": &lint_findings,
     });
-    if let Some(stage) = try_extension_refactor_source_stage(
+    let extension_stage = try_extension_refactor_source_stage(
         "lint",
         component,
         root,
         &lint_source_result,
         write,
         settings,
-    )? {
-        return Ok(stage);
-    }
+    )?;
 
     // ── Phase 2: Apply fixes (only when --write) ───────────────────────
     // The engine controls fix application. The extension's fix-mode
@@ -457,6 +455,12 @@ pub(super) fn run_lint_stage(
         (Vec::new(), Vec::new(), Vec::new())
     };
 
+    let (stage_changed_files, fix_results, stage_warnings) = merge_lint_extension_stage(
+        extension_stage,
+        stage_changed_files,
+        fix_results,
+        stage_warnings,
+    );
     let edit_count = fix_results.len();
 
     Ok(PlannedStage {
@@ -474,6 +478,33 @@ pub(super) fn run_lint_stage(
         },
         fix_results,
     })
+}
+
+fn merge_lint_extension_stage(
+    extension_stage: Option<PlannedStage>,
+    stage_changed_files: Vec<String>,
+    fix_results: Vec<FixApplied>,
+    stage_warnings: Vec<String>,
+) -> (Vec<String>, Vec<FixApplied>, Vec<String>) {
+    let Some(extension_stage) = extension_stage else {
+        return (stage_changed_files, fix_results, stage_warnings);
+    };
+
+    let mut changed_files = extension_stage.summary.changed_files;
+    changed_files.extend(stage_changed_files);
+    changed_files = changed_files
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut merged_fix_results = extension_stage.fix_results;
+    merged_fix_results.extend(fix_results);
+
+    let mut warnings = extension_stage.summary.warnings;
+    warnings.extend(stage_warnings);
+
+    (changed_files, merged_fix_results, warnings)
 }
 
 pub(super) fn empty_lint_stage() -> PlannedStage {
@@ -699,4 +730,88 @@ pub(super) fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) 
     }
 
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fix(file: &str, rule: &str) -> FixApplied {
+        FixApplied {
+            file: file.to_string(),
+            rule: rule.to_string(),
+            action: None,
+            primitive: None,
+        }
+    }
+
+    fn extension_stage() -> PlannedStage {
+        PlannedStage {
+            source: "lint".to_string(),
+            summary: SourceStageSummary {
+                stage: "lint".to_string(),
+                collected: true,
+                applied: true,
+                edit_count: 1,
+                files_modified: 1,
+                detected_findings: Some(2),
+                changed_files: vec!["src/semantic.php".to_string()],
+                fix_summary: None,
+                warnings: vec!["semantic lint fixer handled import drift".to_string()],
+            },
+            fix_results: vec![fix("src/semantic.php", "homeboy-semantic")],
+        }
+    }
+
+    #[test]
+    fn lint_extension_source_merges_with_tool_native_fix_results() {
+        let (changed_files, fix_results, warnings) = merge_lint_extension_stage(
+            Some(extension_stage()),
+            vec![
+                "assets/app.js".to_string(),
+                "src/semantic.php".to_string(),
+                "src/style.php".to_string(),
+            ],
+            vec![
+                fix("src/style.php", "phpcbf:WordPress.WhiteSpace"),
+                fix("assets/app.js", "eslint:semi"),
+            ],
+            vec!["tool-native fix warning".to_string()],
+        );
+
+        assert_eq!(
+            changed_files,
+            vec![
+                "assets/app.js".to_string(),
+                "src/semantic.php".to_string(),
+                "src/style.php".to_string(),
+            ]
+        );
+        assert_eq!(fix_results.len(), 3);
+        assert_eq!(fix_results[0].rule, "homeboy-semantic");
+        assert_eq!(fix_results[1].rule, "phpcbf:WordPress.WhiteSpace");
+        assert_eq!(fix_results[2].rule, "eslint:semi");
+        assert_eq!(
+            warnings,
+            vec![
+                "semantic lint fixer handled import drift".to_string(),
+                "tool-native fix warning".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn lint_tool_native_fix_results_pass_through_without_extension_source() {
+        let (changed_files, fix_results, warnings) = merge_lint_extension_stage(
+            None,
+            vec!["src/style.php".to_string()],
+            vec![fix("src/style.php", "phpcbf:WordPress.WhiteSpace")],
+            vec!["tool-native fix warning".to_string()],
+        );
+
+        assert_eq!(changed_files, vec!["src/style.php".to_string()]);
+        assert_eq!(fix_results.len(), 1);
+        assert_eq!(fix_results[0].rule, "phpcbf:WordPress.WhiteSpace");
+        assert_eq!(warnings, vec!["tool-native fix warning".to_string()]);
+    }
 }

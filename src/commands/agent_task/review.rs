@@ -334,6 +334,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
                 "version": catalog_version,
             },
             "dispatch_config_layers": dispatch_config_layers(providers),
+            "provider_identity_catalog": provider_identity_catalog(providers),
             "capability_contract": homeboy::core::agent_tasks::provider::provider_capability_contract(),
             "providers": providers,
             "readiness_validation": {
@@ -346,6 +347,24 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
         }),
         0,
     ))
+}
+
+fn provider_identity_catalog(providers: &[AgentTaskExecutorProvider]) -> Vec<Value> {
+    providers
+        .iter()
+        .map(|provider| {
+            let ai_provider_ids = provider.provider_defaults.keys().cloned().collect::<Vec<_>>();
+            serde_json::json!({
+                "executor_provider_id": provider.id,
+                "executor_backend": provider.backend,
+                "runtime_id": provider.runtime_id,
+                "runtime_package_source": provider.runtime_package_source.as_ref().or(provider.extension_id.as_ref()),
+                "runtime_path": provider.runtime_path,
+                "ai_provider_ids": ai_provider_ids,
+                "model": null,
+            })
+        })
+        .collect()
 }
 
 /// Operator-facing explanation of the two distinct dispatch configuration
@@ -739,6 +758,10 @@ mod tests {
             "id": "wordpress.sandbox-agent-task-executor",
             "backend": "wordpress",
             "extension_id": "wordpress.sandbox",
+            "runtime_id": "sandbox-runtime",
+            "provider_defaults": {
+                "codex": { "secret_env": ["CODEX_TOKEN"] }
+            }
         }))
         .expect("provider fixture");
 
@@ -776,6 +799,37 @@ mod tests {
             .as_str()
             .expect("common mistake")
             .contains("codex"));
+    }
+
+    #[test]
+    fn provider_identity_catalog_uses_explicit_runtime_vocabulary() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "opencode.agent-task-executor",
+            "backend": "opencode",
+            "extension_id": "wp-codebox",
+            "runtime_package_source": "wp-codebox",
+            "runtime_id": "opencode-local-runtime",
+            "provider_defaults": {
+                "openai": {},
+                "anthropic": {}
+            }
+        }))
+        .expect("provider fixture");
+
+        let catalog = provider_identity_catalog(&[provider]);
+
+        assert_eq!(
+            catalog[0]["executor_provider_id"],
+            "opencode.agent-task-executor"
+        );
+        assert_eq!(catalog[0]["executor_backend"], "opencode");
+        assert_eq!(catalog[0]["runtime_id"], "opencode-local-runtime");
+        assert_eq!(catalog[0]["runtime_package_source"], "wp-codebox");
+        assert_eq!(
+            catalog[0]["ai_provider_ids"],
+            serde_json::json!(["anthropic", "openai"])
+        );
+        assert!(catalog[0]["model"].is_null());
     }
 
     #[test]
