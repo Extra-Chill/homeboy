@@ -253,6 +253,30 @@ process.exit(0);
 	const quietAgentResult = JSON.parse(fs.readFileSync(quietResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
 	assert.deepEqual(quietAgentResult.artifacts, { patch: false, transcript: false });
 
+	const inheritedPipeCliPath = path.join(root, 'mock-opencode-inherited-pipe.cjs');
+	fs.writeFileSync(inheritedPipeCliPath, `#!/usr/bin/env node
+const { spawn } = require('node:child_process');
+spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }).unref();
+process.stdout.write('parent finished');
+process.exit(0);
+`);
+	const inheritedPipeResult = await Promise.race([
+		executeOpenCodeAgentTask({
+			...request,
+			task_id: 'opencode-inherited-pipe-exit',
+			executor: {
+				...request.executor,
+				config: {
+					...request.executor.config,
+					command_args: [inheritedPipeCliPath],
+				},
+			},
+		}, { env: fixtureEnv }),
+		new Promise((_, reject) => setTimeout(() => reject(new Error('OpenCode executor hung on inherited stdio pipes')), 2000)),
+	]);
+	assert.equal(inheritedPipeResult.status, 'succeeded');
+	assert.match(inheritedPipeResult.diagnostics[0].message, /status 0/);
+
 	const implicitArtifactResult = await executeOpenCodeAgentTask({
 		...request,
 		task_id: 'opencode-implicit-artifact-dir',

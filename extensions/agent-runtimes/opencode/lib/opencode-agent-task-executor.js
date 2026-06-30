@@ -592,6 +592,7 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 		let settled = false;
 		let timedOut = false;
 		let child;
+		let exitFallbackTimer = null;
 
 		for (const filePath of Object.values(options.runtimeLogPaths || {})) {
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -616,6 +617,9 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 				return;
 			}
 			settled = true;
+			if (exitFallbackTimer) {
+				clearTimeout(exitFallbackTimer);
+			}
 			resolve({
 				stdout: stdoutChunks.join(''),
 				stderr: stderrChunks.join(''),
@@ -638,6 +642,20 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 		child.stdout.on('data', (chunk) => append('stdout', chunk));
 		child.stderr.on('data', (chunk) => append('stderr', chunk));
 		child.on('error', (error) => finish({ error }));
+		child.on('exit', (status, signal) => {
+			// Some runtimes leave descendants holding inherited stdio open after the
+			// command exits. Fall back to process exit so Homeboy does not wait forever
+			// for a `close` event that cannot arrive until those descendants die.
+			exitFallbackTimer = setTimeout(() => {
+				child.stdout.destroy();
+				child.stderr.destroy();
+				finish({
+					status,
+					signal,
+					...(timedOut ? { error: Object.assign(new Error('OpenCode execution timed out.'), { code: 'ETIMEDOUT' }) } : {}),
+				});
+			}, 250);
+		});
 		child.on('close', (status, signal) => {
 			if (timer) {
 				clearTimeout(timer);
