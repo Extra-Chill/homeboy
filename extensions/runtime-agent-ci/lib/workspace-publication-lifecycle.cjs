@@ -780,6 +780,104 @@ function publishRevision(workspace, publication, delta, hooks = {}) {
   };
 }
 
+function finalizationGateArgs(lifecycle = {}) {
+  return [
+    lifecycle.verification?.gate_result,
+    lifecycle.drift?.gate_result,
+    lifecycle.sideEffectPolicy?.gate_result,
+    lifecycle.writablePaths?.gate_result,
+    lifecycle.workspaceContract?.gate_result,
+    ...(Array.isArray(lifecycle.gate_results) ? lifecycle.gate_results : []),
+  ].filter((gate) => gate && gate.enabled !== false && gate.status === 'passed').map((gate) => {
+    const name = String(gate.id || gate.name || gate.label || 'workspace_lifecycle').replace(/[^A-Za-z0-9_.-]+/g, '_');
+    const detail = String(gate.message || gate.reason || '').replace(/\n/g, ' ').trim();
+    return detail ? `${name}=passed:${detail}` : `${name}=passed`;
+  });
+}
+
+function parseHomeboyJsonOutput(stdout) {
+  const text = String(stdout || '').trim();
+  if (!text) {
+    return null;
+  }
+  const parsed = JSON.parse(text);
+  return plainObject(parsed?.data) ? parsed.data : parsed;
+}
+
+function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycle = {}, hooks = {}) {
+  const gateArgs = finalizationGateArgs({
+    ...lifecycle,
+    gate_results: [
+      ...(Array.isArray(lifecycle.gate_results) ? lifecycle.gate_results : []),
+      ...(Array.isArray(config.finalization_gate_results) ? config.finalization_gate_results : []),
+    ],
+  });
+  if (gateArgs.length === 0) {
+    throw new Error('Homeboy agent-task finalize-pr requires at least one passed deterministic gate_result; no eligible lifecycle gates were available');
+  }
+
+  const adapter = lifecycleHooks(hooks);
+  const homeboyBin = config.homeboy_bin || config.homeboyBin || adapter.env.HOMEBOY_BIN || 'homeboy';
+  const metadata = lifecycle.scenario?.metadata || {};
+  const runId = publication.values.run_id || metadata.run_id || metadata.job_id || 'run';
+  const verificationCommands = commandList(config, 'verification_commands').map((entry) => entry.command);
+  const args = [
+    'agent-task', 'finalize-pr',
+    '--run-id', runId,
+    '--path', workspace,
+    '--base', publication.base,
+    '--head', publication.branch,
+    '--title', publication.templates.title,
+    '--commit-message', publication.templates.commitMessage,
+    '--attempt-summary', lifecycle.gateSummary?.reason || 'green deterministic workspace lifecycle gates completed',
+    '--ai-tool', config.ai_tool || config.aiTool || 'OpenCode',
+    '--ai-model', config.ai_model || config.aiModel || 'not recorded',
+    '--ci-expected', config.ci_expected || config.ciExpected || 'Homeboy CI after push',
+    '--ai-used-for', config.ai_used_for || config.aiUsedFor || 'Drafted implementation and tests; Chris reviews and owns the change.',
+  ];
+  for (const gateArg of gateArgs) {
+    args.push('--gate-result', gateArg);
+  }
+  for (const file of delta.staged) {
+    args.push('--changed-file', file);
+  }
+  for (const command of verificationCommands) {
+    args.push('--targeted-check-run', command);
+  }
+  for (const ref of config.source_refs || config.sourceRefs || []) {
+    args.push('--source-ref', ref);
+  }
+  for (const ref of config.artifact_refs || config.artifactRefs || []) {
+    args.push('--artifact-ref', ref);
+  }
+  for (const branch of config.protected_branches || config.protectedBranches || []) {
+    args.push('--protected-branch', branch);
+  }
+
+  const result = adapter.run(homeboyBin, args, { cwd: workspace });
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || 'homeboy agent-task finalize-pr failed').trim());
+  }
+  const report = parseHomeboyJsonOutput(result.stdout) || {};
+  const publicationProof = plainObject(report.publication_proof) ? report.publication_proof : {};
+  const target = plainObject(publicationProof.target) ? publicationProof.target : {};
+  const url = report.pr_url || publicationProof.adapter_ref || target.url || '';
+  const action = report.pr_action || publicationProof.adapter_action || '';
+  return {
+    report,
+    changed: Array.isArray(report.changed_files) ? report.changed_files.length > 0 : delta.changed,
+    head: report.head || publication.branch,
+    base: report.base || publication.base,
+    url,
+    action,
+    pr_number: report.pr_number ?? null,
+    pr_state: url ? 'OPEN' : '',
+    files: Array.isArray(report.changed_files) ? report.changed_files : delta.staged,
+    publication_intent: report.publication_intent || null,
+    publication_proof: report.publication_proof || null,
+  };
+}
+
 function updateReviewSummary(workspace, review, templates, hooks = {}) {
   if (!review?.number) {
     return { updated: false };
@@ -830,7 +928,7 @@ function ensurePullRequest(workspace, branch, templates, hooks = {}) {
   return ensureReviewRequest(workspace, branch, templates, hooks);
 }
 
-function publishWorkspace(config, results, scenario, workspace, files, hooks = {}) {
+function publishWorkspace(config, results, scenario, workspace, files, hooks = {}, lifecycle = {}) {
   if (files.length === 0) {
     return { opened: false, changed: false };
   }
@@ -845,18 +943,17 @@ function publishWorkspace(config, results, scenario, workspace, files, hooks = {
     return { opened: false, changed: false, head: publication.branch, files: [], publication_evidence_ref: delta.publication_evidence_ref };
   }
 
-  const revision = publishRevision(workspace, publication, delta, hooks);
-  const pullRequest = ensureReviewRequest(workspace, publication.branch, publication.templates, hooks);
-  const url = pullRequest.url;
+  const finalization = finalizeWorkspaceReview(config, workspace, publication, delta, { ...lifecycle, scenario }, hooks);
+  const url = finalization.url;
   const evidenceRef = publicationEvidenceRef({
     repo: publication.repo,
-    head: pullRequest.head || revision.head,
+    head: finalization.head,
     base: publication.base,
     url,
-    action: pullRequest.action,
-    number: pullRequest.number,
-    state: pullRequest.state,
-    files: revision.files,
+    action: finalization.action,
+    number: finalization.pr_number,
+    state: finalization.pr_state,
+    files: finalization.files,
   });
 
 
@@ -867,17 +964,17 @@ function publishWorkspace(config, results, scenario, workspace, files, hooks = {
     source: 'host_runner_lifecycle',
     success: Boolean(url),
     repo: publication.repo,
-    head: pullRequest.head || revision.head,
+    head: finalization.head,
     base: publication.base,
     url,
-    action: pullRequest.action,
-    pr_number: pullRequest.number,
-    pr_state: pullRequest.state,
-    closed_pr_number: pullRequest.closed_pr_number,
-    closed_pr_url: pullRequest.closed_pr_url,
-    reopen_error: pullRequest.reopen_error,
-    files: revision.files,
+    action: finalization.action,
+    pr_number: finalization.pr_number,
+    pr_state: finalization.pr_state,
+    files: finalization.files,
     publication_evidence_ref: evidenceRef,
+    finalization: finalization.report,
+    publication_intent: finalization.publication_intent,
+    publication_proof: finalization.publication_proof,
   };
 }
 
@@ -995,7 +1092,15 @@ function runDeterministicWorkspaceLifecycle(config, results, scenario, workspace
     }
   } else {
     try {
-      publication = publishWorkspace(config, results, scenario, workspace, files, hooks);
+      publication = publishWorkspace(config, results, scenario, workspace, files, hooks, {
+        verification,
+        drift,
+        sideEffectPolicy,
+        writablePaths,
+        workspaceContract,
+        gateSummary,
+        scenario,
+      });
       if (capture.changed && !publication.opened && !publication.dry_run) {
         success = false;
         error = 'Agent wrote files without opening a pull request';
@@ -1030,6 +1135,7 @@ module.exports = {
   evaluateWorkspaceContract,
   ensurePullRequest,
   ensureReviewRequest,
+  finalizeWorkspaceReview,
   lifecycleHooks,
   preparePublication,
   publicationBase,

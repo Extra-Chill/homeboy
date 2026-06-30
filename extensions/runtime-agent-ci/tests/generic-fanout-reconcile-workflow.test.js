@@ -9,7 +9,12 @@ const {
   createGenericFanoutReconcilePlan,
   createGenericFanoutReconcileResult,
 } = require('../lib/generic-fanout-reconcile-workflow');
-const { executeFanoutReconcileRun } = require('../lib/fanout-reconcile-runner');
+const {
+  AGENT_TASK_FANOUT_CANONICAL_PATH,
+  AGENT_TASK_FANOUT_PLAN_SCHEMA,
+  executeFanoutReconcileRun,
+  projectHomeboyAgentTaskFanoutPlan,
+} = require('../lib/fanout-reconcile-runner');
 
 async function observedConcurrency(options = {}) {
   const plan = createGenericFanoutReconcilePlan({
@@ -92,6 +97,39 @@ async function observedConcurrency(options = {}) {
   assert.equal(providerStatusRun.status, 'completed');
   assert.deepEqual(providerStatusRun.records.map((record) => record.status), ['completed', 'completed']);
   assert.deepEqual(providerStatusRun.records.map((record) => record.outcome.status), ['succeeded', 'no_op']);
+
+  const homeboyFanoutPlan = {
+    id: 'fanout/site-workflow',
+    inputs: {
+      schema: AGENT_TASK_FANOUT_PLAN_SCHEMA,
+      fanout_id: 'fanout/site-workflow',
+      plane: 'workflow',
+      group_key: 'site-workflow',
+      canonical_path: AGENT_TASK_FANOUT_CANONICAL_PATH,
+      runtime_boundary: {
+        boundary: 'manifest_declared_runtime_executor',
+        durable_scheduler: 'homeboy',
+        executor: 'declared_by_task_executor',
+        runtime: 'declared_by_task_runtime',
+      },
+    },
+    steps: [
+      { id: 'generate', inputs: { request: { task_id: 'generate', instructions: 'Generate' } } },
+      { id: 'diagnose', inputs: { request: { task_id: 'diagnose', instructions: 'Diagnose' } } },
+    ],
+  };
+  const projected = projectHomeboyAgentTaskFanoutPlan(homeboyFanoutPlan);
+  assert.equal(projected.plan_schema, AGENT_TASK_FANOUT_PLAN_SCHEMA);
+  assert.equal(projected.orchestrator.canonical_path, AGENT_TASK_FANOUT_CANONICAL_PATH);
+  assert.deepEqual(projected.task_requests.map((request) => request.task_id), ['generate', 'diagnose']);
+
+  const homeboyProjectedRun = await executeFanoutReconcileRun({
+    plan: homeboyFanoutPlan,
+    execute_task_request: (request) => ({ id: request.task_id, group_key: request.group_key, status: 'completed' }),
+  });
+  assert.equal(homeboyProjectedRun.plan_schema, 'homeboy/fanout-reconcile-plan/v1');
+  assert.equal(homeboyProjectedRun.orchestrator.fanout_id, 'fanout/site-workflow');
+  assert.deepEqual(homeboyProjectedRun.records.map((record) => record.id), ['generate', 'diagnose']);
 
   console.log('Generic fanout reconcile workflow test passed');
 })().catch((error) => {

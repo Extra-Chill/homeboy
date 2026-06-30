@@ -191,11 +191,39 @@ try {
     if (command === 'git' && args[0] === 'diff' && args[1] === '--cached') {
       return { status: 0, stdout: 'docs/generated.md\n', stderr: '' };
     }
-    if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
-      return { status: 1, stdout: '', stderr: 'not found' };
-    }
-    if (command === 'gh' && args[0] === 'pr' && args[1] === 'create') {
-      return { status: 0, stdout: 'https://github.com/owner/repo/pull/1291\n', stderr: '' };
+    if (command === 'homeboy' && args[0] === 'agent-task' && args[1] === 'finalize-pr') {
+      return {
+        status: 0,
+        stdout: `${JSON.stringify({
+          schema: 'homeboy/agent-task-pr-finalization/v1',
+          run_id: '12345',
+          status: 'review_ready',
+          path: workspace,
+          base: 'trunk',
+          head: 'agent-artifacts/fixture-agent-12345',
+          pr_action: 'created',
+          pr_number: 1291,
+          pr_url: 'https://github.com/owner/repo/pull/1291',
+          changed_files: ['docs/generated.md'],
+          publication_intent: {
+            schema: 'homeboy/agent-task-publication-intent/v1',
+            run_id: '12345',
+            action: 'review_request',
+            target: { kind: 'code_review', adapter: 'github_pull_request', base: 'trunk', head: 'agent-artifacts/fixture-agent-12345' },
+            changed_files: ['docs/generated.md'],
+          },
+          publication_proof: {
+            schema: 'homeboy/agent-task-publication-proof/v1',
+            run_id: '12345',
+            status: 'review_ready',
+            intent_schema: 'homeboy/agent-task-publication-intent/v1',
+            target: { kind: 'code_review', adapter: 'github_pull_request', base: 'trunk', head: 'agent-artifacts/fixture-agent-12345', url: 'https://github.com/owner/repo/pull/1291' },
+            adapter_action: 'created',
+            adapter_ref: 'https://github.com/owner/repo/pull/1291',
+          },
+        })}\n`,
+        stderr: '',
+      };
     }
     return { status: 0, stdout: '', stderr: '' };
   };
@@ -206,6 +234,7 @@ try {
     provider: 'openai',
     model: 'gpt-5.5',
     workload_id: 'fixture-workload',
+    finalization_gate_results: [{ id: 'verification_commands', status: 'passed' }],
     runner_workspace: { branch: 'agent-artifacts/{agent_slug}-{run_id}', from: 'origin/trunk' },
     artifact_export: {
       commit_message_template: 'chore: persist {task_id}',
@@ -228,7 +257,11 @@ try {
   assert.equal(publication.base, 'trunk');
   assert.equal(publication.url, 'https://github.com/owner/repo/pull/1291');
   assert.equal(publication.action, 'created');
+  assert.equal(publication.pr_number, 1291);
   assert.deepEqual(publication.files, ['docs/generated.md']);
+  assert.equal(publication.finalization.schema, 'homeboy/agent-task-pr-finalization/v1');
+  assert.equal(publication.publication_intent.schema, 'homeboy/agent-task-publication-intent/v1');
+  assert.equal(publication.publication_proof.schema, 'homeboy/agent-task-publication-proof/v1');
   assert.deepEqual(publication.publication_evidence_ref, {
     type: 'pull_request',
     provider: 'github',
@@ -237,16 +270,19 @@ try {
     base: 'trunk',
     url: 'https://github.com/owner/repo/pull/1291',
     action: 'created',
-    pr_number: null,
+    pr_number: 1291,
     pr_state: 'OPEN',
     files: ['docs/generated.md'],
   });
-  assert.deepEqual(calls.filter((call) => call.command === 'gh').map((call) => call.args.slice(0, 2)), [
-    ['pr', 'view'],
-    ['pr', 'create'],
-  ]);
-  assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'push'), true);
-  assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'commit'), true);
+  const finalizationCall = calls.find((call) => call.command === 'homeboy' && call.args[0] === 'agent-task' && call.args[1] === 'finalize-pr');
+  assert.ok(finalizationCall, 'publication delegates review finalization to Homeboy');
+  assert.equal(finalizationCall.args.includes('--gate-result'), true);
+  assert.equal(finalizationCall.args.includes('verification_commands=passed'), true);
+  assert.equal(finalizationCall.args.includes('--changed-file'), true);
+  assert.equal(finalizationCall.args.includes('docs/generated.md'), true);
+  assert.equal(calls.some((call) => call.command === 'gh'), false);
+  assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'push'), false);
+  assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'commit'), false);
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
