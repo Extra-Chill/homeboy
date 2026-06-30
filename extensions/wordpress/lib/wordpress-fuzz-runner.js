@@ -394,7 +394,7 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 function wpCodeboxPluginFile({ activation, sourceLayout = {}, wordpressExtension = {}, mountSlug } = {}) {
 	const configured = nonEmptyString(wordpressExtension?.wp_codebox_plugin_file || wordpressExtension?.wpCodeboxPluginFile);
 	if (configured) {
-		if (sourceLayout.sourceIsPluginRoot && sourceLayout.sourceSubpath && configured.startsWith(`${sourceLayout.sourceSubpath}/`)) {
+		if (sourceLayout.sourceSubpath && configured.startsWith(`${sourceLayout.sourceSubpath}/`)) {
 			return joinRelativePath(mountSlug || path.basename(sourceLayout.sourceSubpath), configured.slice(sourceLayout.sourceSubpath.length + 1));
 		}
 		return configured.includes('/') || configured.includes('\\') || !sourceLayout.sourceSubpath
@@ -406,10 +406,13 @@ function wpCodeboxPluginFile({ activation, sourceLayout = {}, wordpressExtension
 	if (!normalizedActivation) {
 		return undefined;
 	}
-	if (sourceLayout.sourceIsPluginRoot || !sourceLayout.sourceSubpath || normalizedActivation.startsWith(`${sourceLayout.sourceSubpath}/`)) {
+	if (sourceLayout.sourceSubpath && normalizedActivation.startsWith(`${sourceLayout.sourceSubpath}/`)) {
+		return joinRelativePath(mountSlug || path.basename(sourceLayout.sourceSubpath), normalizedActivation.slice(sourceLayout.sourceSubpath.length + 1));
+	}
+	if (sourceLayout.sourceIsPluginRoot || !sourceLayout.sourceSubpath || normalizedActivation.startsWith(`${mountSlug}/`)) {
 		return normalizePathSeparators(normalizedActivation);
 	}
-	return joinRelativePath(sourceLayout.sourceSubpath, path.basename(normalizedActivation));
+	return joinRelativePath(mountSlug || path.basename(sourceLayout.sourceSubpath), path.basename(normalizedActivation));
 }
 
 function joinRelativePath(...parts) {

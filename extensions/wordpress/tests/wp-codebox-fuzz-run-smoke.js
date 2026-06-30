@@ -336,6 +336,7 @@ const monorepoPluginResult = buildWordPressFuzzRunnerResult({
 						path: monorepoPluginCheckoutRoot,
 						extensions: {
 							wordpress: {
+								wp_codebox_source_path: monorepoPluginCheckoutRoot,
 								wp_codebox_source_subpath: 'plugins/woocommerce',
 								wp_codebox_plugin_file: 'plugins/woocommerce/woocommerce.php',
 							},
@@ -351,8 +352,12 @@ const monorepoPluginResult = buildWordPressFuzzRunnerResult({
 		runId: 'monorepo-plugin-file-path',
 	},
 });
-assert.equal(monorepoPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].pluginFile, 'plugins/woocommerce/woocommerce.php');
-assert.equal(monorepoPluginResult.wp_codebox_runtime_requirements.component_contracts[0].pluginFile, 'plugins/woocommerce/woocommerce.php');
+assert.equal(monorepoPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].sourceSubdir, 'plugins/woocommerce');
+assert.equal(monorepoPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].mountSlug, 'woocommerce');
+assert.equal(monorepoPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].pluginFile, 'woocommerce/woocommerce.php');
+assert.equal(monorepoPluginResult.wp_codebox_runtime_requirements.component_contracts[0].sourceSubdir, 'plugins/woocommerce');
+assert.equal(monorepoPluginResult.wp_codebox_runtime_requirements.component_contracts[0].mountSlug, 'woocommerce');
+assert.equal(monorepoPluginResult.wp_codebox_runtime_requirements.component_contracts[0].pluginFile, 'woocommerce/woocommerce.php');
 assert.throws(
 	() => validateWpCodeboxRuntimeRequirementMounts({ runtime_mounts: [{ source: path.join(runtimeRequirementRoot, 'missing-workloads'), target: '/tmp/missing-workloads' }] }),
 	/WP Codebox runtime requirement runtime_mounts\[0\] source does not exist/
