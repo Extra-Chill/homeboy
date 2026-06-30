@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.12] - 2026-06-30
+
+### Changed
+- Resolve rig-qualified fuzz component paths
+
 ## [3.22.11] - 2026-06-30
 
 ### Changed
