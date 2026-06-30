@@ -74,6 +74,10 @@ function selectWpCodeboxSource(options, env, settings) {
 
 	const envBin = firstString(env.HOMEBOY_WP_CODEBOX_BIN, env.WP_CODEBOX_BIN, env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN);
 	if (envBin) {
+		const configuredCacheRoot = firstExistingDirectory(configuredCacheRootCandidates(options, env, settings));
+		if (configuredCacheRoot && !pathIsInside(envBin, configuredCacheRoot)) {
+			return { source: 'cache', path: configuredCacheRoot };
+		}
 		return { source: 'env', bin: envBin, path: envBin };
 	}
 
@@ -108,6 +112,19 @@ function selectWpCodeboxSource(options, env, settings) {
 	}
 
 	return { source: 'default', bin: DEFAULT_WP_CODEBOX_BIN, path: DEFAULT_WP_CODEBOX_BIN };
+}
+
+function configuredCacheRootCandidates(options, env, settings) {
+	const explicit = firstString(
+		options.wpCodeboxInstallDir,
+		options.wpCodeboxInstallRoot,
+		options.installRoot,
+		env.HOMEBOY_WP_CODEBOX_INSTALL_DIR,
+		env.HOMEBOY_WP_CODEBOX_INSTALL_ROOT,
+		settings.wp_codebox_install_dir,
+		settings.wpCodeboxInstallDir
+	);
+	return explicit ? [explicit] : [];
 }
 
 function resolveSourceRoot(selection, options, env, settings) {
@@ -297,6 +314,15 @@ function sourceRootFromPath(value) {
 		return absolute;
 	}
 	return undefined;
+}
+
+function pathIsInside(value, root) {
+	if (typeof value !== 'string' || !value.trim() || typeof root !== 'string' || !root.trim()) {
+		return false;
+	}
+	const resolvedValue = path.resolve(expandHome(value));
+	const resolvedRoot = path.resolve(expandHome(root));
+	return resolvedValue === resolvedRoot || resolvedValue.startsWith(`${resolvedRoot}${path.sep}`);
 }
 
 function wpCodeboxFingerprint({ sourceRoot, installRoot, bin, coreModulePath, runtimePackagePath } = {}) {

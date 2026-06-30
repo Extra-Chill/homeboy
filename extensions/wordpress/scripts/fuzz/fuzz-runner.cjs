@@ -312,11 +312,27 @@ function discoverWpCodeboxBin(env) {
 
 function wpCodeboxCommand(env) {
 	const settings = parseJsonObject(env.HOMEBOY_SETTINGS_JSON);
-	return env.HOMEBOY_WP_CODEBOX_BIN
-		|| env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
+	const discoveredBin = discoverWpCodeboxBin(env);
+	if (env.HOMEBOY_WP_CODEBOX_BIN) {
+		const configuredInstallRoot = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || env.HOMEBOY_WP_CODEBOX_INSTALL_ROOT;
+		if (!configuredInstallRoot || pathIsInside(env.HOMEBOY_WP_CODEBOX_BIN, configuredInstallRoot)) {
+			return env.HOMEBOY_WP_CODEBOX_BIN;
+		}
+		return discoveredBin || env.HOMEBOY_WP_CODEBOX_BIN;
+	}
+	return env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
 		|| settings?.wp_codebox_bin
-		|| discoverWpCodeboxBin(env)
+		|| discoveredBin
 		|| 'wp-codebox';
+}
+
+function pathIsInside(value, root) {
+	if (!value || !root) {
+		return false;
+	}
+	const resolvedValue = path.resolve(String(value));
+	const resolvedRoot = path.resolve(String(root));
+	return resolvedValue === resolvedRoot || resolvedValue.startsWith(`${resolvedRoot}${path.sep}`);
 }
 
 function parseJsonObject(value) {
