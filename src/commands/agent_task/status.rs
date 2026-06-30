@@ -16,6 +16,7 @@ use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
+use homeboy::core::observation::ObservationStore;
 use homeboy::core::redaction::{self, RedactionPolicy};
 
 use super::super::CmdResult;
@@ -36,7 +37,16 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         ));
     }
 
-    let record = agent_task_service::status(&args.run_id)?;
+    let record = match agent_task_service::status(&args.run_id) {
+        Ok(record) => record,
+        Err(error) if is_missing_agent_task_run_metadata_error(&error) => {
+            if let Some(remediation) = offloaded_status_remediation(&args.run_id)? {
+                return Ok((remediation, 1));
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
     if args.full {
@@ -44,6 +54,77 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     }
     let summary = compact_status_summary(&value, &args.run_id);
     Ok((summary, 0))
+}
+
+fn is_missing_agent_task_run_metadata_error(error: &homeboy::core::Error) -> bool {
+    error.code == homeboy::core::ErrorCode::InternalJsonError
+        && error.message.contains("is missing agent_task_run metadata")
+}
+
+fn offloaded_status_remediation(run_id: &str) -> homeboy::core::Result<Option<Value>> {
+    let Some(run) = ObservationStore::open_initialized()?.get_run(run_id)? else {
+        return Ok(None);
+    };
+    let Some(runner_id) = metadata_string(
+        &run.metadata_json,
+        &[&["runner_id"], &["identity", "runner_id"]],
+    )
+    .filter(|runner_id| !runner_id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let runner_job_id = metadata_string(
+        &run.metadata_json,
+        &[
+            &["runner_job_id"],
+            &["job_id"],
+            &["identity", "runner_job_id"],
+        ],
+    );
+
+    Ok(Some(runner_status_remediation(
+        run_id,
+        &runner_id,
+        runner_job_id.as_deref(),
+    )))
+}
+
+fn runner_status_remediation(run_id: &str, runner_id: &str, runner_job_id: Option<&str>) -> Value {
+    let command_prefix = format!("homeboy --runner {runner_id} agent-task");
+    let mut commands = vec![
+        format!("{command_prefix} status {run_id}"),
+        format!("{command_prefix} logs {run_id} --full"),
+        format!("{command_prefix} artifacts {run_id}"),
+    ];
+    if let Some(job_id) = runner_job_id.filter(|job_id| !job_id.trim().is_empty()) {
+        commands.push(format!(
+            "homeboy runner job logs {runner_id} {job_id} --full"
+        ));
+    }
+
+    json!({
+        "schema": "homeboy/agent-task-status-remediation/v1",
+        "status": "runner_status_required",
+        "run_id": run_id,
+        "runner_id": runner_id,
+        "runner_job_id": runner_job_id,
+        "message": "Local observation metadata does not contain an agent-task run record; query the runner that owns this durable run.",
+        "commands": commands,
+        "remediation": {
+            "status": format!("{command_prefix} status {run_id}"),
+            "logs": format!("{command_prefix} logs {run_id} --full"),
+            "artifacts": format!("{command_prefix} artifacts {run_id}"),
+        },
+    })
+}
+
+fn metadata_string(metadata: &Value, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| {
+        let mut current = metadata;
+        for segment in *path {
+            current = current.get(*segment)?;
+        }
+        current.as_str().map(str::to_string)
+    })
 }
 
 pub(super) fn list_runs(
@@ -1509,6 +1590,88 @@ fn diagnose_next_commands(run_id: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_isolated_home;
+    use homeboy::core::observation::{RunRecord, RunStatus};
+
+    #[test]
+    fn status_returns_runner_remediation_for_offloaded_record_without_agent_task_metadata() {
+        with_isolated_home(|_| {
+            ObservationStore::open_initialized()
+                .expect("observation store")
+                .upsert_imported_run(&RunRecord {
+                    id: "agent-task-offloaded".to_string(),
+                    kind: "agent-task".to_string(),
+                    component_id: None,
+                    started_at: "2026-06-30T00:00:00Z".to_string(),
+                    finished_at: None,
+                    status: RunStatus::Running.as_str().to_string(),
+                    command: Some("homeboy agent-task".to_string()),
+                    cwd: None,
+                    homeboy_version: None,
+                    git_sha: None,
+                    rig_id: None,
+                    metadata_json: json!({
+                        "runner_id": "homeboy-lab",
+                        "runner_job_id": "job-123",
+                    }),
+                })
+                .expect("raw offload mirror written");
+
+            let (value, exit_code) = status(StatusArgs {
+                run_id: "agent-task-offloaded".to_string(),
+                bridge: false,
+                since_cursor: None,
+                full: false,
+            })
+            .expect("status remediation");
+
+            assert_eq!(exit_code, 1);
+            assert_eq!(value["schema"], "homeboy/agent-task-status-remediation/v1");
+            assert_eq!(value["status"], "runner_status_required");
+            assert_eq!(value["runner_id"], "homeboy-lab");
+            assert_eq!(value["runner_job_id"], "job-123");
+            assert_eq!(
+                value["remediation"]["status"],
+                "homeboy --runner homeboy-lab agent-task status agent-task-offloaded"
+            );
+            assert!(value["commands"]
+                .as_array()
+                .expect("commands")
+                .iter()
+                .any(|command| command
+                    == "homeboy --runner homeboy-lab agent-task logs agent-task-offloaded --full"));
+        });
+    }
+
+    #[test]
+    fn runner_status_remediation_uses_nested_identity_runner_metadata() {
+        let metadata = json!({
+            "identity": {
+                "runner_id": "lab-nested",
+                "runner_job_id": "job-nested",
+            }
+        });
+        let runner_id = metadata_string(&metadata, &[&["runner_id"], &["identity", "runner_id"]])
+            .expect("runner id");
+        let runner_job_id = metadata_string(
+            &metadata,
+            &[
+                &["runner_job_id"],
+                &["job_id"],
+                &["identity", "runner_job_id"],
+            ],
+        );
+        let remediation =
+            runner_status_remediation("agent-task-run", &runner_id, runner_job_id.as_deref());
+
+        assert_eq!(remediation["runner_id"], "lab-nested");
+        assert_eq!(remediation["runner_job_id"], "job-nested");
+        assert!(remediation["commands"]
+            .as_array()
+            .expect("commands")
+            .iter()
+            .any(|command| command == "homeboy runner job logs lab-nested job-nested --full"));
+    }
 
     #[test]
     fn compact_status_surfaces_latest_promotion() {
