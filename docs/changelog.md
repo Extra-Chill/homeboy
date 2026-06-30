@@ -4,6 +4,32 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.271.0] - 2026-06-30
+
+### Added
+- add generic performance hotspot summary contract
+- add artifact postprocess runner contract
+- add generic runner capability plumbing
+- add rig dependency materialization contract
+
+### Changed
+- Surface Codebox replay context
+
+### Fixed
+- route fanout cook-batch lab label
+- resolve runner capability error collision
+- add runner dependency cache primitives
+- tighten lab handoff artifact manifest contract
+- stabilize agent-task fanout artifact manifest
+- validate runner secret env inheritance
+- add agent task publication intent contract
+- structure dependency lifecycle failures
+- prepare fuzz list rig dependencies
+- add runtime package refresh command
+- reduce runner-resident read polling noise
+- emit runner job heartbeat progress
+- guide offloaded agent-task status reads
+
 ## [0.270.4] - 2026-06-30
 
 ### Fixed
