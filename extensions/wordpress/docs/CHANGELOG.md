@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.5] - 2026-06-30
+
+### Changed
+- Require WordPress fuzz runtime contract fields
+
 ## [3.22.4] - 2026-06-30
 
 ### Fixed
