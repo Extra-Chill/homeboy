@@ -239,6 +239,44 @@ fn missing_sidecar_declarations_have_no_structured_contract() {
 }
 
 #[test]
+fn manifest_parses_extension_materialization_source_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "materialization_source": {
+            "source_kind": "archive",
+            "revision": "abc1234",
+            "runner_archive_url": "https://example.com/extensions/example.tar.gz",
+            "runner_archive_sha256": "sha256-fixture",
+            "runner_ref": "refs/tags/example-v1",
+            "helper_manifest_refs": [{
+                "id": "example-runtime",
+                "path": "runtime/example-runtime.json",
+                "schema": "homeboy/agent-runtime-manifest/v1",
+                "purpose": "agent runtime helper"
+            }]
+        }
+    }))
+    .unwrap();
+
+    let source = manifest
+        .materialization_source
+        .expect("materialization source contract");
+    assert_eq!(source.schema, EXTENSION_MATERIALIZATION_SOURCE_SCHEMA);
+    assert_eq!(
+        source.source_kind,
+        ExtensionMaterializationSourceKind::Archive
+    );
+    assert_eq!(source.revision.as_deref(), Some("abc1234"));
+    assert_eq!(
+        source.runner_archive_url.as_deref(),
+        Some("https://example.com/extensions/example.tar.gz")
+    );
+    assert_eq!(source.runner_ref.as_deref(), Some("refs/tags/example-v1"));
+    assert_eq!(source.helper_manifest_refs[0].id, "example-runtime");
+}
+
+#[test]
 fn legacy_sidecar_schema_fields_do_not_declare_structured_contracts() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
