@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.13] - 2026-06-30
+
+### Changed
+- Resolve monorepo WordPress plugin file paths
+
 ## [3.22.12] - 2026-06-30
 
 ### Changed
