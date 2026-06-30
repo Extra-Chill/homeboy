@@ -6,6 +6,7 @@ use crate::core::extension::trace::TraceProbeConfig;
 use crate::core::extension::trace::TraceSpanMetadata;
 use std::collections::{BTreeMap, HashMap};
 
+pub use crate::core::artifact_postprocess::ArtifactPostprocessAction as ArtifactPostprocessSpec;
 use crate::core::component::ScopedExtensionConfig;
 use crate::core::extension::bench::{BenchGate, BenchGateOp};
 use crate::core::lifecycle::LifecycleContract;
@@ -556,31 +557,6 @@ pub struct WorkloadSpec {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<LifecycleContract>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactPostprocessSpec {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-
-    pub helper: String,
-
-    pub action: String,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<String>,
-
-    pub output: String,
-
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub parameters: BTreeMap<String, serde_json::Value>,
-
-    #[serde(default = "default_artifact_postprocess_required")]
-    pub required: bool,
-}
-
-fn default_artifact_postprocess_required() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
