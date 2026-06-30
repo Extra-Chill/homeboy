@@ -83,8 +83,8 @@ pub use proof::{
 pub use reports::*;
 pub use request::*;
 pub use run_failure_summary::{
-    build_run_failure_summary, ControllerRunEvidenceRef, ControllerRunFailureSummary,
-    CONTROLLER_RUN_FAILURE_SUMMARY_SCHEMA,
+    build_run_failure_summary, ControllerRunCodeboxContext, ControllerRunEvidenceRef,
+    ControllerRunFailureSummary, CONTROLLER_RUN_FAILURE_SUMMARY_SCHEMA,
 };
 pub use spec::*;
 #[cfg(test)]

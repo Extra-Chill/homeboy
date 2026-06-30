@@ -112,3 +112,64 @@ fn run_failure_summary_falls_back_to_stopped_reason() {
     assert_homeboy_command_parses(&summary.next_command);
     assert_emitted_homeboy_evidence_commands_parse(&summary);
 }
+
+#[test]
+fn run_failure_summary_surfaces_codebox_context_and_recipe_replay() {
+    let results = vec![serde_json::json!({
+        "schema": ACTION_RESULT_SCHEMA,
+        "status": "failed",
+        "action_id": "validate-recipe",
+        "failure_summary": {
+            "action_id": "validate-recipe",
+            "provider": "wp-codebox",
+            "failure_phase": "schema_validation",
+            "diagnostic": "unsupported recipe command `wordpress.editor-validate-blocks`",
+        },
+        "execution": {
+            "outputs": {
+                "provider_run_result": {
+                    "source": "wp-codebox/artifact-result-envelope/v1",
+                    "generated_recipe_path": "/tmp/generated recipe.json",
+                    "codebox": {
+                        "binary_path": "/opt/wp-codebox/bin/wp-codebox",
+                        "version": "0.9.1",
+                        "commit": "abc1234",
+                        "fingerprint": "sha256:codebox",
+                        "supported_recipe_commands": [
+                            "wordpress.load",
+                            "wordpress.editor-validate-blocks"
+                        ]
+                    }
+                }
+            }
+        }
+    })];
+    let status = serde_json::json!({ "controller": { "phase": "verify" } });
+
+    let summary = build_run_failure_summary("loop/9", "action_failed", &results, &status);
+    let context = summary
+        .codebox_context
+        .as_ref()
+        .expect("codebox context is surfaced");
+
+    assert_eq!(
+        context.binary_path.as_deref(),
+        Some("/opt/wp-codebox/bin/wp-codebox")
+    );
+    assert_eq!(context.version.as_deref(), Some("0.9.1"));
+    assert_eq!(context.commit.as_deref(), Some("abc1234"));
+    assert_eq!(context.fingerprint.as_deref(), Some("sha256:codebox"));
+    assert!(context
+        .capabilities
+        .iter()
+        .any(|capability| capability == "wordpress.editor-validate-blocks"));
+
+    let replay = summary
+        .codebox_replay_command
+        .as_deref()
+        .expect("codebox replay command is surfaced");
+    assert_eq!(
+        replay,
+        "/opt/wp-codebox/bin/wp-codebox recipe-run --recipe '/tmp/generated recipe.json' --artifacts /tmp/homeboy-codebox-replay/loop-9/validate-recipe --json"
+    );
+}
