@@ -1,7 +1,8 @@
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -13,6 +14,9 @@ use crate::command_contract::{
     RUN_LOCATION_INDEX_SCHEMA,
 };
 use crate::commands::{CmdResult, GlobalArgs};
+use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
+use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
+use crate::core::{Error, Result};
 
 const CONTRACT_EXPORT_INDEX_SCHEMA: &str = "homeboy/contract-export-index/v1";
 const COMMAND_REGISTRY_EXPORT_SCHEMA: &str = "homeboy/command-registry-export/v1";
@@ -33,6 +37,8 @@ pub enum ContractCommand {
     Show(ContractShowArgs),
     /// Export machine-consumable Homeboy contract JSON files.
     Export(ContractExportArgs),
+    /// Validate and normalize generic contract values.
+    Normalize(ContractNormalizeArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -47,6 +53,29 @@ pub enum ContractOutput {
     Export(ContractExportOutput),
     List(ContractListOutput),
     Show(ContractShowOutput),
+    Normalize(ContractNormalizeOutput),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ContractNormalizeArgs {
+    /// Contract value kind to normalize
+    #[arg(value_enum)]
+    pub kind: ContractNormalizeKind,
+
+    /// JSON value to normalize. If omitted, stdin is read.
+    #[arg(long, conflicts_with = "input_file", value_name = "JSON")]
+    pub input: Option<String>,
+
+    /// Read JSON value to normalize from a file.
+    #[arg(long, value_name = "PATH")]
+    pub input_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum ContractNormalizeKind {
+    ArtifactRef,
+    RunLifecycleStatus,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -76,6 +105,31 @@ pub struct ContractDetail {
     pub owner: &'static str,
     pub summary: &'static str,
     pub rust_type: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContractNormalizeOutput {
+    ArtifactRef(ArtifactRefNormalizeOutput),
+    RunLifecycleStatus(RunLifecycleStatusNormalizeOutput),
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ArtifactRefNormalizeOutput {
+    pub schema: &'static str,
+    pub input: String,
+    pub normalized: String,
+    pub reference_type: &'static str,
+    pub valid: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunLifecycleStatusNormalizeOutput {
+    pub schema: &'static str,
+    pub status: RunLifecycleStatus,
+    pub is_terminal: bool,
+    pub is_success: bool,
+    pub is_retryable: bool,
 }
 
 impl From<&'static ContractRegistryEntry> for ContractListEntry {
@@ -238,7 +292,7 @@ pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput
         )),
         ContractCommand::Show(args) => {
             let contract = registered_contract(&args.schema_id_or_name).ok_or_else(|| {
-                homeboy::core::Error::validation_invalid_argument(
+                Error::validation_invalid_argument(
                     "schema_id_or_name",
                     format!("unknown Homeboy core contract `{}`", args.schema_id_or_name),
                     Some(args.schema_id_or_name.clone()),
@@ -259,6 +313,139 @@ pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput
         ContractCommand::Export(args) => {
             export_contracts(args).map(|(output, code)| (ContractOutput::Export(output), code))
         }
+        ContractCommand::Normalize(args) => Ok((ContractOutput::Normalize(normalize(args)?), 0)),
+    }
+}
+
+fn normalize(args: ContractNormalizeArgs) -> Result<ContractNormalizeOutput> {
+    let value = read_json_value(args.input.as_deref(), args.input_file.as_ref())?;
+
+    match args.kind {
+        ContractNormalizeKind::ArtifactRef => {
+            normalize_artifact_ref(value).map(ContractNormalizeOutput::ArtifactRef)
+        }
+        ContractNormalizeKind::RunLifecycleStatus => {
+            normalize_run_lifecycle_status(value).map(ContractNormalizeOutput::RunLifecycleStatus)
+        }
+    }
+}
+
+fn normalize_artifact_ref(value: Value) -> Result<ArtifactRefNormalizeOutput> {
+    let raw = string_value(&value, &["ref", "value", "target"], "artifact-ref")?;
+    let normalized = raw.trim().to_string();
+
+    validate_reviewer_facing_artifact_ref(&normalized).map_err(|err| {
+        Error::validation_invalid_argument(
+            "artifact-ref",
+            err.to_string(),
+            Some(normalized.clone()),
+            None,
+        )
+    })?;
+
+    let reference = ArtifactReference::parse(normalized.clone());
+
+    Ok(ArtifactRefNormalizeOutput {
+        schema: "homeboy/contract-normalize-artifact-ref/v1",
+        input: raw,
+        normalized,
+        reference_type: artifact_reference_type(&reference),
+        valid: true,
+    })
+}
+
+fn normalize_run_lifecycle_status(value: Value) -> Result<RunLifecycleStatusNormalizeOutput> {
+    let status_value = if let Some(status) = value.get("status").or_else(|| value.get("value")) {
+        status.clone()
+    } else {
+        value
+    };
+    let status: RunLifecycleStatus = serde_json::from_value(status_value).map_err(|err| {
+        Error::validation_invalid_argument(
+            "run-lifecycle-status",
+            err.to_string(),
+            None,
+            Some(vec![
+                "unknown".to_string(),
+                "queued".to_string(),
+                "running".to_string(),
+                "succeeded".to_string(),
+                "partial_failure".to_string(),
+                "failed".to_string(),
+                "cancelled".to_string(),
+                "timed_out".to_string(),
+                "stale".to_string(),
+            ]),
+        )
+    })?;
+
+    Ok(RunLifecycleStatusNormalizeOutput {
+        schema: RUN_LIFECYCLE_STATUS_SCHEMA,
+        status,
+        is_terminal: status.is_terminal(),
+        is_success: status.is_success(),
+        is_retryable: status.is_retryable(),
+    })
+}
+
+fn read_json_value(input: Option<&str>, input_file: Option<&PathBuf>) -> Result<Value> {
+    let raw = if let Some(input) = input {
+        input.to_string()
+    } else if let Some(path) = input_file {
+        fs::read_to_string(path).map_err(|err| {
+            Error::validation_invalid_argument(
+                "input-file",
+                format!("failed to read input file: {err}"),
+                Some(path.display().to_string()),
+                None,
+            )
+        })?
+    } else {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer).map_err(|err| {
+            Error::validation_invalid_argument(
+                "input",
+                format!("failed to read stdin: {err}"),
+                None,
+                None,
+            )
+        })?;
+        buffer
+    };
+
+    serde_json::from_str(&raw).map_err(|err| {
+        Error::validation_invalid_json(err, Some("contract normalize input".to_string()), Some(raw))
+    })
+}
+
+fn string_value(value: &Value, fields: &[&str], field_name: &str) -> Result<String> {
+    if let Some(value) = value.as_str() {
+        return Ok(value.to_string());
+    }
+
+    for field in fields {
+        if let Some(value) = value.get(field).and_then(Value::as_str) {
+            return Ok(value.to_string());
+        }
+    }
+
+    Err(Error::validation_invalid_argument(
+        field_name,
+        format!(
+            "expected a JSON string or object with one of: {}",
+            fields.join(", ")
+        ),
+        None,
+        None,
+    ))
+}
+
+fn artifact_reference_type(reference: &ArtifactReference) -> &'static str {
+    match reference {
+        ArtifactReference::PublishedUrl(_) => "published_url",
+        ArtifactReference::RunnerArtifact { .. } => "runner_artifact",
+        ArtifactReference::MetadataOnly(_) => "metadata_only",
+        ArtifactReference::LocalPath(_) => "local_path",
     }
 }
 
@@ -724,6 +911,8 @@ fn json_error(error: serde_json::Error) -> homeboy::core::Error {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::cli_surface::{current_command_surface, Commands};
 
@@ -847,5 +1036,43 @@ mod tests {
         .expect_err("unknown contract should fail");
 
         assert!(err.to_string().contains("missing-contract"));
+    }
+
+    #[test]
+    fn artifact_ref_normalizer_trims_and_classifies_reviewer_url() {
+        let output =
+            normalize_artifact_ref(json!({ "ref": " https://example.com/artifact.json " }))
+                .expect("artifact ref should normalize");
+
+        assert_eq!(output.normalized, "https://example.com/artifact.json");
+        assert_eq!(output.reference_type, "published_url");
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn artifact_ref_normalizer_rejects_localhost() {
+        let err = normalize_artifact_ref(json!("http://localhost:8080/artifact.json"))
+            .expect_err("localhost refs should be rejected");
+
+        assert!(err.message.contains("localhost"));
+    }
+
+    #[test]
+    fn run_lifecycle_status_normalizer_reports_generic_classification() {
+        let output = normalize_run_lifecycle_status(json!({ "status": "timed_out" }))
+            .expect("status should normalize");
+
+        assert_eq!(output.status, RunLifecycleStatus::TimedOut);
+        assert!(output.is_terminal);
+        assert!(!output.is_success);
+        assert!(output.is_retryable);
+    }
+
+    #[test]
+    fn run_lifecycle_status_normalizer_rejects_non_contract_status() {
+        let err = normalize_run_lifecycle_status(json!("wordpress_failed"))
+            .expect_err("domain-specific statuses should be rejected");
+
+        assert!(err.message.contains("run-lifecycle-status"));
     }
 }

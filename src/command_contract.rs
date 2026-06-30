@@ -24,6 +24,9 @@ mod registry;
 pub mod safety_manifest;
 mod spec;
 
+pub use crate::core::artifact_ref::{
+    validate_reviewer_facing_artifact_ref, ArtifactReference, ReviewerFacingArtifactRefError,
+};
 pub use lab::{
     lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
     lab_runner_supports_contract_label, lab_runner_unsupported_hint,
@@ -66,3 +69,4 @@ pub use crate::core::artifacts::{
     ArtifactPostprocessResult, ArtifactPostprocessReviewerRef, ArtifactPostprocessRoot,
     ARTIFACT_POSTPROCESS_PLAN_SCHEMA, ARTIFACT_POSTPROCESS_RESULT_SCHEMA,
 };
+pub use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
