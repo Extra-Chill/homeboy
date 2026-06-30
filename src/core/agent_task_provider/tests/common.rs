@@ -40,6 +40,7 @@ pub(super) fn request(
         runtime_contract: AgentTaskRuntimeContract::default(),
         extension_id: None,
         extension_path: None,
+        runtime_package_source: None,
         runtime_id: None,
         runtime_path: None,
         extra: BTreeMap::new(),

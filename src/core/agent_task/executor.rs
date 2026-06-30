@@ -31,8 +31,8 @@ pub struct AgentTaskRuntimeSelection {
         skip_serializing_if = "Option::is_none"
     )]
     pub executor_provider_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    #[serde(default, alias = "provider", skip_serializing_if = "Option::is_none")]
+    pub ai_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,8 +50,8 @@ impl AgentTaskExecutor {
             executor_provider_id: explicit
                 .executor_provider_id
                 .or_else(|| self.selector.clone()),
-            provider: explicit
-                .provider
+            ai_provider_id: explicit
+                .ai_provider_id
                 .or_else(|| config_string(&self.config, "provider")),
             model: explicit.model.or_else(|| self.model.clone()),
             substrate_ref: explicit.substrate_ref,
@@ -82,7 +82,7 @@ impl AgentTaskExecutor {
     pub fn provider(&self) -> Option<&str> {
         self.runtime_selection
             .as_ref()
-            .and_then(|selection| selection.provider.as_deref())
+            .and_then(|selection| selection.ai_provider_id.as_deref())
             .or_else(|| config_str(&self.config, "provider"))
     }
 

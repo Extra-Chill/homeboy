@@ -2200,6 +2200,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             runtime_contract: Default::default(),
             extension_id: None,
             extension_path: None,
+            runtime_package_source: None,
             runtime_id: None,
             runtime_path: None,
             extra: std::collections::BTreeMap::new(),
