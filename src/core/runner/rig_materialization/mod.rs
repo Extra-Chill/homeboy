@@ -479,12 +479,10 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         // rig check resolves `${components.<id>.path}` to the materialized path,
         // even when the checkout root is the already-synced primary workspace
         // (which is not re-materialized below).
-        component_path_env.push((
-            crate::core::rig::expand::rig_component_path_override_env_name(
-                &dependency.rig_id,
-                &dependency.component_id,
-            ),
-            effective_remote_component_path(&dependency, primary_local_path, primary_remote_path),
+        component_path_env.extend(rig_component_env_overrides(
+            &dependency,
+            primary_local_path,
+            primary_remote_path,
         ));
 
         if !should_materialize_dependency(&dependency, primary_remote_path) {
@@ -550,6 +548,29 @@ fn effective_remote_component_path(
         &dependency.remote_checkout_root,
         dependency.required_subpath.as_deref(),
     )
+}
+
+fn rig_component_env_overrides(
+    dependency: &RigComponentDependency,
+    primary_local_path: &str,
+    primary_remote_path: &str,
+) -> Vec<(String, String)> {
+    vec![
+        (
+            crate::core::rig::expand::rig_component_path_override_env_name(
+                &dependency.rig_id,
+                &dependency.component_id,
+            ),
+            effective_remote_component_path(dependency, primary_local_path, primary_remote_path),
+        ),
+        (
+            crate::core::rig::expand::rig_component_checkout_root_override_env_name(
+                &dependency.rig_id,
+                &dependency.component_id,
+            ),
+            dependency.remote_checkout_root.clone(),
+        ),
+    ]
 }
 
 pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result<Option<PathBuf>> {
@@ -1053,6 +1074,37 @@ mod tests {
                 Some("packages/example-component")
             );
         });
+    }
+
+    #[test]
+    fn rig_component_env_overrides_include_checkout_root() {
+        let dependency = RigComponentDependency {
+            rig_id: "woocommerce-performance".to_string(),
+            component_id: "woocommerce".to_string(),
+            local_checkout_root: "/Users/user/Developer/woocommerce".to_string(),
+            declared_checkout_root: "/Users/user/Developer/woocommerce".to_string(),
+            remote_checkout_root: "/home/user/Developer/_lab_workspaces/woocommerce".to_string(),
+            required_subpath: Some("plugins/woocommerce".to_string()),
+            remote_url: Some("https://github.com/woocommerce/woocommerce.git".to_string()),
+            pinned_ref: None,
+            component_ref: None,
+            dependency_cache: None,
+        };
+
+        let env = rig_component_env_overrides(
+            &dependency,
+            "/Users/user/Developer/woocommerce",
+            "/home/user/Developer/_lab_workspaces/woocommerce",
+        );
+
+        assert!(env.contains(&(
+            "HOMEBOY_RIG_COMPONENT_PATH__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE".to_string(),
+            "/home/user/Developer/_lab_workspaces/woocommerce/plugins/woocommerce".to_string(),
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE".to_string(),
+            "/home/user/Developer/_lab_workspaces/woocommerce".to_string(),
+        )));
     }
 
     #[test]

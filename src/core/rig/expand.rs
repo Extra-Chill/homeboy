@@ -165,6 +165,15 @@ pub fn rig_component_path_override_env_name(rig_id: &str, component_id: &str) ->
     )
 }
 
+/// Build the generic override env var name for a rig component's checkout root.
+pub fn rig_component_checkout_root_override_env_name(rig_id: &str, component_id: &str) -> String {
+    format!(
+        "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__{}__{}",
+        sanitize_env_segment(rig_id),
+        sanitize_env_segment(component_id),
+    )
+}
+
 fn sanitize_env_segment(value: &str) -> String {
     value
         .chars()
