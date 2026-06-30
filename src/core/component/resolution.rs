@@ -266,15 +266,40 @@ fn prefer_cwd_for_component(component_id: &str) -> Option<Component> {
     let mut registered = load(component_id).ok()?;
     let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
     let cwd_git_root = detect_git_root(&cwd)?;
-    if same_git_common_dir(&registered_path, &cwd_git_root)
-        || is_named_component_worktree(component_id, &registered_path, &cwd_git_root)
-    {
+
+    if same_git_common_dir(&registered_path, &cwd_git_root) {
+        registered.local_path = rebase_registered_path_to_checkout(&registered_path, &cwd_git_root)
+            .to_string_lossy()
+            .to_string();
+        registered.resolve_remote_path();
+        return Some(registered);
+    }
+
+    if is_named_component_worktree(component_id, &registered_path, &cwd_git_root) {
         registered.local_path = cwd_git_root.to_string_lossy().to_string();
         registered.resolve_remote_path();
         return Some(registered);
     }
 
     None
+}
+
+fn rebase_registered_path_to_checkout(registered_path: &Path, cwd_git_root: &Path) -> PathBuf {
+    let Some(registered_git_root) = detect_git_root(registered_path) else {
+        return cwd_git_root.to_path_buf();
+    };
+
+    let canonical_registered_path = registered_path
+        .canonicalize()
+        .unwrap_or_else(|_| registered_path.to_path_buf());
+    let canonical_registered_root = registered_git_root
+        .canonicalize()
+        .unwrap_or(registered_git_root);
+
+    match canonical_registered_path.strip_prefix(&canonical_registered_root) {
+        Ok(relative) if !relative.as_os_str().is_empty() => cwd_git_root.join(relative),
+        _ => cwd_git_root.to_path_buf(),
+    }
 }
 
 fn is_named_component_worktree(
@@ -906,6 +931,79 @@ mod tests {
                     target.component.local_path,
                     target.source_path.to_string_lossy()
                 );
+                assert!(!target.synthetic);
+            });
+        });
+    }
+
+    #[test]
+    fn target_spec_preserves_registered_monorepo_package_subpath_from_repo_root() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let repo = dir.path().join("repo");
+            let package = repo.join("packages").join("foo");
+            std::fs::create_dir_all(&package).expect("package dir");
+            git(&repo, &["init"]);
+            git(&repo, &["config", "user.email", "test@example.com"]);
+            git(&repo, &["config", "user.name", "Test User"]);
+            std::fs::write(package.join("README.md"), "fixture\n").expect("readme");
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-m", "Initial commit"]);
+            write_standalone_registration(home.path(), "foo", &package);
+
+            with_cwd(&repo, || {
+                let target =
+                    resolve_target(TargetSpec::new(Some("foo"), None)).expect("package target");
+                let canonical_package = package.canonicalize().expect("canonical package");
+
+                assert_eq!(target.component_id, "foo");
+                assert_eq!(target.source_path, canonical_package);
+                assert_eq!(
+                    target.component.local_path,
+                    target.source_path.to_string_lossy()
+                );
+                let monorepo =
+                    crate::core::git::MonorepoContext::detect(&target.component.local_path, "foo")
+                        .expect("package path should still be monorepo-scoped");
+                assert_eq!(monorepo.path_prefix, "packages/foo");
+                assert!(!target.synthetic);
+            });
+        });
+    }
+
+    #[test]
+    fn target_spec_rebases_registered_monorepo_package_subpath_into_worktree() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("primary");
+            let primary_package = primary.join("packages").join("foo");
+            let worktree = dir.path().join("worktree");
+            let worktree_package = worktree.join("packages").join("foo");
+            std::fs::create_dir_all(&primary_package).expect("package dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            std::fs::write(primary_package.join("README.md"), "fixture\n").expect("readme");
+            git(&primary, &["add", "."]);
+            git(&primary, &["commit", "-m", "Initial commit"]);
+            git(&primary, &["worktree", "add", worktree.to_str().unwrap()]);
+            write_standalone_registration(home.path(), "foo", &primary_package);
+
+            with_cwd(&worktree, || {
+                let target =
+                    resolve_target(TargetSpec::new(Some("foo"), None)).expect("package target");
+                let canonical_package = worktree_package.canonicalize().expect("canonical package");
+
+                assert_eq!(target.component_id, "foo");
+                assert_eq!(target.source_path, canonical_package);
+                assert_eq!(
+                    target.component.local_path,
+                    target.source_path.to_string_lossy()
+                );
+                let monorepo =
+                    crate::core::git::MonorepoContext::detect(&target.component.local_path, "foo")
+                        .expect("package path should still be monorepo-scoped");
+                assert_eq!(monorepo.path_prefix, "packages/foo");
                 assert!(!target.synthetic);
             });
         });
