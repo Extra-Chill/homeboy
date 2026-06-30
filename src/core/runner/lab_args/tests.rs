@@ -242,6 +242,27 @@ mod provider_config_materialization_tests {
     }
 
     #[test]
+    fn provider_config_materialization_preflight_allows_pruneable_provider_plugin_paths() {
+        let config = serde_json::json!({
+            "provider": "example-oauth",
+            "provider_plugin_paths": [
+                "/Users/user/Developer/stale-provider-plugin"
+            ]
+        })
+        .to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--provider-config".to_string(),
+            config,
+        ];
+
+        preflight_provider_config_paths_materialized_in_args(&args, &[])
+            .expect("stale provider plugin paths are pruned before remote dispatch");
+    }
+
+    #[test]
     fn provider_config_runtime_manifest_records_effective_paths() {
         let args = vec![
             "homeboy".to_string(),

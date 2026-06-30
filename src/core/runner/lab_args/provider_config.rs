@@ -247,6 +247,11 @@ fn collect_unmaterialized_path_strings(
 ) {
     match value {
         Value::String(text) if is_controller_path_like(text) => {
+            if is_provider_plugin_path_location(location)
+                && provider_plugin_path_is_pruneable_before_offload(text, mappings)
+            {
+                return;
+            }
             if let Some(reason) = unmaterialized_path_reason(text, mappings) {
                 failures.push(UnmaterializedPath {
                     location: location.to_string(),
@@ -292,6 +297,15 @@ fn is_materializable_provider_config_path_key(key: &str) -> bool {
             | "component_contracts"
             | "path"
     )
+}
+
+fn is_provider_plugin_path_location(location: &str) -> bool {
+    location.contains(".provider_plugin_paths")
+}
+
+fn provider_plugin_path_is_pruneable_before_offload(path: &str, mappings: &[LabPathRemap]) -> bool {
+    let ordered = super::path_remap::order_mappings_by_specificity(mappings);
+    remap_local_path(path, &ordered).is_none() && !path_is_under_remote_mapping(path, mappings)
 }
 
 fn unmaterialized_path_reason(path: &str, mappings: &[LabPathRemap]) -> Option<&'static str> {
