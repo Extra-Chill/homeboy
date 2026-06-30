@@ -197,6 +197,7 @@ pub mod ci;
 pub mod cleanup;
 pub mod component;
 pub mod config;
+pub mod contract;
 pub mod daemon;
 pub mod db;
 pub mod deploy;

@@ -71,7 +71,9 @@ pub use manifest::{
     CiJobSpec, CiLocalContext, CiProfileSpec, CliAutoFlag, CliAutoFlagCondition, CliConfig,
     CliHelpConfig, ComponentEnvConfig, DatabaseCliConfig, DatabaseConfig, DeployCapability,
     DeployOverride, DeployOwnerHint, DeployVerification, DepsConfig, DiscoveryConfig,
-    DiscoveryMarkerConfig, DocTarget, ExecutableCapability, ExtensionManifest,
+    DiscoveryMarkerConfig, DocTarget, ExecutableCapability, ExtensionContractProducer,
+    ExtensionContractProducerInvocation, ExtensionContractProducerOutput,
+    ExtensionContractProducerOutputKind, ExtensionContractProducerPhase, ExtensionManifest,
     ExtensionMaterializationHelperManifestRef, ExtensionMaterializationSourceContract,
     ExtensionMaterializationSourceKind, FeatureContextRule, FileContainsCondition, FuzzConfig,
     HttpMethod, IncludeWrapperPolicy, InputConfig, LintChangedFileRoute, LintConfig, OutputConfig,
@@ -83,7 +85,8 @@ pub use manifest::{
     TestPassthroughFilter, TestPassthroughFilterStrategy, TestVacuityPolicy,
     TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
     TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
-    VersionPatternConfig, EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
+    VersionPatternConfig, EXTENSION_CONTRACT_PRODUCER_SCHEMA,
+    EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
 };
 pub use manifest_deploy_config::{DeployArchiveInstallPolicy, DeployRequiredHeader};
 pub use refactor_protocol::{

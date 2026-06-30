@@ -649,6 +649,7 @@ mod tests {
             autofix_verify: None,
             structured_sidecars: Default::default(),
             materialization_source: None,
+            contract_producers: Vec::new(),
             release_preflights: Vec::new(),
             agent_runtimes: Vec::new(),
             agent_task: None,

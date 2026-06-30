@@ -390,6 +390,7 @@ JSON
             trace: None,
             structured_sidecars: std::collections::BTreeMap::new(),
             materialization_source: None,
+            contract_producers: vec![],
             release_preflights: vec![],
             agent_runtimes: vec![],
             agent_task: None,

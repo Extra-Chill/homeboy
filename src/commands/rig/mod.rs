@@ -11,14 +11,16 @@ use homeboy::core::rig;
 
 use self::output::{
     RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledStackSummary,
-    RigInstalledSummary, RigListOutput, RigReleaseLockOutput, RigRepairOutput, RigShowOutput,
-    RigSourceSummary, RigStatusOutput, RigSummary, RigSyncOutput, RigUpOutput, RigUpPlanOutput,
-    RigUpPlanStep, RigUpdateOutput,
+    RigInstalledSummary, RigListOutput, RigReleaseLockOutput, RigRepairOutput, RigRunOutput,
+    RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary, RigSyncOutput, RigUpOutput,
+    RigUpPlanOutput, RigUpPlanStep, RigUpdateOutput,
 };
+use super::bench::RigRunBenchOptions;
+use super::utils::args::SettingArgs;
 use super::CmdResult;
 use crate::command_contract::{
-    CommandPortabilityContract, LabCommandContract, LAB_NO_EXTRA_TOOLS, RIG_CHECK_LAB_LABEL,
-    RIG_UP_LAB_UNSUPPORTED_REASON,
+    CommandPortabilityContract, LabCommandContract, BENCH_LAB_LABEL, LAB_NO_EXTRA_TOOLS,
+    RIG_CHECK_LAB_LABEL, RIG_UP_LAB_UNSUPPORTED_REASON,
 };
 
 #[derive(Args)]
@@ -74,6 +76,14 @@ impl RigArgs {
                 )
             };
             return CommandPortabilityContract::lab(contract);
+        }
+        if matches!(self.command, RigCommand::Run(_)) {
+            return CommandPortabilityContract::lab(LabCommandContract::portable(
+                BENCH_LAB_LABEL,
+                None,
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ));
         }
         if self.is_hot_resource_command() {
             return CommandPortabilityContract::lab(LabCommandContract::local_only(
@@ -152,6 +162,8 @@ enum RigCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Refresh, sync, check, and benchmark a rig profile end-to-end
+    Run(RigRunArgs),
     /// Show current state of a rig: running services, last up/check
     Status {
         /// Rig ID
@@ -240,6 +252,59 @@ enum RigAppCommand {
     },
 }
 
+#[derive(Args)]
+struct RigRunArgs {
+    /// Rig ID
+    rig_id: String,
+
+    /// Rig-defined bench profile to run
+    #[arg(long, value_name = "PROFILE")]
+    profile: String,
+
+    /// Optional component ID override for rigs with multiple bench components
+    #[arg(long, value_name = "COMPONENT")]
+    component: Option<String>,
+
+    /// Override the component checkout path for this invocation
+    #[arg(long)]
+    path: Option<String>,
+
+    /// Iterations per scenario. Forwarded to the bench runner.
+    #[arg(long, default_value_t = 10)]
+    iterations: u64,
+
+    /// Warmup iterations to run before measured iterations.
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    warmup: Option<u64>,
+
+    /// Number of repetitions (independent substrate spawns).
+    #[arg(long, default_value_t = 1, value_name = "COUNT", value_parser = crate::commands::parse_runs_count)]
+    runs: u64,
+
+    /// Caller-supplied stable proof label for this run.
+    #[arg(long = "run-id", value_name = "ID")]
+    run_id: Option<String>,
+
+    /// Directory shared across bench runner instances.
+    #[arg(long, value_name = "DIR")]
+    shared_state: Option<std::path::PathBuf>,
+
+    /// Number of concurrent bench runner instances.
+    #[arg(long, default_value_t = 1)]
+    concurrency: u32,
+
+    #[command(flatten)]
+    setting_args: SettingArgs,
+
+    /// Print compact machine-readable bench summary.
+    #[arg(long)]
+    json_summary: bool,
+
+    /// Additional arguments to pass to the bench runner (must follow --)
+    #[arg(last = true)]
+    args: Vec<String>,
+}
+
 pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOutput> {
     match args.command {
         RigCommand::List => list(),
@@ -250,6 +315,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Down { rig_id } => down(&rig_id),
         RigCommand::Repair { rig_id } => repair(&rig_id),
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
+        RigCommand::Run(args) => run_profile(args),
         RigCommand::Status { rig_id } => status(&rig_id),
         RigCommand::Runs { rig_id, limit } => runs(&rig_id, limit),
         RigCommand::ReleaseLock { rig_id, force } => release_lock(&rig_id, force),
@@ -686,6 +752,74 @@ fn sync(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
     ))
 }
 
+fn run_profile(args: RigRunArgs) -> CmdResult<RigCommandOutput> {
+    let source_update = refresh_rig_source_if_materialized(&args.rig_id)?;
+    let rig = rig::load(&args.rig_id)?;
+    let sync_report = rig::run_sync(&rig, false)?;
+    let bench_options = rig_run_bench_options(args);
+    let profile = bench_options.profile.clone();
+    let bench_invocation = bench_options.bench_plan();
+
+    if !sync_report.success {
+        return Ok((
+            RigCommandOutput::Run(RigRunOutput {
+                command: "rig.run",
+                rig_id: rig.id,
+                profile,
+                source_update,
+                sync: sync_report,
+                bench_invocation,
+                bench: None,
+            }),
+            1,
+        ));
+    }
+
+    let (bench, bench_exit_code) = super::bench::run_rig_profile(bench_options)?;
+    Ok((
+        RigCommandOutput::Run(RigRunOutput {
+            command: "rig.run",
+            rig_id: rig.id,
+            profile,
+            source_update,
+            sync: sync_report,
+            bench_invocation,
+            bench: Some(bench),
+        }),
+        bench_exit_code,
+    ))
+}
+
+fn refresh_rig_source_if_materialized(
+    rig_id: &str,
+) -> homeboy::core::Result<Option<rig::RigSourceUpdateResult>> {
+    let Some(metadata) = rig::read_source_metadata(rig_id) else {
+        return Ok(None);
+    };
+    if metadata.linked {
+        return Ok(None);
+    }
+    Ok(Some(rig::update_source_for_rig(rig_id)?))
+}
+
+fn rig_run_bench_options(args: RigRunArgs) -> RigRunBenchOptions {
+    RigRunBenchOptions {
+        rig_id: args.rig_id,
+        profile: args.profile,
+        component: args.component,
+        path: args.path,
+        iterations: args.iterations,
+        warmup: args.warmup,
+        runs: args.runs,
+        run_id: args.run_id,
+        shared_state: args.shared_state,
+        concurrency: args.concurrency,
+        settings: args.setting_args,
+        json_summary: args.json_summary,
+        passthrough_args: args.args,
+    }
+}
+
 fn status(rig_id: &str) -> CmdResult<RigCommandOutput> {
     let rig = rig::load(rig_id)?;
     let report = rig::run_status(&rig)?;
@@ -785,6 +919,123 @@ mod tests {
         };
         assert_eq!(target, "studio-bfb");
         assert_eq!(path.as_deref(), Some("/tmp/studio"));
+    }
+
+    #[test]
+    fn parses_rig_run_profile_and_bench_settings() {
+        let cli = TestCli::try_parse_from([
+            "homeboy",
+            "run",
+            "static-site-importer-fixture-matrix",
+            "--profile",
+            "fixture-matrix",
+            "--iterations",
+            "1",
+            "--setting",
+            "bench_env.CORPUS_SIZE=44",
+            "--setting-json",
+            "artifact_env={\"KEEP\":\"1\"}",
+            "--json-summary",
+            "--",
+            "--full",
+        ])
+        .expect("rig run should parse profile and bench settings");
+
+        let RigCommand::Run(args) = cli.rig.command else {
+            panic!("expected rig run command");
+        };
+        assert_eq!(args.rig_id, "static-site-importer-fixture-matrix");
+        assert_eq!(args.profile, "fixture-matrix");
+        assert_eq!(args.iterations, 1);
+        assert_eq!(
+            args.setting_args.setting,
+            vec![("bench_env.CORPUS_SIZE".to_string(), "44".to_string())]
+        );
+        assert_eq!(args.args, vec!["--full".to_string()]);
+    }
+
+    #[test]
+    fn rig_run_accepts_global_runner_after_subcommand() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "rig",
+            "run",
+            "static-site-importer-fixture-matrix",
+            "--profile",
+            "fixture-matrix",
+            "--runner",
+            "homeboy-lab",
+        ])
+        .expect("global --runner should parse for rig run");
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        let crate::cli_surface::Commands::Rig(args) = cli.command else {
+            panic!("expected rig command");
+        };
+        assert!(matches!(args.command, RigCommand::Run(_)));
+    }
+
+    #[test]
+    fn rig_run_builds_canonical_bench_invocation() {
+        let args = RigRunArgs {
+            rig_id: "static-site-importer-fixture-matrix".to_string(),
+            profile: "fixture-matrix".to_string(),
+            component: None,
+            path: Some("/tmp/static-site-importer".to_string()),
+            iterations: 3,
+            warmup: Some(1),
+            runs: 2,
+            run_id: Some("proof-7118".to_string()),
+            shared_state: Some(std::path::PathBuf::from("/tmp/homeboy-shared")),
+            concurrency: 4,
+            setting_args: SettingArgs {
+                setting: vec![("bench_env.CORPUS_SIZE".to_string(), "44".to_string())],
+                setting_json: vec![(
+                    "artifact_env".to_string(),
+                    serde_json::json!({ "KEEP": "1" }),
+                )],
+            },
+            json_summary: true,
+            args: vec!["--full".to_string()],
+        };
+
+        let plan = rig_run_bench_options(args).bench_plan();
+
+        assert_eq!(
+            plan.command,
+            vec![
+                "homeboy",
+                "bench",
+                "--rig",
+                "static-site-importer-fixture-matrix",
+                "--profile",
+                "fixture-matrix",
+                "--iterations",
+                "3",
+                "--path",
+                "/tmp/static-site-importer",
+                "--warmup",
+                "1",
+                "--runs",
+                "2",
+                "--run-id",
+                "proof-7118",
+                "--shared-state",
+                "/tmp/homeboy-shared",
+                "--concurrency",
+                "4",
+                "--setting",
+                "bench_env.CORPUS_SIZE=44",
+                "--setting-json",
+                "artifact_env={\"KEEP\":\"1\"}",
+                "--json-summary",
+                "--",
+                "--full",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
     }
 
     #[test]
