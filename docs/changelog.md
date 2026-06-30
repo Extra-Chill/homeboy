@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.273.0] - 2026-06-30
+
+### Added
+- add run lifecycle status contract
+- add secret env source mapping primitive
+- add extension materialization source contract
+- add resource cleanup intent contract
+- expose fuzz workload validation
+- validate reviewer-facing artifact refs
+- add resolved agent runtime execution contract
+- add generic loop lifecycle schemas
+
+### Changed
+- Add artifact manifest path helpers
+- add run location index
+
 ## [0.272.2] - 2026-06-30
 
 ### Changed
