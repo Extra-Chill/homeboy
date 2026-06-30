@@ -163,6 +163,7 @@ fn agent_task_fanout_cook_batch_help_uses_generic_worktree_terms() {
     assert!(!help.contains("DMC"));
     assert!(!help.contains("dmc"));
     assert!(!help.contains("studio"));
+    assert!(!help.contains("Workspace Registry"));
     assert!(!help.contains("workspace-registry"));
 }
 

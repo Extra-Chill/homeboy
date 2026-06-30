@@ -56,7 +56,7 @@ pub struct AgentTaskFanoutCookBatchArgs {
     #[arg(value_name = "ISSUE_URL", required = true)]
     pub issues: Vec<String>,
 
-    /// Repo/workspace slug managed by Workspace Registry.
+    /// Registered component/repo handle.
     #[arg(long = "repo", value_name = "REPO")]
     pub repo: String,
 
