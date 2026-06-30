@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
@@ -694,6 +694,10 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
             })
         })
         .unwrap_or_default();
+    let extra_workloads = filter_component_conventional_bench_workloads(
+        extra_workloads,
+        path_override.as_deref(),
+    );
 
     let run_dir = RunDir::create()?;
     let resource_run = homeboy::core::engine::resource::ResourceSummaryRun::start(Some(format!(
@@ -733,6 +737,35 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
     let output = output?;
 
     Ok((BenchOutput::List(output), 0))
+}
+
+pub(crate) fn filter_component_conventional_bench_workloads(
+    workloads: Vec<PathBuf>,
+    component_root: Option<&str>,
+) -> Vec<PathBuf> {
+    let Some(component_root) = component_root else {
+        return workloads;
+    };
+    let component_root = Path::new(component_root);
+
+    workloads
+        .into_iter()
+        .filter(|path| !is_component_conventional_bench_workload(path, component_root))
+        .collect()
+}
+
+fn is_component_conventional_bench_workload(path: &Path, component_root: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(component_root) else {
+        return false;
+    };
+    let mut components = relative.components();
+    if components.next().and_then(|component| component.as_os_str().to_str()) != Some("bench") {
+        return false;
+    }
+    relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".bench."))
 }
 
 fn report_list_rig_source(context: &ListRigContext) {
