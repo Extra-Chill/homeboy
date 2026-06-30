@@ -101,6 +101,75 @@ fn resolve_component_id_uses_fuzz_default_component() {
 }
 
 #[test]
+fn resolve_fuzz_context_preserves_rig_extensions_with_explicit_path_when_registry_missing() {
+    with_isolated_home(|home| {
+        let extension_dir = home.path().join(".config/homeboy/extensions/generic");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("generic.json"),
+            serde_json::json!({
+                "name": "generic",
+                "version": "0.0.0",
+                "fuzz": {
+                    "workloads": [{ "id": "fixture" }]
+                }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        let component_dir = tempfile::tempdir().expect("component dir");
+        let spec: RigSpec = serde_json::from_value(serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": "${env.HOMEBOY_EMPTY_PACKAGE_PATH}",
+                    "extensions": {
+                        "generic": {
+                            "settings": {}
+                        }
+                    }
+                }
+            },
+            "fuzz": {
+                "default_component": "package"
+            }
+        }))
+        .expect("parse rig spec");
+        unsafe {
+            std::env::remove_var("HOMEBOY_EMPTY_PACKAGE_PATH");
+        }
+        let context = FuzzRigContext {
+            spec,
+            package_root: None,
+        };
+        let comp = PositionalComponentArgs {
+            component: Some("package".to_string()),
+            path: Some(component_dir.path().to_string_lossy().to_string()),
+        };
+
+        let resolved = resolve_fuzz_context(
+            "package",
+            &comp,
+            &SettingArgs::default(),
+            &ExtensionOverrideArgs::default(),
+            homeboy::core::extension::ExtensionCapability::Fuzz,
+            Some(&context),
+        )
+        .expect("resolve fuzz context");
+
+        assert_eq!(
+            resolved.component.local_path,
+            component_dir.path().to_string_lossy()
+        );
+        assert!(resolved
+            .component
+            .extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions.contains_key("generic")));
+    });
+}
+
+#[test]
 fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_contract() {
     let args = FuzzRunArgs {
         comp: PositionalComponentArgs {

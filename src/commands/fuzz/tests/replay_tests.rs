@@ -170,6 +170,69 @@ fn fuzz_replay_resolves_persisted_run_artifact_without_path() {
 }
 
 #[test]
+fn fuzz_replay_dry_run_resolves_persisted_homeboy_artifact_ref_without_local_bytes() {
+    with_isolated_home(|home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                homeboy::core::observation::NewRunRecord::builder("fuzz")
+                    .component_id("component-a")
+                    .command("homeboy fuzz run component-a")
+                    .cwd_path(home.path())
+                    .build(),
+            )
+            .expect("run");
+        store
+            .import_artifact(&homeboy::core::observation::ArtifactRecord {
+                id: "artifact-1".to_string(),
+                run_id: run.id.clone(),
+                kind: "fuzz_result_envelope".to_string(),
+                artifact_type: "file".to_string(),
+                path: home
+                    .path()
+                    .join("missing-envelope.json")
+                    .to_string_lossy()
+                    .to_string(),
+                url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: None,
+                size_bytes: None,
+                mime: Some("application/json".to_string()),
+                metadata_json: serde_json::json!({
+                    "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA
+                }),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .expect("import artifact ref");
+
+        let (output, exit) = run_replay(FuzzReplayArgs {
+            component: None,
+            path: None,
+            rig: None,
+            extension_override: ExtensionOverrideArgs::default(),
+            setting_args: SettingArgs::default(),
+            artifact_or_case: None,
+            artifact: None,
+            case_id: Some("case-1".to_string()),
+            run_id: Some(run.id.clone()),
+            dry_run: true,
+            args: Vec::new(),
+        })
+        .expect("resolve homeboy artifact ref dry-run");
+
+        assert_eq!(exit, 0);
+        assert_eq!(output.status, "dry_run");
+        let expected_ref = format!("homeboy://run/{}/artifact/artifact-1", run.id);
+        assert_eq!(output.artifact_file.as_deref(), Some(expected_ref.as_str()));
+        assert!(output.env.iter().any(|env| {
+            env.name == "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE" && env.value == expected_ref
+        }));
+    });
+}
+
+#[test]
 fn fuzz_replay_dry_run_accepts_runner_artifact_ref_without_local_bytes() {
     let reference = "runner-artifact://lab-runner/proof-run/fuzz-result-envelope";
 
