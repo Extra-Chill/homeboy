@@ -91,6 +91,7 @@ assert.equal(process.argv[2], 'exec');
 assert.equal(process.argv[3], '--model');
 assert.equal(process.argv[4], 'gpt-5.5');
 assert.equal(process.argv.at(-1), 'Prove the Codex runtime boundary without leaking secrets.');
+assert.equal(process.env.UNDECLARED_SECRET, undefined);
 process.stdout.write(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN || 'missing secret');
 process.stderr.write(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN || 'missing secret');
 process.exit(0);
@@ -122,6 +123,7 @@ process.exit(0);
 			...process.env,
 			AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'refresh-token-must-not-leak',
 			AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-must-not-leak',
+			UNDECLARED_SECRET: 'must-not-reach-codex',
 		},
 		input: JSON.stringify(request),
 	});

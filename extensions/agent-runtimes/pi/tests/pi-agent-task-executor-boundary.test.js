@@ -89,6 +89,7 @@ process.stdin.on('end', () => {
   const envRequest = JSON.parse(process.env.HOMEBOY_AGENT_TASK_REQUEST);
   assert.equal(stdinRequest.task_id, 'pi-real-executor');
   assert.equal(envRequest.instructions, 'Validate the Pi provider boundary through a configured command.');
+  assert.equal(process.env.UNDECLARED_SECRET, undefined);
   process.exit(0);
 });
 `);
@@ -108,6 +109,7 @@ process.stdin.on('end', () => {
 	};
 	const runResult = spawnSync(process.execPath, [scriptPath], {
 		encoding: 'utf8',
+		env: { ...process.env, UNDECLARED_SECRET: 'must-not-reach-pi' },
 		input: JSON.stringify(configuredRequest),
 	});
 	assert.equal(runResult.status, 0, runResult.stderr);

@@ -10,6 +10,7 @@ const {
 	providerSecretEnvRequirement,
 } = require('../../../agent-task-contracts/agent-task-provider-contract');
 const {
+	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
 } = require('../../lib/cli-agent-task-executor');
 
@@ -138,7 +139,13 @@ const { execute: executeClaudeCodeAgentTask, outcome, validationFailure } = crea
 		return null;
 	},
 	buildArgs: (request, config, commandSpec) => commandSpec.args,
-	buildSpawn: (request) => ({ env: process.env, input: JSON.stringify(request) }),
+	buildSpawn: (request, config, options) => ({
+		env: cliAgentTaskSpawnEnv(request, options, {
+			allowlist: ['HOMEBOY_CLAUDE_CODE_AGENT_TASK_COMMAND', 'HOMEBOY_CLAUDE_CODE_AGENT_TASK_COMMAND_ARGS'],
+			secretEnv: CLAUDE_CODE_SECRET_ENV,
+		}),
+		input: JSON.stringify(request),
+	}),
 	messages: {
 		invalidRequest: { code: 'agent_task.invalid_claude_code_request', summary: 'Claude Code request validation failed.' },
 		invalidCommand: { code: 'agent_task.invalid_claude_code_command', summary: 'Claude Code command configuration is invalid.' },

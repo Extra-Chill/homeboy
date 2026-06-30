@@ -29,6 +29,7 @@ const baseSpec = {
 
 (async () => {
 const executedTaskIds = [];
+const loopArtifactRefDir = path.join(os.tmpdir(), `headless-loop-ref-${process.pid}`);
 const twoRevolution = await runHeadlessDeterministicLoop({
   spec: {
     ...baseSpec,
@@ -49,6 +50,7 @@ const twoRevolution = await runHeadlessDeterministicLoop({
     },
   },
   runtime,
+  artifact_paths: { run_dir: loopArtifactRefDir },
   validate: false,
   execute: ({ request }) => {
     executedTaskIds.push(request.task_id);
@@ -75,8 +77,11 @@ assert.equal(twoRevolution.tasks[0].loop_policy.iterations[1].accepted, true);
 assert.equal(twoRevolution.tasks[0].loop_result.schema, 'homeboy/headless-loop-result-envelope/v1');
 assert.equal(twoRevolution.tasks[0].loop_result.mode, 'count');
 assert.equal(twoRevolution.tasks[0].loop_result.revolutions, 2);
+assert.equal(twoRevolution.tasks[0].loop_result.artifact_manifest.schema, 'homeboy/runner-artifact-manifest-ref/v1');
+assert.equal(twoRevolution.tasks[0].loop_result.artifact_manifest.manifest_schema, 'homeboy/artifact-manifest/v1');
 assert.equal(twoRevolution.loop_result.schema, 'homeboy/headless-loop-result-envelope/v1');
 assert.equal(twoRevolution.loop_result.revolutions, 2);
+assert.equal(twoRevolution.loop_result.artifact_manifest.schema, 'homeboy/runner-artifact-manifest-ref/v1');
 assert.equal(twoRevolution.tasks[0].outcome.metadata.headless_loop_policy_status.iteration_count, 2);
 assert.equal(twoRevolution.tasks[0].results.scenarios[0].metadata.completion_outcome_satisfied, true);
 assert.equal(twoRevolution.fanout.records[0].status, 'completed');
@@ -191,6 +196,18 @@ assert.equal(expiredHeadlessCalls, 0);
 assert.equal(expiredDeadline.status, 'failed');
 assert.equal(expiredDeadline.tasks[0].loop_policy.stop_reason, 'deadline_reached');
 assert.equal(expiredDeadline.tasks[0].loop_policy.iteration_count, 0);
+
+const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'headless-loop-artifact-manifest-'));
+try {
+  writeHeadlessDeterministicLoopArtifacts({ result: twoRevolution, artifact_paths: { run_dir: artifactDir } });
+  const manifest = JSON.parse(fs.readFileSync(path.join(artifactDir, 'homeboy-artifact-manifest.json'), 'utf8'));
+  assert.equal(manifest.schema, 'homeboy/artifact-manifest/v1');
+  assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'loop-result.json'), true);
+  assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'events.json'), true);
+  assert.equal(manifest.artifacts.every((artifact) => !path.isAbsolute(artifact.path)), true);
+} finally {
+  fs.rmSync(artifactDir, { recursive: true, force: true });
+}
 
 await assert.rejects(
   () => runHeadlessDeterministicLoop({

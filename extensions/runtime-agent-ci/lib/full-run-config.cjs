@@ -123,6 +123,13 @@ function buildConfig(env) {
     runnerWorkspaceGuestCheckout,
   });
 
+  const secretEnv = uniqueStrings([
+    ...normalizeStringArray(runtimeConfig.secret_env),
+    githubRepositoryTokenEnv,
+    githubTokenEnv,
+    ...Array.from(providerBenchEnvNames),
+  ]);
+
   return {
     ...runtimeConfig,
     _configPath: path.join(runnerTemp, 'runtime-agent-full-run-config.json'),
@@ -164,12 +171,13 @@ function buildConfig(env) {
     runtime_requirements: effectiveRuntimeProfile,
     github_token_env: githubTokenEnv,
     github_repository_token_env: githubRepositoryTokenEnv,
-    secret_env: uniqueStrings([
-      ...normalizeStringArray(runtimeConfig.secret_env),
-      githubRepositoryTokenEnv,
-      githubTokenEnv,
-      ...Array.from(providerBenchEnvNames),
-    ]),
+    secret_env: secretEnv,
+    secret_env_plan: buildSecretEnvPlan({
+      secretEnv,
+      runtimeEnv,
+      providerSecretEnvMapping,
+      secretEnvFallbacks,
+    }),
     // Fill a target secret env from a fallback source before the sandbox
     // preflight runs: the provider's canonical key (e.g. OPENAI_API_KEY) from
     // the caller's generic credential secret (PROVIDER_SECRET_n), and the
@@ -323,6 +331,23 @@ function buildSecretEnvFallbacks({
     }
   }
   return fallbacks;
+}
+
+function buildSecretEnvPlan({ secretEnv = [], runtimeEnv = {}, providerSecretEnvMapping = {}, secretEnvFallbacks = {} } = {}) {
+  return {
+    schema: 'homeboy/secret-env-plan/v1',
+    public_env: Object.fromEntries(Object.entries(runtimeEnv).filter(([, value]) => typeof value === 'string')),
+    secret_env_names: uniqueStrings(secretEnv),
+    requirements: uniqueStrings(secretEnv).map((name) => ({ name, required: true })),
+    env_name_mapping: Object.fromEntries(Object.entries({
+      provider_secret_env: Object.values(providerSecretEnvMapping).filter((value) => typeof value === 'string' && value.length > 0),
+      secret_env_fallbacks: Object.values(secretEnvFallbacks).flat().filter((value) => typeof value === 'string' && value.length > 0),
+    }).filter(([, names]) => names.length > 0)),
+    inheritance: {
+      require_declaration: true,
+      allowed_env_names: ['HOMEBOY_AGENT_RUNTIME_SECRET_ENV'],
+    },
+  };
 }
 
 function runtimeWorkloadFromEnv(env, fallbackId) {

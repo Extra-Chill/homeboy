@@ -353,6 +353,20 @@ process.stdout.write(JSON.stringify({
     artifact_paths: { run_dir: sharedArtifactDir },
   });
   assert.equal(sharedArtifactsRun.outcome.metadata.runtime_invocation_result.stderr_artifact.path, path.join(sharedArtifactDir, 'shared-artifact-paths-runtime-stderr.txt'));
+  genericLoopRunner.writeGenericAgentLoopArtifacts({
+    outcome: sharedArtifactsRun.outcome,
+    results: sharedArtifactsRun.results,
+    artifact_paths: { run_dir: sharedArtifactDir },
+  });
+  const sharedManifest = JSON.parse(fs.readFileSync(path.join(sharedArtifactDir, 'homeboy-artifact-manifest.json'), 'utf8'));
+  assert.equal(sharedManifest.schema, 'homeboy/artifact-manifest/v1');
+  assert.deepEqual(sharedManifest.artifacts.map((artifact) => artifact.path).sort(), [
+    'outcome.json',
+    'results.json',
+    'shared-artifact-paths-runtime-stderr.txt',
+    'status.json',
+  ]);
+  assert.equal(sharedManifest.artifacts.every((artifact) => !path.isAbsolute(artifact.path)), true);
 
   let capturedEnv = null;
   genericLoopRunner.runGenericAgentLoop({
@@ -394,6 +408,24 @@ process.stdout.write(JSON.stringify({
     },
   });
   assert.equal(capturedEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE, '/tmp/wp-codebox-core/contracts.js');
+  const inheritEnvRun = genericLoopRunner.runGenericAgentLoop({
+    runtime: {
+      id: 'env-inherit-runtime',
+      executor: { backend: 'fixture', invocation: { command: 'node', inherit_env: true } },
+    },
+    request: {
+      schema: 'homeboy/agent-task-request/v1',
+      task_id: 'env-inherit-runtime',
+      instructions: 'Exercise runtime inherit_env rejection.',
+      executor: { backend: 'fixture', config: {} },
+    },
+    plan: { ...plan, workload_id: 'env-inherit-runtime' },
+    validationPolicy: { success_completion_outcomes: ['done'] },
+    validate: false,
+    spawnSync: () => ({ status: 0, stdout: '{}', stderr: '' }),
+  });
+  assert.equal(inheritEnvRun.outcome.status, 'failed');
+  assert.match(inheritEnvRun.outcome.summary, /ambient env inheritance is not supported/);
 
   const hugePayloadSentinel = 'WHOLESALE_RESULT_PAYLOAD_SENTINEL';
   const stdoutSummary = genericLoopRunner.genericAgentLoopStdoutSummary({

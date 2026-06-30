@@ -8,6 +8,7 @@ const {
 	agentTaskProviderContractFields,
 } = require('../../../agent-task-contracts/agent-task-provider-contract');
 const {
+	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
 } = require('../../lib/cli-agent-task-executor');
 
@@ -91,13 +92,17 @@ const { execute: executePiAgentTask, outcome, validationFailure } = createCliAge
 	timeoutFallback: (config) => config.timeout_seconds || DEFAULT_TIMEOUT_SECONDS,
 	resolveCommandSpec,
 	buildArgs: (request, config, commandSpec) => commandSpec.args,
-	buildSpawn: (request) => {
+	buildSpawn: (request, config, options) => {
 		const requestJson = JSON.stringify(request);
 		return {
-			env: {
-				...process.env,
+			env: cliAgentTaskSpawnEnv(request, {
+				...options,
+				env_overrides: {
+					...options.env_overrides,
+					...options.envOverrides,
 				HOMEBOY_AGENT_TASK_REQUEST: requestJson,
 			},
+			}, { allowlist: ['HOMEBOY_PI_COMMAND', 'HOMEBOY_PI_COMMAND_ARGS'] }),
 			input: requestJson,
 		};
 	},

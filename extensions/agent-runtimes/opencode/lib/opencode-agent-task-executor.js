@@ -10,6 +10,7 @@ const {
 	providerSecretEnvRequirement,
 } = require('../../../agent-task-contracts/agent-task-provider-contract');
 const {
+	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
 	timeoutSecondsFromLimits,
 } = require('../../lib/cli-agent-task-executor');
@@ -213,25 +214,14 @@ function providerContract(options = {}) {
 }
 
 function opencodeSpawnEnv(request = {}, options = {}) {
-	const ambient = options.env && typeof options.env === 'object' && !Array.isArray(options.env) ? options.env : process.env;
 	const config = request.executor?.config || {};
 	if (config.inherit_env === true || config.inheritEnv === true) {
-		return { ...ambient, ...objectValue(config.runtime_env), ...objectValue(options.envOverrides || options.env_overrides) };
+		throw new Error('OpenCode ambient env inheritance is not supported; declare env_allowlist, runtime_env, and secret_env explicitly.');
 	}
-	const names = new Set([
-		...OPENCODE_PROCESS_ENV_ALLOWLIST,
-		...arrayValue(config.env_allowlist || config.envAllowlist),
-		...arrayValue(config.runtime_env_allowlist || config.runtimeEnvAllowlist),
-		...arrayValue(config.secret_env),
-		...arrayValue(request.executor?.secret_env),
-	]);
-	const env = {};
-	for (const name of names) {
-		if (typeof name === 'string' && name && ambient[name] !== undefined) {
-			env[name] = ambient[name];
-		}
-	}
-	return { ...env, ...objectValue(config.runtime_env), ...objectValue(options.envOverrides || options.env_overrides) };
+	return cliAgentTaskSpawnEnv(request, options, {
+		allowlist: OPENCODE_PROCESS_ENV_ALLOWLIST,
+		secretEnv: OPENCODE_SECRET_ENV,
+	});
 }
 
 function withDeclaredArtifactDiagnostics(request = {}, normalized = {}) {
@@ -564,6 +554,9 @@ function validateOpenCodeRequest(request) {
 	}
 	if (!request.instructions || typeof request.instructions !== 'string') {
 		return 'Request instructions are required.';
+	}
+	if (request.executor.config.inherit_env === true || request.executor.config.inheritEnv === true) {
+		return 'executor.config.inherit_env is not supported; declare env_allowlist, runtime_env, and secret_env explicitly.';
 	}
 	return null;
 }

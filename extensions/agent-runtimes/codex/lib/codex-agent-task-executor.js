@@ -10,6 +10,7 @@ const {
 	providerSecretEnvRequirement,
 } = require('../../../agent-task-contracts/agent-task-provider-contract');
 const {
+	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
 } = require('../../lib/cli-agent-task-executor');
 
@@ -116,7 +117,12 @@ const { execute: executeCodexAgentTask, outcome, validationFailure } = createCli
 		...(config.model ? ['--model', config.model] : []),
 		request.instructions,
 	],
-	buildSpawn: () => ({ env: process.env }),
+	buildSpawn: (request, config, options) => ({
+		env: cliAgentTaskSpawnEnv(request, options, {
+			allowlist: ['HOMEBOY_CODEX_COMMAND', 'HOMEBOY_CODEX_COMMAND_ARGS'],
+			secretEnv: CODEX_SECRET_ENV,
+		}),
+	}),
 	messages: {
 		invalidRequest: { code: 'agent_task.invalid_codex_request', summary: 'Codex request validation failed.' },
 		invalidCommand: { code: 'agent_task.invalid_codex_command', summary: 'Codex command configuration is invalid.' },

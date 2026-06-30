@@ -14,7 +14,7 @@ const {
 const { runtimeAgentCiTaskExecutorConfig } = require('./runtime-agent-ci-plan');
 const { evaluateGatePlan } = require('./gate-plan-evaluator');
 const { assertLoopSuccess, loopEvidence, loopIteration, loopRun } = require('./loop-lifecycle.cjs');
-const { runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
+const { artifactManifestForFiles, runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
 
 const DEFAULT_STDIO_SUMMARY_BYTES = 8192;
 const DEFAULT_RUNTIME_ENV_ALLOWLIST = [
@@ -435,9 +435,7 @@ function runtimeInvocationEnv(options = {}) {
   const executor = optionalObject(request.executor);
   const config = optionalObject(executor.config);
   const invocation = optionalObject(options.invocation);
-  if (invocation.inherit_env === true || invocation.inheritEnv === true || config.inherit_env === true || config.inheritEnv === true) {
-    return { ...ambient, ...optionalObject(config.runtime_env), ...optionalObject(invocation.env) };
-  }
+  assertNoAmbientEnvInheritance(invocation, config);
 
   const names = new Set([
     ...DEFAULT_RUNTIME_ENV_ALLOWLIST,
@@ -517,6 +515,7 @@ function runtimeExecutorInvocation(runtime = {}) {
       stdin: executor.invocation.stdin || 'request_json',
       stdout: executor.invocation.stdout || 'outcome_json',
       stderr: executor.invocation.stderr || 'inherit_on_failure',
+      inherit_env: executor.invocation.inherit_env === true || executor.invocation.inheritEnv === true,
       env_allowlist: normalizeArray(executor.invocation.env_allowlist || executor.invocation.envAllowlist),
       artifacts: executor.invocation.artifacts || {},
       results: executor.invocation.results || {},
@@ -536,6 +535,12 @@ function runtimeExecutorInvocation(runtime = {}) {
     };
   }
   return {};
+}
+
+function assertNoAmbientEnvInheritance(invocation = {}, config = {}) {
+  if (invocation.inherit_env === true || invocation.inheritEnv === true || config.inherit_env === true || config.inheritEnv === true) {
+    throw new Error('Runtime executor ambient env inheritance is not supported; declare env_allowlist, runtime_env, and secret_env explicitly.');
+  }
 }
 
 function invocationStdin(invocation, request) {
@@ -856,11 +861,14 @@ function validateGenericAgentLoopOutcomeContract(options = {}) {
 
 function writeGenericAgentLoopArtifacts(options = {}) {
   const artifactPaths = runtimeAgentArtifactPaths(options);
+  const manifestFiles = [];
   if (artifactPaths.outcome) {
     writeJsonFile(artifactPaths.outcome, options.outcome);
+    manifestFiles.push({ id: 'outcome', kind: 'agent-task-outcome', role: 'outcome', label: 'Agent task outcome', path: artifactPaths.outcome, content_type: 'application/json' });
   }
   if (artifactPaths.results) {
     writeJsonFile(artifactPaths.results, options.results);
+    manifestFiles.push({ id: 'results', kind: 'runtime-agent-results', role: 'results', label: 'Runtime agent results', path: artifactPaths.results, content_type: 'application/json' });
   }
   if (artifactPaths.status) {
     writeJsonFile(artifactPaths.status, {
@@ -869,6 +877,19 @@ function writeGenericAgentLoopArtifacts(options = {}) {
       status: options.outcome?.status || 'failed',
       success: ['succeeded', 'no_op'].includes(options.outcome?.status),
     });
+    manifestFiles.push({ id: 'status', kind: 'runtime-agent-status', role: 'status', label: 'Runtime agent status', path: artifactPaths.status, content_type: 'application/json' });
+  }
+  for (const artifact of normalizeArray(options.outcome?.artifacts)) {
+    if (artifact?.path) {
+      manifestFiles.push(artifact);
+    }
+  }
+  const stderrArtifact = options.outcome?.metadata?.runtime_invocation_result?.stderr_artifact || options.outcome?.metadata?.runtime_invocation_stderr_artifact;
+  if (stderrArtifact?.path) {
+    manifestFiles.push({ id: 'runtime_stderr', role: 'stderr', label: 'Runtime stderr', ...stderrArtifact });
+  }
+  if (artifactPaths.artifact_manifest) {
+    writeJsonFile(artifactPaths.artifact_manifest, artifactManifestForFiles(artifactPaths, manifestFiles));
   }
 }
 

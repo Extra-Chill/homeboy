@@ -52,6 +52,12 @@ try {
 
   assert.equal(config.execution_kind, 'runtime_execution');
   assert.deepEqual(config.secret_env.slice(0, 2), ['GITHUB_TOKEN', 'HOMEBOY_GITHUB_APP_TOKEN']);
+  assert.equal(config.secret_env_plan.schema, 'homeboy/secret-env-plan/v1');
+  assert.deepEqual(config.secret_env_plan.inheritance, {
+    require_declaration: true,
+    allowed_env_names: ['HOMEBOY_AGENT_RUNTIME_SECRET_ENV'],
+  });
+  assert.deepEqual(config.secret_env_plan.secret_env_names, config.secret_env);
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 }

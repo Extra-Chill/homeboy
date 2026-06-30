@@ -16,7 +16,7 @@ const {
 } = require('./loop-policy');
 const { executeFanoutReconcileRun } = require('./fanout-reconcile-runner');
 const { resolveRuntimeProvider, runtimeIdFromOptions } = require('./runtime-provider-resolver.cjs');
-const { runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
+const { artifactManifestForFiles, artifactManifestRef, runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
 
 async function runHeadlessDeterministicLoop(options = {}) {
   const spec = requiredObject(options.spec || options.config || options.plan, 'spec');
@@ -424,23 +424,41 @@ function readJsonOrNull(filePath) {
 
 function writeHeadlessDeterministicLoopArtifacts(options = {}) {
   const artifactPaths = runtimeAgentArtifactPaths(options);
+  const manifestFiles = [];
   if (artifactPaths.loop_result) {
     writeJsonFile(artifactPaths.loop_result, options.result);
+    manifestFiles.push({ id: 'loop_result', kind: 'headless-loop-result', role: 'loop_result', label: 'Headless loop result', path: artifactPaths.loop_result, content_type: 'application/json' });
   }
   if (artifactPaths.events) {
     writeJsonFile(artifactPaths.events, options.result?.events || []);
+    manifestFiles.push({ id: 'events', kind: 'runtime-agent-events', role: 'events', label: 'Runtime agent events', path: artifactPaths.events, content_type: 'application/json' });
   }
   if (artifactPaths.loop_policy) {
     writeJsonFile(artifactPaths.loop_policy, policyArtifact(options.result));
+    manifestFiles.push({ id: 'loop_policy', kind: 'runtime-agent-loop-policy', role: 'loop_policy', label: 'Runtime agent loop policy', path: artifactPaths.loop_policy, content_type: 'application/json' });
   }
   if (artifactPaths.status) {
     writeJsonFile(artifactPaths.status, statusArtifact(options.result));
+    manifestFiles.push({ id: 'status', kind: 'runtime-agent-status', role: 'status', label: 'Runtime agent status', path: artifactPaths.status, content_type: 'application/json' });
   }
   writeGenericAgentLoopArtifacts({
     outcome: options.result?.outcome,
     results: options.result?.results,
     artifact_paths: { ...artifactPaths, status: '' },
   });
+  for (const key of ['outcome', 'results']) {
+    if (artifactPaths[key]) {
+      manifestFiles.push({ id: key, kind: key === 'outcome' ? 'agent-task-outcome' : 'runtime-agent-results', role: key, path: artifactPaths[key], content_type: 'application/json' });
+    }
+  }
+  for (const artifact of normalizeArray(options.result?.outcome?.artifacts)) {
+    if (artifact?.path) {
+      manifestFiles.push(artifact);
+    }
+  }
+  if (artifactPaths.artifact_manifest) {
+    writeJsonFile(artifactPaths.artifact_manifest, artifactManifestForFiles(artifactPaths, manifestFiles));
+  }
 }
 
 function runHeadlessPolicyLoop(options = {}) {
@@ -848,6 +866,7 @@ function taskLoopResultEnvelope({ loop, loopPolicy, policyStatus, startedAt, sta
     max_revolutions: loopPolicy.max_revolutions,
     max_synchronous_revolutions: loopPolicy.max_synchronous_revolutions,
     artifact_paths: artifactPaths,
+    artifact_manifest: artifactManifestRef(artifactPaths),
   };
 }
 
@@ -864,6 +883,7 @@ function aggregateLoopResultEnvelope({ loopId, status, startedAt, completedAt, t
     duration_ms: tasks.at(-1)?.loop_policy?.duration_ms || 0,
     deadline_at: tasks.at(-1)?.loop_policy?.deadline_at || 0,
     artifact_paths: artifactPaths,
+    artifact_manifest: artifactManifestRef(artifactPaths),
   };
 }
 

@@ -80,6 +80,7 @@ process.stdin.on('end', () => {
   assert.equal(request.executor.backend, 'claude-code');
   assert.equal(request.executor.runtime, 'claude-code');
   assert.equal(request.instructions, 'Prove the Claude Code provider boundary without leaking secrets.');
+  assert.equal(process.env.UNDECLARED_SECRET, undefined);
   process.stdout.write(process.env.AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN || 'missing secret');
   process.stderr.write(process.env.AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN || 'missing secret');
   process.exit(0);
@@ -112,6 +113,7 @@ process.stdin.on('end', () => {
 			AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN: 'refresh-token-must-not-leak',
 			AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN: 'access-token-must-not-leak',
 			AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT: 'expires-at-must-not-leak',
+			UNDECLARED_SECRET: 'must-not-reach-claude-code',
 		},
 		input: JSON.stringify(runRequest),
 	});

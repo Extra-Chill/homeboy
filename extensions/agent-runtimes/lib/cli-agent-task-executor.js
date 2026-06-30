@@ -18,6 +18,19 @@ const {
 } = require('../../runtime-agent-ci/lib/agent-task-outcome-normalizer');
 
 const DEFAULT_MAX_BUFFER = 10 * 1024 * 1024;
+const DEFAULT_PROCESS_ENV_ALLOWLIST = [
+	'CI',
+	'HOME',
+	'LANG',
+	'LC_ALL',
+	'LOGNAME',
+	'NODE_OPTIONS',
+	'PATH',
+	'PWD',
+	'SHELL',
+	'TMPDIR',
+	'USER',
+];
 
 /**
  * Build a CLI agent-task executor from a per-provider configuration.
@@ -156,6 +169,9 @@ function createCliAgentTaskExecutor(spec) {
 		if (!request.instructions || typeof request.instructions !== 'string') {
 			return 'Request instructions are required.';
 		}
+		if (request.executor?.config?.inherit_env === true || request.executor?.config?.inheritEnv === true) {
+			return 'executor.config.inherit_env is not supported; declare env_allowlist, runtime_env, and secret_env explicitly.';
+		}
 		return null;
 	}
 
@@ -264,7 +280,42 @@ function redactSecrets(content, secretEnvNames) {
 	return redacted;
 }
 
+function cliAgentTaskSpawnEnv(request = {}, options = {}, envOptions = {}) {
+	const ambient = options.env && typeof options.env === 'object' && !Array.isArray(options.env) ? options.env : process.env;
+	const config = request.executor?.config || {};
+	const names = new Set([
+		...DEFAULT_PROCESS_ENV_ALLOWLIST,
+		...arrayValue(envOptions.allowlist),
+		...arrayValue(config.env_allowlist || config.envAllowlist),
+		...arrayValue(config.runtime_env_allowlist || config.runtimeEnvAllowlist),
+		...arrayValue(envOptions.secretEnv),
+		...arrayValue(config.secret_env),
+		...arrayValue(request.executor?.secret_env),
+	]);
+	const env = {};
+	for (const name of names) {
+		if (typeof name === 'string' && name && ambient[name] !== undefined) {
+			env[name] = ambient[name];
+		}
+	}
+	return {
+		...env,
+		...objectValue(config.runtime_env),
+		...objectValue(options.envOverrides || options.env_overrides),
+	};
+}
+
+function arrayValue(value) {
+	return Array.isArray(value) ? value : [];
+}
+
+function objectValue(value) {
+	return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
 module.exports = {
+	DEFAULT_PROCESS_ENV_ALLOWLIST,
+	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,
 	timeoutSecondsFromLimits,
 	resolveCwd,

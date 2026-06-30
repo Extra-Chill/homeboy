@@ -3,6 +3,9 @@
 const path = require('node:path');
 
 const ARTIFACT_PATHS_SCHEMA = 'homeboy/runtime-agent-artifact-paths/v1';
+const ARTIFACT_MANIFEST_SCHEMA = 'homeboy/artifact-manifest/v1';
+const ARTIFACT_MANIFEST_FILE = 'homeboy-artifact-manifest.json';
+const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = 'homeboy/runner-artifact-manifest-ref/v1';
 const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
   events: 'events.json',
   status: 'status.json',
@@ -44,7 +47,71 @@ function runtimeAgentArtifactPaths(options = {}) {
     fanout_run: firstString(provided.fanout_run, provided.fanoutRun, options.fanoutRunFile, options.fanout_run_file, options.runsOutputPath, options.runs_output_path, options.env?.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, process.env.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, runArtifactPath(runDir, 'fanout_run')),
     loop_result: firstString(provided.loop_result, provided.loopResult, options.loopResultFile, options.loop_result_file, options.resultFile, options.result_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, runArtifactPath(runDir, 'loop_result')),
     loop_policy: firstString(provided.loop_policy, provided.loopPolicy, options.loopPolicyFile, options.loop_policy_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, runArtifactPath(runDir, 'loop_policy')),
+    artifact_manifest: firstString(provided.artifact_manifest, provided.artifactManifest, options.artifactManifestFile, options.artifact_manifest_file, options.env?.HOMEBOY_RUNTIME_AGENT_ARTIFACT_MANIFEST_FILE, process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACT_MANIFEST_FILE, runDir ? path.join(runDir, ARTIFACT_MANIFEST_FILE) : ''),
   });
+}
+
+function artifactManifestRef(artifactPaths = runtimeAgentArtifactPaths()) {
+  const manifestPath = artifactPaths.artifact_manifest || '';
+  return manifestPath ? {
+    schema: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+    manifest_schema: ARTIFACT_MANIFEST_SCHEMA,
+    path: manifestPath,
+  } : null;
+}
+
+function artifactManifestForFiles(artifactPaths = {}, files = []) {
+  const root = artifactPaths.run_dir || '';
+  return {
+    schema: ARTIFACT_MANIFEST_SCHEMA,
+    artifacts: normalizeManifestFiles(files)
+      .map((file) => manifestEntryForFile(root, file))
+      .filter(Boolean),
+  };
+}
+
+function normalizeManifestFiles(files) {
+  return files
+    .map((file) => typeof file === 'string' ? { path: file } : file)
+    .filter((file) => file && typeof file === 'object' && typeof file.path === 'string' && file.path.trim() !== '');
+}
+
+function manifestEntryForFile(root, file) {
+  const relative = relativeArtifactPath(root, file.path);
+  if (!relative) {
+    return null;
+  }
+  return stripUndefined({
+    id: firstString(file.id, file.name, file.role, path.basename(relative)),
+    path: relative,
+    kind: firstString(file.kind, file.type, 'file'),
+    role: firstString(file.role),
+    label: firstString(file.label, file.name),
+    semantic_key: firstString(file.semantic_key, file.semanticKey),
+    content_type: firstString(file.content_type, file.contentType),
+    public_url: firstString(file.public_url, file.publicUrl),
+    size_bytes: Number.isFinite(file.size_bytes) ? file.size_bytes : Number.isFinite(file.bytes) ? file.bytes : undefined,
+    sha256: firstString(file.sha256),
+    metadata: file.metadata && typeof file.metadata === 'object' && !Array.isArray(file.metadata) ? file.metadata : {},
+  });
+}
+
+function relativeArtifactPath(root, filePath) {
+  const absolute = path.resolve(filePath);
+  if (!root) {
+    return safeRelativePath(filePath);
+  }
+  const rootAbsolute = path.resolve(root);
+  const relative = path.relative(rootAbsolute, absolute);
+  return safeRelativePath(relative);
+}
+
+function safeRelativePath(value) {
+  const normalized = String(value || '').replaceAll(path.sep, '/');
+  if (!normalized || normalized.startsWith('../') || normalized === '..' || normalized.startsWith('/') || normalized.includes('/../') || normalized === '.') {
+    return '';
+  }
+  return normalized;
 }
 
 function runArtifactPath(runDir, key) {
@@ -65,7 +132,12 @@ function stripUndefined(value) {
 }
 
 module.exports = {
+  ARTIFACT_MANIFEST_FILE,
+  ARTIFACT_MANIFEST_SCHEMA,
   ARTIFACT_PATHS_SCHEMA,
   CANONICAL_RUN_ARTIFACT_FILES,
+  RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+  artifactManifestForFiles,
+  artifactManifestRef,
   runtimeAgentArtifactPaths,
 };
