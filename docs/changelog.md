@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.275.0] - 2026-06-30
+
+### Added
+- export contract constants
+- add contract validation CLI
+- add contract normalize command
+- add contract registry CLI
+
+### Fixed
+- Fix rig run Lab workload label
+
 ## [0.274.0] - 2026-06-30
 
 ### Added
