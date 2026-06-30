@@ -226,11 +226,13 @@ impl Commands {
                 CommandOutputContractKind::JsonEnvelope,
             ),
             Commands::Version(_) => version::adapter(output_file_mode).output_descriptor(),
+            Commands::Contract(_) => {
+                crate::commands::contract::adapter(output_file_mode).output_descriptor()
+            }
             Commands::AgentTask(_)
             | Commands::Project(_)
             | Commands::Component(_)
             | Commands::Config(_)
-            | Commands::Contract(_)
             | Commands::Extension(_)
             | Commands::Manifest(_)
             | Commands::Changelog(_)

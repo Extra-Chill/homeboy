@@ -8,13 +8,13 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::command_contract::{
-    registered_contract, registered_contracts, CommandDispatchFamily, CommandJsonFamily,
-    CommandOutputContractKind, CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode,
-    CommandStdoutMode, ContractRegistryEntry, COMMAND_REGISTRY, PUBLIC_OUTPUT_VARIANT_CONTRACTS,
-    RUNNER_ARTIFACT_MANIFEST_SCHEMA, RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA,
-    RUN_LOCATION_INDEX_SCHEMA,
+    contract_constants, registered_contract, registered_contracts, CommandDispatchFamily,
+    CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode, CommandRawOutputMode,
+    CommandResponseMode, CommandStdoutMode, ContractConstantsOutput, ContractRegistryEntry,
+    COMMAND_REGISTRY, PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+    RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA, RUN_LOCATION_INDEX_SCHEMA,
 };
-use crate::commands::{CmdResult, GlobalArgs};
+use crate::commands::{adapter, CmdResult, GlobalArgs};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
 use crate::core::fuzz::{FuzzWorkload, FUZZ_WORKLOAD_SCHEMA};
 use crate::core::loop_lifecycle::{
@@ -49,8 +49,16 @@ pub enum ContractCommand {
     Export(ContractExportArgs),
     /// Validate a JSON file against a registered generic Homeboy contract.
     Validate(ContractValidateArgs),
+    /// Export Homeboy-owned constants for a generic contract surface.
+    Constants(ContractConstantsArgs),
     /// Validate and normalize generic contract values.
     Normalize(ContractNormalizeArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ContractConstantsArgs {
+    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, run-location-index, reviewer-facing-ref.
+    pub contract_id: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -63,6 +71,7 @@ pub struct ContractShowArgs {
 #[serde(untagged)]
 pub enum ContractOutput {
     Export(ContractExportOutput),
+    Constants(ContractConstantsOutput),
     List(ContractListOutput),
     Show(ContractShowOutput),
     Validate(ContractValidateOutput),
@@ -345,6 +354,7 @@ pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput
             export_contracts(args).map(|(output, code)| (ContractOutput::Export(output), code))
         }
         ContractCommand::Validate(args) => Ok((ContractOutput::Validate(validate(args)?), 0)),
+        ContractCommand::Constants(args) => constants(&args.contract_id),
         ContractCommand::Normalize(args) => Ok((ContractOutput::Normalize(normalize(args)?), 0)),
     }
 }
@@ -365,6 +375,35 @@ fn validate(args: ContractValidateArgs) -> Result<ContractValidateOutput> {
         file: display_path(&args.file),
         valid: true,
     })
+}
+
+pub(crate) fn adapter(
+    output_file_mode: CommandOutputFileMode,
+) -> adapter::TypedCommandAdapter<ContractArgs> {
+    adapter::TypedCommandAdapter::json_only(
+        CommandJsonFamily::Workspace,
+        output_file_mode,
+        run_json,
+    )
+}
+
+fn run_json(args: ContractArgs, global: &GlobalArgs) -> adapter::JsonCommandRun {
+    crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
+}
+
+fn constants(contract_id: &str) -> CmdResult<ContractOutput> {
+    let output = contract_constants(contract_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "contract_id",
+            format!("unknown contract constants id `{contract_id}`"),
+            None,
+            Some(vec![
+                "Use one of: all, artifact-manifest, loop, secret-env-plan, run-location-index, reviewer-facing-ref".to_string(),
+            ]),
+        )
+    })?;
+
+    Ok((ContractOutput::Constants(output), 0))
 }
 
 fn normalize(args: ContractNormalizeArgs) -> Result<ContractNormalizeOutput> {
