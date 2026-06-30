@@ -30,8 +30,8 @@ use super::spec::{
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
 pub const RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
 pub const RUN_LOCATION_INDEX_SCHEMA: &str = "homeboy/run-location-index/v1";
-pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = "homeboy/artifact-manifest/v1";
-pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = "homeboy-artifact-manifest.json";
+pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = crate::core::artifacts::ARTIFACT_MANIFEST_SCHEMA;
+pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = crate::core::artifacts::ARTIFACT_MANIFEST_FILE;
 
 /// Routing-policy flags shared by every Lab command representation
 /// (`LabCommandContract`, `LabRoutePlan`, `LabOffloadCommand`). These four
