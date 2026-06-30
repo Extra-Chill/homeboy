@@ -63,6 +63,11 @@ assert.equal(manifest.name, 'OpenCode');
 assert.equal(manifest.agent_task_executors.length, 1);
 assert.equal(manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
 assert.deepEqual(manifest.agent_task_executors[0], providerContract());
+const packageJson = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'package.json'), 'utf8'));
+assert.equal(packageJson.name, 'homeboy-agent-runtime-opencode');
+assert.equal(packageJson.homeboy.agent_runtime_manifest, 'opencode.json');
+assert.equal(JSON.stringify({ manifest, packageJson }).includes('wp-codebox'), false);
+assert.equal(JSON.stringify({ manifest, packageJson }).includes('WP Codebox'), false);
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-provider-contract-'));
 try {
@@ -201,6 +206,50 @@ process.exit(0);
 	const agentResult = JSON.parse(fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
 	assert.equal(agentResult.opencode_session.status, 'not_discovered');
 	assert.equal(artifactResult.metadata.missing_declared_artifacts, undefined);
+
+	const quietWorkspace = path.join(root, 'quiet-workspace');
+	fs.mkdirSync(quietWorkspace, { recursive: true });
+	spawnSync('git', ['init'], { cwd: quietWorkspace, encoding: 'utf8' });
+	fs.writeFileSync(path.join(quietWorkspace, 'README.md'), 'unchanged\n');
+	spawnSync('git', ['add', 'README.md'], { cwd: quietWorkspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '-m', 'initial'], {
+		cwd: quietWorkspace,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: 'Homeboy Test',
+			GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+			GIT_COMMITTER_NAME: 'Homeboy Test',
+			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+		},
+	});
+
+	const quietCliPath = path.join(root, 'mock-opencode-quiet.cjs');
+	fs.writeFileSync(quietCliPath, `#!/usr/bin/env node
+process.exit(0);
+`);
+	const quietArtifactDir = path.join(root, 'quiet-artifacts');
+	const quietResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-quiet-no-diff-artifacts',
+		workspace_path: quietWorkspace,
+		artifacts_path: quietArtifactDir,
+		expected_artifacts: ['patch', 'transcript', 'agent_result'],
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				command_args: [quietCliPath],
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(quietResult.status, 'succeeded');
+	assert.deepEqual(quietResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'patch', 'transcript']);
+	assert.equal(quietResult.metadata.missing_declared_artifacts, undefined);
+	assert.equal(fs.readFileSync(quietResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8'), '');
+	assert.equal(fs.readFileSync(quietResult.artifacts.find((artifact) => artifact.name === 'transcript').path, 'utf8'), '');
+	const quietAgentResult = JSON.parse(fs.readFileSync(quietResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
+	assert.deepEqual(quietAgentResult.artifacts, { patch: false, transcript: false });
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }

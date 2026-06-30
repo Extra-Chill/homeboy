@@ -316,18 +316,19 @@ function collectOpenCodeArtifacts(context = {}) {
 	const artifacts = [];
 	const evidence_refs = [];
 	const addArtifact = (requirement, filename, content, fallbackKind) => {
-		if (content === undefined || content === null || content === '') {
+		if (content === undefined || content === null) {
 			return;
 		}
+		const artifactContent = String(content);
 		const filePath = path.join(artifactDir, filename);
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, content);
+		fs.writeFileSync(filePath, artifactContent);
 		const artifact = {
 			id: requirement.name,
 			name: requirement.name,
 			kind: requirement.kind || fallbackKind,
 			path: filePath,
-			bytes: Buffer.byteLength(content),
+			bytes: Buffer.byteLength(artifactContent),
 		};
 		artifacts.push(artifact);
 		evidence_refs.push({ kind: artifact.kind, label: requirement.name, path: filePath });

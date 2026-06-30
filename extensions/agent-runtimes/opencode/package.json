@@ -7,6 +7,9 @@
     ".": "./index.js",
     "./opencode-agent-task-executor": "./lib/opencode-agent-task-executor.js"
   },
+  "homeboy": {
+    "agent_runtime_manifest": "opencode.json"
+  },
   "bin": {
     "homeboy-opencode-agent-task-executor": "./scripts/agent/homeboy-opencode-agent-task-executor.cjs"
   },

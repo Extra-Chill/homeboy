@@ -85,6 +85,9 @@ assert.equal(opencodeRuntime.executor.backend, 'opencode');
 assert.equal(opencodeRuntime.executor.path, path.join(rootDir, 'agent-runtimes/opencode/scripts/agent/homeboy-opencode-agent-task-executor.cjs'));
 assert.equal(opencodeRuntime.manifest.agent_task_executors[0].status, 'active');
 assert.equal(opencodeRuntime.manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
+assert.equal(opencodeRuntime.manifest.name, 'OpenCode');
+assert.equal(JSON.stringify(opencodeRuntime.manifest).includes('wp-codebox'), false);
+assert.equal(JSON.stringify(opencodeRuntime.manifest).includes('WP Codebox'), false);
 
 const tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-provider-')));
 const externalRuntimeDir = path.join(tempDir, 'external-runtime');
