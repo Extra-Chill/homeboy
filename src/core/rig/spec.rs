@@ -11,11 +11,19 @@ use crate::core::extension::bench::{BenchGate, BenchGateOp};
 use crate::core::lifecycle::LifecycleContract;
 
 mod check;
+mod dependencies;
 mod pipeline;
 mod trace;
 mod workload;
 
 pub use check::{CheckSpec, NewerThanSpec, TimeSource};
+pub use dependencies::{
+    normalize_dependency_materialization_steps, validate_dependency_materialization_steps,
+    DependencyMaterializationArtifactSpec, DependencyMaterializationLogSpec,
+    DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
+    DependencyMaterializationSafety, DependencyMaterializationStepSpec,
+    NormalizedDependencyMaterializationStep,
+};
 pub use pipeline::{GitOp, PatchOp, PipelineStep, ServiceOp, SharedPathOp, StackOp, SymlinkOp};
 pub use trace::{
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
@@ -204,6 +212,12 @@ pub struct RigRequirementsSpec {
     /// for downstream planners without interpreting domain-specific shape.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, serde_json::Value>,
+
+    /// Generic dependency materialization steps the rig can run before Lab
+    /// workloads. Core validates the declarative shape only; command/provider
+    /// semantics belong to the referenced runner or extension.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_materialization: Vec<DependencyMaterializationStepSpec>,
 }
 
 impl RigRequirementsSpec {
@@ -211,6 +225,7 @@ impl RigRequirementsSpec {
         self.executables.is_empty()
             && self.filesystem_assertions.is_empty()
             && self.extensions.is_empty()
+            && self.dependency_materialization.is_empty()
     }
 }
 
