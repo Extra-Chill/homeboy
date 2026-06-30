@@ -245,13 +245,10 @@ fn planned_release_tag_name(context: &ReleaseExecutionContext) -> Result<String>
                     ]),
                 )
             })?;
-    let monorepo =
-        super::planning_semver::release_monorepo_context(context.component, context.component_id);
+    let release_scope =
+        super::scope::ReleaseScope::resolve(context.component, context.component_id)?;
 
-    Ok(monorepo
-        .as_ref()
-        .map(|ctx| ctx.format_tag(&new_version))
-        .unwrap_or_else(|| format!("v{}", new_version)))
+    Ok(release_scope.tag_name(&new_version))
 }
 
 fn run_default_branch_preflight(

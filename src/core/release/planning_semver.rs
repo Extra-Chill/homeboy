@@ -1,15 +1,16 @@
-use crate::core::component::{resolve_component_scope, Component, ScopeCommand};
+use crate::core::component::Component;
 use crate::core::error::{Error, Result};
 use crate::core::git;
 
+use super::scope::ReleaseScope;
 use super::types::{ReleaseSemverCommit, ReleaseSemverRecommendation};
 
 pub(super) fn build_semver_recommendation(
-    component: &Component,
+    _component: &Component,
     requested_bump: &str,
-    monorepo: Option<&git::MonorepoContext>,
+    scope: &ReleaseScope,
 ) -> Result<Option<ReleaseSemverRecommendation>> {
-    let (latest_tag, commits) = resolve_tag_and_commits(&component.local_path, monorepo)?;
+    let (latest_tag, commits) = resolve_tag_and_commits(scope)?;
 
     if commits.is_empty() {
         return Ok(None);
@@ -64,129 +65,6 @@ pub(super) fn build_semver_recommendation(
     }))
 }
 
-pub(super) fn release_monorepo_context(
-    component: &Component,
-    component_id: &str,
-) -> Option<git::MonorepoContext> {
-    let mut context = git::MonorepoContext::detect(&component.local_path, component_id);
-    let extra_prefixes = release_scope_prefixes(component);
-
-    if let Some(ctx) = context.as_mut() {
-        for prefix in extra_prefixes {
-            let component_prefix = ctx.path_prefix.trim_end_matches('/');
-            let scoped = if prefix == component_prefix
-                || prefix.starts_with(&format!("{}/", component_prefix))
-            {
-                prefix
-            } else {
-                format!("{}/{}", component_prefix, prefix)
-            };
-            if !ctx.path_prefixes.contains(&scoped) {
-                ctx.path_prefixes.push(scoped);
-            }
-        }
-        return context;
-    }
-
-    if extra_prefixes.is_empty() {
-        return None;
-    }
-
-    let git_root = git::get_git_root(&component.local_path).ok()?;
-    Some(git::MonorepoContext {
-        git_root,
-        path_prefix: extra_prefixes[0].clone(),
-        path_prefixes: extra_prefixes,
-        tag_prefix: component_id.to_string(),
-    })
-}
-
-fn release_scope_prefixes(component: &Component) -> Vec<String> {
-    let scope = resolve_component_scope(component, ScopeCommand::Release);
-    let mut prefixes: Vec<String> = scope
-        .include
-        .iter()
-        .filter_map(|path| normalize_release_scope_path(path))
-        .collect();
-
-    if prefixes.is_empty() {
-        if let Some(prefix) = infer_common_release_prefix(component) {
-            prefixes.push(prefix);
-        }
-    }
-
-    prefixes.sort();
-    prefixes.dedup();
-    prefixes
-}
-
-fn infer_common_release_prefix(component: &Component) -> Option<String> {
-    let mut paths = Vec::new();
-
-    if let Some(targets) = component.version_targets.as_ref() {
-        paths.extend(
-            targets
-                .iter()
-                .filter_map(|target| normalize_release_scope_path(&target.file)),
-        );
-    }
-
-    if let Some(target) = component.changelog_target.as_ref() {
-        if let Some(path) = normalize_release_scope_path(target) {
-            paths.push(path);
-        }
-    }
-
-    common_directory_prefix(&paths)
-}
-
-fn normalize_release_scope_path(path: &str) -> Option<String> {
-    let mut value = path.trim().trim_start_matches("./").trim_matches('/');
-    if value.is_empty() || value == "." {
-        return None;
-    }
-
-    if let Some(wildcard) = value.find('*') {
-        value = value[..wildcard].trim_end_matches('/');
-    }
-
-    if value.is_empty() || value == "." {
-        return None;
-    }
-
-    Some(value.to_string())
-}
-
-fn common_directory_prefix(paths: &[String]) -> Option<String> {
-    let mut iter = paths.iter();
-    let first = iter.next()?;
-    let mut prefix: Vec<&str> = first.split('/').collect();
-    if prefix.len() <= 1 {
-        return None;
-    }
-    prefix.pop();
-
-    for path in iter {
-        let mut dirs: Vec<&str> = path.split('/').collect();
-        if dirs.len() <= 1 {
-            return None;
-        }
-        dirs.pop();
-
-        let keep = prefix
-            .iter()
-            .zip(dirs.iter())
-            .take_while(|(left, right)| left == right)
-            .count();
-        prefix.truncate(keep);
-        if prefix.is_empty() {
-            return None;
-        }
-    }
-
-    Some(prefix.join("/"))
-}
-
 pub(super) fn validate_release_version_floor(
     latest_tag: Option<&str>,
     current_version: &str,
@@ -216,22 +94,18 @@ pub(super) fn validate_release_version_floor(
 }
 
 pub(super) fn validate_current_version_tag_reachable(
-    local_path: &str,
-    monorepo: Option<&git::MonorepoContext>,
+    scope: &ReleaseScope,
     current_version: &str,
 ) -> Result<Option<String>> {
-    let git_root = monorepo
-        .map(|ctx| ctx.git_root.as_str())
-        .unwrap_or(local_path);
-    let tag_name = current_version_tag_name(monorepo, current_version);
+    let tag_name = current_version_tag_name(scope, current_version);
 
-    if !git::tag_exists_locally(git_root, &tag_name)? {
+    if !git::tag_exists_locally(&scope.git_root, &tag_name)? {
         return Ok(None);
     }
 
-    let tag_commit = git::get_tag_commit(git_root, &tag_name)?;
+    let tag_commit = git::get_tag_commit(&scope.git_root, &tag_name)?;
     let output = git::execute_git_for_release(
-        git_root,
+        &scope.git_root,
         &["merge-base", "--is-ancestor", &tag_commit, "HEAD"],
     )
     .map_err(|err| Error::git_command_failed(format!("git merge-base failed: {}", err)))?;
@@ -245,13 +119,8 @@ pub(super) fn validate_current_version_tag_reachable(
     )))
 }
 
-pub(super) fn current_version_tag_name(
-    monorepo: Option<&git::MonorepoContext>,
-    current_version: &str,
-) -> String {
-    monorepo
-        .map(|ctx| ctx.format_tag(current_version))
-        .unwrap_or_else(|| format!("v{}", current_version))
+pub(super) fn current_version_tag_name(scope: &ReleaseScope, current_version: &str) -> String {
+    scope.tag_name(current_version)
 }
 
 /// Detect whether the release for `current_version` is already published at
@@ -262,21 +131,17 @@ pub(super) fn current_version_tag_name(
 /// "release already exists" message instead of a downstream changelog
 /// contract error for the next version (issue #4316).
 pub(super) fn current_version_tag_at_head(
-    local_path: &str,
-    monorepo: Option<&git::MonorepoContext>,
+    scope: &ReleaseScope,
     current_version: &str,
 ) -> Result<Option<String>> {
-    let git_root = monorepo
-        .map(|ctx| ctx.git_root.as_str())
-        .unwrap_or(local_path);
-    let tag_name = current_version_tag_name(monorepo, current_version);
+    let tag_name = current_version_tag_name(scope, current_version);
 
-    if !git::tag_exists_locally(git_root, &tag_name)? {
+    if !git::tag_exists_locally(&scope.git_root, &tag_name)? {
         return Ok(None);
     }
 
-    let tag_commit = git::get_tag_commit(git_root, &tag_name)?;
-    let head_commit = git::get_head_commit(git_root)?;
+    let tag_commit = git::get_tag_commit(&scope.git_root, &tag_name)?;
+    let head_commit = git::get_head_commit(&scope.git_root)?;
 
     if tag_commit == head_commit {
         Ok(Some(tag_name))
@@ -290,8 +155,7 @@ pub(super) fn current_version_tag_at_head(
 /// In a monorepo, uses component-prefixed tags and path-scoped commits.
 /// In a single-repo, uses standard global tags and all commits.
 pub(super) fn resolve_tag_and_commits(
-    local_path: &str,
-    monorepo: Option<&git::MonorepoContext>,
+    scope: &ReleaseScope,
 ) -> Result<(Option<String>, Vec<git::CommitInfo>)> {
     // Make release tags (and connecting history) available before the
     // reachability/changelog-range guard inspects them. A tagless or shallow
@@ -299,42 +163,16 @@ pub(super) fn resolve_tag_and_commits(
     // reachable from HEAD" and refuse (issue #6916). Best-effort: offline
     // checkouts still fall through to the guard against local history, so a tag
     // that is truly not an ancestor of HEAD is still refused.
-    let guard_root = monorepo
-        .map(|ctx| ctx.git_root.as_str())
-        .unwrap_or(local_path);
-    git::fetch_tags(guard_root)?;
-
-    match monorepo {
-        Some(ctx) => {
-            let latest_tag = git::get_latest_tag_with_prefix(&ctx.git_root, Some(&ctx.tag_prefix))?;
-            validate_latest_release_tag_reachable(
-                &ctx.git_root,
-                latest_tag.as_deref(),
-                Some(&ctx.tag_prefix),
-            )?;
-            let path_prefixes: Vec<&str> = ctx.path_prefixes.iter().map(String::as_str).collect();
-            let commits = git::get_commits_since_tag_for_paths(
-                &ctx.git_root,
-                latest_tag.as_deref(),
-                &path_prefixes,
-            )?;
-            Ok((latest_tag, commits))
-        }
-        None => {
-            let latest_tag = git::get_latest_tag(local_path)?;
-            validate_latest_release_tag_reachable(local_path, latest_tag.as_deref(), None)?;
-            let commits = git::get_commits_since_tag(local_path, latest_tag.as_deref())?;
-            Ok((latest_tag, commits))
-        }
-    }
+    let (latest_tag, commits) = scope.commits_since_latest_tag()?;
+    validate_latest_release_tag_reachable(scope, latest_tag.as_deref())?;
+    Ok((latest_tag, commits))
 }
 
 fn validate_latest_release_tag_reachable(
-    git_root: &str,
+    scope: &ReleaseScope,
     latest_reachable_tag: Option<&str>,
-    tag_prefix: Option<&str>,
 ) -> Result<()> {
-    let Some(latest_any_tag) = git::get_latest_tag_any_with_prefix(git_root, tag_prefix)? else {
+    let Some(latest_any_tag) = scope.latest_tag_any()? else {
         return Ok(());
     };
 
@@ -342,7 +180,7 @@ fn validate_latest_release_tag_reachable(
         return Ok(());
     }
 
-    if git::is_ancestor(git_root, &latest_any_tag, "HEAD")? {
+    if git::is_ancestor(&scope.git_root, &latest_any_tag, "HEAD")? {
         return Ok(());
     }
 
@@ -353,7 +191,7 @@ fn validate_latest_release_tag_reachable(
             latest_any_tag,
             latest_reachable_tag.unwrap_or("the initial commit")
         ),
-        Some(format!("Repository: {}", git_root)),
+        Some(format!("Repository: {}", scope.git_root)),
         Some(vec![
             format!(
                 "Merge or recover the {} release commit onto the selected release base/default branch, then rerun the release.",
@@ -434,10 +272,11 @@ fn commit_range(latest_tag: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_semver_recommendation, release_monorepo_context, resolve_tag_and_commits,
+        build_semver_recommendation, resolve_tag_and_commits,
         validate_current_version_tag_reachable, validate_release_version_floor,
     };
     use crate::core::component::{CommandScopeConfig, Component, ScopeConfig, VersionTarget};
+    use crate::core::release::scope::ReleaseScope;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new("git")
@@ -484,7 +323,8 @@ mod tests {
             ..Default::default()
         };
 
-        let recommendation = build_semver_recommendation(&component, "patch", None)
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let recommendation = build_semver_recommendation(&component, "patch", &release_scope)
             .expect("recommendation should build")
             .expect("feature commit should recommend a release");
 
@@ -510,7 +350,8 @@ mod tests {
             ..Default::default()
         };
 
-        let recommendation = build_semver_recommendation(&component, "2.0.0", None)
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let recommendation = build_semver_recommendation(&component, "2.0.0", &release_scope)
             .expect("recommendation should build")
             .expect("breaking commit should recommend a release");
 
@@ -537,7 +378,8 @@ mod tests {
             ..Default::default()
         };
 
-        let recommendation = build_semver_recommendation(&component, "none", None)
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let recommendation = build_semver_recommendation(&component, "none", &release_scope)
             .expect("no-op recommendation should be valid");
 
         assert!(
@@ -554,8 +396,13 @@ mod tests {
         run_git(dir, &["tag", "v1.0.0"]);
         commit_file(dir, "fix.txt", "fix", "fix: patch bug");
 
-        let (latest_tag, commits) = resolve_tag_and_commits(&dir.to_string_lossy(), None)
-            .expect("tag and commits should resolve");
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let (latest_tag, commits) =
+            resolve_tag_and_commits(&release_scope).expect("tag and commits should resolve");
 
         assert_eq!(latest_tag.as_deref(), Some("v1.0.0"));
         assert_eq!(commits.len(), 1);
@@ -592,10 +439,10 @@ mod tests {
             ..Default::default()
         });
 
-        let monorepo = release_monorepo_context(&component, "package-a")
-            .expect("release scope should create monorepo context");
-        let (latest_tag, commits) = resolve_tag_and_commits(&component.local_path, Some(&monorepo))
-            .expect("scoped commits should resolve");
+        let release_scope =
+            ReleaseScope::resolve(&component, "package-a").expect("release scope should resolve");
+        let (latest_tag, commits) =
+            resolve_tag_and_commits(&release_scope).expect("scoped commits should resolve");
 
         assert_eq!(latest_tag.as_deref(), Some("package-a-v1.0.0"));
         assert_eq!(commits.len(), 1);
@@ -631,11 +478,11 @@ mod tests {
             ..Default::default()
         };
 
-        let monorepo = release_monorepo_context(&component, "package-a")
-            .expect("release files should create monorepo context");
-        assert_eq!(monorepo.path_prefixes, vec!["packages/package-a"]);
-        let (latest_tag, commits) = resolve_tag_and_commits(&component.local_path, Some(&monorepo))
-            .expect("scoped commits should resolve");
+        let release_scope = ReleaseScope::resolve(&component, "package-a")
+            .expect("release files should create release scope");
+        assert_eq!(release_scope.path_prefixes, vec!["packages/package-a"]);
+        let (latest_tag, commits) =
+            resolve_tag_and_commits(&release_scope).expect("scoped commits should resolve");
 
         assert_eq!(latest_tag.as_deref(), Some("package-a-v1.0.0"));
         assert_eq!(commits.len(), 1);
@@ -667,7 +514,12 @@ mod tests {
             "fix: second release work",
         );
 
-        let err = resolve_tag_and_commits(&dir.to_string_lossy(), None)
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let err = resolve_tag_and_commits(&release_scope)
             .expect_err("off-branch latest release tag should fail closed");
 
         assert!(err.message.contains("Latest release tag v0.2.0"));
@@ -711,7 +563,12 @@ mod tests {
         run_git(dir, &["tag", "v0.1.1"]);
         run_git(dir, &["checkout", "main"]);
 
-        let message = validate_current_version_tag_reachable(&dir.to_string_lossy(), None, "0.1.1")
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let message = validate_current_version_tag_reachable(&release_scope, "0.1.1")
             .expect("validation should run")
             .expect("orphaned current-version tag should block release");
 
@@ -728,7 +585,12 @@ mod tests {
         commit_file(dir, "VERSION", "0.1.1", "release: v0.1.1");
         run_git(dir, &["tag", "v0.1.1"]);
 
-        let message = validate_current_version_tag_reachable(&dir.to_string_lossy(), None, "0.1.1")
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let message = validate_current_version_tag_reachable(&release_scope, "0.1.1")
             .expect("validation should run");
 
         assert!(message.is_none());
@@ -781,7 +643,12 @@ mod tests {
 
         // resolve_tag_and_commits fetches tags from origin before the guard, so
         // the now-reachable tag is found and the call proceeds.
-        let (latest_tag, commits) = resolve_tag_and_commits(&work_dir.to_string_lossy(), None)
+        let component = Component {
+            local_path: work_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let (latest_tag, commits) = resolve_tag_and_commits(&release_scope)
             .expect("tag reachable on origin should let the release proceed past the guard");
 
         assert_eq!(latest_tag.as_deref(), Some("v0.1.18"));
@@ -829,7 +696,12 @@ mod tests {
         run_git(work_dir, &["config", "user.email", "homeboy@example.com"]);
         run_git(work_dir, &["config", "user.name", "Homeboy Test"]);
 
-        let err = resolve_tag_and_commits(&work_dir.to_string_lossy(), None)
+        let component = Component {
+            local_path: work_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let err = resolve_tag_and_commits(&release_scope)
             .expect_err("off-branch tag must still fail closed after fetching tags");
 
         assert!(err.message.contains("Latest release tag v0.2.0"));

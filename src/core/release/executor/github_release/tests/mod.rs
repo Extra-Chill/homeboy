@@ -56,6 +56,9 @@ pub(super) fn run_git(dir: &std::path::Path, args: &[&str]) {
 }
 
 pub(super) fn commit_file(dir: &std::path::Path, name: &str, content: &str, message: &str) {
+    if let Some(parent) = dir.join(name).parent() {
+        std::fs::create_dir_all(parent).expect("create fixture parent");
+    }
     std::fs::write(dir.join(name), content).expect("write fixture file");
     run_git(dir, &["add", name]);
     run_git(dir, &["commit", "-q", "-m", message]);

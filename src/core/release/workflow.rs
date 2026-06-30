@@ -2,7 +2,7 @@ use crate::core::error::{Error, Result};
 use crate::core::git;
 
 use super::context::load_component;
-use super::planning_semver::release_monorepo_context;
+use super::scope::ReleaseScope;
 use super::types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseBumpPolicyOptions,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan, ReleaseOptions, ReleasePlan,
@@ -65,11 +65,11 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         },
     )?;
 
-    let monorepo = release_monorepo_context(&component, &input.component_id);
+    let release_scope = ReleaseScope::resolve(&component, &input.component_id)?;
     let resolved_bump = if input.pipeline.head {
         None
     } else {
-        resolve_bump(&component.local_path, monorepo.as_ref())?
+        resolve_bump(&release_scope)?
     };
     let (auto_bump_type, releasable_count) = resolved_bump
         .clone()
@@ -187,9 +187,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             } else {
                 extract_new_version_from_plan(&plan)
             };
-            let tag = new_version
-                .as_ref()
-                .map(|v| format_tag(v, monorepo.as_ref()));
+            let tag = new_version.as_ref().map(|v| release_scope.tag_name(v));
 
             return Ok((
                 ReleaseCommandResult {
@@ -244,9 +242,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         } else {
             extract_new_version_from_plan(&plan)
         };
-        let tag = new_version
-            .as_ref()
-            .map(|v| format_tag(v, monorepo.as_ref()));
+        let tag = new_version.as_ref().map(|v| release_scope.tag_name(v));
         let deployment = dry_run_deployment_plan(&input.component_id, input.pipeline.deploy, &plan);
         let skipped_reason = skipped_reason_from_plan(&plan);
         let dry_run_exit_code = release_command_exit_code(skipped_reason.as_deref(), 0, 0, 0);
@@ -279,9 +275,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     } else {
         extract_new_version_from_run(&run_result)
     };
-    let tag = new_version
-        .as_ref()
-        .map(|v| format_tag(v, monorepo.as_ref()));
+    let tag = new_version.as_ref().map(|v| release_scope.tag_name(v));
     let release_step_exit = release_run_failure_exit(&run_result);
     let post_release_exit = if has_post_release_warnings(&run_result) {
         3
@@ -400,12 +394,8 @@ fn current_component_version(
     super::version::read_component_version(component).map(|info| Some(info.version))
 }
 
-fn resolve_bump(
-    local_path: &str,
-    monorepo: Option<&git::MonorepoContext>,
-) -> Result<Option<(String, usize)>> {
-    let (_latest_tag, commits) =
-        super::planning_semver::resolve_tag_and_commits(local_path, monorepo)?;
+fn resolve_bump(release_scope: &ReleaseScope) -> Result<Option<(String, usize)>> {
+    let (_latest_tag, commits) = super::planning_semver::resolve_tag_and_commits(release_scope)?;
 
     if commits.is_empty() {
         return Ok(None);
@@ -420,14 +410,6 @@ fn resolve_bump(
             Ok(Some((bump.as_str().to_string(), releasable)))
         }
         None => Ok(None),
-    }
-}
-
-/// Format a version string as a tag name, using component prefix in monorepos.
-pub(super) fn format_tag(version: &str, monorepo: Option<&git::MonorepoContext>) -> String {
-    match monorepo {
-        Some(ctx) => ctx.format_tag(version),
-        None => format!("v{}", version),
     }
 }
 
