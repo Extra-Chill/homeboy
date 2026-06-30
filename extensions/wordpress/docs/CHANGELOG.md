@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.8] - 2026-06-30
+
+### Changed
+- Resolve WP Codebox core from selected cache
+
 ## [3.22.7] - 2026-06-30
 
 ### Changed
