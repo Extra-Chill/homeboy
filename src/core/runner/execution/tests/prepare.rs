@@ -175,6 +175,68 @@ fn local_runner_prep_does_not_mark_commands_as_runner_hosted() {
 }
 
 #[test]
+fn runner_prep_rejects_undeclared_sensitive_env() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let err = prepare_runner_process(RunnerProcessRequest {
+            runner_id: "local".to_string(),
+            runner: Some(local_runner(workspace.display().to_string())),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec!["env".to_string()],
+            env: HashMap::from([(
+                "UNDECLARED_API_TOKEN".to_string(),
+                "secret-value".to_string(),
+            )]),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect_err("undeclared sensitive env should fail closed");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("UNDECLARED_API_TOKEN"));
+        assert!(!format!("{err:?}").contains("secret-value"));
+    });
+}
+
+#[test]
+fn runner_prep_allows_declared_sensitive_env() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let plan = prepare_runner_process(RunnerProcessRequest {
+            runner_id: "local".to_string(),
+            runner: Some(local_runner(workspace.display().to_string())),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec!["env".to_string()],
+            env: HashMap::from([("DECLARED_API_TOKEN".to_string(), "secret-value".to_string())]),
+            secret_env_names: vec!["DECLARED_API_TOKEN".to_string()],
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect("declared sensitive env is allowed");
+
+        assert_eq!(
+            plan.env.get("DECLARED_API_TOKEN").map(String::as_str),
+            Some("secret-value")
+        );
+    });
+}
+
+#[test]
 fn daemon_local_prep_normalizes_default_path_on_runner_side() {
     crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");

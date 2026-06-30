@@ -27,6 +27,11 @@ pub struct SecretEnvPlan {
         skip_serializing_if = "SecretEnvRedactionPolicy::is_default_policy"
     )]
     pub redaction: SecretEnvRedactionPolicy,
+    #[serde(
+        default,
+        skip_serializing_if = "SecretEnvInheritancePolicy::is_default_policy"
+    )]
+    pub inheritance: SecretEnvInheritancePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,7 +54,16 @@ pub struct SecretEnvRefreshHint {
 pub struct SecretEnvPlanDiagnostics {
     pub passthrough_secret_env_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_env: Vec<SecretEnvInheritedEnvStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub status: Vec<SecretEnvDiagnosticStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvInheritedEnvStatus {
+    pub name: String,
+    pub declared: bool,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +79,8 @@ pub struct SecretEnvDiagnosticStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretEnvPlanDiagnosticError {
     pub missing_required_secret_env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undeclared_inherited_secret_env: Vec<String>,
     pub message: String,
     pub diagnostics: SecretEnvPlanDiagnostics,
 }
@@ -188,6 +204,7 @@ impl Default for SecretEnvPlan {
             env_name_mapping: BTreeMap::new(),
             status: Vec::new(),
             redaction: SecretEnvRedactionPolicy::default(),
+            inheritance: SecretEnvInheritancePolicy::default(),
         }
     }
 }
@@ -269,6 +286,7 @@ impl SecretEnvPlan {
 
         let diagnostics = SecretEnvPlanDiagnostics {
             passthrough_secret_env_names,
+            inherited_env: Vec::new(),
             status: diagnostic_status,
         };
 
@@ -281,6 +299,50 @@ impl SecretEnvPlan {
                     missing_required_secret_env.join(", ")
                 ),
                 missing_required_secret_env,
+                undeclared_inherited_secret_env: Vec::new(),
+                diagnostics,
+            })
+        }
+    }
+
+    pub fn diagnose_inherited_env(
+        &self,
+        env: &BTreeMap<String, String>,
+        source: impl Into<String>,
+    ) -> Result<SecretEnvPlanDiagnostics, SecretEnvPlanDiagnosticError> {
+        let source = source.into();
+        let declared = self.declared_inherited_env_names();
+        let policy = self.redaction.to_policy();
+        let mut undeclared = Vec::new();
+        let mut inherited_env = Vec::new();
+
+        for name in env.keys() {
+            if !policy.is_sensitive_key(name) {
+                continue;
+            }
+            let is_declared = declared.contains(name);
+            if self.inheritance.require_declaration && !is_declared {
+                undeclared.push(name.clone());
+            }
+            inherited_env.push(SecretEnvInheritedEnvStatus {
+                name: name.clone(),
+                declared: is_declared,
+                source: source.clone(),
+            });
+        }
+
+        let mut diagnostics = self
+            .diagnose(self.status.clone())
+            .unwrap_or_else(|error| error.diagnostics);
+        diagnostics.inherited_env = inherited_env;
+
+        if undeclared.is_empty() {
+            Ok(diagnostics)
+        } else {
+            Err(SecretEnvPlanDiagnosticError {
+                message: format!("undeclared inherited secret env: {}", undeclared.join(", ")),
+                missing_required_secret_env: Vec::new(),
+                undeclared_inherited_secret_env: undeclared,
                 diagnostics,
             })
         }
@@ -314,6 +376,16 @@ impl SecretEnvPlan {
 
     pub fn extend_secret_env_names(&mut self, names: impl IntoIterator<Item = String>) {
         self.secret_env_names = normalize_names(self.secret_env_names.iter().cloned().chain(names));
+    }
+
+    pub fn allow_inherited_env_names(&mut self, names: impl IntoIterator<Item = String>) {
+        self.inheritance.allowed_env_names = normalize_names(
+            self.inheritance
+                .allowed_env_names
+                .iter()
+                .cloned()
+                .chain(names),
+        );
     }
 
     pub fn map_env_names(
@@ -365,6 +437,37 @@ impl SecretEnvPlan {
             .map(|(name, value)| (name.clone(), policy.redact_env_value(value)))
             .collect();
         redacted
+    }
+
+    fn declared_inherited_env_names(&self) -> BTreeSet<String> {
+        self.secret_env_names()
+            .into_iter()
+            .chain(self.public_env.keys().cloned())
+            .chain(self.inheritance.allowed_env_names.iter().cloned())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvInheritancePolicy {
+    #[serde(default = "default_require_declaration")]
+    pub require_declaration: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_env_names: Vec<String>,
+}
+
+impl Default for SecretEnvInheritancePolicy {
+    fn default() -> Self {
+        Self {
+            require_declaration: default_require_declaration(),
+            allowed_env_names: Vec::new(),
+        }
+    }
+}
+
+impl SecretEnvInheritancePolicy {
+    fn is_default_policy(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -467,6 +570,10 @@ fn default_replacement() -> String {
 }
 
 fn default_required() -> bool {
+    true
+}
+
+fn default_require_declaration() -> bool {
     true
 }
 
@@ -695,6 +802,63 @@ mod tests {
                 refresh: None,
             }]
         );
+        assert!(diagnostics.inherited_env.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_reject_undeclared_inherited_secret_env() {
+        let plan = SecretEnvPlan::default();
+
+        let error = plan
+            .diagnose_inherited_env(
+                &BTreeMap::from([(
+                    "UNDECLARED_API_TOKEN".to_string(),
+                    "secret-value".to_string(),
+                )]),
+                "runner.env",
+            )
+            .expect_err("sensitive inherited env must be declared");
+
+        assert_eq!(
+            error.undeclared_inherited_secret_env,
+            vec!["UNDECLARED_API_TOKEN".to_string()]
+        );
+        assert_eq!(
+            error.diagnostics.inherited_env,
+            vec![SecretEnvInheritedEnvStatus {
+                name: "UNDECLARED_API_TOKEN".to_string(),
+                declared: false,
+                source: "runner.env".to_string(),
+            }]
+        );
+        assert!(!serde_json::to_string(&error)
+            .expect("error json")
+            .contains("secret-value"));
+    }
+
+    #[test]
+    fn diagnostics_allow_declared_or_allowlisted_inherited_secret_env() {
+        let mut plan = SecretEnvPlan::from_secret_env_names(["DECLARED_API_TOKEN".to_string()]);
+        plan.allow_inherited_env_names(["HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string()]);
+
+        let diagnostics = plan
+            .diagnose_inherited_env(
+                &BTreeMap::from([
+                    ("DECLARED_API_TOKEN".to_string(), "secret-value".to_string()),
+                    (
+                        "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
+                        "DECLARED_API_TOKEN".to_string(),
+                    ),
+                ]),
+                "request.env",
+            )
+            .expect("declared sensitive inherited env is allowed");
+
+        assert_eq!(diagnostics.inherited_env.len(), 2);
+        assert!(diagnostics
+            .inherited_env
+            .iter()
+            .all(|status| status.declared));
     }
 
     #[test]
