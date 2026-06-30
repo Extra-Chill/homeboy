@@ -144,6 +144,54 @@ process.exit(0);
 	assert.equal(missingArtifactResult.failure_code, 'agent_task.opencode_missing_declared_artifacts');
 	assert.match(missingArtifactResult.summary, /opencode-report/);
 	assert.equal(missingArtifactResult.metadata.missing_declared_artifacts[0].name, 'opencode-report');
+
+	const workspace = path.join(root, 'workspace');
+	const artifactDir = path.join(root, 'artifacts');
+	fs.mkdirSync(workspace, { recursive: true });
+	spawnSync('git', ['init'], { cwd: workspace, encoding: 'utf8' });
+	fs.writeFileSync(path.join(workspace, 'README.md'), 'before\n');
+	spawnSync('git', ['add', 'README.md'], { cwd: workspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '-m', 'initial'], {
+		cwd: workspace,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: 'Homeboy Test',
+			GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+			GIT_COMMITTER_NAME: 'Homeboy Test',
+			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+		},
+	});
+
+	const artifactCliPath = path.join(root, 'mock-opencode-artifact.cjs');
+	fs.writeFileSync(artifactCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync('README.md', 'after\\n');
+process.stdout.write('transcript output ' + process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN);
+process.exit(0);
+`);
+	const artifactResult = executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-artifacts',
+		workspace_path: workspace,
+		artifacts_path: artifactDir,
+		expected_artifacts: ['patch', 'transcript', 'agent_result'],
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				command_args: [artifactCliPath],
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(artifactResult.status, 'succeeded');
+	assert.deepEqual(artifactResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'patch', 'transcript']);
+	assert.match(fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8'), /after/);
+	const transcript = fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'transcript').path, 'utf8');
+	assert.match(transcript, /transcript output/);
+	assert.equal(transcript.includes('refresh-token-must-not-leak'), false);
+	assert.match(transcript, /\[redacted\]/);
+	assert.equal(artifactResult.metadata.missing_declared_artifacts, undefined);
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }

@@ -13,6 +13,10 @@ const {
 	createCliAgentTaskExecutor,
 } = require('../../lib/cli-agent-task-executor');
 
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+
 const OPENCODE_PROVIDER_ID = 'opencode.agent-task-executor';
 const OPENCODE_PROVIDER_LABEL = 'OpenCode agent task executor';
 const OPENCODE_SECRET_ENV = [
@@ -271,6 +275,118 @@ function findArtifact(artifacts, declaration) {
 	});
 }
 
+function opencodeSuccessOutcome(context) {
+	return {
+		status: 'succeeded',
+		summary: 'OpenCode completed successfully.',
+		diagnostics: [{ classification: 'provider', message: 'OpenCode CLI exited with status 0.' }],
+		metadata: { exit_code: 0 },
+		...collectOpenCodeArtifacts(context),
+	};
+}
+
+function collectOpenCodeArtifacts(context = {}) {
+	const request = context.request || {};
+	const config = context.config || {};
+	const artifactDir = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
+	if (!artifactDir) {
+		return {};
+	}
+
+	const requirements = uniqueDeclaredArtifactRequirements(request);
+	if (requirements.length === 0) {
+		return {};
+	}
+
+	const artifacts = [];
+	const evidence_refs = [];
+	const addArtifact = (requirement, filename, content, fallbackKind) => {
+		if (content === undefined || content === null || content === '') {
+			return;
+		}
+		const filePath = path.join(artifactDir, filename);
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, content);
+		const artifact = {
+			id: requirement.name,
+			name: requirement.name,
+			kind: requirement.kind || fallbackKind,
+			path: filePath,
+			bytes: Buffer.byteLength(content),
+		};
+		artifacts.push(artifact);
+		evidence_refs.push({ kind: artifact.kind, label: requirement.name, path: filePath });
+	};
+
+	const spawnResult = context.spawnResult || {};
+	const stdout = redactKnownSecrets(String(spawnResult.stdout || ''), context.spawnExtra?.env);
+	const stderr = redactKnownSecrets(String(spawnResult.stderr || ''), context.spawnExtra?.env);
+	const transcript = [stdout, stderr].filter(Boolean).join('\n');
+	const patch = gitDiff(context.cwd);
+	const resultEnvelope = JSON.stringify({
+		schema: 'homeboy/opencode-agent-result/v1',
+		task_id: request.task_id,
+		status: 'succeeded',
+		exit_code: spawnResult.status,
+		command: context.commandSpec?.command,
+		args: Array.isArray(context.commandSpec?.args) ? context.commandSpec.args : [],
+		artifacts: {
+			patch: patch !== '',
+			transcript: transcript !== '',
+		},
+	}, null, 2);
+
+	for (const requirement of requirements) {
+		if (requirement.name === 'patch') {
+			addArtifact(requirement, `${safeFileSegment(request.task_id)}-opencode.patch`, patch, 'git-diff');
+		} else if (requirement.name === 'transcript') {
+			addArtifact(requirement, `${safeFileSegment(request.task_id)}-opencode-transcript.txt`, transcript, 'agent-runtime-transcript');
+		} else if (requirement.name === 'agent_result') {
+			addArtifact(requirement, `${safeFileSegment(request.task_id)}-opencode-result.json`, `${resultEnvelope}\n`, 'json');
+		}
+	}
+
+	return { artifacts, evidence_refs };
+}
+
+function gitDiff(cwd) {
+	if (!cwd) {
+		return '';
+	}
+	const result = spawnSync('git', ['diff', '--no-ext-diff', '--binary'], { cwd, encoding: 'utf8' });
+	if (result.status !== 0 || result.error) {
+		return '';
+	}
+	return String(result.stdout || '');
+}
+
+function uniqueDeclaredArtifactRequirements(request = {}) {
+	const seen = new Set();
+	return declaredArtifactRequirements(request).filter((requirement) => {
+		const key = `${requirement.name}:${requirement.kind || ''}`;
+		if (seen.has(key)) {
+			return false;
+		}
+		seen.add(key);
+		return true;
+	});
+}
+
+function redactKnownSecrets(content, env = process.env) {
+	let redacted = content;
+	for (const name of OPENCODE_SECRET_ENV) {
+		const value = env?.[name] || process.env[name];
+		if (value) {
+			redacted = redacted.split(value).join('[redacted]');
+		}
+	}
+	return redacted;
+}
+
+function safeFileSegment(value) {
+	return String(value || 'agent-task').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'agent-task';
+}
+
 function arrayValue(value) {
 	return Array.isArray(value) ? value : [];
 }
@@ -311,6 +427,7 @@ const { execute: executeOpenCodeAgentTask, outcome, validationFailure } = create
 	validateRuntime: false,
 	finalizeOutcome: withDeclaredArtifactDiagnostics,
 	resolveCommandSpec,
+	successOutcome: opencodeSuccessOutcome,
 	buildArgs: (request, config, commandSpec) => [
 		...commandSpec.args,
 		'run',
