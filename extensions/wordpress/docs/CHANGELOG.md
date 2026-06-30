@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.10] - 2026-06-30
+
+### Changed
+- Package WP Codebox runtime contract source
+
 ## [3.22.9] - 2026-06-30
 
 ### Changed
