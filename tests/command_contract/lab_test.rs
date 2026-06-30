@@ -1249,3 +1249,41 @@ fn lab_mutation_patch_capture_is_descriptor_owned() {
     assert!(!read_only_descriptor.lab_offload_captures_mutation_patch);
     assert_eq!(read_only_descriptor.lab_offload_mutation_flag, None);
 }
+
+#[test]
+fn run_location_index_contract_serializes_required_fields() {
+    let index = RunLocationIndex {
+        schema: RUN_LOCATION_INDEX_SCHEMA.to_string(),
+        run_id: "agent-task-run-6454".to_string(),
+        controller_location: "controller:mac.lan".to_string(),
+        runner_id: "lab".to_string(),
+        remote_job_id: "job-123".to_string(),
+        artifact_manifest_ref: RunnerHandoffArtifactManifestRef {
+            schema: "homeboy/runner-artifact-manifest-ref/v1".to_string(),
+            manifest_schema: RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),
+            path: "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
+                .to_string(),
+        },
+        liveness_heartbeat_timestamp: "2026-06-30T15:58:00Z".to_string(),
+    };
+
+    let json = serde_json::to_value(&index).expect("serialize run location index");
+    assert_eq!(json["schema"], RUN_LOCATION_INDEX_SCHEMA);
+    assert_eq!(json["run_id"], "agent-task-run-6454");
+    assert_eq!(json["controller_location"], "controller:mac.lan");
+    assert_eq!(json["runner_id"], "lab");
+    assert_eq!(json["remote_job_id"], "job-123");
+    assert_eq!(
+        json["artifact_manifest_ref"]["manifest_schema"],
+        RUNNER_ARTIFACT_MANIFEST_SCHEMA
+    );
+    assert_eq!(
+        json["artifact_manifest_ref"]["path"],
+        "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
+    );
+    assert_eq!(json["liveness_heartbeat_timestamp"], "2026-06-30T15:58:00Z");
+
+    let round_trip: RunLocationIndex =
+        serde_json::from_value(json).expect("deserialize run location index");
+    assert_eq!(round_trip, index);
+}
