@@ -28,6 +28,8 @@ use super::spec::{
 
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
 pub const RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
+pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = "homeboy/artifact-manifest/v1";
+pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = "homeboy-artifact-manifest.json";
 
 /// Routing-policy flags shared by every Lab command representation
 /// (`LabCommandContract`, `LabRoutePlan`, `LabOffloadCommand`). These four
@@ -249,7 +251,15 @@ pub struct RunnerHandoffEnvelope {
     pub persisted_run_id: Option<String>,
     pub mirror_run_id: Option<String>,
     pub remote_cwd: String,
+    pub artifact_manifest: RunnerHandoffArtifactManifestRef,
     pub follow_commands: RunnerHandoffFollowCommands,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerHandoffArtifactManifestRef {
+    pub schema: String,
+    pub manifest_schema: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -312,8 +322,22 @@ impl RunnerHandoffEnvelope {
             durable_run_id: mirror_run_id.clone(),
             persisted_run_id: mirror_run_id.clone(),
             mirror_run_id,
+            artifact_manifest: RunnerHandoffArtifactManifestRef::for_remote_cwd(&remote_cwd),
             remote_cwd,
             follow_commands,
+        }
+    }
+}
+
+impl RunnerHandoffArtifactManifestRef {
+    pub fn for_remote_cwd(remote_cwd: &str) -> Self {
+        Self {
+            schema: "homeboy/runner-artifact-manifest-ref/v1".to_string(),
+            manifest_schema: RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),
+            path: format!(
+                "{}-homeboy-artifacts/{RUNNER_ARTIFACT_MANIFEST_FILE}",
+                remote_cwd.trim_end_matches('/')
+            ),
         }
     }
 }

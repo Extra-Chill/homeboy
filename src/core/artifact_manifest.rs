@@ -165,14 +165,7 @@ impl ArtifactManifest {
         &self,
         root: impl AsRef<Path>,
     ) -> Result<Vec<ValidatedArtifactManifestEntry>> {
-        if self.schema != ARTIFACT_MANIFEST_SCHEMA {
-            return Err(Error::validation_invalid_argument(
-                "schema",
-                format!("expected {ARTIFACT_MANIFEST_SCHEMA}"),
-                Some(self.schema.clone()),
-                None,
-            ));
-        }
+        self.validate_shape()?;
 
         let root = root.as_ref();
         let root_canonical = canonicalize_existing_dir(root, "artifact_root")?;
@@ -235,6 +228,27 @@ impl ArtifactManifest {
             });
         }
         Ok(validated)
+    }
+
+    /// Validate the portable manifest contract without requiring local files.
+    ///
+    /// Lab handoffs can carry a durable artifact manifest before the controller
+    /// has imported the files locally. This check enforces the typed manifest
+    /// shape while leaving byte-level validation to [`Self::validate_under`]
+    /// once an artifact root is available.
+    pub fn validate_shape(&self) -> Result<()> {
+        if self.schema != ARTIFACT_MANIFEST_SCHEMA {
+            return Err(Error::validation_invalid_argument(
+                "schema",
+                format!("expected {ARTIFACT_MANIFEST_SCHEMA}"),
+                Some(self.schema.clone()),
+                None,
+            ));
+        }
+        for entry in &self.artifacts {
+            validate_entry_shape(entry)?;
+        }
+        Ok(())
     }
 }
 
@@ -391,6 +405,7 @@ fn validate_entry_shape(entry: &ArtifactManifestEntry) -> Result<()> {
         validate_non_empty("id", id)?;
     }
     validate_non_empty("path", &entry.path)?;
+    validate_relative_artifact_path(&entry.path)?;
     validate_non_empty("kind", &entry.kind)?;
     if let Some(role) = &entry.role {
         validate_non_empty("role", role)?;
@@ -452,6 +467,19 @@ fn validate_entry_shape(entry: &ArtifactManifestEntry) -> Result<()> {
     Ok(())
 }
 
+fn validate_relative_artifact_path(relative: &str) -> Result<()> {
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute() || relative_path.components().any(disallowed_component) {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "artifact path must be relative and stay within the artifact root",
+            Some(relative.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 fn validate_optional_non_empty(field: &str, value: Option<&str>) -> Result<()> {
     if let Some(value) = value {
         validate_non_empty(field, value)?;
@@ -472,16 +500,9 @@ fn validate_non_empty(field: &str, value: &str) -> Result<()> {
 }
 
 fn confined_existing_file(root_canonical: &Path, relative: &str) -> Result<PathBuf> {
-    let relative_path = Path::new(relative);
-    if relative_path.is_absolute() || relative_path.components().any(disallowed_component) {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "artifact path must be relative and stay within the artifact root",
-            Some(relative.to_string()),
-            None,
-        ));
-    }
+    validate_relative_artifact_path(relative)?;
 
+    let relative_path = Path::new(relative);
     let candidate = root_canonical.join(relative_path);
     let canonical = candidate.canonicalize().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {

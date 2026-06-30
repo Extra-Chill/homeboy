@@ -497,6 +497,18 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         assert_eq!(envelope.job_id, job_id);
         assert_eq!(envelope.remote_cwd, "/srv/homeboy/project");
         assert_eq!(
+            envelope.artifact_manifest.schema,
+            "homeboy/runner-artifact-manifest-ref/v1"
+        );
+        assert_eq!(
+            envelope.artifact_manifest.manifest_schema,
+            crate::command_contract::RUNNER_ARTIFACT_MANIFEST_SCHEMA
+        );
+        assert_eq!(
+            envelope.artifact_manifest.path,
+            "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
+        );
+        assert_eq!(
             envelope.durable_run_id.as_deref(),
             Some("agent-task-run-6454")
         );
@@ -516,6 +528,10 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         assert_eq!(
             json["identity"]["handoff_id"],
             format!("runner:lab:job:{job_id}")
+        );
+        assert_eq!(
+            json["artifact_manifest"]["path"],
+            "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
         );
         assert_eq!(json["job_id"], job_id);
         assert_eq!(json["durable_run_id"], "agent-task-run-6454");
@@ -553,6 +569,10 @@ fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
     assert_eq!(json["identity"]["runner_id"], "lab");
     assert_eq!(json["identity"]["runner_job_id"], "job-123");
     assert_eq!(json["identity"]["handoff_id"], "runner:lab:job:job-123");
+    assert_eq!(
+        json["artifact_manifest"]["path"],
+        "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
+    );
     assert!(json["identity"].get("persisted_run_id").is_none());
     assert!(json["identity"].get("run_id").is_none());
     assert_eq!(json["durable_run_id"], Value::Null);
