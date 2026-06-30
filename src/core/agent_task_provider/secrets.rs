@@ -108,6 +108,8 @@ pub(super) fn provider_secret_env_plan_with_status(
         name: status.name,
         configured: status.configured,
         source: status.source,
+        source_env_name: None,
+        missing_source_env_names: Vec::new(),
     });
     plan.with_status(status).redacted()
 }

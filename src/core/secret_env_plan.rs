@@ -41,6 +41,8 @@ pub struct SecretEnvRequirement {
     pub name: String,
     #[serde(default = "default_required")]
     pub required: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_env_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<SecretEnvRefreshHint>,
 }
@@ -74,6 +76,10 @@ pub struct SecretEnvDiagnosticStatus {
     pub required: bool,
     pub configured: bool,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_env_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_source_env_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<SecretEnvRefreshHint>,
 }
@@ -92,6 +98,10 @@ pub struct SecretEnvStatus {
     pub name: String,
     pub configured: bool,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_env_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_source_env_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,6 +203,71 @@ impl<'a> SecretEnvResolver<'a> {
             })
         }
     }
+
+    pub fn resolve_plan(
+        mut self,
+        plan: &SecretEnvPlan,
+        missing_message_prefix: &str,
+    ) -> Result<SecretEnvResolution, SecretEnvResolutionError> {
+        let mut env = Vec::new();
+        let mut status = Vec::new();
+        let mut missing = Vec::new();
+
+        for requirement in plan.secret_env_requirements() {
+            let source_env_names = requirement.source_env_candidates();
+            let mut resolved = None;
+            let mut missing_source_env_names = Vec::new();
+
+            for source_env_name in &source_env_names {
+                let mut source_resolved = None;
+                for provider in self.providers.iter_mut() {
+                    if let Some(value) = (provider.resolve)(source_env_name) {
+                        source_resolved = Some((provider.source.clone(), value));
+                        break;
+                    }
+                }
+
+                if let Some((source, value)) = source_resolved {
+                    resolved = Some((source_env_name.clone(), source, value));
+                    break;
+                }
+
+                missing_source_env_names.push(source_env_name.clone());
+            }
+
+            if let Some((source_env_name, source, value)) = resolved {
+                env.push((requirement.name.clone(), value));
+                status.push(secret_env_status_with_sources(
+                    requirement.name,
+                    true,
+                    source,
+                    Some(source_env_name),
+                    missing_source_env_names,
+                ));
+            } else {
+                status.push(secret_env_status_with_sources(
+                    requirement.name.clone(),
+                    false,
+                    "missing",
+                    None,
+                    missing_source_env_names,
+                ));
+                if requirement.required {
+                    missing.push(requirement.name);
+                }
+            }
+        }
+
+        if missing.is_empty() {
+            Ok(SecretEnvResolution { env, status })
+        } else {
+            Err(SecretEnvResolutionError {
+                message: format!("{missing_message_prefix}: {}", missing.join(", ")),
+                missing_secret_env: missing,
+                status,
+            })
+        }
+    }
 }
 
 impl Default for SecretEnvPlan {
@@ -250,11 +325,10 @@ impl SecretEnvPlan {
             self.secret_env_names
                 .iter()
                 .cloned()
-                .chain(
-                    self.requirements
-                        .iter()
-                        .map(|requirement| requirement.name.clone()),
-                )
+                .chain(self.requirements.iter().flat_map(|requirement| {
+                    std::iter::once(requirement.name.clone())
+                        .chain(requirement.source_env_names.iter().cloned())
+                }))
                 .chain(mapped_names)
                 .chain(env_name_mapping_names),
         )
@@ -284,11 +358,14 @@ impl SecretEnvPlan {
             if requirement.required && !status.configured {
                 missing_required_secret_env.push(requirement.name.clone());
             }
+            let source_env_names = requirement.source_env_candidates();
             diagnostic_status.push(SecretEnvDiagnosticStatus {
                 name: requirement.name,
                 required: requirement.required,
                 configured: status.configured,
                 source: status.source,
+                source_env_names,
+                missing_source_env_names: status.missing_source_env_names,
                 refresh: requirement.refresh,
             });
         }
@@ -391,12 +468,28 @@ impl SecretEnvPlan {
             .map(|requirement| (requirement.name.clone(), requirement))
             .collect::<BTreeMap<_, _>>();
 
-        for name in self.secret_env_names() {
+        let mapped_names = self
+            .provider_credentials
+            .values()
+            .flat_map(|mapping| mapping.secret_env.iter().cloned());
+        let env_name_mapping_names = self
+            .env_name_mapping
+            .values()
+            .flat_map(|names| names.iter().cloned());
+
+        for name in normalize_names(
+            self.secret_env_names
+                .iter()
+                .cloned()
+                .chain(mapped_names)
+                .chain(env_name_mapping_names),
+        ) {
             requirements
                 .entry(name.clone())
                 .or_insert_with(|| SecretEnvRequirement {
                     name,
                     required: true,
+                    source_env_names: Vec::new(),
                     refresh: None,
                 });
         }
@@ -475,6 +568,16 @@ impl SecretEnvPlan {
             .chain(self.public_env.keys().cloned())
             .chain(self.inheritance.allowed_env_names.iter().cloned())
             .collect()
+    }
+}
+
+impl SecretEnvRequirement {
+    fn source_env_candidates(&self) -> Vec<String> {
+        if self.source_env_names.is_empty() {
+            vec![self.name.clone()]
+        } else {
+            self.source_env_names.clone()
+        }
     }
 }
 
@@ -570,6 +673,7 @@ fn normalize_requirements(
         .into_iter()
         .map(|mut requirement| {
             requirement.name = requirement.name.trim().to_string();
+            requirement.source_env_names = normalize_ordered_names(requirement.source_env_names);
             requirement
         })
         .filter(|requirement| !requirement.name.is_empty())
@@ -580,11 +684,35 @@ fn normalize_requirements(
 }
 
 fn secret_env_status(name: String, configured: bool, source: impl Into<String>) -> SecretEnvStatus {
+    secret_env_status_with_sources(name, configured, source, None, Vec::new())
+}
+
+fn secret_env_status_with_sources(
+    name: String,
+    configured: bool,
+    source: impl Into<String>,
+    source_env_name: Option<String>,
+    missing_source_env_names: Vec<String>,
+) -> SecretEnvStatus {
     SecretEnvStatus {
         name,
         configured,
         source: source.into(),
+        source_env_name,
+        missing_source_env_names,
     }
+}
+
+fn normalize_ordered_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for name in names {
+        let name = name.trim().to_string();
+        if !name.is_empty() && seen.insert(name.clone()) {
+            normalized.push(name);
+        }
+    }
+    normalized
 }
 
 fn secret_env_plan_schema() -> String {
@@ -759,6 +887,8 @@ mod tests {
                 name: "API_TOKEN".to_string(),
                 configured: true,
                 source: "test-source".to_string(),
+                source_env_name: None,
+                missing_source_env_names: Vec::new(),
             }]
         );
         assert!(!serde_json::to_string(&resolved.status)
@@ -792,10 +922,110 @@ mod tests {
     }
 
     #[test]
+    fn plan_resolver_maps_requirement_to_multiple_source_env_fallbacks() {
+        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+            name: "API_TOKEN".to_string(),
+            required: true,
+            source_env_names: vec![
+                "PRIMARY_API_TOKEN".to_string(),
+                "FALLBACK_API_TOKEN".to_string(),
+            ],
+            refresh: None,
+        }]);
+        let resolver =
+            SecretEnvResolver::new(vec![SecretEnvValueProvider::new("test-env", |name| {
+                (name == "FALLBACK_API_TOKEN").then(|| "secret-value".to_string())
+            })]);
+
+        let resolved = resolver
+            .resolve_plan(&plan, "missing required secret env")
+            .expect("fallback source resolves");
+
+        assert_eq!(
+            resolved.env,
+            vec![("API_TOKEN".to_string(), "secret-value".to_string())]
+        );
+        assert_eq!(
+            resolved.status,
+            vec![SecretEnvStatus {
+                name: "API_TOKEN".to_string(),
+                configured: true,
+                source: "test-env".to_string(),
+                source_env_name: Some("FALLBACK_API_TOKEN".to_string()),
+                missing_source_env_names: vec!["PRIMARY_API_TOKEN".to_string()],
+            }]
+        );
+        assert_eq!(
+            plan.secret_env_names(),
+            vec![
+                "API_TOKEN".to_string(),
+                "FALLBACK_API_TOKEN".to_string(),
+                "PRIMARY_API_TOKEN".to_string(),
+            ]
+        );
+        assert!(!serde_json::to_string(&resolved.status)
+            .expect("status json")
+            .contains("secret-value"));
+    }
+
+    #[test]
+    fn plan_resolver_reports_missing_source_env_names_without_values() {
+        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+            name: "API_TOKEN".to_string(),
+            required: true,
+            source_env_names: vec![
+                "PRIMARY_API_TOKEN".to_string(),
+                "FALLBACK_API_TOKEN".to_string(),
+            ],
+            refresh: None,
+        }]);
+        let resolver =
+            SecretEnvResolver::new(vec![SecretEnvValueProvider::new("test-env", |_| {
+                None::<String>
+            })]);
+
+        let error = resolver
+            .resolve_plan(&plan, "missing required secret env")
+            .expect_err("all source env fallbacks are missing");
+
+        assert_eq!(error.missing_secret_env, vec!["API_TOKEN".to_string()]);
+        assert_eq!(
+            error.status[0].missing_source_env_names,
+            vec![
+                "PRIMARY_API_TOKEN".to_string(),
+                "FALLBACK_API_TOKEN".to_string(),
+            ]
+        );
+        let diagnostics = plan
+            .diagnose(error.status.clone())
+            .expect_err("required mapped secret is missing")
+            .diagnostics;
+        assert_eq!(
+            diagnostics.status[0].source_env_names,
+            vec![
+                "PRIMARY_API_TOKEN".to_string(),
+                "FALLBACK_API_TOKEN".to_string(),
+            ]
+        );
+        assert_eq!(
+            diagnostics.status[0].missing_source_env_names,
+            vec![
+                "PRIMARY_API_TOKEN".to_string(),
+                "FALLBACK_API_TOKEN".to_string(),
+            ]
+        );
+        let serialized = serde_json::to_string(&diagnostics).expect("diagnostics json");
+        assert!(serialized.contains("PRIMARY_API_TOKEN"));
+        assert!(serialized.contains("FALLBACK_API_TOKEN"));
+        assert!(!serialized.contains("secret-value"));
+    }
+
+    #[test]
     fn diagnostics_fail_for_missing_required_secret_env() {
         let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
             name: "PROVIDER_TOKEN".to_string(),
             required: true,
+            source_env_names: Vec::new(),
             refresh: None,
         }]);
 
@@ -822,6 +1052,7 @@ mod tests {
         let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
             name: "OPTIONAL_PROVIDER_TOKEN".to_string(),
             required: false,
+            source_env_names: Vec::new(),
             refresh: None,
         }]);
 
@@ -840,6 +1071,8 @@ mod tests {
                 required: false,
                 configured: false,
                 source: "missing".to_string(),
+                source_env_names: vec!["OPTIONAL_PROVIDER_TOKEN".to_string()],
+                missing_source_env_names: Vec::new(),
                 refresh: None,
             }]
         );
@@ -907,6 +1140,7 @@ mod tests {
         let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
             name: "FIXTURE_PROVIDER_ACCESS_TOKEN".to_string(),
             required: true,
+            source_env_names: Vec::new(),
             refresh: None,
         }]);
 
@@ -942,6 +1176,7 @@ mod tests {
         let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
             name: "FIXTURE_PROVIDER_ACCESS_TOKEN".to_string(),
             required: true,
+            source_env_names: Vec::new(),
             refresh: Some(refresh.clone()),
         }]);
 
