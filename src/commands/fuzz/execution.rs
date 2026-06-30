@@ -369,7 +369,7 @@ fn fuzz_prepare_settings(args: &FuzzRunArgs) -> Vec<(String, String)> {
         .collect()
 }
 
-fn fuzz_prepare_failure_message(prepare: &FuzzPrepareReport) -> String {
+pub(super) fn fuzz_prepare_failure_message(prepare: &FuzzPrepareReport) -> String {
     let failed_steps = prepare
         .pipeline
         .steps

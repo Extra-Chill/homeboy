@@ -170,6 +170,127 @@ fn resolve_fuzz_context_preserves_rig_extensions_with_explicit_path_when_registr
 }
 
 #[test]
+fn fuzz_list_materializes_prepare_dependencies_before_workload_validation() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_fuzz_prepare_rig(
+            home.path(),
+            &component_dir,
+            r#"mkdir -p runtime && printf ready > runtime/ready.txt"#,
+            "runtime/ready.txt",
+            "materialize runtime dependency",
+        );
+
+        let output = run_list(fuzz_list_args()).expect("fuzz list");
+
+        assert_eq!(output.count, 1);
+        assert!(component_dir.join("runtime/ready.txt").is_file());
+    });
+}
+
+#[test]
+fn fuzz_list_reports_structured_prepare_step_failure() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_fuzz_prepare_rig(
+            home.path(),
+            &component_dir,
+            "false",
+            "runtime/ready.txt",
+            "materialize runtime dependency",
+        );
+
+        let error = match run_list(fuzz_list_args()) {
+            Ok(_) => panic!("prepare should fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("fuzz_prepare"));
+        assert!(message.contains("requirement `materialize runtime dependency` failed"));
+        assert!(message.contains("prepare command failed"));
+    });
+}
+
+fn fuzz_list_args() -> FuzzListArgs {
+    FuzzListArgs {
+        comp: PositionalComponentArgs {
+            component: None,
+            path: None,
+        },
+        rig: Some("package-fuzz".to_string()),
+        extension_override: ExtensionOverrideArgs::default(),
+        setting_args: SettingArgs::default(),
+    }
+}
+
+fn write_generic_fuzz_extension(home: &Path) {
+    let extension_dir = home.join(".config/homeboy/extensions/generic");
+    fs::create_dir_all(&extension_dir).expect("extension dir");
+    fs::write(
+        extension_dir.join("generic.json"),
+        serde_json::json!({
+            "name": "generic",
+            "version": "0.0.0",
+            "fuzz": {
+                "workloads": [{ "id": "fixture" }]
+            }
+        })
+        .to_string(),
+    )
+    .expect("extension manifest");
+}
+
+fn write_fuzz_prepare_rig(
+    home: &Path,
+    component_dir: &Path,
+    prepare_command: &str,
+    required_file: &str,
+    label: &str,
+) {
+    let rig_dir = home.join(".config/homeboy/rigs");
+    fs::create_dir_all(&rig_dir).expect("rig dir");
+    fs::write(
+        rig_dir.join("package-fuzz.json"),
+        serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": component_dir.to_string_lossy(),
+                    "extensions": {
+                        "generic": {
+                            "settings": {}
+                        }
+                    }
+                }
+            },
+            "fuzz": {
+                "default_component": "package"
+            },
+            "pipeline": {
+                "fuzz_prepare": [
+                    {
+                        "kind": "requirement",
+                        "id": "runtime-ready",
+                        "file": required_file,
+                        "cwd": component_dir.to_string_lossy(),
+                        "prepare_command": prepare_command,
+                        "prepare_phases": ["fuzz_prepare"],
+                        "label": label
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .expect("rig config");
+}
+
+#[test]
 fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_contract() {
     let args = FuzzRunArgs {
         comp: PositionalComponentArgs {

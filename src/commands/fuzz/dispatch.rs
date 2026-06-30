@@ -11,7 +11,7 @@ use homeboy::core::fuzz::{
 use super::super::{CmdResult, GlobalArgs};
 use super::compare::run_compare;
 use super::doctor::run_doctor;
-use super::execution::run_run;
+use super::execution::{fuzz_prepare_failure_message, run_run};
 use super::inspect::run_inspect;
 use super::planning::run_plan;
 use super::replay::{run_minimize, run_replay};
@@ -149,8 +149,22 @@ pub(super) fn run_contract() -> FuzzContractOutput {
     }
 }
 
-fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutput> {
+pub(super) fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutput> {
     let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
+    if let Some(context) = rig_context.as_ref() {
+        let prepare_settings = fuzz_list_prepare_settings(&args);
+        if let Some(prepare) =
+            homeboy::core::rig::run_fuzz_prepare(&context.spec, &prepare_settings)?
+        {
+            if !prepare.success {
+                return Err(homeboy::core::Error::rig_pipeline_failed(
+                    &context.spec.id,
+                    "fuzz_prepare",
+                    fuzz_prepare_failure_message(&prepare),
+                ));
+            }
+        }
+    }
     let effective_id = resolve_component_id(
         &args.comp,
         rig_context.as_ref().map(|context| &context.spec),
@@ -177,4 +191,18 @@ fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutput> {
         workloads,
         run_hint: "Select one workload with `homeboy fuzz run <component> --workload <id>`; offload heavy campaigns with the global `--runner <id>` flag when configured.".to_string(),
     })
+}
+
+fn fuzz_list_prepare_settings(args: &FuzzListArgs) -> Vec<(String, String)> {
+    args.setting_args
+        .setting
+        .iter()
+        .cloned()
+        .chain(
+            args.setting_args
+                .setting_json
+                .iter()
+                .map(|(key, value)| (key.clone(), value.to_string())),
+        )
+        .collect()
 }
