@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.270.4] - 2026-06-30
+
+### Fixed
+- use primary checkout for lab fuzz rig paths
+- allow replay dry-run artifact refs without context
+
 ## [0.270.3] - 2026-06-30
 
 ### Fixed
