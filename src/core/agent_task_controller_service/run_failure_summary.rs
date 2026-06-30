@@ -14,7 +14,7 @@
 //! hand-extract the root cause again.
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Owner surface that a controller run blocker is attributed to.
 ///
@@ -58,6 +58,21 @@ pub struct ControllerRunEvidenceRef {
     pub label: Option<String>,
 }
 
+/// Effective WP Codebox runtime context surfaced from provider/result metadata.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ControllerRunCodeboxContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+}
+
 /// Compact, operator-facing root-cause summary for a failed controller run.
 ///
 /// Built purely from the `run-from-spec` result envelope (resume results,
@@ -90,6 +105,13 @@ pub struct ControllerRunFailureSummary {
     /// Durable evidence refs (runner job logs, run evidence, artifact bundles).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<ControllerRunEvidenceRef>,
+    /// Effective WP Codebox context, when the failed run delegated through a
+    /// Codebox-backed provider and the provider emitted runtime metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codebox_context: Option<ControllerRunCodeboxContext>,
+    /// Direct WP Codebox recipe replay command for generated recipes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codebox_replay_command: Option<String>,
     /// Next recommended Homeboy command to investigate or resume.
     pub next_command: String,
 }
@@ -156,6 +178,12 @@ pub fn build_run_failure_summary(
     );
 
     let evidence_refs = collect_evidence_refs(loop_id, failed_action, status);
+    let codebox_context = failed_action.and_then(extract_codebox_context);
+    let codebox_replay_command = failed_action.and_then(|action| {
+        codebox_context.as_ref().and_then(|context| {
+            codebox_replay_command(loop_id, action_id.as_deref(), action, context)
+        })
+    });
 
     let next_command = next_command(loop_id, owner_surface, action_status.as_deref());
 
@@ -170,6 +198,8 @@ pub fn build_run_failure_summary(
         provider,
         failure_phase,
         evidence_refs,
+        codebox_context,
+        codebox_replay_command,
         next_command,
     }
 }
@@ -539,6 +569,217 @@ fn best_diagnostic_message(value: Option<&Value>) -> Option<String> {
             )
         })
         .map(|candidate| candidate.message)
+}
+
+fn extract_codebox_context(value: &Value) -> Option<ControllerRunCodeboxContext> {
+    if !contains_codebox_marker(value) {
+        return None;
+    }
+
+    let context = ControllerRunCodeboxContext {
+        binary_path: first_string_field(
+            value,
+            &[
+                "codebox_binary_path",
+                "wp_codebox_binary_path",
+                "wp_codebox_binary",
+                "codebox_binary",
+            ],
+        )
+        .or_else(|| {
+            first_codebox_scoped_string_field(value, &["binary_path", "executable_path", "path"])
+        }),
+        version: first_string_field(value, &["codebox_version", "wp_codebox_version"])
+            .or_else(|| first_codebox_scoped_string_field(value, &["version"])),
+        commit: first_string_field(value, &["codebox_commit", "wp_codebox_commit"]).or_else(|| {
+            first_codebox_scoped_string_field(value, &["commit", "git_commit", "revision"])
+        }),
+        fingerprint: first_string_field(value, &["codebox_fingerprint", "wp_codebox_fingerprint"])
+            .or_else(|| first_codebox_scoped_string_field(value, &["fingerprint"])),
+        capabilities: first_codebox_capabilities(value),
+    };
+
+    if context.binary_path.is_some()
+        || context.version.is_some()
+        || context.commit.is_some()
+        || context.fingerprint.is_some()
+        || !context.capabilities.is_empty()
+    {
+        Some(context)
+    } else {
+        Some(ControllerRunCodeboxContext {
+            binary_path: Some("wp-codebox".to_string()),
+            version: None,
+            commit: None,
+            fingerprint: None,
+            capabilities: Vec::new(),
+        })
+    }
+}
+
+fn contains_codebox_marker(value: &Value) -> bool {
+    match value {
+        Value::String(text) => is_codebox_marker(text),
+        Value::Array(items) => items.iter().any(contains_codebox_marker),
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, nested)| is_codebox_marker(key) || contains_codebox_marker(nested)),
+        _ => false,
+    }
+}
+
+fn is_codebox_marker(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("codebox")
+}
+
+fn first_string_field(value: &Value, fields: &[&str]) -> Option<String> {
+    find_all_strings(value, fields).into_iter().next()
+}
+
+fn first_codebox_scoped_string_field(value: &Value, fields: &[&str]) -> Option<String> {
+    first_codebox_scoped_string_field_inner(value, fields, false)
+}
+
+fn first_codebox_scoped_string_field_inner(
+    value: &Value,
+    fields: &[&str],
+    codebox_scoped: bool,
+) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            let scoped = codebox_scoped || object_has_codebox_marker(map);
+            if scoped {
+                for field in fields {
+                    if let Some(found) = string_field(value, field) {
+                        return Some(found);
+                    }
+                }
+            }
+            map.iter().find_map(|(key, nested)| {
+                first_codebox_scoped_string_field_inner(
+                    nested,
+                    fields,
+                    scoped || is_codebox_marker(key),
+                )
+            })
+        }
+        Value::Array(items) => items.iter().find_map(|nested| {
+            first_codebox_scoped_string_field_inner(nested, fields, codebox_scoped)
+        }),
+        _ => None,
+    }
+}
+
+fn object_has_codebox_marker(map: &Map<String, Value>) -> bool {
+    map.iter().any(|(key, value)| {
+        is_codebox_marker(key) || matches!(value, Value::String(text) if is_codebox_marker(text))
+    })
+}
+
+fn first_codebox_capabilities(value: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_codebox_capabilities(value, false, &mut out);
+    out.truncate(40);
+    out
+}
+
+fn collect_codebox_capabilities(value: &Value, codebox_scoped: bool, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            let scoped = codebox_scoped || object_has_codebox_marker(map);
+            if scoped {
+                for key in [
+                    "capabilities",
+                    "commands",
+                    "supported_commands",
+                    "recipe_commands",
+                    "supported_recipe_commands",
+                ] {
+                    if let Some(Value::Array(items)) = map.get(key) {
+                        for item in items {
+                            push_capability(item, out);
+                        }
+                    }
+                }
+            }
+            for (key, nested) in map {
+                collect_codebox_capabilities(nested, scoped || is_codebox_marker(key), out);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_codebox_capabilities(nested, codebox_scoped, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_capability(value: &Value, out: &mut Vec<String>) {
+    let capability = value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| string_field(value, "id"))
+        .or_else(|| string_field(value, "name"))
+        .or_else(|| string_field(value, "command"));
+    if let Some(capability) = capability.filter(|capability| !capability.trim().is_empty()) {
+        if !out.iter().any(|seen| seen == &capability) {
+            out.push(capability);
+        }
+    }
+}
+
+fn codebox_replay_command(
+    loop_id: &str,
+    action_id: Option<&str>,
+    value: &Value,
+    context: &ControllerRunCodeboxContext,
+) -> Option<String> {
+    let recipe = first_string_field(
+        value,
+        &[
+            "generated_recipe_path",
+            "recipe_path",
+            "recipe_file",
+            "recipe",
+        ],
+    )?;
+    let binary = context.binary_path.as_deref().unwrap_or("wp-codebox");
+    let artifact_dir = format!(
+        "/tmp/homeboy-codebox-replay/{}/{}",
+        safe_shell_path_segment(loop_id),
+        safe_shell_path_segment(action_id.unwrap_or("failed-action"))
+    );
+    Some(format!(
+        "{} recipe-run --recipe {} --artifacts {} --json",
+        shell_quote(binary),
+        shell_quote(&recipe),
+        shell_quote(&artifact_dir)
+    ))
+}
+
+fn safe_shell_path_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 struct DiagnosticCandidate {
