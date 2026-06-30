@@ -577,7 +577,7 @@ function resolveArtifactDir(context = {}) {
 	if (configured) {
 		return configured;
 	}
-	const workspacePath = request.workspace_path || request.workspace?.path || '';
+	const workspacePath = config.workspace_root || config.workspaceRoot || request.workspace_path || request.workspace?.path || request.workspace?.root || '';
 	return workspacePath ? path.join(workspacePath, '.homeboy', 'opencode') : '';
 }
 

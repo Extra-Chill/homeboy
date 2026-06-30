@@ -271,6 +271,31 @@ process.exit(0);
 		implicitArtifactResult.artifacts.every((artifact) => artifact.path.startsWith(path.join(quietWorkspace, '.homeboy', 'opencode'))),
 		true
 	);
+
+	const workspaceRootResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-workspace-root-artifact-dir',
+		workspace: {
+			mode: 'existing',
+			root: quietWorkspace,
+		},
+		expected_artifacts: ['patch', 'transcript', 'agent_result'],
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				command_args: [quietCliPath],
+				workspace_root: quietWorkspace,
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(workspaceRootResult.status, 'succeeded');
+	assert.deepEqual(workspaceRootResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'patch', 'transcript']);
+	assert.equal(workspaceRootResult.metadata.missing_declared_artifacts, undefined);
+	assert.equal(
+		workspaceRootResult.artifacts.every((artifact) => artifact.path.startsWith(path.join(quietWorkspace, '.homeboy', 'opencode'))),
+		true
+	);
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }
