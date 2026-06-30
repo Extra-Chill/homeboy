@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.16] - 2026-06-30
+
+### Fixed
+- Fix Codebox nested plugin file mapping
+
 ## [3.22.15] - 2026-06-30
 
 ### Changed
