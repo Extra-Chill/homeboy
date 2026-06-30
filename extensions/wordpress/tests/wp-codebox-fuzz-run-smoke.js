@@ -142,6 +142,35 @@ assert.deepEqual(REQUIRED_WP_CODEBOX_FUZZ_CONTRACT_PATHS, [
 	'schemas.wordpressRuntime.workloadRun',
 ]);
 assert.equal(wpCodeboxRuntimeContractManifest({ loadRuntimeContractSource: () => ({ manifest }) }), manifest);
+const contractSourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-contract-source-'));
+try {
+	const cacheRoot = path.join(contractSourceRoot, 'cache', 'wp-codebox');
+	const cacheSourceRoot = path.join(cacheRoot, 'source');
+	const staleSourceRoot = path.join(contractSourceRoot, 'wp-codebox@stale');
+	const cacheCoreModule = path.join(cacheSourceRoot, 'packages', 'runtime-core', 'dist', 'index.js');
+	fs.mkdirSync(path.join(cacheSourceRoot, 'packages', 'cli', 'dist'), { recursive: true });
+	fs.mkdirSync(path.dirname(cacheCoreModule), { recursive: true });
+	fs.mkdirSync(path.join(cacheSourceRoot, 'packages', 'runtime-playground', 'dist'), { recursive: true });
+	fs.mkdirSync(path.join(staleSourceRoot, 'packages', 'runtime-core', 'dist'), { recursive: true });
+	fs.writeFileSync(path.join(cacheSourceRoot, 'packages', 'cli', 'dist', 'index.js'), '#!/usr/bin/env node\n');
+	fs.writeFileSync(cacheCoreModule, 'module.exports = {};\n');
+	fs.writeFileSync(path.join(cacheSourceRoot, 'packages', 'runtime-playground', 'dist', 'index.js'), 'module.exports = {};\n');
+	const staleCoreModule = path.join(staleSourceRoot, 'packages', 'runtime-core', 'dist', 'index.js');
+	fs.writeFileSync(staleCoreModule, 'module.exports = {};\n');
+	assert.equal(wpCodeboxRuntimeContractManifest({
+		env: {
+			HOMEBOY_WP_CODEBOX_BIN: path.join(staleSourceRoot, 'packages', 'cli', 'dist', 'index.js'),
+			HOMEBOY_WP_CODEBOX_CORE_MODULE: staleCoreModule,
+			HOMEBOY_WP_CODEBOX_INSTALL_DIR: cacheRoot,
+		},
+		loadRuntimeContractSource: (options) => {
+			assert.equal(options.wpCodeboxCoreModule, cacheCoreModule);
+			return { manifest };
+		},
+	}), manifest);
+} finally {
+	fs.rmSync(contractSourceRoot, { recursive: true, force: true });
+}
 assert.deepEqual(wpCodeboxWordPressWorkloadRunInput({
 	id: 'workload-run',
 	steps: [{ command: 'wordpress.run-declarative-fuzz' }],

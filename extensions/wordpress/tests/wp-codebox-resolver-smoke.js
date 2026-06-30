@@ -72,10 +72,14 @@ try {
 
 	const staleEnvWithCacheIdentity = resolveWpCodeboxIdentity({
 		wpCodeboxInstallDir: cacheRoot,
-		env: { HOMEBOY_WP_CODEBOX_BIN: envBin },
+		env: {
+			HOMEBOY_WP_CODEBOX_BIN: envBin,
+			HOMEBOY_WP_CODEBOX_CORE_MODULE: path.join(envRoot, 'packages', 'runtime-core', 'dist', 'index.js'),
+		},
 	});
 	assert.equal(staleEnvWithCacheIdentity.selectionSource, 'cache');
 	assert.equal(staleEnvWithCacheIdentity.bin, path.join(cacheSourceRoot, 'packages', 'cli', 'dist', 'index.js'));
+	assert.equal(staleEnvWithCacheIdentity.coreModulePath, path.join(cacheSourceRoot, 'packages', 'runtime-core', 'dist', 'index.js'));
 
 	const explicitBinWithCacheIdentity = resolveWpCodeboxIdentity({
 		wpCodeboxBin: envBin,
