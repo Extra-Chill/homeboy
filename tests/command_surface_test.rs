@@ -149,6 +149,24 @@ fn agent_task_controller_events_command_parses() {
 }
 
 #[test]
+fn agent_task_fanout_cook_batch_help_uses_generic_worktree_terms() {
+    let mut root = Cli::command();
+    let help = root
+        .find_subcommand_mut("agent-task")
+        .and_then(|command| command.find_subcommand_mut("fanout"))
+        .and_then(|command| command.find_subcommand_mut("cook-batch"))
+        .expect("agent-task fanout cook-batch command")
+        .render_long_help()
+        .to_string();
+
+    assert!(help.contains("task worktrees"));
+    assert!(!help.contains("DMC"));
+    assert!(!help.contains("dmc"));
+    assert!(!help.contains("studio"));
+    assert!(!help.contains("workspace-registry"));
+}
+
+#[test]
 fn agent_task_controller_resume_dispatch_defaults_parse() {
     Cli::try_parse_from([
         "homeboy",
@@ -301,25 +319,65 @@ fn runner_exec_flags_parse_before_trailing_command() {
     // distinct flags that share this ordering invariant in one place.
     for args in [
         [
-            "homeboy", "runner", "exec", "homeboy-lab", "--raw", "--cwd", "/runner/workspaces",
-            "python3", "-c", "print('hello')",
+            "homeboy",
+            "runner",
+            "exec",
+            "homeboy-lab",
+            "--raw",
+            "--cwd",
+            "/runner/workspaces",
+            "python3",
+            "-c",
+            "print('hello')",
         ]
         .as_slice(),
         [
-            "homeboy", "runner", "exec", "homeboy-lab", "--run-id", "ssi-fixture-matrix-summary",
-            "--cwd", "/runner/workspaces", "homeboy", "trace", "matrix", "summary",
+            "homeboy",
+            "runner",
+            "exec",
+            "homeboy-lab",
+            "--run-id",
+            "ssi-fixture-matrix-summary",
+            "--cwd",
+            "/runner/workspaces",
+            "homeboy",
+            "trace",
+            "matrix",
+            "summary",
         ]
         .as_slice(),
         [
-            "homeboy", "runner", "exec", "homeboy-lab", "--run-id", "runner-exec-artifact-fixture",
-            "--artifact", "output/report.json", "--cwd", "/runner/workspaces", "homeboy", "trace",
-            "matrix", "summary",
+            "homeboy",
+            "runner",
+            "exec",
+            "homeboy-lab",
+            "--run-id",
+            "runner-exec-artifact-fixture",
+            "--artifact",
+            "output/report.json",
+            "--cwd",
+            "/runner/workspaces",
+            "homeboy",
+            "trace",
+            "matrix",
+            "summary",
         ]
         .as_slice(),
         [
-            "homeboy", "runner", "exec", "homeboy-lab", "--run-id",
-            "runner-exec-artifact-dir-fixture", "--artifact-dir", "output", "--cwd",
-            "/runner/workspaces", "homeboy", "trace", "matrix", "summary",
+            "homeboy",
+            "runner",
+            "exec",
+            "homeboy-lab",
+            "--run-id",
+            "runner-exec-artifact-dir-fixture",
+            "--artifact-dir",
+            "output",
+            "--cwd",
+            "/runner/workspaces",
+            "homeboy",
+            "trace",
+            "matrix",
+            "summary",
         ]
         .as_slice(),
     ] {

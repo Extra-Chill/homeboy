@@ -53,9 +53,9 @@ enum WorktreeCommand {
         #[arg(long)]
         provenance_json: Option<String>,
     },
-    /// Create multiple DMC worktrees one-at-a-time with lock-aware queue status JSON
+    /// Create multiple task worktrees one-at-a-time with queue status JSON
     QueueCreate {
-        /// DMC workspace repo handle, e.g. homeboy
+        /// Registered component/repo handle, e.g. homeboy
         repo: String,
         /// Branch to create. Repeat for fanout batches.
         #[arg(long = "branch", value_name = "BRANCH", required = true)]
@@ -66,18 +66,15 @@ enum WorktreeCommand {
         /// Task or issue URL associated with these worktrees
         #[arg(long)]
         task_url: Option<String>,
-        /// Short task reference recorded by DMC, e.g. Extra-Chill/homeboy#5786
+        /// Short task reference associated with these worktrees, e.g. Extra-Chill/homeboy#5786
         #[arg(long)]
         task_ref: Option<String>,
         /// Print the queue plan/status without creating worktrees
         #[arg(long)]
         dry_run: bool,
-        /// Suggested orchestrator wait when DMC reports an active lock but no retry-after value
+        /// Suggested orchestrator wait when queueing is blocked but no retry-after value is available
         #[arg(long, default_value_t = 60)]
         retry_after_seconds: u64,
-        /// Executable used for DMC calls. Defaults to `studio`.
-        #[arg(long, default_value = "studio")]
-        dmc_bin: String,
     },
     /// List persisted task worktrees
     List,
@@ -187,7 +184,6 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
             task_ref,
             dry_run,
             retry_after_seconds,
-            dmc_bin,
         } => WorktreeOutput::QueueCreate(worktree::queue_create(WorktreeQueueCreateOptions {
             repo,
             branches,
@@ -196,7 +192,6 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
             task_ref,
             dry_run,
             retry_after_seconds,
-            dmc_bin,
         })?),
         WorktreeCommand::List => WorktreeOutput::List(worktree::list()?),
         WorktreeCommand::Status { id } => WorktreeOutput::Status(worktree::status(&id)?),

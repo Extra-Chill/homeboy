@@ -60,6 +60,31 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
             parsed_command(&[
                 "homeboy",
                 "agent-task",
+                "fanout",
+                "cook-batch",
+                "--repo",
+                "homeboy",
+                "--verify",
+                "true",
+                "https://github.com/Extra-Chill/homeboy/issues/6453",
+            ]),
+            "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "fanout",
+                "run-plan",
+                "--input",
+                "fanout.json",
+            ]),
+            "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
                 "cook",
                 "--to-worktree",
                 "homeboy@cook",
@@ -131,7 +156,7 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
                 "--input",
                 "fanout.json",
             ]),
-            "agent-task fanout run-plan/submit-batch/status/artifacts",
+            "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
         ),
         (
             parsed_command(&[
@@ -141,7 +166,7 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
                 "status",
                 "fanout-batch-123",
             ]),
-            "agent-task fanout run-plan/submit-batch/status/artifacts",
+            "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
         ),
         (
             parsed_command(&[
@@ -151,7 +176,7 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
                 "artifacts",
                 "fanout-batch-123",
             ]),
-            "agent-task fanout submit-batch/status/artifacts",
+            "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
         ),
         (
             parsed_command(&[

@@ -34,7 +34,7 @@ pub struct AgentTaskFanoutArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskFanoutCommand {
-    /// Build an operator-ready batch-cook fanout from issue URLs and create/reuse DMC worktrees.
+    /// Build an operator-ready batch-cook fanout from issue URLs and create/reuse task worktrees.
     CookBatch(AgentTaskFanoutCookBatchArgs),
     /// Normalize a batch-cook fanout plan with independent cooks, worktrees, and PR targets.
     Plan(AgentTaskFanoutPlanArgs),
@@ -114,10 +114,6 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// Run the generated batch-cook plan immediately after worktree creation succeeds.
     #[arg(long = "run-plan")]
     pub run_plan: bool,
-
-    /// Path to the `studio`/DMC wrapper binary.
-    #[arg(long = "dmc-bin", default_value = "studio", value_name = "BIN")]
-    pub dmc_bin: String,
 }
 
 #[derive(Args, Debug, Clone)]
