@@ -10,10 +10,10 @@ use super::planning_changelog::{build_changelog_plan, generate_changelog_entries
 use super::planning_policy::release_skip_plan;
 use super::planning_semver::{
     build_semver_recommendation, current_version_tag_at_head, current_version_tag_name,
-    release_monorepo_context, validate_current_version_tag_reachable,
-    validate_release_version_floor,
+    validate_current_version_tag_reachable, validate_release_version_floor,
 };
 use super::planning_worktree::validate_release_worktree;
+use super::scope::ReleaseScope;
 use super::types::{
     ReleaseChangelogPlan, ReleaseOptions, ReleasePlan, ReleaseSemverRecommendation,
 };
@@ -31,21 +31,17 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
 
     let mut v = ValidationCollector::new();
 
-    let monorepo = release_monorepo_context(&component, component_id);
+    let release_scope = ReleaseScope::resolve(&component, component_id)?;
     let version_info = v.capture(version::read_component_version(&component), "version");
     if let Some(ref info) = version_info {
         if let Some(message) = v
             .capture(
-                validate_current_version_tag_reachable(
-                    &component.local_path,
-                    monorepo.as_ref(),
-                    &info.version,
-                ),
+                validate_current_version_tag_reachable(&release_scope, &info.version),
                 "tag",
             )
             .flatten()
         {
-            let tag_name = current_version_tag_name(monorepo.as_ref(), &info.version);
+            let tag_name = current_version_tag_name(&release_scope, &info.version);
             v.push(
                 "tag",
                 &message,
@@ -65,7 +61,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let mut semver_recommendation = if options.pipeline.head {
         None
     } else {
-        build_semver_recommendation(&component, &options.bump_type, monorepo.as_ref())?
+        build_semver_recommendation(&component, &options.bump_type, &release_scope)?
     };
 
     if !options.pipeline.head {
@@ -74,7 +70,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         // skip plan instead of a downstream changelog contract error for the
         // next version (issue #4316).
         let release_already_at_head = version_info.as_ref().and_then(|info| {
-            current_version_tag_at_head(&component.local_path, monorepo.as_ref(), &info.version)
+            current_version_tag_at_head(&release_scope, &info.version)
                 .ok()
                 .flatten()
         });
@@ -93,7 +89,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         Default::default()
     } else {
         v.capture(
-            generate_changelog_entries(&component, component_id, options, monorepo.as_ref()),
+            generate_changelog_entries(&component, component_id, options, &release_scope),
             "commits",
         )
         .unwrap_or_default()
@@ -167,7 +163,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         &new_version,
         &changelog_plan,
         options,
-        monorepo.as_ref(),
+        &release_scope,
         &mut warnings,
         &mut hints,
     )?);

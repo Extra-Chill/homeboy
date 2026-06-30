@@ -129,16 +129,13 @@ fn initial_release_state(
     }
 
     let version_info = super::version::read_component_version(component)?;
-    let monorepo = super::planning_semver::release_monorepo_context(component, component_id);
-    let expected_tag = match monorepo.as_ref() {
-        Some(ctx) => ctx.format_tag(&version_info.version),
-        None => format!("v{}", version_info.version),
-    };
+    let release_scope = super::scope::ReleaseScope::resolve(component, component_id)?;
+    let expected_tag = release_scope.tag_name(&version_info.version);
 
     let (tag, version) = resolve_head_release(
         &component.local_path,
         &expected_tag,
-        monorepo.as_ref().map(|ctx| ctx.tag_prefix.as_str()),
+        release_scope.tag_prefix(),
         component_id,
     )?;
     let notes = read_current_release_notes(component)?;
@@ -489,6 +486,25 @@ mod tests {
 
         assert_eq!(tag, "v0.11.11");
         assert_eq!(version, "0.11.11");
+    }
+
+    #[test]
+    fn head_release_uses_package_tag_namespace() {
+        let (_remote, checkout) = release_repo_with_remote_tag("3.22.1", "wordpress-v3.22.1");
+        run_in(checkout.path(), &["git", "tag", "v2.10.0"]);
+        run_in(checkout.path(), &["git", "tag", "nodejs-v2.2.0"]);
+        run_in(checkout.path(), &["git", "tag", "wordpress-v3.22.1"]);
+
+        let (tag, version) = resolve_head_release(
+            checkout.path().to_str().expect("checkout path"),
+            "wordpress-v3.22.1",
+            Some("wordpress"),
+            "wordpress",
+        )
+        .expect("package release tag at HEAD should be used");
+
+        assert_eq!(tag, "wordpress-v3.22.1");
+        assert_eq!(version, "3.22.1");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use super::super::{github_generated_notes_start_tag, github_release_notes_start_tag};
 use super::{commit_file, component_for_repo, git_repo, run_git};
+use crate::core::component::Component;
 
 #[test]
 fn generated_notes_start_tag_fails_closed_when_prior_release_tag_is_off_branch() {
@@ -106,4 +107,39 @@ fn generated_notes_start_tag_uses_prior_release_tag_when_reachable() {
         .expect("reachable previous tag should resolve");
 
     assert_eq!(start_tag.as_deref(), Some("v0.2.0"));
+}
+
+#[test]
+fn generated_notes_start_tag_uses_package_tag_namespace() {
+    let temp = git_repo();
+    let dir = temp.path();
+    commit_file(dir, "README.md", "initial", "chore: initial");
+    run_git(dir, &["tag", "v2.10.0"]);
+    run_git(dir, &["tag", "nodejs-v2.2.0"]);
+    run_git(dir, &["tag", "wordpress-v3.22.1"]);
+    commit_file(
+        dir,
+        "packages/nodejs/src/index.ts",
+        "nodejs",
+        "fix: update nodejs package",
+    );
+    run_git(dir, &["tag", "nodejs-v2.2.1"]);
+    commit_file(
+        dir,
+        "packages/wordpress/src/index.ts",
+        "wordpress",
+        "fix: update wordpress package",
+    );
+    run_git(dir, &["tag", "wordpress-v3.22.2"]);
+
+    let component = Component {
+        id: "wordpress".to_string(),
+        local_path: dir.join("packages/wordpress").to_string_lossy().to_string(),
+        ..Default::default()
+    };
+
+    let start_tag = github_generated_notes_start_tag(&component, "wordpress-v3.22.2")
+        .expect("package previous tag should resolve");
+
+    assert_eq!(start_tag.as_deref(), Some("wordpress-v3.22.1"));
 }

@@ -151,7 +151,13 @@ pub(crate) fn github_changelog_url(
     tag: &str,
 ) -> Option<String> {
     let changelog_path = changelog::resolve_changelog_path(component).ok()?;
-    let local_path = std::path::Path::new(&component.local_path);
+    let release_scope =
+        crate::core::release::scope::ReleaseScope::resolve(component, &component.id).ok();
+    let component_path = release_scope
+        .as_ref()
+        .map(|scope| scope.component_path.as_str())
+        .unwrap_or(component.local_path.as_str());
+    let local_path = std::path::Path::new(component_path);
     let component_relative = changelog_path
         .strip_prefix(local_path)
         .unwrap_or(&changelog_path)
@@ -164,19 +170,14 @@ pub(crate) fn github_changelog_url(
     // component's path prefix so the link points at the real file
     // (`php-transformer/CHANGELOG.md`) instead of a root-level `CHANGELOG.md`
     // that does not exist (issue #6146).
-    let repo_relative =
-        match crate::core::git::MonorepoContext::detect(&component.local_path, &component.id) {
-            Some(ctx) => {
-                let prefix = ctx.path_prefix.replace('\\', "/");
-                let prefix = prefix.trim_matches('/');
-                if prefix.is_empty() {
-                    component_relative
-                } else {
-                    format!("{}/{}", prefix, component_relative)
-                }
-            }
-            None => component_relative,
-        };
+    let repo_relative = match release_scope {
+        Some(scope) if !scope.path_prefix.is_empty() => {
+            let prefix = scope.path_prefix.replace('\\', "/");
+            let prefix = prefix.trim_matches('/');
+            format!("{}/{}", prefix, component_relative)
+        }
+        _ => component_relative,
+    };
 
     Some(format!(
         "https://{}/{}/{}/blob/{}/{}",
@@ -207,23 +208,19 @@ pub(crate) fn github_generated_notes_start_tag(
     component: &Component,
     tag: &str,
 ) -> Result<Option<String>> {
-    let monorepo = crate::core::git::MonorepoContext::detect(&component.local_path, &component.id);
-    let (git_root, tag_prefix) = match monorepo.as_ref() {
-        Some(ctx) => (ctx.git_root.as_str(), Some(ctx.tag_prefix.as_str())),
-        None => (component.local_path.as_str(), None),
-    };
-    let previous =
-        crate::core::git::get_previous_tag_before_any_with_prefix(git_root, tag, tag_prefix)?;
+    let release_scope =
+        crate::core::release::scope::ReleaseScope::resolve(component, &component.id)?;
+    let previous = release_scope.previous_tag_before_any(tag)?;
 
     if let Some(previous_tag) = previous.as_deref() {
-        if !crate::core::git::is_ancestor(git_root, previous_tag, tag)? {
+        if !crate::core::git::is_ancestor(&release_scope.git_root, previous_tag, tag)? {
             return Err(Error::validation_invalid_argument(
                 "release-notes-range",
                 format!(
                     "Previous release tag {} is not reachable from release tag {}. Refusing to generate GitHub release notes because using an older reachable tag would duplicate prior release ranges.",
                     previous_tag, tag
                 ),
-                Some(format!("Repository: {}", git_root)),
+                Some(format!("Repository: {}", release_scope.git_root)),
                 Some(vec![
                     format!(
                         "Merge or recover the {} release commit onto the selected release base/default branch, then rerun the release.",

@@ -4,6 +4,7 @@ use super::release::build_release_steps;
 use crate::core::component::{Component, ScopedExtensionConfig};
 use crate::core::extension::ExtensionManifest;
 use crate::core::plan::PlanStepStatus;
+use crate::core::release::scope::ReleaseScope;
 use crate::core::release::types::{
     ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions,
     ReleaseSemverRecommendation,
@@ -344,6 +345,7 @@ fn test_build_release_steps() {
     .expect("extension manifest");
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
     let options = ReleaseOptions {
         bump_type: "patch".to_string(),
         ..Default::default()
@@ -356,7 +358,7 @@ fn test_build_release_steps() {
         "1.0.1",
         &fixture_changelog_plan(),
         &options,
-        None,
+        &release_scope,
         &mut warnings,
         &mut hints,
     )
@@ -414,6 +416,7 @@ fn release_plan_runs_package_preflight_before_mutating_release_steps() {
     extension.id = "fixture-packager".to_string();
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
     let options = ReleaseOptions {
         bump_type: "patch".to_string(),
         ..Default::default()
@@ -426,7 +429,7 @@ fn release_plan_runs_package_preflight_before_mutating_release_steps() {
         "1.0.1",
         &fixture_changelog_plan(),
         &options,
-        None,
+        &release_scope,
         &mut warnings,
         &mut hints,
     )
@@ -474,6 +477,7 @@ fn release_plan_records_changelog_contract() {
     let component = fixture_component();
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
     let options = ReleaseOptions {
         bump_type: "patch".to_string(),
         ..Default::default()
@@ -487,7 +491,7 @@ fn release_plan_records_changelog_contract() {
         "1.0.1",
         &changelog_plan,
         &options,
-        None,
+        &release_scope,
         &mut warnings,
         &mut hints,
     )
@@ -542,6 +546,7 @@ fn release_plan_includes_deploy_intent_when_requested() {
     let component = fixture_component();
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
     let options = ReleaseOptions {
         bump_type: "patch".to_string(),
         pipeline: ReleasePipelineOptions {
@@ -558,7 +563,7 @@ fn release_plan_includes_deploy_intent_when_requested() {
         "1.0.1",
         &fixture_changelog_plan(),
         &options,
-        None,
+        &release_scope,
         &mut warnings,
         &mut hints,
     )
@@ -598,6 +603,7 @@ fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
     extension.id = "wordpress".to_string();
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
     let options = ReleaseOptions {
         bump_type: "head".to_string(),
         pipeline: ReleasePipelineOptions {
@@ -615,7 +621,7 @@ fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
         "1.0.1",
         &fixture_changelog_plan(),
         &options,
-        None,
+        &release_scope,
         &mut warnings,
         &mut hints,
     )
@@ -664,6 +670,7 @@ fn head_release_skip_publish_still_uploads_existing_artifacts() {
     extension.id = "package-runtime".to_string();
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
     let options = ReleaseOptions {
         bump_type: "head".to_string(),
         pipeline: ReleasePipelineOptions {
@@ -682,7 +689,7 @@ fn head_release_skip_publish_still_uploads_existing_artifacts() {
         "1.0.1",
         &fixture_changelog_plan(),
         &options,
-        None,
+        &release_scope,
         &mut warnings,
         &mut hints,
     )
@@ -716,6 +723,7 @@ fn release_plan_warns_when_configured_extensions_have_no_publish_action() {
     extension.id = "wordpress".to_string();
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
     let options = ReleaseOptions {
         bump_type: "patch".to_string(),
         ..Default::default()
@@ -728,7 +736,7 @@ fn release_plan_warns_when_configured_extensions_have_no_publish_action() {
         "1.0.1",
         &fixture_changelog_plan(),
         &options,
-        None,
+        &release_scope,
         &mut warnings,
         &mut hints,
     )

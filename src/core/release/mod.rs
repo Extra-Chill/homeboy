@@ -21,6 +21,7 @@ mod planning_policy;
 mod planning_quality;
 mod planning_semver;
 mod planning_worktree;
+mod scope;
 mod types;
 mod utils;
 pub mod version;
