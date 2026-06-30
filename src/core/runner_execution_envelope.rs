@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
+use std::str::FromStr;
 
 use crate::command_contract::{RunnerWorkload, RunnerWorkloadArtifactRef};
 use crate::core::agent_task::{AgentTaskArtifactDeclaration, AgentTaskRequest};
@@ -7,6 +9,53 @@ use crate::core::secret_env_plan::SecretEnvPlan;
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
 pub const RUNNER_EXECUTION_RECORD_SCHEMA: &str = "homeboy/runner-execution-record/v1";
+pub const PATH_MATERIALIZATION_PLAN_SCHEMA: &str = "homeboy/path-materialization-plan/v1";
+pub const PATH_MATERIALIZATION_MODE_EXISTING_REMOTE: &str = "existing_remote";
+pub const PATH_MATERIALIZATION_MODE_GIT: &str = "git";
+pub const PATH_MATERIALIZATION_MODE_SNAPSHOT: &str = "snapshot";
+pub const PATH_MATERIALIZATION_ROLE_PRIMARY_WORKSPACE: &str = "primary_workspace";
+pub const PATH_MATERIALIZATION_ROLE_REQUIRED_PATH: &str = "required_path";
+pub const PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT: &str =
+    "runner_exec.source_snapshot";
+pub const PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS: &str = "runner_exec.require_paths";
+pub const PATH_MATERIALIZATION_STATUS_MATERIALIZED: &str = "materialized";
+pub const PATH_MATERIALIZATION_STATUS_VALIDATED: &str = "validated";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMaterializationMode {
+    ExistingRemote,
+    Git,
+    Snapshot,
+}
+
+impl PathMaterializationMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExistingRemote => PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+            Self::Git => PATH_MATERIALIZATION_MODE_GIT,
+            Self::Snapshot => PATH_MATERIALIZATION_MODE_SNAPSHOT,
+        }
+    }
+}
+
+impl fmt::Display for PathMaterializationMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PathMaterializationMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            PATH_MATERIALIZATION_MODE_EXISTING_REMOTE => Ok(Self::ExistingRemote),
+            PATH_MATERIALIZATION_MODE_GIT => Ok(Self::Git),
+            PATH_MATERIALIZATION_MODE_SNAPSHOT => Ok(Self::Snapshot),
+            _ => Err(()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunnerExecutionEnvelope {
@@ -71,6 +120,24 @@ pub struct PathMaterializationPlan {
     pub entries: Vec<PathMaterializationEntry>,
 }
 
+impl PathMaterializationPlan {
+    pub fn new(entries: impl IntoIterator<Item = PathMaterializationEntry>) -> Self {
+        Self {
+            schema: PATH_MATERIALIZATION_PLAN_SCHEMA.to_string(),
+            entries: entries.into_iter().collect(),
+        }
+    }
+
+    pub fn non_empty(entries: impl IntoIterator<Item = PathMaterializationEntry>) -> Option<Self> {
+        let plan = Self::new(entries);
+        if plan.entries.is_empty() {
+            None
+        } else {
+            Some(plan)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PathMaterializationEntry {
     pub role: String,
@@ -80,6 +147,75 @@ pub struct PathMaterializationEntry {
     pub remote_path: String,
     pub materialization_mode: String,
     pub validation_status: String,
+}
+
+impl PathMaterializationEntry {
+    pub fn new(
+        role: impl Into<String>,
+        owner: impl Into<String>,
+        local_path: Option<String>,
+        remote_path: impl Into<String>,
+        materialization_mode: impl Into<String>,
+        validation_status: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            owner: owner.into(),
+            local_path,
+            remote_path: remote_path.into(),
+            materialization_mode: materialization_mode.into(),
+            validation_status: validation_status.into(),
+        }
+    }
+
+    pub fn with_mode(
+        role: impl Into<String>,
+        owner: impl Into<String>,
+        local_path: Option<String>,
+        remote_path: impl Into<String>,
+        materialization_mode: PathMaterializationMode,
+        validation_status: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            role,
+            owner,
+            local_path,
+            remote_path,
+            materialization_mode.to_string(),
+            validation_status,
+        )
+    }
+
+    pub fn required_existing_remote(remote_path: impl Into<String>) -> Self {
+        Self::with_mode(
+            PATH_MATERIALIZATION_ROLE_REQUIRED_PATH,
+            PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
+            None,
+            remote_path,
+            PathMaterializationMode::ExistingRemote,
+            PATH_MATERIALIZATION_STATUS_VALIDATED,
+        )
+    }
+
+    pub fn primary_workspace_materialized(
+        owner: impl Into<String>,
+        local_path: Option<String>,
+        remote_path: impl Into<String>,
+        materialization_mode: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            PATH_MATERIALIZATION_ROLE_PRIMARY_WORKSPACE,
+            owner,
+            local_path,
+            remote_path,
+            materialization_mode,
+            PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+        )
+    }
+
+    pub fn mode(&self) -> Option<PathMaterializationMode> {
+        PathMaterializationMode::from_str(&self.materialization_mode).ok()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -401,7 +537,7 @@ fn runner_execution_record_schema() -> String {
 }
 
 fn path_materialization_plan_schema() -> String {
-    "homeboy/path-materialization-plan/v1".to_string()
+    PATH_MATERIALIZATION_PLAN_SCHEMA.to_string()
 }
 
 #[cfg(test)]
@@ -495,14 +631,12 @@ mod tests {
             }])
             .with_path_materialization_plan(Some(PathMaterializationPlan {
                 schema: path_materialization_plan_schema(),
-                entries: vec![PathMaterializationEntry {
-                    role: "primary_workspace".to_string(),
-                    owner: "runner_exec.source_snapshot".to_string(),
-                    local_path: Some("/local/project".to_string()),
-                    remote_path: "/runner/project".to_string(),
-                    materialization_mode: "snapshot".to_string(),
-                    validation_status: "materialized".to_string(),
-                }],
+                entries: vec![PathMaterializationEntry::primary_workspace_materialized(
+                    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
+                    Some("/local/project".to_string()),
+                    "/runner/project",
+                    PathMaterializationMode::Snapshot.to_string(),
+                )],
             }))
             .with_next_actions(vec![RunnerExecutionNextAction {
                 label: "runner_job_logs".to_string(),
@@ -526,7 +660,7 @@ mod tests {
         assert_eq!(value["remote_run_id"], "run-1");
         assert_eq!(
             value["path_materialization_plan"]["schema"],
-            "homeboy/path-materialization-plan/v1"
+            PATH_MATERIALIZATION_PLAN_SCHEMA
         );
         assert_eq!(
             value["path_materialization_plan"]["entries"][0]["remote_path"],
@@ -534,6 +668,48 @@ mod tests {
         );
         assert_eq!(value["artifact_refs"][0]["id"], "artifact-1");
         assert_eq!(value["next_actions"][0]["label"], "runner_job_logs");
+    }
+
+    #[test]
+    fn path_materialization_entry_parses_known_modes_without_rejecting_unknowns() {
+        let entry = PathMaterializationEntry::primary_workspace_materialized(
+            PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
+            None,
+            "/runner/project",
+            PathMaterializationMode::Snapshot.to_string(),
+        );
+        let provider_owned = PathMaterializationEntry {
+            materialization_mode: "provider_owned_mode".to_string(),
+            ..entry.clone()
+        };
+
+        assert_eq!(entry.mode(), Some(PathMaterializationMode::Snapshot));
+        assert_eq!(provider_owned.mode(), None);
+    }
+
+    #[test]
+    fn path_materialization_plan_helpers_emit_canonical_shape() {
+        let plan = PathMaterializationPlan::non_empty(vec![
+            PathMaterializationEntry::required_existing_remote("/runner/cache"),
+        ])
+        .expect("non-empty plan");
+
+        assert_eq!(plan.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
+        assert_eq!(plan.entries[0].role, PATH_MATERIALIZATION_ROLE_REQUIRED_PATH);
+        assert_eq!(
+            plan.entries[0].owner,
+            PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS
+        );
+        assert_eq!(plan.entries[0].remote_path, "/runner/cache");
+        assert_eq!(
+            plan.entries[0].mode(),
+            Some(PathMaterializationMode::ExistingRemote)
+        );
+        assert_eq!(
+            plan.entries[0].validation_status,
+            PATH_MATERIALIZATION_STATUS_VALIDATED
+        );
+        assert!(PathMaterializationPlan::non_empty(Vec::new()).is_none());
     }
 
     #[test]

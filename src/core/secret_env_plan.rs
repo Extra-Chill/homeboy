@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::core::redaction::RedactionPolicy;
 
 pub const SECRET_ENV_PLAN_SCHEMA: &str = "homeboy/secret-env-plan/v1";
+pub const AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV: &str = "HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON";
+pub const SECRET_ENV_PLAN_ENV_DELTA_SOURCE: &str = "secret_env_plan_env_delta";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretEnvPlan {
@@ -226,6 +228,13 @@ impl SecretEnvPlan {
             .map(|requirement| requirement.name.clone())
             .collect();
         plan
+    }
+
+    pub fn json_env_pair(&self) -> (String, String) {
+        (
+            AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV.to_string(),
+            serde_json::to_string(self).unwrap_or_else(|_| "null".to_string()),
+        )
     }
 
     pub fn secret_env_names(&self) -> Vec<String> {
@@ -701,6 +710,17 @@ mod tests {
                 "MAPPED_SECRET".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn secret_env_plan_json_env_pair_uses_canonical_handoff_name() {
+        let plan = SecretEnvPlan::from_secret_env_names(["API_TOKEN".to_string()]);
+
+        let (name, value) = plan.json_env_pair();
+
+        assert_eq!(name, AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV);
+        let decoded: SecretEnvPlan = serde_json::from_str(&value).expect("secret plan json");
+        assert_eq!(decoded.secret_env_names(), vec!["API_TOKEN".to_string()]);
     }
 
     #[test]

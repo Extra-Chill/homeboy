@@ -3,6 +3,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use crate::core::agent_task_provider::WorkspaceCwdMode;
 use crate::core::agent_task_provider::{
     AgentTaskExecutorProvider, AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
     AgentTaskProviderWorkspaceMaterialization,
@@ -721,7 +723,7 @@ mod tests {
                     },
                     "env_passthrough": ["EXAMPLE_RUNTIME_BIN", "EXAMPLE_RUNTIME_TOKEN", "EXAMPLE_RUNTIME_BIN"],
                     "workspace": {
-                        "cwd": "git_checkout",
+                        "cwd": WorkspaceCwdMode::GitCheckout.to_string(),
                         "requires_git": true
                     }
                 },
@@ -825,7 +827,7 @@ mod tests {
                         "request_schema": AGENT_TASK_REQUEST_SCHEMA,
                         "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
                         "workspace_materialization": {
-                            "cwd": "git_checkout",
+                            "cwd": WorkspaceCwdMode::GitCheckout.to_string(),
                             "requires_git": true,
                             "write_scope": "artifacts",
                             "artifact_paths": [".homeboy/example"]

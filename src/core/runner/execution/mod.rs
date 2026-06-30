@@ -17,6 +17,7 @@ use crate::core::error::{Error, Result};
 use crate::core::runner_execution_envelope::{
     PathMaterializationEntry, PathMaterializationPlan, RunnerExecutionArtifactRef,
     RunnerExecutionNextAction, RunnerExecutionRecord,
+    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
 };
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -227,22 +228,9 @@ fn path_materialization_plan(
         if trimmed.is_empty() {
             return None;
         }
-        Some(PathMaterializationEntry {
-            role: "required_path".to_string(),
-            owner: "runner_exec.require_paths".to_string(),
-            local_path: None,
-            remote_path: trimmed.to_string(),
-            materialization_mode: "existing_remote".to_string(),
-            validation_status: "validated".to_string(),
-        })
+        Some(PathMaterializationEntry::required_existing_remote(trimmed))
     }));
-    if entries.is_empty() {
-        return None;
-    }
-    Some(PathMaterializationPlan {
-        schema: "homeboy/path-materialization-plan/v1".to_string(),
-        entries,
-    })
+    PathMaterializationPlan::non_empty(entries)
 }
 
 fn path_materialization_entry_from_snapshot(
@@ -252,14 +240,12 @@ fn path_materialization_entry_from_snapshot(
     if remote_path.is_empty() {
         return None;
     }
-    Some(PathMaterializationEntry {
-        role: "primary_workspace".to_string(),
-        owner: "runner_exec.source_snapshot".to_string(),
-        local_path: snapshot.local_path.clone(),
-        remote_path: remote_path.to_string(),
-        materialization_mode: snapshot.sync_mode.clone(),
-        validation_status: "materialized".to_string(),
-    })
+    Some(PathMaterializationEntry::primary_workspace_materialized(
+        PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
+        snapshot.local_path.clone(),
+        remote_path,
+        snapshot.sync_mode.clone(),
+    ))
 }
 
 fn job_artifact_refs(artifacts: &[JobArtifactMetadata]) -> Vec<RunnerExecutionArtifactRef> {

@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::core::runner_execution_envelope::PATH_MATERIALIZATION_MODE_EXISTING_REMOTE;
+#[cfg(test)]
+use crate::core::runner_execution_envelope::PATH_MATERIALIZATION_MODE_SNAPSHOT;
+
 use crate::core::git;
 
 const SOURCE_SYNC_EXCLUDES_ENV: &str = "HOMEBOY_SOURCE_SYNC_EXCLUDES";
@@ -142,7 +146,8 @@ impl SourceSnapshot {
         policy: &SourceSnapshotPolicy,
     ) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(b"existing_remote\0");
+        hasher.update(PATH_MATERIALIZATION_MODE_EXISTING_REMOTE.as_bytes());
+        hasher.update(b"\0");
         hasher.update(runner_id.as_bytes());
         hasher.update(b"\0");
         hasher.update(remote_path.as_bytes());
@@ -159,7 +164,7 @@ impl SourceSnapshot {
             git_branch: None,
             git_sha: None,
             dirty: false,
-            sync_mode: "existing_remote".to_string(),
+            sync_mode: PATH_MATERIALIZATION_MODE_EXISTING_REMOTE.to_string(),
             workspace_snapshot_identity: None,
             snapshot_hash: format!("sha256:{:x}", hasher.finalize()),
             synced_at: chrono::Utc::now().to_rfc3339(),
@@ -296,12 +301,12 @@ mod tests {
             "lab-local",
             source_path,
             Some("/srv/homeboy/repo"),
-            "snapshot",
+            PATH_MATERIALIZATION_MODE_SNAPSHOT,
         );
 
         assert_eq!(snapshot.runner_id, "lab-local");
         assert_eq!(snapshot.remote_path.as_deref(), Some("/srv/homeboy/repo"));
-        assert_eq!(snapshot.sync_mode, "snapshot");
+        assert_eq!(snapshot.sync_mode, PATH_MATERIALIZATION_MODE_SNAPSHOT);
         assert_eq!(
             snapshot.local_path.as_deref(),
             Some(source_path.to_str().unwrap())
@@ -330,7 +335,7 @@ mod tests {
             "lab-local",
             tempdir.path(),
             Some("/srv/homeboy/repo"),
-            "snapshot",
+            PATH_MATERIALIZATION_MODE_SNAPSHOT,
         );
 
         assert_eq!(
@@ -352,7 +357,10 @@ mod tests {
         assert_eq!(snapshot.runner_id, "lab");
         assert_eq!(snapshot.remote_path.as_deref(), Some("/srv/homeboy/repo"));
         assert_eq!(snapshot.workspace_root.as_deref(), Some("/srv/homeboy"));
-        assert_eq!(snapshot.sync_mode, "existing_remote");
+        assert_eq!(
+            snapshot.sync_mode,
+            PATH_MATERIALIZATION_MODE_EXISTING_REMOTE
+        );
         assert!(!snapshot.dirty);
         assert!(snapshot.snapshot_hash.starts_with("sha256:"));
         assert!(snapshot.sync_excludes.contains(&".git/".to_string()));
