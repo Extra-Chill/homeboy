@@ -4,7 +4,6 @@ use super::super::exec::{
     promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts, read_bounded,
     read_runner_exec_script, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
-use super::super::types::RUNNER_EXEC_SCRIPT_ENV;
 
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
 use homeboy::core::runners::{self as runner, RunnerExecMode, RunnerExecOutput};
@@ -110,12 +109,15 @@ fn read_runner_exec_script_rejects_oversized_script() {
 
 #[test]
 fn script_file_prepares_bash_stdin_command() {
-    let command = prepare_runner_exec_command(Some(&"echo hi".to_string()), Vec::new())
+    let command = prepare_runner_exec_command(Some(&"echo '$GREETING'".to_string()), Vec::new())
         .expect("script command");
 
     assert_eq!(command[0], "bash");
     assert_eq!(command[1], "-c");
-    assert!(command[2].contains(RUNNER_EXEC_SCRIPT_ENV));
+    assert!(command[2].contains("printf '%s'"));
+    assert!(command[2].contains("bash -s"));
+    assert!(!command[2].contains("HOMEBOY_RUNNER_EXEC_SCRIPT"));
+    assert!(command[2].contains("'echo '\\''$GREETING'\\'''"));
 }
 
 #[test]
@@ -137,7 +139,7 @@ fn env_parser_injects_script_body_without_shell_quoting() {
     .expect("env");
 
     assert_eq!(env["GREETING"], "hello world");
-    assert_eq!(env[RUNNER_EXEC_SCRIPT_ENV], "echo \"$GREETING\"");
+    assert!(!env.contains_key("HOMEBOY_RUNNER_EXEC_SCRIPT"));
 }
 
 #[test]

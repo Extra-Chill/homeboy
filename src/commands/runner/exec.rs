@@ -19,7 +19,6 @@ use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::{server, Error};
 
 use super::super::CmdResult;
-use super::types::RUNNER_EXEC_SCRIPT_ENV;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn exec(
@@ -82,11 +81,7 @@ pub(super) fn exec(
             allow_diagnostic_ssh,
             command: prepared_command,
             env,
-            secret_env_names: script_file
-                .is_some()
-                .then(|| RUNNER_EXEC_SCRIPT_ENV.to_string())
-                .into_iter()
-                .collect(),
+            secret_env_names: Vec::new(),
             capture_patch,
             raw_exec: true,
             source_snapshot,
@@ -295,7 +290,10 @@ pub(super) fn prepare_runner_exec_command(
         (true, true) => Ok(vec![
             "bash".to_string(),
             "-c".to_string(),
-            "printf '%s' \"$HOMEBOY_RUNNER_EXEC_SCRIPT\" | bash -s".to_string(),
+            format!(
+                "printf '%s' {} | bash -s",
+                shell::quote_arg(script.expect("script is present"))
+            ),
         ]),
         (false, false) => Ok(command),
     }
@@ -303,7 +301,7 @@ pub(super) fn prepare_runner_exec_command(
 
 pub(super) fn prepare_runner_exec_env(
     env: Vec<String>,
-    script: Option<&str>,
+    _script: Option<&str>,
 ) -> homeboy::core::Result<HashMap<String, String>> {
     let mut values = HashMap::new();
     for assignment in env {
@@ -324,9 +322,6 @@ pub(super) fn prepare_runner_exec_env(
             ));
         }
         values.insert(key.to_string(), value.to_string());
-    }
-    if let Some(script) = script {
-        values.insert(RUNNER_EXEC_SCRIPT_ENV.to_string(), script.to_string());
     }
     Ok(values)
 }
