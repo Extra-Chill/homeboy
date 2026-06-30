@@ -49,11 +49,13 @@ function exportRuntimeBin(workspace, env = process.env) {
 }
 
 function exportRuntimePath(workspace, env, existingEnvNames, relativePath, exportName) {
-  // Already provided by the caller/env — don't override an explicit value.
-  if (existingEnvNames.some((name) => env[name])) {
+  const resolvedPath = path.join(workspace, relativePath);
+  // A checked-out runtime build is the deterministic contract for this job. Keep
+  // an explicit value only when it already points inside the materialized
+  // workspace; stale runner-global env must not outrank the fresh checkout.
+  if (existingEnvNames.some((name) => envPathIsInsideWorkspace(env[name], workspace))) {
     return;
   }
-  const resolvedPath = path.join(workspace, relativePath);
   if (!fs.existsSync(resolvedPath)) {
     // Build did not produce the artifact; let the downstream check surface a
     // clear, accurate error rather than a wrong path.
@@ -63,6 +65,15 @@ function exportRuntimePath(workspace, env, existingEnvNames, relativePath, expor
   if (githubEnv) {
     fs.appendFileSync(githubEnv, `${exportName}=${resolvedPath}\n`);
   }
+}
+
+function envPathIsInsideWorkspace(value, workspace) {
+  if (!value) {
+    return false;
+  }
+  const resolvedValue = path.resolve(String(value));
+  const resolvedWorkspace = path.resolve(workspace);
+  return resolvedValue === resolvedWorkspace || resolvedValue.startsWith(`${resolvedWorkspace}${path.sep}`);
 }
 
 function requiresWordPressDependencies(env = process.env) {
@@ -84,6 +95,7 @@ function requiresWordPressDependencies(env = process.env) {
 }
 
 module.exports = {
+  envPathIsInsideWorkspace,
   requiresWordPressDependencies,
   setupRuntime,
 };

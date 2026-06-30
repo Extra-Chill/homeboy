@@ -1,11 +1,14 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider, runtimeIdFromOptions } = require('../lib/runtime-provider-resolver.cjs');
 const { runtimeAgentCiRunnerSpec } = require('..');
 const { runRuntimeSetup, runtimeSetupAdapter } = require('../../.github/scripts/runtime-agent-full-run/setup-runtime.cjs');
-const { requiresWordPressDependencies, setupRuntime } = require('../../agent-runtimes/wp-codebox/lib/runtime-setup.cjs');
+const { envPathIsInsideWorkspace, requiresWordPressDependencies, setupRuntime } = require('../../agent-runtimes/wp-codebox/lib/runtime-setup.cjs');
 
 assert.equal(DEFAULT_RUNTIME_ID, 'local-shell');
 
@@ -104,5 +107,50 @@ setupRuntime({
   },
 });
 assert.equal(installedCheckedOutDependencies, true);
+
+const runtimeWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-runtime-'));
+const githubEnvPath = path.join(runtimeWorkspace, 'github-env');
+const builtCliPath = path.join(runtimeWorkspace, '.ci/wp-codebox/packages/cli/dist/index.js');
+const builtContractsPath = path.join(runtimeWorkspace, '.ci/wp-codebox/packages/runtime-core/dist/contracts.js');
+fs.mkdirSync(path.dirname(builtCliPath), { recursive: true });
+fs.mkdirSync(path.dirname(builtContractsPath), { recursive: true });
+fs.writeFileSync(builtCliPath, '#!/usr/bin/env node\n');
+fs.writeFileSync(builtContractsPath, 'export {};\n');
+
+assert.equal(envPathIsInsideWorkspace(path.join(runtimeWorkspace, '.ci/wp-codebox/packages/cli/dist/index.js'), runtimeWorkspace), true);
+assert.equal(envPathIsInsideWorkspace('/home/chubes/Developer/wp-codebox@main-fuzz-proof-20260625/packages/cli/dist/index.js', runtimeWorkspace), false);
+
+setupRuntime({
+  phase: 'after_commands',
+  workspace: runtimeWorkspace,
+  env: {
+    GITHUB_ENV: githubEnvPath,
+    HOMEBOY_WP_CODEBOX_BIN: '/home/chubes/Developer/wp-codebox@main-fuzz-proof-20260625/packages/cli/dist/index.js',
+    HOMEBOY_WP_CODEBOX_CORE_MODULE: '/home/chubes/Developer/wp-codebox@main-fuzz-proof-20260625/packages/runtime-core/dist/index.js',
+  },
+  run: () => {},
+  installCheckedOutPhpDependencies: () => {},
+});
+const githubEnv = fs.readFileSync(githubEnvPath, 'utf8');
+assert.match(githubEnv, new RegExp(`HOMEBOY_WP_CODEBOX_BIN=${escapeRegExp(builtCliPath)}`));
+assert.match(githubEnv, new RegExp(`HOMEBOY_WP_CODEBOX_CORE_MODULE=${escapeRegExp(builtContractsPath)}`));
+
+fs.writeFileSync(githubEnvPath, '');
+setupRuntime({
+  phase: 'after_commands',
+  workspace: runtimeWorkspace,
+  env: {
+    GITHUB_ENV: githubEnvPath,
+    HOMEBOY_WP_CODEBOX_BIN: builtCliPath,
+    HOMEBOY_WP_CODEBOX_CORE_MODULE: builtContractsPath,
+  },
+  run: () => {},
+  installCheckedOutPhpDependencies: () => {},
+});
+assert.equal(fs.readFileSync(githubEnvPath, 'utf8'), '');
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 process.stdout.write('Runtime provider boundary passed\n');
