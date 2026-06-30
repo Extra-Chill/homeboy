@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.273.2] - 2026-06-30
+
+### Changed
+- Forward Lab rig checkout root env
+
 ## [0.273.1] - 2026-06-30
 
 ### Fixed
