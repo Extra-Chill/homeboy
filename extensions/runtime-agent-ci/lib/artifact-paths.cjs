@@ -1,20 +1,13 @@
 'use strict';
 
 const path = require('node:path');
-
-const ARTIFACT_PATHS_SCHEMA = 'homeboy/runtime-agent-artifact-paths/v1';
-const ARTIFACT_MANIFEST_SCHEMA = 'homeboy/artifact-manifest/v1';
-const ARTIFACT_MANIFEST_FILE = 'homeboy-artifact-manifest.json';
-const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = 'homeboy/runner-artifact-manifest-ref/v1';
-const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
-  events: 'events.json',
-  status: 'status.json',
-  results: 'results.json',
-  outcome: 'outcome.json',
-  fanout_run: 'fanout-run.json',
-  loop_result: 'loop-result.json',
-  loop_policy: 'loop-policy.json',
-});
+const {
+  ARTIFACT_MANIFEST_FILE,
+  ARTIFACT_MANIFEST_SCHEMA,
+  ARTIFACT_PATHS_SCHEMA,
+  CANONICAL_RUN_ARTIFACT_FILES,
+  RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+} = require('./runtime-contracts.cjs');
 
 function runtimeAgentArtifactPaths(options = {}) {
   const provided = options.artifact_paths && typeof options.artifact_paths === 'object' && !Array.isArray(options.artifact_paths) ? options.artifact_paths : {};

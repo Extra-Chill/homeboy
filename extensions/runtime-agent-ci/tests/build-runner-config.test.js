@@ -7,7 +7,9 @@ const path = require('node:path');
 
 const {
   buildConfig,
+  buildSecretEnvPlan,
   loopPolicyFromEnv,
+  SECRET_ENV_PLAN_SCHEMA,
 } = require('..');
 const { normalizeProviderPlugin } = require('../lib/full-run-inputs.cjs');
 
@@ -52,7 +54,7 @@ try {
 
   assert.equal(config.execution_kind, 'runtime_execution');
   assert.deepEqual(config.secret_env.slice(0, 2), ['GITHUB_TOKEN', 'HOMEBOY_GITHUB_APP_TOKEN']);
-  assert.equal(config.secret_env_plan.schema, 'homeboy/secret-env-plan/v1');
+  assert.equal(config.secret_env_plan.schema, SECRET_ENV_PLAN_SCHEMA);
   assert.deepEqual(config.secret_env_plan.inheritance, {
     require_declaration: true,
     allowed_env_names: ['HOMEBOY_AGENT_RUNTIME_SECRET_ENV'],
@@ -61,6 +63,29 @@ try {
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 }
+
+assert.deepEqual(
+  buildSecretEnvPlan({
+    secretEnv: ['PRIVATE_TOKEN'],
+    runtimeEnv: { PUBLIC_MODE: 'test', PRIVATE_MODE: false },
+    providerSecretEnvMapping: { token: 'PROVIDER_SECRET_1' },
+    secretEnvFallbacks: { PRIVATE_TOKEN: ['PROVIDER_SECRET_1'] },
+  }),
+  {
+    schema: SECRET_ENV_PLAN_SCHEMA,
+    public_env: { PUBLIC_MODE: 'test' },
+    secret_env_names: ['PRIVATE_TOKEN'],
+    requirements: [{ name: 'PRIVATE_TOKEN', required: true }],
+    env_name_mapping: {
+      provider_secret_env: ['PROVIDER_SECRET_1'],
+      secret_env_fallbacks: ['PROVIDER_SECRET_1'],
+    },
+    inheritance: {
+      require_declaration: true,
+      allowed_env_names: ['HOMEBOY_AGENT_RUNTIME_SECRET_ENV'],
+    },
+  }
+);
 
 assert.deepEqual(
   normalizeProviderPlugin('{"providerSecretEnv":{"token":"PROVIDER_TOKEN"}}', 'fixture', true).provider_secret_env,

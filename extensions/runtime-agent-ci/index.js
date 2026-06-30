@@ -17,4 +17,5 @@ Object.assign(module.exports, require('./lib/agent-task-outcome-normalizer'));
 Object.assign(module.exports, require('./lib/gate-plan-evaluator'));
 Object.assign(module.exports, require('./lib/loop-lifecycle.cjs'));
 Object.assign(module.exports, require('./lib/runtime-status.cjs'));
+Object.assign(module.exports, require('./lib/runtime-contracts.cjs'));
 Object.assign(module.exports, require('./lib/full-run-config.cjs'));

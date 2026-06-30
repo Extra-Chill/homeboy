@@ -27,6 +27,9 @@ const {
   providerFailureClassification,
 } = require('../../../runtime-agent-ci/lib/agent-task-outcome-normalizer');
 const {
+  SECRET_ENV_PLAN_SCHEMA,
+} = require('../../../runtime-agent-ci/lib/runtime-contracts.cjs');
+const {
   artifactResultEnvelopeFromCodeboxResult,
   artifactNameFromDeclaration,
   normalizeCodeboxArtifactDeclaration,
@@ -1777,7 +1780,7 @@ function homeboyAgentTaskSecretEnvPlan() {
 }
 
 function secretEnvNamesFromPlan(plan) {
-  if (!plan || plan.schema !== 'homeboy/secret-env-plan/v1') {
+  if (!plan || plan.schema !== SECRET_ENV_PLAN_SCHEMA) {
     return [];
   }
   // Mirror core's authoritative SecretEnvPlan::secret_env_names() aggregation

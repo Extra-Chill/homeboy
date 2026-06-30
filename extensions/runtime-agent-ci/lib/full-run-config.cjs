@@ -20,6 +20,10 @@ const {
 const {
   renderRuntimeWorkflowInputs,
 } = require('./runtime-workflow-inputs.cjs');
+const {
+  buildSecretEnvFallbacks,
+  buildSecretEnvPlan,
+} = require('./runtime-contracts.cjs');
 
 function main() {
   const config = buildConfig(process.env);
@@ -302,54 +306,6 @@ function uniqueStrings(values) {
   return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.length > 0))).sort();
 }
 
-// Build the declarative secret-env fallback map consumed by the run step. Each
-// entry maps a target secret env name to an ordered list of source env names;
-// the run step sets target = first non-empty source when target is unset. This
-// keeps the translation generic (driven by the runtime manifest + caller
-// credential mapping) with no per-consumer or per-provider hardcoding.
-function buildSecretEnvFallbacks({
-  githubTokenEnv,
-  githubRepositoryTokenEnv,
-  providerCanonicalSecretEnvNames = [],
-  providerCredentialSourceEnvNames = [],
-} = {}) {
-  const fallbacks = {};
-  // The Homeboy app token falls back to the repository GITHUB_TOKEN for
-  // consumers that run with require_homeboy_app_token=false and no app creds.
-  if (githubTokenEnv && githubRepositoryTokenEnv && githubTokenEnv !== githubRepositoryTokenEnv) {
-    fallbacks[githubTokenEnv] = [githubRepositoryTokenEnv];
-  }
-  // When the caller maps provider credentials to generic secret env names, the
-  // provider plugin still reads the runtime's canonical name (e.g.
-  // OPENAI_API_KEY), so source the canonical name from the mapped secret.
-  if (providerCredentialSourceEnvNames.length > 0) {
-    for (const canonical of providerCanonicalSecretEnvNames) {
-      const sources = providerCredentialSourceEnvNames.filter((name) => name !== canonical);
-      if (sources.length > 0) {
-        fallbacks[canonical] = uniqueStrings([...(fallbacks[canonical] || []), ...sources]);
-      }
-    }
-  }
-  return fallbacks;
-}
-
-function buildSecretEnvPlan({ secretEnv = [], runtimeEnv = {}, providerSecretEnvMapping = {}, secretEnvFallbacks = {} } = {}) {
-  return {
-    schema: 'homeboy/secret-env-plan/v1',
-    public_env: Object.fromEntries(Object.entries(runtimeEnv).filter(([, value]) => typeof value === 'string')),
-    secret_env_names: uniqueStrings(secretEnv),
-    requirements: uniqueStrings(secretEnv).map((name) => ({ name, required: true })),
-    env_name_mapping: Object.fromEntries(Object.entries({
-      provider_secret_env: Object.values(providerSecretEnvMapping).filter((value) => typeof value === 'string' && value.length > 0),
-      secret_env_fallbacks: Object.values(secretEnvFallbacks).flat().filter((value) => typeof value === 'string' && value.length > 0),
-    }).filter(([, names]) => names.length > 0)),
-    inheritance: {
-      require_declaration: true,
-      allowed_env_names: ['HOMEBOY_AGENT_RUNTIME_SECRET_ENV'],
-    },
-  };
-}
-
 function runtimeWorkloadFromEnv(env, fallbackId) {
   const workload = parseJsonInput('workload', env.WORKLOAD || '{}', 'object', {});
   return Object.keys(workload).length > 0 ? workload : { id: fallbackId };
@@ -529,4 +485,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, buildSecretEnvFallbacks, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys };
+module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys };

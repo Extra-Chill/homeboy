@@ -21,6 +21,7 @@
     "./full-run-inputs": "./lib/full-run-inputs.cjs",
     "./runtime-status": "./lib/runtime-status.cjs",
     "./artifact-paths": "./lib/artifact-paths.cjs",
+    "./runtime-contracts": "./lib/runtime-contracts.cjs",
     "./loop-lifecycle": "./lib/loop-lifecycle.cjs",
     "./workspace-publication-lifecycle": "./lib/workspace-publication-lifecycle.cjs"
   },
