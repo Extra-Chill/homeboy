@@ -92,6 +92,11 @@ jobs:
 
 Removed domain-specific wrappers should migrate to `runtime-agent-full-run.yml`
 directly and provide their runtime stack as explicit generic inputs.
+WordPress runner-workspace publication wrappers have also been removed; callers
+that need host-runner publication should invoke
+`.github/scripts/runtime-agent-full-run/run-host-runner-lifecycle.cjs` or
+`.github/scripts/runtime-agent-full-run/update-runner-workspace-pr.cjs` through
+the reusable workflow instead of `wordpress/scripts/agent/*` paths.
 
 Use this mapping when updating old wrapper workflow bodies:
 

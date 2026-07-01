@@ -667,7 +667,8 @@ Audit fanout has two boundaries. Generic extraction and reconcile mechanics live
 in `../runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js` and
 `../runtime-agent-ci/lib/fanout-reconcile-runner.js`; use
 `../runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs` for JSON-file
-planning/reconcile workflows. The generic
+planning/reconcile workflows. The old WordPress package re-export paths were
+removed; import the `runtime-agent-ci` modules or package exports directly. The generic
 runtime provider interface lives in `lib/audit-fanout-runtime-provider.js` and is
 exported from the WordPress package. Runtime providers own execution: they map
 generic grouped work into their provider task contract, run the task, and

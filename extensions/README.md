@@ -22,9 +22,9 @@ helper contract.
 Generic runtime fanout/reconcile planning and runner primitives live in
 `runtime-agent-ci/lib/` and are documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
-Use `runAgentTaskToReview()` from `runtime-agent-ci` when a caller needs the
-standard single-task path: injectable runtime execution, workspace verification,
-dry-run or PR publication evidence, and one final green/red proof envelope.
+Use `.github/workflows/runtime-agent-full-run.yml` for the standard single-task
+path: injectable runtime execution, workspace verification, dry-run or PR
+publication evidence, and one final green/red proof envelope.
 
 Integration-specific examples live under [`docs/integrations/`](docs/integrations/)
 when a reusable integration needs documentation outside its owning project.
@@ -173,14 +173,13 @@ checked-in runtime registry. It emits durable JSON loop results, ordered events,
 and the existing outcome/results files consumed by workflow adapters.
 
 The public `runtime-agent-ci` binaries are the package `bin` entries. Legacy
-agent-loop, artifact-fanout, and agent-task-to-review wrapper commands were
-removed after Homeboy gained the canonical loop, artifact, fanout, and review
-publication primitives.
-
-The remaining WordPress fanout/review publication compatibility wrappers stay in
-place because repository workflow and smoke-test callsites still invoke them.
-Remove those wrappers after the callers migrate to Homeboy-owned workflow
-commands directly.
+agent-loop, artifact-fanout, agent-task-to-review, and WordPress compatibility
+wrapper commands were removed after active callsites migrated to the canonical
+loop, fanout, and review publication primitives. Use
+`homeboy-runtime-agent-ci/generic-fanout-reconcile-workflow`,
+`homeboy-runtime-agent-ci/fanout-reconcile-runner`,
+`runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs`, and the
+`.github/scripts/runtime-agent-full-run/*` workflow helpers directly.
 
 WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,
