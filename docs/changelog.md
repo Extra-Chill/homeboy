@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.276.0] - 2026-07-01
+
+### Added
+- scope rig bench checks by scenario
+- register artifact postprocess contract
+
+### Changed
+- cover rig check lab path offload
+
+### Fixed
+- prepare rig dependencies before bench checks
+- clarify rig up lab remediation
+- stage codebox fuzz workload files
+- keep cook agents out of git finalization
+- keep agent-task finalization on controller
+
 ## [0.275.0] - 2026-06-30
 
 ### Added
