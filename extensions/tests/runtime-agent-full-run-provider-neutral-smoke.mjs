@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { dependencyEntries, resolvePlan } = require(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/materialize-dependencies.cjs'));
-const { buildConfig, buildSecretEnvFallbacks, providerBenchEnvFromManifest } = require(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/build-runner-config.cjs'));
+const { buildConfig, buildSecretEnvFallbacks, providerBenchEnvFromManifest, workflowInputCompatibility } = require(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/build-runner-config.cjs'));
 const { normalizeProviderPlugin } = require(path.join(repoRoot, '.github/scripts/runtime-agent-full-run/lib/common.cjs'));
 const { resolveRuntimeProvider } = require(path.join(repoRoot, 'runtime-agent-ci/lib/runtime-provider-resolver.cjs'));
 
@@ -24,6 +24,17 @@ const baseEnv = {
 assert.deepEqual(dependencyEntries(baseEnv), []);
 assert.deepEqual(resolvePlan(dependencyEntries(baseEnv), true), []);
 assert.deepEqual(normalizeProviderPlugin('{}', 'openai', true).provider_secret_env, {});
+assert.deepEqual(workflowInputCompatibility({ RUNTIME_PROVIDER: 'wp-codebox', RUNTIME_PROFILE: 'legacy-profile', TOOL_POLICY: '{"tools":{}}' }), {
+  runtimeId: 'wp-codebox',
+  runtime: 'wp-codebox',
+  profile: 'legacy-profile',
+  toolProfile: '{"tools":{}}',
+  deprecated_aliases: [
+    { input: 'runtime_provider', canonical_input: 'runtime' },
+    { input: 'runtime_profile', canonical_input: 'profile' },
+    { input: 'tool_policy', canonical_input: 'tool_profile' },
+  ],
+});
 
 const explicitProviderPlugin = {
   repo: 'WordPress/ai-provider-for-openai',

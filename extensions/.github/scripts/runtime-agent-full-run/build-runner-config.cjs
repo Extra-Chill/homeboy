@@ -12,6 +12,7 @@ const {
   providerBenchEnvFromManifest,
   runtimePathRequired,
   withoutInternalKeys,
+  workflowInputCompatibility,
 } = require('../../../runtime-agent-ci');
 const { writeGithubOutput } = require('../../../runtime-agent-ci/lib/full-run-inputs.cjs');
 
@@ -31,4 +32,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired };
+module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, workflowInputCompatibility };

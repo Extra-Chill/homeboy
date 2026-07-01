@@ -13,7 +13,7 @@ const RUNTIME_WORKFLOW_INPUTS_SCHEMA = 'homeboy/runtime-workflow-inputs/v1';
 function renderRuntimeWorkflowInputs(options = {}) {
 	const runtimeInput = options.runtime_id || options.runtime?.id || options.runtime;
 	const runtimeId = normalizeRuntimeId(runtimeInput);
-	const runtime = options.runtime || resolveRuntimeProvider(runtimeId, options);
+	const runtime = runtimeFromOptions(runtimeId, options);
 	const workloadProfile = namedProfile(options.workloadProfile || options.workload_profile, workloadProfiles(runtime));
 	const profileSelection = normalizeRuntimeProfileSelection(options.runtime_profile || workloadProfile.runtime_profile);
 	const runtimeProfiles = plainObject(options.runtime_profiles);
@@ -43,6 +43,19 @@ function renderRuntimeWorkflowInputs(options = {}) {
 		workload_profile: workloadProfile.id,
 		workflow_inputs: stripUndefined(rendered.workflow_inputs || {}),
 	});
+}
+
+function runtimeFromOptions(runtimeId, options = {}) {
+	if (isPlainObject(options.runtime)) {
+		return options.runtime;
+	}
+	if (isPlainObject(options.runtimeProviderConfig)) {
+		return options.runtimeProviderConfig;
+	}
+	if (isPlainObject(options.runtime_provider_config)) {
+		return options.runtime_provider_config;
+	}
+	return resolveRuntimeProvider(runtimeId, options);
 }
 
 function runtimeWorkflowInputAdapter(runtime, options = {}) {
