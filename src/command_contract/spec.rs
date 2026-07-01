@@ -75,6 +75,7 @@ pub(crate) const REFACTOR_LAB_LABEL: &str = "refactor";
 pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
 pub(crate) const RIG_RUN_LAB_LABEL: &str = "rig run";
 pub(crate) const RUNTIME_REFRESH_LAB_LABEL: &str = "runtime refresh";
+pub(crate) const WORKTREE_CLEANUP_LAB_LABEL: &str = "worktree cleanup";
 pub(crate) const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
 pub(crate) const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
 pub(crate) const TUNNEL_SERVICE_START_LAB_LABEL: &str = "tunnel service start";
@@ -311,6 +312,12 @@ const RUNTIME_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSumm
     hint_label: RUNTIME_REFRESH_LAB_LABEL,
 }];
 
+const WORKTREE_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
+    contract_labels: &[WORKTREE_CLEANUP_LAB_LABEL],
+    message_label: WORKTREE_CLEANUP_LAB_LABEL,
+    hint_label: "worktree cleanup --runner <runner-id>",
+}];
+
 const TUNNEL_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     CommandLabSupportSummary {
         contract_labels: &[TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL],
@@ -527,7 +534,12 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "Lab runner routing covers runtime package refresh workflows",
         RUNTIME_LAB_SUPPORT,
     ),
-    command_spec("worktree", CommandJsonFamily::Workspace),
+    lab_command_spec_with_summary(
+        "worktree",
+        CommandJsonFamily::Workspace,
+        "Lab runner routing covers runner-resident task worktree cleanup",
+        WORKTREE_LAB_SUPPORT,
+    ),
     lab_command_spec_with_summary(
         "tunnel",
         CommandJsonFamily::Workspace,

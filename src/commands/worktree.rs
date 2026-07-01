@@ -10,12 +10,25 @@ use homeboy::core::worktree::{
     WorktreeQueueCreateOutput, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 
+use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
+
 use super::CmdResult;
 
 #[derive(Args)]
 pub struct WorktreeArgs {
     #[command(subcommand)]
     command: WorktreeCommand,
+}
+
+impl WorktreeArgs {
+    pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
+        match self.command {
+            WorktreeCommand::Cleanup { .. } => Some(LabCommandContract::runner_resident(
+                WORKTREE_CLEANUP_LAB_LABEL,
+            )),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Subcommand)]
