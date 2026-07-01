@@ -28,6 +28,7 @@ pub struct AgentTaskCookServiceOptions {
     pub cook_id: String,
     pub initial_run_id: String,
     pub to_worktree: String,
+    pub source_worktree_path: Option<PathBuf>,
     pub provider_command: Option<String>,
     /// Shared deterministic verification gate fields, factored out of the
     /// per-field duplication that previously spanned the loop/promote types.
@@ -266,6 +267,23 @@ where
     ))
 }
 
+pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> Option<PathBuf> {
+    cwd.or_else(|| {
+        workspace.and_then(|workspace| {
+            let path = PathBuf::from(&workspace);
+            path.exists().then_some(workspace)
+        })
+    })
+    .map(PathBuf::from)
+}
+
+pub fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
+    let start = ai_tool.find('(')?;
+    let end = ai_tool[start + 1..].find(')')? + start + 1;
+    let model = ai_tool[start + 1..end].trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
 pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
     if spec != "-" {
         let path = PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));
@@ -302,6 +320,8 @@ fn promote_attempt(
         source,
         source_run_id: Some(run_id.to_string()),
         source_path,
+        source_worktree_path: options.source_worktree_path.clone(),
+        base_ref: Some(options.base.clone()),
         to_worktree: options.to_worktree.clone(),
         task_id: None,
         artifact_id: None,

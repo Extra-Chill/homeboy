@@ -8,16 +8,12 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
 
 use homeboy::core::agent_task_service as agent_task_service_direct;
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
-use homeboy::core::observation::ObservationStore;
-use homeboy::core::redaction::{self, RedactionPolicy};
 
 use super::super::CmdResult;
 use super::args::{CancelArgs, DiagnoseArgs, EvidenceArgs, ReplayProviderBoundaryArgs, StatusArgs};
@@ -26,7 +22,6 @@ use super::args::{CancelArgs, DiagnoseArgs, EvidenceArgs, ReplayProviderBoundary
 /// aggregate cannot flood recovery output. Overflow is reported as an
 /// `omitted` count rather than dropped silently.
 const COMPACT_REF_LIMIT: usize = 12;
-const EVIDENCE_TEXT_LIMIT: usize = 16 * 1024;
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     if args.bridge {
@@ -40,7 +35,9 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     let record = match agent_task_service::status(&args.run_id) {
         Ok(record) => record,
         Err(error) if is_missing_agent_task_run_metadata_error(&error) => {
-            if let Some(remediation) = offloaded_status_remediation(&args.run_id)? {
+            if let Some(remediation) =
+                agent_task_service::offloaded_status_remediation(&args.run_id)?
+            {
                 return Ok((remediation, 1));
             }
             return Err(error);
@@ -59,72 +56,6 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
 fn is_missing_agent_task_run_metadata_error(error: &homeboy::core::Error) -> bool {
     error.code == homeboy::core::ErrorCode::InternalJsonError
         && error.message.contains("is missing agent_task_run metadata")
-}
-
-fn offloaded_status_remediation(run_id: &str) -> homeboy::core::Result<Option<Value>> {
-    let Some(run) = ObservationStore::open_initialized()?.get_run(run_id)? else {
-        return Ok(None);
-    };
-    let Some(runner_id) = metadata_string(
-        &run.metadata_json,
-        &[&["runner_id"], &["identity", "runner_id"]],
-    )
-    .filter(|runner_id| !runner_id.trim().is_empty()) else {
-        return Ok(None);
-    };
-    let runner_job_id = metadata_string(
-        &run.metadata_json,
-        &[
-            &["runner_job_id"],
-            &["job_id"],
-            &["identity", "runner_job_id"],
-        ],
-    );
-
-    Ok(Some(runner_status_remediation(
-        run_id,
-        &runner_id,
-        runner_job_id.as_deref(),
-    )))
-}
-
-fn runner_status_remediation(run_id: &str, runner_id: &str, runner_job_id: Option<&str>) -> Value {
-    let command_prefix = format!("homeboy --runner {runner_id} agent-task");
-    let mut commands = vec![
-        format!("{command_prefix} status {run_id}"),
-        format!("{command_prefix} logs {run_id} --full"),
-        format!("{command_prefix} artifacts {run_id}"),
-    ];
-    if let Some(job_id) = runner_job_id.filter(|job_id| !job_id.trim().is_empty()) {
-        commands.push(format!(
-            "homeboy runner job logs {runner_id} {job_id} --full"
-        ));
-    }
-
-    json!({
-        "schema": "homeboy/agent-task-status-remediation/v1",
-        "status": "runner_status_required",
-        "run_id": run_id,
-        "runner_id": runner_id,
-        "runner_job_id": runner_job_id,
-        "message": "Local observation metadata does not contain an agent-task run record; query the runner that owns this durable run.",
-        "commands": commands,
-        "remediation": {
-            "status": format!("{command_prefix} status {run_id}"),
-            "logs": format!("{command_prefix} logs {run_id} --full"),
-            "artifacts": format!("{command_prefix} artifacts {run_id}"),
-        },
-    })
-}
-
-fn metadata_string(metadata: &Value, paths: &[&[&str]]) -> Option<String> {
-    paths.iter().find_map(|path| {
-        let mut current = metadata;
-        for segment in *path {
-            current = current.get(*segment)?;
-        }
-        current.as_str().map(str::to_string)
-    })
 }
 
 pub(super) fn list_runs(
@@ -250,7 +181,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
             continue;
         }
 
-        hydrated.push(hydrate_evidence_ref(
+        hydrated.push(agent_task_service::hydrate_evidence_ref(
             &args.run_id,
             &evidence_ref,
             task_id.as_deref(),
@@ -285,7 +216,9 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     if let Some(aggregate) = aggregate.as_ref() {
         for outcome in &aggregate.outcomes {
             for evidence in &outcome.evidence_refs {
-                if let Some(summary) = hydrate_evidence_summary(&outcome.task_id, evidence) {
+                if let Some(summary) =
+                    agent_task_service::hydrate_evidence_summary(&outcome.task_id, evidence)
+                {
                     collect_nested_diagnostics(
                         &outcome.task_id,
                         summary.get("summary").unwrap_or(&Value::Null),
@@ -366,7 +299,7 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
         ));
     };
 
-    let hydrated = hydrate_evidence_ref(
+    let hydrated = agent_task_service::hydrate_evidence_ref(
         &args.run_id,
         &evidence_ref,
         task_id.as_deref(),
@@ -390,7 +323,7 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
         },
         "normalized_provider_boundary": boundary,
     });
-    let evidence_uri = persist_provider_boundary_replay_evidence(&report);
+    let evidence_uri = agent_task_service::persist_provider_boundary_replay_evidence(&report);
     let report = match evidence_uri {
         Some(uri) => {
             let mut report = report;
@@ -414,7 +347,9 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
     Ok((value, 0))
 }
 
-fn hydrated_executor_input_value(result: &HydratedEvidence) -> homeboy::core::Result<Value> {
+fn hydrated_executor_input_value(
+    result: &agent_task_service::AgentTaskHydratedEvidence,
+) -> homeboy::core::Result<Value> {
     if result.status != "ok" {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "executor-input evidence",
@@ -470,49 +405,13 @@ fn provider_boundary_projection(input: &Value) -> Value {
     })
 }
 
-fn persist_provider_boundary_replay_evidence(report: &Value) -> Option<String> {
-    let run_id = report.get("run_id")?.as_str().unwrap_or("unknown-run");
-    let task_id = report
-        .get("task_id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown-task");
-    let dir = std::env::temp_dir()
-        .join("homeboy-agent-task-evidence")
-        .join(sanitize_evidence_path_part(run_id));
-    fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!(
-        "provider-boundary-replay-{}.json",
-        sanitize_evidence_path_part(task_id)
-    ));
-    fs::write(&path, serde_json::to_vec_pretty(report).ok()?).ok()?;
-    Some(format!("file://{}", path.display()))
-}
-
-fn sanitize_evidence_path_part(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "unknown".to_string()
-    } else {
-        sanitized
-    }
-}
-
 #[derive(Serialize)]
 struct AgentTaskEvidenceReport {
     schema: &'static str,
     run_id: String,
     filters: AgentTaskEvidenceFilters,
     count: usize,
-    evidence: Vec<HydratedEvidence>,
+    evidence: Vec<agent_task_service::AgentTaskHydratedEvidence>,
 }
 
 #[derive(Serialize)]
@@ -520,285 +419,6 @@ struct AgentTaskEvidenceFilters {
     kind: Option<String>,
     task: Option<String>,
     failure_only: bool,
-}
-
-#[derive(Serialize)]
-struct HydratedEvidence {
-    kind: String,
-    label: Option<String>,
-    task_id: Option<String>,
-    uri: String,
-    source: String,
-    status: String,
-    truncated: bool,
-    bytes_read: Option<usize>,
-    omitted_bytes: Option<u64>,
-    content: Value,
-    error: Option<String>,
-}
-
-fn hydrate_evidence_ref(
-    run_id: &str,
-    evidence_ref: &AgentTaskEvidenceRef,
-    task_id: Option<&str>,
-    plan: Option<&AgentTaskPlan>,
-    aggregate: Option<&AgentTaskAggregate>,
-) -> HydratedEvidence {
-    let hydrated = if evidence_ref.uri.starts_with("homeboy://agent-task/") {
-        hydrate_homeboy_evidence_ref(run_id, &evidence_ref.uri, task_id, plan, aggregate)
-    } else if evidence_ref.uri.starts_with("file://") {
-        hydrate_file_evidence_ref(&evidence_ref.uri)
-    } else if let Some(path) = local_evidence_path(&evidence_ref.uri) {
-        hydrate_local_path_evidence_ref(&path)
-    } else {
-        Ok(HydratedContent {
-            source: "unsupported".to_string(),
-            truncated: false,
-            bytes_read: None,
-            omitted_bytes: None,
-            content: json!({
-                "summary": "Evidence ref is recorded but this URI scheme is not hydratable by agent-task evidence yet.",
-                "unsupported_ref": evidence_ref.uri,
-                "supported_refs": ["homeboy://agent-task/run/<run-id>/<section>", "file://<absolute-path>", "local filesystem path"],
-                "next_action": "Use a file:// URI or local path for evidence stored on this machine; otherwise inspect the producing provider or artifact store for this ref.",
-            }),
-        })
-    };
-
-    match hydrated {
-        Ok(content) => HydratedEvidence {
-            kind: evidence_ref.kind.clone(),
-            label: evidence_ref.label.clone(),
-            task_id: task_id.map(str::to_string),
-            uri: evidence_ref.uri.clone(),
-            source: content.source,
-            status: "ok".to_string(),
-            truncated: content.truncated,
-            bytes_read: content.bytes_read,
-            omitted_bytes: content.omitted_bytes,
-            content: redaction::redact_json(&content.content),
-            error: None,
-        },
-        Err(error) => HydratedEvidence {
-            kind: evidence_ref.kind.clone(),
-            label: evidence_ref.label.clone(),
-            task_id: task_id.map(str::to_string),
-            uri: evidence_ref.uri.clone(),
-            source: "error".to_string(),
-            status: "error".to_string(),
-            truncated: false,
-            bytes_read: None,
-            omitted_bytes: None,
-            content: Value::Null,
-            error: Some(redaction::redact_string(&error.message)),
-        },
-    }
-}
-
-struct HydratedContent {
-    source: String,
-    truncated: bool,
-    bytes_read: Option<usize>,
-    omitted_bytes: Option<u64>,
-    content: Value,
-}
-
-fn hydrate_homeboy_evidence_ref(
-    run_id: &str,
-    uri: &str,
-    task_id: Option<&str>,
-    plan: Option<&AgentTaskPlan>,
-    aggregate: Option<&AgentTaskAggregate>,
-) -> homeboy::core::Result<HydratedContent> {
-    let parsed = parse_agent_task_homeboy_uri(uri)?;
-    if parsed.run_id != run_id {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "evidence_ref",
-            format!(
-                "evidence ref points at run {} but command is hydrating run {run_id}",
-                parsed.run_id
-            ),
-            Some(uri.to_string()),
-            None,
-        ));
-    }
-
-    let content = match parsed.section.as_str() {
-        "plan" => match (plan, task_id.or(parsed.task.as_deref())) {
-            (Some(plan), Some(task_id)) => plan
-                .tasks
-                .iter()
-                .find(|task| task.task_id == task_id)
-                .map(|task| json!(task))
-                .unwrap_or_else(|| json!({ "missing_task": task_id })),
-            (Some(plan), None) => json!(plan),
-            (None, _) => json!({ "summary": "plan is not available for this run" }),
-        },
-        "aggregate" => match (aggregate, parsed.outcome.as_deref().or(task_id)) {
-            (Some(aggregate), Some(task_id)) => aggregate
-                .outcomes
-                .iter()
-                .find(|outcome| outcome.task_id == task_id)
-                .map(|outcome| json!(outcome))
-                .unwrap_or_else(|| json!({ "missing_outcome": task_id })),
-            (Some(aggregate), None) => json!(aggregate),
-            (None, _) => json!({ "summary": "aggregate is not available for this run" }),
-        },
-        "artifacts" => match (aggregate, task_id.or(parsed.task.as_deref())) {
-            (Some(aggregate), Some(task_id)) => aggregate
-                .outcomes
-                .iter()
-                .find(|outcome| outcome.task_id == task_id)
-                .map(|outcome| {
-                    json!({
-                        "task_id": outcome.task_id,
-                        "status": outcome.status,
-                        "summary": outcome.summary,
-                        "artifacts": outcome.artifacts,
-                        "typed_artifacts": outcome.typed_artifacts,
-                        "evidence_refs": outcome.evidence_refs,
-                        "diagnostics": outcome.diagnostics,
-                    })
-                })
-                .unwrap_or_else(|| json!({ "missing_outcome": task_id })),
-            _ => json!({ "summary": "outcome artifacts are not available for this run" }),
-        },
-        "logs" => serde_json::to_value(agent_task_service::logs(run_id)?)
-            .unwrap_or_else(|_| json!({ "summary": "logs could not be serialized" })),
-        "status" => serde_json::to_value(agent_task_service::status(run_id)?)
-            .unwrap_or_else(|_| json!({ "summary": "status could not be serialized" })),
-        section => json!({
-            "summary": format!("homeboy agent-task evidence does not hydrate section '{section}' yet"),
-        }),
-    };
-
-    Ok(HydratedContent {
-        source: "homeboy".to_string(),
-        truncated: false,
-        bytes_read: None,
-        omitted_bytes: None,
-        content,
-    })
-}
-
-fn hydrate_file_evidence_ref(uri: &str) -> homeboy::core::Result<HydratedContent> {
-    let path = file_uri_path(uri)?;
-    hydrate_local_path_evidence_ref(&path)
-}
-
-fn hydrate_local_path_evidence_ref(path: &Path) -> homeboy::core::Result<HydratedContent> {
-    let metadata = fs::metadata(&path)
-        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
-    if !metadata.is_file() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "evidence_ref",
-            "file evidence ref does not point at a regular file",
-            None,
-            None,
-        ));
-    }
-
-    let bytes = fs::read(&path)
-        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
-    let truncated = bytes.len() > EVIDENCE_TEXT_LIMIT;
-    let visible = &bytes[..bytes.len().min(EVIDENCE_TEXT_LIMIT)];
-    let text = String::from_utf8_lossy(visible);
-    let redacted_text = redaction::redact_string(&text);
-    let content = serde_json::from_str::<Value>(&redacted_text)
-        .map(|value| json!({ "format": "json", "value": value }))
-        .unwrap_or_else(|_| json!({ "format": "text", "text": redacted_text }));
-
-    Ok(HydratedContent {
-        source: "file".to_string(),
-        truncated,
-        bytes_read: Some(visible.len()),
-        omitted_bytes: truncated.then_some(bytes.len().saturating_sub(EVIDENCE_TEXT_LIMIT) as u64),
-        content,
-    })
-}
-
-fn local_evidence_path(uri: &str) -> Option<PathBuf> {
-    if uri.contains("://") || uri.contains('\0') || uri.trim().is_empty() {
-        return None;
-    }
-    let path = Path::new(uri);
-    if path.is_absolute() || path.exists() {
-        Some(path.to_path_buf())
-    } else {
-        None
-    }
-}
-
-fn file_uri_path(uri: &str) -> homeboy::core::Result<PathBuf> {
-    let raw = uri.strip_prefix("file://").ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "evidence_ref",
-            "file evidence ref must start with file://",
-            Some(uri.to_string()),
-            None,
-        )
-    })?;
-    if raw.is_empty() || raw.contains('\0') {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "evidence_ref",
-            "file evidence ref path is empty or invalid",
-            Some(uri.to_string()),
-            None,
-        ));
-    }
-    Ok(Path::new(raw).to_path_buf())
-}
-
-struct ParsedAgentTaskUri {
-    run_id: String,
-    section: String,
-    task: Option<String>,
-    outcome: Option<String>,
-}
-
-fn parse_agent_task_homeboy_uri(uri: &str) -> homeboy::core::Result<ParsedAgentTaskUri> {
-    let rest = uri
-        .strip_prefix("homeboy://agent-task/run/")
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "evidence_ref",
-                "unsupported homeboy agent-task evidence ref",
-                Some(uri.to_string()),
-                None,
-            )
-        })?;
-    let (path, fragment) = rest.split_once('#').unwrap_or((rest, ""));
-    let mut parts = path.split('/');
-    let run_id = parts.next().unwrap_or_default();
-    let section = parts.next().unwrap_or_default();
-    if run_id.is_empty() || section.is_empty() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "evidence_ref",
-            "homeboy agent-task evidence ref must include run id and section",
-            Some(uri.to_string()),
-            None,
-        ));
-    }
-
-    Ok(ParsedAgentTaskUri {
-        run_id: run_id.to_string(),
-        section: section.to_string(),
-        task: fragment_value(fragment, "task"),
-        outcome: fragment_value(fragment, "outcome"),
-    })
-}
-
-fn fragment_value(fragment: &str, key: &str) -> Option<String> {
-    fragment.split('&').find_map(|part| {
-        let (candidate, value) = part.split_once('=')?;
-        (candidate == key && !value.trim().is_empty()).then(|| value.to_string())
-    })
-}
-
-fn evidence_ref_task_id(evidence_ref: &AgentTaskEvidenceRef) -> Option<String> {
-    parse_agent_task_homeboy_uri(&evidence_ref.uri)
-        .ok()
-        .and_then(|parsed| parsed.task.or(parsed.outcome))
 }
 
 fn failed_task_statuses(
@@ -846,7 +466,10 @@ fn evidence_refs_with_tasks(
     }
     for evidence_ref in refs {
         if seen.insert((evidence_ref.kind.clone(), evidence_ref.uri.clone())) {
-            entries.push((evidence_ref.clone(), evidence_ref_task_id(evidence_ref)));
+            entries.push((
+                evidence_ref.clone(),
+                agent_task_service::evidence_ref_task_id(evidence_ref),
+            ));
         }
     }
     entries
@@ -1403,118 +1026,6 @@ fn evidence_is_test(kind: &str, uri: &str) -> bool {
         || uri.contains("transcript")
 }
 
-fn hydrate_evidence_summary(
-    task_id: &str,
-    evidence: &homeboy::core::agent_tasks::AgentTaskEvidenceRef,
-) -> Option<Value> {
-    let path = evidence.uri.strip_prefix("file://")?;
-    if !path.ends_with(".json") {
-        return None;
-    }
-    let raw = std::fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&raw).ok()?;
-    let redacted = RedactionPolicy::default().redact_json(&value);
-    Some(json!({
-        "task_id": task_id,
-        "kind": evidence.kind,
-        "label": evidence.label,
-        "uri": evidence.uri,
-        "summary": evidence_json_summary(&redacted),
-    }))
-}
-
-fn evidence_json_summary(value: &Value) -> Value {
-    json!({
-        "status": find_string_field(value, &["status", "state"]),
-        "failure_classification": find_string_field(value, &["failure_classification", "failure_class", "classification", "class", "code", "kind"]),
-        "message": find_string_field(value, &["message", "summary", "error", "detail", "reason"]),
-        "command": find_string_field(value, &["command", "cmd", "failing_command"]),
-        "exit_code": find_number_field(value, &["exit_code", "exit_status", "status_code"]),
-        "stderr_excerpt": find_string_field(value, &["stderr", "stderr_excerpt"]).map(|text| excerpt(&text)),
-        "stdout_excerpt": find_string_field(value, &["stdout", "stdout_excerpt"]).map(|text| excerpt(&text)),
-        "diagnostics": first_diagnostics(value),
-    })
-}
-
-fn find_string_field(value: &Value, names: &[&str]) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            for name in names {
-                if let Some(text) = map.get(*name).and_then(Value::as_str) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_string());
-                    }
-                }
-            }
-            map.values()
-                .find_map(|nested| find_string_field(nested, names))
-        }
-        Value::Array(items) => items
-            .iter()
-            .find_map(|nested| find_string_field(nested, names)),
-        _ => None,
-    }
-}
-
-fn find_number_field(value: &Value, names: &[&str]) -> Option<i64> {
-    match value {
-        Value::Object(map) => {
-            for name in names {
-                if let Some(number) = map.get(*name).and_then(Value::as_i64) {
-                    return Some(number);
-                }
-            }
-            map.values()
-                .find_map(|nested| find_number_field(nested, names))
-        }
-        Value::Array(items) => items
-            .iter()
-            .find_map(|nested| find_number_field(nested, names)),
-        _ => None,
-    }
-}
-
-fn first_diagnostics(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            if let Some(Value::Array(items)) = map.get("diagnostics") {
-                return Value::Array(items.iter().take(5).cloned().collect());
-            }
-            map.values()
-                .find_map(|nested| {
-                    let diagnostics = first_diagnostics(nested);
-                    diagnostics
-                        .as_array()
-                        .is_some_and(|items| !items.is_empty())
-                        .then_some(diagnostics)
-                })
-                .unwrap_or_else(|| Value::Array(Vec::new()))
-        }
-        Value::Array(items) => items
-            .iter()
-            .find_map(|nested| {
-                let diagnostics = first_diagnostics(nested);
-                diagnostics
-                    .as_array()
-                    .is_some_and(|items| !items.is_empty())
-                    .then_some(diagnostics)
-            })
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-        _ => Value::Array(Vec::new()),
-    }
-}
-
-fn excerpt(text: &str) -> String {
-    const MAX_CHARS: usize = 1200;
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= MAX_CHARS {
-        return trimmed.to_string();
-    }
-    let truncated: String = trimmed.chars().take(MAX_CHARS).collect();
-    format!("{truncated}…")
-}
-
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
     json!({
         "task_id": item.task_id,
@@ -1590,88 +1101,6 @@ fn diagnose_next_commands(run_id: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_isolated_home;
-    use homeboy::core::observation::{RunRecord, RunStatus};
-
-    #[test]
-    fn status_returns_runner_remediation_for_offloaded_record_without_agent_task_metadata() {
-        with_isolated_home(|_| {
-            ObservationStore::open_initialized()
-                .expect("observation store")
-                .upsert_imported_run(&RunRecord {
-                    id: "agent-task-offloaded".to_string(),
-                    kind: "agent-task".to_string(),
-                    component_id: None,
-                    started_at: "2026-06-30T00:00:00Z".to_string(),
-                    finished_at: None,
-                    status: RunStatus::Running.as_str().to_string(),
-                    command: Some("homeboy agent-task".to_string()),
-                    cwd: None,
-                    homeboy_version: None,
-                    git_sha: None,
-                    rig_id: None,
-                    metadata_json: json!({
-                        "runner_id": "homeboy-lab",
-                        "runner_job_id": "job-123",
-                    }),
-                })
-                .expect("raw offload mirror written");
-
-            let (value, exit_code) = status(StatusArgs {
-                run_id: "agent-task-offloaded".to_string(),
-                bridge: false,
-                since_cursor: None,
-                full: false,
-            })
-            .expect("status remediation");
-
-            assert_eq!(exit_code, 1);
-            assert_eq!(value["schema"], "homeboy/agent-task-status-remediation/v1");
-            assert_eq!(value["status"], "runner_status_required");
-            assert_eq!(value["runner_id"], "homeboy-lab");
-            assert_eq!(value["runner_job_id"], "job-123");
-            assert_eq!(
-                value["remediation"]["status"],
-                "homeboy --runner homeboy-lab agent-task status agent-task-offloaded"
-            );
-            assert!(value["commands"]
-                .as_array()
-                .expect("commands")
-                .iter()
-                .any(|command| command
-                    == "homeboy --runner homeboy-lab agent-task logs agent-task-offloaded --full"));
-        });
-    }
-
-    #[test]
-    fn runner_status_remediation_uses_nested_identity_runner_metadata() {
-        let metadata = json!({
-            "identity": {
-                "runner_id": "lab-nested",
-                "runner_job_id": "job-nested",
-            }
-        });
-        let runner_id = metadata_string(&metadata, &[&["runner_id"], &["identity", "runner_id"]])
-            .expect("runner id");
-        let runner_job_id = metadata_string(
-            &metadata,
-            &[
-                &["runner_job_id"],
-                &["job_id"],
-                &["identity", "runner_job_id"],
-            ],
-        );
-        let remediation =
-            runner_status_remediation("agent-task-run", &runner_id, runner_job_id.as_deref());
-
-        assert_eq!(remediation["runner_id"], "lab-nested");
-        assert_eq!(remediation["runner_job_id"], "job-nested");
-        assert!(remediation["commands"]
-            .as_array()
-            .expect("commands")
-            .iter()
-            .any(|command| command == "homeboy runner job logs lab-nested job-nested --full"));
-    }
 
     #[test]
     fn compact_status_surfaces_latest_promotion() {

@@ -276,12 +276,43 @@ pub(crate) fn run_provider_command(
         ));
     }
 
+    let workspace_path = PathBuf::from(response.workspace_path);
+    validate_provider_workspace_path(&workspace_path)?;
+
     let mut command_evidence = response.command_evidence;
     if command_evidence.is_empty() {
         command_evidence.push(report);
     }
     Ok(AgentTaskPromotionWorkspace {
-        path: PathBuf::from(response.workspace_path),
+        path: workspace_path,
         command_evidence,
     })
+}
+
+fn validate_provider_workspace_path(path: &Path) -> Result<()> {
+    match git_output(path, &["rev-parse", "--is-inside-work-tree"]) {
+        Some(value) if value == "true" => Ok(()),
+        _ => Err(Error::validation_invalid_argument(
+            "promotion_provider.response.workspace_path",
+            format!(
+                "promotion provider response workspace_path is not a git worktree: {}",
+                path.display()
+            ),
+            None,
+            None,
+        )),
+    }
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

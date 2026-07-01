@@ -522,12 +522,17 @@ impl BatchCookSpec {
             .commit_message
             .clone()
             .unwrap_or_else(|| default_cook_commit_message(self));
+        let source_worktree_path = agent_task_service::source_worktree_path(
+            self.cwd.clone(),
+            self.workspace.clone(),
+        );
         Ok(BatchCookInvocation {
             dispatch,
             options: AgentTaskCookServiceOptions {
                 cook_id: self.cook_id.clone(),
                 initial_run_id: self.run_id(),
                 to_worktree: self.to_worktree.clone(),
+                source_worktree_path,
                 provider_command: self.provider_command.clone(),
                 gates: VerifyGateOptions {
                     verify: self.verify.clone(),
@@ -546,18 +551,11 @@ impl BatchCookSpec {
                 ai_model: self
                     .model
                     .clone()
-                    .or_else(|| ai_model_from_tool(&self.ai_tool)),
+                    .or_else(|| agent_task_service::ai_model_from_tool(&self.ai_tool)),
                 ai_used_for: self.ai_used_for.clone(),
             },
         })
     }
-}
-
-fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
-    let start = ai_tool.find('(')?;
-    let end = ai_tool[start + 1..].find(')')? + start + 1;
-    let model = ai_tool[start + 1..end].trim();
-    (!model.is_empty()).then(|| model.to_string())
 }
 
 fn default_cook_title(cook: &BatchCookSpec) -> String {
