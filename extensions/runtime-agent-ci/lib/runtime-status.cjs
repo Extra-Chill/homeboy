@@ -7,6 +7,11 @@ const HOST_RUN_FAILURE_STATUSES = Object.freeze(['failed']);
 const HOST_RUN_PENDING_STATUSES = Object.freeze(['incomplete']);
 const PROVIDER_SUCCESS_STATUSES = Object.freeze(['accepted', 'completed', 'passed', 'success', 'succeeded', 'no_op']);
 const PROVIDER_FAILURE_STATUSES = Object.freeze(['cancelled', 'failed', 'provider_error', 'timeout', 'unable_to_remediate']);
+const RUN_LIFECYCLE_STATUSES = Object.freeze(['unknown', 'queued', 'running', 'succeeded', 'partial_failure', 'failed', 'cancelled', 'timed_out', 'stale']);
+const RUN_LIFECYCLE_PENDING_STATUSES = Object.freeze(['unknown', 'queued', 'running']);
+const RUN_LIFECYCLE_SUCCESS_STATUSES = Object.freeze(['succeeded']);
+const RUN_LIFECYCLE_FAILURE_STATUSES = Object.freeze(['partial_failure', 'failed', 'cancelled', 'timed_out', 'stale']);
+const RUN_LIFECYCLE_RETRYABLE_STATUSES = Object.freeze(['failed', 'timed_out', 'stale']);
 
 function normalizeHostRecordStatus(value = {}, options = {}) {
   const record = plainObject(value) ? value : { status: value };
@@ -65,6 +70,24 @@ function normalizeAgentTaskOutcomeStatus(result = {}, options = {}) {
   return Object.keys(result || {}).length > 0 ? 'provider_error' : 'failed';
 }
 
+function normalizeRunLifecycleStatus(value = {}) {
+  const run = plainObject(value) ? value : { status: value };
+  const status = text(run.status || run.state);
+  return RUN_LIFECYCLE_STATUSES.includes(status) ? status : 'unknown';
+}
+
+function classifyRunLifecycleStatus(value = {}) {
+  const status = normalizeRunLifecycleStatus(value);
+  return {
+    is_retryable: RUN_LIFECYCLE_RETRYABLE_STATUSES.includes(status),
+    is_success: RUN_LIFECYCLE_SUCCESS_STATUSES.includes(status),
+    is_terminal: RUN_LIFECYCLE_SUCCESS_STATUSES.includes(status) || RUN_LIFECYCLE_FAILURE_STATUSES.includes(status),
+    kind: 'run_lifecycle_status',
+    schema: 'homeboy/run-lifecycle-status/v1',
+    status,
+  };
+}
+
 function providerStatusSucceeded(status) {
   return PROVIDER_SUCCESS_STATUSES.includes(text(status));
 }
@@ -89,9 +112,16 @@ module.exports = {
   HOST_RUN_SUCCESS_STATUSES,
   PROVIDER_FAILURE_STATUSES,
   PROVIDER_SUCCESS_STATUSES,
+  RUN_LIFECYCLE_FAILURE_STATUSES,
+  RUN_LIFECYCLE_PENDING_STATUSES,
+  RUN_LIFECYCLE_RETRYABLE_STATUSES,
+  RUN_LIFECYCLE_STATUSES,
+  RUN_LIFECYCLE_SUCCESS_STATUSES,
+  classifyRunLifecycleStatus,
   normalizeAgentTaskOutcomeStatus,
   normalizeHostRecordStatus,
   normalizeHostRunStatus,
+  normalizeRunLifecycleStatus,
   providerStatusFailed,
   providerStatusSucceeded,
 };

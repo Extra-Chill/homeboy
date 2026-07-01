@@ -132,6 +132,17 @@ assert.equal(noOpOutcome.failure_classification, undefined);
 assert.equal(noOpOutcome.failure_category, undefined);
 assert.equal(noOpOutcome.retryable, undefined);
 
+const failedStatusWithoutSuccess = normalizeAgentTaskOutcome(request, {
+  status: 'failed',
+  summary: 'Provider reported a terminal failure without success false.',
+}, { status: 'succeeded' });
+assert.equal(failedStatusWithoutSuccess.status, 'failed');
+assert.equal(failedStatusWithoutSuccess.failure_classification, 'execution_failed');
+
+const emptyJsonOutcome = normalizeAgentTaskOutcome(request, {});
+assert.equal(emptyJsonOutcome.status, 'failed');
+assert.equal(emptyJsonOutcome.failure_classification, 'execution_failed');
+
 assert.equal(normalizeAgentTaskStatus({ status: 'completed' }), 'succeeded');
 assert.equal(normalizeAgentTaskStatus({ success: false }), 'failed');
 assert.equal(normalizeProviderStatus({ success: true, status: 'completed' }, 1), 'failed');

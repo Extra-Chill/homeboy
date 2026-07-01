@@ -63,7 +63,11 @@ function normalizeAgentTaskStatus(result = {}, options = {}) {
   if (TERMINAL_FAILURE_STATUSES.includes(explicitStatus)) {
     return explicitStatus;
   }
-  return normalizeAgentTaskOutcomeStatus({ ...result, status: explicitStatus || resultStatus }, { exitStatus });
+  if (TERMINAL_FAILURE_STATUSES.includes(resultStatus)) {
+    return resultStatus;
+  }
+  const status = explicitStatus || resultStatus;
+  return normalizeAgentTaskOutcomeStatus(status === undefined ? result : { ...result, status }, { exitStatus });
 }
 
 function normalizeProviderStatus(result = {}, exitStatus = 0) {
