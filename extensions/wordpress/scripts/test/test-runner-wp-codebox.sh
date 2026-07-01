@@ -56,6 +56,12 @@ fi
 settings_json="${HOMEBOY_SETTINGS_JSON:-}"
 [ -n "$settings_json" ] || settings_json="{}"
 
+PHPUNIT_NO_TESTS="skipped"
+if [ "$settings_json" != "{}" ]; then
+    extracted=$(printf '%s' "$settings_json" | jq -r '.phpunit_no_tests // empty' 2>/dev/null || true)
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && PHPUNIT_NO_TESTS="$extracted"
+fi
+
 WP_CODEBOX_SOURCE_ROOT=""
 WP_CODEBOX_SOURCE_SUBPATH=""
 WP_CODEBOX_PLUGIN_SOURCE_PATH="$PLUGIN_PATH"
@@ -360,6 +366,17 @@ if [ ! -d "$TEST_DIR" ]; then
     if component_npm_test_script; then
         run_npm_test_script
         exit $?
+    fi
+
+    if [ "$PHPUNIT_NO_TESTS" = "failed" ] || [ "$PHPUNIT_NO_TESTS" = "fail" ]; then
+        echo ""
+        echo "NO PHPUNIT TEST DIRECTORY DISCOVERED"
+        echo "  Expected: ${TEST_DIR}"
+        echo "  PHPUnit no-test discovery is configured as failure, and no PHPUnit test directory exists."
+        echo ""
+        FAILED_STEP="PHPUnit tests (configured suite has no test directory, wp-codebox)"
+        write_phpunit_discovery_result failed "no-phpunit-test-directory-configured" "No PHPUnit test directory exists at the WordPress runner discovery path; no PHPUnit assertions ran."
+        exit 1
     fi
 
     echo ""
@@ -722,7 +739,6 @@ WP_CONFIG_DEFINES_JSON="{}"
 PHPUNIT_ENV_JSON="{}"
 WP_CODEBOX_FILE_MOUNTS_JSON="[]"
 WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON="null"
-PHPUNIT_NO_TESTS="skipped"
 WP_CODEBOX_WORDPRESS_VERSION=""
 WP_CODEBOX_MULTISITE=""
 if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
