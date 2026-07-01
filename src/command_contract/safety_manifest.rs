@@ -542,7 +542,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["runner", "workspace", "prune"] => {
             metadata.mutates = true;
             metadata.operator = true;
-            metadata.output_notes = "default output is a non-mutating orphan cleanup plan; pass --apply to delete exact runner workspace paths";
+            metadata.output_notes = "default output is a non-mutating orphan cleanup plan with candidate/remaining bytes; pass --apply to delete exact runner workspace paths and --passes to drain bounded pages";
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["http", "request"] => {

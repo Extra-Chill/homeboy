@@ -140,7 +140,11 @@ fn runner_followups_include_workspace_prune_for_disk_pressure_recovery() {
     let followups = runner_followups(Some("homeboy-lab"));
     let serialized = serde_json::to_string(&followups).expect("serialize followups");
 
-    assert!(serialized.contains("homeboy runner workspace prune homeboy-lab --apply"));
+    assert!(serialized.contains("workspace_prune_preview"));
+    assert!(serialized.contains("homeboy runner workspace prune homeboy-lab"));
+    assert!(serialized.contains("workspace_prune_drain"));
+    assert!(serialized.contains("homeboy runner workspace prune homeboy-lab --apply --passes 10"));
+    assert!(serialized.contains("counts and bytes"));
     assert!(serialized.contains("disk pressure"));
 }
 
