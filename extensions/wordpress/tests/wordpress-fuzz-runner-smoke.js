@@ -447,6 +447,55 @@ assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.
 assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].mountSlug, 'woocommerce');
 assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].sourceRoot, rigQualifiedPluginRoot);
 assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].sourceSubpath, 'plugins/woocommerce');
+assert.equal(rigQualifiedEnvMountedPluginResult.wp_codebox_runtime_requirements.extra_plugins[0].pluginFile, 'woocommerce/woocommerce.php');
+
+const nestedMetadataCheckoutRoot = path.join(os.tmpdir(), 'homeboy-wordpress-placeholder-checkout');
+const nestedMetadataResult = buildWordPressFuzzRunnerResult({
+	env: readWordPressFuzzRunnerEnv({
+		HOMEBOY_FUZZ_WORKLOAD_PATH: '/unused/in-unit-test.json',
+		HOMEBOY_FUZZ_WORKLOAD_ID: 'nested-metadata-plugin',
+		HOMEBOY_FUZZ_RUN_ID: 'nested-metadata-plugin-run',
+		HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE: nestedMetadataCheckoutRoot,
+	}),
+	workload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'nested-metadata-plugin',
+		target: { type: 'wordpress-plugin', slug: 'woocommerce', component: 'woocommerce' },
+		metadata: {
+			fixture: { component: 'woocommerce', activation: 'woocommerce/woocommerce.php' },
+			homeboy_runtime_context: {
+				schema: 'homeboy/fuzz-workload-runtime-context/v1',
+				rig_id: 'woocommerce-performance',
+				components: {
+					woocommerce: {
+						path: nestedMetadataCheckoutRoot,
+						extensions: {
+							wordpress: {
+								wp_codebox_source_path: '${env.HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE}',
+								wp_codebox_source_root: '${env.HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE}',
+								wp_codebox_source_subdir: 'plugins/woocommerce',
+								wp_codebox_mount_slug: 'woocommerce',
+								wp_codebox_plugin_file: 'woocommerce/woocommerce.php',
+							},
+						},
+					},
+				},
+			},
+		},
+		cases: [{ id: 'nested-metadata-plugin:default', intent: { plugin: { activation: 'woocommerce/woocommerce.php' } } }],
+	},
+});
+const nestedExtraPlugin = nestedMetadataResult.wp_codebox_runtime_requirements.extra_plugins[0];
+assert.equal(nestedExtraPlugin.sourcePath, nestedMetadataCheckoutRoot);
+assert.equal(nestedExtraPlugin.sourceSubdir, 'plugins/woocommerce');
+assert.equal(nestedExtraPlugin.mountSlug, 'woocommerce');
+assert.equal(nestedExtraPlugin.pluginFile, 'woocommerce/woocommerce.php');
+assert.notEqual(nestedExtraPlugin.pluginFile, 'woocommerce.php');
+const nestedRuntimeTaskPlugin = nestedMetadataResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0];
+assert.equal(nestedRuntimeTaskPlugin.sourcePath, nestedMetadataCheckoutRoot);
+assert.equal(nestedRuntimeTaskPlugin.sourceSubdir, 'plugins/woocommerce');
+assert.equal(nestedRuntimeTaskPlugin.mountSlug, 'woocommerce');
+assert.equal(nestedRuntimeTaskPlugin.pluginFile, 'woocommerce/woocommerce.php');
 
 const genericPrimitiveResult = buildWordPressFuzzRunnerResult({
 	env: {
