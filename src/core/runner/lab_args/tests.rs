@@ -1536,6 +1536,35 @@ mod lab_args_rewrite_tests {
     }
 
     #[test]
+    fn lab_args_rewrite_runtime_refresh_source_with_synced_mapping() {
+        let args = vec![
+            "homeboy".to_string(),
+            "runtime".to_string(),
+            "refresh".to_string(),
+            "opencode".to_string(),
+            "--source".to_string(),
+            "/controller/homeboy-extensions".to_string(),
+        ];
+        let mappings = vec![LabPathRemap {
+            local: "/controller/homeboy-extensions".to_string(),
+            remote: "/runner/workspaces/homeboy-extensions".to_string(),
+        }];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, "/runner/primary", &mappings, None),
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "runtime".to_string(),
+                "refresh".to_string(),
+                "opencode".to_string(),
+                "--source".to_string(),
+                "/runner/workspaces/homeboy-extensions".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn lab_args_rewrite_path_prefers_more_specific_duplicate_local_mapping() {
         let args = vec![
             "homeboy".to_string(),

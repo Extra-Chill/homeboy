@@ -89,7 +89,7 @@ use super::super::lab_workspaces::{
     path_setting_extra_workspaces, preflight_provider_config_source_cli_dependencies,
     provider_config_extra_workspaces, resolve_path_setting_workspace_refs_in_args,
     rig_component_path_env_extra_workspaces, runtime_overlay_env_overrides,
-    sync_extra_lab_workspaces, sync_lab_runtime_overlays,
+    runtime_refresh_source_extra_workspaces, sync_extra_lab_workspaces, sync_lab_runtime_overlays,
     workspace_mapping_entries_for_git_dependency, workspace_mapping_entry,
     workspace_mapping_entry_for_validation_dependency, workspace_ref_extra_workspaces,
     LabWorkspaceMappingEntry,

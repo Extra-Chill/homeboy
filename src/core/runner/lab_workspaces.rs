@@ -74,6 +74,7 @@ pub(super) struct ExtraLabWorkspace {
     pub(super) path: PathBuf,
     pub(super) snapshot_includes: Vec<String>,
     pub(super) bootstrap_node_dependencies: bool,
+    pub(super) allow_dirty_lab_workspace: bool,
     pub(super) source_provenance: Option<serde_json::Value>,
 }
 
@@ -178,7 +179,7 @@ pub(super) fn sync_extra_lab_workspaces(
                 changed_since_base: None,
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: extra.snapshot_includes.clone(),
-                allow_dirty_lab_workspace: false,
+                allow_dirty_lab_workspace: extra.allow_dirty_lab_workspace,
                 run_isolation_token: None,
             },
         )?
@@ -388,6 +389,7 @@ pub(super) fn parse_runtime_overlays(
                 path,
                 snapshot_includes: spec.snapshot_includes,
                 bootstrap_node_dependencies: false,
+                allow_dirty_lab_workspace: false,
                 source_provenance: None,
             },
             install: spec.install,
@@ -662,6 +664,7 @@ pub(super) fn agent_task_plan_extra_workspaces(
                         path: canon,
                         snapshot_includes: Vec::new(),
                         bootstrap_node_dependencies: false,
+                        allow_dirty_lab_workspace: false,
                         source_provenance: None,
                     });
                 }
@@ -824,6 +827,87 @@ pub(super) fn path_setting_extra_workspaces(
     Ok(workspaces)
 }
 
+pub(super) fn runtime_refresh_source_extra_workspaces(
+    args: &[String],
+    source_path: &Path,
+    allow_dirty_lab_workspace: bool,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let Some(source) = runtime_refresh_source_arg(args) else {
+        return Ok(Vec::new());
+    };
+    let source = PathBuf::from(shellexpand::tilde(&source).to_string());
+    if !source.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    let mut seen = BTreeSet::new();
+    let mut workspaces = Vec::new();
+    add_candidate_extra_workspace(
+        &source.display().to_string(),
+        "runtime_refresh_source",
+        &source_canon,
+        &mut seen,
+        &mut workspaces,
+    )?;
+    for workspace in &mut workspaces {
+        workspace.allow_dirty_lab_workspace = allow_dirty_lab_workspace;
+        workspace.source_provenance = Some(runtime_refresh_source_provenance(&workspace.path));
+    }
+    Ok(workspaces)
+}
+
+fn runtime_refresh_source_arg(args: &[String]) -> Option<String> {
+    if !args.windows(2).any(|window| {
+        matches!(window, [command, subcommand] if command == "runtime" && subcommand == "refresh")
+    }) {
+        return None;
+    }
+
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--source" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--source=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn runtime_refresh_source_provenance(path: &Path) -> serde_json::Value {
+    let git_branch = super::workspace::git_output(path, &["branch", "--show-current"])
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            super::workspace::git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()
+        });
+    let git_sha = super::workspace::git_output(path, &["rev-parse", "HEAD"])
+        .ok()
+        .filter(|value| !value.is_empty());
+    let git_remote = super::workspace::git_output(path, &["config", "--get", "remote.origin.url"])
+        .ok()
+        .filter(|value| !value.is_empty());
+    let dirty = super::workspace::git_output(path, &["status", "--porcelain=v1"])
+        .ok()
+        .map(|status| !status.is_empty());
+
+    serde_json::json!({
+        "schema": "homeboy/runtime-refresh-source/v1",
+        "local_path": path.display().to_string(),
+        "git_branch": git_branch,
+        "git_sha": git_sha,
+        "git_remote": git_remote,
+        "dirty": dirty,
+    })
+}
+
 pub(super) fn resolve_path_setting_workspace_refs_in_args(
     args: &[String],
 ) -> Result<(Vec<String>, Vec<WorkspaceRefResolution>)> {
@@ -883,6 +967,7 @@ fn add_candidate_workspace_ref_extra_workspace(
         path: canon,
         snapshot_includes: Vec::new(),
         bootstrap_node_dependencies: false,
+        allow_dirty_lab_workspace: false,
         source_provenance: Some(serde_json::json!({
             "source_provenance": "workspace_ref",
             "ref": resolution.raw_ref,
@@ -1404,8 +1489,8 @@ mod provider_config_candidate_paths_tests {
         preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
         provider_config_extra_workspaces, resolve_path_setting_workspace_refs_in_args,
         rig_component_path_env_extra_workspaces_from_entries,
-        workspace_mapping_entries_for_git_dependency, workspace_ref_extra_workspaces,
-        ExtraLabWorkspace,
+        runtime_refresh_source_extra_workspaces, workspace_mapping_entries_for_git_dependency,
+        workspace_ref_extra_workspaces, ExtraLabWorkspace,
     };
     use crate::core::runner::{
         ByteFileCounts, RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode,
@@ -1518,6 +1603,59 @@ mod provider_config_candidate_paths_tests {
             .snapshot_includes
             .contains(&"packages/cli/dist/**".to_string()));
         assert!(workspaces[0].bootstrap_node_dependencies);
+    }
+
+    #[test]
+    fn runtime_refresh_source_syncs_local_source_and_records_dirty_identity() {
+        let controller = tempfile::tempdir().expect("controller");
+        let primary = controller.path().join("primary");
+        let runtime_source = controller.path().join("homeboy-extensions");
+        std::fs::create_dir_all(&primary).expect("primary dir");
+        std::fs::create_dir_all(&runtime_source).expect("runtime source dir");
+        std::fs::write(runtime_source.join("README.md"), "runtime\n").expect("runtime file");
+        git(&runtime_source, &["init", "-b", "main"]);
+        git(
+            &runtime_source,
+            &["config", "user.email", "test@example.com"],
+        );
+        git(&runtime_source, &["config", "user.name", "Homeboy Test"]);
+        git(
+            &runtime_source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.test/runtime.git",
+            ],
+        );
+        git(&runtime_source, &["add", "."]);
+        git(&runtime_source, &["commit", "-m", "initial"]);
+        std::fs::write(runtime_source.join("dirty.txt"), "dirty\n").expect("dirty file");
+        let args = vec![
+            "homeboy".to_string(),
+            "runtime".to_string(),
+            "refresh".to_string(),
+            "opencode".to_string(),
+            "--source".to_string(),
+            runtime_source.display().to_string(),
+        ];
+
+        let workspaces = runtime_refresh_source_extra_workspaces(&args, &primary, true)
+            .expect("runtime refresh source workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "runtime_refresh_source");
+        assert_eq!(workspaces[0].path, runtime_source.canonicalize().unwrap());
+        assert!(workspaces[0].allow_dirty_lab_workspace);
+        let provenance = workspaces[0]
+            .source_provenance
+            .as_ref()
+            .expect("source provenance");
+        assert_eq!(provenance["schema"], "homeboy/runtime-refresh-source/v1");
+        assert_eq!(provenance["git_branch"], "main");
+        assert_eq!(provenance["git_remote"], "https://example.test/runtime.git");
+        assert_eq!(provenance["dirty"], true);
+        assert!(provenance["git_sha"].as_str().is_some());
     }
 
     #[test]
@@ -2158,6 +2296,7 @@ mod provider_config_candidate_paths_tests {
             path: PathBuf::from("/local/repo@cook"),
             snapshot_includes: Vec::new(),
             bootstrap_node_dependencies: false,
+            allow_dirty_lab_workspace: false,
             source_provenance: Some(serde_json::json!({
                 "source_provenance": "workspace_ref",
                 "ref": "@workspace:repo@cook/file.json"
