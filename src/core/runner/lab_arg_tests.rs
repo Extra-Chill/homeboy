@@ -244,3 +244,35 @@ fn detects_lab_offload_source_path_from_path_flag() {
         std::path::PathBuf::from("/Users/user/Developer/project")
     );
 }
+
+#[test]
+fn rig_check_lab_offload_uses_explicit_component_path_as_source() {
+    let input = args(&[
+        "homeboy",
+        "rig",
+        "check",
+        "woocommerce-performance",
+        "--path",
+        "/Users/user/Developer/woocommerce",
+        "--runner",
+        "homeboy-lab",
+        "--lab-only",
+    ]);
+
+    assert_eq!(
+        lab_offload_source_path(&input).expect("rig check source path"),
+        std::path::PathBuf::from("/Users/user/Developer/woocommerce")
+    );
+    assert_eq!(
+        rewrite_lab_offload_args(&input, "/home/user/Developer/woocommerce", &[], None),
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "rig",
+            "check",
+            "woocommerce-performance",
+            "--path",
+            "/home/user/Developer/woocommerce",
+        ])
+    );
+}
