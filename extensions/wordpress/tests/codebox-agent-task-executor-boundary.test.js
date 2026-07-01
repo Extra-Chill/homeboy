@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -46,6 +47,22 @@ function restoreEnv(name, value) {
     return;
   }
   process.env[name] = value;
+}
+
+function validateSecretEnvPlan(plan) {
+  const fixturePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-secret-env-plan-')), 'plan.json');
+  fs.writeFileSync(fixturePath, `${JSON.stringify(plan, null, 2)}\n`);
+  const result = spawnSync(process.env.HOMEBOY_COMMAND || 'homeboy', [
+    'contract',
+    'validate',
+    runtimeAgentCi.SECRET_ENV_PLAN_SCHEMA,
+    '--file',
+    fixturePath,
+  ], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.success, true);
+  assert.equal(output.data.valid, true);
 }
 
 function secretEnvRequirementForProvider(contract, provider) {
@@ -1437,14 +1454,16 @@ assert.deepEqual(codexTaskInput.provider_plugin_paths, ['/missing/stale-openai-p
 assert.deepEqual(codexTaskInput.secret_env, provider.provider_defaults.codex.secret_env);
 
 const previousSecretEnvPlan = process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON;
-process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON = JSON.stringify({
+const plannedSecretEnvPlan = {
   schema: 'homeboy/secret-env-plan/v1',
   secret_env_names: ['HOMEBOY_PLANNED_CODEBOX_SECRET'],
   env_name_mapping: {
     'wordpress.codebox-agent-task-executor': ['HOMEBOY_PLANNED_CODEBOX_SECRET'],
   },
   status: [{ name: 'HOMEBOY_PLANNED_CODEBOX_SECRET', configured: true, source: 'env' }],
-});
+};
+validateSecretEnvPlan(plannedSecretEnvPlan);
+process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON = JSON.stringify(plannedSecretEnvPlan);
 let plannedSecretEnvTaskInput;
 try {
   plannedSecretEnvTaskInput = codeboxTaskRequestFromAgentTaskRequest({
@@ -1474,7 +1493,7 @@ assert.deepEqual(plannedSecretEnvTaskInput.secret_env, [
 // provider-credential names and requirement-derived names were previously
 // dropped, so those declared secrets silently never reached the sandbox.
 const previousFullPlan = process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON;
-process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON = JSON.stringify({
+const fullSecretEnvPlan = {
   schema: 'homeboy/secret-env-plan/v1',
   secret_env_names: ['HOMEBOY_PLANNED_CODEBOX_SECRET'],
   requirements: [
@@ -1490,7 +1509,9 @@ process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON = JSON.stringify({
     'wordpress.codebox-agent-task-executor': ['HOMEBOY_MAPPED_CODEBOX_SECRET'],
   },
   status: [{ name: 'HOMEBOY_PLANNED_CODEBOX_SECRET', configured: true, source: 'env' }],
-});
+};
+validateSecretEnvPlan(fullSecretEnvPlan);
+process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON = JSON.stringify(fullSecretEnvPlan);
 let fullPlanSecretEnvTaskInput;
 try {
   fullPlanSecretEnvTaskInput = codeboxTaskRequestFromAgentTaskRequest({
