@@ -423,6 +423,14 @@ pub struct BenchSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepted_settings: Vec<String>,
 
+    /// Check-pipeline groups required before any scenario-scoped bench run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_groups: Vec<String>,
+
+    /// Additional check-pipeline groups keyed by bench scenario id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scenario_check_groups: BTreeMap<String, Vec<String>>,
+
     /// Optional matrix axes for cross-rig bench comparison reporting.
     ///
     /// Example: `{ "runtime": "sdk", "substrate": "bfb" }`. When
