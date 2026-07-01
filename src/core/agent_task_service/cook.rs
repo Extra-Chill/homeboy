@@ -267,6 +267,16 @@ where
     ))
 }
 
+pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> Option<PathBuf> {
+    cwd.or_else(|| {
+        workspace.and_then(|workspace| {
+            let path = PathBuf::from(&workspace);
+            path.exists().then_some(workspace)
+        })
+    })
+    .map(PathBuf::from)
+}
+
 pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
     if spec != "-" {
         let path = PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));

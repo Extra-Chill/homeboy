@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use homeboy::core::agent_tasks::batch;
 use homeboy::core::agent_tasks::dispatch_service::{
@@ -523,16 +522,10 @@ impl BatchCookSpec {
             .commit_message
             .clone()
             .unwrap_or_else(|| default_cook_commit_message(self));
-        let source_worktree_path = self
-            .cwd
-            .clone()
-            .or_else(|| {
-                self.workspace.as_ref().and_then(|workspace| {
-                    let path = PathBuf::from(workspace);
-                    path.exists().then(|| workspace.clone())
-                })
-            })
-            .map(PathBuf::from);
+        let source_worktree_path = agent_task_service::source_worktree_path(
+            self.cwd.clone(),
+            self.workspace.clone(),
+        );
         Ok(BatchCookInvocation {
             dispatch,
             options: AgentTaskCookServiceOptions {
