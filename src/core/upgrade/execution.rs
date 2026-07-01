@@ -64,6 +64,7 @@ pub(crate) fn execute_upgrade(
     previous_build_identity: Option<&str>,
 ) -> Result<(bool, Option<String>, Option<String>)> {
     let defaults = defaults::load_defaults();
+    let mut source_workspace_root = None;
 
     let output = match method {
         InstallMethod::Homebrew => {
@@ -81,6 +82,7 @@ pub(crate) fn execute_upgrade(
         InstallMethod::Source => {
             let workspace_root = resolve_source_workspace(source_path)?;
             prepare_source_workspace_for_upgrade(&workspace_root)?;
+            source_workspace_root = Some(workspace_root.clone());
 
             // Execute the upgrade command from defaults
             let cmd = &defaults.install_methods.source.upgrade_command;
@@ -161,6 +163,7 @@ pub(crate) fn execute_upgrade(
         success,
         new_version.as_deref(),
         new_build_identity.as_deref(),
+        source_workspace_root.as_deref(),
     ) {
         return Err(error);
     }
@@ -179,6 +182,7 @@ fn source_swap_failure(
     success: bool,
     new_version: Option<&str>,
     new_build_identity: Option<&str>,
+    source_workspace: Option<&Path>,
 ) -> Option<Error> {
     if method != InstallMethod::Source || success {
         return None;
@@ -188,17 +192,172 @@ fn source_swap_failure(
         .or(new_version)
         .unwrap_or("an unverifiable version");
 
-    Some(
-        Error::internal_unexpected(format!(
-            "source upgrade command exited successfully but the active binary was not replaced (still {observed})"
-        ))
-        .with_hint(
-            "The build succeeded but the swap into the active binary path did not take effect.",
-        )
-        .with_hint(
-            "Verify the active binary is writable and on PATH, then re-run: homeboy upgrade --method source --force",
-        ),
+    let diagnostics = source_swap_failure_diagnostics(source_workspace);
+    let mut error = Error::internal_unexpected(format!(
+        "source upgrade command exited successfully but the active binary was not replaced (still {observed})"
+    ))
+    .with_hint("The source build succeeded, but replacing the active binary did not take effect.")
+    .with_hint(format!("Active binary path: {}", diagnostics.active_path))
+    .with_hint(format!(
+        "Built source binary: {}",
+        diagnostics.built_binary_path
+    ))
+    .with_hint(format!(
+        "Replacement target path: {}",
+        diagnostics.replacement_path
+    ))
+    .with_hint(format!("Permissions: {}", diagnostics.permissions));
+
+    if let Some(command) = diagnostics.copy_command {
+        error = error.with_hint(format!("Remediate safely: {command}"));
+    }
+
+    if let Some(command) = diagnostics.built_binary_command {
+        error = error.with_hint(format!("Invoke just-built binary: {command}"));
+    }
+
+    Some(error)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceSwapFailureDiagnostics {
+    active_path: String,
+    built_binary_path: String,
+    replacement_path: String,
+    permissions: String,
+    copy_command: Option<String>,
+    built_binary_command: Option<String>,
+}
+
+fn source_swap_failure_diagnostics(
+    source_workspace: Option<&Path>,
+) -> SourceSwapFailureDiagnostics {
+    let active_path = active_binary_path().ok();
+    source_swap_failure_diagnostics_for_paths(source_workspace, active_path.as_deref())
+}
+
+fn source_swap_failure_diagnostics_for_paths(
+    source_workspace: Option<&Path>,
+    active_path: Option<&Path>,
+) -> SourceSwapFailureDiagnostics {
+    let built_binary = source_workspace.map(|path| path.join("target/release/homeboy"));
+    let active_path_text = active_path.map(display_path).unwrap_or_else(|| {
+        "unresolved (command -v homeboy and current executable unavailable)".to_string()
+    });
+    let built_binary_text = built_binary
+        .as_deref()
+        .map(display_path)
+        .unwrap_or_else(|| "unresolved (source workspace unavailable)".to_string());
+    let replacement_path_text = active_path
+        .map(display_path)
+        .unwrap_or_else(|| "unresolved".to_string());
+    let permissions = active_path
+        .map(binary_replacement_permission_context)
+        .unwrap_or_else(|| "active binary path unresolved; cannot inspect writability".to_string());
+
+    let copy_command = built_binary
+        .as_deref()
+        .zip(active_path)
+        .map(|(built, active)| {
+            let prefix = if replacement_target_may_be_writable(active) {
+                "install"
+            } else {
+                "sudo install"
+            };
+            format!(
+                "{prefix} -m 0755 {} {}",
+                shell_quote_path(built),
+                shell_quote_path(active)
+            )
+        });
+
+    let built_binary_command = built_binary.as_deref().map(|built| {
+        let mut command = format!(
+            "{} upgrade --method source --source-path {} --force",
+            shell_quote_path(built),
+            shell_quote_path(source_workspace.unwrap_or_else(|| Path::new(".")))
+        );
+        command.push_str(" --skip-runners --skip-extensions");
+        command
+    });
+
+    SourceSwapFailureDiagnostics {
+        active_path: active_path_text,
+        built_binary_path: built_binary_text,
+        replacement_path: replacement_path_text,
+        permissions,
+        copy_command,
+        built_binary_command,
+    }
+}
+
+fn binary_replacement_permission_context(path: &Path) -> String {
+    let parent = path.parent();
+    let parent_context = parent
+        .map(path_permission_context)
+        .unwrap_or_else(|| "parent=<none>".to_string());
+    format!(
+        "active={}; parent={}",
+        path_permission_context(path),
+        parent_context
     )
+}
+
+fn path_permission_context(path: &Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let writable = !metadata.permissions().readonly();
+            format!(
+                "{} exists=true writable={}{}",
+                display_path(path),
+                writable,
+                unix_mode_suffix(&metadata)
+            )
+        }
+        Err(err) => format!(
+            "{} exists=false writable=false metadata_error={}",
+            display_path(path),
+            err
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn unix_mode_suffix(metadata: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    format!(" mode={:o}", metadata.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn unix_mode_suffix(_metadata: &std::fs::Metadata) -> String {
+    String::new()
+}
+
+fn replacement_target_may_be_writable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| !metadata.permissions().readonly())
+        .unwrap_or(false)
+        || path
+            .parent()
+            .and_then(|parent| std::fs::metadata(parent).ok())
+            .map(|metadata| !metadata.permissions().readonly())
+            .unwrap_or(false)
+}
+
+fn display_path(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    shell_quote(&path.display().to_string())
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Read back the active binary version after a successful swap, retrying while
@@ -1059,6 +1218,7 @@ mod tests {
             false,
             Some("0.247.5"),
             Some("homeboy 0.247.5+old"),
+            Some(Path::new("/src/homeboy")),
         )
         .expect("unverified source swap must surface an error");
 
@@ -1068,20 +1228,47 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.message.contains("--method source")));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("Active binary path:")));
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("Built source binary: /src/homeboy/target/release/homeboy")));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("Replacement target path:")));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("Permissions:")));
     }
 
     #[test]
     fn source_swap_failure_reports_version_when_no_build_identity() {
-        let err = source_swap_failure(InstallMethod::Source, false, Some("0.247.5"), None)
-            .expect("unverified source swap must surface an error");
+        let err = source_swap_failure(
+            InstallMethod::Source,
+            false,
+            Some("0.247.5"),
+            None,
+            Some(Path::new("/src/homeboy")),
+        )
+        .expect("unverified source swap must surface an error");
 
         assert!(err.message.contains("0.247.5"));
     }
 
     #[test]
     fn source_swap_failure_reports_placeholder_when_version_unverifiable() {
-        let err = source_swap_failure(InstallMethod::Source, false, None, None)
-            .expect("unverified source swap must surface an error");
+        let err = source_swap_failure(
+            InstallMethod::Source,
+            false,
+            None,
+            None,
+            Some(Path::new("/src/homeboy")),
+        )
+        .expect("unverified source swap must surface an error");
 
         assert!(err.message.contains("an unverifiable version"));
     }
@@ -1089,7 +1276,14 @@ mod tests {
     #[test]
     fn source_swap_failure_silent_on_verified_swap() {
         assert!(
-            source_swap_failure(InstallMethod::Source, true, Some("0.249.0"), None).is_none(),
+            source_swap_failure(
+                InstallMethod::Source,
+                true,
+                Some("0.249.0"),
+                None,
+                Some(Path::new("/src/homeboy")),
+            )
+            .is_none(),
             "a verified source swap is not a failure"
         );
     }
@@ -1098,9 +1292,67 @@ mod tests {
     fn source_swap_failure_ignores_non_source_methods() {
         // Non-source methods keep their soft unverified reporting; only source
         // (where the swap is part of the command's contract) fails loudly here.
-        assert!(source_swap_failure(InstallMethod::Binary, false, Some("0.247.5"), None).is_none());
-        assert!(
-            source_swap_failure(InstallMethod::Secondary, false, Some("0.247.5"), None).is_none()
+        assert!(source_swap_failure(
+            InstallMethod::Binary,
+            false,
+            Some("0.247.5"),
+            None,
+            Some(Path::new("/src/homeboy")),
+        )
+        .is_none());
+        assert!(source_swap_failure(
+            InstallMethod::Secondary,
+            false,
+            Some("0.247.5"),
+            None,
+            Some(Path::new("/src/homeboy")),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn source_swap_failure_diagnostics_include_paths_permissions_and_remediation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source checkout");
+        let bin_dir = dir.path().join("bin dir");
+        std::fs::create_dir_all(source.join("target/release")).expect("source dirs");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let active = bin_dir.join("homeboy active");
+        let built = source.join("target/release/homeboy");
+        std::fs::write(&active, "old").expect("active");
+        std::fs::write(&built, "new").expect("built");
+
+        let diagnostics = source_swap_failure_diagnostics_for_paths(Some(&source), Some(&active));
+
+        assert_eq!(diagnostics.active_path, active.display().to_string());
+        assert_eq!(diagnostics.built_binary_path, built.display().to_string());
+        assert_eq!(diagnostics.replacement_path, active.display().to_string());
+        assert!(diagnostics.permissions.contains("active="));
+        assert!(diagnostics.permissions.contains("parent="));
+        assert!(diagnostics.permissions.contains("writable="));
+        let expected_copy_command = format!(
+            "install -m 0755 '{}' '{}'",
+            built.display(),
+            active.display()
+        );
+        assert_eq!(
+            diagnostics.copy_command.as_deref(),
+            Some(expected_copy_command.as_str())
+        );
+        let built_command = diagnostics
+            .built_binary_command
+            .as_deref()
+            .expect("built command");
+        assert!(built_command.contains("upgrade --method source"));
+        assert!(built_command.contains("--source-path"));
+        assert!(built_command.contains(&source.display().to_string()));
+    }
+
+    #[test]
+    fn shell_quote_handles_paths_with_single_quotes() {
+        assert_eq!(
+            shell_quote("/tmp/homeboy's/bin"),
+            "'/tmp/homeboy'\\''s/bin'"
         );
     }
 
