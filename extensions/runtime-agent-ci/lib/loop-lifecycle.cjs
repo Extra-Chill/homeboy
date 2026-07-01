@@ -7,12 +7,14 @@ const LOOP_ITERATION_SCHEMA = 'homeboy/loop-iteration/v1';
 const LOOP_EVIDENCE_SCHEMA = 'homeboy/loop-evidence/v1';
 
 function loopRun(input = {}) {
+  const loopId = input.loop_id || input.loopId || input.id || 'loop';
   const iterations = normalizeArray(input.iterations);
   const evidence = normalizeArray(input.evidence);
   return {
     schema: LOOP_RUN_SCHEMA,
-    loop_id: input.loop_id || input.loopId || input.id || 'loop',
-    status: input.status || 'completed',
+    id: loopId,
+    loop_id: loopId,
+    status: normalizeLoopStatus(input.status),
     stop_reason: input.stop_reason || input.stopReason || '',
     max_iterations: positiveInteger(input.max_iterations || input.maxIterations) || iterations.length,
     iteration_count: positiveInteger(input.iteration_count || input.iterationCount) || iterations.length,
@@ -24,10 +26,16 @@ function loopRun(input = {}) {
 }
 
 function loopIteration(input = {}) {
+  const loopId = input.loop_id || input.loopId || '';
+  const iteration = positiveInteger(input.iteration) || 1;
   return {
     schema: LOOP_ITERATION_SCHEMA,
-    loop_id: input.loop_id || input.loopId || '',
-    iteration: positiveInteger(input.iteration) || 1,
+    id: input.id || `${loopId}:${iteration}`,
+    run_id: input.run_id || input.runId || loopId,
+    index: positiveInteger(input.index) || iteration,
+    status: normalizeLoopStatus(input.status || input.result?.status || input.outcome?.status),
+    loop_id: loopId,
+    iteration,
     task: input.task || input.input || null,
     result: input.result || input.outcome || null,
     artifacts: normalizeArray(input.artifacts),
@@ -42,6 +50,9 @@ function loopEvidence(input = {}) {
   const uri = input.uri || input.url || input.href || input.path || input.ref || '';
   return {
     schema: LOOP_EVIDENCE_SCHEMA,
+    id: input.id || uri,
+    run_id: input.run_id || input.runId || input.loop_id || input.loopId || '',
+    status: input.status || 'captured',
     kind: input.kind || input.type || 'evidence',
     uri,
     ref: uri,
@@ -149,6 +160,13 @@ function plainObject(value) {
 function positiveInteger(value) {
   const parsed = Number.parseInt(value || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function normalizeLoopStatus(status) {
+  if (status === 'completed') {
+    return 'succeeded';
+  }
+  return status || 'succeeded';
 }
 
 module.exports = {
