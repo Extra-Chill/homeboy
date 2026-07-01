@@ -60,6 +60,80 @@ pub fn run_pipeline_check_groups(
     run_ordered_steps(rig, "check", &steps, ordered_indices, fail_fast, &[])
 }
 
+pub fn run_prepare_requirement_steps(
+    rig: &RigSpec,
+    phase: &str,
+    settings: &[(String, String)],
+) -> Result<PipelineOutcome> {
+    let mut outcomes = Vec::new();
+    let mut failed = 0;
+    let mut passed = 0;
+
+    for (pipeline_name, steps) in &rig.pipeline {
+        if pipeline_name == phase {
+            continue;
+        }
+
+        for (idx, step) in steps.iter().enumerate() {
+            if !is_prepare_requirement_step(step, phase) {
+                continue;
+            }
+
+            let label = labels::step_label(rig, step, idx);
+            crate::log_status!("rig", "{}: {}", phase, label);
+            let result = requirement_step::run_requirement_step(rig, phase, step, settings);
+            let outcome = match &result {
+                Ok(()) => PipelineStepOutcome {
+                    kind: labels::step_kind(step).to_string(),
+                    label: label.clone(),
+                    status: "pass".to_string(),
+                    error: None,
+                },
+                Err(error) => PipelineStepOutcome {
+                    kind: labels::step_kind(step).to_string(),
+                    label: label.clone(),
+                    status: "fail".to_string(),
+                    error: Some(error.to_string()),
+                },
+            };
+
+            match result {
+                Ok(()) => passed += 1,
+                Err(_) => {
+                    failed += 1;
+                    outcomes.push(outcome);
+                    return Ok(PipelineOutcome {
+                        name: phase.to_string(),
+                        steps: outcomes,
+                        passed,
+                        failed,
+                    });
+                }
+            }
+
+            outcomes.push(outcome);
+        }
+    }
+
+    Ok(PipelineOutcome {
+        name: phase.to_string(),
+        steps: outcomes,
+        passed,
+        failed,
+    })
+}
+
+fn is_prepare_requirement_step(step: &PipelineStep, phase: &str) -> bool {
+    matches!(
+        step,
+        PipelineStep::Requirement {
+            prepare_command: Some(_),
+            prepare_phases,
+            ..
+        } if prepare_phases.iter().any(|candidate| candidate == phase)
+    )
+}
+
 pub fn cleanup_shared_paths(rig: &RigSpec) -> Result<()> {
     fs_step::cleanup_shared_paths(rig)
 }
