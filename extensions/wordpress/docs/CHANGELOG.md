@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.18] - 2026-07-01
+
+### Changed
+- Remove WordPress fanout reconcile script shim
+
 ## [3.22.17] - 2026-07-01
 
 ### Fixed
