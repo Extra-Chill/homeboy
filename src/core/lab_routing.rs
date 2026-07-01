@@ -222,17 +222,15 @@ pub fn dispatch_lab_offload(
             output_file_content,
             ..
         }) => {
+            let mut finish_metadata = json!({ "exit_code": exit_code });
+            attach_handoff_metadata(&mut finish_metadata, &stdout);
             let retrieval = observer.finish(
                 if exit_code == 0 {
                     RunStatus::Pass
                 } else {
                     RunStatus::Fail
                 },
-                lab_dispatch_metadata(
-                    runner_id,
-                    "offloaded_complete",
-                    json!({ "exit_code": exit_code }),
-                ),
+                lab_dispatch_metadata(runner_id, "offloaded_complete", finish_metadata),
             );
             let stdout = stdout_with_persisted_run_retrieval(&stdout, retrieval.as_ref());
             Ok(LabRouteOutcome::Offloaded(LabRouteOutput {
@@ -243,6 +241,42 @@ pub fn dispatch_lab_offload(
             }))
         }
     }
+}
+
+fn attach_handoff_metadata(metadata: &mut serde_json::Value, stdout: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return;
+    };
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some(crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA)
+    {
+        return;
+    }
+    let Some(object) = metadata.as_object_mut() else {
+        return;
+    };
+    for (target, path) in [
+        ("runner_id", &["identity", "runner_id"][..]),
+        ("runner_job_id", &["identity", "runner_job_id"][..]),
+        ("job_id", &["job_id"][..]),
+        ("durable_run_id", &["durable_run_id"][..]),
+        ("handoff_id", &["identity", "handoff_id"][..]),
+    ] {
+        if let Some(value) = metadata_path_string(&value, path) {
+            object.insert(target.to_string(), serde_json::Value::String(value));
+        }
+    }
+    if let Some(commands) = value.get("follow_commands") {
+        object.insert("follow_commands".to_string(), commands.clone());
+    }
+}
+
+fn metadata_path_string(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_str().map(str::to_string)
 }
 
 fn lab_dispatch_metadata(
@@ -713,6 +747,37 @@ mod tests {
         let stdout = stdout_with_persisted_run_retrieval("{\"ok\":true}\n", None);
 
         assert_eq!(stdout, "{\"ok\":true}\n");
+    }
+
+    #[test]
+    fn handoff_stdout_metadata_records_queryable_runner_identity() {
+        let mut metadata = serde_json::json!({ "exit_code": 0 });
+        attach_handoff_metadata(
+            &mut metadata,
+            r#"{
+                "schema":"homeboy/runner-exec-handoff/v1",
+                "identity":{
+                    "runner_id":"homeboy-lab",
+                    "runner_job_id":"job-7167",
+                    "handoff_id":"runner:homeboy-lab:job:job-7167"
+                },
+                "job_id":"job-7167",
+                "durable_run_id":"agent-task-dispatch-7167",
+                "follow_commands":{
+                    "job_logs":"homeboy runner job logs homeboy-lab job-7167 --follow"
+                }
+            }"#,
+        );
+
+        assert_eq!(metadata["runner_id"], "homeboy-lab");
+        assert_eq!(metadata["runner_job_id"], "job-7167");
+        assert_eq!(metadata["job_id"], "job-7167");
+        assert_eq!(metadata["durable_run_id"], "agent-task-dispatch-7167");
+        assert_eq!(metadata["handoff_id"], "runner:homeboy-lab:job:job-7167");
+        assert_eq!(
+            metadata["follow_commands"]["job_logs"],
+            "homeboy runner job logs homeboy-lab job-7167 --follow"
+        );
     }
 
     #[test]
