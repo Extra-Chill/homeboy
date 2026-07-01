@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.278.1] - 2026-07-01
+
+### Fixed
+- persist lab fanout handoff status
+- add lab contract for worktree cleanup
+- surface runner workspace prune bytes
+- propagate forced worktree cleanup removal
+
 ## [0.278.0] - 2026-07-01
 
 ### Added
