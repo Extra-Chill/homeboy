@@ -346,12 +346,14 @@ pub mod secrets {
 /// High-level service entry points combining lifecycle and scheduling.
 pub mod service {
     pub use super::super::agent_task_service::{
-        aggregate_exit_code, ai_model_from_tool, artifacts, cancel, discover_runs, logs,
-        normalize_plan_workspaces, promotion_source, read_plan, resume, retry, run_cook,
-        run_loaded_plan, run_next, run_status, run_submitted, source_worktree_path, status,
-        submit_plan_spec, AgentTaskCookAttemptReport, AgentTaskCookReport,
-        AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands, AgentTaskDiscoveryCounts,
-        AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport, AgentTaskDiscoveryRun,
-        AgentTaskRetryServiceResult, AgentTaskRunResult,
+        aggregate_exit_code, ai_model_from_tool, artifacts, cancel, discover_runs,
+        hydrate_evidence_ref, hydrate_evidence_summary, logs, normalize_plan_workspaces,
+        offloaded_status_remediation, persist_provider_boundary_replay_evidence, promotion_source,
+        read_plan, resume, retry, run_cook, run_loaded_plan, run_next, run_status, run_submitted,
+        source_worktree_path, status, submit_plan_spec, AgentTaskCookAttemptReport,
+        AgentTaskCookReport, AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands,
+        AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport,
+        AgentTaskDiscoveryRun, AgentTaskHydratedEvidence, AgentTaskRetryServiceResult,
+        AgentTaskRunResult,
     };
 }
