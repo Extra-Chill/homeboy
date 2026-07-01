@@ -200,6 +200,8 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         source: raw,
         source_run_id: source_run_id.clone(),
         source_path,
+        source_worktree_path: None,
+        base_ref: None,
         to_worktree: args.to_worktree,
         task_id: args.task_id,
         artifact_id: args.artifact_id,

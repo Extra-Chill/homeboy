@@ -16,6 +16,10 @@ pub struct AgentTaskPromotionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_run_id: Option<String>,
     pub source_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_worktree_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
     pub to_worktree: String,
     pub task_id: Option<String>,
     pub artifact_id: Option<String>,

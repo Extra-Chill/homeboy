@@ -2,6 +2,7 @@
 //! resume, and retry.
 
 use serde_json::Value;
+use std::path::PathBuf;
 
 use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
@@ -70,11 +71,23 @@ where
         .commit_message
         .clone()
         .unwrap_or_else(|| default_loop_commit_message(&args));
+    let source_worktree_path = args
+        .dispatch
+        .cwd
+        .clone()
+        .or_else(|| {
+            args.dispatch.workspace.as_ref().and_then(|workspace| {
+                let path = PathBuf::from(workspace);
+                path.exists().then(|| workspace.clone())
+            })
+        })
+        .map(PathBuf::from);
     let result = agent_task_service::run_cook(
         agent_task_service::AgentTaskCookServiceOptions {
             cook_id,
             initial_run_id: run_id,
             to_worktree: args.to_worktree,
+            source_worktree_path,
             provider_command: args.provider_command,
             gates: args.gates.into(),
             max_attempts: args.max_attempts,

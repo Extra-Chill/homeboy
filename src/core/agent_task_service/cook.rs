@@ -28,6 +28,7 @@ pub struct AgentTaskCookServiceOptions {
     pub cook_id: String,
     pub initial_run_id: String,
     pub to_worktree: String,
+    pub source_worktree_path: Option<PathBuf>,
     pub provider_command: Option<String>,
     /// Shared deterministic verification gate fields, factored out of the
     /// per-field duplication that previously spanned the loop/promote types.
@@ -302,6 +303,8 @@ fn promote_attempt(
         source,
         source_run_id: Some(run_id.to_string()),
         source_path,
+        source_worktree_path: options.source_worktree_path.clone(),
+        base_ref: Some(options.base.clone()),
         to_worktree: options.to_worktree.clone(),
         task_id: None,
         artifact_id: None,

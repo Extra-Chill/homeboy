@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -136,6 +137,42 @@ fn write_patch_source(temp: &tempfile::TempDir) -> (PathBuf, String) {
     (source_path, source)
 }
 
+fn write_empty_patch_source(temp: &tempfile::TempDir) -> (PathBuf, String) {
+    let patch_path = temp.path().join("empty.patch");
+    std::fs::write(&patch_path, "").expect("write empty patch");
+    let source_path = temp.path().join("outcome.json");
+    let source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "task-1",
+        "status": "succeeded",
+        "artifacts": [{
+            "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+            "id": "patch",
+            "kind": "patch",
+            "path": "empty.patch",
+            "size_bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }]
+    })
+    .to_string();
+    std::fs::write(&source_path, &source).expect("write source");
+    (source_path, source)
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn validate_patch_extracts_safe_changed_files() {
     let patch = normalize_promotion_patch(VALID_PATCH, "repo@promoted-task").expect("valid patch");
@@ -224,6 +261,8 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
             source,
             source_run_id: Some("run-empty".to_string()),
             source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
             to_worktree: "repo@promoted-task".to_string(),
             task_id: None,
             artifact_id: None,
@@ -243,6 +282,64 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
     assert!(report.changed_files.is_empty());
     assert!(provider.apply_calls.is_empty());
     assert!(provider.verify_calls.is_empty());
+}
+
+#[test]
+fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "homeboy@example.test"]);
+    git(&repo, &["config", "user.name", "Homeboy Test"]);
+    git(&repo, &["checkout", "-b", "main"]);
+    std::fs::create_dir(repo.join("src")).expect("create src");
+    std::fs::write(repo.join("src/lib.rs"), "old\n").expect("write base file");
+    git(&repo, &["add", "src/lib.rs"]);
+    git(&repo, &["commit", "-m", "base"]);
+    git(&repo, &["checkout", "-b", "fix/committed"]);
+    std::fs::write(repo.join("src/lib.rs"), "new\n").expect("write committed change");
+    git(&repo, &["commit", "-am", "fix: committed change"]);
+
+    let (source_path, source) = write_empty_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider::default();
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run-committed".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: Some("main".to_string()),
+            to_worktree: "repo@fix-committed".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+        },
+        &mut provider,
+    )
+    .expect("committed changes are promoted");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.changed_files, vec!["src/lib.rs"]);
+    assert_eq!(report.patch_artifact.id, "committed-changes");
+    assert!(Path::new(&report.patch_artifact.path).is_file());
+    assert!(std::fs::read_to_string(&report.patch_artifact.path)
+        .expect("read committed patch")
+        .contains("+new"));
+    assert_eq!(
+        report.provenance["change_source"].as_str(),
+        Some("local_commits")
+    );
+    assert_eq!(provider.apply_calls.len(), 0);
+    assert_eq!(provider.verify_calls.len(), 1);
+    assert_eq!(provider.verify_calls[0].0, repo);
 }
 
 #[test]
@@ -353,6 +450,8 @@ fn promote_dry_run_reports_selected_patch_without_provider_mutation() {
         source,
         source_run_id: None,
         source_path: Some(source_path),
+        source_worktree_path: None,
+        base_ref: None,
         to_worktree: "repo@promoted-task".to_string(),
         task_id: None,
         artifact_id: None,
@@ -389,6 +488,8 @@ fn promote_applies_patch_with_fake_workspace_provider() {
             source,
             source_run_id: Some("run-1".to_string()),
             source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
             to_worktree: "repo@controlled-worktree".to_string(),
             task_id: None,
             artifact_id: None,
@@ -486,6 +587,8 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
                 source,
                 source_run_id: Some("run-3771".to_string()),
                 source_path: Some(source_path),
+                source_worktree_path: None,
+                base_ref: None,
                 to_worktree: "repo@worktree".to_string(),
                 task_id: None,
                 artifact_id: None,
@@ -547,6 +650,8 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
             source,
             source_run_id: None,
             source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
             to_worktree: "homeboy@promoted-task".to_string(),
             task_id: None,
             artifact_id: None,
@@ -582,6 +687,8 @@ fn promote_requires_provider_for_apply() {
         source,
         source_run_id: None,
         source_path: Some(source_path),
+        source_worktree_path: None,
+        base_ref: None,
         to_worktree: "repo@controlled-worktree".to_string(),
         task_id: None,
         artifact_id: None,
@@ -607,6 +714,8 @@ fn promotion_options_keep_flat_verify_gate_serialized_shape() {
         source: "source.json".to_string(),
         source_run_id: Some("run-1".to_string()),
         source_path: None,
+        source_worktree_path: None,
+        base_ref: None,
         to_worktree: "repo@flatten".to_string(),
         task_id: None,
         artifact_id: None,
