@@ -327,13 +327,14 @@ function normalizeCommands(commands) {
 }
 
 function resolvePaths(paths, workspace, env = process.env) {
+	const settings = homeboySettings(env);
 	return Object.fromEntries(Object.entries(paths).map(([key, value]) => [
 		key,
-		resolvePathValue(value, workspace, env),
+		resolvePathValue(value, workspace, env, settings),
 	]));
 }
 
-function resolvePathValue(value, workspace, env = process.env) {
+function resolvePathValue(value, workspace, env = process.env, settings = homeboySettings(env)) {
 	if (typeof value === 'string') {
 		return value.length > 0 && isWorkspaceRelativePath(value) ? path.join(workspace, value) : value;
 	}
@@ -346,6 +347,11 @@ function resolvePathValue(value, workspace, env = process.env) {
 				return env[envName];
 			}
 		}
+		for (const settingName of Array.isArray(value.settings) ? value.settings : []) {
+			if (typeof settingName === 'string' && typeof settings[settingName] === 'string' && settings[settingName].trim() !== '') {
+				return settings[settingName].trim();
+			}
+		}
 		return value.default || value.command || '';
 	}
 	if (value.type === 'path') {
@@ -355,14 +361,29 @@ function resolvePathValue(value, workspace, env = process.env) {
 				return envPath.length > 0 && isWorkspaceRelativePath(envPath) ? path.join(workspace, envPath) : envPath;
 			}
 		}
+		for (const settingName of Array.isArray(value.settings) ? value.settings : []) {
+			if (typeof settingName === 'string' && typeof settings[settingName] === 'string' && settings[settingName].trim() !== '') {
+				const settingPath = settings[settingName].trim();
+				return settingPath.length > 0 && isWorkspaceRelativePath(settingPath) ? path.join(workspace, settingPath) : settingPath;
+			}
+		}
 		const defaultPath = value.default || value.path || '';
 		return defaultPath.length > 0 && isWorkspaceRelativePath(defaultPath) ? path.join(workspace, defaultPath) : defaultPath;
 	}
 	return value.value || value.path || '';
 }
 
+function homeboySettings(env = process.env) {
+	try {
+		const settings = env.HOMEBOY_SETTINGS_JSON ? JSON.parse(env.HOMEBOY_SETTINGS_JSON) : {};
+		return settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : {};
+	} catch {
+		return {};
+	}
+}
+
 function isWorkspaceRelativePath(value) {
-	return value.startsWith('.') || value.includes('/') || value.includes('\\');
+	return !path.isAbsolute(value) && !value.startsWith('@') && (value.startsWith('.') || value.includes('/') || value.includes('\\'));
 }
 
 function resolveExecutor(manifest, source, options = {}) {

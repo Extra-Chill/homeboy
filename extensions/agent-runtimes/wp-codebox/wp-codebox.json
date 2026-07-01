@@ -117,6 +117,7 @@
       "runtime_bin": {
         "type": "executable",
         "env": ["HOMEBOY_WP_CODEBOX_BIN", "WP_CODEBOX_BIN"],
+        "settings": ["wp_codebox_bin", "wpCodeboxBin"],
         "default": "wp-codebox"
       },
       "runtime_component": {
@@ -124,7 +125,12 @@
         "env": ["HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT"],
         "default": ""
       },
-      "runtime_core_module": "@automattic/wp-codebox-core"
+      "runtime_core_module": {
+        "type": "path",
+        "env": ["HOMEBOY_WP_CODEBOX_CORE_MODULE", "WP_CODEBOX_CORE_MODULE"],
+        "settings": ["wp_codebox_core_module", "wpCodeboxCoreModule"],
+        "default": "@automattic/wp-codebox-core"
+      }
     },
     "required_paths": ["runtime_bin"]
   },

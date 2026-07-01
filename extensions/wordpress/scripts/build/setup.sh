@@ -74,6 +74,7 @@ install_wp_codebox() {
         fi
 
         if [ "${configured_bin}" -eq 1 ] && { [ "${configured_core_module}" -eq 1 ] || resolve_core_module_from_known_locations; }; then
+            node "${EXTENSION_PATH}/scripts/build/persist-wp-codebox-overrides.mjs" "${EXTENSION_PATH}/wordpress.json"
             return 0
         fi
 

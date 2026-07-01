@@ -44,6 +44,7 @@ assert.equal(runtime.checkout.targetPath, path.join(workspace, '.ci/wp-codebox')
 assert.deepEqual(runtime.setupCommands, [{ command: 'npm', args: ['install'], cwd: '.ci/wp-codebox' }]);
 assert.deepEqual(runtime.buildCommands, [{ command: 'npm', args: ['run', 'build'], cwd: '.ci/wp-codebox' }]);
 assert.equal(runtime.paths.runtime_bin, 'wp-codebox');
+assert.equal(runtime.paths.runtime_core_module, '@automattic/wp-codebox-core');
 assert.equal(runtime.paths.runtime_component, '');
 assert.equal(runtime.executor.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(runtime.executor.backend, 'wp-codebox');
@@ -67,6 +68,19 @@ const envRuntime = resolveRuntimeProvider('wp-codebox', {
 	env: { HOMEBOY_WP_CODEBOX_BIN: '/opt/bin/wp-codebox' },
 });
 assert.equal(envRuntime.paths.runtime_bin, '/opt/bin/wp-codebox');
+
+const settingsRuntime = resolveRuntimeProvider('wp-codebox', {
+	repoRoot: rootDir,
+	workspace,
+	env: {
+		HOMEBOY_SETTINGS_JSON: JSON.stringify({
+			wp_codebox_bin: '/settings/wp-codebox',
+			wp_codebox_core_module: '/settings/wp-codebox-core/dist/index.js',
+		}),
+	},
+});
+assert.equal(settingsRuntime.paths.runtime_bin, '/settings/wp-codebox');
+assert.equal(settingsRuntime.paths.runtime_core_module, '/settings/wp-codebox-core/dist/index.js');
 
 const envRuntimeComponent = resolveRuntimeProvider('wp-codebox', {
 	repoRoot: rootDir,
