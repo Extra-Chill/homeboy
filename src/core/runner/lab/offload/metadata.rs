@@ -4,6 +4,7 @@
 use super::*;
 #[cfg(test)]
 use crate::core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
+use std::path::{Path, PathBuf};
 
 const ENV_RESOLUTION_SCHEMA: &str = "homeboy/env-resolution/v1";
 const REDACTED_ENV_VALUE: &str = "<redacted>";
@@ -207,7 +208,13 @@ pub(crate) fn lab_runner_homeboy_metadata(
         format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
         format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
     ];
-    let primary_remediation_command = runner_homeboy_primary_remediation_command(runner_id, status);
+    let primary_remediation_command =
+        runner_homeboy_primary_remediation_command(runner_id, configured_executable, status);
+    let topology_recovery_command =
+        runner_homeboy_topology_recovery_command(runner_id, configured_executable, status);
+    let controller_binary = std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string());
     let stale_daemon = status.stale_daemon.as_ref();
     serde_json::json!({
         "schema": "homeboy/lab-runner-homeboy/v1",
@@ -224,6 +231,8 @@ pub(crate) fn lab_runner_homeboy_metadata(
         "stale_daemon": status.stale_daemon,
         "version_drift": lab_runner_homeboy_version_drift(status),
         "primary_remediation_command": primary_remediation_command,
+        "topology_recovery_command": topology_recovery_command,
+        "controller_binary": controller_binary,
         "refresh_commands": refresh_commands,
         "local_upgrade_command": "homeboy upgrade",
         "upgrade_command": format!("homeboy upgrade --force --upgrade-runner {}", shell::quote_arg(runner_id)),
@@ -406,10 +415,16 @@ fn runner_daemon_newer_than_controller(status: &RunnerStatusReport) -> bool {
 
 fn runner_homeboy_primary_remediation_command(
     runner_id: &str,
+    configured_executable: &str,
     status: &RunnerStatusReport,
 ) -> String {
     if runner_daemon_newer_than_controller(status) {
-        return "homeboy upgrade".to_string();
+        return controller_homeboy_recovery_command();
+    }
+
+    if let Some(command) = runner_configured_binary_select_command(runner_id, configured_executable)
+    {
+        return command;
     }
 
     runner_homeboy_refresh_commands(runner_id, status)
@@ -421,6 +436,80 @@ fn runner_homeboy_primary_remediation_command(
                 shell::quote_arg(runner_id)
             )
         })
+}
+
+fn runner_homeboy_topology_recovery_command(
+    runner_id: &str,
+    configured_executable: &str,
+    status: &RunnerStatusReport,
+) -> String {
+    if runner_daemon_newer_than_controller(status) {
+        return controller_homeboy_recovery_command();
+    }
+    runner_configured_binary_select_command(runner_id, configured_executable).unwrap_or_else(|| {
+        runner_homeboy_primary_remediation_command(runner_id, configured_executable, status)
+    })
+}
+
+fn runner_configured_binary_select_command(
+    runner_id: &str,
+    configured_executable: &str,
+) -> Option<String> {
+    let configured_executable = configured_executable.trim();
+    if configured_executable.is_empty() || configured_executable == "homeboy" {
+        return None;
+    }
+    Some(format!(
+        "homeboy runner refresh-homeboy {} --select {} --reconnect",
+        shell::quote_arg(runner_id),
+        shell::quote_arg(configured_executable)
+    ))
+}
+
+fn controller_homeboy_recovery_command() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return "homeboy upgrade".to_string();
+    };
+    controller_homeboy_recovery_command_for_binary(&exe)
+}
+
+pub(super) fn controller_homeboy_recovery_command_for_binary(exe: &Path) -> String {
+    if let Some(source_checkout) = source_checkout_for_binary(exe) {
+        return format!(
+            "homeboy upgrade --method source --source-path {} --force",
+            shell::quote_arg(&source_checkout.display().to_string())
+        );
+    }
+    let exe_display = exe.display().to_string();
+    if exe_display.contains("/Homebrew/")
+        || exe_display.contains("/homebrew/")
+        || exe_display.contains("/Cellar/homeboy/")
+        || exe_display.contains("/.linuxbrew/")
+    {
+        return "homeboy upgrade --method homebrew --force".to_string();
+    }
+    if exe_display.contains(&format!(
+        "/.{}/bin/",
+        crate::core::defaults::secondary_install_method_key()
+    )) {
+        return format!(
+            "homeboy upgrade --method {} --force",
+            crate::core::defaults::secondary_install_method_key()
+        );
+    }
+    "homeboy upgrade".to_string()
+}
+
+fn source_checkout_for_binary(binary: &Path) -> Option<PathBuf> {
+    for ancestor in binary.ancestors() {
+        if ancestor.file_name().and_then(|name| name.to_str()) == Some("target") {
+            return ancestor.parent().map(Path::to_path_buf);
+        }
+        if ancestor.join("Cargo.toml").is_file() && ancestor.join("src/main.rs").is_file() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 pub(crate) fn lab_source_checkout_metadata(source_path: &Path) -> serde_json::Value {
@@ -564,9 +653,13 @@ pub(crate) fn stale_runner_homeboy_error(
     if runner_daemon_newer_than_controller(status) {
         tried.push(format!(
             "Upgrade this local Homeboy controller before retrying Lab offload: {}",
-            runner_homeboy_primary_remediation_command(runner_id, status)
+            runner_homeboy_primary_remediation_command(runner_id, configured_executable, status)
         ));
     }
+    tried.push(format!(
+        "One-command topology recovery: {}",
+        runner_homeboy_topology_recovery_command(runner_id, configured_executable, status)
+    ));
     tried.extend([
         format!("Reconnect runner `{runner_id}` before retrying Lab offload: {refresh}"),
         format!("If the runner binary itself is stale, refresh or select a clean runner binary with `homeboy runner refresh-homeboy {} --ref main --reconnect`.", shell::quote_arg(runner_id)),
