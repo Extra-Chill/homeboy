@@ -55,38 +55,13 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
             let (out, code) = write(&project_id, &path, apply)?;
             Ok((FileCommandOutput::Standard(out), code))
         }
-        FileCommand::Mkdir { project_id, path } => {
-            let project = project::load(&project_id)?;
-            let project_base_path = require_project_base_path(&project_id, &project)?;
-            let full_path = join_remote_path(Some(&project_base_path), &path)?;
-            let output = executor::execute_for_project(
-                &project,
-                &format!("mkdir {}", shell::quote_path(&full_path)),
-            )?;
-            command::require_success(output.success, &output.stderr, "MKDIR")?;
-
-            Ok((
-                FileCommandOutput::Standard(FileOutput {
-                    command: "file.mkdir".to_string(),
-                    project_id,
-                    base_path: Some(project_base_path),
-                    path: Some(full_path),
-                    old_path: None,
-                    new_path: None,
-                    recursive: None,
-                    entries: None,
-                    content: None,
-                    size: None,
-                    bytes_written: None,
-                    dry_run: false,
-                    action_required: None,
-                    stdout: None,
-                    stderr: None,
-                    exit_code: 0,
-                    success: true,
-                }),
-                0,
-            ))
+        FileCommand::Mkdir {
+            project_id,
+            path,
+            apply,
+        } => {
+            let (out, code) = mkdir(&project_id, &path, apply)?;
+            Ok((FileCommandOutput::Standard(out), code))
         }
         FileCommand::Delete {
             project_id,
@@ -101,8 +76,9 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
             project_id,
             old_path,
             new_path,
+            apply,
         } => {
-            let (out, code) = rename(&project_id, &old_path, &new_path)?;
+            let (out, code) = rename(&project_id, &old_path, &new_path, apply)?;
             Ok((FileCommandOutput::Standard(out), code))
         }
         FileCommand::Find {
@@ -344,7 +320,101 @@ fn delete(project_id: &str, path: &str, recursive: bool, apply: bool) -> CmdResu
     ))
 }
 
-fn rename(project_id: &str, old_path: &str, new_path: &str) -> CmdResult<FileOutput> {
+fn mkdir(project_id: &str, path: &str, apply: bool) -> CmdResult<FileOutput> {
+    let project = project::load(project_id)?;
+    let project_base_path = require_project_base_path(project_id, &project)?;
+    let full_path = join_remote_path(Some(&project_base_path), path)?;
+
+    if !apply {
+        return Ok((
+            FileOutput {
+                command: "file.mkdir".to_string(),
+                project_id: project_id.to_string(),
+                base_path: Some(project_base_path),
+                path: Some(full_path),
+                old_path: None,
+                new_path: None,
+                recursive: None,
+                entries: None,
+                content: None,
+                size: None,
+                bytes_written: None,
+                dry_run: true,
+                action_required: Some(
+                    "Re-run with --apply to create the remote directory.".to_string(),
+                ),
+                stdout: None,
+                stderr: None,
+                exit_code: 0,
+                success: true,
+            },
+            0,
+        ));
+    }
+
+    let output = executor::execute_for_project(
+        &project,
+        &format!("mkdir {}", shell::quote_path(&full_path)),
+    )?;
+    command::require_success(output.success, &output.stderr, "MKDIR")?;
+
+    Ok((
+        FileOutput {
+            command: "file.mkdir".to_string(),
+            project_id: project_id.to_string(),
+            base_path: Some(project_base_path),
+            path: Some(full_path),
+            old_path: None,
+            new_path: None,
+            recursive: None,
+            entries: None,
+            content: None,
+            size: None,
+            bytes_written: None,
+            dry_run: false,
+            action_required: None,
+            stdout: None,
+            stderr: None,
+            exit_code: 0,
+            success: true,
+        },
+        0,
+    ))
+}
+
+fn rename(project_id: &str, old_path: &str, new_path: &str, apply: bool) -> CmdResult<FileOutput> {
+    if !apply {
+        let project = project::load(project_id)?;
+        let project_base_path = require_project_base_path(project_id, &project)?;
+        let full_old = join_remote_path(Some(&project_base_path), old_path)?;
+        let full_new = join_remote_path(Some(&project_base_path), new_path)?;
+
+        return Ok((
+            FileOutput {
+                command: "file.rename".to_string(),
+                project_id: project_id.to_string(),
+                base_path: Some(project_base_path),
+                path: None,
+                old_path: Some(full_old),
+                new_path: Some(full_new),
+                recursive: None,
+                entries: None,
+                content: None,
+                size: None,
+                bytes_written: None,
+                dry_run: true,
+                action_required: Some(
+                    "Re-run with --apply to rename or move the remote path.".to_string(),
+                ),
+                stdout: None,
+                stderr: None,
+                exit_code: 0,
+                success: true,
+            },
+            0,
+        ));
+    }
+
     let result = files::rename(project_id, old_path, new_path)?;
 
     Ok((
