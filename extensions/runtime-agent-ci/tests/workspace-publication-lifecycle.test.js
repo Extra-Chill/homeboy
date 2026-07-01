@@ -13,7 +13,6 @@ const path = require('node:path');
  */
 const {
   calculatePublishSet,
-  ensureReviewRequest,
   evaluateSideEffectPolicy,
   preparePublication,
   publicationTemplates,
@@ -104,78 +103,6 @@ assert.deepEqual(prepared.publication_evidence_ref, {
   files: ['docs/generated.md'],
 });
 
-{
-  const calls = [];
-  const review = ensureReviewRequest('/workspace', 'agent-artifacts/fixture-agent-12345', {
-    base: 'trunk',
-    title: 'Updated title',
-    body: 'Updated body',
-  }, {
-    run(command, args, options = {}) {
-      calls.push({ command, args, cwd: options.cwd });
-      if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
-        return { status: 0, stdout: JSON.stringify({ number: 47, state: 'OPEN', url: 'https://github.com/owner/repo/pull/47' }), stderr: '' };
-      }
-      return { status: 0, stdout: '', stderr: '' };
-    },
-  });
-  assert.equal(review.action, 'updated');
-  assert.equal(review.url, 'https://github.com/owner/repo/pull/47');
-  assert.deepEqual(review.publication_evidence_ref, {
-    type: 'pull_request',
-    provider: 'github',
-    repo: '',
-    head: 'agent-artifacts/fixture-agent-12345',
-    base: 'trunk',
-    url: 'https://github.com/owner/repo/pull/47',
-    action: 'updated',
-    pr_number: 47,
-    pr_state: 'OPEN',
-    files: [],
-  });
-  assert.deepEqual(calls.filter((call) => call.command === 'gh').map((call) => call.args.slice(0, 2)), [
-    ['pr', 'view'],
-    ['pr', 'edit'],
-  ]);
-}
-
-{
-  const calls = [];
-  const review = ensureReviewRequest('/workspace', 'agent-artifacts/fixture-agent-12345', {
-    base: 'trunk',
-    title: 'Updated title',
-    body: 'Updated body',
-  }, {
-    env: { GITHUB_RUN_ID: '999' },
-    run(command, args, options = {}) {
-      calls.push({ command, args, cwd: options.cwd });
-      if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
-        return { status: 0, stdout: JSON.stringify({ number: 47, state: 'CLOSED', url: 'https://github.com/owner/repo/pull/47' }), stderr: '' };
-      }
-      if (command === 'gh' && args[0] === 'pr' && args[1] === 'reopen') {
-        return { status: 1, stdout: '', stderr: 'Could not open the pull request' };
-      }
-      if (command === 'gh' && args[0] === 'pr' && args[1] === 'create') {
-        return { status: 0, stdout: 'https://github.com/owner/repo/pull/1291\n', stderr: '' };
-      }
-      return { status: 0, stdout: '', stderr: '' };
-    },
-  });
-  assert.equal(review.action, 'created_after_closed_pr');
-  assert.equal(review.head, 'agent-artifacts/fixture-agent-12345-run-999');
-  assert.equal(review.closed_pr_number, 47);
-  assert.match(review.reopen_error, /Could not open the pull request/);
-  assert.equal(review.publication_evidence_ref.type, 'pull_request');
-  assert.equal(review.publication_evidence_ref.head, 'agent-artifacts/fixture-agent-12345-run-999');
-  assert.equal(review.publication_evidence_ref.action, 'created_after_closed_pr');
-  assert.deepEqual(calls.filter((call) => call.command === 'gh').map((call) => call.args.slice(0, 2)), [
-    ['pr', 'view'],
-    ['pr', 'reopen'],
-    ['pr', 'create'],
-  ]);
-  assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'push'), true);
-}
-
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-workspace-publication-lifecycle.'));
 try {
   const workspace = path.join(tmp, 'repo');
@@ -205,22 +132,7 @@ try {
           pr_number: 1291,
           pr_url: 'https://github.com/owner/repo/pull/1291',
           changed_files: ['docs/generated.md'],
-          publication_intent: {
-            schema: 'homeboy/agent-task-publication-intent/v1',
-            run_id: '12345',
-            action: 'review_request',
-            target: { kind: 'code_review', adapter: 'github_pull_request', base: 'trunk', head: 'agent-artifacts/fixture-agent-12345' },
-            changed_files: ['docs/generated.md'],
-          },
-          publication_proof: {
-            schema: 'homeboy/agent-task-publication-proof/v1',
-            run_id: '12345',
-            status: 'review_ready',
-            intent_schema: 'homeboy/agent-task-publication-intent/v1',
-            target: { kind: 'code_review', adapter: 'github_pull_request', base: 'trunk', head: 'agent-artifacts/fixture-agent-12345', url: 'https://github.com/owner/repo/pull/1291' },
-            adapter_action: 'created',
-            adapter_ref: 'https://github.com/owner/repo/pull/1291',
-          },
+          proof: { schema: 'homeboy/proof/v1' },
         })}\n`,
         stderr: '',
       };
@@ -260,8 +172,8 @@ try {
   assert.equal(publication.pr_number, 1291);
   assert.deepEqual(publication.files, ['docs/generated.md']);
   assert.equal(publication.finalization.schema, 'homeboy/agent-task-pr-finalization/v1');
-  assert.equal(publication.publication_intent.schema, 'homeboy/agent-task-publication-intent/v1');
-  assert.equal(publication.publication_proof.schema, 'homeboy/agent-task-publication-proof/v1');
+  assert.equal(publication.publication_intent, null);
+  assert.equal(publication.publication_proof, null);
   assert.deepEqual(publication.publication_evidence_ref, {
     type: 'pull_request',
     provider: 'github',

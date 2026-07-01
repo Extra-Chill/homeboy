@@ -125,15 +125,6 @@ function git(workspace, args, options = {}) {
   return result;
 }
 
-function gh(workspace, args, options = {}) {
-  const adapter = lifecycleHooks(options.hooks || {});
-  const result = adapter.run('gh', args, { cwd: workspace, env: options.env });
-  if (options.check !== false && result.status !== 0) {
-    throw new Error((result.stderr || result.stdout || `gh ${args.join(' ')} failed`).trim());
-  }
-  return result;
-}
-
 function ignoredWorkspacePathPrefixes(config = {}) {
   let configured = [];
   if (Array.isArray(config.ignored_workspace_paths)) {
@@ -632,47 +623,6 @@ function resetPublicationBranch(workspace, branch, base, files, hooks = {}) {
   restoreWorkspaceFiles(workspace, preserved);
 }
 
-function pushWorkspaceBranch(workspace, branch, hooks = {}) {
-  const fetch = git(workspace, ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { check: false, hooks });
-  const args = ['push', '-u', 'origin', `HEAD:${branch}`];
-  if (fetch.status === 0) {
-    args.splice(1, 0, `--force-with-lease=refs/heads/${branch}`);
-  }
-  git(workspace, args, { hooks });
-}
-
-function pushNewWorkspaceBranch(workspace, branch, hooks = {}) {
-  git(workspace, ['push', '-u', 'origin', `HEAD:${branch}`], { hooks });
-}
-
-function pullRequestForBranch(workspace, branch, hooks = {}) {
-  const result = gh(workspace, ['pr', 'view', branch, '--json', 'number,state,url', '--jq', '.'], { check: false, hooks });
-  if (result.status !== 0) {
-    return null;
-  }
-  try {
-    return JSON.parse(result.stdout || '{}');
-  } catch {
-    return null;
-  }
-}
-
-function createPullRequest(workspace, branch, templates, hooks = {}) {
-  return gh(workspace, [
-    'pr', 'create',
-    '--head', branch,
-    '--base', templates.base,
-    '--title', templates.title,
-    '--body', templates.body,
-  ], { hooks }).stdout.trim();
-}
-
-function replacementBranchName(branch, hooks = {}) {
-  const adapter = lifecycleHooks(hooks);
-  const suffix = adapter.env.GITHUB_RUN_ID || adapter.now();
-  return `${branch}-run-${suffix}`.replace(/[^A-Za-z0-9._/-]+/g, '-').replace(/^-+|-+$/g, '');
-}
-
 function publicationEvidenceRef(input = {}) {
   return {
     type: input.url ? 'pull_request' : 'branch',
@@ -743,39 +693,6 @@ function captureWorkspaceDelta(config, workspace, publication, hooks = {}) {
       head: publication.branch,
       base: publication.base,
       files: staged,
-    }),
-  };
-}
-
-function publishRevision(workspace, publication, delta, hooks = {}) {
-  if (!delta.changed) {
-    return {
-      changed: false,
-      head: publication.branch,
-      files: [],
-      publication_evidence_ref: publicationEvidenceRef({
-        repo: publication.repo,
-        head: publication.branch,
-        base: publication.base,
-        files: [],
-      }),
-    };
-  }
-
-  git(workspace, ['config', 'user.name', 'homeboy-agent-ci'], { hooks });
-  git(workspace, ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { hooks });
-  git(workspace, ['commit', '-m', publication.templates.commitMessage], { hooks });
-  pushWorkspaceBranch(workspace, publication.branch, hooks);
-
-  return {
-    changed: true,
-    head: publication.branch,
-    files: delta.staged,
-    publication_evidence_ref: publicationEvidenceRef({
-      repo: publication.repo,
-      head: publication.branch,
-      base: publication.base,
-      files: delta.staged,
     }),
   };
 }
@@ -873,59 +790,11 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
     pr_number: report.pr_number ?? null,
     pr_state: url ? 'OPEN' : '',
     files: Array.isArray(report.changed_files) ? report.changed_files : delta.staged,
+    // TODO(homeboy-core): pass these through when finalize-pr exposes explicit
+    // publication_intent/publication_proof fields in its JSON report.
     publication_intent: report.publication_intent || null,
     publication_proof: report.publication_proof || null,
   };
-}
-
-function updateReviewSummary(workspace, review, templates, hooks = {}) {
-  if (!review?.number) {
-    return { updated: false };
-  }
-  const result = gh(
-    workspace,
-    ['pr', 'edit', String(review.number), '--title', templates.title, '--body', templates.body],
-    { check: false, hooks },
-  );
-  return { updated: result.status === 0, error: result.status === 0 ? '' : (result.stderr || result.stdout || '').trim() };
-}
-
-function ensureReviewRequest(workspace, branch, templates, hooks = {}) {
-  const existing = pullRequestForBranch(workspace, branch, hooks);
-  if (existing?.state === 'OPEN' && existing.url) {
-    updateReviewSummary(workspace, { number: existing.number || branch }, templates, hooks);
-    return { url: existing.url, action: 'updated', number: existing.number || null, state: 'OPEN', publication_evidence_ref: publicationEvidenceRef({ head: branch, base: templates.base, url: existing.url, action: 'updated', number: existing.number || null, state: 'OPEN' }) };
-  }
-
-  if (existing?.state === 'CLOSED' && existing.number) {
-    const reopened = gh(workspace, ['pr', 'reopen', String(existing.number)], { check: false, hooks });
-    if (reopened.status === 0) {
-      updateReviewSummary(workspace, existing, templates, hooks);
-      return { url: existing.url || '', action: 'reopened', head: branch, number: existing.number, state: 'OPEN', publication_evidence_ref: publicationEvidenceRef({ head: branch, base: templates.base, url: existing.url || '', action: 'reopened', number: existing.number, state: 'OPEN' }) };
-    }
-
-    const replacementBranch = replacementBranchName(branch, hooks);
-    pushNewWorkspaceBranch(workspace, replacementBranch, hooks);
-    const url = createPullRequest(workspace, replacementBranch, templates, hooks);
-    return {
-      url,
-      action: 'created_after_closed_pr',
-      head: replacementBranch,
-      number: null,
-      state: 'OPEN',
-      closed_pr_number: existing.number,
-      closed_pr_url: existing.url || '',
-      reopen_error: (reopened.stderr || reopened.stdout || '').trim(),
-      publication_evidence_ref: publicationEvidenceRef({ head: replacementBranch, base: templates.base, url, action: 'created_after_closed_pr', state: 'OPEN' }),
-    };
-  }
-
-  const url = createPullRequest(workspace, branch, templates, hooks);
-  return { url, action: 'created', head: branch, number: null, state: 'OPEN', publication_evidence_ref: publicationEvidenceRef({ head: branch, base: templates.base, url, action: 'created', state: 'OPEN' }) };
-}
-
-function ensurePullRequest(workspace, branch, templates, hooks = {}) {
-  return ensureReviewRequest(workspace, branch, templates, hooks);
 }
 
 function publishWorkspace(config, results, scenario, workspace, files, hooks = {}, lifecycle = {}) {
@@ -1133,22 +1002,17 @@ module.exports = {
   evaluateSideEffectPolicy,
   evaluateWritablePaths: validateWritablePaths,
   evaluateWorkspaceContract,
-  ensurePullRequest,
-  ensureReviewRequest,
   finalizeWorkspaceReview,
   lifecycleHooks,
   preparePublication,
   publicationBase,
   publicationEvidenceRef,
   publicationTemplates,
-  publishRevision,
   publishWorkspace,
   prepareRunnerCommand,
   recordLifecycle,
-  replacementBranchName,
   runDeterministicWorkspaceLifecycle,
   runShellCommand,
   scenarioById,
-  updateReviewSummary,
   validateWritablePaths,
 };
