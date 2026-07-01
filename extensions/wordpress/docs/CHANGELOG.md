@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.5] - 2026-07-01
+
+### Fixed
+- stage WP Codebox workload PHP files
+
 ## [3.23.4] - 2026-07-01
 
 ### Fixed
