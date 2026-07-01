@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.22.19] - 2026-07-01
+
+### Changed
+- Validate artifact postprocess contract export when available
+
 ## [3.22.18] - 2026-07-01
 
 ### Changed
