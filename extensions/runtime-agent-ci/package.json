@@ -34,6 +34,7 @@
   "scripts": {
     "test": "set -e; for test in tests/*.test.js; do node \"$test\"; done",
     "probe:homeboy-contract": "node scripts/probe-homeboy-contract-surface.cjs",
+    "test:homeboy-contract-export": "node scripts/check-homeboy-contract-export-fixtures.cjs",
     "test:controller-loop-proof-validator": "node ../tests/controller-loop-proof-validator.test.mjs",
     "test:generic-fanout-reconcile-boundary": "node ../tests/generic-fanout-reconcile-boundary.test.mjs",
     "test:workspace-publication-lifecycle": "node tests/workspace-publication-lifecycle.test.js",

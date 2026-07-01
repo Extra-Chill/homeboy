@@ -1,0 +1,31 @@
+{
+  "_generated_by": "homeboy contract export --dir",
+  "schema": "homeboy/runtime-agent-ci-contract-export-fixture/v1",
+  "schema_catalog": {
+    "contract_ids": [
+      "homeboy/runner-workload/v1",
+      "homeboy/runner-exec-handoff/v1",
+      "homeboy/run-location-index/v1"
+    ],
+    "examples": {
+      "homeboy/run-location-index/v1": {
+        "artifact_manifest_ref": {
+          "manifest_schema": "homeboy/artifact-manifest/v1",
+          "schema": "homeboy/runner-artifact-manifest-ref/v1"
+        },
+        "schema": "homeboy/run-location-index/v1"
+      },
+      "homeboy/runner-exec-handoff/v1": {
+        "artifact_manifest": {
+          "manifest_schema": "homeboy/artifact-manifest/v1",
+          "schema": "homeboy/runner-artifact-manifest-ref/v1"
+        },
+        "schema": "homeboy/runner-exec-handoff/v1"
+      },
+      "homeboy/runner-workload/v1": {
+        "schema": "homeboy/runner-workload/v1"
+      }
+    },
+    "schema": "homeboy/contract-schema-catalog/v1"
+  }
+}

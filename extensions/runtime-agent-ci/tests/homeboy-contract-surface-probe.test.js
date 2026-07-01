@@ -6,6 +6,10 @@ const {
   MIRRORED_ARTIFACT_MANIFEST_CONSTANTS,
   probeHomeboyContractSurface,
 } = require('../lib/homeboy-contract-surface-probe.cjs');
+const {
+  checkHomeboyContractExportFixtures,
+  compareSchemaCatalogFixture,
+} = require('../scripts/check-homeboy-contract-export-fixtures.cjs');
 
 const missing = probeHomeboyContractSurface({
   homeboyCommand: 'homeboy',
@@ -71,12 +75,38 @@ const drift = probeHomeboyContractSurface({
 assert.equal(drift.status, 'failed');
 assert.match(drift.message, /ARTIFACT_MANIFEST_SCHEMA expected homeboy\/artifact-manifest\/v1/);
 
+const fixtureDrift = compareSchemaCatalogFixture({
+  schema: 'homeboy/contract-schema-catalog/v1',
+  contracts: [
+    {
+      id: 'homeboy/runner-workload/v1',
+      example: { schema: 'homeboy/runner-workload/v1' },
+    },
+  ],
+}, {
+  schema: 'homeboy/contract-schema-catalog/v1',
+  contract_ids: ['homeboy/runner-workload/v1'],
+  examples: {
+    'homeboy/runner-workload/v1': { schema: 'homeboy/runner-workload/v2' },
+  },
+});
+
+assert.match(fixtureDrift.join('; '), /homeboy\/runner-workload\/v2/);
+
 const live = probeHomeboyContractSurface();
 if (live.status === 'skipped') {
   process.stdout.write(`${live.message}\n`);
 } else {
   assert.equal(live.status, 'passed', live.message);
   process.stdout.write(`${live.message}\n`);
+}
+
+const exportFixtures = checkHomeboyContractExportFixtures();
+if (exportFixtures.status === 'skipped') {
+  process.stdout.write(`${exportFixtures.message}\n`);
+} else {
+  assert.equal(exportFixtures.status, 'passed', exportFixtures.message);
+  process.stdout.write(`${exportFixtures.message}\n`);
 }
 
 process.stdout.write('Homeboy contract surface probe check passed\n');
