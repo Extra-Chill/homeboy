@@ -444,6 +444,8 @@ pub(crate) const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 pub(crate) const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
 const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
+const AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON: &str =
+    "agent-task cook finalization commits, pushes, and opens/updates GitHub PRs from the trusted controller; use --no-finalize for Lab patch evidence and finalize from the controller";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabRunnerSupportSummary {
@@ -558,6 +560,12 @@ impl Commands {
             }) if !args.gates.has_deterministic_gate() => LabCommandContract::local_only(
                 AGENT_TASK_RUN_LAB_LABEL,
                 AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Cook(args),
+            }) if !args.no_finalize => LabCommandContract::local_only(
+                AGENT_TASK_RUN_LAB_LABEL,
+                AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
@@ -1164,6 +1172,52 @@ mod low_noise_polling_tests {
             assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
             assert!(!contract.routing_policy.read_only_polling);
         }
+    }
+
+    #[test]
+    fn agent_task_cook_finalization_is_controller_owned() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "make a change",
+            "--to-worktree",
+            "homeboy@cook-finalization",
+            "--verify",
+            "cargo test --lib",
+        ]);
+
+        let contract = command
+            .lab_contract()
+            .expect("cook contract should explain controller-owned finalization");
+
+        assert_eq!(
+            contract.portability,
+            LabCommandPortability::LocalOnly(AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON)
+        );
+    }
+
+    #[test]
+    fn agent_task_cook_no_finalize_remains_lab_portable() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "make a change",
+            "--to-worktree",
+            "homeboy@cook-finalization",
+            "--verify",
+            "cargo test --lib",
+            "--no-finalize",
+        ]);
+
+        let contract = command
+            .lab_contract()
+            .expect("no-finalize cook should remain portable");
+
+        assert_eq!(contract.portability, LabCommandPortability::Portable);
     }
 }
 pub(crate) use extension_ids::*;
