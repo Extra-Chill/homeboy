@@ -69,6 +69,40 @@ fn submit_plan_persists_queued_status() {
 }
 
 #[test]
+fn cook_index_keeps_repeated_attempts_unique_with_stable_latest_alias() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let aggregate = succeeded_aggregate(&plan);
+        let first_run_id = cook_attempt_run_id("cook-issue-6978", 1);
+        let second_run_id = cook_attempt_run_id("cook-issue-6978", 1);
+
+        assert_ne!(first_run_id, second_run_id);
+
+        record_completed_run(&plan, &aggregate, Some(&first_run_id)).expect("first run recorded");
+        record_cook_attempt("cook-issue-6978", 1, &first_run_id).expect("first cook indexed");
+        record_completed_run(&plan, &aggregate, Some(&second_run_id)).expect("second run recorded");
+        record_cook_attempt("cook-issue-6978", 1, &second_run_id).expect("second cook indexed");
+
+        let index = cook_index("cook-issue-6978").expect("cook index loaded");
+        assert_eq!(index.latest_run_id, second_run_id);
+        assert_eq!(index.attempts.len(), 2);
+        assert_eq!(index.attempts[0].run_id, first_run_id);
+        assert_eq!(index.attempts[1].run_id, second_run_id);
+
+        let latest = status("cook-issue-6978").expect("stable cook id resolves");
+        assert_eq!(latest.run_id, second_run_id);
+        assert_eq!(latest.metadata["cook_alias"], "cook-issue-6978");
+        assert_eq!(
+            latest.metadata["cook_index"]["latest_run_id"],
+            second_run_id
+        );
+
+        let (_raw, path) = aggregate_source("cook-issue-6978").expect("latest aggregate resolves");
+        assert!(path.display().to_string().contains(&second_run_id));
+    });
+}
+
+#[test]
 fn record_promotion_persists_latest_event_on_run_metadata() {
     with_isolated_home(|_| {
         let plan = test_plan();

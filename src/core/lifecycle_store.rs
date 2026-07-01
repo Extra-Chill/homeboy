@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::{sanitize_run_id, AgentTaskRunRecord, AgentTaskRunState};
+use super::{
+    sanitize_run_id, AgentTaskCookIndex, AgentTaskCookIndexAttempt, AgentTaskRunRecord,
+    AgentTaskRunState,
+};
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::core::{paths, Error, ErrorCode, Result};
@@ -65,6 +68,36 @@ pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
         )
     })?;
     record_from_run(&run)
+}
+
+pub(super) fn write_cook_index_attempt(
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    recorded_at: String,
+) -> Result<AgentTaskCookIndex> {
+    let cook_id = sanitize_run_id(cook_id);
+    let run_id = sanitize_run_id(run_id);
+    let mut index = read_cook_index(&cook_id).unwrap_or_else(|_| AgentTaskCookIndex {
+        schema: super::records::schemas::COOK_INDEX.to_string(),
+        cook_id: cook_id.clone(),
+        latest_run_id: run_id.clone(),
+        attempts: Vec::new(),
+    });
+    index.cook_id = cook_id;
+    index.latest_run_id = run_id.clone();
+    index.attempts.retain(|entry| entry.run_id != run_id);
+    index.attempts.push(AgentTaskCookIndexAttempt {
+        attempt,
+        run_id,
+        recorded_at,
+    });
+    write_json(&cook_index_path(&index.cook_id)?, &index)?;
+    Ok(index)
+}
+
+pub(super) fn read_cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
+    read_json(&cook_index_path(cook_id)?)
 }
 
 pub(super) fn record_exists(run_id: &str) -> Result<bool> {
@@ -241,4 +274,11 @@ fn run_dir(run_id: &str) -> Result<PathBuf> {
     Ok(paths::homeboy_data()?
         .join("agent-task-runs")
         .join(sanitize_run_id(run_id)))
+}
+
+fn cook_index_path(cook_id: &str) -> Result<PathBuf> {
+    Ok(paths::homeboy_data()?
+        .join("agent-task-cooks")
+        .join(sanitize_run_id(cook_id))
+        .join("index.json"))
 }

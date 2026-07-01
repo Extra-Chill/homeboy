@@ -49,6 +49,10 @@ pub struct AgentTaskCookServiceOptions {
 pub struct AgentTaskCookReport {
     pub schema: &'static str,
     pub cook_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_run_ids: Vec<String>,
     pub status: String,
     pub attempts: Vec<AgentTaskCookAttemptReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +87,7 @@ where
     let cook_id = options.cook_id.clone();
 
     for attempt in 1..=max_attempts {
+        agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
         let record = agent_task_lifecycle::status(&run_id)?;
         let plan = agent_task_lifecycle::load_plan(&run_id)?;
         let Some(source_request) = plan.tasks.first().cloned() else {
@@ -232,7 +237,7 @@ where
                         1,
                     ));
                 };
-                let next_run_id = format!("{cook_id}-attempt-{}", attempt + 1);
+                let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, attempt + 1);
                 let follow_up_plan = AgentTaskPlan::new(
                     format!("{cook_id}-cook-attempt-{}", attempt + 1),
                     vec![follow_up_request],
@@ -391,10 +396,24 @@ fn cook_report(
     stop_reason: Option<String>,
     exit_code: i32,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let (latest_run_id, history_run_ids) = agent_task_lifecycle::cook_index(&cook_id)
+        .map(|index| {
+            (
+                Some(index.latest_run_id),
+                index
+                    .attempts
+                    .into_iter()
+                    .map(|attempt| attempt.run_id)
+                    .collect(),
+            )
+        })
+        .unwrap_or((None, Vec::new()));
     AgentTaskRunResult {
         value: AgentTaskCookReport {
             schema: "homeboy/agent-task-cook/v1",
             cook_id,
+            latest_run_id,
+            history_run_ids,
             status: status.to_string(),
             attempts,
             finalization,
