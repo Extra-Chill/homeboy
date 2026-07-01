@@ -99,6 +99,41 @@ fn bare_json_output_format_is_rejected_as_footgun() {
 }
 
 #[test]
+fn rig_up_runner_error_points_to_offloadable_rig_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let output = homeboy_command()
+        .args([
+            "--runner",
+            "homeboy-lab",
+            "rig",
+            "up",
+            "woocommerce-performance",
+        ])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .expect("run homeboy");
+
+    assert_eq!(output.status.code(), Some(2));
+
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    let message = stdout_json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("--runner is unavailable for this local-only resource-pressure command"),
+        "runner error should identify the unsupported local-only command: {message}"
+    );
+    assert!(
+        message.contains("homeboy rig check <rig-id> --runner <runner-id>"),
+        "runner error should point to offloadable rig check preparation: {message}"
+    );
+    assert!(
+        message.contains("homeboy rig run <rig-id> --runner <runner-id>"),
+        "runner error should point to offloadable rig run workflow: {message}"
+    );
+}
+
+#[test]
 fn command_owned_output_path_is_not_rejected_as_global_format() {
     let dir = tempfile::tempdir().expect("tempdir");
 
