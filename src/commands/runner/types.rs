@@ -253,7 +253,6 @@ pub enum RunnerConnectionOutput {
 pub type RunnerOutput = EntityCrudOutput<Runner, RunnerExtra>;
 
 pub(super) const REDACTED_ENV_VALUE: &str = "[redacted]";
-pub(super) const RUNNER_EXEC_SCRIPT_ENV: &str = "HOMEBOY_RUNNER_EXEC_SCRIPT";
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]

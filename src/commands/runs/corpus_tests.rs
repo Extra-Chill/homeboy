@@ -236,7 +236,7 @@ fn import_from_gh_actions_requires_workflow_or_run_id() {
 }
 
 #[test]
-fn bundle_import_marks_file_artifacts_metadata_only_and_query_reports_skip() {
+fn bundle_import_restores_file_artifacts_and_query_reads_embedded_bytes() {
     let bundle_dir = tempfile::tempdir().expect("bundle dir");
     let mut run_id = String::new();
     let mut source_home_path = String::new();
@@ -273,15 +273,15 @@ fn bundle_import_marks_file_artifacts_metadata_only_and_query_reports_skip() {
         let RunsOutput::Import(output) = output else {
             panic!("expected import output");
         };
-        assert_eq!(output.imported.artifacts, 0);
-        assert_eq!(output.imported.artifact_metadata_only, 1);
+        assert_eq!(output.imported.artifacts, 1);
+        assert_eq!(output.imported.artifact_metadata_only, 0);
 
         let store = ObservationStore::open_initialized().expect("store");
         let artifacts = store.list_artifacts(&run_id).expect("artifacts");
         assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].artifact_type, "metadata-only");
+        assert_eq!(artifacts[0].artifact_type, "file");
         assert!(!artifacts[0].path.contains(&source_home_path));
-        assert!(!std::path::Path::new(&artifacts[0].path).is_absolute());
+        assert!(std::path::Path::new(&artifacts[0].path).is_absolute());
 
         let (output, _) = query::runs_query(query::RunsQueryArgs {
             component_id: Some("homeboy".into()),
@@ -297,24 +297,9 @@ fn bundle_import_marks_file_artifacts_metadata_only_and_query_reports_skip() {
         let RunsOutput::Query(output) = output else {
             panic!("expected query output");
         };
-        assert_eq!(output.matched_artifact_count, 0);
-        assert_eq!(output.skipped_artifact_count, 1);
-        assert_eq!(output.skipped_artifacts[0].artifact_type, "metadata-only");
-        assert!(output.skipped_artifacts[0]
-            .reason
-            .contains("artifact bytes are not available"));
-
-        let err = super::artifact_get(super::RunsArtifactGetArgs {
-            run_id,
-            artifact_id: artifacts[0].id.clone(),
-            runner: None,
-            output: None,
-            field: Vec::new(),
-        })
-        .err()
-        .expect("metadata-only artifact get must fail");
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("metadata only"));
+        assert_eq!(output.matched_artifact_count, 1);
+        assert_eq!(output.skipped_artifact_count, 0);
+        assert_eq!(output.rows[0].values[0], "homeboy");
     });
 }
 

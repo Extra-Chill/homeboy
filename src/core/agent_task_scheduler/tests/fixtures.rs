@@ -33,6 +33,8 @@ pub(super) struct SuccessMissingRequiredArtifactsExecutor;
 
 pub(super) struct SuccessEmptyRequiredTypedArtifactExecutor {
     pub(super) artifact_path: std::path::PathBuf,
+    pub(super) artifact_name: &'static str,
+    pub(super) artifact_kind: &'static str,
 }
 
 impl AgentTaskExecutorAdapter for RetryOnceExecutor {
@@ -249,21 +251,21 @@ impl AgentTaskExecutorAdapter for SuccessEmptyRequiredTypedArtifactExecutor {
         let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
         let artifact = AgentTaskArtifact {
             schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: "empty-patch".to_string(),
-            kind: "patch".to_string(),
-            name: Some("patch.diff".to_string()),
+            id: format!("empty-{}", self.artifact_name),
+            kind: self.artifact_kind.to_string(),
+            name: Some(self.artifact_name.to_string()),
             label: None,
             role: None,
             semantic_key: None,
             path: Some(self.artifact_path.display().to_string()),
             url: None,
-            mime: Some("text/x-patch".to_string()),
+            mime: None,
             size_bytes: Some(0),
             sha256: None,
-            metadata: json!({ "role": "patch" }),
+            metadata: json!({ "role": self.artifact_name }),
         };
         outcome.typed_artifacts.push(AgentTaskTypedArtifact {
-            name: "patch".to_string(),
+            name: self.artifact_name.to_string(),
             artifact_type: Some("file".to_string()),
             artifact_schema: None,
             payload: json!({

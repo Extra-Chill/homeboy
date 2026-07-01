@@ -1,5 +1,6 @@
 use clap::Args;
 use serde::Serialize;
+use std::{fs, path::Path};
 
 use homeboy::core::component;
 use homeboy::core::deploy::{self, ReleaseStateStatus};
@@ -126,6 +127,11 @@ pub struct ReleaseArgs {
     /// get a reviewer-facing GitHub Release.
     #[arg(long)]
     i_know_ci_creates_the_github_release: bool,
+
+    /// Confirm an intentional manual tag-only release. Use only when no CI-owned
+    /// GitHub Release automation should create the reviewer-facing release page.
+    #[arg(long)]
+    i_know_this_is_a_manual_tag_only_release: bool,
 
     /// Git identity for release commits and tags.
     /// Use "bot" for the default CI bot identity, or "Name <email>" for custom.
@@ -300,6 +306,7 @@ impl ReleaseArgs {
             skip_publish,
             no_github_release: false,
             i_know_ci_creates_the_github_release: false,
+            i_know_this_is_a_manual_tag_only_release: false,
             git_identity: None,
             cascade: false,
         }
@@ -559,7 +566,7 @@ fn run_package_only(
     ))
 }
 
-/// Guard `--no-github-release` as a sharp, manual override (issue #6137).
+/// Guard `--no-github-release` as a sharp, manual override (issues #6137, #7049).
 ///
 /// On a manual/local release of a GitHub component, suppressing the
 /// reviewer-facing GitHub Release is almost never intended — the flag is too
@@ -576,7 +583,7 @@ fn guard_no_github_release(
     args: &ReleaseArgs,
     component_ids: &[String],
 ) -> homeboy::core::Result<()> {
-    if !args.no_github_release || args.i_know_ci_creates_the_github_release {
+    if !args.no_github_release {
         return Ok(());
     }
     if args.dry_run_args.dry_run {
@@ -585,49 +592,147 @@ fn guard_no_github_release(
 
     // Only gate components that would actually get a reviewer-facing GitHub
     // Release; non-GitHub remotes never create one, so the flag is a no-op there.
-    let mut gated: Vec<&String> = Vec::new();
+    let mut gated: Vec<(&str, component::Component)> = Vec::new();
     for id in component_ids {
         match component::load(id) {
-            Ok(component) if release::github_release_expected(&component) => gated.push(id),
+            Ok(component) if release::github_release_expected(&component) => {
+                gated.push((id.as_str(), component));
+            }
             // Unresolved or non-GitHub components are not gated here — the
             // downstream release flow reports load failures with full context.
             _ => {}
         }
     }
 
+    no_github_release_guard_for_components(args, gated)
+}
+
+fn no_github_release_guard_for_components(
+    args: &ReleaseArgs,
+    gated: Vec<(&str, component::Component)>,
+) -> homeboy::core::Result<()> {
+    if !args.no_github_release || args.dry_run_args.dry_run {
+        return Ok(());
+    }
+
     if gated.is_empty() {
         return Ok(());
     }
 
+    if args.i_know_this_is_a_manual_tag_only_release {
+        return Ok(());
+    }
+
+    if args.i_know_ci_creates_the_github_release {
+        let missing_evidence = gated
+            .iter()
+            .filter(|(_, component)| !ci_owned_github_release_evidence(component))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+
+        if missing_evidence.is_empty() {
+            return Ok(());
+        }
+
+        return Err(no_github_release_error(
+            "no-github-release",
+            &missing_evidence.join(", "),
+            missing_evidence.first().copied().unwrap_or("<component>"),
+            Some(
+                "--i-know-ci-creates-the-github-release requires machine-checkable evidence that CI creates the GitHub Release.",
+            ),
+        ));
+    }
+
     let components = gated
         .iter()
-        .map(|id| id.as_str())
+        .map(|(id, _)| *id)
         .collect::<Vec<_>>()
         .join(", ");
-    let example = gated.first().map(|id| id.as_str()).unwrap_or("<component>");
+    let example = gated.first().map(|(id, _)| *id).unwrap_or("<component>");
 
-    Err(homeboy::core::Error::validation_invalid_argument(
+    Err(no_github_release_error(
         "no-github-release",
-        format!(
-            "--no-github-release is a SHARP, manual override and would suppress the \
-             reviewer-facing GitHub Release for: {components}. On a manual/local release humans \
-             expect the GitHub Release page to exist, so this is gated. Confirm only if CI (or \
-             another pipeline) creates the GitHub Release."
+        &components,
+        example,
+        None,
+    ))
+}
+
+fn no_github_release_error(
+    argument: &'static str,
+    components: &str,
+    example: &str,
+    prefix: Option<&str>,
+) -> homeboy::core::Error {
+    let message = match prefix {
+        Some(prefix) => format!(
+            "{prefix} --no-github-release would suppress the reviewer-facing GitHub Release for: {components}. Drop --no-github-release for a normal manual release."
         ),
+        None => format!(
+            "--no-github-release is a SHARP, manual override and would suppress the reviewer-facing GitHub Release for: {components}. On a manual/local release humans expect the GitHub Release page to exist, so this is gated. Confirm only if CI (or another pipeline) creates the GitHub Release, or if you explicitly want a manual tag-only release."
+        ),
+    };
+
+    homeboy::core::Error::validation_invalid_argument(
+        argument,
+        message,
         None,
         Some(vec![
-            "If CI creates the GitHub Release, re-run with --i-know-ci-creates-the-github-release \
-             to confirm the tag-only intent."
+            "If CI creates the GitHub Release, add release.github_release.owner = \"ci\" to the component config or ensure a GitHub Actions workflow contains both release-skip-github-release and a release-head finish step, then re-run with --i-know-ci-creates-the-github-release."
                 .to_string(),
             "If you actually want a normal release, drop --no-github-release so the GitHub Release \
              is created."
+                .to_string(),
+            "If you truly want a manual tag-only release, re-run with --i-know-this-is-a-manual-tag-only-release instead of the CI-owned confirmation."
                 .to_string(),
             format!(
                 "If a tag-only release was already produced, create the GitHub Release later from \
                  the existing tag (same notes Homeboy generated): homeboy release {example} --head"
             ),
         ]),
-    ))
+    )
+}
+
+fn ci_owned_github_release_evidence(component: &component::Component) -> bool {
+    if component
+        .release
+        .github_release
+        .as_ref()
+        .and_then(|config| config.owner)
+        == Some(component::GithubReleaseOwner::Ci)
+    {
+        return true;
+    }
+
+    detected_ci_owned_github_release_workflow(Path::new(&component.local_path))
+}
+
+fn detected_ci_owned_github_release_workflow(local_path: &Path) -> bool {
+    let workflows_dir = local_path.join(".github").join("workflows");
+    let Ok(entries) = fs::read_dir(workflows_dir) else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        let is_workflow = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| matches!(extension, "yml" | "yaml"))
+            .unwrap_or(false);
+        if !is_workflow {
+            return false;
+        }
+
+        let Ok(content) = fs::read_to_string(path) else {
+            return false;
+        };
+
+        content.contains("release-skip-github-release")
+            && (content.contains("release-head") || content.contains("--head"))
+            && (content.contains("release-from-artifacts") || content.contains("from-artifacts"))
+    })
 }
 
 fn validate_apply_boundary(execution: &ReleaseExecutionPlan) -> homeboy::core::Result<()> {
@@ -804,6 +909,7 @@ mod tests {
             skip_publish: false,
             no_github_release: false,
             i_know_ci_creates_the_github_release: false,
+            i_know_this_is_a_manual_tag_only_release: false,
             git_identity: None,
             cascade: false,
         }
@@ -960,13 +1066,103 @@ mod tests {
     }
 
     #[test]
-    fn no_github_release_guard_passes_with_confirmation_flag() {
+    fn normal_manual_release_creates_github_release_by_default() {
+        let args = args(&["fixture"]);
+
+        assert!(!args.no_github_release);
+    }
+
+    fn github_component(local_path: &std::path::Path) -> component::Component {
+        let mut component = component::Component::new(
+            "fixture".to_string(),
+            local_path.to_string_lossy().into_owned(),
+            String::new(),
+            None,
+        );
+        component.remote_url = Some("https://github.com/Extra-Chill/fixture.git".to_string());
+        component
+    }
+
+    #[test]
+    fn no_github_release_ci_confirmation_requires_evidence() {
         let mut args = args(&["fixture"]);
         args.dry_run_args.dry_run = false;
         args.no_github_release = true;
         args.i_know_ci_creates_the_github_release = true;
-        guard_no_github_release(&args, &["fixture".to_string()])
-            .expect("explicit confirmation satisfies the guard");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let component = github_component(temp.path());
+
+        let err = no_github_release_guard_for_components(&args, vec![("fixture", component)])
+            .expect_err("CI-owned confirmation requires evidence");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err
+            .message
+            .contains("requires machine-checkable evidence that CI creates the GitHub Release"));
+        assert!(err.message.contains("Drop --no-github-release"));
+    }
+
+    #[test]
+    fn no_github_release_guard_passes_with_configured_ci_ownership() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.no_github_release = true;
+        args.i_know_ci_creates_the_github_release = true;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut component = github_component(temp.path());
+        component.release.github_release = Some(component::ComponentGithubReleaseConfig {
+            owner: Some(component::GithubReleaseOwner::Ci),
+        });
+
+        no_github_release_guard_for_components(&args, vec![("fixture", component)])
+            .expect("configured CI ownership satisfies the guard");
+    }
+
+    #[test]
+    fn no_github_release_guard_passes_with_detected_ci_ownership() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.no_github_release = true;
+        args.i_know_ci_creates_the_github_release = true;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workflows = temp.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).expect("workflow dir");
+        std::fs::write(
+            workflows.join("release.yml"),
+            r#"
+jobs:
+  prepare:
+    steps:
+      - uses: Extra-Chill/homeboy-action@v2
+        with:
+          release-skip-github-release: 'true'
+  host:
+    steps:
+      - uses: Extra-Chill/homeboy-action@v2
+        with:
+          release-head: 'true'
+          release-from-artifacts: artifacts
+"#,
+        )
+        .expect("workflow fixture");
+        let component = github_component(temp.path());
+
+        no_github_release_guard_for_components(&args, vec![("fixture", component)])
+            .expect("detected CI ownership satisfies the guard");
+    }
+
+    #[test]
+    fn no_github_release_guard_passes_with_manual_tag_only_confirmation() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.no_github_release = true;
+        args.i_know_this_is_a_manual_tag_only_release = true;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let component = github_component(temp.path());
+
+        no_github_release_guard_for_components(&args, vec![("fixture", component)]).expect(
+            "manual tag-only confirmation satisfies the guard without implying CI ownership",
+        );
     }
 
     #[test]

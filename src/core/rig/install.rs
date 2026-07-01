@@ -12,6 +12,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use super::spec::{validate_dependency_materialization_steps, RigSpec};
+
 const EXTENDS_FIELD: &str = "extends";
 
 pub use super::discovery::{discover_rigs, discover_stacks, DiscoveredRig, DiscoveredStack};
@@ -129,7 +131,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
     let mut installed = Vec::new();
     for rig in selected {
         let target = paths::rig_config(&rig.id)?;
-        materialize_rig_spec(&rig.rig_path, &prepared.source_root)?;
+        validate_rig_spec_file(&rig.rig_path, &prepared.source_root, &rig.id)?;
         if target.exists() || fs::symlink_metadata(&target).is_ok() {
             ensure_rig_refreshable(&rig, &target)?;
             remove_existing_config(&target, "replace rig config link")?;
@@ -197,6 +199,52 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
         installed,
         installed_stacks,
     })
+}
+
+fn validate_rig_spec_file(path: &Path, source_root: &Path, rig_id: &str) -> Result<()> {
+    let value = match materialize_rig_spec(path, source_root)? {
+        Some(value) => value,
+        None => {
+            let content = fs::read_to_string(path).map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some(format!("read rig spec {}", path.display())),
+                )
+            })?;
+            serde_json::from_str(&content).map_err(|e| {
+                Error::validation_invalid_json(
+                    e,
+                    Some(format!("parse rig spec {}", path.display())),
+                    Some(content.chars().take(200).collect()),
+                )
+            })?
+        }
+    };
+    let mut spec: RigSpec = serde_json::from_value(value).map_err(|e| {
+        Error::rig_schema_unsupported(
+            e.to_string(),
+            format!("parse rig spec {}", path.display()),
+            None,
+        )
+    })?;
+    if spec.id.is_empty() {
+        spec.id = rig_id.to_string();
+    }
+
+    let errors = validate_dependency_materialization_steps(&spec);
+    if errors.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "rig",
+        format!(
+            "Rig `{}` has invalid dependency materialization configuration",
+            spec.id
+        ),
+        Some(spec.id),
+        Some(errors),
+    ))
 }
 
 pub(crate) fn write_rig_config_from_source(

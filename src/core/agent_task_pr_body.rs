@@ -20,10 +20,11 @@ pub(crate) fn render_pr_body(
     changed_files: &[String],
 ) -> String {
     format!(
-        "## Summary\n- Finalized Homeboy agent-task cook run `{}` into review-ready branch `{}`.\n\n## Proof provenance\n{}\n\n## Source refs\n{}\n\n{}{}{}## Attempt summary\n{}\n\n## Gate results\n{}\n\n## Verification capability\n{}\n\n## CI-equivalent coverage\n{}\n\n## Changed files\n{}\n\n## Artifact refs\n{}\n\n{}## Final status\n- **Status:** review-ready\n- **Base:** `{}`\n- **Head:** `{}`\n- **Merge/deploy:** not performed\n\n## AI assistance\n- **AI assistance:** Yes\n- **Tool(s):** {}\n- **Model:** {}\n- **Used for:** {}\n",
+        "## Summary\n- Finalized Homeboy agent-task cook run `{}` into review-ready branch `{}`.\n\n## Proof provenance\n{}\n\n## Publication intent\n{}\n\n## Source refs\n{}\n\n{}{}{}## Attempt summary\n{}\n\n## Gate results\n{}\n\n## Verification capability\n{}\n\n## CI-equivalent coverage\n{}\n\n## Changed files\n{}\n\n## Artifact refs\n{}\n\n{}## Final status\n- **Status:** review-ready\n- **Base:** `{}`\n- **Head:** `{}`\n- **Merge/deploy:** not performed\n\n## AI assistance\n- **AI assistance:** Yes\n- **Tool(s):** {}\n- **Model:** {}\n- **Used for:** {}\n",
         options.run_id,
         head,
         proof_provenance(proof),
+        publication_intent_bullets(options, head),
         bullets(&options.evidence.source_refs),
         source_relationship_section(options),
         runtime_guardrails_section(options),
@@ -45,6 +46,18 @@ pub(crate) fn render_pr_body(
             .unwrap_or(AI_MODEL_NOT_RECORDED),
         options.ai_used_for
     )
+}
+
+fn publication_intent_bullets(options: &AgentTaskPrFinalizationOptions, head: &str) -> String {
+    [
+        "- **Schema:** `homeboy/agent-task-publication-intent/v1`".to_string(),
+        "- **Action:** `review_request`".to_string(),
+        "- **Target kind:** `code_review`".to_string(),
+        "- **Adapter:** `github_pull_request`".to_string(),
+        format!("- **Base:** `{}`", options.base),
+        format!("- **Head:** `{head}`"),
+    ]
+    .join("\n")
 }
 
 fn lifecycle_section(options: &AgentTaskPrFinalizationOptions) -> String {

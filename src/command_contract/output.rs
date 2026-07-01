@@ -226,6 +226,9 @@ impl Commands {
                 CommandOutputContractKind::JsonEnvelope,
             ),
             Commands::Version(_) => version::adapter(output_file_mode).output_descriptor(),
+            Commands::Contract(_) => {
+                crate::commands::contract::adapter(output_file_mode).output_descriptor()
+            }
             Commands::AgentTask(_)
             | Commands::Project(_)
             | Commands::Component(_)
@@ -360,6 +363,14 @@ mod tests {
             "review" => Some(&["homeboy", "review"]),
             "audit" => Some(&["homeboy", "audit"]),
             "refactor" => Some(&["homeboy", "refactor", "--all"]),
+            "runtime" => Some(&[
+                "homeboy",
+                "runtime",
+                "refresh",
+                "example-runtime",
+                "--source",
+                ".",
+            ]),
             "rig" => Some(&["homeboy", "rig", "check", "example-rig"]),
             "tunnel" => Some(&[
                 "homeboy",

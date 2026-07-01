@@ -90,6 +90,12 @@ pub struct ControllerRunFailureSummary {
     /// Durable evidence refs (runner job logs, run evidence, artifact bundles).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<ControllerRunEvidenceRef>,
+    /// Provider-owned runtime context for the failed run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_context: Option<Value>,
+    /// Provider-owned replay command for reproducing the failed runtime action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_command: Option<String>,
     /// Next recommended Homeboy command to investigate or resume.
     pub next_command: String,
 }
@@ -156,6 +162,13 @@ pub fn build_run_failure_summary(
     );
 
     let evidence_refs = collect_evidence_refs(loop_id, failed_action, status);
+    let runtime_context = failure_summary
+        .and_then(|summary| summary.get("runtime_context"))
+        .cloned()
+        .or_else(|| failed_action.and_then(provider_owned_runtime_context));
+    let replay_command = failure_summary
+        .and_then(|summary| string_field(summary, "replay_command"))
+        .or_else(|| failed_action.and_then(provider_owned_replay_command));
 
     let next_command = next_command(loop_id, owner_surface, action_status.as_deref());
 
@@ -170,6 +183,8 @@ pub fn build_run_failure_summary(
         provider,
         failure_phase,
         evidence_refs,
+        runtime_context,
+        replay_command,
         next_command,
     }
 }
@@ -539,6 +554,45 @@ fn best_diagnostic_message(value: Option<&Value>) -> Option<String> {
             )
         })
         .map(|candidate| candidate.message)
+}
+
+fn provider_owned_runtime_context(value: &Value) -> Option<Value> {
+    find_value_field(value, "runtime_context")
+}
+
+fn provider_owned_replay_command(value: &Value) -> Option<String> {
+    find_string_field(value, "replay_command")
+}
+
+fn find_value_field(value: &Value, field: &str) -> Option<Value> {
+    match value {
+        Value::Object(map) => map.get(field).cloned().or_else(|| {
+            map.values()
+                .find_map(|value| find_value_field(value, field))
+        }),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|value| find_value_field(value, field)),
+        _ => None,
+    }
+}
+
+fn find_string_field(value: &Value, field: &str) -> Option<String> {
+    match value {
+        Value::Object(map) => map
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                map.values()
+                    .find_map(|value| find_string_field(value, field))
+            }),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|value| find_string_field(value, field)),
+        _ => None,
+    }
 }
 
 struct DiagnosticCandidate {

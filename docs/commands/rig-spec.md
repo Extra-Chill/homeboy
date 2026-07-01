@@ -480,9 +480,13 @@ Rig specs can pin benchmark dispatch for `homeboy bench --rig <id>`.
 | `bench.components` | array | Components to benchmark as a rig-pinned matrix. |
 | `bench.default_baseline_rig` | string | Implicit baseline rig for branch-vs-main comparisons. |
 | `bench.warmup_iterations` | integer | Warmup iterations forwarded to bench runners. |
+| `bench.check_groups` | array | Common check-pipeline groups required before scenario-scoped bench runs. |
+| `bench.scenario_check_groups` | object | Additional check-pipeline groups keyed by bench scenario ID. |
 | `bench_workloads` | object | Out-of-tree workloads keyed by extension ID. |
 | `trace_workloads` | object | Out-of-tree trace workloads keyed by extension ID. |
 | `bench_profiles` | object | Named scenario lists used by `homeboy bench --profile <name>`. |
+
+When `homeboy bench --scenario <id>` selects scenarios and every selected scenario has a `bench.scenario_check_groups` entry, Homeboy runs `bench.check_groups` plus those scenario-specific groups instead of the full `rig check`. Runs without selected scenarios, or with an unmapped selected scenario, preserve the full rig check.
 
 `bench_workloads` and `trace_workloads` entries must use object form with a `path` field. Optional `check_groups` scope workload preflights; when every workload for the selected extension declares `check_groups`, workload commands run only those grouped check-pipeline steps. Workloads that omit `check_groups` run the full rig check. Trace workload objects can also declare `trace_phase_presets` and `trace_default_phase_preset`.
 
@@ -493,7 +497,12 @@ Workload paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and `${pac
   "bench": {
     "components": ["studio", "playground"],
     "default_baseline_rig": "studio-main",
-    "warmup_iterations": 2
+    "warmup_iterations": 2,
+    "check_groups": ["common"],
+    "scenario_check_groups": {
+      "admin-first-load": ["admin-assets"],
+      "rest-product-batch-import": ["rest-api"]
+    }
   },
   "bench_workloads": {
     "wordpress": [

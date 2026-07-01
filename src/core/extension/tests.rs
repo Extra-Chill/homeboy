@@ -239,6 +239,156 @@ fn missing_sidecar_declarations_have_no_structured_contract() {
 }
 
 #[test]
+fn manifest_parses_extension_materialization_source_contract() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "materialization_source": {
+            "source_kind": "archive",
+            "revision": "abc1234",
+            "runner_archive_url": "https://example.com/extensions/example.tar.gz",
+            "runner_archive_sha256": "sha256-fixture",
+            "runner_ref": "refs/tags/example-v1",
+            "helper_manifest_refs": [{
+                "id": "example-runtime",
+                "path": "runtime/example-runtime.json",
+                "schema": "homeboy/agent-runtime-manifest/v1",
+                "purpose": "agent runtime helper"
+            }]
+        }
+    }))
+    .unwrap();
+
+    let source = manifest
+        .materialization_source
+        .expect("materialization source contract");
+    assert_eq!(source.schema, EXTENSION_MATERIALIZATION_SOURCE_SCHEMA);
+    assert_eq!(
+        source.source_kind,
+        ExtensionMaterializationSourceKind::Archive
+    );
+    assert_eq!(source.revision.as_deref(), Some("abc1234"));
+    assert_eq!(
+        source.runner_archive_url.as_deref(),
+        Some("https://example.com/extensions/example.tar.gz")
+    );
+    assert_eq!(source.runner_ref.as_deref(), Some("refs/tags/example-v1"));
+    assert_eq!(source.helper_manifest_refs[0].id, "example-runtime");
+}
+
+#[test]
+fn manifest_parses_extension_contract_producers() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "contract_producers": [
+            {
+                "id": "capabilities",
+                "phase": "discovery",
+                "invocation": {
+                    "script": "contracts/discovery.sh",
+                    "args": ["--json"],
+                    "env": ["HOMEBOY_COMPONENT_ROOT"],
+                    "input_schema": "homeboy/extension-discovery-request/v1",
+                    "output_schema": "homeboy/extension-discovery-response/v1"
+                },
+                "produces": [{
+                    "kind": "capability",
+                    "name": "capabilities",
+                    "schema": "homeboy/extension-capabilities/v1"
+                }]
+            },
+            {
+                "id": "plans",
+                "phase": "planning",
+                "invocation": { "script": "contracts/planning.sh" },
+                "produces": [
+                    { "kind": "execution_plan" },
+                    { "kind": "materialization_plan" },
+                    { "kind": "secret_plan" }
+                ]
+            },
+            {
+                "id": "handoff",
+                "phase": "handoff",
+                "invocation": { "script": "contracts/handoff.sh" },
+                "produces": [{ "kind": "runner_envelope_addition" }]
+            },
+            {
+                "id": "results",
+                "phase": "result",
+                "invocation": { "script": "contracts/result.sh" },
+                "produces": [
+                    { "kind": "artifact" },
+                    { "kind": "status" },
+                    { "kind": "evidence" }
+                ]
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(manifest.contract_producers.len(), 4);
+    assert_eq!(
+        manifest.contract_producers[0].schema,
+        EXTENSION_CONTRACT_PRODUCER_SCHEMA
+    );
+    assert_eq!(
+        manifest.contract_producers[0].phase,
+        ExtensionContractProducerPhase::Discovery
+    );
+    assert_eq!(
+        manifest.contract_producers[0].invocation.script,
+        "contracts/discovery.sh"
+    );
+    assert_eq!(
+        manifest.contract_producers[0].invocation.args,
+        vec!["--json"]
+    );
+    assert_eq!(
+        manifest.contract_producers[0].produces[0].name.as_deref(),
+        Some("capabilities")
+    );
+    assert_eq!(
+        manifest.contract_producers[1].produces[0].kind,
+        ExtensionContractProducerOutputKind::ExecutionPlan
+    );
+    assert_eq!(
+        manifest.contract_producers[1].produces[1].kind,
+        ExtensionContractProducerOutputKind::MaterializationPlan
+    );
+    assert_eq!(
+        manifest.contract_producers[1].produces[2].kind,
+        ExtensionContractProducerOutputKind::SecretPlan
+    );
+    assert_eq!(
+        manifest.contract_producers[2].produces[0].kind,
+        ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
+    );
+    assert_eq!(
+        manifest.contract_producers[3].produces[2].kind,
+        ExtensionContractProducerOutputKind::Evidence
+    );
+}
+
+#[test]
+fn contract_producers_reject_unknown_fields() {
+    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "contract_producers": [{
+            "id": "capabilities",
+            "phase": "discovery",
+            "domain": "wordpress",
+            "invocation": { "script": "contracts/discovery.sh" }
+        }]
+    }))
+    .expect_err("contract producers should stay explicit and generic");
+
+    assert!(err.to_string().contains("unknown field"));
+}
+
+#[test]
 fn legacy_sidecar_schema_fields_do_not_declare_structured_contracts() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",

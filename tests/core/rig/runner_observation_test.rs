@@ -211,6 +211,7 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
+                dependency_cache: None,
             },
         );
         rig.pipeline.insert(

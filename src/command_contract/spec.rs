@@ -59,6 +59,7 @@ pub(crate) const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task cont
 pub(crate) const AGENT_TASK_STATUS_LAB_LABEL: &str =
     "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
 pub(crate) const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
+pub(crate) const AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL: &str = "agent-task fanout cook-batch";
 pub(crate) const AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL: &str = "agent-task fanout run-plan";
 pub(crate) const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
 pub(crate) const AGENT_TASK_FANOUT_STATUS_LAB_LABEL: &str = "agent-task fanout status/artifacts";
@@ -72,6 +73,7 @@ pub(crate) const FUZZ_LAB_LABEL: &str = "fuzz";
 pub(crate) const TRACE_LAB_LABEL: &str = "trace";
 pub(crate) const REFACTOR_LAB_LABEL: &str = "refactor";
 pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
+pub(crate) const RIG_RUN_LAB_LABEL: &str = "rig run";
 pub(crate) const RUNTIME_REFRESH_LAB_LABEL: &str = "runtime refresh";
 pub(crate) const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
 pub(crate) const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
@@ -227,12 +229,13 @@ const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     },
     CommandLabSupportSummary {
         contract_labels: &[
+            AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
             AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
             AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
             AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
         ],
-        message_label: "agent-task fanout run-plan/submit-batch/status/artifacts",
-        hint_label: "agent-task fanout run-plan/submit-batch/status/artifacts",
+        message_label: "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
+        hint_label: "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_AUTH_STATUS_LAB_LABEL],
@@ -289,11 +292,18 @@ const REFACTOR_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSum
     hint_label: "refactor source runs",
 }];
 
-const RIG_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
-    contract_labels: &[RIG_CHECK_LAB_LABEL],
-    message_label: RIG_CHECK_LAB_LABEL,
-    hint_label: RIG_CHECK_LAB_LABEL,
-}];
+const RIG_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
+    CommandLabSupportSummary {
+        contract_labels: &[RIG_CHECK_LAB_LABEL],
+        message_label: RIG_CHECK_LAB_LABEL,
+        hint_label: RIG_CHECK_LAB_LABEL,
+    },
+    CommandLabSupportSummary {
+        contract_labels: &[RIG_RUN_LAB_LABEL],
+        message_label: RIG_RUN_LAB_LABEL,
+        hint_label: RIG_RUN_LAB_LABEL,
+    },
+];
 
 const RUNTIME_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
     contract_labels: &[RUNTIME_REFRESH_LAB_LABEL],
@@ -439,6 +449,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     command_spec("component", CommandJsonFamily::Workspace),
     command_spec("config", CommandJsonFamily::Workspace),
+    command_spec_with_output_notes(
+        "contract",
+        CommandJsonFamily::Workspace,
+        "lists, shows, exports constants, exports schemas, validates, and normalizes Homeboy-owned contract metadata through the central contract surface",
+    ),
     command_spec("daemon", CommandJsonFamily::Ops),
     command_spec("extension", CommandJsonFamily::Workspace),
     command_spec("status", CommandJsonFamily::Ops),

@@ -39,7 +39,7 @@ pub use types::{
 
 // Shared external imports, re-exported so submodules can pull them via
 // `use super::*`.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::command_contract::lab_runner_support_summary;
@@ -96,14 +96,15 @@ use super::super::lab_workspaces::{
 };
 use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
-    evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_changed_since_ref,
-    lab_offload_metadata, lab_offload_metadata_with_workspace_mapping, load,
-    plan_managed_runner_source_syncs, preflight_lab_offload_changed_since,
-    prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
-    status, sync_workspace, LabRunnerGateDecision, MaterializedWorkspace, RunnerCapabilityPreflight,
-    RunnerExecOptions, RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
-    WorkspaceCleanupPolicy,
+    dependency_cache_save, evaluate_lab_runner_capabilities_for_runner, exec,
+    lab_offload_changed_since_ref, lab_offload_metadata,
+    lab_offload_metadata_with_workspace_mapping, load, plan_managed_runner_source_syncs,
+    preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
+    prepare_lab_runner_capability, rig_materialization, status, sync_workspace,
+    LabRunnerGateDecision, MaterializedWorkspace, RunnerCapabilityPreflight,
+    RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest, RunnerExecOptions,
+    RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
 };
 
 use super::super::workload::{build_runner_workload, RunnerWorkloadBuildInput};

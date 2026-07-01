@@ -505,16 +505,21 @@ fn refresh_hint(
 }
 
 fn refresh_command(runner_id: &str, runner_homeboy: &serde_json::Value) -> String {
-    runner_homeboy["refresh_commands"]
-        .as_array()
-        .and_then(|commands| {
-            commands
-                .iter()
-                .filter_map(|command| command.as_str())
-                .next()
-        })
+    runner_homeboy["primary_remediation_command"]
+        .as_str()
         .map(str::to_string)
         .filter(|command| !command.is_empty())
+        .or_else(|| {
+            runner_homeboy["refresh_commands"]
+                .as_array()
+                .and_then(|commands| {
+                    commands
+                        .iter()
+                        .filter_map(|command| command.as_str())
+                        .next()
+                })
+                .map(str::to_string)
+        })
         .or_else(|| {
             runner_homeboy["upgrade_command"]
                 .as_str()

@@ -10,6 +10,4 @@ pub(crate) mod copy_tree;
 pub mod output_file;
 
 pub(crate) use copy_tree::{copy_tree, EntryPolicy};
-pub use output_file::{
-    write_output_file, write_output_file_atomically, OutputWriteOptions, TrailingNewline,
-};
+pub use output_file::{write_output_file_atomically, OutputWriteOptions};

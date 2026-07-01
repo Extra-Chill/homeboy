@@ -3,6 +3,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use crate::core::agent_task_provider::WorkspaceCwdMode;
 use crate::core::agent_task_provider::{
     AgentTaskExecutorProvider, AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
     AgentTaskProviderWorkspaceMaterialization,
@@ -476,6 +478,9 @@ fn agent_task_executor_providers_from_runtime_manifests(
         for mut provider in runtime_manifest.agent_task_executors {
             provider.extension_id = runtime_manifest.extension_id.clone();
             provider.extension_path = runtime_manifest.extension_path.clone();
+            if provider.runtime_package_source.is_none() {
+                provider.runtime_package_source = runtime_manifest.extension_id.clone();
+            }
             provider.runtime_id = Some(runtime_manifest.id.clone());
             provider.runtime_path = runtime_manifest.runtime_path.clone();
             if let Ok(value) = serde_json::to_value(&materialization_plan) {
@@ -643,6 +648,8 @@ mod tests {
             trace: None,
             autofix_verify: None,
             structured_sidecars: Default::default(),
+            materialization_source: None,
+            contract_producers: Vec::new(),
             release_preflights: Vec::new(),
             agent_runtimes: Vec::new(),
             agent_task: None,
@@ -718,7 +725,7 @@ mod tests {
                     },
                     "env_passthrough": ["EXAMPLE_RUNTIME_BIN", "EXAMPLE_RUNTIME_TOKEN", "EXAMPLE_RUNTIME_BIN"],
                     "workspace": {
-                        "cwd": "git_checkout",
+                        "cwd": WorkspaceCwdMode::GitCheckout.to_string(),
                         "requires_git": true
                     }
                 },
@@ -822,7 +829,7 @@ mod tests {
                         "request_schema": AGENT_TASK_REQUEST_SCHEMA,
                         "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
                         "workspace_materialization": {
-                            "cwd": "git_checkout",
+                            "cwd": WorkspaceCwdMode::GitCheckout.to_string(),
                             "requires_git": true,
                             "write_scope": "artifacts",
                             "artifact_paths": [".homeboy/example"]

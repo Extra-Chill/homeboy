@@ -768,7 +768,11 @@ mod install_flows {
     fn run_lint_reports_package_conflict_markers() {
         let _home = HomeGuard::new();
         let package = tempfile::tempdir().expect("package");
-        write_rig(package.path(), "lint-conflict", &minimal_rig("lint-conflict"));
+        write_rig(
+            package.path(),
+            "lint-conflict",
+            &minimal_rig("lint-conflict"),
+        );
         fs::write(package.path().join("conflicted.txt"), "<<<<<<< ours\n")
             .expect("conflict fixture");
 
@@ -834,7 +838,7 @@ mod install_flows {
             "pipeline": {
                 "check": [
                     { "$merge": "append" },
-                    { "kind": "check", "label": "wp codebox cli exists", "command": "wp-codebox --version" }
+                    { "kind": "check", "label": "sample runtime cli exists", "command": "sample-runtime --version" }
                 ]
             }
         }"#,
@@ -855,7 +859,7 @@ mod install_flows {
             .iter()
             .map(|step| step["label"].as_str().expect("label"))
             .collect();
-        assert_eq!(labels, vec!["npm available", "wp codebox cli exists"]);
+        assert_eq!(labels, vec!["npm available", "sample runtime cli exists"]);
 
         // The materialized spec still parses as a rig (directive fully removed).
         load("appender").expect("load appended rig");

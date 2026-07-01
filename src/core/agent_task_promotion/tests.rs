@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::apply::{
@@ -25,8 +25,7 @@ use crate::core::agent_task::{
     AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::core::agent_task_gate::{
-    AgentTaskGateEnvironment, AgentTaskGateReport, AgentTaskGateRevealPolicy,
-    AgentTaskGateVisibility, VerifyGateOptions,
+    AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::{Error, Result};
@@ -179,7 +178,11 @@ fn validate_patch_rejects_empty_patch() {
 }
 
 #[test]
-fn select_patch_artifact_rejects_empty_patch_metadata() {
+fn promote_reports_no_changes_for_empty_patch_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let patch_path = temp.path().join("patch.diff");
+    std::fs::write(&patch_path, "").expect("write empty patch");
+    let source_path = temp.path().join("outcome.json");
     let outcome = AgentTaskOutcome {
         schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: "task-1".to_string(),
@@ -211,11 +214,35 @@ fn select_patch_artifact_rejects_empty_patch_metadata() {
         follow_up: None,
         metadata: Value::Null,
     };
+    let source = serde_json::to_string(&outcome).expect("serialize outcome");
+    std::fs::write(&source_path, &source).expect("write source");
 
-    let err = select_patch_artifact(&outcome, None).expect_err("empty patch rejected");
+    let mut provider = FakePromotionWorkspaceProvider::default();
 
-    assert!(err.message.contains("non-empty patch artifact"));
-    assert!(err.message.contains("agent result or transcript"));
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run-empty".to_string()),
+            source_path: Some(source_path),
+            to_worktree: "repo@promoted-task".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["cargo test".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+        },
+        &mut provider,
+    )
+    .expect("empty patch reports no changes");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+    assert!(report.changed_files.is_empty());
+    assert!(provider.apply_calls.is_empty());
+    assert!(provider.verify_calls.is_empty());
 }
 
 #[test]

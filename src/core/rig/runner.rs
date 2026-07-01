@@ -4,7 +4,7 @@
 //! JSON. Reports are the contract — they should be stable across minor
 //! homeboy versions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -16,11 +16,12 @@ use super::expand::{expand_resources, expand_vars};
 use super::lease::acquire_active_run_lease;
 use super::lint::run_package_lint;
 use super::pipeline::{
-    cleanup_shared_paths, run_pipeline, run_pipeline_check_groups, run_pipeline_with_settings,
-    PipelineOutcome,
+    cleanup_shared_paths, run_command_step, run_pipeline, run_pipeline_check_groups,
+    run_pipeline_with_settings, run_prepare_requirement_steps, PipelineOutcome,
+    PipelineStepOutcome,
 };
 use super::service::{self, ServiceStatus};
-use super::spec::{RigSpec, ServiceKind, SymlinkSpec};
+use super::spec::{DependencyMaterializationOutputKind, RigSpec, ServiceKind, SymlinkSpec};
 use super::state::{
     now_rfc3339, ComponentSnapshot, MaterializedRigState, RigState, RigStateSnapshot,
 };
@@ -299,11 +300,23 @@ pub fn run_bench_prepare(
     rig: &RigSpec,
     settings: &[(String, String)],
 ) -> Result<Option<BenchPrepareReport>> {
-    if !rig.pipeline.contains_key("bench_prepare") {
+    let prepare_requirements = run_prepare_requirement_steps(rig, "bench_prepare", settings)?;
+    if !rig.pipeline.contains_key("bench_prepare") && prepare_requirements.steps.is_empty() {
         return Ok(None);
     }
 
-    let outcome = run_pipeline_with_settings(rig, "bench_prepare", true, settings)?;
+    let pipeline_outcome =
+        if prepare_requirements.is_success() && rig.pipeline.contains_key("bench_prepare") {
+            run_pipeline_with_settings(rig, "bench_prepare", true, settings)?
+        } else {
+            PipelineOutcome {
+                name: "bench_prepare".to_string(),
+                steps: Vec::new(),
+                passed: 0,
+                failed: 0,
+            }
+        };
+    let outcome = merge_prepare_outcomes("bench_prepare", prepare_requirements, pipeline_outcome);
     Ok(Some(BenchPrepareReport {
         rig_id: rig.id.clone(),
         success: outcome.is_success(),
@@ -320,16 +333,228 @@ pub fn run_fuzz_prepare(
     rig: &RigSpec,
     settings: &[(String, String)],
 ) -> Result<Option<FuzzPrepareReport>> {
-    if !rig.pipeline.contains_key("fuzz_prepare") {
+    if !rig.pipeline.contains_key("fuzz_prepare")
+        && rig.requirements.dependency_materialization.is_empty()
+    {
         return Ok(None);
     }
 
-    let outcome = run_pipeline_with_settings(rig, "fuzz_prepare", true, settings)?;
+    let dependency_outcome = run_dependency_materialization_steps(rig, "fuzz_prepare", settings)?;
+    let pipeline_outcome =
+        if dependency_outcome.is_success() && rig.pipeline.contains_key("fuzz_prepare") {
+            run_pipeline_with_settings(rig, "fuzz_prepare", true, settings)?
+        } else {
+            PipelineOutcome {
+                name: "fuzz_prepare".to_string(),
+                steps: Vec::new(),
+                passed: 0,
+                failed: 0,
+            }
+        };
+    let outcome = merge_prepare_outcomes("fuzz_prepare", dependency_outcome, pipeline_outcome);
     Ok(Some(FuzzPrepareReport {
         rig_id: rig.id.clone(),
         success: outcome.is_success(),
         pipeline: outcome,
     }))
+}
+
+fn run_dependency_materialization_steps(
+    rig: &RigSpec,
+    phase: &str,
+    settings: &[(String, String)],
+) -> Result<PipelineOutcome> {
+    let mut steps = Vec::new();
+    let mut passed = 0;
+    let mut failed = 0;
+
+    for step in super::normalize_dependency_materialization_steps(rig) {
+        let label = if step.id.is_empty() {
+            "dependency materialization".to_string()
+        } else {
+            format!("dependency materialization {}", step.id)
+        };
+        let result = materialize_dependency_step(rig, &step.spec, settings);
+        match result {
+            Ok(()) => {
+                passed += 1;
+                steps.push(PipelineStepOutcome {
+                    kind: "dependency_materialization".to_string(),
+                    label,
+                    status: "pass".to_string(),
+                    error: None,
+                });
+            }
+            Err(error) => {
+                failed += 1;
+                steps.push(PipelineStepOutcome {
+                    kind: "dependency_materialization".to_string(),
+                    label,
+                    status: "fail".to_string(),
+                    error: Some(error.to_string()),
+                });
+                break;
+            }
+        }
+    }
+
+    Ok(PipelineOutcome {
+        name: phase.to_string(),
+        steps,
+        passed,
+        failed,
+    })
+}
+
+fn materialize_dependency_step(
+    rig: &RigSpec,
+    step: &super::DependencyMaterializationStepSpec,
+    settings: &[(String, String)],
+) -> Result<()> {
+    if dependency_outputs_satisfied(rig, step) {
+        return Ok(());
+    }
+
+    if let Some(command) = step.command.as_deref() {
+        let env: HashMap<String, String> = step
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        run_command_step(
+            rig,
+            command,
+            dependency_step_cwd(rig, step).as_deref(),
+            &env,
+            settings,
+        )?;
+    } else if step.provider.is_some() {
+        let component_id = step.component.as_deref().ok_or_else(|| {
+            Error::rig_pipeline_failed(
+                &rig.id,
+                "dependency_materialization",
+                format!(
+                    "dependency materialization step '{}' declares provider but no component",
+                    step.id
+                ),
+            )
+        })?;
+        let component = super::resolve_component(rig, component_id)?;
+        let path = dependency_step_cwd(rig, step)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&component.local_path));
+        crate::core::deps::install_for_resolved(&component, &path).map_err(|error| {
+            Error::rig_pipeline_failed(
+                &rig.id,
+                "dependency_materialization",
+                format!(
+                    "dependency materialization step '{}' provider '{}' failed: {}",
+                    step.id,
+                    step.provider.as_deref().unwrap_or_default(),
+                    error
+                ),
+            )
+        })?;
+    }
+
+    let missing = missing_dependency_outputs(rig, step);
+    if !missing.is_empty() {
+        return Err(Error::rig_pipeline_failed(
+            &rig.id,
+            "dependency_materialization",
+            format!(
+                "dependency materialization step '{}' did not produce required outputs: {}",
+                step.id,
+                missing.join("; ")
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn dependency_outputs_satisfied(
+    rig: &RigSpec,
+    step: &super::DependencyMaterializationStepSpec,
+) -> bool {
+    missing_dependency_outputs(rig, step).is_empty()
+}
+
+fn missing_dependency_outputs(
+    rig: &RigSpec,
+    step: &super::DependencyMaterializationStepSpec,
+) -> Vec<String> {
+    step.expected_outputs
+        .iter()
+        .filter(|output| output.required)
+        .filter_map(|output| {
+            let path = resolve_dependency_output_path(rig, step, &output.path);
+            let ok = match output.kind {
+                DependencyMaterializationOutputKind::File => path.is_file(),
+                DependencyMaterializationOutputKind::Dir => path.is_dir(),
+                DependencyMaterializationOutputKind::Path => path.exists(),
+            };
+            (!ok).then(|| {
+                format!(
+                    "{} does not exist: {}",
+                    output_kind_label(output.kind),
+                    path.display()
+                )
+            })
+        })
+        .collect()
+}
+
+fn resolve_dependency_output_path(
+    rig: &RigSpec,
+    step: &super::DependencyMaterializationStepSpec,
+    path: &str,
+) -> PathBuf {
+    let expanded = expand_vars(rig, path);
+    let output_path = PathBuf::from(&expanded);
+    if output_path.is_absolute() {
+        return output_path;
+    }
+    if let Some(cwd) = dependency_step_cwd(rig, step) {
+        return PathBuf::from(cwd).join(output_path);
+    }
+    output_path
+}
+
+fn dependency_step_cwd(
+    rig: &RigSpec,
+    step: &super::DependencyMaterializationStepSpec,
+) -> Option<String> {
+    step.cwd
+        .as_deref()
+        .map(|cwd| expand_vars(rig, cwd))
+        .or_else(|| {
+            step.component
+                .as_deref()
+                .and_then(|component_id| super::resolve_component_path(rig, component_id).ok())
+        })
+}
+
+fn output_kind_label(kind: DependencyMaterializationOutputKind) -> &'static str {
+    match kind {
+        DependencyMaterializationOutputKind::File => "file",
+        DependencyMaterializationOutputKind::Dir => "dir",
+        DependencyMaterializationOutputKind::Path => "path",
+    }
+}
+
+fn merge_prepare_outcomes(
+    name: &str,
+    mut left: PipelineOutcome,
+    right: PipelineOutcome,
+) -> PipelineOutcome {
+    left.steps.extend(right.steps);
+    PipelineOutcome {
+        name: name.to_string(),
+        passed: left.passed + right.passed,
+        failed: left.failed + right.failed,
+        steps: left.steps,
+    }
 }
 
 /// Tear down a rig. Runs the `down` pipeline if defined, then stops every

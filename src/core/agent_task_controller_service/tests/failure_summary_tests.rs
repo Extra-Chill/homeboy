@@ -112,3 +112,55 @@ fn run_failure_summary_falls_back_to_stopped_reason() {
     assert_homeboy_command_parses(&summary.next_command);
     assert_emitted_homeboy_evidence_commands_parse(&summary);
 }
+
+#[test]
+fn run_failure_summary_surfaces_provider_runtime_context_and_replay() {
+    let results = vec![serde_json::json!({
+        "schema": ACTION_RESULT_SCHEMA,
+        "status": "failed",
+        "action_id": "validate-runtime-input",
+        "failure_summary": {
+            "action_id": "validate-runtime-input",
+            "provider": "sample-runtime",
+            "failure_phase": "schema_validation",
+            "diagnostic": "unsupported runtime operation `render.preview`",
+            "runtime_context": {
+                "binary_path": "/opt/sample-runtime/bin/runtime",
+                "version": "0.9.1",
+                "fingerprint": "sha256:runtime",
+                "capabilities": ["render.preview"]
+            },
+            "replay_command": "/opt/sample-runtime/bin/runtime replay --input '/tmp/generated input.json' --json"
+        },
+        "execution": {
+            "outputs": {
+                "provider_run_result": {
+                    "source": "sample-runtime/result-envelope/v1"
+                }
+            }
+        }
+    })];
+    let status = serde_json::json!({ "controller": { "phase": "verify" } });
+
+    let summary = build_run_failure_summary("loop/9", "action_failed", &results, &status);
+    let context = summary
+        .runtime_context
+        .as_ref()
+        .expect("provider runtime context is surfaced");
+
+    assert_eq!(
+        context["binary_path"].as_str(),
+        Some("/opt/sample-runtime/bin/runtime")
+    );
+    assert_eq!(context["version"].as_str(), Some("0.9.1"));
+    assert_eq!(context["fingerprint"].as_str(), Some("sha256:runtime"));
+
+    let replay = summary
+        .replay_command
+        .as_deref()
+        .expect("provider replay command is surfaced");
+    assert_eq!(
+        replay,
+        "/opt/sample-runtime/bin/runtime replay --input '/tmp/generated input.json' --json"
+    );
+}

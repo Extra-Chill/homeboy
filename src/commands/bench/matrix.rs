@@ -634,10 +634,6 @@ fn run_component_with_rig_context(
         });
     }
 
-    if let Some(spec) = rig_spec {
-        run_rig_workload_preflight(spec, ctx.extension_id.as_deref())?;
-    }
-
     let run_dir = RunDir::create()?;
     let resource_run = homeboy::core::engine::resource::ResourceSummaryRun::start(Some(format!(
         "bench {}",
@@ -646,8 +642,17 @@ fn run_component_with_rig_context(
 
     let (extra_workloads, env_provider_extensions, invocation_requirements) =
         rig_workload_runtime_inputs(rig_context, rig_spec, ctx.extension_id.as_deref());
+    let extra_workloads = super::filter_component_conventional_bench_workloads(
+        extra_workloads,
+        path_override.as_deref(),
+    );
 
     let selected_scenarios = selected_scenario_ids(args, rig_spec)?;
+
+    if let Some(spec) = rig_spec {
+        run_rig_workload_preflight(spec, ctx.extension_id.as_deref(), &selected_scenarios)?;
+    }
+
     let observation = observation::start(BenchObservationStart {
         component_id: &ctx.component_id,
         component_label: &effective_id,
@@ -792,9 +797,12 @@ fn rig_workload_runtime_inputs(
 fn run_rig_workload_preflight(
     spec: &RigSpec,
     extension_id: Option<&str>,
+    scenario_ids: &[String],
 ) -> homeboy::core::Result<()> {
-    let groups = extension_id.and_then(|id| {
-        rig::check_groups_for_extension_workloads(spec, rig::RigWorkloadKind::Bench, id)
+    let groups = rig::check_groups_for_bench_scenarios(spec, scenario_ids).or_else(|| {
+        extension_id.and_then(|id| {
+            rig::check_groups_for_extension_workloads(spec, rig::RigWorkloadKind::Bench, id)
+        })
     });
     let check = match groups {
         Some(groups) => rig::run_check_groups(spec, &groups)?,
@@ -964,6 +972,98 @@ mod tests {
 
         assert_eq!(rig_spec.components["primary"].path, "/src/primary");
         assert_eq!(rig_spec.components["candidate"].path, "/tmp/candidate");
+    }
+
+    #[test]
+    fn rig_bench_preflight_uses_scenario_scoped_check_groups() {
+        with_isolated_home(|_| {
+            let rig_spec: RigSpec = serde_json::from_str(
+                r#"{
+                    "id": "woocommerce-performance",
+                    "bench": {
+                        "check_groups": ["common"],
+                        "scenario_check_groups": {
+                            "rest-product-batch-import": ["rest"],
+                            "admin-page-assets": ["admin"]
+                        }
+                    },
+                    "pipeline": {
+                        "check": [
+                            {
+                                "kind": "check",
+                                "label": "common rig health",
+                                "groups": ["common"],
+                                "command": "true"
+                            },
+                            {
+                                "kind": "check",
+                                "label": "REST endpoint healthy",
+                                "groups": ["rest"],
+                                "command": "true"
+                            },
+                            {
+                                "kind": "check",
+                                "label": "Woo admin asset registries",
+                                "groups": ["admin"],
+                                "command": "false"
+                            }
+                        ]
+                    }
+                }"#,
+            )
+            .expect("parse rig spec");
+
+            run_rig_workload_preflight(&rig_spec, None, &["rest-product-batch-import".to_string()])
+                .expect("REST scenario should skip unrelated admin checks");
+
+            assert!(run_rig_workload_preflight(
+                &rig_spec,
+                None,
+                &["admin-page-assets".to_string()],
+            )
+            .is_err());
+
+            assert!(run_rig_workload_preflight(&rig_spec, None, &[]).is_err());
+        });
+    }
+
+    #[test]
+    fn rig_bench_preflight_falls_back_to_full_check_for_unmapped_scenario() {
+        with_isolated_home(|_| {
+            let rig_spec: RigSpec = serde_json::from_str(
+                r#"{
+                    "id": "woocommerce-performance",
+                    "bench": {
+                        "check_groups": ["common"],
+                        "scenario_check_groups": {
+                            "rest-product-batch-import": ["rest"]
+                        }
+                    },
+                    "pipeline": {
+                        "check": [
+                            {
+                                "kind": "check",
+                                "label": "REST endpoint healthy",
+                                "groups": ["rest"],
+                                "command": "true"
+                            },
+                            {
+                                "kind": "check",
+                                "label": "unmapped surface still enforced by full check",
+                                "groups": ["admin"],
+                                "command": "false"
+                            }
+                        ]
+                    }
+                }"#,
+            )
+            .expect("parse rig spec");
+
+            assert!(
+                run_rig_workload_preflight(&rig_spec, None, &["unknown-scenario".to_string()],)
+                    .is_err()
+            );
+        });
     }
 
     #[test]

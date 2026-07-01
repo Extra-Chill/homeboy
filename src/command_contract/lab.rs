@@ -19,15 +19,19 @@ use std::collections::BTreeSet;
 use super::spec::{
     CommandLabSupportSummary, AGENT_TASK_AUTH_STATUS_LAB_LABEL,
     AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL, AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
-    AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL, AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
-    AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL,
-    AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL, AUDIT_LAB_LABEL, BENCH_LAB_LABEL,
-    COMMAND_SPECS, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL,
-    RIG_CHECK_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
+    AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL, AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
+    AGENT_TASK_FANOUT_STATUS_LAB_LABEL, AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
+    AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL,
+    AUDIT_LAB_LABEL, BENCH_LAB_LABEL, COMMAND_SPECS, FUZZ_LAB_LABEL, LINT_LAB_LABEL,
+    REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL,
+    RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
 };
 
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
 pub const RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
+pub const RUN_LOCATION_INDEX_SCHEMA: &str = "homeboy/run-location-index/v1";
+pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = crate::core::artifacts::ARTIFACT_MANIFEST_SCHEMA;
+pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = crate::core::artifacts::ARTIFACT_MANIFEST_FILE;
 
 /// Routing-policy flags shared by every Lab command representation
 /// (`LabCommandContract`, `LabRoutePlan`, `LabOffloadCommand`). These four
@@ -249,7 +253,15 @@ pub struct RunnerHandoffEnvelope {
     pub persisted_run_id: Option<String>,
     pub mirror_run_id: Option<String>,
     pub remote_cwd: String,
+    pub artifact_manifest: RunnerHandoffArtifactManifestRef,
     pub follow_commands: RunnerHandoffFollowCommands,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerHandoffArtifactManifestRef {
+    pub schema: String,
+    pub manifest_schema: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -274,6 +286,17 @@ pub struct RunnerHandoffFollowCommands {
     pub logs: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunLocationIndex {
+    pub schema: String,
+    pub run_id: String,
+    pub controller_location: String,
+    pub runner_id: String,
+    pub remote_job_id: String,
+    pub artifact_manifest_ref: RunnerHandoffArtifactManifestRef,
+    pub liveness_heartbeat_timestamp: String,
 }
 
 impl RunnerHandoffEnvelope {
@@ -312,8 +335,22 @@ impl RunnerHandoffEnvelope {
             durable_run_id: mirror_run_id.clone(),
             persisted_run_id: mirror_run_id.clone(),
             mirror_run_id,
+            artifact_manifest: RunnerHandoffArtifactManifestRef::for_remote_cwd(&remote_cwd),
             remote_cwd,
             follow_commands,
+        }
+    }
+}
+
+impl RunnerHandoffArtifactManifestRef {
+    pub fn for_remote_cwd(remote_cwd: &str) -> Self {
+        Self {
+            schema: "homeboy/runner-artifact-manifest-ref/v1".to_string(),
+            manifest_schema: RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),
+            path: format!(
+                "{}-homeboy-artifacts/{RUNNER_ARTIFACT_MANIFEST_FILE}",
+                remote_cwd.trim_end_matches('/')
+            ),
         }
     }
 }
@@ -404,9 +441,11 @@ impl LabLocalExecutionPolicy {
 
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
 pub(crate) const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
-pub(crate) const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
+pub(crate) const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror. For Lab/offloaded dependency preparation and verification, run `homeboy rig check <rig-id> --runner <runner-id>` or the rig's benchmark profile through `homeboy rig run <rig-id> --runner <runner-id>`.";
 const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
+const AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON: &str =
+    "agent-task cook finalization commits, pushes, and opens/updates GitHub PRs from the trusted controller; use --no-finalize for Lab patch evidence and finalize from the controller";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabRunnerSupportSummary {
@@ -523,6 +562,12 @@ impl Commands {
                 AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Cook(args),
+            }) if !args.no_finalize => LabCommandContract::local_only(
+                AGENT_TASK_RUN_LAB_LABEL,
+                AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Cook(_)
                     | agent_task::AgentTaskCommand::RunPlan(_)
@@ -539,12 +584,21 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command:
-                            agent_task::AgentTaskFanoutCommand::RunPlan(_)
-                            | agent_task::AgentTaskFanoutCommand::CookBatch(_),
+                        command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
                     }),
             }) => LabCommandContract::portable(
                 AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
+                None,
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
+                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                        command: agent_task::AgentTaskFanoutCommand::CookBatch(_),
+                    }),
+            }) => LabCommandContract::portable(
+                AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 None,
                 true,
                 LAB_NO_EXTRA_TOOLS,
@@ -913,7 +967,9 @@ impl RunnerWorkloadCommandFamily {
         match label {
             label if label.starts_with("agent-task") => Self::AgentTask,
             LINT_LAB_LABEL | TEST_LAB_LABEL | AUDIT_LAB_LABEL | REVIEW_LAB_LABEL
-            | BENCH_LAB_LABEL | FUZZ_LAB_LABEL | TRACE_LAB_LABEL => Self::Quality,
+            | BENCH_LAB_LABEL | FUZZ_LAB_LABEL | TRACE_LAB_LABEL | RIG_RUN_LAB_LABEL => {
+                Self::Quality
+            }
             REFACTOR_LAB_LABEL | RIG_CHECK_LAB_LABEL | RUNTIME_REFRESH_LAB_LABEL => Self::Workspace,
             label if label.starts_with("tunnel") => Self::Service,
             _ => Self::Unknown,
@@ -1116,6 +1172,52 @@ mod low_noise_polling_tests {
             assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
             assert!(!contract.routing_policy.read_only_polling);
         }
+    }
+
+    #[test]
+    fn agent_task_cook_finalization_is_controller_owned() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "make a change",
+            "--to-worktree",
+            "homeboy@cook-finalization",
+            "--verify",
+            "cargo test --lib",
+        ]);
+
+        let contract = command
+            .lab_contract()
+            .expect("cook contract should explain controller-owned finalization");
+
+        assert_eq!(
+            contract.portability,
+            LabCommandPortability::LocalOnly(AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON)
+        );
+    }
+
+    #[test]
+    fn agent_task_cook_no_finalize_remains_lab_portable() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "make a change",
+            "--to-worktree",
+            "homeboy@cook-finalization",
+            "--verify",
+            "cargo test --lib",
+            "--no-finalize",
+        ]);
+
+        let contract = command
+            .lab_contract()
+            .expect("no-finalize cook should remain portable");
+
+        assert_eq!(contract.portability, LabCommandPortability::Portable);
     }
 }
 pub(crate) use extension_ids::*;

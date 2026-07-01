@@ -148,7 +148,9 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::RigResourceConflict
         | ErrorCode::RunnerLabTransportFailure
         | ErrorCode::RunnerControllerDisconnected
-        | ErrorCode::StackApplyConflict => 20,
+        | ErrorCode::StackApplyConflict
+        | ErrorCode::DependencyStepFailed
+        | ErrorCode::DependencyOutputMissing => 20,
 
         ErrorCode::SshServerInvalid
         | ErrorCode::SshIdentityFileNotFound

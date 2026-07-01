@@ -5,6 +5,7 @@ use crate::core::git;
 use crate::core::release::changelog;
 
 use super::planning_semver::resolve_tag_and_commits;
+use super::scope::ReleaseScope;
 use super::types::{ReleaseChangelogPlan, ReleaseOptions};
 
 pub(super) fn build_changelog_plan(
@@ -32,9 +33,9 @@ pub(super) fn generate_changelog_entries(
     component: &Component,
     component_id: &str,
     options: &ReleaseOptions,
-    monorepo: Option<&git::MonorepoContext>,
+    release_scope: &ReleaseScope,
 ) -> Result<std::collections::HashMap<String, Vec<String>>> {
-    let (latest_tag, commits) = resolve_tag_and_commits(&component.local_path, monorepo)?;
+    let (latest_tag, commits) = resolve_tag_and_commits(release_scope)?;
 
     if commits.is_empty() {
         if options.bump_policy.force_empty_release {
@@ -233,6 +234,7 @@ mod tests {
     };
     use crate::core::component::Component;
     use crate::core::git::{CommitCategory, CommitInfo};
+    use crate::core::release::scope::ReleaseScope;
     use crate::core::release::types::ReleaseOptions;
 
     fn commit(subject: &str, category: CommitCategory) -> CommitInfo {
@@ -400,10 +402,15 @@ mod tests {
             "feat: add release planner (#2478)",
         );
         let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
 
-        let entries =
-            generate_changelog_entries(&component, "fixture", &ReleaseOptions::default(), None)
-                .expect("changelog entries should generate");
+        let entries = generate_changelog_entries(
+            &component,
+            "fixture",
+            &ReleaseOptions::default(),
+            &release_scope,
+        )
+        .expect("changelog entries should generate");
 
         assert_eq!(entries["added"], vec!["add release planner"]);
     }

@@ -146,7 +146,7 @@ fn export_since_writes_multiple_runs() {
 }
 
 #[test]
-fn export_artifacts_is_metadata_only() {
+fn export_embeds_local_file_artifact_bytes() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
@@ -168,8 +168,15 @@ fn export_artifacts_is_metadata_only() {
         .expect("export");
 
         let artifacts: Vec<ArtifactRecord> = read_bundle_test_json(&output.join("artifacts.json"));
-        assert_eq!(artifacts, vec![artifact]);
-        assert!(!output.join("files").exists());
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].id, artifact.id);
+        assert_eq!(artifacts[0].artifact_type, "file");
+        assert!(artifacts[0].path.starts_with("bundle://artifact-bytes/"));
+        assert_eq!(artifacts[0].size_bytes, Some(11));
+        assert!(artifacts[0].sha256.is_some());
+        assert!(artifacts[0].metadata_json.get("portable_bundle").is_some());
+        assert!(output.join("artifact_bytes.json").exists());
+        assert!(output.join("artifact-bytes").exists());
     });
 }
 

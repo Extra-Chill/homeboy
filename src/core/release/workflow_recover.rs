@@ -10,8 +10,9 @@ use crate::core::plan::PlanStep;
 
 use super::advanced_remote;
 use super::context::load_component;
+use super::scope::ReleaseScope;
 use super::types::{ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePlan};
-use super::workflow::{format_tag, release_execution_plan, short_sha};
+use super::workflow::{release_execution_plan, short_sha};
 
 pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
     let component = load_component(
@@ -28,11 +29,10 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
         git::configure_identity(&component.local_path, &identity)?;
     }
 
-    let monorepo =
-        super::planning_semver::release_monorepo_context(&component, &input.component_id);
+    let release_scope = ReleaseScope::resolve(&component, &input.component_id)?;
     let version_info = crate::core::release::version::read_component_version(&component)?;
     let current_version = &version_info.version;
-    let tag_name = format_tag(current_version, monorepo.as_ref());
+    let tag_name = release_scope.tag_name(current_version);
 
     // Create the annotated release tag, surfacing `err_label` on failure. Shared
     // by the retag-to-HEAD and first-time create paths below, which issue the
@@ -78,7 +78,7 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
     // loudly so the operator can decide whether to delete the orphan tag, hand
     // back-fill a release: commit, or run `--recover` to commit the version
     // files at the tagged commit.
-    if let Some(latest_tag) = latest_release_tag(&component.local_path, monorepo.as_ref()) {
+    if let Some(latest_tag) = latest_release_tag(&release_scope) {
         if let Some(diagnostic) = diagnose_orphan_tag(&component.local_path, &latest_tag) {
             log_status!("recover", "{}", diagnostic);
         }
@@ -545,11 +545,8 @@ fn recovery_step(id: &str, label: impl Into<String>, needed: bool, needs: Vec<St
 
 /// Resolve the most recent release-shaped tag for the component, honoring
 /// monorepo prefixes. Returns `None` if no matching tag is found.
-fn latest_release_tag(local_path: &str, monorepo: Option<&git::MonorepoContext>) -> Option<String> {
-    match monorepo {
-        Some(ctx) => git::get_latest_tag_with_prefix(&ctx.git_root, Some(&ctx.tag_prefix)).ok()?,
-        None => git::get_latest_tag(local_path).ok()?,
-    }
+fn latest_release_tag(release_scope: &ReleaseScope) -> Option<String> {
+    release_scope.latest_tag().ok()?
 }
 
 /// Inspect the latest release tag for the orphan-tag pattern (#2234): a tag

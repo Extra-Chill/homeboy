@@ -60,6 +60,7 @@ Maintainer architecture and implementation contracts:
 - [Internals index](internals/index.md)
 - [Architecture overview](internals/developer-guide/architecture-overview.md)
 - [Architecture cleanup map](internals/developer-guide/architecture-cleanup-map.md)
+- [Agent runtime contract handshake](architecture/agent-runtime-contract-handshake.md)
 - [Docs maintenance](internals/docs-maintenance/index.md)
 - [Embedded docs topic resolution](architecture/embedded-docs-topic-resolution.md)
 

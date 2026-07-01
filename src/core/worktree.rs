@@ -1,8 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-use serde_json::Value;
 
 use crate::core::component::{self, TargetSpec};
 use crate::core::error::{Error, Result};
@@ -185,7 +182,6 @@ mod types {
         pub task_ref: Option<String>,
         pub dry_run: bool,
         pub retry_after_seconds: u64,
-        pub dmc_bin: String,
     }
 
     #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -356,24 +352,7 @@ mod store_ops {
             accept_bare_directory: false,
             ..TargetSpec::default()
         })?;
-        let source_checkout = target
-            .git_root
-            .clone()
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "component",
-                    "Component local_path is not inside a git checkout",
-                    Some(options.component_id.clone()),
-                    Some(vec!["Register a git-backed component checkout".to_string()]),
-                )
-            })?
-            .canonicalize()
-            .map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some(target.source_path.display().to_string()),
-                )
-            })?;
+        let source_checkout = source_checkout_for_worktree(&target)?;
 
         let parent = source_checkout.parent().ok_or_else(|| {
             Error::internal_unexpected(format!(
@@ -712,8 +691,8 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
     let mut rows = Vec::new();
     let total = options.branches.len();
     for (index, branch) in options.branches.iter().enumerate() {
-        let command = dmc_add_command(&options, branch);
-        let handle = dmc_worktree_handle(&options.repo, branch);
+        let command = worktree_create_command(&options, branch);
+        let handle = worktree_handle(&options.repo, branch);
 
         if options.dry_run {
             rows.push(queue_row(
@@ -725,74 +704,34 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
             continue;
         }
 
-        if let Some(holder) = active_lock_holder(&options.dmc_bin, &options.repo)? {
-            let mut row = queue_row(
-                branch,
-                handle,
-                command,
-                WorktreeQueueCreateStatus::ActiveLockHolder,
-            );
-            row.retry_after_seconds = Some(options.retry_after_seconds);
-            row.active_lock_holder = Some(holder);
-            rows.push(row);
-            for queued_branch in options.branches.iter().take(total).skip(index + 1) {
-                rows.push(queue_row(
-                    queued_branch,
-                    dmc_worktree_handle(&options.repo, queued_branch),
-                    dmc_add_command(&options, queued_branch),
-                    WorktreeQueueCreateStatus::Queued,
-                ));
+        match create(WorktreeCreateOptions {
+            component_id: options.repo.clone(),
+            branch: branch.clone(),
+            from: Some(options.from.clone()),
+            task_url: options.task_url.clone(),
+            run_id: None,
+            cleanup_policy: None,
+        }) {
+            Ok(created) => {
+                let mut row =
+                    queue_row(branch, handle, command, WorktreeQueueCreateStatus::Created);
+                row.path = Some(created.record.worktree_path);
+                rows.push(row);
             }
-            break;
-        }
-
-        let output = Command::new(&options.dmc_bin)
-            .args(dmc_add_args(&options, branch))
-            .output()
-            .map_err(|err| Error::internal_io(err.to_string(), Some(command.join(" "))))?;
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut row = queue_row(branch, handle, command, WorktreeQueueCreateStatus::Created);
-            row.path = parse_prefixed_line(&stdout, "Path:");
-            let path = row.path.as_deref().ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "dmc_output",
-                    "DMC worktree add succeeded but did not report a Path line",
-                    Some(stdout.to_string()),
-                    None,
-                )
-            })?;
-            record_queued_worktree(&options, branch, &row.handle, path)?;
-            rows.push(row);
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let status_error = format_command_error(&stdout, &stderr);
-            let mut row = if let Some(holder) = active_lock_holder(&options.dmc_bin, &options.repo)?
-            {
-                let mut row = queue_row(
-                    branch,
-                    handle,
-                    command,
-                    WorktreeQueueCreateStatus::ActiveLockHolder,
-                );
-                row.retry_after_seconds = Some(options.retry_after_seconds);
-                row.active_lock_holder = Some(holder);
-                row
-            } else {
-                queue_row(branch, handle, command, WorktreeQueueCreateStatus::Failed)
-            };
-            row.error = Some(status_error);
-            rows.push(row);
-            for queued_branch in options.branches.iter().take(total).skip(index + 1) {
-                rows.push(queue_row(
-                    queued_branch,
-                    dmc_worktree_handle(&options.repo, queued_branch),
-                    dmc_add_command(&options, queued_branch),
-                    WorktreeQueueCreateStatus::Queued,
-                ));
+            Err(error) => {
+                let mut row = queue_row(branch, handle, command, WorktreeQueueCreateStatus::Failed);
+                row.error = Some(error.message);
+                rows.push(row);
+                for queued_branch in options.branches.iter().take(total).skip(index + 1) {
+                    rows.push(queue_row(
+                        queued_branch,
+                        worktree_handle(&options.repo, queued_branch),
+                        worktree_create_command(&options, queued_branch),
+                        WorktreeQueueCreateStatus::Queued,
+                    ));
+                }
+                break;
             }
-            break;
         }
     }
 
@@ -807,6 +746,64 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
 
 mod queue_ops {
     use super::*;
+
+    pub(super) fn source_checkout_for_worktree(
+        target: &component::ResolvedTarget,
+    ) -> Result<PathBuf> {
+        if let Some(git_root) = &target.git_root {
+            return git_root.canonicalize().map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some(target.source_path.display().to_string()),
+                )
+            });
+        }
+
+        if let Some(checkout) = lab_runner_workspace_checkout(&target.component_id)? {
+            return Ok(checkout);
+        }
+
+        Err(Error::validation_invalid_argument(
+            "component",
+            "Component local_path is not inside a git checkout",
+            Some(target.component_id.clone()),
+            Some(vec!["Register a git-backed component checkout".to_string()]),
+        ))
+    }
+
+    fn lab_runner_workspace_checkout(component_id: &str) -> Result<Option<PathBuf>> {
+        let cwd = std::env::current_dir()
+            .map_err(|err| Error::internal_io(err.to_string(), Some("current_dir".to_string())))?;
+        let Some(runner_root) = runner_workspace_root_from_lab_snapshot(&cwd) else {
+            return Ok(None);
+        };
+        let candidate = runner_root.join(component_id);
+        let Some(git_root) = component::resolution::detect_git_root(&candidate) else {
+            return Ok(None);
+        };
+        if git_root != candidate.canonicalize().unwrap_or_else(|_| candidate.clone()) {
+            return Ok(None);
+        }
+        let Some(discovered) = component::discover_from_portable(&git_root) else {
+            return Ok(None);
+        };
+        if discovered.id != component_id {
+            return Ok(None);
+        }
+        git_root
+            .canonicalize()
+            .map(Some)
+            .map_err(|err| Error::internal_io(err.to_string(), Some(candidate.display().to_string())))
+    }
+
+    fn runner_workspace_root_from_lab_snapshot(cwd: &Path) -> Option<PathBuf> {
+        for ancestor in cwd.ancestors() {
+            if ancestor.file_name().and_then(|name| name.to_str()) == Some("_lab_workspaces") {
+                return ancestor.parent().map(Path::to_path_buf);
+            }
+        }
+        None
+    }
 
     pub(super) fn queue_row(
         branch: &str,
@@ -826,177 +823,29 @@ mod queue_ops {
         }
     }
 
-    pub(super) fn record_queued_worktree(
-        options: &WorktreeQueueCreateOptions,
-        branch: &str,
-        handle: &str,
-        path: &str,
-    ) -> Result<()> {
-        let worktree_path = PathBuf::from(path).canonicalize().map_err(|err| {
-            Error::internal_io(err.to_string(), Some(format!("DMC worktree path {path}")))
-        })?;
-        let source_checkout = registered_component_git_root(&options.repo)?;
-        let record = TaskWorktreeRecord {
-            id: handle.to_string(),
-            component_id: options.repo.clone(),
-            source_checkout: source_checkout.to_string_lossy().to_string(),
-            worktree_path: worktree_path.to_string_lossy().to_string(),
-            branch: branch.to_string(),
-            base_ref: options.from.clone(),
-            task_url: options.task_url.clone(),
-            run_id: None,
-            cleanup_policy: CleanupPolicy::RemoveWhenSafe,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            state: TaskWorktreeState::Active,
-        };
-        write_record(&metadata_dir()?, &record)
-    }
-
-    pub(super) fn registered_component_git_root(repo: &str) -> Result<PathBuf> {
-        let component = component::load(repo)?;
-        let git_root = git::get_git_root(&component.local_path).map_err(|_| {
-            Error::validation_invalid_argument(
-                "repo",
-                "DMC worktree queue source component is not inside a git checkout",
-                Some(repo.to_string()),
-                None,
-            )
-        })?;
-        PathBuf::from(git_root)
-            .canonicalize()
-            .map_err(|err| Error::internal_io(err.to_string(), Some(repo.to_string())))
-    }
-
-    pub(super) fn dmc_add_command(
+    pub(super) fn worktree_create_command(
         options: &WorktreeQueueCreateOptions,
         branch: &str,
     ) -> Vec<String> {
-        let mut command = vec![options.dmc_bin.clone()];
-        command.extend(dmc_add_args(options, branch));
-        command
-    }
-
-    pub(super) fn dmc_add_args(options: &WorktreeQueueCreateOptions, branch: &str) -> Vec<String> {
         let mut args = vec![
-            "wp".to_string(),
-            "workspace-registry".to_string(),
-            "workspace".to_string(),
+            "homeboy".to_string(),
             "worktree".to_string(),
-            "add".to_string(),
+            "create".to_string(),
             options.repo.clone(),
+            "--branch".to_string(),
             branch.to_string(),
-            format!("--from={}", options.from),
+            "--from".to_string(),
+            options.from.clone(),
         ];
         if let Some(task_url) = &options.task_url {
-            args.push(format!("--task-url={task_url}"));
-        }
-        if let Some(task_ref) = &options.task_ref {
-            args.push(format!("--task-ref={task_ref}"));
+            args.push("--task-url".to_string());
+            args.push(task_url.clone());
         }
         args
     }
 
-    pub(super) fn dmc_worktree_handle(repo: &str, branch: &str) -> String {
+    pub(super) fn worktree_handle(repo: &str, branch: &str) -> String {
         format!("{}@{}", repo, branch_slug(branch))
-    }
-
-    pub(super) fn active_lock_holder(
-        dmc_bin: &str,
-        repo: &str,
-    ) -> Result<Option<WorktreeQueueLockHolder>> {
-        let output = Command::new(dmc_bin)
-            .args([
-                "wp",
-                "workspace-registry",
-                "workspace",
-                "worktree",
-                "locks",
-                "--format=json",
-            ])
-            .output()
-            .map_err(|err| {
-                Error::internal_io(err.to_string(), Some("DMC lock status".to_string()))
-            })?;
-        if !output.status.success() {
-            return Ok(None);
-        }
-        let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
-            Error::internal_json(err.to_string(), Some("DMC lock status".to_string()))
-        })?;
-        Ok(active_lock_holder_from_status(&value, repo))
-    }
-
-    pub(super) fn active_lock_holder_from_status(
-        value: &Value,
-        repo: &str,
-    ) -> Option<WorktreeQueueLockHolder> {
-        let lock_key = format!("worktree-{repo}");
-        for section in ["database", "filesystem"] {
-            let Some(section_value) = value.get(section) else {
-                continue;
-            };
-            let active_keys = section_value
-                .get("active_keys")
-                .and_then(Value::as_array)
-                .map(|keys| keys.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-                .unwrap_or_default();
-            let Some(locks) = section_value.get("locks").and_then(Value::as_array) else {
-                continue;
-            };
-            for lock in locks {
-                let key = lock
-                    .get("lock_key")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let scope = lock
-                    .get("scope")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let state = lock
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let active = state == "active"
-                    || active_keys.iter().any(|active_key| {
-                        *active_key == key || *active_key == scope || *active_key == lock_key
-                    });
-                if (key == lock_key || scope == repo) && active {
-                    return Some(WorktreeQueueLockHolder {
-                        lock_key: key.to_string(),
-                        scope: scope.to_string(),
-                        path: lock.get("path").and_then(Value::as_str).map(str::to_string),
-                        command: lock
-                            .get("command")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                    });
-                }
-            }
-        }
-        None
-    }
-
-    pub(super) fn parse_prefixed_line(output: &str, prefix: &str) -> Option<String> {
-        output.lines().find_map(|line| {
-            line.trim()
-                .strip_prefix(prefix)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-    }
-
-    pub(super) fn format_command_error(stdout: &str, stderr: &str) -> String {
-        let message = [stderr.trim(), stdout.trim()]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if message.is_empty() {
-            "DMC worktree add failed without output".to_string()
-        } else {
-            message
-        }
     }
 }
 use queue_ops::*;
@@ -1211,12 +1060,11 @@ mod tests {
             task_ref: Some("Extra-Chill/homeboy#5786".to_string()),
             dry_run: true,
             retry_after_seconds: 30,
-            dmc_bin: "studio".to_string(),
         }
     }
 
     #[test]
-    fn queue_create_dry_run_returns_queued_rows_with_exact_dmc_commands() {
+    fn queue_create_dry_run_returns_queued_rows_with_exact_homeboy_commands() {
         let output = queue_create(queue_options()).unwrap();
 
         assert_eq!(output.schema, "homeboy/worktree-queue-create/v1");
@@ -1226,76 +1074,69 @@ mod tests {
         assert_eq!(
             output.rows[0].command,
             vec![
-                "studio",
-                "wp",
-                "workspace-registry",
-                "workspace",
-                "worktree",
-                "add",
                 "homeboy",
+                "worktree",
+                "create",
+                "homeboy",
+                "--branch",
                 "cook/one",
-                "--from=origin/main",
-                "--task-url=https://github.com/Extra-Chill/homeboy/issues/5786",
-                "--task-ref=Extra-Chill/homeboy#5786",
+                "--from",
+                "origin/main",
+                "--task-url",
+                "https://github.com/Extra-Chill/homeboy/issues/5786",
             ]
         );
     }
 
     #[test]
-    #[cfg(unix)]
-    fn queue_create_records_successful_dmc_worktree() {
+    fn queue_create_records_successful_homeboy_worktree() {
         use crate::test_support::with_isolated_home;
-        use std::os::unix::fs::PermissionsExt;
 
         with_isolated_home(|home| {
             let parent = home.path().join("Developer");
-            let source = parent.join("homeboy");
-            let worktree_path = parent.join("homeboy@cook-one");
+            let source = parent.join("queue-fixture");
+            let worktree_path = parent.join("queue-fixture@cook-one");
+            if parent.exists() {
+                fs::remove_dir_all(&parent).unwrap();
+            }
             fs::create_dir_all(&parent).unwrap();
             fs::create_dir_all(&source).unwrap();
             run_git(&source, &["init", "-q"]);
             run_git(&source, &["config", "user.email", "homeboy@example.com"]);
             run_git(&source, &["config", "user.name", "Homeboy Test"]);
             fs::write(source.join("README.md"), "initial\n").unwrap();
-            fs::write(source.join("homeboy.json"), r#"{"id":"homeboy"}"#).unwrap();
+            fs::write(source.join("homeboy.json"), r#"{"id":"queue-fixture"}"#).unwrap();
             run_git(&source, &["add", "."]);
             run_git(&source, &["commit", "-q", "-m", "initial"]);
-            write_component_registration(home.path(), "homeboy", &source);
-
-            let dmc = home.path().join("fake-dmc");
-            fs::write(
-                &dmc,
-                format!(
-                    "#!/bin/sh\nif [ \"$5\" = \"locks\" ]; then\n  printf '{{\"database\":{{\"locks\":[]}},\"filesystem\":{{\"locks\":[]}}}}\\n'\n  exit 0\nfi\nmkdir -p '{}'\nprintf 'Path: {}\\n'\n",
-                    worktree_path.display(),
-                    worktree_path.display()
-                ),
-            )
-            .unwrap();
-            let mut perms = fs::metadata(&dmc).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dmc, perms).unwrap();
+            write_component_registration(home.path(), "queue-fixture", &source);
 
             let output = queue_create(WorktreeQueueCreateOptions {
-                repo: "homeboy".to_string(),
+                repo: "queue-fixture".to_string(),
                 branches: vec!["cook/one".to_string()],
-                from: "origin/main".to_string(),
+                from: "HEAD".to_string(),
                 task_url: Some("https://github.com/Extra-Chill/homeboy/issues/5924".to_string()),
                 task_ref: None,
                 dry_run: false,
                 retry_after_seconds: 30,
-                dmc_bin: dmc.display().to_string(),
             })
             .unwrap();
 
-            assert_eq!(output.rows[0].status, WorktreeQueueCreateStatus::Created);
-            let record = resolve("homeboy@cook-one").expect("queued worktree record");
             assert_eq!(
-                std::fs::canonicalize(&record.worktree_path).unwrap(),
-                std::fs::canonicalize(&worktree_path).unwrap()
+                output.rows[0].status,
+                WorktreeQueueCreateStatus::Created,
+                "queue row failed: {:?}",
+                output.rows[0].error
+            );
+            assert_eq!(output.rows[0].handle, "queue-fixture@cook-one");
+            assert!(output.rows[0].path.is_some());
+            let record = resolve("queue-fixture@cook-one").expect("queued worktree record");
+            assert!(Path::new(&record.worktree_path).exists());
+            assert_eq!(
+                PathBuf::from(&record.worktree_path).canonicalize().unwrap(),
+                worktree_path.canonicalize().unwrap()
             );
             assert_eq!(record.branch, "cook/one");
-            assert_eq!(record.base_ref, "origin/main");
+            assert_eq!(record.base_ref, "HEAD");
             assert_eq!(
                 record.task_url.as_deref(),
                 Some("https://github.com/Extra-Chill/homeboy/issues/5924")
@@ -1304,46 +1145,68 @@ mod tests {
     }
 
     #[test]
-    fn active_lock_status_distinguishes_holder_for_repo() {
-        let status = serde_json::json!({
-            "database": { "locks": [{
-                "lock_key": "worktree-homeboy",
-                "scope": "homeboy",
-                "state": "active",
-                "path": "/tmp/worktree-homeboy.lock",
-                "command": "wp workspace-registry workspace worktree add homeboy cook/one"
-            }]},
-            "filesystem": { "locks": [] }
+    fn queue_create_uses_runner_checkout_when_lab_snapshot_is_not_git_backed() {
+        use crate::test_support::with_isolated_home;
+
+        with_isolated_home(|home| {
+            let runner_root = home.path().join("Developer");
+            let source = runner_root.join("lab-fixture");
+            let snapshot = runner_root.join("_lab_workspaces/job-123");
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir_all(&snapshot).unwrap();
+            run_git(&source, &["init", "-q"]);
+            run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+            run_git(&source, &["config", "user.name", "Homeboy Test"]);
+            fs::write(source.join("README.md"), "initial\n").unwrap();
+            fs::write(source.join("homeboy.json"), r#"{"id":"lab-fixture"}"#).unwrap();
+            fs::write(
+                snapshot.join("homeboy.json"),
+                r#"{"id":"lab-fixture"}"#,
+            )
+            .unwrap();
+            run_git(&source, &["add", "."]);
+            run_git(&source, &["commit", "-q", "-m", "initial"]);
+            write_component_registration(home.path(), "lab-fixture", &snapshot);
+            let _cwd = CurrentDirGuard::set(&snapshot);
+
+            let output = queue_create(WorktreeQueueCreateOptions {
+                repo: "lab-fixture".to_string(),
+                branches: vec!["cook/lab".to_string()],
+                from: "HEAD".to_string(),
+                task_url: None,
+                task_ref: None,
+                dry_run: false,
+                retry_after_seconds: 30,
+            })
+            .unwrap();
+
+            assert_eq!(
+                output.rows[0].status,
+                WorktreeQueueCreateStatus::Created,
+                "queue row failed: {:?}",
+                output.rows[0].error
+            );
+            let record = resolve("lab-fixture@cook-lab").expect("queued worktree record");
+            assert_eq!(PathBuf::from(record.source_checkout), source.canonicalize().unwrap());
+            assert!(runner_root.join("lab-fixture@cook-lab").exists());
         });
-
-        let holder = active_lock_holder_from_status(&status, "homeboy").unwrap();
-
-        assert_eq!(holder.lock_key, "worktree-homeboy");
-        assert_eq!(holder.scope, "homeboy");
-        assert_eq!(holder.path.as_deref(), Some("/tmp/worktree-homeboy.lock"));
-        assert_eq!(
-            holder.command.as_deref(),
-            Some("wp workspace-registry workspace worktree add homeboy cook/one")
-        );
     }
 
-    #[test]
-    fn active_lock_status_checks_filesystem_when_database_section_is_absent() {
-        let status = serde_json::json!({
-            "filesystem": {
-                "active_keys": ["worktree-homeboy"],
-                "locks": [{
-                    "lock_key": "worktree-homeboy",
-                    "scope": "homeboy",
-                    "path": "/tmp/worktree-homeboy.lock"
-                }]
-            }
-        });
+    struct CurrentDirGuard {
+        prior: PathBuf,
+    }
 
-        let holder = active_lock_holder_from_status(&status, "homeboy").unwrap();
+    impl CurrentDirGuard {
+        fn set(path: &Path) -> Self {
+            let prior = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self { prior }
+        }
+    }
 
-        assert_eq!(holder.lock_key, "worktree-homeboy");
-        assert_eq!(holder.scope, "homeboy");
-        assert_eq!(holder.path.as_deref(), Some("/tmp/worktree-homeboy.lock"));
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.prior).unwrap();
+        }
     }
 }

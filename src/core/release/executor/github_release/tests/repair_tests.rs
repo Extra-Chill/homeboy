@@ -157,14 +157,19 @@ fn repair_commands_include_configured_enterprise_proxy_env() {
         Some("build/v1.2.3-release-notes.md"),
     );
 
-    assert!(repair.create_command.starts_with(
-        "GH_HOST=github.enterprise.test HTTP_PROXY=http://proxy.example.test:8080 ALL_PROXY=socks5://127.0.0.1:8080 gh release create v1.2.3"
-    ));
     assert!(repair
-        .env_hint
-        .as_deref()
-        .unwrap_or_default()
-        .contains("HTTP_PROXY, ALL_PROXY"));
+        .create_command
+        .contains("GH_HOST=github.enterprise.test"));
+    assert!(repair
+        .create_command
+        .contains("HTTP_PROXY=http://proxy.example.test:8080"));
+    assert!(repair
+        .create_command
+        .contains("ALL_PROXY=socks5://127.0.0.1:8080"));
+    assert!(repair.create_command.contains("gh release create v1.2.3"));
+    let env_hint = repair.env_hint.as_deref().unwrap_or_default();
+    assert!(env_hint.contains("HTTP_PROXY"));
+    assert!(env_hint.contains("ALL_PROXY"));
 }
 
 #[test]

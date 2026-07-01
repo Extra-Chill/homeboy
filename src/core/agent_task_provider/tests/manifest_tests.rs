@@ -161,7 +161,7 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
             }
         },
         "workspace_materialization": {
-            "cwd": "git_checkout",
+            "cwd": WorkspaceCwdMode::GitCheckout.to_string(),
             "provider_workspace_mode": "linked"
         }
     }))

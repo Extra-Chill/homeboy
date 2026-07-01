@@ -23,6 +23,7 @@ fn rig_with_patch(component_path: &str, step: PipelineStep) -> RigSpec {
             r#ref: None,
             default_ref: None,
             extensions: None,
+            dependency_cache: None,
         },
     );
     let mut pipeline = HashMap::new();

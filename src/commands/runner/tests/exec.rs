@@ -4,7 +4,6 @@ use super::super::exec::{
     promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts, read_bounded,
     read_runner_exec_script, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
-use super::super::types::RUNNER_EXEC_SCRIPT_ENV;
 
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
 use homeboy::core::runners::{self as runner, RunnerExecMode, RunnerExecOutput};
@@ -110,12 +109,15 @@ fn read_runner_exec_script_rejects_oversized_script() {
 
 #[test]
 fn script_file_prepares_bash_stdin_command() {
-    let command = prepare_runner_exec_command(Some(&"echo hi".to_string()), Vec::new())
+    let command = prepare_runner_exec_command(Some(&"echo '$GREETING'".to_string()), Vec::new())
         .expect("script command");
 
     assert_eq!(command[0], "bash");
     assert_eq!(command[1], "-c");
-    assert!(command[2].contains(RUNNER_EXEC_SCRIPT_ENV));
+    assert!(command[2].contains("printf '%s'"));
+    assert!(command[2].contains("bash -s"));
+    assert!(!command[2].contains("HOMEBOY_RUNNER_EXEC_SCRIPT"));
+    assert!(command[2].contains("'echo '\\''$GREETING'\\'''"));
 }
 
 #[test]
@@ -137,7 +139,7 @@ fn env_parser_injects_script_body_without_shell_quoting() {
     .expect("env");
 
     assert_eq!(env["GREETING"], "hello world");
-    assert_eq!(env[RUNNER_EXEC_SCRIPT_ENV], "echo \"$GREETING\"");
+    assert!(!env.contains_key("HOMEBOY_RUNNER_EXEC_SCRIPT"));
 }
 
 #[test]
@@ -605,7 +607,7 @@ fn runner_exec_promotes_fuzz_envelope_observations_and_hotspots_as_typed_artifac
 }
 
 #[test]
-fn runner_exec_promotes_artifact_dir_typed_fuzz_children() {
+fn runner_exec_promotes_artifact_dir_typed_schema_children() {
     homeboy::test_support::with_isolated_home(|home| {
         let artifact_root = home.path().join("artifacts");
         homeboy::core::set_artifact_root_override(Some(artifact_root));
@@ -632,6 +634,27 @@ fn runner_exec_promotes_artifact_dir_typed_fuzz_children() {
         )
         .expect("write observations");
         std::fs::write(
+            outputs.join("performance-hotspots.json"),
+            r#"{
+                "schema": "homeboy/performance-hotspots-summary/v1",
+                "version": 1,
+                "id": "bench-hotspots",
+                "aggregation": {
+                    "method": "sum_by_dimension",
+                    "score_metric": "duration_ms"
+                },
+                "rankings": [
+                    {
+                        "id": "scenario:route-a",
+                        "rank": 1,
+                        "score": 40.0,
+                        "primary_metric": { "name": "duration_ms", "value": 40.0, "unit": "ms" }
+                    }
+                ]
+            }"#,
+        )
+        .expect("write performance hotspots");
+        std::fs::write(
             outputs.join("runner-specific-report.json"),
             r#"{"schema":"runner/mutation-isolation/v1","passed":true}"#,
         )
@@ -656,9 +679,9 @@ fn runner_exec_promotes_artifact_dir_typed_fuzz_children() {
             promote_runner_exec_artifact_dirs(&run.id, &output, &["outputs".to_string()])
                 .expect("promote artifact dir children");
 
-        assert_eq!(promoted.len(), 2);
+        assert_eq!(promoted.len(), 3);
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
-        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts.len(), 3);
         assert_eq!(artifacts[0].kind, "fuzz_observation_set");
         assert_eq!(
             artifacts[0].metadata_json["schema"],
@@ -669,9 +692,22 @@ fn runner_exec_promotes_artifact_dir_typed_fuzz_children() {
             artifacts[0].metadata_json["promoted_kind"],
             "fuzz-observations_json"
         );
-        assert_eq!(artifacts[1].kind, "runner-specific-report_json");
-        assert_eq!(artifacts[1].metadata_json["artifact_dir"], "outputs");
-        assert!(artifacts[1]
+        assert_eq!(artifacts[1].kind, "performance_hotspots_summary");
+        assert_eq!(
+            artifacts[1].metadata_json["schema"],
+            "homeboy/performance-hotspots-summary/v1"
+        );
+        assert_eq!(
+            artifacts[1].metadata_json["typed_artifact_kind"],
+            "performance_hotspots_summary"
+        );
+        assert_eq!(
+            artifacts[1].metadata_json["promoted_kind"],
+            "performance-hotspots_json"
+        );
+        assert_eq!(artifacts[2].kind, "runner-specific-report_json");
+        assert_eq!(artifacts[2].metadata_json["artifact_dir"], "outputs");
+        assert!(artifacts[2]
             .metadata_json
             .get("typed_artifact_kind")
             .is_none());

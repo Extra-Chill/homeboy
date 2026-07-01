@@ -351,7 +351,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.operator = true;
             metadata.dry_run_flag = Some("--dry-run");
             metadata.output_notes =
-                "creates/reuses DMC worktrees and can run the generated fanout unless --dry-run is passed";
+                "creates/reuses task worktrees and can run the generated fanout unless --dry-run is passed";
             metadata.dangerous_flags = vec!["--run-plan"];
         }
         ["fuzz", "replay"] | ["fuzz", "minimize"] => {
@@ -555,7 +555,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["worktree", "queue-create"] => {
             metadata.mutates = true;
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "default output creates DMC worktrees one-at-a-time; pass --dry-run to plan without creating";
+            metadata.output_notes = "default output creates task worktrees one-at-a-time; pass --dry-run to plan without creating";
         }
         ["worktree", "create"] => {
             metadata.mutates = true;

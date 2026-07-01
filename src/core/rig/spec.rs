@@ -6,16 +6,25 @@ use crate::core::extension::trace::TraceProbeConfig;
 use crate::core::extension::trace::TraceSpanMetadata;
 use std::collections::{BTreeMap, HashMap};
 
+pub use crate::core::artifact_postprocess::ArtifactPostprocessAction as ArtifactPostprocessSpec;
 use crate::core::component::ScopedExtensionConfig;
 use crate::core::extension::bench::{BenchGate, BenchGateOp};
 use crate::core::lifecycle::LifecycleContract;
 
 mod check;
+mod dependencies;
 mod pipeline;
 mod trace;
 mod workload;
 
 pub use check::{CheckSpec, NewerThanSpec, TimeSource};
+pub use dependencies::{
+    normalize_dependency_materialization_steps, validate_dependency_materialization_steps,
+    DependencyMaterializationArtifactSpec, DependencyMaterializationLogSpec,
+    DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
+    DependencyMaterializationSafety, DependencyMaterializationStepSpec,
+    NormalizedDependencyMaterializationStep,
+};
 pub use pipeline::{GitOp, PatchOp, PipelineStep, ServiceOp, SharedPathOp, StackOp, SymlinkOp};
 pub use trace::{
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
@@ -208,6 +217,12 @@ pub struct RigRequirementsSpec {
     /// for downstream planners without interpreting domain-specific shape.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, serde_json::Value>,
+
+    /// Generic dependency materialization steps the rig can run before Lab
+    /// workloads. Core validates the declarative shape only; command/provider
+    /// semantics belong to the referenced runner or extension.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_materialization: Vec<DependencyMaterializationStepSpec>,
 }
 
 impl RigRequirementsSpec {
@@ -216,6 +231,7 @@ impl RigRequirementsSpec {
             && self.filesystem_assertions.is_empty()
             && self.runner_tools.is_empty()
             && self.extensions.is_empty()
+            && self.dependency_materialization.is_empty()
     }
 }
 
@@ -434,6 +450,14 @@ pub struct BenchSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepted_settings: Vec<String>,
 
+    /// Check-pipeline groups required before any scenario-scoped bench run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_groups: Vec<String>,
+
+    /// Additional check-pipeline groups keyed by bench scenario id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scenario_check_groups: BTreeMap<String, Vec<String>>,
+
     /// Optional matrix axes for cross-rig bench comparison reporting.
     ///
     /// Example: `{ "runtime": "sdk", "substrate": "bfb" }`. When
@@ -568,31 +592,6 @@ pub struct WorkloadSpec {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<LifecycleContract>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactPostprocessSpec {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-
-    pub helper: String,
-
-    pub action: String,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<String>,
-
-    pub output: String,
-
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub parameters: BTreeMap<String, serde_json::Value>,
-
-    #[serde(default = "default_artifact_postprocess_required")]
-    pub required: bool,
-}
-
-fn default_artifact_postprocess_required() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1138,6 +1137,27 @@ pub struct ComponentSpec {
     /// components or repo-owned `homeboy.json` files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<HashMap<String, ScopedExtensionConfig>>,
+
+    /// Optional generic runner-side dependency cache declaration. Rigs declare
+    /// inputs and cache paths; Homeboy owns key computation, restore, and save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_cache: Option<DependencyCacheSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependencyCacheSpec {
+    /// Stable dependency materialization step ID supplied by the rig/extension.
+    pub step_id: String,
+    /// Relative paths inside the materialized checkout to restore/save.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Relative lockfile paths whose contents participate in the cache key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lockfiles: Vec<String>,
+    /// Relative package/dependency metadata paths whose contents participate in
+    /// the cache key. The name is generic: Homeboy does not interpret contents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_metadata: Vec<String>,
 }
 
 /// A background service the rig manages.

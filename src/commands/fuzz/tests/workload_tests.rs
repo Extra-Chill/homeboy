@@ -170,6 +170,304 @@ fn resolve_fuzz_context_preserves_rig_extensions_with_explicit_path_when_registr
 }
 
 #[test]
+fn fuzz_list_materializes_prepare_dependencies_before_workload_validation() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_fuzz_prepare_rig(
+            home.path(),
+            &component_dir,
+            r#"mkdir -p runtime && printf ready > runtime/ready.txt"#,
+            "runtime/ready.txt",
+            "materialize runtime dependency",
+        );
+
+        let output = run_list(fuzz_list_args()).expect("fuzz list");
+
+        assert_eq!(output.count, 1);
+        assert!(component_dir.join("runtime/ready.txt").is_file());
+    });
+}
+
+#[test]
+fn fuzz_list_runs_declared_dependency_materialization_before_prepare_validation() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_dependency_materialization_fuzz_rig(home.path(), &component_dir);
+
+        let output = run_list(fuzz_list_args()).expect("fuzz list");
+
+        assert_eq!(output.count, 1);
+        assert!(component_dir.join("runtime/ready.txt").is_file());
+    });
+}
+
+#[test]
+fn fuzz_list_materializes_declared_plugin_subpath_dependency_before_prepare_validation() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("woocommerce");
+        fs::create_dir_all(component_dir.join("plugins/woocommerce")).expect("plugin dir");
+        write_generic_fuzz_extension(home.path());
+        write_plugin_subpath_dependency_materialization_fuzz_rig(home.path(), &component_dir);
+
+        let output = run_list(fuzz_list_args()).expect("fuzz list");
+
+        assert_eq!(output.count, 1);
+        assert!(component_dir
+            .join("plugins/woocommerce/vendor/autoload_packages.php")
+            .is_file());
+    });
+}
+
+#[test]
+fn fuzz_list_reports_structured_dependency_materialization_failure() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_dependency_materialization_failure_rig(home.path(), &component_dir);
+
+        let error = match run_list(fuzz_list_args()) {
+            Ok(_) => panic!("dependency materialization should fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("fuzz_prepare"));
+        assert!(message.contains("dependency materialization runtime-dependencies"));
+        assert!(message.contains("did not produce required outputs"));
+    });
+}
+
+#[test]
+fn fuzz_list_reports_structured_prepare_step_failure() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_fuzz_prepare_rig(
+            home.path(),
+            &component_dir,
+            "false",
+            "runtime/ready.txt",
+            "materialize runtime dependency",
+        );
+
+        let error = match run_list(fuzz_list_args()) {
+            Ok(_) => panic!("prepare should fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("fuzz_prepare"));
+        assert!(message.contains("requirement `materialize runtime dependency` failed"));
+        assert!(message.contains("prepare command failed"));
+    });
+}
+
+fn fuzz_list_args() -> FuzzListArgs {
+    FuzzListArgs {
+        comp: PositionalComponentArgs {
+            component: None,
+            path: None,
+        },
+        rig: Some("package-fuzz".to_string()),
+        extension_override: ExtensionOverrideArgs::default(),
+        setting_args: SettingArgs::default(),
+    }
+}
+
+fn write_generic_fuzz_extension(home: &Path) {
+    let extension_dir = home.join(".config/homeboy/extensions/generic");
+    fs::create_dir_all(&extension_dir).expect("extension dir");
+    fs::write(
+        extension_dir.join("generic.json"),
+        serde_json::json!({
+            "name": "generic",
+            "version": "0.0.0",
+            "fuzz": {
+                "workloads": [{ "id": "fixture" }]
+            }
+        })
+        .to_string(),
+    )
+    .expect("extension manifest");
+}
+
+fn write_fuzz_prepare_rig(
+    home: &Path,
+    component_dir: &Path,
+    prepare_command: &str,
+    required_file: &str,
+    label: &str,
+) {
+    let rig_dir = home.join(".config/homeboy/rigs");
+    fs::create_dir_all(&rig_dir).expect("rig dir");
+    fs::write(
+        rig_dir.join("package-fuzz.json"),
+        serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": component_dir.to_string_lossy(),
+                    "extensions": {
+                        "generic": {
+                            "settings": {}
+                        }
+                    }
+                }
+            },
+            "fuzz": {
+                "default_component": "package"
+            },
+            "pipeline": {
+                "fuzz_prepare": [
+                    {
+                        "kind": "requirement",
+                        "id": "runtime-ready",
+                        "file": required_file,
+                        "cwd": component_dir.to_string_lossy(),
+                        "prepare_command": prepare_command,
+                        "prepare_phases": ["fuzz_prepare"],
+                        "label": label
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .expect("rig config");
+}
+
+fn write_dependency_materialization_fuzz_rig(home: &Path, component_dir: &Path) {
+    write_dependency_materialization_rig(
+        home,
+        component_dir,
+        r#"mkdir -p runtime && printf ready > runtime/ready.txt"#,
+    );
+}
+
+fn write_dependency_materialization_failure_rig(home: &Path, component_dir: &Path) {
+    write_dependency_materialization_rig(home, component_dir, "true");
+}
+
+fn write_dependency_materialization_rig(home: &Path, component_dir: &Path, command: &str) {
+    let rig_dir = home.join(".config/homeboy/rigs");
+    fs::create_dir_all(&rig_dir).expect("rig dir");
+    fs::write(
+        rig_dir.join("package-fuzz.json"),
+        serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": component_dir.to_string_lossy(),
+                    "extensions": {
+                        "generic": {
+                            "settings": {}
+                        }
+                    }
+                }
+            },
+            "requirements": {
+                "dependency_materialization": [
+                    {
+                        "id": "runtime-dependencies",
+                        "command": command,
+                        "component": "package",
+                        "cwd": "${components.package.path}",
+                        "expected_outputs": [
+                            { "path": "runtime/ready.txt", "kind": "file" }
+                        ],
+                        "safety": "writes_working_tree"
+                    }
+                ]
+            },
+            "fuzz": {
+                "default_component": "package"
+            },
+            "pipeline": {
+                "fuzz_prepare": [
+                    {
+                        "kind": "requirement",
+                        "id": "runtime-ready",
+                        "file": "runtime/ready.txt",
+                        "cwd": component_dir.to_string_lossy(),
+                        "label": "runtime dependency is present"
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .expect("rig config");
+}
+
+fn write_plugin_subpath_dependency_materialization_fuzz_rig(home: &Path, component_dir: &Path) {
+    let rig_dir = home.join(".config/homeboy/rigs");
+    fs::create_dir_all(&rig_dir).expect("rig dir");
+    fs::write(
+        rig_dir.join("package-fuzz.json"),
+        serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": component_dir.to_string_lossy(),
+                    "extensions": {
+                        "generic": {
+                            "settings": {}
+                        }
+                    }
+                }
+            },
+            "requirements": {
+                "dependency_materialization": [
+                    {
+                        "id": "woocommerce-php-package-dependencies",
+                        "command": "mkdir -p plugins/woocommerce/vendor && printf ready > plugins/woocommerce/vendor/autoload_packages.php",
+                        "component": "package",
+                        "cwd": "${components.package.path}",
+                        "inputs": {
+                            "recipe": "wordpress-plugin-php-package-dependencies",
+                            "manifest": "${components.package.path}/plugins/woocommerce/composer.json",
+                            "lockfile": "${components.package.path}/plugins/woocommerce/composer.lock"
+                        },
+                        "expected_outputs": [
+                            {
+                                "path": "${components.package.path}/plugins/woocommerce/vendor/autoload_packages.php",
+                                "kind": "file"
+                            }
+                        ],
+                        "cache_key_inputs": [
+                            "${components.package.path}/plugins/woocommerce/composer.json",
+                            "${components.package.path}/plugins/woocommerce/composer.lock"
+                        ],
+                        "safety": "writes_working_tree"
+                    }
+                ]
+            },
+            "fuzz": {
+                "default_component": "package"
+            },
+            "pipeline": {
+                "fuzz_prepare": [
+                    {
+                        "kind": "requirement",
+                        "id": "woocommerce-autoloader-ready",
+                        "file": "${components.package.path}/plugins/woocommerce/vendor/autoload_packages.php",
+                        "label": "WooCommerce Composer package autoloader exists or can be prepared"
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .expect("rig config");
+}
+
+#[test]
 fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_contract() {
     let args = FuzzRunArgs {
         comp: PositionalComponentArgs {
@@ -427,4 +725,246 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
     assert!(env.iter().any(|(key, value)| {
         key == "HOMEBOY_FUZZ_WORKLOAD_ROOT" && value == &temp.path().to_string_lossy()
     }));
+}
+
+#[test]
+fn fuzz_runner_env_stages_codebox_workload_file_refs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("bench")).expect("create bench dir");
+    let php_path = temp.path().join("bench/rest-product-batch-import.php");
+    std::fs::write(&php_path, "<?php return array( 'ok' => true );\n").expect("write php workload");
+    let workload_path = temp
+        .path()
+        .join("bench/rest-product-batch-import.workload.json");
+    std::fs::write(
+        &workload_path,
+        r#"{
+          "schema": "wp-codebox/wordpress-workload-run/v1",
+          "steps": [
+            {
+              "command": "wordpress.run-workload",
+              "args": [
+                "path=${package.root}/bench/rest-product-batch-import.php",
+                "type=php"
+              ]
+            }
+          ]
+        }"#,
+    )
+    .expect("write workload");
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "package-fuzz",
+        "components": {
+            "package": {
+                "path": "${package.root}/plugins/package",
+                "branch": "main"
+            }
+        }
+    }))
+    .expect("parse rig spec");
+    let context = FuzzRigContext {
+        spec,
+        package_root: Some(temp.path().to_path_buf()),
+    };
+    let args = FuzzRunArgs {
+        comp: PositionalComponentArgs {
+            component: Some("package".to_string()),
+            path: None,
+        },
+        rig: Some("package-fuzz".to_string()),
+        extension_override: ExtensionOverrideArgs { extensions: vec![] },
+        setting_args: SettingArgs {
+            setting: vec![],
+            setting_json: vec![],
+        },
+        workload_id: Some("rest-product-batch-import".to_string()),
+        run_id: Some("proof-1".to_string()),
+        tracker_refs: vec![],
+        seed: None,
+        inventory: None,
+        sequence_plan: None,
+        require_case_log: false,
+        require_coverage_summary: false,
+        require_result_envelope: false,
+        max_duration: None,
+        gate_profile: FuzzGateProfileArg::Measurement,
+        allow_destructive: false,
+        isolation: FuzzIsolationArg::Shared,
+        isolation_proof: None,
+        expect_metric: vec![],
+        action_model: None,
+        exploration_policy: None,
+        args: vec![],
+    };
+    let workload = FuzzWorkloadOutput {
+        id: "rest-product-batch-import".to_string(),
+        label: None,
+        description: None,
+        source: format!("rig_workloads:generic:{}", workload_path.display()),
+        manifest_path: Some(workload_path.to_string_lossy().to_string()),
+    };
+    let run_dir = RunDir::create().expect("run dir");
+    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+
+    let env = fuzz_runner_env(
+        &args,
+        Some(&context),
+        Some(&workload),
+        &results_path,
+        &run_dir,
+        None,
+        None,
+    )
+    .expect("fuzz runner env");
+    let expanded_path = env
+        .iter()
+        .find_map(|(key, value)| (key == "HOMEBOY_FUZZ_WORKLOAD_PATH").then_some(value))
+        .expect("expanded workload path");
+    let expanded: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(expanded_path).expect("read expanded workload"),
+    )
+    .expect("parse expanded workload");
+
+    assert_eq!(
+        expanded["steps"][0]["args"][0].as_str(),
+        Some("path=/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
+    );
+    assert_eq!(
+        expanded["staged_files"][0]["source"].as_str(),
+        Some(php_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        expanded["staged_files"][0]["target"].as_str(),
+        Some("/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
+    );
+}
+
+#[test]
+fn fuzz_runner_env_stages_nested_codebox_workload_json_file_refs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("bench")).expect("create bench dir");
+    let php_path = temp.path().join("bench/rest-product-batch-import.php");
+    std::fs::write(&php_path, "<?php return array( 'ok' => true );\n").expect("write php workload");
+    let nested = serde_json::json!({
+        "schema": "wp-codebox/wordpress-workload-run/v1",
+        "steps": [
+            {
+                "command": "wordpress.run-workload",
+                "args": [
+                    format!("path={}", php_path.display()),
+                    "type=php".to_string()
+                ]
+            }
+        ]
+    });
+    let workload_path = temp.path().join("fuzz/rest-product-batch-import.json");
+    std::fs::create_dir_all(workload_path.parent().expect("workload parent"))
+        .expect("create workload dir");
+    std::fs::write(
+        &workload_path,
+        serde_json::json!({
+            "schema": "wp-codebox/wordpress-workload-run/v1",
+            "steps": [
+                {
+                    "command": "wordpress.run-workload",
+                    "args": [
+                        format!("workload-json={}", serde_json::to_string(&nested).expect("nested json"))
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write workload");
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "package-fuzz",
+        "components": {
+            "package": {
+                "path": "${package.root}/plugins/package",
+                "branch": "main"
+            }
+        }
+    }))
+    .expect("parse rig spec");
+    let context = FuzzRigContext {
+        spec,
+        package_root: Some(temp.path().to_path_buf()),
+    };
+    let args = FuzzRunArgs {
+        comp: PositionalComponentArgs {
+            component: Some("package".to_string()),
+            path: None,
+        },
+        rig: Some("package-fuzz".to_string()),
+        extension_override: ExtensionOverrideArgs { extensions: vec![] },
+        setting_args: SettingArgs {
+            setting: vec![],
+            setting_json: vec![],
+        },
+        workload_id: Some("rest-product-batch-import".to_string()),
+        run_id: Some("proof-1".to_string()),
+        tracker_refs: vec![],
+        seed: None,
+        inventory: None,
+        sequence_plan: None,
+        require_case_log: false,
+        require_coverage_summary: false,
+        require_result_envelope: false,
+        max_duration: None,
+        gate_profile: FuzzGateProfileArg::Measurement,
+        allow_destructive: false,
+        isolation: FuzzIsolationArg::Shared,
+        isolation_proof: None,
+        expect_metric: vec![],
+        action_model: None,
+        exploration_policy: None,
+        args: vec![],
+    };
+    let workload = FuzzWorkloadOutput {
+        id: "rest-product-batch-import".to_string(),
+        label: None,
+        description: None,
+        source: format!("rig_workloads:generic:{}", workload_path.display()),
+        manifest_path: Some(workload_path.to_string_lossy().to_string()),
+    };
+    let run_dir = RunDir::create().expect("run dir");
+    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+
+    let env = fuzz_runner_env(
+        &args,
+        Some(&context),
+        Some(&workload),
+        &results_path,
+        &run_dir,
+        None,
+        None,
+    )
+    .expect("fuzz runner env");
+    let expanded_path = env
+        .iter()
+        .find_map(|(key, value)| (key == "HOMEBOY_FUZZ_WORKLOAD_PATH").then_some(value))
+        .expect("expanded workload path");
+    let expanded: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(expanded_path).expect("read expanded workload"),
+    )
+    .expect("parse expanded workload");
+    let nested_arg = expanded["steps"][0]["args"][0]
+        .as_str()
+        .expect("nested workload arg")
+        .strip_prefix("workload-json=")
+        .expect("workload-json prefix");
+    let nested: serde_json::Value = serde_json::from_str(nested_arg).expect("nested json");
+
+    assert_eq!(
+        nested["steps"][0]["args"][0].as_str(),
+        Some("path=/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
+    );
+    assert_eq!(
+        nested["staged_files"][0]["source"].as_str(),
+        Some(php_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        nested["staged_files"][0]["target"].as_str(),
+        Some("/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
+    );
 }

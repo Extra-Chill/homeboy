@@ -458,16 +458,6 @@ fn secret_env_handoff_remediation(entry: &SecretEnvHandoffEntry) -> String {
     }
 }
 
-fn declared_agent_task_controller_secret_env(args: &[String]) -> Vec<String> {
-    if subcommand_index(args, "agent-task").is_none() {
-        return Vec::new();
-    }
-
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    declared_agent_task_controller_secret_env_with_providers(args, executor.providers())
-        .unwrap_or_default()
-}
-
 fn declared_agent_task_controller_secret_env_with_providers(
     args: &[String],
     providers: &[AgentTaskExecutorProvider],
@@ -2210,6 +2200,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             runtime_contract: Default::default(),
             extension_id: None,
             extension_path: None,
+            runtime_package_source: None,
             runtime_id: None,
             runtime_path: None,
             extra: std::collections::BTreeMap::new(),

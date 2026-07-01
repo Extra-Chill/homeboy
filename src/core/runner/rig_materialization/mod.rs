@@ -6,9 +6,10 @@ use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, Result};
 
 use super::{
-    exec, load, materialize_git_dependency, preflight_remote_argv_path_translation, sync_workspace,
+    dependency_cache_save_request, exec, load, materialize_git_dependency,
+    preflight_remote_argv_path_translation, sync_workspace,
     workspace::{parent_remote_path, sanitize_path_segment},
-    RunnerExecOptions, RunnerGitDependencyMaterializationOptions,
+    RunnerDependencyCacheSaveRequest, RunnerExecOptions, RunnerGitDependencyMaterializationOptions,
     RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 
@@ -28,6 +29,8 @@ pub(super) struct RigComponentDependency {
     pub required_subpath: Option<String>,
     pub remote_url: Option<String>,
     pub pinned_ref: Option<String>,
+    pub component_ref: Option<String>,
+    pub dependency_cache: Option<crate::core::rig::spec::DependencyCacheSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -438,6 +441,7 @@ fn has_path_arg(args: &[String]) -> bool {
 pub(super) struct LabOffloadRigComponentSync {
     /// Per-dependency materialization outputs (remote paths, freshness, etc.).
     pub materializations: Vec<RunnerGitDependencyMaterializationOutput>,
+    pub dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
     /// Generic `${components.<id>.path}` override env vars mapping each rig
     /// component to its runner-side materialized path, so checks that execute
     /// on the runner resolve component paths to the runner workspace instead of
@@ -461,6 +465,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
     if dependencies.is_empty() {
         return Ok(LabOffloadRigComponentSync {
             materializations: Vec::new(),
+            dependency_cache_saves: Vec::new(),
             component_path_env: Vec::new(),
         });
     }
@@ -474,12 +479,10 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         // rig check resolves `${components.<id>.path}` to the materialized path,
         // even when the checkout root is the already-synced primary workspace
         // (which is not re-materialized below).
-        component_path_env.push((
-            crate::core::rig::expand::rig_component_path_override_env_name(
-                &dependency.rig_id,
-                &dependency.component_id,
-            ),
-            effective_remote_component_path(&dependency, primary_local_path, primary_remote_path),
+        component_path_env.extend(rig_component_env_overrides(
+            &dependency,
+            primary_local_path,
+            primary_remote_path,
         ));
 
         if !should_materialize_dependency(&dependency, primary_remote_path) {
@@ -488,7 +491,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         if !seen.insert(dependency.remote_checkout_root.clone()) {
             continue;
         }
-        synced.push(materialize_git_dependency(
+        let materialization = materialize_git_dependency(
             &runner,
             RunnerGitDependencyMaterializationOptions {
                 local_path: dependency.local_checkout_root,
@@ -497,12 +500,20 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
                 required_subpath: dependency.required_subpath,
                 pinned_ref: dependency.pinned_ref,
                 allow_dirty: allow_dirty_lab_workspace,
+                dependency_cache: dependency.dependency_cache,
+                component_ref: dependency.component_ref,
             },
-        )?);
+        )?;
+        synced.push(materialization);
     }
+    let dependency_cache_saves = synced
+        .iter()
+        .filter_map(dependency_cache_save_request)
+        .collect();
 
     Ok(LabOffloadRigComponentSync {
         materializations: synced,
+        dependency_cache_saves,
         component_path_env,
     })
 }
@@ -537,6 +548,29 @@ fn effective_remote_component_path(
         &dependency.remote_checkout_root,
         dependency.required_subpath.as_deref(),
     )
+}
+
+fn rig_component_env_overrides(
+    dependency: &RigComponentDependency,
+    primary_local_path: &str,
+    primary_remote_path: &str,
+) -> Vec<(String, String)> {
+    vec![
+        (
+            crate::core::rig::expand::rig_component_path_override_env_name(
+                &dependency.rig_id,
+                &dependency.component_id,
+            ),
+            effective_remote_component_path(dependency, primary_local_path, primary_remote_path),
+        ),
+        (
+            crate::core::rig::expand::rig_component_checkout_root_override_env_name(
+                &dependency.rig_id,
+                &dependency.component_id,
+            ),
+            dependency.remote_checkout_root.clone(),
+        ),
+    ]
 }
 
 pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result<Option<PathBuf>> {
@@ -638,6 +672,8 @@ pub(super) fn lab_offload_rig_component_dependencies(
                 required_subpath,
                 remote_url: component.remote_url.clone(),
                 pinned_ref: rig::component_ref(component),
+                component_ref: rig::component_ref(component),
+                dependency_cache: component.dependency_cache.clone(),
             });
         }
     }
@@ -1038,6 +1074,37 @@ mod tests {
                 Some("packages/example-component")
             );
         });
+    }
+
+    #[test]
+    fn rig_component_env_overrides_include_checkout_root() {
+        let dependency = RigComponentDependency {
+            rig_id: "woocommerce-performance".to_string(),
+            component_id: "woocommerce".to_string(),
+            local_checkout_root: "/Users/user/Developer/woocommerce".to_string(),
+            declared_checkout_root: "/Users/user/Developer/woocommerce".to_string(),
+            remote_checkout_root: "/home/user/Developer/_lab_workspaces/woocommerce".to_string(),
+            required_subpath: Some("plugins/woocommerce".to_string()),
+            remote_url: Some("https://github.com/woocommerce/woocommerce.git".to_string()),
+            pinned_ref: None,
+            component_ref: None,
+            dependency_cache: None,
+        };
+
+        let env = rig_component_env_overrides(
+            &dependency,
+            "/Users/user/Developer/woocommerce",
+            "/home/user/Developer/_lab_workspaces/woocommerce",
+        );
+
+        assert!(env.contains(&(
+            "HOMEBOY_RIG_COMPONENT_PATH__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE".to_string(),
+            "/home/user/Developer/_lab_workspaces/woocommerce/plugins/woocommerce".to_string(),
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE".to_string(),
+            "/home/user/Developer/_lab_workspaces/woocommerce".to_string(),
+        )));
     }
 
     #[test]
@@ -1584,6 +1651,8 @@ mod tests {
             required_subpath: Some("projects/plugins/jetpack".to_string()),
             remote_url: None,
             pinned_ref: None,
+            component_ref: None,
+            dependency_cache: None,
         };
         let remote = effective_remote_component_path(
             &dependency,
@@ -1609,6 +1678,8 @@ mod tests {
             required_subpath: None,
             remote_url: None,
             pinned_ref: None,
+            component_ref: None,
+            dependency_cache: None,
         };
         let remote = effective_remote_component_path(
             &dependency,
@@ -1688,6 +1759,8 @@ mod tests {
             required_subpath: None,
             remote_url: Some("https://github.example.com/example-org/studio-web.git".to_string()),
             pinned_ref: None,
+            component_ref: None,
+            dependency_cache: None,
         }];
 
         assert!(dependencies

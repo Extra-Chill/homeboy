@@ -3,11 +3,11 @@ use super::changelog::build_changelog_steps;
 use super::hints::{github_release_applies, push_publish_vs_github_release_hints};
 use crate::core::component::Component;
 use crate::core::extension::ExtensionManifest;
-use crate::core::git;
 use crate::core::plan::PlanStep;
 use crate::core::release::pipeline_capabilities::{
     get_publish_targets, has_package_capability, has_prepare_capability,
 };
+use crate::core::release::scope::ReleaseScope;
 use crate::core::release::types::{ReleaseChangelogPlan, ReleaseOptions};
 use crate::core::Result;
 
@@ -20,7 +20,7 @@ pub(in crate::core::release) fn build_release_steps(
     new_version: &str,
     changelog_plan: &ReleaseChangelogPlan,
     options: &ReleaseOptions,
-    monorepo: Option<&git::MonorepoContext>,
+    release_scope: &ReleaseScope,
     warnings: &mut Vec<String>,
     hints: &mut Vec<String>,
 ) -> Result<Vec<PlanStep>> {
@@ -37,7 +37,7 @@ pub(in crate::core::release) fn build_release_steps(
             extensions,
             new_version,
             options,
-            monorepo,
+            release_scope,
             &publish_targets,
             warnings,
         ));
@@ -59,10 +59,7 @@ pub(in crate::core::release) fn build_release_steps(
         "preflight.changelog_bootstrap",
     );
 
-    let tag_name = match monorepo {
-        Some(ctx) => ctx.format_tag(new_version),
-        None => format!("v{}", new_version),
-    };
+    let tag_name = release_scope.tag_name(new_version);
 
     let tag_preflight_needs = package_preflight_step_id
         .as_deref()
@@ -237,7 +234,7 @@ fn build_head_release_steps(
     extensions: &[ExtensionManifest],
     version: &str,
     options: &ReleaseOptions,
-    monorepo: Option<&git::MonorepoContext>,
+    release_scope: &ReleaseScope,
     publish_targets: &[String],
     warnings: &mut Vec<String>,
 ) -> Vec<PlanStep> {
@@ -284,10 +281,7 @@ fn build_head_release_steps(
     }
 
     if !options.skip_github_release && github_release_applies(component) {
-        let tag_name = match monorepo {
-            Some(ctx) => ctx.format_tag(version),
-            None => format!("v{}", version),
-        };
+        let tag_name = release_scope.tag_name(version);
         steps.push(ready_step(
             "github.release",
             "github.release",

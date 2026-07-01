@@ -59,9 +59,11 @@ pub use super::agent_task_aggregate::{
 };
 
 pub use super::agent_task_contract::{
-    agent_task_core_contract, AgentTaskCoreContract, AgentTaskCoreContractEnums,
-    AgentTaskCoreContractSchemas, AgentTaskCoreProviderCapabilityContract,
-    AgentTaskCoreRedactionDefaults, AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+    agent_runtime_contract_handshake, agent_task_core_contract, AgentRuntimeContractHandshake,
+    AgentRuntimeContractHandshakePhase, AgentRuntimeContractHandshakeProvider,
+    AgentTaskCoreContract, AgentTaskCoreContractEnums, AgentTaskCoreContractSchemas,
+    AgentTaskCoreProviderCapabilityContract, AgentTaskCoreRedactionDefaults,
+    AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
     AGENT_TASK_CORE_CONTRACT_SCHEMA,
 };
@@ -209,11 +211,13 @@ pub mod dispatch_service {
 /// PR finalization contracts and backends.
 pub mod finalization {
     pub use super::super::agent_task_finalization::{
-        finalize_pr, finalize_pr_with_backend, AgentTaskGateResult, AgentTaskPrEvidence,
-        AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
+        finalize_pr, finalize_pr_with_backend, validate_publication_intent, AgentTaskGateResult,
+        AgentTaskPrEvidence, AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
         AgentTaskPrFinalizationReport, AgentTaskPrRef, AgentTaskPrRuntimeGuardrails,
-        AgentTaskPrSourceRelationship, AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
-        AGENT_TASK_PR_FINALIZATION_SCHEMA,
+        AgentTaskPrSourceRelationship, AgentTaskPrVerification, AgentTaskPublicationIntent,
+        AgentTaskPublicationProof, AgentTaskPublicationTarget, RealAgentTaskPrFinalizationBackend,
+        AGENT_TASK_PR_FINALIZATION_SCHEMA, AGENT_TASK_PUBLICATION_INTENT_SCHEMA,
+        AGENT_TASK_PUBLICATION_PROOF_SCHEMA,
     };
 }
 
@@ -249,11 +253,11 @@ pub mod loop_controller {
         AgentTaskGateBundleCheckKind, AgentTaskGateBundleResult, AgentTaskGateBundleStatus,
         AgentTaskGateCheckResult, AgentTaskLoopActionDiagnostic, AgentTaskLoopActionStatus,
         AgentTaskLoopArtifactRef, AgentTaskLoopControllerDiagnosticSummary,
-        AgentTaskLoopControllerDiagnostics,
-        AgentTaskLoopControllerRecord, AgentTaskLoopControllerState,
-        AgentTaskLoopControllerStatusReport, AgentTaskLoopDedupeRecord, AgentTaskLoopEntity,
-        AgentTaskLoopExternalEvent, AgentTaskLoopFeedbackArtifact, AgentTaskLoopFeedbackStatus,
-        AgentTaskLoopFindingPacket, AgentTaskLoopHistoryEvent, AgentTaskLoopLocalFallbackPolicy,
+        AgentTaskLoopControllerDiagnostics, AgentTaskLoopControllerRecord,
+        AgentTaskLoopControllerState, AgentTaskLoopControllerStatusReport,
+        AgentTaskLoopDedupeRecord, AgentTaskLoopEntity, AgentTaskLoopExternalEvent,
+        AgentTaskLoopFeedbackArtifact, AgentTaskLoopFeedbackStatus, AgentTaskLoopFindingPacket,
+        AgentTaskLoopHistoryEvent, AgentTaskLoopLocalFallbackPolicy,
         AgentTaskLoopPendingActionDiagnostic, AgentTaskLoopPolicy, AgentTaskLoopPolicyAction,
         AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef, AgentTaskLoopReviewFinding,
         AgentTaskLoopRunRef, AgentTaskLoopRunnerAvailability, AgentTaskLoopRunnerExecutionTarget,

@@ -15,6 +15,8 @@ use crate::core::proof::{
 use crate::core::run_lifecycle_record::RunLifecycleRecord;
 
 pub const AGENT_TASK_PR_FINALIZATION_SCHEMA: &str = "homeboy/agent-task-pr-finalization/v1";
+pub const AGENT_TASK_PUBLICATION_INTENT_SCHEMA: &str = "homeboy/agent-task-publication-intent/v1";
+pub const AGENT_TASK_PUBLICATION_PROOF_SCHEMA: &str = "homeboy/agent-task-publication-proof/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateResult {
@@ -42,8 +44,56 @@ pub struct AgentTaskPrFinalizationReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub normalized_gate_results: Vec<HomeboyGateResult>,
     pub proof: HomeboyProof,
+    pub publication_intent: AgentTaskPublicationIntent,
+    pub publication_proof: AgentTaskPublicationProof,
     #[serde(flatten)]
     pub evidence: AgentTaskPrEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskPublicationIntent {
+    #[serde(default = "publication_intent_schema")]
+    pub schema: String,
+    pub run_id: String,
+    pub action: String,
+    pub target: AgentTaskPublicationTarget,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<String>,
+    pub proof: HomeboyProof,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPublicationTarget {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskPublicationProof {
+    #[serde(default = "publication_proof_schema")]
+    pub schema: String,
+    pub run_id: String,
+    pub status: String,
+    pub intent_schema: String,
+    pub target: AgentTaskPublicationTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_ref: Option<String>,
+    pub proof: HomeboyProof,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -336,10 +386,13 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     };
     changed_files.sort();
     changed_files.dedup();
+    let intent = build_pr_publication_intent(&options, &head, &changed_files, proof.clone());
+    validate_publication_intent(&intent)?;
 
     if changed_files.is_empty() {
         return Ok(report(
             &options,
+            intent,
             &head,
             "no_changes",
             "none",
@@ -367,6 +420,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 
     Ok(report(
         &options,
+        intent,
         &head,
         "review_ready",
         action,
@@ -466,8 +520,105 @@ fn refuse_protected_head(head: &str, protected_branches: &[String]) -> Result<()
     Ok(())
 }
 
+pub fn validate_publication_intent(intent: &AgentTaskPublicationIntent) -> Result<()> {
+    if intent.schema != AGENT_TASK_PUBLICATION_INTENT_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent.schema",
+            "publication intent schema is not supported",
+            None,
+            Some(vec![intent.schema.clone()]),
+        ));
+    }
+    if intent.run_id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent.run_id",
+            "publication intent requires a run id",
+            None,
+            None,
+        ));
+    }
+    if intent.action.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent.action",
+            "publication intent requires an action",
+            None,
+            None,
+        ));
+    }
+    if intent.target.kind.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent.target.kind",
+            "publication intent requires a target kind",
+            None,
+            None,
+        ));
+    }
+    if intent
+        .target
+        .head
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Err(Error::validation_invalid_argument(
+            "publication_intent.target.head",
+            "publication intent requires a target head ref",
+            None,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn build_pr_publication_intent(
+    options: &AgentTaskPrFinalizationOptions,
+    head: &str,
+    changed_files: &[String],
+    proof: HomeboyProof,
+) -> AgentTaskPublicationIntent {
+    AgentTaskPublicationIntent {
+        schema: AGENT_TASK_PUBLICATION_INTENT_SCHEMA.to_string(),
+        run_id: options.run_id.clone(),
+        action: "review_request".to_string(),
+        target: AgentTaskPublicationTarget {
+            kind: "code_review".to_string(),
+            adapter: Some("github_pull_request".to_string()),
+            path: Some(options.path.clone()),
+            base: Some(options.base.clone()),
+            head: Some(head.to_string()),
+            url: None,
+        },
+        changed_files: changed_files.to_vec(),
+        source_refs: options.evidence.source_refs.clone(),
+        artifact_refs: options.evidence.artifact_refs.clone(),
+        proof,
+    }
+}
+
+fn publication_proof(
+    intent: &AgentTaskPublicationIntent,
+    status: &str,
+    adapter_action: &str,
+    adapter_ref: Option<String>,
+) -> AgentTaskPublicationProof {
+    let mut target = intent.target.clone();
+    target.url = adapter_ref.clone();
+    AgentTaskPublicationProof {
+        schema: AGENT_TASK_PUBLICATION_PROOF_SCHEMA.to_string(),
+        run_id: intent.run_id.clone(),
+        status: status.to_string(),
+        intent_schema: intent.schema.clone(),
+        target,
+        adapter_action: (adapter_action != "none").then(|| adapter_action.to_string()),
+        adapter_ref,
+        proof: intent.proof.clone(),
+    }
+}
+
 fn report(
     options: &AgentTaskPrFinalizationOptions,
+    mut publication_intent: AgentTaskPublicationIntent,
     head: &str,
     status: &str,
     pr_action: &str,
@@ -479,6 +630,9 @@ fn report(
     let normalized_gate_results = options.normalized_gate_results.clone();
     let proof =
         proof.unwrap_or_else(|| build_finalization_proof(options, normalized_gate_results.clone()));
+    publication_intent.proof = proof.clone();
+    let publication_proof =
+        publication_proof(&publication_intent, status, pr_action, pr_url.clone());
     AgentTaskPrFinalizationReport {
         schema: AGENT_TASK_PR_FINALIZATION_SCHEMA.to_string(),
         run_id: options.run_id.clone(),
@@ -493,8 +647,18 @@ fn report(
         gate_results: options.gate_results.clone(),
         normalized_gate_results,
         proof,
+        publication_intent,
+        publication_proof,
         evidence: options.evidence.clone(),
     }
+}
+
+fn publication_intent_schema() -> String {
+    AGENT_TASK_PUBLICATION_INTENT_SCHEMA.to_string()
+}
+
+fn publication_proof_schema() -> String {
+    AGENT_TASK_PUBLICATION_PROOF_SCHEMA.to_string()
 }
 
 fn build_finalization_proof(
@@ -673,6 +837,10 @@ mod tests {
         assert!(backend.created);
         assert!(backend.last_body.contains("## AI assistance"));
         assert!(backend.last_body.contains("## Proof provenance"));
+        assert!(backend.last_body.contains("## Publication intent"));
+        assert!(backend
+            .last_body
+            .contains("**Adapter:** `github_pull_request`"));
         assert!(backend
             .last_body
             .contains("**Proof runner:** Homeboy agent-task cook loop"));
@@ -685,6 +853,28 @@ mod tests {
             .last_body
             .contains("CI-equivalent required gate was not recorded"));
         assert!(backend.last_body.contains("review-ready"));
+        assert_eq!(
+            report.publication_intent.schema,
+            AGENT_TASK_PUBLICATION_INTENT_SCHEMA
+        );
+        assert_eq!(report.publication_intent.action, "review_request");
+        assert_eq!(report.publication_intent.target.kind, "code_review");
+        assert_eq!(
+            report.publication_intent.target.adapter.as_deref(),
+            Some("github_pull_request")
+        );
+        assert_eq!(
+            report.publication_proof.schema,
+            AGENT_TASK_PUBLICATION_PROOF_SCHEMA
+        );
+        assert_eq!(
+            report.publication_proof.adapter_action.as_deref(),
+            Some("created")
+        );
+        assert_eq!(
+            report.publication_proof.adapter_ref.as_deref(),
+            Some("https://github.com/Extra-Chill/homeboy/pull/123")
+        );
     }
 
     #[test]
@@ -895,6 +1085,23 @@ mod tests {
 
         assert!(error.message.contains("green gates"));
         assert!(!backend.committed);
+    }
+
+    #[test]
+    fn validates_publication_intent_contract() {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            ..Default::default()
+        };
+        let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
+
+        validate_publication_intent(&report.publication_intent).expect("intent is valid");
+
+        let mut invalid = report.publication_intent;
+        invalid.target.head = Some(String::new());
+        let error = validate_publication_intent(&invalid).expect_err("missing head rejected");
+
+        assert!(error.message.contains("target head ref"));
     }
 
     fn options() -> AgentTaskPrFinalizationOptions {

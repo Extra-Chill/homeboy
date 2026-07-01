@@ -17,6 +17,8 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
   "executable": {},
   "platform": {},
   "structured_sidecars": {},
+  "materialization_source": {},
+  "contract_producers": [],
   "commands": {},
   "actions": [],
   "hooks": {},
@@ -44,6 +46,8 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
 - **`executable`** (object): Standalone tool runtime, inputs, output schema
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
 - **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
+- **`materialization_source`** (object): Declares runner-resolvable source metadata for materializing this extension away from controller-local paths
+- **`contract_producers`** (array): Declares generic producer invocations Homeboy can call at explicit lifecycle phases
 - **`fuzz`** (object): Declares fuzz workload metadata, optional runner script, and optional campaign portability metadata
 - **`commands`** (object): Additional CLI commands provided by extension
 - **`actions`** (array): Action definitions for `homeboy extension action`; release actions are normal actions whose IDs start with `release.`
@@ -209,6 +213,119 @@ Known sidecar names default to these run-directory paths when `path` is omitted:
 ### Inspection Behavior
 
 Core exposes declared sidecars through manifest inspection, including `homeboy extension show <id>` JSON output. Consumers that need machine-readable output should require the matching declaration before relying on a sidecar.
+
+## Extension Materialization Source
+
+Extensions can declare a small runner-facing source contract for rapid local iteration and runner parity workflows. The contract is additive: missing `materialization_source` means the extension has not declared a runner-resolvable materialization source.
+
+```json
+{
+  "materialization_source": {
+    "schema": "homeboy/extension-materialization-source/v1",
+    "source_kind": "git",
+    "revision": "abc1234",
+    "runner_archive_url": "https://example.com/extensions/example.tar.gz",
+    "runner_archive_sha256": "sha256-fixture",
+    "runner_ref": "refs/heads/feat/example",
+    "helper_manifest_refs": [
+      {
+        "id": "example-runtime",
+        "path": "runtime/example-runtime.json",
+        "schema": "homeboy/agent-runtime-manifest/v1",
+        "purpose": "agent runtime helper"
+      }
+    ]
+  }
+}
+```
+
+### Materialization Source Fields
+
+- **`materialization_source.schema`** (string): Contract schema. Defaults to `homeboy/extension-materialization-source/v1` when omitted.
+- **`materialization_source.source_kind`** (string): Source shape. Supported values are `git`, `archive`, `local_path`, and `generated`.
+- **`materialization_source.revision`** (string): Optional source revision/fingerprint for parity checks.
+- **`materialization_source.runner_archive_url`** (string): Optional archive URL a runner can fetch directly.
+- **`materialization_source.runner_archive_sha256`** (string): Optional checksum for `runner_archive_url`.
+- **`materialization_source.runner_ref`** (string): Optional runner-resolvable branch, tag, commit, or ref.
+- **`materialization_source.helper_manifest_refs`** (array): Optional helper manifests bundled with or referenced by the extension materialization source.
+- **`materialization_source.helper_manifest_refs[].id`** (string): Stable helper manifest identifier.
+- **`materialization_source.helper_manifest_refs[].path`** (string): Extension-relative helper manifest path or runner-resolvable path inside the materialized source.
+- **`materialization_source.helper_manifest_refs[].schema`** (string): Optional helper manifest schema identifier.
+- **`materialization_source.helper_manifest_refs[].purpose`** (string): Optional human-readable reason the helper manifest is relevant.
+
+`homeboy extension show <id>` includes `materialization_source` when the extension declares it, allowing runner parity tooling to consume the contract without reading controller-local extension files directly.
+
+## Extension Contract Producers
+
+Extensions can declare generic producer invocations for the times when Homeboy needs extension-owned data but must not learn the extension's domain. This is a declaration surface only: Homeboy can inspect the producer IDs, phases, invocation protocol, and advertised output kinds without embedding product, language, framework, or runner-specific behavior.
+
+```json
+{
+  "contract_producers": [
+    {
+      "schema": "homeboy/extension-contract-producer/v1",
+      "id": "capabilities",
+      "phase": "discovery",
+      "invocation": {
+        "script": "contracts/discovery.sh",
+        "args": ["--json"],
+        "env": ["HOMEBOY_COMPONENT_ROOT"],
+        "input_schema": "homeboy/extension-discovery-request/v1",
+        "output_schema": "homeboy/extension-discovery-response/v1"
+      },
+      "produces": [
+        {
+          "kind": "capability",
+          "name": "capabilities",
+          "schema": "homeboy/extension-capabilities/v1"
+        }
+      ]
+    },
+    {
+      "id": "plans",
+      "phase": "planning",
+      "invocation": { "script": "contracts/planning.sh" },
+      "produces": [
+        { "kind": "execution_plan" },
+        { "kind": "materialization_plan" },
+        { "kind": "secret_plan" }
+      ]
+    },
+    {
+      "id": "handoff-envelope",
+      "phase": "handoff",
+      "invocation": { "script": "contracts/handoff.sh" },
+      "produces": [{ "kind": "runner_envelope_addition" }]
+    },
+    {
+      "id": "results",
+      "phase": "result",
+      "invocation": { "script": "contracts/result.sh" },
+      "produces": [
+        { "kind": "artifact" },
+        { "kind": "status" },
+        { "kind": "evidence" }
+      ]
+    }
+  ]
+}
+```
+
+### Contract Producer Fields
+
+- **`contract_producers[].schema`** (string): Producer declaration schema. Defaults to `homeboy/extension-contract-producer/v1` when omitted.
+- **`contract_producers[].id`** (string): Stable producer identifier within the extension.
+- **`contract_producers[].phase`** (string): Explicit lifecycle phase when Homeboy may ask for data. Supported values are `discovery`, `planning`, `handoff`, and `result`.
+- **`contract_producers[].invocation.script`** (string): Extension-relative executable that produces the declared data.
+- **`contract_producers[].invocation.args`** (array): Optional static arguments for the invocation.
+- **`contract_producers[].invocation.env`** (array): Optional environment variable names the invocation consumes.
+- **`contract_producers[].invocation.input_schema`** (string): Optional schema identifier for the request payload Homeboy sends to the producer.
+- **`contract_producers[].invocation.output_schema`** (string): Optional schema identifier for the response payload emitted by the producer.
+- **`contract_producers[].produces[]`** (array): Generic payloads the producer can return. Supported `kind` values are `capability`, `execution_plan`, `materialization_plan`, `secret_plan`, `runner_envelope_addition`, `artifact`, `status`, and `evidence`.
+- **`contract_producers[].produces[].name`** (string): Optional stable logical output name.
+- **`contract_producers[].produces[].schema`** (string): Optional schema identifier for this specific output.
+
+`homeboy extension show <id>` includes `contract_producers` when the extension declares them, allowing orchestrators and runners to inspect available lifecycle data without reading extension files directly.
 
 ## Fuzz Capability
 

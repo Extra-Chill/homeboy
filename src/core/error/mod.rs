@@ -44,6 +44,8 @@ pub enum ErrorCode {
     StackNotFound,
     StackApplyConflict,
     RunnerControllerDisconnected,
+    DependencyStepFailed,
+    DependencyOutputMissing,
 
     SshServerInvalid,
     SshIdentityFileNotFound,
@@ -100,6 +102,8 @@ impl ErrorCode {
             ErrorCode::StackNotFound => "stack.not_found",
             ErrorCode::StackApplyConflict => "stack.apply_conflict",
             ErrorCode::RunnerControllerDisconnected => "runner.controller_disconnected",
+            ErrorCode::DependencyStepFailed => "dependency_step_failed",
+            ErrorCode::DependencyOutputMissing => "dependency_output_missing",
 
             ErrorCode::SshServerInvalid => "ssh.server_invalid",
             ErrorCode::SshIdentityFileNotFound => "ssh.identity_file_not_found",
@@ -346,6 +350,24 @@ pub struct GitCommandFailedDetails {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DependencyFailureDetails {
+    pub step_id: String,
+    pub component_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_path_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_machine_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
 
 pub struct SshServerInvalidDetails {
     pub server_id: String,
@@ -433,6 +455,61 @@ impl Error {
         }
 
         Self::new(ErrorCode::ValidationInvalidJson, "Invalid JSON", details)
+    }
+
+    pub fn dependency_step_failed(
+        step_id: impl Into<String>,
+        component_id: impl Into<String>,
+        status: Option<i32>,
+        logs: Vec<String>,
+        artifact_refs: Vec<String>,
+        next_machine_action: Option<String>,
+        cause: Option<Value>,
+    ) -> Self {
+        let step_id = step_id.into();
+        let component_id = component_id.into();
+        Self::new(
+            ErrorCode::DependencyStepFailed,
+            format!("Dependency step '{step_id}' failed for component '{component_id}'"),
+            to_details(DependencyFailureDetails {
+                step_id,
+                component_id,
+                output_path_ref: None,
+                status,
+                logs,
+                artifact_refs,
+                next_machine_action,
+                cause,
+            }),
+        )
+    }
+
+    pub fn dependency_output_missing(
+        step_id: impl Into<String>,
+        component_id: impl Into<String>,
+        output_path_ref: impl Into<String>,
+        artifact_refs: Vec<String>,
+        next_machine_action: Option<String>,
+    ) -> Self {
+        let step_id = step_id.into();
+        let component_id = component_id.into();
+        let output_path_ref = output_path_ref.into();
+        Self::new(
+            ErrorCode::DependencyOutputMissing,
+            format!(
+                "Dependency output '{output_path_ref}' was missing after step '{step_id}' for component '{component_id}'"
+            ),
+            to_details(DependencyFailureDetails {
+                step_id,
+                component_id,
+                output_path_ref: Some(output_path_ref),
+                status: None,
+                logs: Vec::new(),
+                artifact_refs,
+                next_machine_action,
+                cause: None,
+            }),
+        )
     }
 
     /// A rig spec parsed as valid JSON but its shape doesn't match this

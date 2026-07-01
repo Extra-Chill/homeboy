@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::core::component::{self, Component};
 use crate::core::error::{Error, ErrorCode, Result, ValidationErrorItem};
@@ -10,6 +11,7 @@ use crate::core::extension::{build, ExtensionCapability};
 use crate::extensions::deps_provider;
 
 const LAB_SOURCE_EVIDENCE_FILE: &str = ".homeboy/lab-source-evidence.json";
+const DEPENDENCY_LIFECYCLE_ARTIFACT_DIR: &str = ".homeboy/dependency-lifecycle";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct LabSourceEvidence {
@@ -513,8 +515,13 @@ pub(crate) fn run_validation_dependency_lifecycle(
     component: &Component,
     path: &Path,
 ) -> Result<()> {
-    run_dependency_install_lifecycle(component, path)?;
-    run_dependency_build_lifecycle(component, path)
+    run_dependency_install_lifecycle(component, path).map_err(|err| {
+        dependency_step_failed_error(component, path, "dependency.install", err, None)
+    })?;
+    run_dependency_build_lifecycle(component, path).map_err(|err| {
+        dependency_step_failed_error(component, path, "dependency.build", err, None)
+    })?;
+    verify_validation_dependency_outputs(component, path)
 }
 
 /// Materialize a component's declared dependencies for the component rooted at
@@ -603,22 +610,217 @@ fn run_dependency_build_lifecycle(component: &Component, path: &Path) -> Result<
         return Ok(());
     }
 
-    Err(Error::validation_invalid_argument(
-        "validation_dependencies",
-        format!(
-            "Validation dependency `{}` build lifecycle failed with status {exit_code}",
-            component.id
-        ),
-        Some(path.display().to_string()),
-        Some(vec![
-            format!(
-                "Run manually: homeboy build {} --path {}",
-                component.id,
-                path.display()
-            ),
-            serde_json::to_string(&result).unwrap_or_default(),
-        ]),
+    let cause = serde_json::to_value(&result).ok();
+    let artifact = write_dependency_lifecycle_artifact(
+        path,
+        "dependency.build",
+        &serde_json::json!({
+            "error": "dependency_step_failed",
+            "step_id": "dependency.build",
+            "component_id": component.id,
+            "status": exit_code,
+            "cause": cause,
+        }),
+    )?;
+    Err(Error::dependency_step_failed(
+        "dependency.build",
+        component.id.clone(),
+        Some(exit_code),
+        Vec::new(),
+        vec![artifact],
+        Some(format!(
+            "homeboy build {} --path {}",
+            component.id,
+            path.display()
+        )),
+        serde_json::to_value(&result).ok(),
     ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidationDependencyOutputDeclaration {
+    step_id: String,
+    path_ref: String,
+    next_machine_action: Option<String>,
+}
+
+fn verify_validation_dependency_outputs(component: &Component, path: &Path) -> Result<()> {
+    for output in validation_dependency_output_declarations(component) {
+        let output_path = path.join(&output.path_ref);
+        if output_path.exists() {
+            continue;
+        }
+        let artifact = write_dependency_lifecycle_artifact(
+            path,
+            &output.step_id,
+            &serde_json::json!({
+                "error": "dependency_output_missing",
+                "step_id": output.step_id,
+                "component_id": component.id,
+                "output_path_ref": output.path_ref,
+                "next_machine_action": output.next_machine_action,
+            }),
+        )?;
+        return Err(Error::dependency_output_missing(
+            output.step_id,
+            component.id.clone(),
+            output.path_ref,
+            vec![artifact],
+            output.next_machine_action,
+        ));
+    }
+    Ok(())
+}
+
+fn validation_dependency_output_declarations(
+    component: &Component,
+) -> Vec<ValidationDependencyOutputDeclaration> {
+    let mut outputs = Vec::new();
+    let Some(extensions) = component.extensions.as_ref() else {
+        return outputs;
+    };
+    for extension in extensions.values() {
+        let Some(value) = extension.settings.get("validation_dependency_outputs") else {
+            continue;
+        };
+        collect_validation_dependency_output_declarations(value, &mut outputs);
+    }
+    outputs
+}
+
+fn collect_validation_dependency_output_declarations(
+    value: &Value,
+    outputs: &mut Vec<ValidationDependencyOutputDeclaration>,
+) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    for item in items {
+        if let Some(path_ref) = item.as_str().map(str::trim).filter(|path| !path.is_empty()) {
+            outputs.push(ValidationDependencyOutputDeclaration {
+                step_id: format!("dependency.output:{path_ref}"),
+                path_ref: path_ref.to_string(),
+                next_machine_action: None,
+            });
+            continue;
+        }
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        let Some(path_ref) = object
+            .get("path")
+            .or_else(|| object.get("path_ref"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        else {
+            continue;
+        };
+        let step_id = object
+            .get("step_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|step| !step.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("dependency.output:{path_ref}"));
+        let next_machine_action = object
+            .get("next_machine_action")
+            .or_else(|| object.get("next_step"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|action| !action.is_empty())
+            .map(str::to_string);
+        outputs.push(ValidationDependencyOutputDeclaration {
+            step_id,
+            path_ref: path_ref.to_string(),
+            next_machine_action,
+        });
+    }
+}
+
+fn dependency_step_failed_error(
+    component: &Component,
+    path: &Path,
+    step_id: &str,
+    err: Error,
+    status: Option<i32>,
+) -> Error {
+    if matches!(err.code, ErrorCode::DependencyStepFailed) {
+        return err;
+    }
+    let cause = serde_json::json!({
+        "code": err.code.as_str(),
+        "message": err.message,
+        "details": err.details,
+    });
+    let artifact = write_dependency_lifecycle_artifact(
+        path,
+        step_id,
+        &serde_json::json!({
+            "error": "dependency_step_failed",
+            "step_id": step_id,
+            "component_id": component.id,
+            "cause": cause,
+        }),
+    )
+    .ok();
+    Error::dependency_step_failed(
+        step_id,
+        component.id.clone(),
+        status,
+        Vec::new(),
+        artifact.into_iter().collect(),
+        None,
+        Some(cause),
+    )
+}
+
+fn write_dependency_lifecycle_artifact(
+    path: &Path,
+    step_id: &str,
+    value: &Value,
+) -> Result<String> {
+    let artifact_dir = path.join(DEPENDENCY_LIFECYCLE_ARTIFACT_DIR);
+    fs::create_dir_all(&artifact_dir).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "create dependency lifecycle artifact directory {}",
+                artifact_dir.display()
+            )),
+        )
+    })?;
+    let file_name = format!("{}.json", sanitize_artifact_name(step_id));
+    let artifact_path = artifact_dir.join(file_name);
+    let content = serde_json::to_string_pretty(value).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("serialize dependency lifecycle artifact".into()),
+        )
+    })?;
+    fs::write(&artifact_path, format!("{content}\n")).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "write dependency lifecycle artifact {}",
+                artifact_path.display()
+            )),
+        )
+    })?;
+    Ok(artifact_path.display().to_string())
+}
+
+fn sanitize_artifact_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -961,5 +1163,92 @@ mod tests {
             )
             .expect("runtime path dependency lifecycle should use portable manifest id");
         });
+    }
+
+    #[test]
+    fn validation_dependency_lifecycle_reports_failed_step_with_artifact_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(PORTABLE_CONFIG_FILE),
+            serde_json::json!({
+                "id": "dep",
+                "scripts": {
+                    "deps": ["sh -c 'printf install-failed >&2; exit 7'"]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut component = Component::new(
+            "dep".to_string(),
+            dir.path().display().to_string(),
+            String::new(),
+            None,
+        );
+        component.scripts =
+            component::resolve_effective(None, Some(&dir.path().display().to_string()), None)
+                .unwrap()
+                .scripts;
+
+        let err = run_validation_dependency_lifecycle(&component, dir.path())
+            .expect_err("failed deps script should be structured");
+
+        assert_eq!(err.code, ErrorCode::DependencyStepFailed);
+        assert_eq!(err.code.as_str(), "dependency_step_failed");
+        assert_eq!(err.details["step_id"], "dependency.install");
+        assert_eq!(err.details["component_id"], "dep");
+        let artifact = err.details["artifact_refs"][0]
+            .as_str()
+            .expect("artifact ref");
+        assert!(artifact.contains(".homeboy/dependency-lifecycle/dependency-install.json"));
+        assert!(Path::new(artifact).exists());
+    }
+
+    #[test]
+    fn validation_dependency_lifecycle_reports_missing_output_with_artifact_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut component = Component::new(
+            "dep".to_string(),
+            dir.path().display().to_string(),
+            String::new(),
+            None,
+        );
+        component.extensions = Some(std::collections::HashMap::from([(
+            "fixture".to_string(),
+            crate::core::component::ScopedExtensionConfig {
+                settings: std::collections::HashMap::from([(
+                    "validation_dependency_outputs".to_string(),
+                    serde_json::json!([{
+                        "step_id": "dependency.output:generated/report.json",
+                        "path": "generated/report.json",
+                        "next_machine_action": "dependency.lifecycle.retry"
+                    }]),
+                )]),
+                ..Default::default()
+            },
+        )]));
+
+        let err = run_validation_dependency_lifecycle(&component, dir.path())
+            .expect_err("declared missing output should be structured");
+
+        assert_eq!(err.code, ErrorCode::DependencyOutputMissing);
+        assert_eq!(err.code.as_str(), "dependency_output_missing");
+        assert_eq!(
+            err.details["step_id"],
+            "dependency.output:generated/report.json"
+        );
+        assert_eq!(err.details["component_id"], "dep");
+        assert_eq!(err.details["output_path_ref"], "generated/report.json");
+        assert_eq!(
+            err.details["next_machine_action"],
+            "dependency.lifecycle.retry"
+        );
+        let artifact = err.details["artifact_refs"][0]
+            .as_str()
+            .expect("artifact ref");
+        assert!(artifact.contains(
+            ".homeboy/dependency-lifecycle/dependency-output-generated-report-json.json"
+        ));
+        assert!(Path::new(artifact).exists());
     }
 }

@@ -26,6 +26,7 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
             r#ref: None,
             default_ref: None,
             extensions: None,
+            dependency_cache: None,
         },
     );
 

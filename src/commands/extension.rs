@@ -424,6 +424,11 @@ pub struct ExtensionDetail {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub structured_sidecars: Vec<homeboy::core::extension::StructuredSidecarDeclaration>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialization_source:
+        Option<homeboy::core::extension::ExtensionMaterializationSourceContract>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contract_producers: Vec<homeboy::core::extension::ExtensionContractProducer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequiresDetail>,
 }
 
@@ -685,6 +690,8 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         inputs: extension.inputs().to_vec(),
         settings: extension.settings.clone(),
         structured_sidecars: extension.structured_sidecars(),
+        materialization_source: extension.materialization_source.clone(),
+        contract_producers: extension.contract_producers.clone(),
         requires,
     };
 
@@ -1179,6 +1186,108 @@ mod tests {
             assert!(diagnostics.freshness.refresh_behavior.contains("reports"));
 
             std::env::remove_var("HOMEBOY_GENERIC_TOOL_BIN");
+        });
+    }
+
+    #[test]
+    fn extension_show_emits_materialization_source_contract() {
+        with_isolated_home(|home| {
+            let extension_id = "local-iteration";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{
+  "name": "Local iteration extension",
+  "version": "1.0.0",
+  "materialization_source": {
+    "source_kind": "git",
+    "revision": "abc1234",
+    "runner_ref": "refs/heads/feat/local-iteration",
+    "helper_manifest_refs": [{
+      "id": "local-runtime",
+      "path": "runtime/local-runtime.json",
+      "schema": "homeboy/agent-runtime-manifest/v1"
+    }]
+  }
+}"#,
+            )
+            .expect("extension manifest");
+
+            let (output, exit_code) = show_extension(extension_id).expect("show extension");
+            assert_eq!(exit_code, 0);
+            let ExtensionOutput::Show { extension } = output else {
+                panic!("expected extension show output");
+            };
+            let source = extension
+                .materialization_source
+                .expect("materialization source");
+
+            assert_eq!(
+                source.source_kind,
+                homeboy::core::extension::ExtensionMaterializationSourceKind::Git
+            );
+            assert_eq!(source.revision.as_deref(), Some("abc1234"));
+            assert_eq!(
+                source.runner_ref.as_deref(),
+                Some("refs/heads/feat/local-iteration")
+            );
+            assert_eq!(
+                source.helper_manifest_refs[0].path,
+                "runtime/local-runtime.json"
+            );
+        });
+    }
+
+    #[test]
+    fn extension_show_emits_contract_producers() {
+        with_isolated_home(|home| {
+            let extension_id = "contract-producer";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{
+  "name": "Contract producer extension",
+  "version": "1.0.0",
+  "contract_producers": [{
+    "id": "handoff-envelope",
+    "phase": "handoff",
+    "invocation": {
+      "script": "contracts/handoff.sh",
+      "output_schema": "homeboy/runner-envelope-additions/v1"
+    },
+    "produces": [{
+      "kind": "runner_envelope_addition",
+      "schema": "homeboy/runner-envelope-additions/v1"
+    }]
+  }]
+}"#,
+            )
+            .expect("extension manifest");
+
+            let (output, exit_code) = show_extension(extension_id).expect("show extension");
+            assert_eq!(exit_code, 0);
+            let ExtensionOutput::Show { extension } = output else {
+                panic!("expected extension show output");
+            };
+
+            assert_eq!(extension.contract_producers.len(), 1);
+            assert_eq!(extension.contract_producers[0].id, "handoff-envelope");
+            assert_eq!(
+                extension.contract_producers[0].phase,
+                homeboy::core::extension::ExtensionContractProducerPhase::Handoff
+            );
+            assert_eq!(
+                extension.contract_producers[0].produces[0].kind,
+                homeboy::core::extension::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
+            );
         });
     }
 

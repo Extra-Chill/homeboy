@@ -1,6 +1,7 @@
 //! Runner-resident Lab offload path and managed-source refresh.
 
 use super::*;
+use crate::core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_runner_resident_lab_offload(
@@ -133,7 +134,7 @@ pub(crate) fn run_runner_resident_lab_offload(
             secret_names: Vec::new(),
         },
         LabEnvResolutionLayer {
-            source: "secret_env_plan_env_delta",
+            source: SECRET_ENV_PLAN_ENV_DELTA_SOURCE,
             env: secret_env_handoff.env_delta.clone(),
             secret_names: secret_env_handoff.secret_env_names.clone(),
         },

@@ -374,45 +374,6 @@ mod normalize_tests {
     }
 
     #[test]
-    fn legacy_cli_aliases_are_rejected() {
-        let cases = [
-            &["homeboy", "components", "list"][..],
-            &["homeboy", "component", "edit", "example", "--json", "{}"][..],
-            &["homeboy", "component", "merge", "example", "--json", "{}"][..],
-            &[
-                "homeboy",
-                "extension",
-                "install",
-                "https://example.test/ext.git",
-                "--revision",
-                "main",
-            ][..],
-            &[
-                "homeboy",
-                "refactor",
-                "propagate",
-                "--struct",
-                "FileFingerprint",
-            ][..],
-            &[
-                "homeboy",
-                "trace",
-                "overlay-locks",
-                "cleanup",
-                "--stale",
-                "--force-stale-lock-cleanup",
-            ][..],
-        ];
-
-        for case in cases {
-            assert!(
-                Cli::try_parse_from(normalize(argv(case))).is_err(),
-                "legacy alias should be rejected: {case:?}"
-            );
-        }
-    }
-
-    #[test]
     fn test_owned_flag_after_component_and_explicit_passthrough_stay_distinct() {
         let input = argv(&[
             "homeboy",

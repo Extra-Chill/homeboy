@@ -4,6 +4,142 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.276.0] - 2026-07-01
+
+### Added
+- scope rig bench checks by scenario
+- register artifact postprocess contract
+
+### Changed
+- cover rig check lab path offload
+
+### Fixed
+- prepare rig dependencies before bench checks
+- clarify rig up lab remediation
+- stage codebox fuzz workload files
+- keep cook agents out of git finalization
+- keep agent-task finalization on controller
+
+## [0.275.0] - 2026-06-30
+
+### Added
+- export contract constants
+- add contract validation CLI
+- add contract normalize command
+- add contract registry CLI
+
+### Fixed
+- Fix rig run Lab workload label
+
+## [0.274.0] - 2026-06-30
+
+### Added
+- export homeboy contract schemas
+
+### Changed
+- Define agent runtime contract handshake
+- Add extension contract producer manifest surface
+- Add rig run bench primitive
+
+## [0.273.3] - 2026-06-30
+
+### Changed
+- Deduplicate conventional rig bench workloads
+
+## [0.273.2] - 2026-06-30
+
+### Changed
+- Forward Lab rig checkout root env
+
+## [0.273.1] - 2026-06-30
+
+### Fixed
+- Fix runner exec script-file env handling
+
+## [0.273.0] - 2026-06-30
+
+### Added
+- add run lifecycle status contract
+- add secret env source mapping primitive
+- add extension materialization source contract
+- add resource cleanup intent contract
+- expose fuzz workload validation
+- validate reviewer-facing artifact refs
+- add resolved agent runtime execution contract
+- add generic loop lifecycle schemas
+
+### Changed
+- Add artifact manifest path helpers
+- add run location index
+
+## [0.272.2] - 2026-06-30
+
+### Changed
+- Validate dependency materialization env prefixes
+
+## [0.272.1] - 2026-06-30
+
+### Changed
+- neutralize generic extension fixtures
+- remove obsolete legacy flag rejection tests
+- Test plugin subpath dependency materialization before fuzz prepare
+
+### Fixed
+- treat empty cook patches as no changes
+
+## [0.272.0] - 2026-06-30
+
+### Added
+- add generic worktree cleanup providers
+
+### Changed
+- remove legacy component create flags
+- centralize runner materialization contracts
+- align release blockers with current contracts
+
+### Fixed
+- allow empty patch artifacts
+- pass fanout worktree to provider dispatch
+- materialize rig dependencies before fuzz prepare
+- centralize release package scope
+- ignore unrelated runner secret env
+- require CI release evidence for tag-only releases
+- run lint autofix after semantic lint refactors
+- point stale local runner diagnostics at upgrade
+- clarify agent task provider identity
+- drop undeclared inherited secret env
+- preserve monorepo package paths in worktrees
+- keep runtime replay summaries provider-owned
+- resolve lab worktree source checkout
+- Fix fanout worktree creation without DMC
+- preflight recipe command compatibility
+
+## [0.271.0] - 2026-06-30
+
+### Added
+- add generic performance hotspot summary contract
+- add artifact postprocess runner contract
+- add generic runner capability plumbing
+- add rig dependency materialization contract
+
+### Changed
+- Surface Codebox replay context
+
+### Fixed
+- route fanout cook-batch lab label
+- resolve runner capability error collision
+- add runner dependency cache primitives
+- tighten lab handoff artifact manifest contract
+- stabilize agent-task fanout artifact manifest
+- validate runner secret env inheritance
+- add agent task publication intent contract
+- structure dependency lifecycle failures
+- prepare fuzz list rig dependencies
+- add runtime package refresh command
+- reduce runner-resident read polling noise
+- emit runner job heartbeat progress
+- guide offloaded agent-task status reads
+
 ## [0.270.4] - 2026-06-30
 
 ### Fixed

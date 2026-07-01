@@ -14,6 +14,7 @@
 - [cleanup](cleanup.md) — declared reconstructable artifact cleanup across managed worktrees
 - [component](component.md)
 - [config](config.md)
+- [contract](contract.md) — core-owned contract registry, constants, exports, and normalization
 - [daemon](daemon.md) — local-only HTTP API daemon
 - [db](db.md)
 - [deploy](deploy.md)

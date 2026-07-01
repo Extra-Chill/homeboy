@@ -308,6 +308,8 @@ fn controller_action_failure_summary(
         phase: Some(record.phase.clone()),
         provider: context.provider,
         failure_phase: context.failure_phase,
+        runtime_context: context.runtime_context,
+        replay_command: context.replay_command,
         diagnostic: context
             .diagnostic
             .or_else(|| first_action_diagnostic_message(record, &action.action_id))
@@ -359,6 +361,8 @@ struct FailureContext {
     task_id: Option<String>,
     provider: Option<String>,
     failure_phase: Option<String>,
+    runtime_context: Option<Value>,
+    replay_command: Option<String>,
 }
 
 fn find_failure_context(value: &Value) -> Option<FailureContext> {
@@ -391,6 +395,15 @@ fn find_failure_context(value: &Value) -> Option<FailureContext> {
                                         .and_then(Value::as_str)
                                         .map(str::to_string)
                                 }),
+                            runtime_context: diagnostic
+                                .get("data")
+                                .and_then(|data| data.get("runtime_context"))
+                                .cloned()
+                                .or_else(|| find_value_field(value, "runtime_context")),
+                            replay_command: diagnostic
+                                .get("data")
+                                .and_then(|data| string_field(data, "replay_command"))
+                                .or_else(|| find_string_field(value, "replay_command")),
                         });
                     }
                 }
@@ -427,6 +440,19 @@ fn find_string_field(value: &Value, field: &str) -> Option<String> {
         Value::Array(items) => items
             .iter()
             .find_map(|value| find_string_field(value, field)),
+        _ => None,
+    }
+}
+
+fn find_value_field(value: &Value, field: &str) -> Option<Value> {
+    match value {
+        Value::Object(map) => map.get(field).cloned().or_else(|| {
+            map.values()
+                .find_map(|value| find_value_field(value, field))
+        }),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|value| find_value_field(value, field)),
         _ => None,
     }
 }

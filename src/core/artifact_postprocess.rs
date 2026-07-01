@@ -4,15 +4,86 @@
 //! that portable contract and records produced files without interpreting the
 //! workload domain.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::artifact_manifest::{self, ARTIFACT_MANIFEST_FILE};
 use crate::core::error::{Error, Result};
 use crate::core::observation::{ArtifactRecord, ObservationStore};
-use crate::core::rig::ArtifactPostprocessSpec;
+
+pub const ARTIFACT_POSTPROCESS_SCHEMA: &str = "homeboy/artifact-postprocess/v1";
+pub const ARTIFACT_POSTPROCESS_PLAN_SCHEMA: &str = ARTIFACT_POSTPROCESS_SCHEMA;
+pub const ARTIFACT_POSTPROCESS_RESULT_SCHEMA: &str = "homeboy/artifact-postprocess-result/v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPostprocessPlan {
+    #[serde(default = "artifact_postprocess_plan_schema")]
+    pub schema: String,
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_roots: Vec<ArtifactPostprocessRoot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ArtifactPostprocessAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_refs: Vec<ArtifactPostprocessReviewerRef>,
+    #[serde(default, skip_serializing_if = "serde_json_value_is_empty")]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPostprocessRoot {
+    pub id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPostprocessAction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub helper: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    pub output: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, serde_json::Value>,
+    #[serde(default = "default_artifact_postprocess_required")]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPostprocessReviewerRef {
+    pub kind: String,
+    pub label: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactPostprocessPlanDescription {
+    pub schema: String,
+    pub plan_id: String,
+    pub artifact_root_count: usize,
+    pub action_count: usize,
+    pub reviewer_ref_count: usize,
+    pub required_action_count: usize,
+    pub output_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactPostprocessResult {
+    pub schema: String,
+    pub plan_id: String,
+    pub success: bool,
+    pub outputs: Vec<ArtifactPostprocessOutput>,
+    pub reviewer_refs: Vec<ArtifactPostprocessReviewerRef>,
+}
 
 #[derive(Clone)]
 pub struct ArtifactPostprocessContext<'a> {
@@ -48,8 +119,95 @@ pub struct ArtifactPostprocessProducedArtifact {
     pub metadata: serde_json::Value,
 }
 
+pub fn validate_artifact_postprocess_plan(plan: &ArtifactPostprocessPlan) -> Result<()> {
+    if plan.schema != ARTIFACT_POSTPROCESS_PLAN_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "artifact_postprocess.schema",
+            format!("artifact postprocess plan schema must be {ARTIFACT_POSTPROCESS_PLAN_SCHEMA}"),
+            Some(plan.schema.clone()),
+            None,
+        ));
+    }
+    validate_non_empty("artifact_postprocess.plan_id", &plan.plan_id)?;
+    if plan.artifact_roots.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "artifact_postprocess.artifact_roots",
+            "artifact postprocess plan must declare at least one persisted artifact root",
+            None,
+            None,
+        ));
+    }
+    for root in &plan.artifact_roots {
+        validate_non_empty("artifact_postprocess.artifact_roots.id", &root.id)?;
+        validate_non_empty("artifact_postprocess.artifact_roots.path", &root.path)?;
+        if let Some(persisted_ref) = &root.persisted_ref {
+            validate_non_empty(
+                "artifact_postprocess.artifact_roots.persisted_ref",
+                persisted_ref,
+            )?;
+        }
+        if let Some(manifest_path) = &root.manifest_path {
+            validate_non_empty(
+                "artifact_postprocess.artifact_roots.manifest_path",
+                manifest_path,
+            )?;
+        }
+    }
+    for action in &plan.actions {
+        validate_artifact_postprocess_action(action)?;
+    }
+    for reviewer_ref in &plan.reviewer_refs {
+        validate_reviewer_ref(reviewer_ref)?;
+    }
+    if !plan.metadata.is_object() && !plan.metadata.is_null() {
+        return Err(Error::validation_invalid_argument(
+            "artifact_postprocess.metadata",
+            "artifact postprocess plan metadata must be an object",
+            None,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+pub fn describe_artifact_postprocess_plan(
+    plan: &ArtifactPostprocessPlan,
+) -> Result<ArtifactPostprocessPlanDescription> {
+    validate_artifact_postprocess_plan(plan)?;
+    Ok(ArtifactPostprocessPlanDescription {
+        schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        artifact_root_count: plan.artifact_roots.len(),
+        action_count: plan.actions.len(),
+        reviewer_ref_count: plan.reviewer_refs.len(),
+        required_action_count: plan.actions.iter().filter(|action| action.required).count(),
+        output_paths: plan
+            .actions
+            .iter()
+            .map(|action| action.output.clone())
+            .collect(),
+    })
+}
+
+pub fn run_artifact_postprocess_plan(
+    plan: &ArtifactPostprocessPlan,
+    context: &ArtifactPostprocessContext<'_>,
+) -> Result<ArtifactPostprocessResult> {
+    validate_artifact_postprocess_plan(plan)?;
+    let outputs = run_artifact_postprocess_steps(&plan.actions, context)?;
+    Ok(ArtifactPostprocessResult {
+        schema: ARTIFACT_POSTPROCESS_RESULT_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        success: outputs
+            .iter()
+            .all(|output| output.success || !output.required),
+        outputs,
+        reviewer_refs: plan.reviewer_refs.clone(),
+    })
+}
+
 pub fn run_artifact_postprocess_steps(
-    steps: &[ArtifactPostprocessSpec],
+    steps: &[ArtifactPostprocessAction],
     context: &ArtifactPostprocessContext<'_>,
 ) -> Result<Vec<ArtifactPostprocessOutput>> {
     if steps.is_empty() {
@@ -102,9 +260,10 @@ pub fn record_artifact_postprocess_outputs(
 
 fn run_artifact_postprocess_step(
     index: usize,
-    step: &ArtifactPostprocessSpec,
+    step: &ArtifactPostprocessAction,
     context: &ArtifactPostprocessContext<'_>,
 ) -> Result<ArtifactPostprocessOutput> {
+    validate_artifact_postprocess_action(step)?;
     let id = step
         .id
         .clone()
@@ -255,9 +414,10 @@ fn produced_artifacts(
 }
 
 fn resolve_postprocess_output_path(output: &str, artifact_root: &Path) -> Result<PathBuf> {
+    let artifact_root = canonical_or_current_artifact_root(artifact_root)?;
     let trimmed = output.trim();
     let path = Path::new(trimmed);
-    if trimmed.is_empty() || path.is_absolute() || trimmed.starts_with("..") {
+    if trimmed.is_empty() || path.is_absolute() || path.components().any(disallowed_component) {
         return Err(Error::validation_invalid_argument(
             "artifact_postprocess.output",
             "artifact postprocess output must be a non-empty path relative to HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT",
@@ -275,6 +435,111 @@ fn resolve_postprocess_output_path(output: &str, artifact_root: &Path) -> Result
         ));
     }
     Ok(resolved)
+}
+
+fn validate_artifact_postprocess_action(action: &ArtifactPostprocessAction) -> Result<()> {
+    if let Some(id) = &action.id {
+        validate_non_empty("artifact_postprocess.actions.id", id)?;
+    }
+    validate_non_empty("artifact_postprocess.actions.helper", &action.helper)?;
+    validate_non_empty("artifact_postprocess.actions.action", &action.action)?;
+    if let Some(input) = &action.input {
+        validate_non_empty("artifact_postprocess.actions.input", input)?;
+    }
+    validate_relative_output_path(&action.output)
+}
+
+fn validate_relative_output_path(output: &str) -> Result<()> {
+    let trimmed = output.trim();
+    let path = Path::new(trimmed);
+    if trimmed.is_empty() || path.is_absolute() || path.components().any(disallowed_component) {
+        return Err(Error::validation_invalid_argument(
+            "artifact_postprocess.output",
+            "artifact postprocess output must be a non-empty relative path confined to the artifact root",
+            Some(output.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reviewer_ref(reviewer_ref: &ArtifactPostprocessReviewerRef) -> Result<()> {
+    validate_non_empty(
+        "artifact_postprocess.reviewer_refs.kind",
+        &reviewer_ref.kind,
+    )?;
+    validate_non_empty(
+        "artifact_postprocess.reviewer_refs.label",
+        &reviewer_ref.label,
+    )?;
+    validate_non_empty("artifact_postprocess.reviewer_refs.url", &reviewer_ref.url)?;
+    let url = reviewer_ref.url.trim();
+    if url.starts_with('/')
+        || url.starts_with("file:")
+        || url.contains("localhost")
+        || url.contains("127.0.0.1")
+        || url.contains("[::1]")
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_postprocess.reviewer_refs.url",
+            "reviewer-facing artifact refs must not use local-only URLs or filesystem paths",
+            Some(reviewer_ref.url.clone()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_non_empty(field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            field,
+            "value cannot be empty",
+            None,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_or_current_artifact_root(artifact_root: &Path) -> Result<PathBuf> {
+    if artifact_root.exists() {
+        return artifact_root.canonicalize().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "canonicalize artifact root {}",
+                    artifact_root.display()
+                )),
+            )
+        });
+    }
+    let parent = artifact_root.parent().unwrap_or_else(|| Path::new("."));
+    let parent = parent.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "canonicalize artifact root parent {}",
+                parent.display()
+            )),
+        )
+    })?;
+    Ok(parent.join(artifact_root.file_name().unwrap_or_default()))
+}
+
+fn disallowed_component(component: Component<'_>) -> bool {
+    matches!(
+        component,
+        Component::Prefix(_) | Component::RootDir | Component::ParentDir | Component::CurDir
+    )
+}
+
+fn artifact_postprocess_plan_schema() -> String {
+    ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string()
+}
+
+fn default_artifact_postprocess_required() -> bool {
+    true
 }
 
 fn expand_postprocess_path(value: &str, context: &ArtifactPostprocessContext<'_>) -> PathBuf {
@@ -349,7 +614,7 @@ mod tests {
             let input = home.path().join("input.json");
             std::fs::write(&input, r#"{"status":"ok"}"#).expect("input");
             let artifact_root = home.path().join("artifacts");
-            let step: ArtifactPostprocessSpec = serde_json::from_value(serde_json::json!({
+            let step: ArtifactPostprocessAction = serde_json::from_value(serde_json::json!({
                 "id": "generic-report",
                 "helper": "sh",
                 "action": "-c",
@@ -398,5 +663,99 @@ mod tests {
             assert_eq!(records[0].metadata_json["declared_artifact_id"], "report");
             assert_eq!(records[0].metadata_json["custom"], "yes");
         });
+    }
+
+    #[test]
+    fn rejects_output_path_escape_before_helper_execution() {
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            let step: ArtifactPostprocessAction = serde_json::from_value(serde_json::json!({
+                "id": "escape",
+                "helper": "sh",
+                "action": "-c",
+                "output": "reports/../../escape.txt",
+                "parameters": {
+                    "args": ["printf should-not-run > /dev/null"]
+                }
+            }))
+            .expect("step");
+
+            let err = run_artifact_postprocess_steps(
+                &[step],
+                &ArtifactPostprocessContext {
+                    artifact_root: &artifact_root,
+                    input_root: None,
+                    path_expander: None,
+                },
+            )
+            .expect_err("path escape should fail");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("artifact_postprocess.output"));
+        });
+    }
+
+    #[test]
+    fn validates_and_describes_generic_plan_outputs() {
+        let plan = ArtifactPostprocessPlan {
+            schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+            plan_id: "plan-1".to_string(),
+            artifact_roots: vec![ArtifactPostprocessRoot {
+                id: "run-artifacts".to_string(),
+                path: "runner-artifact://run/123/root".to_string(),
+                persisted_ref: Some("runner-artifact://run/123/root".to_string()),
+                manifest_path: Some("homeboy-artifact-manifest.json".to_string()),
+            }],
+            actions: vec![ArtifactPostprocessAction {
+                id: Some("summary".to_string()),
+                helper: "artifact-helper".to_string(),
+                action: "summarize".to_string(),
+                input: Some("${run.artifacts}/raw.json".to_string()),
+                output: "summary/result.json".to_string(),
+                parameters: BTreeMap::new(),
+                required: true,
+            }],
+            reviewer_refs: vec![ArtifactPostprocessReviewerRef {
+                kind: "artifact_index".to_string(),
+                label: "Artifact index".to_string(),
+                url: "https://artifacts.example.test/runs/123".to_string(),
+            }],
+            metadata: serde_json::json!({ "producer": "test" }),
+        };
+
+        let description = describe_artifact_postprocess_plan(&plan).expect("description");
+
+        assert_eq!(description.schema, ARTIFACT_POSTPROCESS_PLAN_SCHEMA);
+        assert_eq!(description.plan_id, "plan-1");
+        assert_eq!(description.artifact_root_count, 1);
+        assert_eq!(description.action_count, 1);
+        assert_eq!(description.required_action_count, 1);
+        assert_eq!(description.output_paths, vec!["summary/result.json"]);
+    }
+
+    #[test]
+    fn rejects_local_only_reviewer_refs() {
+        let plan = ArtifactPostprocessPlan {
+            schema: ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+            plan_id: "plan-1".to_string(),
+            artifact_roots: vec![ArtifactPostprocessRoot {
+                id: "run-artifacts".to_string(),
+                path: "runner-artifact://run/123/root".to_string(),
+                persisted_ref: None,
+                manifest_path: None,
+            }],
+            actions: Vec::new(),
+            reviewer_refs: vec![ArtifactPostprocessReviewerRef {
+                kind: "artifact_index".to_string(),
+                label: "Local artifact index".to_string(),
+                url: "http://127.0.0.1:7350/runs/123".to_string(),
+            }],
+            metadata: serde_json::json!({}),
+        };
+
+        let err = validate_artifact_postprocess_plan(&plan).expect_err("local URL should fail");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("reviewer_refs.url"));
     }
 }

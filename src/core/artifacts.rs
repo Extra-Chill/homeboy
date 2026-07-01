@@ -22,18 +22,24 @@ pub use super::artifact_links::{
     PublicArtifactUrlValidation, PUBLIC_ARTIFACT_BASE_URL_ENV,
 };
 pub use super::artifact_manifest::{
-    manifest_for_existing_files, read_manifest_from_root, write_manifest_to_root, ArtifactManifest,
-    ArtifactManifestEntry, ArtifactManifestProvenance, ArtifactManifestPublicUrlState,
-    ArtifactManifestViewer, ArtifactManifestViewerLink, ArtifactRedactionState,
-    ValidatedArtifactManifestEntry, ARTIFACT_MANIFEST_FILE, ARTIFACT_MANIFEST_SCHEMA,
+    manifest_for_existing_files, manifest_path, normalize_relative_artifact_path,
+    read_manifest_from_root, write_manifest_to_root, ArtifactManifest, ArtifactManifestEntry,
+    ArtifactManifestProvenance, ArtifactManifestPublicUrlState, ArtifactManifestViewer,
+    ArtifactManifestViewerLink, ArtifactRedactionState, ValidatedArtifactManifestEntry,
+    ARTIFACT_MANIFEST_FILE, ARTIFACT_MANIFEST_SCHEMA,
 };
 pub use super::artifact_origin::{
     inspect, serve, status, status_with_command, ArtifactOriginInspect, ArtifactOriginServeSpec,
     ArtifactOriginStatus,
 };
 pub use super::artifact_postprocess::{
-    record_artifact_postprocess_outputs, run_artifact_postprocess_steps,
-    ArtifactPostprocessContext, ArtifactPostprocessOutput, ArtifactPostprocessProducedArtifact,
+    describe_artifact_postprocess_plan, record_artifact_postprocess_outputs,
+    run_artifact_postprocess_plan, run_artifact_postprocess_steps,
+    validate_artifact_postprocess_plan, ArtifactPostprocessAction, ArtifactPostprocessContext,
+    ArtifactPostprocessOutput, ArtifactPostprocessPlan, ArtifactPostprocessPlanDescription,
+    ArtifactPostprocessProducedArtifact, ArtifactPostprocessResult, ArtifactPostprocessReviewerRef,
+    ArtifactPostprocessRoot, ARTIFACT_POSTPROCESS_PLAN_SCHEMA, ARTIFACT_POSTPROCESS_RESULT_SCHEMA,
+    ARTIFACT_POSTPROCESS_SCHEMA,
 };
 pub use super::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 pub use super::artifact_ref::{

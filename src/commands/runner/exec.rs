@@ -9,6 +9,7 @@ use homeboy::core::fuzz::{
     FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::core::observation::{ArtifactRecord, ObservationStore};
+use homeboy::core::performance_hotspots::PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA;
 use homeboy::core::runners::{
     self as runner, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
     RunnerKind,
@@ -18,7 +19,6 @@ use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::{server, Error};
 
 use super::super::CmdResult;
-use super::types::RUNNER_EXEC_SCRIPT_ENV;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn exec(
@@ -81,11 +81,7 @@ pub(super) fn exec(
             allow_diagnostic_ssh,
             command: prepared_command,
             env,
-            secret_env_names: script_file
-                .is_some()
-                .then(|| RUNNER_EXEC_SCRIPT_ENV.to_string())
-                .into_iter()
-                .collect(),
+            secret_env_names: Vec::new(),
             capture_patch,
             raw_exec: true,
             source_snapshot,
@@ -294,7 +290,10 @@ pub(super) fn prepare_runner_exec_command(
         (true, true) => Ok(vec![
             "bash".to_string(),
             "-c".to_string(),
-            "printf '%s' \"$HOMEBOY_RUNNER_EXEC_SCRIPT\" | bash -s".to_string(),
+            format!(
+                "printf '%s' {} | bash -s",
+                shell::quote_arg(script.expect("script is present"))
+            ),
         ]),
         (false, false) => Ok(command),
     }
@@ -302,7 +301,7 @@ pub(super) fn prepare_runner_exec_command(
 
 pub(super) fn prepare_runner_exec_env(
     env: Vec<String>,
-    script: Option<&str>,
+    _script: Option<&str>,
 ) -> homeboy::core::Result<HashMap<String, String>> {
     let mut values = HashMap::new();
     for assignment in env {
@@ -323,9 +322,6 @@ pub(super) fn prepare_runner_exec_env(
             ));
         }
         values.insert(key.to_string(), value.to_string());
-    }
-    if let Some(script) = script {
-        values.insert(RUNNER_EXEC_SCRIPT_ENV.to_string(), script.to_string());
     }
     Ok(values)
 }
@@ -520,14 +516,14 @@ fn record_runner_exec_output(
             .map(|record| vec![record]);
     }
 
-    let (kind, metadata) = fuzz_typed_artifact_metadata(kind, record_path, metadata);
+    let (kind, metadata) = typed_artifact_metadata(kind, record_path, metadata);
     let record = store.record_artifact_with_metadata(run_id, &kind, record_path, metadata)?;
     let mut records = vec![record.clone()];
     records.extend(persist_derived_fuzz_artifacts(store, run_id, &record)?);
     Ok(records)
 }
 
-fn fuzz_typed_artifact_metadata(
+fn typed_artifact_metadata(
     kind: &str,
     record_path: &Path,
     mut metadata: serde_json::Value,
@@ -543,6 +539,7 @@ fn fuzz_typed_artifact_metadata(
         FUZZ_RESULT_ENVELOPE_SCHEMA => Some("fuzz_result_envelope"),
         FUZZ_OBSERVATION_SET_SCHEMA => Some("fuzz_observation_set"),
         FUZZ_HOTSPOT_SET_SCHEMA => Some("fuzz_hotspot_set"),
+        PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA => Some("performance_hotspots_summary"),
         _ => None,
     };
     let Some(canonical_kind) = canonical_kind else {

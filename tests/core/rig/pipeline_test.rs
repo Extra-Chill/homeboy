@@ -779,6 +779,7 @@ mod dag {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
+                dependency_cache: None,
             },
         );
         let rig = rig_with_steps(
@@ -826,6 +827,7 @@ mod dag {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
+                dependency_cache: None,
             },
         );
         components.insert(
@@ -842,6 +844,7 @@ mod dag {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
+                dependency_cache: None,
             },
         );
 
@@ -917,6 +920,7 @@ mod git_steps {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
+                dependency_cache: None,
             },
         );
 
@@ -1044,6 +1048,7 @@ mod extension_lifecycle {
                 r#ref: None,
                 default_ref: None,
                 extensions: Some(extensions),
+                dependency_cache: None,
             },
         );
 

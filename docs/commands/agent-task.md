@@ -146,6 +146,15 @@ processes start. Compact `agent-task status` includes `execution_location` as
 | `contract` | Export Homeboy's machine-readable agent-task core contract metadata. |
 | `auth` | Configure and inspect provider authentication secrets. |
 
+`agent-task contract --format=json` includes `agent_runtime_handshake`, the
+Homeboy-owned extension-facing protocol registry for runtime capability
+manifests, readiness checks, resolved execution contracts, materialization plans,
+secret env plans, and result/artifact declarations. The registry is generic by
+design: extensions provide runtime-specific declarations and results, while
+Homeboy owns schema ids, required wire fields, redaction boundaries, and resolved
+handoff vocabulary. See
+[`docs/architecture/agent-runtime-contract-handshake.md`](../architecture/agent-runtime-contract-handshake.md).
+
 ### Prompt Store
 
 `agent-task prompts` stores markdown prompt files under Homeboy's data directory,

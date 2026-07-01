@@ -1,18 +1,24 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
+use crate::core::rig::spec::DependencyCacheSpec;
 
 use super::{
     workspace::{
         canonical_workspace_path, effective_snapshot_excludes, git_output, local_snapshot_stats,
-        materialize_snapshot, materialize_snapshot_git, snapshot_identity, ByteFileCounts,
+        materialize_snapshot, materialize_snapshot_git, parent_remote_path, run_shell_capture,
+        run_shell_command, shell_command_for_runner, snapshot_identity, ByteFileCounts,
         DEFAULT_EXCLUDES,
     },
-    Runner, RunnerWorkspaceSyncMode,
+    Runner, RunnerKind, RunnerWorkspaceSyncMode,
 };
+
+pub(crate) const DEPENDENCY_CACHE_SCHEMA: &str = "homeboy/runner-dependency-cache/v1";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct RunnerGitDependencyMaterializationOutput {
@@ -41,6 +47,8 @@ pub(crate) struct RunnerGitDependencyMaterializationOutput {
     /// a clean checkout at HEAD. Makes bench artifact provenance explicit.
     pub dirty_overlay: bool,
     pub sync_mode: RunnerWorkspaceSyncMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency_cache: Option<RunnerDependencyCacheRestoreOutput>,
     #[serde(flatten)]
     pub counts: ByteFileCounts,
 }
@@ -56,6 +64,58 @@ pub(crate) struct RunnerGitDependencyMaterializationOptions {
     /// instead of being refused. The snapshot already tars the working tree, so
     /// the dirty overlay travels to the runner. Defaults to false (clean-HEAD).
     pub allow_dirty: bool,
+    pub dependency_cache: Option<DependencyCacheSpec>,
+    pub component_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RunnerDependencyCacheRestoreOutput {
+    pub schema: &'static str,
+    pub status: String,
+    pub key: String,
+    pub cache_path: String,
+    pub restored_paths: Vec<String>,
+    pub missing_paths: Vec<String>,
+    pub manifest: RunnerDependencyCacheManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RunnerDependencyCacheSaveOutput {
+    pub schema: &'static str,
+    pub status: String,
+    pub key: String,
+    pub cache_path: String,
+    pub saved_paths: Vec<String>,
+    pub missing_paths: Vec<String>,
+    pub manifest: RunnerDependencyCacheManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RunnerDependencyCacheManifest {
+    pub schema: &'static str,
+    pub key: String,
+    pub step_id: String,
+    pub component_ref: String,
+    pub runner_os: String,
+    pub runner_arch: String,
+    pub key_files: Vec<RunnerDependencyCacheKeyFile>,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RunnerDependencyCacheKeyFile {
+    pub role: String,
+    pub path: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RunnerDependencyCacheSaveRequest {
+    pub remote_path: String,
+    pub cache_path: String,
+    pub manifest: RunnerDependencyCacheManifest,
 }
 
 pub(crate) fn materialize_git_dependency(
@@ -122,6 +182,24 @@ pub(crate) fn materialize_git_dependency(
             &snapshot,
         )?;
     }
+    let dependency_cache = options
+        .dependency_cache
+        .as_ref()
+        .map(|cache| {
+            dependency_cache_restore(
+                runner,
+                &local_path,
+                &options.remote_path,
+                cache,
+                options
+                    .component_ref
+                    .as_deref()
+                    .or(freshness.after_sha.as_deref())
+                    .or(freshness.pinned_ref.as_deref())
+                    .unwrap_or(&snapshot),
+            )
+        })
+        .transpose()?;
 
     Ok(RunnerGitDependencyMaterializationOutput {
         local_path: local_path.display().to_string(),
@@ -139,8 +217,305 @@ pub(crate) fn materialize_git_dependency(
         used_pinned_ref: freshness.used_pinned_ref,
         dirty_overlay,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+        dependency_cache,
         counts: stats,
     })
+}
+
+pub(crate) fn dependency_cache_save(
+    runner: &Runner,
+    request: &RunnerDependencyCacheSaveRequest,
+) -> Result<RunnerDependencyCacheSaveOutput> {
+    save_dependency_cache_paths(
+        runner,
+        &request.remote_path,
+        &request.cache_path,
+        &request.manifest,
+    )
+}
+
+pub(crate) fn dependency_cache_save_request(
+    output: &RunnerGitDependencyMaterializationOutput,
+) -> Option<RunnerDependencyCacheSaveRequest> {
+    let cache = output.dependency_cache.as_ref()?;
+    Some(RunnerDependencyCacheSaveRequest {
+        remote_path: output.remote_path.clone(),
+        cache_path: cache.cache_path.clone(),
+        manifest: cache.manifest.clone(),
+    })
+}
+
+fn dependency_cache_restore(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    spec: &DependencyCacheSpec,
+    component_ref: &str,
+) -> Result<RunnerDependencyCacheRestoreOutput> {
+    let manifest = dependency_cache_manifest(runner, local_path, spec, component_ref)?;
+    let cache_path = dependency_cache_path(runner, remote_path, &manifest.key);
+    restore_dependency_cache_paths(runner, remote_path, &cache_path, &manifest)
+}
+
+fn dependency_cache_manifest(
+    runner: &Runner,
+    local_path: &Path,
+    spec: &DependencyCacheSpec,
+    component_ref: &str,
+) -> Result<RunnerDependencyCacheManifest> {
+    validate_dependency_cache_spec(spec)?;
+    let runner_os = runner_label(runner, "os", std::env::consts::OS);
+    let runner_arch = runner_label(runner, "arch", std::env::consts::ARCH);
+    let mut key_files = Vec::new();
+    for path in &spec.lockfiles {
+        key_files.push(cache_key_file(local_path, "lockfile", path)?);
+    }
+    for path in &spec.package_metadata {
+        key_files.push(cache_key_file(local_path, "package_metadata", path)?);
+    }
+    key_files.sort_by(|left, right| {
+        left.role
+            .cmp(&right.role)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let mut paths = spec
+        .paths
+        .iter()
+        .map(|path| normalize_relative_cache_path(path))
+        .collect::<Result<Vec<_>>>()?;
+    paths.sort();
+    paths.dedup();
+    let mut hasher = Sha256::new();
+    hasher.update(DEPENDENCY_CACHE_SCHEMA.as_bytes());
+    hasher.update(spec.step_id.trim().as_bytes());
+    hasher.update(component_ref.as_bytes());
+    hasher.update(runner_os.as_bytes());
+    hasher.update(runner_arch.as_bytes());
+    for file in &key_files {
+        hasher.update(file.role.as_bytes());
+        hasher.update(file.path.as_bytes());
+        hasher.update(file.status.as_bytes());
+        if let Some(sha) = &file.sha256 {
+            hasher.update(sha.as_bytes());
+        }
+    }
+    for path in &paths {
+        hasher.update(path.as_bytes());
+    }
+    let key = format!("dep-cache-{}", hex(&hasher.finalize()));
+    Ok(RunnerDependencyCacheManifest {
+        schema: DEPENDENCY_CACHE_SCHEMA,
+        key,
+        step_id: spec.step_id.trim().to_string(),
+        component_ref: component_ref.to_string(),
+        runner_os,
+        runner_arch,
+        key_files,
+        paths,
+    })
+}
+
+fn restore_dependency_cache_paths(
+    runner: &Runner,
+    remote_path: &str,
+    cache_path: &str,
+    manifest: &RunnerDependencyCacheManifest,
+) -> Result<RunnerDependencyCacheRestoreOutput> {
+    let mut restored = Vec::new();
+    let mut missing = Vec::new();
+    for path in &manifest.paths {
+        let archive = cache_archive_path(cache_path, path);
+        let probe = format!(
+            "if test -f {}; then printf yes; fi",
+            shell::quote_arg(&archive)
+        );
+        if run_shell_capture(&shell_command_for_runner(runner, &probe)?).is_none() {
+            missing.push(path.clone());
+            continue;
+        }
+        let command = format!(
+            "mkdir -p {dest} && rm -rf {target} && tar -C {dest} -xf {archive}",
+            dest = shell::quote_arg(remote_path),
+            target = shell::quote_arg(&Path::new(remote_path).join(path).display().to_string()),
+            archive = shell::quote_arg(&archive),
+        );
+        run_shell_command(
+            &shell_command_for_runner(runner, &command)?,
+            "restore runner dependency cache",
+        )?;
+        restored.push(path.clone());
+    }
+    Ok(RunnerDependencyCacheRestoreOutput {
+        schema: DEPENDENCY_CACHE_SCHEMA,
+        status: if restored.is_empty() { "miss" } else { "hit" }.to_string(),
+        key: manifest.key.clone(),
+        cache_path: cache_path.to_string(),
+        restored_paths: restored,
+        missing_paths: missing,
+        manifest: manifest.clone(),
+    })
+}
+
+fn save_dependency_cache_paths(
+    runner: &Runner,
+    remote_path: &str,
+    cache_path: &str,
+    manifest: &RunnerDependencyCacheManifest,
+) -> Result<RunnerDependencyCacheSaveOutput> {
+    let mut saved = Vec::new();
+    let mut missing = Vec::new();
+    for path in &manifest.paths {
+        let source = Path::new(remote_path).join(path).display().to_string();
+        let archive = cache_archive_path(cache_path, path);
+        let probe = format!(
+            "if test -e {}; then printf yes; fi",
+            shell::quote_arg(&source)
+        );
+        if run_shell_capture(&shell_command_for_runner(runner, &probe)?).is_none() {
+            missing.push(path.clone());
+            continue;
+        }
+        let command = format!(
+            "mkdir -p {cache} {archive_parent} && tar -C {remote} -cf {archive} {path}",
+            cache = shell::quote_arg(cache_path),
+            archive_parent = shell::quote_arg(&parent_remote_path(&archive)),
+            remote = shell::quote_arg(remote_path),
+            archive = shell::quote_arg(&archive),
+            path = shell::quote_arg(path),
+        );
+        run_shell_command(
+            &shell_command_for_runner(runner, &command)?,
+            "save runner dependency cache",
+        )?;
+        saved.push(path.clone());
+    }
+    let manifest_json = serde_json::to_string_pretty(manifest).unwrap_or_else(|_| "{}".to_string());
+    let write_manifest = format!(
+        "mkdir -p {cache} && printf %s {json} > {manifest}",
+        cache = shell::quote_arg(cache_path),
+        json = shell::quote_arg(&manifest_json),
+        manifest = shell::quote_arg(
+            &Path::new(cache_path)
+                .join("manifest.json")
+                .display()
+                .to_string()
+        ),
+    );
+    run_shell_command(
+        &shell_command_for_runner(runner, &write_manifest)?,
+        "write runner dependency cache manifest",
+    )?;
+    Ok(RunnerDependencyCacheSaveOutput {
+        schema: DEPENDENCY_CACHE_SCHEMA,
+        status: if saved.is_empty() { "empty" } else { "saved" }.to_string(),
+        key: manifest.key.clone(),
+        cache_path: cache_path.to_string(),
+        saved_paths: saved,
+        missing_paths: missing,
+        manifest: manifest.clone(),
+    })
+}
+
+fn validate_dependency_cache_spec(spec: &DependencyCacheSpec) -> Result<()> {
+    if spec.step_id.trim().is_empty() || spec.paths.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "dependency_cache",
+            "dependency cache requires a non-empty step_id and at least one path",
+            None,
+            None,
+        ));
+    }
+    for path in spec
+        .paths
+        .iter()
+        .chain(spec.lockfiles.iter())
+        .chain(spec.package_metadata.iter())
+    {
+        normalize_relative_cache_path(path)?;
+    }
+    Ok(())
+}
+
+fn cache_key_file(
+    local_path: &Path,
+    role: &str,
+    path: &str,
+) -> Result<RunnerDependencyCacheKeyFile> {
+    let normalized = normalize_relative_cache_path(path)?;
+    let full = local_path.join(&normalized);
+    if !full.is_file() {
+        return Ok(RunnerDependencyCacheKeyFile {
+            role: role.to_string(),
+            path: normalized,
+            status: "missing".to_string(),
+            sha256: None,
+        });
+    }
+    let bytes = std::fs::read(&full).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("read dependency cache key file {}", full.display())),
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(RunnerDependencyCacheKeyFile {
+        role: role.to_string(),
+        path: normalized,
+        status: "present".to_string(),
+        sha256: Some(hex(&hasher.finalize())),
+    })
+}
+
+fn normalize_relative_cache_path(path: &str) -> Result<String> {
+    let value = path.trim().trim_matches('/');
+    if value.is_empty()
+        || value.starts_with("../")
+        || value.contains("/../")
+        || Path::new(value).is_absolute()
+    {
+        return Err(Error::validation_invalid_argument(
+            "dependency_cache",
+            "dependency cache paths must be non-empty relative paths that stay inside the checkout",
+            Some(path.to_string()),
+            None,
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn dependency_cache_path(runner: &Runner, remote_path: &str, key: &str) -> String {
+    let root = runner
+        .workspace_root
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| parent_remote_path(remote_path));
+    format!("{}/_dependency_cache/{}", root.trim_end_matches('/'), key)
+}
+
+fn cache_archive_path(cache_path: &str, path: &str) -> String {
+    PathBuf::from(cache_path)
+        .join(format!("{}.tar", path.replace('/', "__")))
+        .display()
+        .to_string()
+}
+
+fn runner_label(runner: &Runner, key: &str, fallback: &str) -> String {
+    runner
+        .resources
+        .get(key)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| match runner.kind {
+            RunnerKind::Local => fallback.to_string(),
+            RunnerKind::Ssh => fallback.to_string(),
+        })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,9 +865,13 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    use crate::core::engine::shell;
+
     use super::{
-        ensure_git_dependency_fresh, materialize_git_dependency, DependencyUpdateStatus,
-        RunnerGitDependencyMaterializationOptions,
+        cache_archive_path, dependency_cache_manifest, ensure_git_dependency_fresh,
+        materialize_git_dependency, restore_dependency_cache_paths, save_dependency_cache_paths,
+        DependencyUpdateStatus, Runner, RunnerDependencyCacheManifest,
+        RunnerGitDependencyMaterializationOptions, RunnerKind, DEPENDENCY_CACHE_SCHEMA,
     };
 
     #[test]
@@ -535,6 +914,8 @@ mod tests {
                     required_subpath: None,
                     pinned_ref: None,
                     allow_dirty: false,
+                    dependency_cache: None,
+                    component_ref: None,
                 },
             )
             .expect("materialize git dependency");
@@ -726,6 +1107,113 @@ mod tests {
         assert_eq!(git_output(checkout.path(), &["rev-parse", "HEAD"]), before);
     }
 
+    #[test]
+    fn dependency_cache_key_changes_with_declared_inputs() {
+        let root = tempfile::tempdir().expect("root");
+        fs::write(root.path().join("lock.txt"), "one").expect("write lock");
+        fs::write(root.path().join("package.meta"), "meta").expect("write metadata");
+        let mut runner = test_runner(tempfile::tempdir().expect("runner root").path());
+        runner
+            .resources
+            .insert("os".to_string(), serde_json::json!("linux"));
+        runner
+            .resources
+            .insert("arch".to_string(), serde_json::json!("x86_64"));
+        let spec = crate::core::rig::spec::DependencyCacheSpec {
+            step_id: "deps".to_string(),
+            paths: vec!["vendor/cache".to_string()],
+            lockfiles: vec!["lock.txt".to_string()],
+            package_metadata: vec!["package.meta".to_string()],
+        };
+
+        let first =
+            dependency_cache_manifest(&runner, root.path(), &spec, "abc").expect("manifest");
+        fs::write(root.path().join("lock.txt"), "two").expect("update lock");
+        let second =
+            dependency_cache_manifest(&runner, root.path(), &spec, "abc").expect("manifest");
+
+        assert_ne!(first.key, second.key);
+        assert_eq!(first.step_id, "deps");
+        assert_eq!(first.runner_os, "linux");
+        assert_eq!(first.runner_arch, "x86_64");
+        assert_eq!(first.key_files.len(), 2);
+    }
+
+    #[test]
+    fn dependency_cache_restore_reports_miss_and_hit() {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let remote = runner_root.path().join("checkout");
+        let cache = runner_root.path().join("cache");
+        fs::create_dir_all(&remote).expect("remote");
+        let runner = test_runner(runner_root.path());
+        let manifest = test_cache_manifest("key", vec!["deps".to_string()]);
+
+        let miss = restore_dependency_cache_paths(
+            &runner,
+            &remote.display().to_string(),
+            &cache.display().to_string(),
+            &manifest,
+        )
+        .expect("restore miss");
+        assert_eq!(miss.status, "miss");
+        assert_eq!(miss.missing_paths, vec!["deps"]);
+
+        fs::create_dir_all(cache.join("unused")).ok();
+        fs::create_dir_all(runner_root.path().join("source/deps")).expect("source deps");
+        fs::write(runner_root.path().join("source/deps/file.txt"), "cached").expect("cached file");
+        let archive = cache_archive_path(&cache.display().to_string(), "deps");
+        run_shell(&format!(
+            "mkdir -p {} && tar -C {} -cf {} deps",
+            shell::quote_arg(&cache.display().to_string()),
+            shell::quote_arg(&runner_root.path().join("source").display().to_string()),
+            shell::quote_arg(&archive),
+        ));
+
+        let hit = restore_dependency_cache_paths(
+            &runner,
+            &remote.display().to_string(),
+            &cache.display().to_string(),
+            &manifest,
+        )
+        .expect("restore hit");
+        assert_eq!(hit.status, "hit");
+        assert_eq!(hit.restored_paths, vec!["deps"]);
+        assert_eq!(
+            fs::read_to_string(remote.join("deps/file.txt")).expect("restored file"),
+            "cached"
+        );
+    }
+
+    #[test]
+    fn dependency_cache_save_writes_manifest_shape() {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let remote = runner_root.path().join("checkout");
+        let cache = runner_root.path().join("cache");
+        fs::create_dir_all(remote.join("deps")).expect("deps");
+        fs::write(remote.join("deps/file.txt"), "saved").expect("saved file");
+        let runner = test_runner(runner_root.path());
+        let manifest =
+            test_cache_manifest("key-save", vec!["deps".to_string(), "missing".to_string()]);
+
+        let saved = save_dependency_cache_paths(
+            &runner,
+            &remote.display().to_string(),
+            &cache.display().to_string(),
+            &manifest,
+        )
+        .expect("save cache");
+
+        assert_eq!(saved.status, "saved");
+        assert_eq!(saved.saved_paths, vec!["deps"]);
+        assert_eq!(saved.missing_paths, vec!["missing"]);
+        assert!(Path::new(&cache_archive_path(&cache.display().to_string(), "deps")).is_file());
+        let manifest_json = fs::read_to_string(cache.join("manifest.json")).expect("manifest json");
+        let value: serde_json::Value = serde_json::from_str(&manifest_json).expect("json");
+        assert_eq!(value["schema"], DEPENDENCY_CACHE_SCHEMA);
+        assert_eq!(value["key"], "key-save");
+        assert_eq!(value["paths"].as_array().expect("paths").len(), 2);
+    }
+
     struct GitFixture {
         remote: tempfile::TempDir,
         work: tempfile::TempDir,
@@ -812,5 +1300,44 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn test_runner(workspace_root: &Path) -> Runner {
+        Runner {
+            id: "test-runner".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: Some(workspace_root.display().to_string()),
+            settings: Default::default(),
+            env: Default::default(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: Default::default(),
+        }
+    }
+
+    fn test_cache_manifest(key: &str, paths: Vec<String>) -> RunnerDependencyCacheManifest {
+        RunnerDependencyCacheManifest {
+            schema: DEPENDENCY_CACHE_SCHEMA,
+            key: key.to_string(),
+            step_id: "deps".to_string(),
+            component_ref: "abc".to_string(),
+            runner_os: "linux".to_string(),
+            runner_arch: "x86_64".to_string(),
+            key_files: Vec::new(),
+            paths,
+        }
+    }
+
+    fn run_shell(command: &str) {
+        let output = Command::new("sh")
+            .args(["-c", command])
+            .output()
+            .expect("run shell");
+        assert!(
+            output.status.success(),
+            "shell failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

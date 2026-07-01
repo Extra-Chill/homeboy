@@ -271,8 +271,6 @@ mod outputs {
 }
 
 mod options {
-    use super::*;
-
     /// Parameters for creating a new issue.
     #[derive(Debug, Clone, Default)]
     pub struct IssueCreateOptions {

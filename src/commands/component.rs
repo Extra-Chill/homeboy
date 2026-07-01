@@ -21,14 +21,6 @@ pub struct ComponentArgs {
 enum ComponentCommand {
     /// Initialize portable component config for a repo
     Create {
-        /// Legacy JSON input spec. Hidden because create now writes repo-owned homeboy.json from flags.
-        #[arg(long, hide = true)]
-        json: Option<String>,
-
-        /// Legacy JSON-mode flag. Hidden because JSON bulk create is no longer supported.
-        #[arg(long, hide = true)]
-        skip_existing: bool,
-
         /// Absolute path to local source directory (writes homeboy.json there)
         #[arg(long)]
         local_path: Option<String>,
@@ -199,8 +191,6 @@ pub fn run(
 ) -> CmdResult<ComponentOutput> {
     match args.command {
         ComponentCommand::Create {
-            json,
-            skip_existing,
             local_path,
             remote_path,
             build_artifact,
@@ -211,18 +201,6 @@ pub fn run(
             extensions,
             project,
         } => {
-            if json.is_some() || skip_existing {
-                return Err(homeboy::core::Error::validation_invalid_argument(
-                    "component.create",
-                    "component create now initializes repo-owned homeboy.json from flags; JSON bulk create is legacy and no longer supported here",
-                    None,
-                    Some(vec![
-                        "Use: homeboy component create --local-path <path> [flags]".to_string(),
-                        "Then attach it to a project with: homeboy project components attach-path <project> <path>".to_string(),
-                    ]),
-                ));
-            }
-
             let local_path = local_path.ok_or_else(|| {
                 homeboy::core::Error::validation_invalid_argument(
                     "local_path",
