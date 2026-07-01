@@ -28,6 +28,14 @@ const OPENCODE_SECRET_ENV = [
 	'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
 	'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ];
+const OPENCODE_FATAL_LOG_PATTERNS = [
+	{
+		pattern: /Usage limit reached/i,
+		code: 'agent_task.opencode_usage_limit',
+		summary: 'OpenCode provider usage limit was reached.',
+		classification: 'provider_quota',
+	},
+];
 
 const OPENCODE_CAPABILITIES = [
 	'cli_runtime',
@@ -218,10 +226,51 @@ function opencodeSpawnEnv(request = {}, options = {}) {
 	if (config.inherit_env === true || config.inheritEnv === true) {
 		throw new Error('OpenCode ambient env inheritance is not supported; declare env_allowlist, runtime_env, and secret_env explicitly.');
 	}
-	return cliAgentTaskSpawnEnv(request, options, {
+	const env = cliAgentTaskSpawnEnv(request, options, {
 		allowlist: OPENCODE_PROCESS_ENV_ALLOWLIST,
 		secretEnv: OPENCODE_SECRET_ENV,
 	});
+	const configContent = opencodeConfigContentForRequest(request, env.OPENCODE_CONFIG_CONTENT);
+	return configContent ? { ...env, OPENCODE_CONFIG_CONTENT: configContent } : env;
+}
+
+function opencodeConfigContentForRequest(request = {}, existingContent = '') {
+	const config = request.executor?.config || {};
+	const model = config.model || request.executor?.model || request.model;
+	const smallModel = config.small_model || config.smallModel;
+	if (!model && !smallModel) {
+		return '';
+	}
+
+	const content = parseOpenCodeConfigContent(existingContent);
+	content.$schema = content.$schema || 'https://opencode.ai/config.json';
+	content.agent = objectValue(content.agent);
+	delete content.agents;
+
+	if (model) {
+		content.model = model;
+		const primaryAgent = config.agent || 'build';
+		content.agent[primaryAgent] = { ...objectValue(content.agent[primaryAgent]), model };
+	}
+
+	if (smallModel) {
+		content.small_model = smallModel;
+		content.agent.title = { ...objectValue(content.agent.title), model: smallModel };
+	}
+
+	return JSON.stringify(content);
+}
+
+function parseOpenCodeConfigContent(content) {
+	if (!content || typeof content !== 'string') {
+		return {};
+	}
+	try {
+		const parsed = JSON.parse(content);
+		return objectValue(parsed);
+	} catch {
+		return {};
+	}
 }
 
 function withDeclaredArtifactDiagnostics(request = {}, normalized = {}) {
@@ -488,11 +537,12 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 		});
 	}
 
-	const cwd = config.cwd || request.workspace_path || request.workspace?.path || process.cwd();
+	const cwd = config.cwd || config.workspace_root || config.workspaceRoot || request.workspace_path || request.workspace?.path || request.workspace?.root || process.cwd();
+	const model = config.model || request.executor.model || request.model;
 	const args = [
 		...commandSpec.args,
 		'run',
-		...(config.model ? ['--model', config.model] : []),
+		...(model ? ['--model', model] : []),
 		...(config.agent ? ['--agent', config.agent] : []),
 		...(config.variant ? ['--variant', config.variant] : []),
 		...(config.title ? ['--title', config.title] : []),
@@ -506,6 +556,7 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 		env: spawnExtra.env,
 		timeoutMs: timeoutSeconds > 0 ? timeoutSeconds * 1000 : 0,
 		runtimeLogPaths,
+		diagnosticLogPath: openCodeDiagnosticLogPath(config, spawnExtra.env),
 	});
 	const context = { request, config, commandSpec, cwd, spawnResult, spawnExtra, runtimeLogPaths };
 	const runtimeLogs = collectOpenCodeRuntimeLogs(context);
@@ -523,12 +574,13 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 
 	if (spawnResult.error) {
 		const timedOut = spawnResult.error.code === 'ETIMEDOUT';
+		const fatalRuntimeError = spawnResult.fatalRuntimeError;
 		return outcome(request, {
 			status: timedOut ? 'timeout' : 'provider_error',
-			failure_classification: timedOut ? 'timeout' : 'provider',
-			failure_code: timedOut ? 'agent_task.opencode_timeout' : 'agent_task.opencode_spawn_failed',
-			summary: timedOut ? 'OpenCode execution timed out.' : 'OpenCode process failed to start or complete.',
-			diagnostics: [{ classification: timedOut ? 'timeout' : 'provider_setup', message: spawnResult.error.message }],
+			failure_classification: fatalRuntimeError?.classification || (timedOut ? 'timeout' : 'provider'),
+			failure_code: fatalRuntimeError?.code || (timedOut ? 'agent_task.opencode_timeout' : 'agent_task.opencode_spawn_failed'),
+			summary: fatalRuntimeError?.summary || (timedOut ? 'OpenCode execution timed out.' : 'OpenCode process failed to start or complete.'),
+			diagnostics: [{ classification: fatalRuntimeError?.classification || (timedOut ? 'timeout' : 'provider_setup'), message: spawnResult.error.message }],
 			metadata: { opencode_session: sessionMetadata(context) },
 			...runtimeLogs,
 		});
@@ -574,6 +626,15 @@ function openCodeRuntimeLogPaths(request = {}, config = {}) {
 	};
 }
 
+function openCodeDiagnosticLogPath(config = {}, env = process.env) {
+	const configured = config.diagnostic_log_path || config.diagnosticLogPath || env.HOMEBOY_OPENCODE_LOG_PATH || '';
+	if (configured) {
+		return configured;
+	}
+	const home = env.HOME || process.env.HOME || '';
+	return home ? path.join(home, '.local', 'share', 'opencode', 'log', 'opencode.log') : '';
+}
+
 function resolveArtifactDir(context = {}) {
 	const request = context.request || {};
 	const config = context.config || {};
@@ -591,8 +652,11 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 		const stderrChunks = [];
 		let settled = false;
 		let timedOut = false;
+		let fatalRuntimeError = null;
 		let child;
 		let exitFallbackTimer = null;
+		let diagnosticLogTimer = null;
+		let diagnosticLogOffset = diagnosticLogInitialOffset(options.diagnosticLogPath);
 
 		for (const filePath of Object.values(options.runtimeLogPaths || {})) {
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -620,9 +684,13 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			if (exitFallbackTimer) {
 				clearTimeout(exitFallbackTimer);
 			}
+			if (diagnosticLogTimer) {
+				clearInterval(diagnosticLogTimer);
+			}
 			resolve({
 				stdout: stdoutChunks.join(''),
 				stderr: stderrChunks.join(''),
+				...(fatalRuntimeError ? { fatalRuntimeError } : {}),
 				...result,
 			});
 		};
@@ -638,6 +706,15 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			timedOut = true;
 			child.kill('SIGTERM');
 		}, options.timeoutMs) : null;
+		diagnosticLogTimer = startOpenCodeDiagnosticLogMonitor({
+			logPath: options.diagnosticLogPath,
+			initialOffset: diagnosticLogOffset,
+			env: options.env,
+			onFatal: (detected) => {
+				fatalRuntimeError = detected;
+				child.kill('SIGTERM');
+			},
+		});
 
 		child.stdout.on('data', (chunk) => append('stdout', chunk));
 		child.stderr.on('data', (chunk) => append('stderr', chunk));
@@ -652,6 +729,7 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 				finish({
 					status,
 					signal,
+					...(fatalRuntimeError ? { error: Object.assign(new Error(fatalRuntimeError.message), { code: 'EOPENCODEFATAL' }) } : {}),
 					...(timedOut ? { error: Object.assign(new Error('OpenCode execution timed out.'), { code: 'ETIMEDOUT' }) } : {}),
 				});
 			}, 250);
@@ -663,10 +741,71 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			finish({
 				status,
 				signal,
+				...(fatalRuntimeError ? { error: Object.assign(new Error(fatalRuntimeError.message), { code: 'EOPENCODEFATAL' }) } : {}),
 				...(timedOut ? { error: Object.assign(new Error('OpenCode execution timed out.'), { code: 'ETIMEDOUT' }) } : {}),
 			});
 		});
 	});
+}
+
+function diagnosticLogInitialOffset(logPath) {
+	try {
+		if (!logPath || !fs.existsSync(logPath)) {
+			return 0;
+		}
+		return fs.statSync(logPath).size;
+	} catch {
+		return 0;
+	}
+}
+
+function startOpenCodeDiagnosticLogMonitor({ logPath, initialOffset = 0, env = process.env, onFatal }) {
+	if (!logPath || typeof onFatal !== 'function') {
+		return null;
+	}
+	let offset = initialOffset;
+	let reported = false;
+	return setInterval(() => {
+		let stat;
+		try {
+			if (reported || !fs.existsSync(logPath)) {
+				return;
+			}
+			stat = fs.statSync(logPath);
+		} catch {
+			return;
+		}
+		if (stat.size < offset) {
+			offset = 0;
+		}
+		if (stat.size === offset) {
+			return;
+		}
+
+		let fd;
+		try {
+			fd = fs.openSync(logPath, 'r');
+			const length = stat.size - offset;
+			const buffer = Buffer.alloc(length);
+			fs.readSync(fd, buffer, 0, length, offset);
+			offset = stat.size;
+			const content = redactKnownSecrets(buffer.toString('utf8'), env);
+			const matched = OPENCODE_FATAL_LOG_PATTERNS.find(({ pattern }) => pattern.test(content));
+			if (matched) {
+				reported = true;
+				onFatal({
+					code: matched.code,
+					summary: matched.summary,
+					classification: matched.classification,
+					message: `${matched.summary} OpenCode diagnostic log reported: ${content.trim()}`,
+				});
+			}
+		} finally {
+			if (fd !== undefined) {
+				fs.closeSync(fd);
+			}
+		}
+	}, 1000);
 }
 
 function parseEnvCommandArgs() {

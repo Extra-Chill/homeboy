@@ -141,6 +141,46 @@ process.exit(0);
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('refresh-token-must-not-leak'), false);
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('access-token-must-not-leak'), false);
 
+	const modelWorkspace = path.join(root, 'model-workspace');
+	fs.mkdirSync(modelWorkspace, { recursive: true });
+	const realModelWorkspace = fs.realpathSync(modelWorkspace);
+	const modelCliPath = path.join(root, 'mock-opencode-model.cjs');
+	fs.writeFileSync(modelCliPath, `#!/usr/bin/env node
+const assert = require('node:assert/strict');
+assert.equal(process.cwd(), ${JSON.stringify(realModelWorkspace)});
+assert.deepEqual(process.argv.slice(2, 5), ['run', '--model', 'opencode-go/kimi-k2.7-code']);
+const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
+assert.equal(config.$schema, 'https://opencode.ai/config.json');
+assert.equal(config.model, 'opencode-go/kimi-k2.7-code');
+assert.equal(config.agent.build.model, 'opencode-go/kimi-k2.7-code');
+assert.equal(config.small_model, 'zai-coding-plan/glm-5.2');
+assert.equal(config.agent.title.model, 'zai-coding-plan/glm-5.2');
+assert.deepEqual(config.mcp, { example: { type: 'local' } });
+assert.equal(Object.hasOwn(config, 'agents'), false);
+process.exit(0);
+`);
+	const modelResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-executor-model',
+		executor: {
+			...request.executor,
+			model: 'opencode-go/kimi-k2.7-code',
+			config: {
+				...request.executor.config,
+				command_args: [modelCliPath],
+				workspace_root: modelWorkspace,
+				runtime_env: {
+					OPENCODE_CONFIG_CONTENT: JSON.stringify({
+						mcp: { example: { type: 'local' } },
+						agents: { build: { model: 'invalid-plural-key/must-not-survive' } },
+					}),
+				},
+				small_model: 'zai-coding-plan/glm-5.2',
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(modelResult.status, 'succeeded');
+
 	const missingArtifactResult = await executeOpenCodeAgentTask({
 		...request,
 		task_id: 'opencode-missing-artifact',
@@ -276,6 +316,33 @@ process.exit(0);
 	]);
 	assert.equal(inheritedPipeResult.status, 'succeeded');
 	assert.match(inheritedPipeResult.diagnostics[0].message, /status 0/);
+
+	const quotaLogPath = path.join(root, 'opencode-quota.log');
+	const quotaCliPath = path.join(root, 'mock-opencode-quota.cjs');
+	fs.writeFileSync(quotaCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(quotaLogPath)}, 'timestamp=2026-06-30T17:03:48.665Z level=ERROR message="stream error" error.error="AI_APICallError: Usage limit reached for 5 hour. Your limit will reset later"\\n');
+setTimeout(() => {}, 10000);
+`);
+	const quotaResult = await Promise.race([
+		executeOpenCodeAgentTask({
+			...request,
+			task_id: 'opencode-quota-fail-fast',
+			executor: {
+				...request.executor,
+				config: {
+					...request.executor.config,
+					command_args: [quotaCliPath],
+					diagnostic_log_path: quotaLogPath,
+				},
+			},
+		}, { env: fixtureEnv }),
+		new Promise((_, reject) => setTimeout(() => reject(new Error('OpenCode executor did not fail fast on provider quota exhaustion')), 3000)),
+	]);
+	assert.equal(quotaResult.status, 'provider_error');
+	assert.equal(quotaResult.failure_code, 'agent_task.opencode_usage_limit');
+	assert.equal(quotaResult.failure_classification, 'provider_quota');
+	assert.match(quotaResult.diagnostics[0].message, /Usage limit reached/);
 
 	const implicitArtifactResult = await executeOpenCodeAgentTask({
 		...request,

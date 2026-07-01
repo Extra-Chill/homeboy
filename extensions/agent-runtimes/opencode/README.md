@@ -30,6 +30,23 @@ The executor reads one AgentTaskRequest JSON object from stdin or
 opencode run [--model <model>] [--agent <agent>] [--variant <variant>] [--title <title>] <instructions>
 ```
 
+OpenCode's `--model` argument selects the run session model, but agent-local
+configuration can still control built-in agents such as `build` and `title`.
+For deterministic run-scoped selection, the executor also injects
+`OPENCODE_CONFIG_CONTENT` with:
+
+- `model` and `agent.build.model` from `executor.config.model`,
+  `executor.model`, or top-level `model`.
+- `small_model` and `agent.title.model` from `executor.config.small_model`
+  or `executor.config.smallModel` when provided.
+
+Direct runtime verification can be done with a temporary config overlay, without
+editing global OpenCode config:
+
+```sh
+OPENCODE_CONFIG_CONTENT='{"model":"opencode-go/kimi-k2.7-code","agent":{"build":{"model":"opencode-go/kimi-k2.7-code"}}}' opencode run --model opencode-go/kimi-k2.7-code 'Report the active provider/model for the build agent.'
+```
+
 The OpenCode binary is resolved from `executor.config.runtime_bin`,
 `executor.config.command`, `HOMEBOY_OPENCODE_COMMAND`, or `opencode` in that
 order. Additional leading command args may be supplied with
