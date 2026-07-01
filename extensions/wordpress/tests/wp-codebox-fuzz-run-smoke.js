@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -12,6 +13,7 @@ const {
 	DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY,
 	DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA,
 	ARTIFACT_POSTPROCESS_COMMAND,
+	ARTIFACT_POSTPROCESS_CONTRACT,
 	WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA,
 	WP_CODEBOX_FUZZ_PREFLIGHT_SCHEMA,
 	WORDPRESS_FUZZ_OBSERVATION_SCHEMA,
@@ -41,6 +43,24 @@ const {
 	wpCodeboxRuntimeContractManifest,
 } = require('../lib/wp-codebox-fuzz-run');
 const { buildWordPressFuzzRunnerResult } = require('../lib/wordpress-fuzz-runner');
+
+function exportedHomeboyContract(contractId) {
+	const exportRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-contract-export-'));
+	try {
+		const result = spawnSync('homeboy', ['contract', 'export', '--dir', exportRoot], { encoding: 'utf8' });
+		if (result.status !== 0) {
+			return undefined;
+		}
+		const catalogPath = path.join(exportRoot, 'schema-catalog.json');
+		if (!fs.existsSync(catalogPath)) {
+			return undefined;
+		}
+		const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
+		return (Array.isArray(catalog.contracts) ? catalog.contracts : []).find((contract) => contract.id === contractId);
+	} finally {
+		fs.rmSync(exportRoot, { recursive: true, force: true });
+	}
+}
 
 const input = wpCodeboxFuzzSuiteInput({
 	id: 'fuzz-smoke',
@@ -225,7 +245,12 @@ assert.equal(artifactPostprocessWorkloadInput.steps[0].artifactName, 'coverage_g
 assert.equal(artifactPostprocessWorkloadInput.steps[0].artifactKind, 'json');
 assert.equal(artifactPostprocessWorkloadInput.steps[0].semantic, 'fuzz.coverage.gap_report');
 assert.deepEqual(artifactPostprocessWorkloadInput.steps[0].args, ['coverage-gap-report', '${inputArtifactRoot}', '${outputArtifactPath}', JSON.stringify({ max_bytes: 1024 })]);
-assert.equal(artifactPostprocessWorkloadInput.steps[0].metadata.contract, 'homeboy/artifact-postprocess/v1');
+assert.equal(artifactPostprocessWorkloadInput.steps[0].metadata.contract, ARTIFACT_POSTPROCESS_CONTRACT);
+const artifactPostprocessHomeboyContract = exportedHomeboyContract(ARTIFACT_POSTPROCESS_CONTRACT);
+if (artifactPostprocessHomeboyContract) {
+	assert.equal(artifactPostprocessHomeboyContract.id, artifactPostprocessWorkloadInput.steps[0].metadata.contract);
+	assert.equal(artifactPostprocessHomeboyContract.version, 1);
+}
 const artifactPostprocessWorkloadInputAgain = wpCodeboxWordPressWorkloadRunInput(artifactPostprocessWorkloadInput);
 assert.equal(artifactPostprocessWorkloadInputAgain.steps[0].helperPath, '${package.root}/tools/artifact-helper.mjs');
 assert.equal(artifactPostprocessWorkloadInputAgain.steps[0].inputArtifactRoot, '${artifacts.root}');

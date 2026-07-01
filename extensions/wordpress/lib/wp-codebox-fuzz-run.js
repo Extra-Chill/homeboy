@@ -69,6 +69,7 @@ const DEFAULT_WORDPRESS_WORKLOAD_RUN_ABILITY = 'wp-codebox/run-wordpress-workloa
 const DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA = 'wp-codebox/wordpress-workload-run/v1';
 const WP_CODEBOX_PUBLIC_CLI_COMMANDS = WP_CODEBOX_FUZZ_PUBLIC_COMMANDS;
 const ARTIFACT_POSTPROCESS_COMMAND = 'homeboy.artifact-postprocess';
+const ARTIFACT_POSTPROCESS_CONTRACT = 'homeboy/artifact-postprocess/v1';
 const ARTIFACT_POSTPROCESS_COMMAND_ALIASES = new Set([ARTIFACT_POSTPROCESS_COMMAND, 'artifact-postprocess', 'homeboy.artifact_postprocess']);
 const DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS = [
 	'wp-codebox-fuzz-suite-result',
@@ -1152,7 +1153,7 @@ function normalizeWordPressWorkloadStep(step, options = {}) {
 		metadata: stripUndefined({
 			...(objectOrUndefined(step.metadata) || {}),
 			adapter: 'homeboy-extensions',
-			contract: 'homeboy/artifact-postprocess/v1',
+			contract: ARTIFACT_POSTPROCESS_CONTRACT,
 		}),
 	});
 }
@@ -3193,6 +3194,7 @@ module.exports = {
 	DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS,
 	DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS,
 	ARTIFACT_POSTPROCESS_COMMAND,
+	ARTIFACT_POSTPROCESS_CONTRACT,
 	FUZZ_ARTIFACT_SEMANTIC_KEYS,
 	WORDPRESS_FUZZ_POSTPROCESS_BINDING_SCHEMA,
 	WORDPRESS_FUZZ_POSTPROCESS_OUTPUTS,
