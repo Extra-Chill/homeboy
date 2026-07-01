@@ -31,6 +31,55 @@ pub(crate) struct DependencyProviderSnapshot {
     pub packages: Vec<DependencyPackage>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DependencyProviderContext<'a> {
+    pub component: &'a Component,
+    pub path: &'a Path,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DependencyProviderStatusRequest<'a> {
+    pub context: DependencyProviderContext<'a>,
+    pub package_filter: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DependencyProviderPackageRequest<'a> {
+    pub context: DependencyProviderContext<'a>,
+    pub package: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DependencyProviderUpdateRequest<'a> {
+    pub context: DependencyProviderContext<'a>,
+    pub package: &'a str,
+    pub constraint: Option<&'a str>,
+}
+
+/// Generic dependency-provider adapter contract.
+///
+/// Core dependency orchestration only deals in these provider-neutral requests
+/// and results. Package-manager-specific details stay inside adapters such as
+/// composer/npm or externally supplied component/extension providers.
+pub(crate) trait DependencyProviderAdapter {
+    fn status(
+        &self,
+        request: DependencyProviderStatusRequest<'_>,
+    ) -> Result<ProviderDependencyStatus>;
+
+    fn handles_package(&self, request: DependencyProviderPackageRequest<'_>) -> Result<bool>;
+
+    fn update(
+        &self,
+        request: DependencyProviderUpdateRequest<'_>,
+    ) -> Result<DependencyUpdateResult>;
+
+    fn install(
+        &self,
+        context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyCommandResult>>;
+}
+
 pub(crate) enum DependencyProvider {
     Composer(ComposerDependencyProvider),
     Npm(NpmDependencyProvider),
@@ -48,24 +97,33 @@ impl DependencyProvider {
         path: &Path,
         package_filter: Option<&str>,
     ) -> Result<ProviderDependencyStatus> {
+        let request = DependencyProviderStatusRequest {
+            context: DependencyProviderContext { component, path },
+            package_filter,
+        };
         match self {
-            DependencyProvider::Composer(provider) => provider.status(path, package_filter),
-            DependencyProvider::Npm(provider) => provider.status(path, package_filter),
-            DependencyProvider::Extension(provider) => {
-                provider.status(component, path, package_filter)
-            }
-            DependencyProvider::ComponentScript(provider) => {
-                provider.status(component, path, package_filter)
-            }
+            DependencyProvider::Composer(provider) => provider.status(request),
+            DependencyProvider::Npm(provider) => provider.status(request),
+            DependencyProvider::Extension(provider) => provider.status(request),
+            DependencyProvider::ComponentScript(provider) => provider.status(request),
         }
     }
 
-    pub(crate) fn handles_package(&self, path: &Path, package: &str) -> Result<bool> {
+    pub(crate) fn handles_package(
+        &self,
+        component: &Component,
+        path: &Path,
+        package: &str,
+    ) -> Result<bool> {
+        let request = DependencyProviderPackageRequest {
+            context: DependencyProviderContext { component, path },
+            package,
+        };
         match self {
-            DependencyProvider::Composer(provider) => provider.handles_package(path, package),
-            DependencyProvider::Npm(provider) => provider.manages_package(path, package),
-            DependencyProvider::Extension(_) => Ok(true),
-            DependencyProvider::ComponentScript(_) => Ok(true),
+            DependencyProvider::Composer(provider) => provider.handles_package(request),
+            DependencyProvider::Npm(provider) => provider.handles_package(request),
+            DependencyProvider::Extension(provider) => provider.handles_package(request),
+            DependencyProvider::ComponentScript(provider) => provider.handles_package(request),
         }
     }
 
@@ -76,19 +134,16 @@ impl DependencyProvider {
         package: &str,
         constraint: Option<&str>,
     ) -> Result<DependencyUpdateResult> {
+        let request = DependencyProviderUpdateRequest {
+            context: DependencyProviderContext { component, path },
+            package,
+            constraint,
+        };
         match self {
-            DependencyProvider::Composer(provider) => {
-                provider.update(component, path, package, constraint)
-            }
-            DependencyProvider::Npm(provider) => {
-                provider.update(component, path, package, constraint)
-            }
-            DependencyProvider::Extension(provider) => {
-                provider.update(component, path, package, constraint)
-            }
-            DependencyProvider::ComponentScript(provider) => {
-                provider.update(component, path, package, constraint)
-            }
+            DependencyProvider::Composer(provider) => provider.update(request),
+            DependencyProvider::Npm(provider) => provider.update(request),
+            DependencyProvider::Extension(provider) => provider.update(request),
+            DependencyProvider::ComponentScript(provider) => provider.update(request),
         }
     }
 
@@ -97,11 +152,12 @@ impl DependencyProvider {
         component: &Component,
         path: &Path,
     ) -> Result<Option<DependencyCommandResult>> {
+        let context = DependencyProviderContext { component, path };
         match self {
-            DependencyProvider::Composer(provider) => provider.install(component, path),
-            DependencyProvider::Npm(provider) => provider.install(component, path),
-            DependencyProvider::ComponentScript(provider) => provider.install(component, path),
-            DependencyProvider::Extension(provider) => provider.install(component, path),
+            DependencyProvider::Composer(provider) => provider.install(context),
+            DependencyProvider::Npm(provider) => provider.install(context),
+            DependencyProvider::ComponentScript(provider) => provider.install(context),
+            DependencyProvider::Extension(provider) => provider.install(context),
         }
     }
 }
@@ -219,32 +275,32 @@ impl ComposerDependencyProvider {
     fn supports(path: &Path) -> bool {
         path.join("composer.json").is_file()
     }
+}
 
+impl DependencyProviderAdapter for ComposerDependencyProvider {
     fn status(
         &self,
-        path: &Path,
-        package_filter: Option<&str>,
+        request: DependencyProviderStatusRequest<'_>,
     ) -> Result<ProviderDependencyStatus> {
         Ok(ProviderDependencyStatus {
             package_manager: "composer".to_string(),
-            dependency_identities: composer_identities(path)?,
-            packages: read_composer_packages(path, package_filter)?,
+            dependency_identities: composer_identities(request.context.path)?,
+            packages: read_composer_packages(request.context.path, request.package_filter)?,
         })
     }
 
-    fn handles_package(&self, path: &Path, package: &str) -> Result<bool> {
-        Ok(package_snapshot(path, package)?.is_some())
+    fn handles_package(&self, request: DependencyProviderPackageRequest<'_>) -> Result<bool> {
+        Ok(package_snapshot(request.context.path, request.package)?.is_some())
     }
 
     fn update(
         &self,
-        component: &Component,
-        path: &Path,
-        package: &str,
-        constraint: Option<&str>,
+        request: DependencyProviderUpdateRequest<'_>,
     ) -> Result<DependencyUpdateResult> {
+        let path = request.context.path;
+        let package = request.package;
         let before = package_snapshot(path, package)?;
-        let action = match constraint {
+        let action = match request.constraint {
             Some(constraint) => ComposerAction::Require {
                 constraint: constraint.to_string(),
             },
@@ -284,11 +340,11 @@ impl ComposerDependencyProvider {
         let after = package_snapshot(path, package)?;
 
         Ok(DependencyUpdateResult {
-            component_id: component.id.clone(),
+            component_id: request.context.component.id.clone(),
             component_path: path.display().to_string(),
             package_manager: "composer".to_string(),
             package: package.to_string(),
-            requested_constraint: constraint.map(str::to_string),
+            requested_constraint: request.constraint.map(str::to_string),
             command: std::iter::once("composer".to_string())
                 .chain(args)
                 .collect(),
@@ -303,9 +359,9 @@ impl ComposerDependencyProvider {
 
     fn install(
         &self,
-        _component: &Component,
-        path: &Path,
+        context: DependencyProviderContext<'_>,
     ) -> Result<Option<DependencyCommandResult>> {
+        let path = context.path;
         let args = composer_install_command_args();
         let output = Command::new("composer")
             .args(&args)
@@ -359,18 +415,17 @@ pub fn composer_install_command_args() -> Vec<String> {
 
 pub(crate) struct ComponentScriptDependencyProvider;
 
-impl ComponentScriptDependencyProvider {
+impl DependencyProviderAdapter for ComponentScriptDependencyProvider {
     fn status(
         &self,
-        component: &Component,
-        path: &Path,
-        package_filter: Option<&str>,
+        request: DependencyProviderStatusRequest<'_>,
     ) -> Result<ProviderDependencyStatus> {
         let mut args = vec!["status".to_string()];
-        if let Some(package_filter) = package_filter {
+        if let Some(package_filter) = request.package_filter {
             args.push(package_filter.to_string());
         }
-        let output = run_component_deps_script(component, path, &args)?;
+        let output =
+            run_component_deps_script(request.context.component, request.context.path, &args)?;
         let status: ExtensionStatusOutput = parse_extension_output(&output.stdout, "deps status")?;
 
         Ok(ProviderDependencyStatus {
@@ -380,15 +435,19 @@ impl ComponentScriptDependencyProvider {
         })
     }
 
+    fn handles_package(&self, _request: DependencyProviderPackageRequest<'_>) -> Result<bool> {
+        Ok(true)
+    }
+
     fn update(
         &self,
-        component: &Component,
-        path: &Path,
-        package: &str,
-        constraint: Option<&str>,
+        request: DependencyProviderUpdateRequest<'_>,
     ) -> Result<DependencyUpdateResult> {
+        let component = request.context.component;
+        let path = request.context.path;
+        let package = request.package;
         let mut args = vec!["update".to_string(), package.to_string()];
-        if let Some(constraint) = constraint {
+        if let Some(constraint) = request.constraint {
             args.push(constraint.to_string());
         }
         let output = run_component_deps_script(component, path, &args)?;
@@ -397,7 +456,7 @@ impl ComponentScriptDependencyProvider {
         result.component_id = component.id.clone();
         result.component_path = path.display().to_string();
         result.package = package.to_string();
-        result.requested_constraint = constraint.map(str::to_string);
+        result.requested_constraint = request.constraint.map(str::to_string);
         result.stdout = output.stdout;
         result.stderr = output.stderr;
         result.install = None;
@@ -407,13 +466,12 @@ impl ComponentScriptDependencyProvider {
 
     fn install(
         &self,
-        component: &Component,
-        path: &Path,
+        context: DependencyProviderContext<'_>,
     ) -> Result<Option<DependencyCommandResult>> {
         let args = vec!["install".to_string()];
-        let output = run_component_deps_script(component, path, &args)?;
+        let output = run_component_deps_script(context.component, context.path, &args)?;
         Ok(Some(DependencyCommandResult {
-            command: component_deps_script_command(component, &args),
+            command: component_deps_script_command(context.component, &args),
             skipped: false,
             status: Some(output.exit_code),
             stdout: output.stdout,
@@ -426,18 +484,16 @@ pub(crate) struct ExtensionDependencyProvider {
     context: ExtensionExecutionContext,
 }
 
-impl ExtensionDependencyProvider {
+impl DependencyProviderAdapter for ExtensionDependencyProvider {
     fn status(
         &self,
-        component: &Component,
-        path: &Path,
-        package_filter: Option<&str>,
+        request: DependencyProviderStatusRequest<'_>,
     ) -> Result<ProviderDependencyStatus> {
         let mut args = vec!["status".to_string()];
-        if let Some(package_filter) = package_filter {
+        if let Some(package_filter) = request.package_filter {
             args.push(package_filter.to_string());
         }
-        let output = self.run(component, path, &args)?;
+        let output = self.run(request.context.component, request.context.path, &args)?;
         let status: ExtensionStatusOutput = parse_extension_output(&output.stdout, "deps status")?;
 
         Ok(ProviderDependencyStatus {
@@ -447,15 +503,19 @@ impl ExtensionDependencyProvider {
         })
     }
 
+    fn handles_package(&self, _request: DependencyProviderPackageRequest<'_>) -> Result<bool> {
+        Ok(true)
+    }
+
     fn update(
         &self,
-        component: &Component,
-        path: &Path,
-        package: &str,
-        constraint: Option<&str>,
+        request: DependencyProviderUpdateRequest<'_>,
     ) -> Result<DependencyUpdateResult> {
+        let component = request.context.component;
+        let path = request.context.path;
+        let package = request.package;
         let mut args = vec!["update".to_string(), package.to_string()];
-        if let Some(constraint) = constraint {
+        if let Some(constraint) = request.constraint {
             args.push(constraint.to_string());
         }
         let output = self.run(component, path, &args)?;
@@ -464,7 +524,7 @@ impl ExtensionDependencyProvider {
         result.component_id = component.id.clone();
         result.component_path = path.display().to_string();
         result.package = package.to_string();
-        result.requested_constraint = constraint.map(str::to_string);
+        result.requested_constraint = request.constraint.map(str::to_string);
         result.stdout = output.stdout;
         result.stderr = output.stderr;
         result.install = None;
@@ -474,11 +534,10 @@ impl ExtensionDependencyProvider {
 
     fn install(
         &self,
-        component: &Component,
-        path: &Path,
+        context: DependencyProviderContext<'_>,
     ) -> Result<Option<DependencyCommandResult>> {
         let args = vec!["install".to_string()];
-        let output = self.run(component, path, &args)?;
+        let output = self.run(context.component, context.path, &args)?;
         Ok(Some(DependencyCommandResult {
             command: extension_deps_command(&args),
             skipped: false,
@@ -487,7 +546,9 @@ impl ExtensionDependencyProvider {
             stderr: output.stderr,
         }))
     }
+}
 
+impl ExtensionDependencyProvider {
     fn run(
         &self,
         component: &Component,
@@ -729,8 +790,12 @@ mod tests {
         std::env::set_var("PATH", format!("{}:{old_path}", bin.path().display()));
         std::fs::write(project.path().join("composer.json"), "{}").expect("composer json");
 
+        let component = Component::default();
         let result = ComposerDependencyProvider
-            .install(&Component::default(), project.path())
+            .install(DependencyProviderContext {
+                component: &component,
+                path: project.path(),
+            })
             .expect("composer install");
 
         std::env::set_var("PATH", old_path);

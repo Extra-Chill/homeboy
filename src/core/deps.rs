@@ -117,7 +117,7 @@ pub fn update(
     let providers = provider::resolve_dependency_providers(&component, &path)?;
 
     for provider in providers {
-        if provider.handles_package(&path, package)? {
+        if provider.handles_package(&component, &path, package)? {
             let mut result = provider.update(&component, &path, package, constraint)?;
             if options.install {
                 result.install = provider.install(&component, &path)?;

@@ -11,6 +11,7 @@ homeboy deps <COMMAND>
 ## Subcommands
 
 - `status` — inspect dependency constraints and locked package versions
+- `install` — install dependencies through detected providers
 - `update` — update one package through its dependency provider
 - `stack status` — list declared dependency stack edges
 - `stack plan <upstream>` — plan downstream updates for a merged upstream component or repo
@@ -54,6 +55,18 @@ homeboy deps stack apply extrachill-components --to ^0.5.2
 ```
 
 Custom `dependency_stack[].update` commands are executed as declared; include any constraint handling directly in the custom command when overriding the default provider-backed update.
+
+## Provider Boundary
+
+`homeboy deps` is provider-backed. Core resolves dependency providers from the
+component/workspace, then calls a generic adapter contract for status, package
+matching, updates, and installs. Composer, npm/pnpm, component scripts, and
+extension-backed providers are implementation details behind that boundary.
+
+Callers should use `homeboy deps status`, `homeboy deps install`, `homeboy deps
+update`, or `homeboy component setup` instead of scripting package-manager
+literals directly. New ecosystems should add or move provider adapters without
+changing dependency command orchestration.
 
 ## Related
 

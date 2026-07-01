@@ -1,7 +1,9 @@
-use crate::core::component::Component;
 use crate::core::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
 use crate::core::{Error, Result};
-use crate::extensions::deps_provider::ProviderDependencyStatus;
+use crate::extensions::deps_provider::{
+    DependencyProviderAdapter, DependencyProviderContext, DependencyProviderPackageRequest,
+    DependencyProviderStatusRequest, DependencyProviderUpdateRequest, ProviderDependencyStatus,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -21,32 +23,32 @@ impl NpmDependencyProvider {
     pub(crate) fn supports(path: &Path) -> bool {
         path.join("package.json").is_file()
     }
+}
 
-    pub(crate) fn status(
+impl DependencyProviderAdapter for NpmDependencyProvider {
+    fn status(
         &self,
-        path: &Path,
-        package_filter: Option<&str>,
+        request: DependencyProviderStatusRequest<'_>,
     ) -> Result<ProviderDependencyStatus> {
         Ok(ProviderDependencyStatus {
             package_manager: "npm".to_string(),
-            dependency_identities: npm_identities(path)?,
-            packages: read_npm_packages(path, package_filter)?,
+            dependency_identities: npm_identities(request.context.path)?,
+            packages: read_npm_packages(request.context.path, request.package_filter)?,
         })
     }
 
-    pub(crate) fn manages_package(&self, path: &Path, package: &str) -> Result<bool> {
-        Ok(npm_package_snapshot(path, package)?.is_some())
+    fn handles_package(&self, request: DependencyProviderPackageRequest<'_>) -> Result<bool> {
+        Ok(npm_package_snapshot(request.context.path, request.package)?.is_some())
     }
 
-    pub(crate) fn update(
+    fn update(
         &self,
-        component: &Component,
-        path: &Path,
-        package: &str,
-        constraint: Option<&str>,
+        request: DependencyProviderUpdateRequest<'_>,
     ) -> Result<DependencyUpdateResult> {
+        let path = request.context.path;
+        let package = request.package;
         let before = npm_package_snapshot(path, package)?;
-        let args = npm_command_args(package, constraint);
+        let args = npm_command_args(package, request.constraint);
         let output = Command::new("npm")
             .args(&args)
             .current_dir(path)
@@ -80,11 +82,11 @@ impl NpmDependencyProvider {
         let after = npm_package_snapshot(path, package)?;
 
         Ok(DependencyUpdateResult {
-            component_id: component.id.clone(),
+            component_id: request.context.component.id.clone(),
             component_path: path.display().to_string(),
             package_manager: "npm".to_string(),
             package: package.to_string(),
-            requested_constraint: constraint.map(str::to_string),
+            requested_constraint: request.constraint.map(str::to_string),
             command: std::iter::once("npm".to_string()).chain(args).collect(),
             before,
             after,
@@ -95,11 +97,11 @@ impl NpmDependencyProvider {
         })
     }
 
-    pub(crate) fn install(
+    fn install(
         &self,
-        _component: &Component,
-        path: &Path,
+        context: DependencyProviderContext<'_>,
     ) -> Result<Option<DependencyCommandResult>> {
+        let path = context.path;
         let install = npm_install_command(path);
         let output = Command::new(&install.binary)
             .args(&install.args)
@@ -368,8 +370,12 @@ mod tests {
         std::env::set_var("PATH", format!("{}:{old_path}", bin.path().display()));
         std::fs::write(project.path().join("package.json"), "{}").expect("package json");
 
+        let component = crate::core::component::Component::default();
         let result = NpmDependencyProvider
-            .install(&Component::default(), project.path())
+            .install(DependencyProviderContext {
+                component: &component,
+                path: project.path(),
+            })
             .expect("npm install");
 
         std::env::set_var("PATH", old_path);
