@@ -69,6 +69,7 @@ pub use capabilities::{
     evaluate_lab_runner_capabilities_for_runner, prepare_lab_runner_capability,
     LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
     PreparedLabRunnerCapability, RunnerCapabilityPreflight, RunnerRequiredTool,
+    RunnerToolCapabilityRequirement,
 };
 pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::{

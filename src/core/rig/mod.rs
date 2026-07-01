@@ -44,7 +44,10 @@ pub use artifact_index::{
     for_run_with_artifacts as artifact_index_for_run_with_artifacts, RigRunArtifactIndex,
     RigRunArtifactRef, RigRunFailedStepRef,
 };
-pub use capabilities::{evaluate_requirements, plan_requirement_checks, RigRequirementCheckPlan};
+pub use capabilities::{
+    evaluate_requirements, plan_requirement_checks, runner_capability_preflight,
+    RigRequirementCheckPlan,
+};
 pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
 pub use install::{
     discover_rigs, discover_stacks, install, read_source_metadata, read_stack_source_metadata,
@@ -74,12 +77,12 @@ pub use spec::{
     AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, ArtifactPostprocessSpec, BenchSpec,
     CheckSpec, ComponentSpec, DiscoverSpec, ExecutableRequirementSpec, FilesystemAssertionKind,
     FilesystemAssertionSpec, NewerThanSpec, PatchOp, PipelineStep, RigRequirementsSpec,
-    RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp,
-    SymlinkSpec, TimeSource, TraceConfig, TraceDependencySpec, TraceExperimentArtifactSpec,
-    TraceExperimentCommandSpec, TraceExperimentSpec, TraceGuardrailSpec,
-    TraceNativePublicPreviewSpec, TracePhaseTemplateSpec, TracePreviewAssetFanoutSpec,
-    TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec, TraceVariantSpec,
-    WorkloadSpec,
+    RigResourcesSpec, RigSpec, RunnerToolRequirementSpec, ServiceKind, ServiceSpec, SharedPathOp,
+    SharedPathSpec, StackOp, SymlinkSpec, TimeSource, TraceConfig, TraceDependencySpec,
+    TraceExperimentArtifactSpec, TraceExperimentCommandSpec, TraceExperimentSpec,
+    TraceGuardrailSpec, TraceNativePublicPreviewSpec, TracePhaseTemplateSpec,
+    TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
+    TraceVariantSpec, WorkloadSpec,
 };
 pub use stack::{
     plan_stack_sync, run_component_sync, run_sync, RigStackPlanEntry, RigStackSyncEntry,

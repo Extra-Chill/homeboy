@@ -13,8 +13,17 @@ pub struct RunnerCapabilityPreflight {
     pub command: String,
     pub required_tools: Vec<RunnerRequiredTool>,
     pub required_commands: Vec<String>,
+    pub required_tool_capabilities: Vec<RunnerToolCapabilityRequirement>,
     pub required_components: Vec<String>,
     pub required_env: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunnerToolCapabilityRequirement {
+    pub tool: String,
+    pub command: String,
+    pub env: Vec<String>,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,7 +94,8 @@ pub fn evaluate_lab_runner_capabilities_for_runner(
     plan: &PreparedLabRunnerCapability,
     mode: LabRunnerGateMode,
 ) -> Result<LabRunnerGateDecision> {
-    let capabilities = RunnerCapabilitySnapshot::from_runner_probe_with_commands(runner, &[])?;
+    let capabilities =
+        RunnerCapabilitySnapshot::from_runner_probe(runner, &RunnerCapabilityPreflight::default())?;
     Ok(evaluate_lab_runner_capabilities(
         &runner.id,
         plan,
@@ -98,7 +108,7 @@ pub(crate) fn runner_capability_snapshot_for_preflight(
     runner: &Runner,
     preflight: &RunnerCapabilityPreflight,
 ) -> Result<RunnerCapabilitySnapshot> {
-    RunnerCapabilitySnapshot::from_runner_probe_with_commands(runner, &preflight.required_commands)
+    RunnerCapabilitySnapshot::from_runner_probe(runner, preflight)
 }
 
 pub(crate) fn validate_runner_capability_preflight(
@@ -126,6 +136,11 @@ pub(crate) fn validate_runner_capability_preflight(
         .filter(|command| !capabilities.has_command(command))
         .cloned()
         .collect::<Vec<_>>();
+    let missing_tool_capabilities = preflight
+        .required_tool_capabilities
+        .iter()
+        .filter_map(|requirement| missing_tool_capability(requirement, capabilities, request_env))
+        .collect::<Vec<_>>();
     let missing_env = preflight
         .required_env
         .iter()
@@ -140,6 +155,7 @@ pub(crate) fn validate_runner_capability_preflight(
     if missing_tools.is_empty()
         && missing_components.is_empty()
         && missing_commands.is_empty()
+        && missing_tool_capabilities.is_empty()
         && missing_env.is_empty()
     {
         return Ok(());
@@ -162,6 +178,12 @@ pub(crate) fn validate_runner_capability_preflight(
     if !missing_commands.is_empty() {
         missing.push(format!("commands: {}", missing_commands.join(", ")));
     }
+    if !missing_tool_capabilities.is_empty() {
+        missing.push(format!(
+            "tool capabilities: {}",
+            missing_tool_capabilities.join(", ")
+        ));
+    }
     if !missing_env.is_empty() {
         missing.push(format!("environment: {}", missing_env.join(", ")));
     }
@@ -183,6 +205,11 @@ pub(crate) fn validate_runner_capability_preflight(
             .iter()
             .map(|command| format!("Install '{command}' on the runner and ensure it is on PATH.")),
     );
+    remediation.extend(missing_tool_capabilities.iter().map(|capability| {
+        format!(
+            "Refresh or configure the runner tool that provides '{capability}', then retry the evidence run."
+        )
+    }));
     remediation.extend(missing_env.iter().map(|name| {
         format!("Set required environment variable '{name}' on the runner or pass it with the runner exec request.")
     }));
@@ -206,29 +233,29 @@ pub(crate) fn validate_runner_capability_preflight(
 pub(crate) struct RunnerCapabilitySnapshot {
     tools: BTreeSet<RunnerRequiredTool>,
     commands: BTreeSet<String>,
+    tool_capabilities: BTreeSet<String>,
     components: BTreeSet<String>,
 }
 
 impl RunnerCapabilitySnapshot {
-    fn from_runner_probe_with_commands(
-        runner: &Runner,
-        required_commands: &[String],
-    ) -> Result<Self> {
+    fn from_runner_probe(runner: &Runner, preflight: &RunnerCapabilityPreflight) -> Result<Self> {
         if runner.kind == RunnerKind::Local {
-            let probe = Self::local_batch_tool_and_command_probe(runner, required_commands)?;
+            let probe = Self::local_batch_probe(runner, preflight)?;
             return Ok(Self {
                 tools: probe.tools,
                 commands: probe.commands,
+                tool_capabilities: probe.tool_capabilities,
                 components: configured_runner_components(runner),
             });
         }
 
         let client = Self::ssh_client_for_runner(runner)?;
-        let probe = Self::batch_tool_and_command_probe(runner, &client, required_commands);
+        let probe = Self::batch_probe(runner, &client, preflight);
 
         Ok(Self {
             tools: probe.tools,
             commands: probe.commands,
+            tool_capabilities: probe.tool_capabilities,
             components: configured_runner_components(runner),
         })
     }
@@ -241,10 +268,14 @@ impl RunnerCapabilitySnapshot {
         self.commands.contains(command.trim())
     }
 
-    fn batch_tool_and_command_probe(
+    fn has_tool_capability(&self, capability: &str) -> bool {
+        self.tool_capabilities.contains(capability.trim())
+    }
+
+    fn batch_probe(
         runner: &Runner,
         client: &SshClient,
-        required_commands: &[String],
+        preflight: &RunnerCapabilityPreflight,
     ) -> RunnerCapabilityProbeResult {
         let tool_commands = RunnerToolRegistry::required_tools()
             .iter()
@@ -260,14 +291,24 @@ impl RunnerCapabilitySnapshot {
                 (tool, command.to_string())
             })
             .collect::<Vec<_>>();
-        let command_names = normalized_command_names(required_commands);
-        let output = client.execute(&batch_probe_script(&tool_commands, &command_names));
-        parse_batch_probe_output(&output.stdout, &tool_commands, &command_names)
+        let command_names = normalized_command_names(&preflight.required_commands);
+        let capability_probes = normalized_tool_capability_probes(preflight);
+        let output = client.execute(&batch_probe_script(
+            &tool_commands,
+            &command_names,
+            &capability_probes,
+        ));
+        parse_batch_probe_output(
+            &output.stdout,
+            &tool_commands,
+            &command_names,
+            &capability_probes,
+        )
     }
 
-    fn local_batch_tool_and_command_probe(
+    fn local_batch_probe(
         runner: &Runner,
-        required_commands: &[String],
+        preflight: &RunnerCapabilityPreflight,
     ) -> Result<RunnerCapabilityProbeResult> {
         let tool_commands = RunnerToolRegistry::required_tools()
             .iter()
@@ -283,8 +324,9 @@ impl RunnerCapabilitySnapshot {
                 (tool, command.to_string())
             })
             .collect::<Vec<_>>();
-        let command_names = normalized_command_names(required_commands);
-        let script = batch_probe_script(&tool_commands, &command_names);
+        let command_names = normalized_command_names(&preflight.required_commands);
+        let capability_probes = normalized_tool_capability_probes(preflight);
+        let script = batch_probe_script(&tool_commands, &command_names, &capability_probes);
         let output = std::process::Command::new("sh")
             .arg("-c")
             .arg(script)
@@ -301,6 +343,7 @@ impl RunnerCapabilitySnapshot {
             &stdout,
             &tool_commands,
             &command_names,
+            &capability_probes,
         ))
     }
 
@@ -333,11 +376,21 @@ impl RunnerCapabilitySnapshot {
 struct RunnerCapabilityProbeResult {
     tools: BTreeSet<RunnerRequiredTool>,
     commands: BTreeSet<String>,
+    tool_capabilities: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerToolCapabilityProbe {
+    id: String,
+    command: String,
+    env: Vec<String>,
+    capability: String,
 }
 
 fn batch_probe_script(
     tool_commands: &[(RunnerRequiredTool, String)],
     command_names: &[String],
+    capability_probes: &[RunnerToolCapabilityProbe],
 ) -> String {
     let mut lines = Vec::new();
     lines.push("set +e".to_string());
@@ -357,14 +410,31 @@ fn batch_probe_script(
             shell::quote_arg(command)
         ));
     }
+    for (index, probe) in capability_probes.iter().enumerate() {
+        lines.push(tool_capability_probe_script(index, probe));
+    }
     lines.push("exit 0".to_string());
     lines.join("\n")
+}
+
+fn tool_capability_probe_script(index: usize, probe: &RunnerToolCapabilityProbe) -> String {
+    let mut candidates = Vec::new();
+    for env in &probe.env {
+        candidates.push(format!("\"${{{env}:-}}\""));
+    }
+    candidates.push(shell::quote_arg(&probe.command));
+    let assignments = candidates.join(" ");
+    let capability = shell::quote_arg(&probe.capability);
+    format!(
+        "for c in {assignments}; do [ -n \"$c\" ] || continue; if [ -x \"$c\" ] || command -v \"$c\" >/dev/null 2>&1; then if \"$c\" {capability} --help >/dev/null 2>&1 || \"$c\" {capability} --version >/dev/null 2>&1; then printf 'P\\t{index}\\t1\\n'; break; fi; fi; done"
+    )
 }
 
 fn parse_batch_probe_output(
     stdout: &str,
     tool_commands: &[(RunnerRequiredTool, String)],
     command_names: &[String],
+    capability_probes: &[RunnerToolCapabilityProbe],
 ) -> RunnerCapabilityProbeResult {
     let mut result = RunnerCapabilityProbeResult::default();
     for line in stdout.lines() {
@@ -387,6 +457,11 @@ fn parse_batch_probe_output(
             "C" => {
                 if let Some(command) = command_names.get(index) {
                     result.commands.insert(command.clone());
+                }
+            }
+            "P" => {
+                if let Some(probe) = capability_probes.get(index) {
+                    result.tool_capabilities.insert(probe.id.clone());
                 }
             }
             _ => {}
@@ -481,6 +556,76 @@ fn normalized_command_names(commands: &[String]) -> Vec<String> {
     names
 }
 
+fn normalized_tool_capability_probes(
+    preflight: &RunnerCapabilityPreflight,
+) -> Vec<RunnerToolCapabilityProbe> {
+    let mut probes = Vec::new();
+    for requirement in &preflight.required_tool_capabilities {
+        let tool = requirement.tool.trim();
+        let command = requirement.command.trim();
+        if tool.is_empty() || command.is_empty() {
+            continue;
+        }
+        let env = requirement
+            .env
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        for capability in &requirement.capabilities {
+            let capability = capability.trim();
+            if capability.is_empty() {
+                continue;
+            }
+            probes.push(RunnerToolCapabilityProbe {
+                id: tool_capability_id(tool, capability),
+                command: command.to_string(),
+                env: env.clone(),
+                capability: capability.to_string(),
+            });
+        }
+    }
+    probes.sort_by(|left, right| left.id.cmp(&right.id));
+    probes.dedup_by(|left, right| left.id == right.id);
+    probes
+}
+
+fn missing_tool_capability(
+    requirement: &RunnerToolCapabilityRequirement,
+    capabilities: &RunnerCapabilitySnapshot,
+    request_env: &HashMap<String, String>,
+) -> Option<String> {
+    let tool = requirement.tool.trim();
+    if tool.is_empty() {
+        return None;
+    }
+    for capability in requirement
+        .capabilities
+        .iter()
+        .map(|capability| capability.trim())
+        .filter(|capability| !capability.is_empty())
+    {
+        let id = tool_capability_id(tool, capability);
+        if capabilities.has_tool_capability(&id) {
+            continue;
+        }
+        if requirement.env.iter().any(|name| {
+            request_env
+                .get(name.as_str())
+                .is_some_and(|value| !value.trim().is_empty())
+        }) {
+            return Some(id);
+        }
+        return Some(id);
+    }
+    None
+}
+
+fn tool_capability_id(tool: &str, capability: &str) -> String {
+    format!("{}:{}", tool.trim(), capability.trim())
+}
+
 fn tool_list(tools: &[RunnerRequiredTool]) -> String {
     tools
         .iter()
@@ -495,6 +640,7 @@ impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {
             command: plan.command.to_string(),
             required_tools: plan.required_tools,
             required_commands: Vec::new(),
+            required_tool_capabilities: Vec::new(),
             required_components: Vec::new(),
             required_env: Vec::new(),
         }
@@ -505,6 +651,7 @@ impl RunnerCapabilityPreflight {
     pub(crate) fn is_empty(&self) -> bool {
         self.required_tools.is_empty()
             && self.required_commands.is_empty()
+            && self.required_tool_capabilities.is_empty()
             && self.required_components.is_empty()
             && self.required_env.is_empty()
     }
@@ -572,6 +719,8 @@ mod tests {
     use crate::core::gate::HOMEBOY_GATE_RESULT_SCHEMA;
     use crate::core::runner::RunnerKind;
     use crate::core::server::{RunnerPolicy, RunnerSettings};
+    use std::fs;
+    use tempfile::tempdir;
 
     fn ssh_runner() -> Runner {
         Runner {
@@ -661,6 +810,7 @@ mod tests {
             .into_iter()
             .collect(),
             commands: BTreeSet::new(),
+            tool_capabilities: BTreeSet::new(),
             components: BTreeSet::new(),
         };
 
@@ -684,6 +834,7 @@ mod tests {
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::Git].into_iter().collect(),
             commands: BTreeSet::new(),
+            tool_capabilities: BTreeSet::new(),
             components: BTreeSet::new(),
         };
 
@@ -754,6 +905,7 @@ mod tests {
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::Git].into_iter().collect(),
             commands: BTreeSet::new(),
+            tool_capabilities: BTreeSet::new(),
             components: BTreeSet::new(),
         };
 
@@ -783,12 +935,14 @@ mod tests {
             command: "test".to_string(),
             required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Pnpm],
             required_commands: vec!["zip".to_string()],
+            required_tool_capabilities: Vec::new(),
             required_components: vec!["fixture-a".to_string(), "fixture-b".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::Git].into_iter().collect(),
             commands: BTreeSet::new(),
+            tool_capabilities: BTreeSet::new(),
             components: ["fixture-a".to_string()].into_iter().collect(),
         };
 
@@ -817,6 +971,7 @@ mod tests {
             command: "lint".to_string(),
             required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Node],
             required_commands: vec!["zip".to_string()],
+            required_tool_capabilities: Vec::new(),
             required_components: vec!["fixture-a".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
         };
@@ -825,6 +980,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             commands: ["zip".to_string()].into_iter().collect(),
+            tool_capabilities: BTreeSet::new(),
             components: ["fixture-a".to_string()].into_iter().collect(),
         };
         let mut env = HashMap::new();
@@ -833,6 +989,82 @@ mod tests {
         validate_runner_capability_preflight("lab", &preflight, &capabilities, &env)
             .expect("capability parity passes");
     }
+
+    #[test]
+    fn runner_tool_capability_probe_resolves_env_backed_binary() {
+        let temp = tempdir().expect("tempdir");
+        let bin = temp.path().join("wp-codebox-fixture");
+        fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1\" = wordpress.editor-validate-blocks ] && exit 0\nexit 2\n",
+        )
+        .expect("write tool");
+        make_executable(&bin);
+
+        let mut runner = Runner {
+            id: "local".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: RunnerSettings::default(),
+            env: HashMap::from([(
+                "HOMEBOY_WP_CODEBOX_BIN".to_string(),
+                bin.to_string_lossy().to_string(),
+            )]),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: RunnerPolicy::default(),
+        };
+        let preflight = RunnerCapabilityPreflight {
+            command: "bench".to_string(),
+            required_tool_capabilities: vec![RunnerToolCapabilityRequirement {
+                tool: "wp-codebox".to_string(),
+                command: "wp-codebox".to_string(),
+                env: vec!["HOMEBOY_WP_CODEBOX_BIN".to_string()],
+                capabilities: vec!["wordpress.editor-validate-blocks".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        let capabilities = runner_capability_snapshot_for_preflight(&runner, &preflight)
+            .expect("capability snapshot");
+        validate_runner_capability_preflight("local", &preflight, &capabilities, &HashMap::new())
+            .expect("capability passes");
+
+        runner.env.clear();
+        let stale_capabilities = runner_capability_snapshot_for_preflight(&runner, &preflight)
+            .expect("stale capability snapshot");
+        let err = validate_runner_capability_preflight(
+            "local",
+            &preflight,
+            &stale_capabilities,
+            &HashMap::new(),
+        )
+        .expect_err("missing capability blocks preflight");
+        assert!(err
+            .message
+            .contains("tool capabilities: wp-codebox:wordpress.editor-validate-blocks"));
+        let tried = err
+            .details
+            .get("tried")
+            .and_then(Value::as_array)
+            .expect("remediation details");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| { hint.contains("Remote execution was not started") })));
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("chmod");
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &std::path::Path) {}
 
     #[test]
     fn every_required_runner_tool_has_doctor_metadata() {

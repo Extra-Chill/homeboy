@@ -169,6 +169,7 @@ pub fn runner_upgrade_capability_plan() -> RunnerCapabilityPreflight {
         command: "homeboy upgrade".to_string(),
         required_tools: vec![RunnerRequiredTool::Homeboy],
         required_commands: Vec::new(),
+        required_tool_capabilities: Vec::new(),
         required_components: Vec::new(),
         required_env: Vec::new(),
     }
