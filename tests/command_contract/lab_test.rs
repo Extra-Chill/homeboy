@@ -354,7 +354,9 @@ fn rig_check_supports_lab_runner_but_rig_up_stays_local_only() {
     assert!(!rig_up_descriptor.supports_lab_runner);
     assert!(rig_up_descriptor
         .lab_runner_unsupported_reason
-        .is_some_and(|reason| reason.contains("rig up")));
+        .is_some_and(|reason| reason.contains("rig up")
+            && reason.contains("rig check <rig-id> --runner <runner-id>")
+            && reason.contains("rig run <rig-id> --runner <runner-id>")));
 }
 
 #[test]
@@ -1156,6 +1158,10 @@ fn test_lab_runner_unsupported_hot_command_reasons() {
         .lab_runner_unsupported_reason()
         .expect("rig up reason")
         .contains("single-workspace Lab snapshot"));
+    assert!(parsed_command(&["homeboy", "rig", "up", "studio"])
+        .lab_runner_unsupported_reason()
+        .expect("rig up reason")
+        .contains("rig check <rig-id> --runner <runner-id>"));
     assert!(parsed_command(&[
         "homeboy", "fleet", "exec", "prod", "--apply", "wp", "plugin", "list",
     ])
