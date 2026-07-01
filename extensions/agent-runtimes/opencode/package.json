@@ -5,7 +5,8 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
-    "./opencode-agent-task-executor": "./lib/opencode-agent-task-executor.js"
+    "./opencode-agent-task-executor": "./lib/opencode-agent-task-executor.js",
+    "./opencode-runtime-manifest": "./lib/opencode-runtime-manifest.js"
   },
   "homeboy": {
     "agent_runtime_manifest": "opencode.json"
@@ -14,6 +15,8 @@
     "homeboy-opencode-agent-task-executor": "./scripts/agent/homeboy-opencode-agent-task-executor.cjs"
   },
   "scripts": {
+    "generate:runtime-manifest": "node scripts/agent/homeboy-opencode-runtime-manifest.cjs --write",
+    "check:runtime-manifest": "node scripts/agent/homeboy-opencode-runtime-manifest.cjs --check",
     "test:opencode-agent-task-executor": "node tests/opencode-agent-task-executor-boundary.test.js",
     "test:opencode-agent-task-executor-boundary": "node tests/opencode-agent-task-executor-boundary.test.js"
   },

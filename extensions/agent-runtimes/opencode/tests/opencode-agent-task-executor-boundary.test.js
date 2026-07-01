@@ -23,6 +23,7 @@ const {
 	OPENCODE_WORKSPACE_TOOLS,
 	executeOpenCodeAgentTask,
 	providerContract,
+	runtimeManifest,
 } = require('..');
 
 const runtimeRoot = path.join(__dirname, '..');
@@ -58,6 +59,7 @@ assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'opencode.json'), 'utf8'));
+assert.deepEqual(manifest, runtimeManifest());
 assert.equal(manifest.id, 'opencode');
 assert.equal(manifest.name, 'OpenCode');
 assert.equal(manifest.agent_task_executors.length, 1);
