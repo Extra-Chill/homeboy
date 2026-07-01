@@ -35,6 +35,7 @@ pub fn runner_stale_daemon(
 pub fn runner_upgrade_final_detail(
     runner_id: &str,
     detail: String,
+    homeboy_path: &str,
     path_update_detail: Option<&str>,
     stale_daemon_repair_detail: Option<&str>,
     path_drift: Option<&str>,
@@ -43,6 +44,11 @@ pub fn runner_upgrade_final_detail(
     extensions_failed: &[RunnerExtensionSyncEntry],
 ) -> String {
     let mut parts = vec![detail];
+
+    parts.push(format!(
+        "selected runner binary path: {homeboy_path}; reconnect required: {}",
+        if stale_daemon.is_some() { "yes" } else { "no" }
+    ));
 
     if let Some(path_update_detail) = path_update_detail {
         parts.push(path_update_detail.to_string());
