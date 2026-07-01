@@ -29,9 +29,10 @@ pub use crate::core::artifact_ref::{
     validate_reviewer_facing_artifact_ref, ArtifactReference, ReviewerFacingArtifactRefError,
 };
 pub use constants::{
-    artifact_manifest_constants, contract_constants, loop_constants, reviewer_facing_ref_constants,
-    run_location_index_constants, secret_env_plan_constants, AllContractConstants,
-    ArtifactManifestConstants, ContractConstants, ContractConstantsOutput, LoopConstants,
+    artifact_manifest_constants, artifact_postprocess_constants, contract_constants,
+    loop_constants, reviewer_facing_ref_constants, run_location_index_constants,
+    secret_env_plan_constants, AllContractConstants, ArtifactManifestConstants,
+    ArtifactPostprocessConstants, ContractConstants, ContractConstantsOutput, LoopConstants,
     ReviewerFacingRefConstants, RunLocationIndexConstants, SecretEnvPlanConstants,
     CONTRACT_CONSTANTS_SCHEMA,
 };
@@ -76,5 +77,6 @@ pub use crate::core::artifacts::{
     ArtifactPostprocessAction, ArtifactPostprocessPlan, ArtifactPostprocessPlanDescription,
     ArtifactPostprocessResult, ArtifactPostprocessReviewerRef, ArtifactPostprocessRoot,
     ARTIFACT_POSTPROCESS_PLAN_SCHEMA, ARTIFACT_POSTPROCESS_RESULT_SCHEMA,
+    ARTIFACT_POSTPROCESS_SCHEMA,
 };
 pub use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};

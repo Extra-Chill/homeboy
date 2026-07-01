@@ -14,7 +14,8 @@ use crate::core::artifact_manifest::{self, ARTIFACT_MANIFEST_FILE};
 use crate::core::error::{Error, Result};
 use crate::core::observation::{ArtifactRecord, ObservationStore};
 
-pub const ARTIFACT_POSTPROCESS_PLAN_SCHEMA: &str = "homeboy/artifact-postprocess-plan/v1";
+pub const ARTIFACT_POSTPROCESS_SCHEMA: &str = "homeboy/artifact-postprocess/v1";
+pub const ARTIFACT_POSTPROCESS_PLAN_SCHEMA: &str = ARTIFACT_POSTPROCESS_SCHEMA;
 pub const ARTIFACT_POSTPROCESS_RESULT_SCHEMA: &str = "homeboy/artifact-postprocess-result/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

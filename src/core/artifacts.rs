@@ -39,6 +39,7 @@ pub use super::artifact_postprocess::{
     ArtifactPostprocessOutput, ArtifactPostprocessPlan, ArtifactPostprocessPlanDescription,
     ArtifactPostprocessProducedArtifact, ArtifactPostprocessResult, ArtifactPostprocessReviewerRef,
     ArtifactPostprocessRoot, ARTIFACT_POSTPROCESS_PLAN_SCHEMA, ARTIFACT_POSTPROCESS_RESULT_SCHEMA,
+    ARTIFACT_POSTPROCESS_SCHEMA,
 };
 pub use super::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 pub use super::artifact_ref::{

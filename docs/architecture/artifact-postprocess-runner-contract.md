@@ -2,7 +2,7 @@
 
 Homeboy core owns a product-neutral artifact postprocess contract for persisted artifact roots.
 
-The contract schema is `homeboy/artifact-postprocess-plan/v1`. A plan declares:
+The contract schema is `homeboy/artifact-postprocess/v1`. A plan declares:
 
 - `artifact_roots`: persisted artifact roots or runner artifact refs the postprocess action reads from.
 - `actions`: helper/action invocations with optional inputs, parameters, required flags, and output paths confined under the artifact root.

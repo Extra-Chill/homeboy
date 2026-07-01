@@ -20,6 +20,10 @@ fn contract_constants_exports_homeboy_owned_contract_ids() {
         "homeboy-artifact-manifest.json"
     );
     assert_eq!(
+        value["constants"]["artifact_postprocess"]["schema_id"],
+        "homeboy/artifact-postprocess/v1"
+    );
+    assert_eq!(
         value["constants"]["secret_env_plan"]["schema_id"],
         "homeboy/secret-env-plan/v1"
     );

@@ -8,14 +8,16 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::command_contract::{
-    contract_constants, registered_contract, registered_contracts, CommandDispatchFamily,
-    CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode, CommandRawOutputMode,
-    CommandResponseMode, CommandStdoutMode, ContractConstantsOutput, ContractRegistryEntry,
-    COMMAND_REGISTRY, PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+    contract_constants, registered_contract, registered_contracts, ArtifactPostprocessPlan,
+    CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
+    CommandRawOutputMode, CommandResponseMode, CommandStdoutMode, ContractConstantsOutput,
+    ContractRegistryEntry, ARTIFACT_POSTPROCESS_SCHEMA, COMMAND_REGISTRY,
+    PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
     RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA, RUN_LOCATION_INDEX_SCHEMA,
 };
 use crate::commands::{adapter, CmdResult, GlobalArgs};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
+use crate::core::artifacts::validate_artifact_postprocess_plan;
 use crate::core::fuzz::{FuzzWorkload, FUZZ_WORKLOAD_SCHEMA};
 use crate::core::loop_lifecycle::{
     LoopEvidenceRecord, LoopIterationRecord, LoopRunRecord, LOOP_EVIDENCE_SCHEMA,
@@ -398,7 +400,7 @@ fn constants(contract_id: &str) -> CmdResult<ContractOutput> {
             format!("unknown contract constants id `{contract_id}`"),
             None,
             Some(vec![
-                "Use one of: all, artifact-manifest, loop, secret-env-plan, run-location-index, reviewer-facing-ref".to_string(),
+                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, run-location-index, reviewer-facing-ref".to_string(),
             ]),
         )
     })?;
@@ -683,6 +685,42 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
             "Homeboy-owned schema IDs and canonical examples for cross-language contract tests.",
         contracts: vec![
             ContractSchemaEntry {
+                id: ARTIFACT_POSTPROCESS_SCHEMA,
+                version: 1,
+                description:
+                    "Generic artifact postprocess plan consumed by Homeboy artifact runners.",
+                fields: vec![
+                    field(
+                        "schema",
+                        "string",
+                        "Schema ID for the artifact postprocess plan.",
+                        true,
+                    ),
+                    field("plan_id", "string", "Stable plan identifier.", true),
+                    field(
+                        "artifact_roots",
+                        "array",
+                        "Persisted artifact roots available to postprocess actions.",
+                        true,
+                    ),
+                    field(
+                        "actions",
+                        "array",
+                        "Helper/action declarations to run against artifacts.",
+                        false,
+                    ),
+                    field(
+                        "reviewer_refs",
+                        "array",
+                        "Optional reviewer-facing references emitted with the result.",
+                        false,
+                    ),
+                    field("metadata", "object|null", "Generic plan metadata.", false),
+                ],
+                required: vec!["schema", "plan_id", "artifact_roots"],
+                example: artifact_postprocess_example(),
+            },
+            ContractSchemaEntry {
                 id: RUNNER_WORKLOAD_SCHEMA,
                 version: 1,
                 description: "Runner-resident workload request consumed by Lab runners.",
@@ -839,6 +877,34 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
             },
         ],
     }
+}
+
+fn artifact_postprocess_example() -> Value {
+    json!({
+        "schema": ARTIFACT_POSTPROCESS_SCHEMA,
+        "plan_id": "artifact-postprocess-1",
+        "artifact_roots": [
+            {
+                "id": "primary",
+                "path": "artifacts",
+                "persisted_ref": "runner-artifact://run-1/artifacts",
+                "manifest_path": "homeboy-artifact-manifest.json"
+            }
+        ],
+        "actions": [
+            {
+                "id": "summarize",
+                "helper": "artifact-helper",
+                "action": "summarize",
+                "input": "artifacts/input.json",
+                "output": "artifact-postprocess/summary.json",
+                "parameters": {},
+                "required": true
+            }
+        ],
+        "reviewer_refs": [],
+        "metadata": {}
+    })
 }
 
 fn runner_workload_example() -> Value {
@@ -1031,6 +1097,10 @@ fn resolve_schema(schema_id: &str) -> homeboy::core::Result<&'static ContractSch
 
 static CONTRACT_SCHEMAS: &[ContractSchema] = &[
     ContractSchema {
+        id: ARTIFACT_POSTPROCESS_SCHEMA,
+        validate_json: validate_artifact_postprocess,
+    },
+    ContractSchema {
         id: SECRET_ENV_PLAN_SCHEMA,
         validate_json: validate_secret_env_plan,
     },
@@ -1059,6 +1129,11 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
 fn validate_secret_env_plan(raw: &str) -> homeboy::core::Result<()> {
     let plan: SecretEnvPlan = deserialize_contract(raw, SECRET_ENV_PLAN_SCHEMA)?;
     validate_schema_field(SECRET_ENV_PLAN_SCHEMA, &plan.schema)
+}
+
+fn validate_artifact_postprocess(raw: &str) -> homeboy::core::Result<()> {
+    let plan: ArtifactPostprocessPlan = deserialize_contract(raw, ARTIFACT_POSTPROCESS_SCHEMA)?;
+    validate_artifact_postprocess_plan(&plan)
 }
 
 fn validate_fuzz_workload(raw: &str) -> homeboy::core::Result<()> {
@@ -1207,6 +1282,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|contract| contract["id"] == RUNNER_WORKLOAD_SCHEMA));
+        assert!(catalog["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|contract| contract["id"] == ARTIFACT_POSTPROCESS_SCHEMA));
     }
 
     #[test]
@@ -1262,6 +1342,27 @@ mod tests {
             output.contract.schema_id,
             crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA
         );
+    }
+
+    #[test]
+    fn show_resolves_artifact_postprocess_contract_by_schema_id() {
+        let (output, exit_code) = run(
+            ContractArgs {
+                command: ContractCommand::Show(ContractShowArgs {
+                    schema_id_or_name: ARTIFACT_POSTPROCESS_SCHEMA.to_string(),
+                }),
+            },
+            &GlobalArgs {},
+        )
+        .expect("show artifact postprocess contract");
+
+        assert_eq!(exit_code, 0);
+        let ContractOutput::Show(output) = output else {
+            panic!("expected show output");
+        };
+        assert_eq!(output.kind, "show");
+        assert_eq!(output.contract.schema_id, ARTIFACT_POSTPROCESS_SCHEMA);
+        assert_eq!(output.contract.name, "artifact-postprocess");
     }
 
     #[test]
@@ -1333,6 +1434,50 @@ mod tests {
 
         assert_eq!(output.schema, SECRET_ENV_PLAN_SCHEMA);
         assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_artifact_postprocess_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "artifact-postprocess.json",
+            json!({
+                "schema": ARTIFACT_POSTPROCESS_SCHEMA,
+                "plan_id": "postprocess-1",
+                "artifact_roots": [
+                    {
+                        "id": "primary",
+                        "path": "artifacts"
+                    }
+                ],
+                "actions": []
+            }),
+        );
+
+        let output = validate_file(ARTIFACT_POSTPROCESS_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, ARTIFACT_POSTPROCESS_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn rejects_invalid_artifact_postprocess_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "artifact-postprocess-invalid.json",
+            json!({
+                "schema": ARTIFACT_POSTPROCESS_SCHEMA,
+                "plan_id": "postprocess-1",
+                "artifact_roots": []
+            }),
+        );
+
+        let err = validate_file(ARTIFACT_POSTPROCESS_SCHEMA, file)
+            .expect_err("empty artifact roots should fail");
+
+        assert!(err.message.contains("artifact postprocess plan"));
     }
 
     #[test]
