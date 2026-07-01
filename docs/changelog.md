@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.277.0] - 2026-07-01
+
+### Added
+- enforce rig runner tool capabilities
+
+### Changed
+- Promote committed agent-task changes
+
 ## [0.276.1] - 2026-07-01
 
 ### Fixed
