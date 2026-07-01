@@ -1,6 +1,6 @@
 # Generic Fanout/Reconcile Workflow
 
-`runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js` and `runtime-agent-ci/lib/fanout-reconcile-runner.js` provide executor-neutral fanout/reconcile primitives. `runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs` exposes the shared planner/reconciler through JSON files, and `wordpress/scripts/agent/homeboy-generic-fanout-reconcile.cjs` remains as a compatibility entrypoint for existing WordPress-lane callers.
+`runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js` and `runtime-agent-ci/lib/fanout-reconcile-runner.js` provide executor-neutral fanout/reconcile primitives. `runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs` exposes the shared planner/reconciler through JSON files.
 
 This helper is the planner/reconciler side of the audit fanout boundary, not a runtime provider. Runtime packages, provider names, credentials, WordPress setup, sandbox recipes, and provider task schemas stay behind the `audit-fanout-runtime-provider` interface. The current audit fanout implementation is the quarantined WP Codebox lane, which maps grouped audit findings to `wp-codebox/task-input/v1` requests and executes them through Codebox-owned task runner contracts.
 
@@ -62,7 +62,7 @@ For Homeboy agent-task fanout, keep record status host-owned: map provider outco
 
 ## Finding Packets
 
-`runtime-agent-ci` and `runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js` export helpers for diagnostic/finding packet inputs. `wordpress/lib/generic-fanout-reconcile-workflow.js` re-exports the same helpers for existing entrypoints.
+`runtime-agent-ci` and `runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js` export helpers for diagnostic/finding packet inputs.
 
 - `normalizeFindingPacketItems(packets, policy)` flattens packet-level `findings` or `diagnostics` arrays into generic items with stable packet/finding IDs.
 - `materializeFindingPacketFanoutConfig({ packets, policy, ...config })` applies policy-driven grouping and returns the generic config/groups/items needed by the planner.

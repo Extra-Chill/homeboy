@@ -101,7 +101,7 @@ async function main() {
     writeJson(itemsPath, items);
     writeJson(recordsPath, result.records);
 
-    const cliPath = path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-generic-fanout-reconcile.cjs');
+    const cliPath = path.join(__dirname, '..', '..', 'runtime-agent-ci', 'scripts', 'homeboy-generic-fanout-reconcile.cjs');
     const planRun = spawnSync(process.execPath, [cliPath, '--config', configPath, '--items', itemsPath, '--output', planPath], { encoding: 'utf8' });
     assert.equal(planRun.status, 0, planRun.stderr);
     assert.deepEqual(readJson(planPath), plan);
