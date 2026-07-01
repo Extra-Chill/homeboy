@@ -2,8 +2,26 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "local-shell",
   "name": "Local Shell",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Minimal host-shell runtime adapter for generic agent-task contract smokes.",
+  "contract_producers": [
+    {
+      "id": "local-shell.agent-task-result",
+      "phase": "result",
+      "invocation": {
+        "script": "scripts/agent/homeboy-local-shell-agent-task-executor.cjs",
+        "input_schema": "homeboy/agent-task-request/v1",
+        "output_schema": "homeboy/agent-task-outcome/v1"
+      },
+      "produces": [
+        {
+          "kind": "status",
+          "name": "agent-task-outcome",
+          "schema": "homeboy/agent-task-outcome/v1"
+        }
+      ]
+    }
+  ],
   "ci_materialization": {
     "paths": {}
   },

@@ -2,8 +2,26 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "claude-code",
   "name": "Claude Code",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Claude Code agent runtime contract for OAuth-backed provider execution.",
+  "contract_producers": [
+    {
+      "id": "claude-code.agent-task-result",
+      "phase": "result",
+      "invocation": {
+        "script": "scripts/agent/homeboy-claude-code-agent-task-executor.cjs",
+        "input_schema": "homeboy/agent-task-request/v1",
+        "output_schema": "homeboy/agent-task-outcome/v1"
+      },
+      "produces": [
+        {
+          "kind": "status",
+          "name": "agent-task-outcome",
+          "schema": "homeboy/agent-task-outcome/v1"
+        }
+      ]
+    }
+  ],
   "agent_task_executors": [
     {
       "schema": "homeboy/agent-task-executor-provider/v1",

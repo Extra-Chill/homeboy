@@ -1,6 +1,6 @@
 {
   "name": "Rust",
-  "version": "1.22.3",
+  "version": "1.23.0",
   "icon": "gearshape.2.fill",
   "description": "Cargo CLI integration for Rust components",
   "author": "Extra Chill",
@@ -16,6 +16,40 @@
     "bench.results": true,
     "annotations": true
   },
+  "contract_producers": [
+    {
+      "id": "rust.lint-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/lint-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "lint.findings" }
+      ]
+    },
+    {
+      "id": "rust.test-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/test-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "test.results" },
+        { "kind": "artifact", "name": "test.failures" }
+      ]
+    },
+    {
+      "id": "rust.bench-results",
+      "phase": "result",
+      "invocation": {
+        "script": "scripts/bench/bench-runner.sh",
+        "output_schema": "homeboy/bench-results/v1"
+      },
+      "produces": [
+        {
+          "kind": "artifact",
+          "name": "bench.results",
+          "schema": "homeboy/bench-results/v1"
+        }
+      ]
+    }
+  ],
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.sh",

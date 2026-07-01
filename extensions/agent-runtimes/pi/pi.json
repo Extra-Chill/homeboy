@@ -2,8 +2,26 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "pi",
   "name": "Pi",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Conservative Pi agent runtime integration for generic Homeboy agent task requests.",
+  "contract_producers": [
+    {
+      "id": "pi.agent-task-result",
+      "phase": "result",
+      "invocation": {
+        "script": "scripts/agent/homeboy-pi-agent-task-executor.cjs",
+        "input_schema": "homeboy/agent-task-request/v1",
+        "output_schema": "homeboy/agent-task-outcome/v1"
+      },
+      "produces": [
+        {
+          "kind": "status",
+          "name": "agent-task-outcome",
+          "schema": "homeboy/agent-task-outcome/v1"
+        }
+      ]
+    }
+  ],
   "agent_task_executors": [
     {
       "schema": "homeboy/agent-task-executor-provider/v1",

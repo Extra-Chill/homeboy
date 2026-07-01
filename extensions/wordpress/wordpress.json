@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.22.19",
+  "version": "3.23.0",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -21,6 +21,109 @@
     "trace.results": true,
     "annotations": false
   },
+  "contract_producers": [
+    {
+      "id": "wordpress.live-surface-discovery",
+      "phase": "discovery",
+      "invocation": {
+        "script": "scripts/runtime/wordpress-live-surface-discovery.php",
+        "output_schema": "homeboy/wordpress-live-surface-discovery-raw/v1"
+      },
+      "produces": [
+        {
+          "kind": "capability",
+          "name": "wordpress-live-surface-discovery",
+          "schema": "homeboy/wordpress-live-surface-discovery-raw/v1"
+        }
+      ]
+    },
+    {
+      "id": "wordpress.runtime-task-plan",
+      "phase": "planning",
+      "invocation": {
+        "script": "scripts/agent/homeboy-wordpress-runtime-task-plan.cjs",
+        "output_schema": "homeboy/agent-task-plan/v1"
+      },
+      "produces": [
+        {
+          "kind": "execution_plan",
+          "name": "agent-task-plan",
+          "schema": "homeboy/agent-task-plan/v1"
+        }
+      ]
+    },
+    {
+      "id": "wordpress.generic-fanout-reconcile-plan",
+      "phase": "planning",
+      "invocation": {
+        "script": "../runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs",
+        "output_schema": "homeboy/fanout-reconcile-plan/v1"
+      },
+      "produces": [
+        {
+          "kind": "execution_plan",
+          "name": "fanout-reconcile-plan",
+          "schema": "homeboy/fanout-reconcile-plan/v1"
+        }
+      ]
+    },
+    {
+      "id": "wordpress.generic-fanout-reconcile-result",
+      "phase": "result",
+      "invocation": {
+        "script": "../runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs",
+        "output_schema": "homeboy/generic-fanout-reconcile-result/v1"
+      },
+      "produces": [
+        {
+          "kind": "status",
+          "name": "generic-fanout-reconcile-result",
+          "schema": "homeboy/generic-fanout-reconcile-result/v1"
+        }
+      ]
+    },
+    {
+      "id": "wordpress.lint-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/lint/lint-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "lint.findings" },
+        { "kind": "artifact", "name": "lint.producers" }
+      ]
+    },
+    {
+      "id": "wordpress.test-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/test/test-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "test.results" },
+        { "kind": "artifact", "name": "test.failures" }
+      ]
+    },
+    {
+      "id": "wordpress.bench-results",
+      "phase": "result",
+      "invocation": {
+        "script": "scripts/bench/bench-runner.sh",
+        "output_schema": "homeboy/bench-results/v1"
+      },
+      "produces": [
+        {
+          "kind": "artifact",
+          "name": "bench.results",
+          "schema": "homeboy/bench-results/v1"
+        }
+      ]
+    },
+    {
+      "id": "wordpress.trace-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/trace/trace-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "trace.results" }
+      ]
+    }
+  ],
   "agent_task": {
     "runtime_requirements": {
       "required_capabilities": [

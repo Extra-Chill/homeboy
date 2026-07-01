@@ -1,7 +1,7 @@
 {
   "name": "Go",
   "id": "go",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "icon": "g.circle.fill",
   "description": "Go CLI integration for services, bridges, and binaries",
   "author": "Extra Chill",
@@ -16,6 +16,24 @@
     "test.coverage": false,
     "annotations": false
   },
+  "contract_producers": [
+    {
+      "id": "go.lint-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/lint-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "lint.findings" }
+      ]
+    },
+    {
+      "id": "go.test-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/test-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "test.failures" }
+      ]
+    }
+  ],
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "validate": "scripts/validate.sh",
