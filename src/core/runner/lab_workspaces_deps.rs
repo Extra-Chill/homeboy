@@ -414,6 +414,7 @@ pub(super) fn source_cli_bootstrap_capability_preflight() -> RunnerCapabilityPre
         command: "lab.source_cli_bootstrap".to_string(),
         required_tools: vec![RunnerRequiredTool::Node, RunnerRequiredTool::Npm],
         required_commands: Vec::new(),
+        required_tool_capabilities: Vec::new(),
         required_components: Vec::new(),
         required_env: Vec::new(),
     }
