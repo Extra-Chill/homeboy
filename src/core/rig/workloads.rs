@@ -194,6 +194,41 @@ pub fn check_groups_for_extension_workloads(
     Some(groups.into_iter().collect())
 }
 
+/// Return scenario-scoped bench preflight groups.
+///
+/// `None` preserves full `rig check` when no scenario is selected or any
+/// selected scenario has no explicit mapping. `Some(groups)` means the bench
+/// spec opted every selected scenario into scoped preflight checks.
+pub fn check_groups_for_bench_scenarios(
+    rig_spec: &RigSpec,
+    scenario_ids: &[String],
+) -> Option<Vec<String>> {
+    if scenario_ids.is_empty() {
+        return None;
+    }
+    let bench = rig_spec.bench.as_ref()?;
+
+    let mut groups = BTreeSet::new();
+    groups.extend(
+        bench
+            .check_groups
+            .iter()
+            .filter(|group| !group.is_empty())
+            .cloned(),
+    );
+    for scenario_id in scenario_ids {
+        let scenario_groups = bench.scenario_check_groups.get(scenario_id)?;
+        groups.extend(
+            scenario_groups
+                .iter()
+                .filter(|group| !group.is_empty())
+                .cloned(),
+        );
+    }
+
+    Some(groups.into_iter().collect())
+}
+
 pub fn invocation_requirements_for_extension_workloads(
     rig_spec: &RigSpec,
     kind: RigWorkloadKind,
