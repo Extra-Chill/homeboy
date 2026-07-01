@@ -262,6 +262,7 @@ function resolveWpCodeboxRuntimePath(options = {}) {
 
 function wpCodeboxRuntimeEnv(env) {
 	const nextEnv = { ...env };
+	const manifestDefaults = installedExtensionSettingDefaults(nextEnv);
 	if (!nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE) {
 		const settings = parseJsonObject(nextEnv.HOMEBOY_SETTINGS_JSON);
 		if (settings?.wp_codebox_core_module) {
@@ -270,6 +271,9 @@ function wpCodeboxRuntimeEnv(env) {
 	}
 	if (!nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE && nextEnv.HOMEBOY_SETTINGS_WP_CODEBOX_CORE_MODULE) {
 		nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE = String(nextEnv.HOMEBOY_SETTINGS_WP_CODEBOX_CORE_MODULE);
+	}
+	if (!nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE && manifestDefaults.wp_codebox_core_module) {
+		nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE = String(manifestDefaults.wp_codebox_core_module);
 	}
 	if (!nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE) {
 		const discoveredCoreModule = discoverWpCodeboxCoreModule(nextEnv);
@@ -311,19 +315,64 @@ function discoverWpCodeboxBin(env) {
 }
 
 function wpCodeboxCommand(env) {
-	const settings = parseJsonObject(env.HOMEBOY_SETTINGS_JSON);
-	const discoveredBin = discoverWpCodeboxBin(env);
 	if (env.HOMEBOY_WP_CODEBOX_BIN) {
 		const configuredInstallRoot = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || env.HOMEBOY_WP_CODEBOX_INSTALL_ROOT;
 		if (!configuredInstallRoot || pathIsInside(env.HOMEBOY_WP_CODEBOX_BIN, configuredInstallRoot)) {
 			return env.HOMEBOY_WP_CODEBOX_BIN;
 		}
+		const discoveredBin = discoverWpCodeboxBin(env);
 		return discoveredBin || env.HOMEBOY_WP_CODEBOX_BIN;
 	}
+	const settings = parseJsonObject(env.HOMEBOY_SETTINGS_JSON);
+	const manifestDefaults = installedExtensionSettingDefaults(env);
 	return env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
 		|| settings?.wp_codebox_bin
-		|| discoveredBin
+		|| manifestDefaults.wp_codebox_bin
+		|| discoverWpCodeboxBin(env)
 		|| 'wp-codebox';
+}
+
+function installedExtensionSettingDefaults(env) {
+	const manifest = readInstalledExtensionManifest(env);
+	const settings = manifest?.settings;
+	const defaults = {};
+	if (Array.isArray(settings)) {
+		for (const setting of settings) {
+			if (!setting || typeof setting !== 'object' || typeof setting.id !== 'string' || setting.default === undefined || setting.default === '') {
+				continue;
+			}
+			defaults[setting.id] = setting.default;
+		}
+		return defaults;
+	}
+	if (settings && typeof settings === 'object') {
+		for (const [id, setting] of Object.entries(settings)) {
+			const value = setting && typeof setting === 'object' && Object.hasOwn(setting, 'default') ? setting.default : undefined;
+			if (value !== undefined && value !== '') {
+				defaults[id] = value;
+			}
+		}
+	}
+	return defaults;
+}
+
+function readInstalledExtensionManifest(env) {
+	const candidates = [
+		env.HOMEBOY_EXTENSION_MANIFEST_PATH,
+		env.HOMEBOY_EXTENSION_PATH && path.resolve(env.HOMEBOY_EXTENSION_PATH, 'wordpress.json'),
+		path.resolve(__dirname, '..', '..', 'wordpress.json'),
+	];
+	for (const candidate of candidates.filter(Boolean)) {
+		try {
+			const parsed = JSON.parse(fs.readFileSync(path.resolve(candidate), 'utf8'));
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				return parsed;
+			}
+		} catch {
+			// Missing or invalid manifests do not contribute defaults.
+		}
+	}
+	return {};
 }
 
 function pathIsInside(value, root) {
@@ -465,4 +514,5 @@ module.exports = {
 	wpCodeboxRuntimeEnv,
 	discoverWpCodeboxBin,
 	wpCodeboxCommand,
+	installedExtensionSettingDefaults,
 };

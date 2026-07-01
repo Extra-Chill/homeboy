@@ -31,15 +31,26 @@ function makeCodeboxRoot(name, version = '1.2.3') {
 try {
 	const envRoot = makeCodeboxRoot('wp-codebox@env', '1.0.0');
 	const settingsRoot = makeCodeboxRoot('wp-codebox@settings', '2.0.0');
+	const manifestDefaultRoot = makeCodeboxRoot('wp-codebox@manifest-default', '2.5.0');
 	const cacheRoot = path.join(root, 'cache', 'wp-codebox');
 	const cacheSourceRoot = makeCodeboxRoot(path.join('cache', 'wp-codebox', 'source'), '3.0.0');
 	const workspaceRoot = path.join(root, 'workspace');
 	const workspaceSourceRoot = makeCodeboxRoot(path.join('workspace', 'wp-codebox@feature'), '4.0.0');
+	const extensionPath = path.join(root, 'extensions', 'wordpress');
 	fs.mkdirSync(cacheRoot, { recursive: true });
 	fs.mkdirSync(workspaceRoot, { recursive: true });
+	fs.mkdirSync(extensionPath, { recursive: true });
 
 	const envBin = path.join(envRoot, 'packages', 'cli', 'dist', 'index.js');
 	const settingsBin = path.join(settingsRoot, 'packages', 'cli', 'dist', 'index.js');
+	const manifestDefaultBin = path.join(manifestDefaultRoot, 'packages', 'cli', 'dist', 'index.js');
+	const manifestDefaultCoreModule = path.join(manifestDefaultRoot, 'packages', 'runtime-core', 'dist', 'index.js');
+	fs.writeFileSync(path.join(extensionPath, 'wordpress.json'), JSON.stringify({
+		settings: [
+			{ id: 'wp_codebox_bin', default: manifestDefaultBin },
+			{ id: 'wp_codebox_core_module', default: manifestDefaultCoreModule },
+		],
+	}));
 
 	const envIdentity = resolveWpCodeboxIdentity({
 		env: {
@@ -61,6 +72,23 @@ try {
 	assert.equal(settingsIdentity.selectionSource, 'settings');
 	assert.equal(settingsIdentity.bin, settingsBin);
 	assert.equal(settingsIdentity.sourceRoot, settingsRoot);
+
+	const manifestDefaultIdentity = resolveWpCodeboxIdentity({
+		env: { HOMEBOY_EXTENSION_PATH: extensionPath },
+	});
+	assert.equal(manifestDefaultIdentity.selectionSource, 'manifest-default');
+	assert.equal(manifestDefaultIdentity.bin, manifestDefaultBin);
+	assert.equal(manifestDefaultIdentity.sourceRoot, manifestDefaultRoot);
+	assert.equal(manifestDefaultIdentity.coreModulePath, manifestDefaultCoreModule);
+
+	const envOverManifestDefaultIdentity = resolveWpCodeboxIdentity({
+		env: {
+			HOMEBOY_EXTENSION_PATH: extensionPath,
+			HOMEBOY_WP_CODEBOX_BIN: envBin,
+		},
+	});
+	assert.equal(envOverManifestDefaultIdentity.selectionSource, 'env');
+	assert.equal(envOverManifestDefaultIdentity.bin, envBin);
 
 	const cacheIdentity = resolveWpCodeboxIdentity({
 		wpCodeboxInstallDir: cacheRoot,

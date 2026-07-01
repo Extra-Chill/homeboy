@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const {
 	resolveWpCodeboxRuntimePath,
+	wpCodeboxCommand,
 	wpCodeboxRuntimeEnv,
 } = require('../scripts/fuzz/fuzz-runner.cjs');
 
@@ -17,12 +18,20 @@ const installedRuntimePath = path.join(homeboyRoot, 'agent-runtimes', 'wp-codebo
 const legacyRuntimePath = path.join(homeboyRoot, 'extensions', 'agent-runtimes', 'wp-codebox');
 const cachedCoreModule = path.join(root, 'wp-codebox-cache', 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'contracts.js');
 const cachedCoreIndex = path.join(root, 'wp-codebox-cache', 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js');
+const manifestDefaultBin = path.join(root, 'wp-codebox-main-current', 'packages', 'cli', 'dist', 'index.js');
+const manifestDefaultCoreModule = path.join(root, 'wp-codebox-main-current', 'packages', 'runtime-core', 'dist', 'index.js');
 
 fs.mkdirSync(extensionPath, { recursive: true });
 fs.mkdirSync(installedRuntimePath, { recursive: true });
 fs.mkdirSync(legacyRuntimePath, { recursive: true });
 fs.writeFileSync(path.join(installedRuntimePath, 'index.js'), 'module.exports = {};\n');
 fs.writeFileSync(path.join(legacyRuntimePath, 'index.js'), 'module.exports = {};\n');
+fs.writeFileSync(path.join(extensionPath, 'wordpress.json'), JSON.stringify({
+	settings: {
+		wp_codebox_bin: { default: manifestDefaultBin },
+		wp_codebox_core_module: { default: manifestDefaultCoreModule },
+	},
+}));
 fs.mkdirSync(path.dirname(cachedCoreModule), { recursive: true });
 fs.writeFileSync(cachedCoreModule, 'export {};\n');
 fs.writeFileSync(cachedCoreIndex, 'export {};\n');
@@ -43,11 +52,27 @@ assert.equal(
 );
 assert.equal(
 	wpCodeboxRuntimeEnv({
+		HOMEBOY_EXTENSION_PATH: extensionPath,
+	}).HOMEBOY_WP_CODEBOX_CORE_MODULE,
+	manifestDefaultCoreModule
+);
+assert.equal(
+	wpCodeboxRuntimeEnv({
 		HOMEBOY_WP_CODEBOX_CORE_MODULE: '/existing/core.mjs',
+		HOMEBOY_EXTENSION_PATH: extensionPath,
 		HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_core_module: '/tmp/wp-codebox-core.mjs' }),
 	}).HOMEBOY_WP_CODEBOX_CORE_MODULE,
 	'/existing/core.mjs'
 );
+assert.equal(wpCodeboxCommand({ HOMEBOY_EXTENSION_PATH: extensionPath }), manifestDefaultBin);
+assert.equal(wpCodeboxCommand({
+	HOMEBOY_EXTENSION_PATH: extensionPath,
+	HOMEBOY_WP_CODEBOX_BIN: '/explicit/wp-codebox',
+}), '/explicit/wp-codebox');
+assert.equal(wpCodeboxCommand({
+	HOMEBOY_EXTENSION_PATH: extensionPath,
+	HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: '/settings-json/wp-codebox' }),
+}), '/settings-json/wp-codebox');
 assert.equal(
 	wpCodeboxRuntimeEnv({
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(root, 'wp-codebox-cache'),

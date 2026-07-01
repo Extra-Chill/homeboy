@@ -44,10 +44,11 @@ function resolveWpCodeboxIdentity(options = {}) {
 
 	const env = { ...process.env, ...(options.env || {}) };
 	const settings = homeboySettings(env);
-	const selection = selectWpCodeboxSource(options, env, settings);
+	const manifestDefaults = installedExtensionSettingDefaults(options, env);
+	const selection = selectWpCodeboxSource(options, env, settings, manifestDefaults);
 	const sourceRoot = resolveSourceRoot(selection, options, env, settings);
 	const installRoot = resolveInstallRoot(selection, sourceRoot, options, env, settings);
-	const coreModulePath = resolveCoreModulePath(sourceRoot, installRoot, options, env);
+	const coreModulePath = resolveCoreModulePath(sourceRoot, installRoot, options, env, manifestDefaults);
 	const runtimePackagePath = resolveRuntimePackagePath(sourceRoot, installRoot, options, env);
 	const bin = selection.bin || resolveBinFromRoots(sourceRoot, installRoot) || DEFAULT_WP_CODEBOX_BIN;
 	const invocation = wpCodeboxInvocation(bin, options);
@@ -67,7 +68,7 @@ function resolveWpCodeboxIdentity(options = {}) {
 	return diagnostics.length > 0 ? { ...identity, diagnostics } : identity;
 }
 
-function selectWpCodeboxSource(options, env, settings) {
+function selectWpCodeboxSource(options, env, settings, manifestDefaults = {}) {
 	const explicitBin = firstString(options.wpCodeboxBin, options.wp_codebox_bin, options.publicCliBin, options.public_cli_bin, options.bin);
 	if (explicitBin) {
 		return { source: 'explicit', bin: explicitBin, path: explicitBin };
@@ -87,6 +88,11 @@ function selectWpCodeboxSource(options, env, settings) {
 		return { source: 'settings', bin: settingsBin, path: settingsBin };
 	}
 
+	const manifestDefaultBin = firstString(manifestDefaults.wp_codebox_bin, manifestDefaults.wpCodeboxBin);
+	if (manifestDefaultBin) {
+		return { source: 'manifest-default', bin: manifestDefaultBin, path: manifestDefaultBin };
+	}
+
 	const explicitSourceRoot = firstString(options.wpCodeboxSourceRoot, options.wp_codebox_source_root, options.sourceRoot, options.source_root);
 	if (explicitSourceRoot) {
 		return { source: 'explicit', path: explicitSourceRoot };
@@ -100,6 +106,11 @@ function selectWpCodeboxSource(options, env, settings) {
 	const settingsSourceRoot = firstString(settings.wp_codebox_source_root, settings.wpCodeboxSourceRoot);
 	if (settingsSourceRoot) {
 		return { source: 'settings', path: settingsSourceRoot };
+	}
+
+	const manifestDefaultSourceRoot = firstString(manifestDefaults.wp_codebox_source_root, manifestDefaults.wpCodeboxSourceRoot);
+	if (manifestDefaultSourceRoot) {
+		return { source: 'manifest-default', path: manifestDefaultSourceRoot };
 	}
 
 	const cacheRoot = firstExistingDirectory(cacheRootCandidates(options, env, settings));
@@ -174,7 +185,7 @@ function resolveInstallRoot(selection, sourceRoot, options, env, settings) {
 	return undefined;
 }
 
-function resolveCoreModulePath(sourceRoot, installRoot, options, env) {
+function resolveCoreModulePath(sourceRoot, installRoot, options, env, manifestDefaults = {}) {
 	const explicit = firstString(options.wpCodeboxCoreModule, options.coreModule);
 	if (explicit) {
 		return isPathSpecifier(explicit) ? path.resolve(expandHome(explicit)) : explicit;
@@ -199,7 +210,56 @@ function resolveCoreModulePath(sourceRoot, installRoot, options, env) {
 		}
 		return discovered;
 	}
+	const manifestDefault = firstString(manifestDefaults.wp_codebox_core_module, manifestDefaults.wpCodeboxCoreModule);
+	if (manifestDefault) {
+		return isPathSpecifier(manifestDefault) ? path.resolve(expandHome(manifestDefault)) : manifestDefault;
+	}
 	return discovered || DEFAULT_CORE_MODULE;
+}
+
+function installedExtensionSettingDefaults(options = {}, env = process.env) {
+	const manifest = readInstalledExtensionManifest(options, env);
+	const settings = manifest?.settings;
+	const defaults = {};
+	if (Array.isArray(settings)) {
+		for (const setting of settings) {
+			if (!setting || typeof setting !== 'object' || typeof setting.id !== 'string' || setting.default === undefined || setting.default === '') {
+				continue;
+			}
+			defaults[setting.id] = setting.default;
+		}
+		return defaults;
+	}
+	if (settings && typeof settings === 'object') {
+		for (const [id, setting] of Object.entries(settings)) {
+			const value = setting && typeof setting === 'object' && Object.hasOwn(setting, 'default') ? setting.default : undefined;
+			if (value !== undefined && value !== '') {
+				defaults[id] = value;
+			}
+		}
+	}
+	return defaults;
+}
+
+function readInstalledExtensionManifest(options = {}, env = process.env) {
+	const explicitPath = firstString(options.extensionManifestPath, options.wordpressManifestPath, env.HOMEBOY_EXTENSION_MANIFEST_PATH);
+	const extensionPath = firstString(options.extensionPath, env.HOMEBOY_EXTENSION_PATH);
+	const candidates = [
+		explicitPath,
+		extensionPath && path.resolve(expandHome(extensionPath), 'wordpress.json'),
+		path.resolve(__dirname, '..', 'wordpress.json'),
+	];
+	for (const candidate of candidates.filter(Boolean)) {
+		try {
+			const parsed = JSON.parse(fs.readFileSync(path.resolve(expandHome(candidate)), 'utf8'));
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				return parsed;
+			}
+		} catch {
+			// Missing or invalid manifests do not contribute defaults.
+		}
+	}
+	return {};
 }
 
 function resolveRuntimePackagePath(sourceRoot, installRoot, options, env) {
@@ -465,6 +525,7 @@ module.exports = {
 	DEFAULT_RUNTIME_PLAYGROUND_ENTRY,
 	assertWpCodeboxIdentityMatches,
 	homeboySettings,
+	installedExtensionSettingDefaults,
 	resolveWpCodeboxIdentity,
 	wpCodeboxCommand,
 	wpCodeboxIdentityMismatchDiagnostics,
