@@ -240,6 +240,62 @@ fn failing_bench_prepare_requirement_reports_context() {
 }
 
 #[test]
+fn bench_prepare_materializes_check_requirement_prepare_commands_before_check() {
+    with_isolated_home(|home| {
+        let component = tempfile::TempDir::new().expect("component");
+        let log_dir = tempfile::TempDir::new().expect("log dir");
+        let log_path = log_dir.path().join("order.log");
+        let marker = component.path().join("ready.marker");
+        write_logging_bench_extension(home, &log_path);
+
+        let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+        fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+        let spec = serde_json::json!({
+            "components": {
+                "studio": {
+                    "path": component.path(),
+                    "extensions": { "fixture-bench": {} }
+                }
+            },
+            "bench": { "default_component": "studio" },
+            "pipeline": {
+                "check": [{
+                    "kind": "requirement",
+                    "label": "fixture marker",
+                    "file": marker,
+                    "prepare_command": format!(
+                        "printf 'prepare\\n' >> '{}'; printf ready > '{}'",
+                        log_path.display(),
+                        marker.display()
+                    ),
+                    "prepare_phases": ["up", "bench_prepare"],
+                    "remediation": "prepare the fixture marker before benchmarking"
+                }]
+            }
+        });
+        fs::write(
+            rig_dir.join("check-requirement-prepare-rig.json"),
+            serde_json::to_string(&spec).expect("serialize rig"),
+        )
+        .expect("write rig");
+
+        let (_output, exit_code) = run(
+            run_args(
+                None,
+                vec!["check-requirement-prepare-rig".to_string()],
+                Vec::new(),
+            ),
+            &GlobalArgs {},
+        )
+        .expect("bench should run");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(log_lines(&log_path), vec!["prepare", "workload"]);
+        assert_eq!(fs::read_to_string(marker).expect("marker"), "ready");
+    });
+}
+
+#[test]
 fn bench_list_rig_discovers_scenarios_without_preflight_or_bench_prepare() {
     with_isolated_home(|home| {
         let component = tempfile::TempDir::new().expect("component");

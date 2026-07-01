@@ -17,7 +17,8 @@ use super::lease::acquire_active_run_lease;
 use super::lint::run_package_lint;
 use super::pipeline::{
     cleanup_shared_paths, run_command_step, run_pipeline, run_pipeline_check_groups,
-    run_pipeline_with_settings, PipelineOutcome, PipelineStepOutcome,
+    run_pipeline_with_settings, run_prepare_requirement_steps, PipelineOutcome,
+    PipelineStepOutcome,
 };
 use super::service::{self, ServiceStatus};
 use super::spec::{DependencyMaterializationOutputKind, RigSpec, ServiceKind, SymlinkSpec};
@@ -299,11 +300,23 @@ pub fn run_bench_prepare(
     rig: &RigSpec,
     settings: &[(String, String)],
 ) -> Result<Option<BenchPrepareReport>> {
-    if !rig.pipeline.contains_key("bench_prepare") {
+    let prepare_requirements = run_prepare_requirement_steps(rig, "bench_prepare", settings)?;
+    if !rig.pipeline.contains_key("bench_prepare") && prepare_requirements.steps.is_empty() {
         return Ok(None);
     }
 
-    let outcome = run_pipeline_with_settings(rig, "bench_prepare", true, settings)?;
+    let pipeline_outcome =
+        if prepare_requirements.is_success() && rig.pipeline.contains_key("bench_prepare") {
+            run_pipeline_with_settings(rig, "bench_prepare", true, settings)?
+        } else {
+            PipelineOutcome {
+                name: "bench_prepare".to_string(),
+                steps: Vec::new(),
+                passed: 0,
+                failed: 0,
+            }
+        };
+    let outcome = merge_prepare_outcomes("bench_prepare", prepare_requirements, pipeline_outcome);
     Ok(Some(BenchPrepareReport {
         rig_id: rig.id.clone(),
         success: outcome.is_success(),
