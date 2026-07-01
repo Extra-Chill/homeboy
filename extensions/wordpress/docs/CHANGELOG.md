@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.4] - 2026-07-01
+
+### Fixed
+- Fix WP Codebox resolver default precedence
+
 ## [3.23.3] - 2026-07-01
 
 ### Changed
