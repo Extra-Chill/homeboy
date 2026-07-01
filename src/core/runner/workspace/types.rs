@@ -148,6 +148,7 @@ pub struct RunnerWorkspacePruneOptions {
     pub apply: bool,
     pub min_age_hours: u64,
     pub limit: usize,
+    pub passes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -162,8 +163,15 @@ pub struct RunnerWorkspacePruneOutput {
     pub candidates: Vec<RunnerWorkspacePruneEntry>,
     pub removed: Vec<RunnerWorkspacePruneEntry>,
     pub skipped: Vec<RunnerWorkspacePruneSkippedEntry>,
+    pub total_candidate_count: usize,
     pub total_candidate_bytes: u64,
     pub total_removed_bytes: u64,
+    pub remaining_candidate_count: usize,
+    pub remaining_candidate_bytes: u64,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
+    pub drain_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

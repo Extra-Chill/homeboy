@@ -657,9 +657,14 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
             purpose: "Run a managed follow-up command through Homeboy instead of opening an ad-hoc shell.".to_string(),
         },
         LabFollowup {
-            label: "workspace_prune".to_string(),
-            command: format!("homeboy runner workspace prune {runner_arg} --apply"),
-            purpose: "Reclaim safe orphaned Lab workspaces when the runner workspace filesystem is under disk pressure.".to_string(),
+            label: "workspace_prune_preview".to_string(),
+            command: format!("homeboy runner workspace prune {runner_arg}"),
+            purpose: "Report safe orphaned Lab workspace counts and bytes before deleting anything.".to_string(),
+        },
+        LabFollowup {
+            label: "workspace_prune_drain".to_string(),
+            command: format!("homeboy runner workspace prune {runner_arg} --apply --passes 10"),
+            purpose: "Reclaim safe orphaned Lab workspaces in bounded passes when the runner workspace filesystem is under disk pressure.".to_string(),
         },
     ]);
     followups.extend(declared_followups_for_legacy(

@@ -266,16 +266,30 @@ pub fn prune_workspaces(
     validate_absolute_path("workspace_root", workspace_root)?;
     let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
     let limit = options.limit.max(1);
-    let candidates = match runner.kind {
-        RunnerKind::Local => prune_candidates_local(Path::new(&lab_workspaces_root), &options)?,
-        RunnerKind::Ssh => prune_candidates_ssh(&runner, &lab_workspaces_root, &options)?,
+    let passes = if options.apply {
+        options.passes.max(1)
+    } else {
+        1
     };
-
     let mut removed = Vec::new();
     let mut skipped = Vec::new();
     let mut candidate_entries = Vec::new();
-    for candidate in candidates.into_iter().take(limit) {
-        if options.apply {
+    let mut total_candidate_count = 0;
+    let mut total_candidate_bytes = 0;
+    for pass in 0..passes {
+        let candidates = prune_candidates_for_runner(&runner, &lab_workspaces_root, &options)?;
+        if pass == 0 {
+            total_candidate_count = candidates.len();
+            total_candidate_bytes = candidates.iter().map(|entry| entry.bytes).sum();
+        }
+        if candidates.is_empty() {
+            break;
+        }
+        for candidate in candidates.into_iter().take(limit) {
+            if !options.apply {
+                candidate_entries.push(candidate);
+                continue;
+            }
             match remove_workspace(&runner, &lab_workspaces_root, &candidate.remote_path) {
                 Ok(()) => removed.push(candidate),
                 Err(err) => skipped.push(RunnerWorkspacePruneSkippedEntry {
@@ -283,30 +297,78 @@ pub fn prune_workspaces(
                     reason: err.to_string(),
                 }),
             }
-        } else {
-            candidate_entries.push(candidate);
+        }
+        if !options.apply || total_candidate_count <= limit {
+            break;
         }
     }
 
-    let total_candidate_bytes = candidate_entries.iter().map(|entry| entry.bytes).sum();
+    let remaining_candidates = if options.apply {
+        prune_candidates_for_runner(&runner, &lab_workspaces_root, &options)?
+    } else {
+        prune_candidates_for_runner(&runner, &lab_workspaces_root, &options)?
+            .into_iter()
+            .skip(limit)
+            .collect()
+    };
+    let remaining_candidate_count = remaining_candidates.len();
+    let remaining_candidate_bytes = remaining_candidates.iter().map(|entry| entry.bytes).sum();
+    let has_more = remaining_candidate_count > 0;
+    let runner_arg = shell_arg(&runner.id);
+    let next_command = has_more.then(|| {
+        if options.apply {
+            format!(
+                "homeboy runner workspace prune {runner_arg} --apply --min-age-hours {} --limit {limit} --passes {passes}",
+                options.min_age_hours
+            )
+        } else {
+            format!(
+                "homeboy runner workspace prune {runner_arg} --min-age-hours {} --limit {limit}",
+                options.min_age_hours
+            )
+        }
+    });
+    let drain_command = format!(
+        "homeboy runner workspace prune {runner_arg} --apply --min-age-hours {} --limit {limit} --passes 10",
+        options.min_age_hours
+    );
     let total_removed_bytes = removed.iter().map(|entry| entry.bytes).sum();
+    let runner_id = runner.id.clone();
+    let workspace_root = workspace_root.to_string();
     Ok((
         RunnerWorkspacePruneOutput {
             variant: "workspace_prune",
             command: "runner.workspace.prune",
-            runner_id: runner.id,
+            runner_id,
             dry_run: !options.apply,
-            workspace_root: workspace_root.to_string(),
+            workspace_root,
             lab_workspaces_root,
             min_age_hours: options.min_age_hours,
             candidates: candidate_entries,
             removed,
             skipped,
+            total_candidate_count,
             total_candidate_bytes,
             total_removed_bytes,
+            remaining_candidate_count,
+            remaining_candidate_bytes,
+            has_more,
+            next_command,
+            drain_command,
         },
         0,
     ))
+}
+
+fn prune_candidates_for_runner(
+    runner: &super::super::Runner,
+    lab_workspaces_root: &str,
+    options: &RunnerWorkspacePruneOptions,
+) -> Result<Vec<RunnerWorkspacePruneEntry>> {
+    match runner.kind {
+        RunnerKind::Local => prune_candidates_local(Path::new(lab_workspaces_root), options),
+        RunnerKind::Ssh => prune_candidates_ssh(runner, lab_workspaces_root, options),
+    }
 }
 
 /// Reap a single run-scoped materialized workspace (and its sibling Homeboy
