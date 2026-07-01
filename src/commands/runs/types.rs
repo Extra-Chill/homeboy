@@ -12,6 +12,7 @@ use serde_json::Value;
 use homeboy::core::artifact_links::ArtifactViewerDescriptor;
 use homeboy::core::artifacts::{ArtifactPreviewEntrypoint, MatrixArtifactSummary};
 use homeboy::core::fuzz::FuzzResultEnvelopeArtifactInspection;
+use homeboy::core::observation::evidence_report::DirectoryArtifactPublicationGuidance;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::runners::RunnerArtifactRef;
@@ -257,6 +258,8 @@ pub struct RunsArtifactsOutput {
     pub path_guide: RunsArtifactPathGuide,
     pub artifacts: Vec<ArtifactRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directory_publication: Vec<RunsDirectoryArtifactPublicationGuidance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview_entrypoints: Vec<ArtifactPreviewEntrypoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matrix_summary: Option<MatrixArtifactSummary>,
@@ -266,6 +269,14 @@ pub struct RunsArtifactsOutput {
     /// retrieval of each artifact's bytes to the operator-local artifact root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull: Option<RunsArtifactPullSummary>,
+}
+
+#[derive(Serialize)]
+pub struct RunsDirectoryArtifactPublicationGuidance {
+    pub artifact_id: String,
+    pub kind: String,
+    #[serde(flatten)]
+    pub guidance: DirectoryArtifactPublicationGuidance,
 }
 
 /// Result of a `runs artifacts <run-id> --pull` retrieval pass.

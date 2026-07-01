@@ -45,6 +45,12 @@ impl EnvGuard {
         std::env::set_var(key, value);
         Self { key, prior }
     }
+
+    fn unset(key: &'static str) -> Self {
+        let prior = std::env::var(key).ok();
+        std::env::remove_var(key);
+        Self { key, prior }
+    }
 }
 
 impl Drop for EnvGuard {
@@ -193,6 +199,8 @@ fn run_show_includes_metadata_and_artifacts() {
 fn runs_dossier_aggregates_failure_env_refs_artifacts_and_commands() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
+        let _public_artifact_base =
+            EnvGuard::unset(homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV);
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run(
@@ -764,6 +772,47 @@ fn runner_job_artifacts_keep_local_evidence_when_refresh_runner_is_unavailable()
 }
 
 #[test]
+fn artifacts_command_marks_directory_publication_status_and_command() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let _artifact_url = EnvGuard::set(
+            homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
+            "https://artifacts.example.test/homeboy",
+        );
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+            .expect("run");
+        let directory = home.path().join("fuzz-artifacts");
+        std::fs::create_dir_all(&directory).expect("directory");
+        std::fs::write(directory.join("summary.json"), br#"{"ok":true}"#).expect("file");
+        let artifact = store
+            .record_directory_artifact(&run.id, "fuzz_artifacts", &directory)
+            .expect("directory artifact");
+
+        let (output, _) = artifacts(&run.id).expect("artifacts");
+
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("expected artifacts output");
+        };
+        let guidance = output
+            .directory_publication
+            .iter()
+            .find(|entry| entry.artifact_id == artifact.id)
+            .expect("directory guidance");
+        assert_eq!(guidance.kind, "fuzz_artifacts");
+        assert_eq!(guidance.guidance.status, "published");
+        assert!(guidance
+            .guidance
+            .public_url
+            .as_deref()
+            .expect("public url")
+            .starts_with("https://artifacts.example.test/homeboy/"));
+        assert!(guidance.guidance.command.is_none());
+    });
+}
+
+#[test]
 fn artifact_get_copies_registered_file_without_raw_path_lookup() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
@@ -854,7 +903,10 @@ fn artifact_get_field_selector_projects_only_requested_fields() {
             Value::String(output_path.display().to_string())
         );
         assert_eq!(selection.fields[1].field, "$.artifact_id");
-        assert_eq!(selection.fields[1].value, Value::String(artifact.id.clone()));
+        assert_eq!(
+            selection.fields[1].value,
+            Value::String(artifact.id.clone())
+        );
     });
 }
 

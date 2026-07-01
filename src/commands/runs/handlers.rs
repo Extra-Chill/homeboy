@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use homeboy::core::artifact_address::ArtifactAddress;
+use homeboy::core::observation::evidence_report::directory_publication_guidance;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{FindingListFilter, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::validation_progress::ValidationProgressLedger;
@@ -19,9 +21,9 @@ use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
     RunDetail, RunsArtifactArgs, RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactGetOutput,
     RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs,
-    RunsArtifactsOutput, RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
-    RunsFieldSelectionOutput, RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput,
-    RunsSelectedField, RunsShowOutput,
+    RunsArtifactsOutput, RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
+    RunsEnvSourceLayerOutput, RunsEnvSummary, RunsFieldSelectionOutput, RunsListArgs,
+    RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsSelectedField, RunsShowOutput,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -200,8 +202,12 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
         .iter()
         .filter_map(homeboy::core::fuzz::inspect_fuzz_result_envelope_artifact)
         .collect();
+    let directory_publication = directory_publication_guidance_for_artifacts(&artifacts);
     let pull = if args.pull {
-        Some(pull_artifacts_to_local(&artifacts, args.pull_dir.as_deref())?)
+        Some(pull_artifacts_to_local(
+            &artifacts,
+            args.pull_dir.as_deref(),
+        )?)
     } else {
         None
     };
@@ -212,6 +218,7 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
             runner_id: None,
             path_guide: RunsArtifactPathGuide::for_listing(&args.run_id, None),
             artifacts,
+            directory_publication,
             preview_entrypoints,
             matrix_summary,
             fuzz_result_envelopes,
@@ -219,6 +226,24 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
         }),
         0,
     ))
+}
+
+fn directory_publication_guidance_for_artifacts(
+    artifacts: &[homeboy::core::observation::ArtifactRecord],
+) -> Vec<RunsDirectoryArtifactPublicationGuidance> {
+    artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let address = ArtifactAddress::from_record(artifact);
+            directory_publication_guidance(artifact, &address).map(|guidance| {
+                RunsDirectoryArtifactPublicationGuidance {
+                    artifact_id: artifact.id.clone(),
+                    kind: artifact.kind.clone(),
+                    guidance,
+                }
+            })
+        })
+        .collect()
 }
 
 /// Best-effort retrieval of each artifact's bytes to the operator-local
@@ -605,7 +630,10 @@ pub(super) fn apply_field_selection(
             Some("serialize runs output for field selection".to_string()),
         )
     })?;
-    let variant = value.get("variant").and_then(Value::as_str).unwrap_or_default();
+    let variant = value
+        .get("variant")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let payload = value.get("payload").cloned().unwrap_or(Value::Null);
     let (root, run_id, artifact_id) = match variant {
         "show" => {
@@ -722,7 +750,10 @@ mod pull_tests {
 
     #[test]
     fn sanitize_artifact_filename_is_path_safe() {
-        assert_eq!(sanitize_artifact_filename("finding-packets.json"), "finding-packets.json");
+        assert_eq!(
+            sanitize_artifact_filename("finding-packets.json"),
+            "finding-packets.json"
+        );
         assert_eq!(sanitize_artifact_filename("../../etc/passwd"), "etc_passwd");
         assert_eq!(sanitize_artifact_filename("a/b\\c"), "a_b_c");
         assert_eq!(sanitize_artifact_filename("..."), "artifact");
@@ -754,7 +785,10 @@ mod pull_tests {
             assert_eq!(summary.entries.len(), 1);
             assert_eq!(summary.entries[0].status, "already_local");
             assert_eq!(summary.entries[0].storage, "local_file");
-            assert_eq!(summary.entries[0].output_path.as_deref(), Some(artifact.path.as_str()));
+            assert_eq!(
+                summary.entries[0].output_path.as_deref(),
+                Some(artifact.path.as_str())
+            );
         });
     }
 
@@ -814,8 +848,7 @@ mod pull_tests {
                 .record_artifact(&run.id, "summary", &local_source)
                 .expect("artifact");
 
-            let summary =
-                pull_artifacts_to_local(&[remote, local], None).expect("pull summary");
+            let summary = pull_artifacts_to_local(&[remote, local], None).expect("pull summary");
 
             assert_eq!(summary.entries.len(), 2);
             assert_eq!(summary.failed_count, 1);

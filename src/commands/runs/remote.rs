@@ -1,9 +1,14 @@
+use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
+use homeboy::core::observation::evidence_report::directory_publication_guidance;
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::runners as runner;
 use homeboy::core::Error;
 
-use super::types::{RunsArtifactGetArgs, RunsArtifactPathGuide, RunsArtifactsOutput};
+use super::types::{
+    RunsArtifactGetArgs, RunsArtifactPathGuide, RunsArtifactsOutput,
+    RunsDirectoryArtifactPublicationGuidance,
+};
 use super::{remote_artifact, CmdResult, RunsListArgs, RunsListOutput, RunsOutput};
 
 pub fn list_runner_runs(
@@ -47,6 +52,7 @@ pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> 
         &format!("/runs/{}/artifacts", encode_uri_component(run_id)),
     )?;
     let artifacts = parse_runner_artifacts(&data)?;
+    let directory_publication = directory_publication_guidance_for_artifacts(&artifacts);
 
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
@@ -55,6 +61,7 @@ pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> 
             runner_id: Some(runner_id.to_string()),
             path_guide: RunsArtifactPathGuide::for_listing(run_id, Some(runner_id)),
             artifacts,
+            directory_publication,
             preview_entrypoints: Vec::new(),
             matrix_summary: None,
             fuzz_result_envelopes: Vec::new(),
@@ -62,6 +69,24 @@ pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> 
         }),
         0,
     ))
+}
+
+fn directory_publication_guidance_for_artifacts(
+    artifacts: &[ArtifactRecord],
+) -> Vec<RunsDirectoryArtifactPublicationGuidance> {
+    artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let address = ArtifactAddress::from_record(artifact);
+            directory_publication_guidance(artifact, &address).map(|guidance| {
+                RunsDirectoryArtifactPublicationGuidance {
+                    artifact_id: artifact.id.clone(),
+                    kind: artifact.kind.clone(),
+                    guidance,
+                }
+            })
+        })
+        .collect()
 }
 
 pub fn runner_artifact_get(
