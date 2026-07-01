@@ -71,62 +71,17 @@ pub(crate) fn promote_with_provider(
     validate_artifact_content(&artifact, &patch)?;
     if patch.trim().is_empty() {
         if let Some(committed_patch) = committed_changes_patch(&options)? {
-            let mut deterministic_gates = Vec::new();
-            let mut dependencies_materialized = false;
-            if !options.dry_run
-                && (!options.gates.verify.is_empty() || !options.gates.private_verify.is_empty())
-            {
-                dependencies_materialized =
-                    crate::core::hygiene::materialize_worktree_dependencies(
-                        &committed_patch.worktree_path,
-                    )?;
-                for (index, command) in options.gates.verify.iter().enumerate() {
-                    deterministic_gates.push(provider.verify(
-                        &committed_patch.worktree_path,
-                        index + 1,
-                        command,
-                        AgentTaskGateVisibility::Visible,
-                        AgentTaskGateRevealPolicy::FullEvidence,
-                    )?);
-                }
-                let private_offset = deterministic_gates.len();
-                for (index, command) in options.gates.private_verify.iter().enumerate() {
-                    deterministic_gates.push(provider.verify(
-                        &committed_patch.worktree_path,
-                        private_offset + index + 1,
-                        command,
-                        AgentTaskGateVisibility::Private,
-                        options.gates.private_gate_reveal,
-                    )?);
-                }
-            }
-            let has_gate_failure = deterministic_gates
-                .iter()
-                .any(|gate| gate.status == AgentTaskGateStatus::Failed);
-            let gate_results = deterministic_gates
-                .iter()
-                .cloned()
-                .map(HomeboyGateResult::from)
-                .collect();
-            let status = status_for_report(options.dry_run, has_gate_failure);
+            let gates = run_promotion_gates(&options, provider, &committed_patch.worktree_path)?;
             let target = AgentTaskPromotionTarget::from_worktree(
                 options.to_worktree.clone(),
                 Some(&committed_patch.worktree_path),
             );
-            let operator_notification = promotion_notification(status, &target);
+            let operator_notification = promotion_notification(gates.status, &target);
 
             return Ok(AgentTaskPromotionReport {
                 schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
-                status,
-                source: AgentTaskPromotionSource {
-                    kind: source_kind,
-                    task_id: outcome.task_id.clone(),
-                    run_id: options.source_run_id,
-                    path: options
-                        .source_path
-                        .as_ref()
-                        .map(|path| path.display().to_string()),
-                },
+                status: gates.status,
+                source: promotion_source(&source_kind, &outcome, &options),
                 to_worktree: options.to_worktree,
                 target,
                 patch_artifact: AgentTaskPromotionArtifactRef {
@@ -137,13 +92,13 @@ pub(crate) fn promote_with_provider(
                 },
                 changed_files: committed_patch.changed_files,
                 command_evidence: Vec::new(),
-                deterministic_gates,
-                gate_results,
+                deterministic_gates: gates.deterministic_gates,
+                gate_results: gates.gate_results,
                 provenance: json!({
                     "source_schema": outcome.schema,
                     "artifact_metadata": artifact.metadata,
                     "worktree_path": committed_patch.worktree_path,
-                    "dependencies_materialized": dependencies_materialized,
+                    "dependencies_materialized": gates.dependencies_materialized,
                     "change_source": "local_commits",
                     "base_ref": committed_patch.base_ref,
                 }),
@@ -157,15 +112,7 @@ pub(crate) fn promote_with_provider(
         return Ok(AgentTaskPromotionReport {
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
             status,
-            source: AgentTaskPromotionSource {
-                kind: source_kind,
-                task_id: outcome.task_id.clone(),
-                run_id: options.source_run_id,
-                path: options
-                    .source_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-            },
+            source: promotion_source(&source_kind, &outcome, &options),
             to_worktree: options.to_worktree,
             target,
             patch_artifact: AgentTaskPromotionArtifactRef {
@@ -210,74 +157,21 @@ pub(crate) fn promote_with_provider(
         applied_worktree_path = Some(target.path);
     }
 
-    let mut deterministic_gates = Vec::new();
-    let mut dependencies_materialized = false;
-    if !options.dry_run
-        && (!options.gates.verify.is_empty() || !options.gates.private_verify.is_empty())
-    {
-        let worktree_path = applied_worktree_path.as_deref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "to_worktree",
-                format!("managed worktree {} was not found", options.to_worktree),
-                None,
-                None,
-            )
-        })?;
-        // Materialize dependencies via the component's resolved dependency
-        // providers (install + build steps) in the freshly created worktree
-        // before running the verify gates. Without this, a fresh worktree has
-        // no installed dependency artifacts and gates fatal on missing
-        // dependencies, masking the real pass/fail signal (#3771).
-        dependencies_materialized =
-            crate::core::hygiene::materialize_worktree_dependencies(Path::new(worktree_path))?;
-        for (index, command) in options.gates.verify.iter().enumerate() {
-            deterministic_gates.push(provider.verify(
-                worktree_path,
-                index + 1,
-                command,
-                AgentTaskGateVisibility::Visible,
-                AgentTaskGateRevealPolicy::FullEvidence,
-            )?);
-        }
-        let private_offset = deterministic_gates.len();
-        for (index, command) in options.gates.private_verify.iter().enumerate() {
-            deterministic_gates.push(provider.verify(
-                worktree_path,
-                private_offset + index + 1,
-                command,
-                AgentTaskGateVisibility::Private,
-                options.gates.private_gate_reveal,
-            )?);
-        }
-    }
-    let has_gate_failure = deterministic_gates
-        .iter()
-        .any(|gate| gate.status == AgentTaskGateStatus::Failed);
-    let gate_results = deterministic_gates
-        .iter()
-        .cloned()
-        .map(HomeboyGateResult::from)
-        .collect();
-
-    let status = status_for_report(options.dry_run, has_gate_failure);
+    let gates = if let Some(worktree_path) = applied_worktree_path.as_deref() {
+        run_promotion_gates(&options, provider, worktree_path)?
+    } else {
+        PromotionGateRun::without_gates(options.dry_run)
+    };
     let target = AgentTaskPromotionTarget::from_worktree(
         options.to_worktree.clone(),
         applied_worktree_path.as_deref(),
     );
-    let operator_notification = promotion_notification(status, &target);
+    let operator_notification = promotion_notification(gates.status, &target);
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
-        status,
-        source: AgentTaskPromotionSource {
-            kind: source_kind,
-            task_id: outcome.task_id.clone(),
-            run_id: options.source_run_id,
-            path: options
-                .source_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-        },
+        status: gates.status,
+        source: promotion_source(&source_kind, &outcome, &options),
         to_worktree: options.to_worktree,
         target,
         patch_artifact: AgentTaskPromotionArtifactRef {
@@ -288,16 +182,101 @@ pub(crate) fn promote_with_provider(
         },
         changed_files,
         command_evidence,
-        deterministic_gates,
-        gate_results,
+        deterministic_gates: gates.deterministic_gates,
+        gate_results: gates.gate_results,
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
             "worktree_path": applied_worktree_path,
-            "dependencies_materialized": dependencies_materialized,
+            "dependencies_materialized": gates.dependencies_materialized,
         }),
         operator_notification,
     })
+}
+
+struct PromotionGateRun {
+    status: AgentTaskPromotionStatus,
+    deterministic_gates: Vec<crate::core::agent_task_gate::AgentTaskGateReport>,
+    gate_results: Vec<HomeboyGateResult>,
+    dependencies_materialized: bool,
+}
+
+impl PromotionGateRun {
+    fn without_gates(dry_run: bool) -> Self {
+        Self {
+            status: status_for_report(dry_run, false),
+            deterministic_gates: Vec::new(),
+            gate_results: Vec::new(),
+            dependencies_materialized: false,
+        }
+    }
+}
+
+fn run_promotion_gates(
+    options: &AgentTaskPromotionOptions,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    worktree_path: &Path,
+) -> Result<PromotionGateRun> {
+    if options.dry_run
+        || (options.gates.verify.is_empty() && options.gates.private_verify.is_empty())
+    {
+        return Ok(PromotionGateRun::without_gates(options.dry_run));
+    }
+
+    // Materialize dependencies via the component's resolved dependency providers
+    // before running verify gates so dependency misses do not mask gate signal.
+    crate::core::hygiene::materialize_worktree_dependencies(worktree_path)?;
+    let mut deterministic_gates = Vec::new();
+    for (index, command) in options.gates.verify.iter().enumerate() {
+        deterministic_gates.push(provider.verify(
+            worktree_path,
+            index + 1,
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+        )?);
+    }
+    let private_offset = deterministic_gates.len();
+    for (index, command) in options.gates.private_verify.iter().enumerate() {
+        deterministic_gates.push(provider.verify(
+            worktree_path,
+            private_offset + index + 1,
+            command,
+            AgentTaskGateVisibility::Private,
+            options.gates.private_gate_reveal,
+        )?);
+    }
+    let has_gate_failure = deterministic_gates
+        .iter()
+        .any(|gate| gate.status == AgentTaskGateStatus::Failed);
+    let gate_results = deterministic_gates
+        .iter()
+        .cloned()
+        .map(HomeboyGateResult::from)
+        .collect();
+
+    Ok(PromotionGateRun {
+        status: status_for_report(options.dry_run, has_gate_failure),
+        deterministic_gates,
+        gate_results,
+        dependencies_materialized: true,
+    })
+}
+
+fn promotion_source(
+    source_kind: &str,
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionOptions,
+) -> AgentTaskPromotionSource {
+    AgentTaskPromotionSource {
+        kind: source_kind.to_string(),
+        task_id: outcome.task_id.clone(),
+        run_id: options.source_run_id.clone(),
+        path: options
+            .source_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+    }
 }
 
 struct CommittedChangesPatch {
