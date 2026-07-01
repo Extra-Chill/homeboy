@@ -732,14 +732,18 @@ fn collect_nested_diagnostics(
 /// loaded best-effort to map task ids back to issue URLs and prompt titles.
 fn compact_status_summary(record: &Value, run_id: &str) -> Value {
     let plan = agent_task_lifecycle::load_plan(run_id).ok();
+    let aggregate = completed_run_aggregate(run_id).and_then(Result::ok);
     let task_table = task_source_table(record, plan.as_ref());
-    let (refs, refs_omitted) = compact_refs(record);
+    let ref_inventory = ref_inventory(record, aggregate.as_ref());
+    let (refs, refs_omitted) = compact_refs(&ref_inventory);
     let risk_flags = risk_flags(record);
+    let work_summary = work_summary(record, aggregate.as_ref(), &ref_inventory);
 
     let mut summary = json!({
         "schema": "homeboy/agent-task-status-summary/v1",
         "run_id": record.get("run_id").cloned().unwrap_or_else(|| json!(run_id)),
         "state": record.get("state").cloned().unwrap_or(Value::Null),
+        "work_summary": work_summary,
         "totals": record.get("totals").cloned().unwrap_or(Value::Null),
         "tasks": task_table,
         "refs": refs,
@@ -902,39 +906,241 @@ fn task_artifact_summary(record: &Value, task_id: &str) -> Value {
     })
 }
 
-/// Deduped, empty-uri-filtered artifact/evidence refs, capped to keep the
-/// recovery summary scannable. The full list remains available via `--full`.
-fn compact_refs(record: &Value) -> (Value, usize) {
-    let refs = record
+#[derive(Clone)]
+struct CompactRef {
+    task_id: Value,
+    kind: Value,
+    uri: String,
+    is_evidence: bool,
+}
+
+fn ref_inventory(record: &Value, aggregate: Option<&AgentTaskAggregate>) -> Vec<CompactRef> {
+    let mut refs: Vec<CompactRef> = record
         .get("artifact_refs")
         .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let uri = item.get("uri").and_then(Value::as_str)?.trim();
+                    (!uri.is_empty()).then(|| CompactRef {
+                        task_id: item.get("task_id").cloned().unwrap_or(Value::Null),
+                        kind: item.get("kind").cloned().unwrap_or(Value::Null),
+                        uri: uri.to_string(),
+                        is_evidence: false,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
+    if let Some(aggregate) = aggregate {
+        for outcome in &aggregate.outcomes {
+            for artifact in &outcome.artifacts {
+                let uri = artifact
+                    .url
+                    .as_deref()
+                    .or(artifact.path.as_deref())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("artifact:{}:{}", outcome.task_id, artifact.id));
+                refs.push(CompactRef {
+                    task_id: json!(outcome.task_id),
+                    kind: json!(artifact.kind),
+                    uri,
+                    is_evidence: false,
+                });
+            }
+            for evidence in &outcome.evidence_refs {
+                let uri = evidence.uri.trim();
+                if uri.is_empty() {
+                    continue;
+                }
+                refs.push(CompactRef {
+                    task_id: json!(outcome.task_id),
+                    kind: json!(evidence.kind),
+                    uri: uri.to_string(),
+                    is_evidence: true,
+                });
+            }
+        }
+    }
+
+    refs
+}
+
+/// Deduped, empty-uri-filtered artifact/evidence refs, capped to keep the
+/// recovery summary scannable. The full list remains available via `--full`.
+fn compact_refs(refs: &[CompactRef]) -> (Value, usize) {
     let mut seen = std::collections::HashSet::new();
     let mut rendered: Vec<Value> = Vec::new();
     let mut total_valid = 0usize;
 
     for item in refs {
-        let uri = item.get("uri").and_then(Value::as_str).unwrap_or("").trim();
-        if uri.is_empty() {
+        if item.uri.trim().is_empty() {
             continue;
         }
-        if !seen.insert(uri.to_string()) {
+        if !seen.insert(item.uri.clone()) {
             continue;
         }
         total_valid += 1;
         if rendered.len() < COMPACT_REF_LIMIT {
             rendered.push(json!({
-                "task_id": item.get("task_id").cloned().unwrap_or(Value::Null),
-                "kind": item.get("kind").cloned().unwrap_or(Value::Null),
-                "uri": uri,
+                "task_id": item.task_id.clone(),
+                "kind": item.kind.clone(),
+                "uri": item.uri.clone(),
             }));
         }
     }
 
     let omitted = total_valid.saturating_sub(rendered.len());
     (Value::Array(rendered), omitted)
+}
+
+fn work_summary(
+    record: &Value,
+    aggregate: Option<&AgentTaskAggregate>,
+    refs: &[CompactRef],
+) -> Value {
+    let latest_promotion = record
+        .get("metadata")
+        .and_then(|metadata| metadata.get("latest_promotion"));
+    let promotion_status = latest_promotion
+        .and_then(|promotion| promotion.get("status"))
+        .and_then(Value::as_str);
+    let artifact_ref_count = deduped_ref_count(refs.iter().filter(|item| !item.is_evidence));
+    let evidence_ref_count = deduped_ref_count(refs.iter().filter(|item| item.is_evidence));
+    let provider_status = provider_execution_status(record, aggregate);
+    let committed_changes = provider_committed_changes(record)
+        || aggregate.is_some_and(aggregate_has_committed_changes)
+        || latest_promotion.is_some_and(promotion_reports_committed_changes);
+    let classification = work_classification(
+        record,
+        promotion_status,
+        artifact_ref_count,
+        evidence_ref_count,
+        committed_changes,
+    );
+
+    json!({
+        "classification": classification,
+        "provider_execution_status": provider_status,
+        "promotion_status": promotion_status,
+        "artifact_ref_count": artifact_ref_count,
+        "evidence_ref_count": evidence_ref_count,
+        "committed_changes_detected": committed_changes,
+        "artifact_command": record.get("run_id").and_then(Value::as_str).map(|run_id| format!("homeboy agent-task artifacts {run_id}")),
+    })
+}
+
+fn deduped_ref_count<'a>(refs: impl Iterator<Item = &'a CompactRef>) -> usize {
+    refs.filter(|item| !item.uri.trim().is_empty())
+        .map(|item| item.uri.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+fn provider_execution_status(record: &Value, aggregate: Option<&AgentTaskAggregate>) -> Value {
+    if let Some(aggregate) = aggregate {
+        let mut statuses: Vec<String> = aggregate
+            .outcomes
+            .iter()
+            .map(|outcome| format!("{:?}", outcome.status).to_ascii_lowercase())
+            .collect();
+        statuses.sort();
+        statuses.dedup();
+        if statuses.len() == 1 {
+            return json!(statuses[0]);
+        }
+        if !statuses.is_empty() {
+            return json!(statuses);
+        }
+    }
+    record.get("state").cloned().unwrap_or(Value::Null)
+}
+
+fn work_classification(
+    record: &Value,
+    promotion_status: Option<&str>,
+    artifact_ref_count: usize,
+    evidence_ref_count: usize,
+    committed_changes: bool,
+) -> &'static str {
+    if committed_changes && promotion_status.is_some_and(is_no_change_promotion_status) {
+        return "committed_changes_pending_promotion";
+    }
+    if promotion_status.is_some_and(is_no_change_promotion_status) {
+        if artifact_ref_count == 0 && evidence_ref_count == 0 {
+            return "no_changes";
+        }
+        return "provider_completed_artifacts_pending_review";
+    }
+    match promotion_status {
+        Some("applied") => return "promoted_changes",
+        Some("gate_failed") => return "promoted_changes_gate_failed",
+        Some("dry_run") => return "promotion_dry_run",
+        _ => {}
+    }
+    if artifact_ref_count > 0 || evidence_ref_count > 0 {
+        return "provider_completed_artifacts_available";
+    }
+    if record.get("state").and_then(Value::as_str) == Some("succeeded") {
+        return "no_changes";
+    }
+    "unknown"
+}
+
+fn is_no_change_promotion_status(status: &str) -> bool {
+    matches!(status, "no_changes" | "no_patch_produced")
+}
+
+fn provider_committed_changes(record: &Value) -> bool {
+    value_reports_committed_changes(record)
+}
+
+fn aggregate_has_committed_changes(aggregate: &AgentTaskAggregate) -> bool {
+    aggregate.outcomes.iter().any(|outcome| {
+        value_reports_committed_changes(&outcome.outputs)
+            || value_reports_committed_changes(&outcome.metadata)
+            || outcome.artifacts.iter().any(|artifact| {
+                value_reports_committed_changes(&artifact.metadata)
+                    || artifact
+                        .metadata
+                        .get("changed_files")
+                        .and_then(Value::as_array)
+                        .is_some_and(|files| !files.is_empty())
+            })
+    })
+}
+
+fn promotion_reports_committed_changes(promotion: &Value) -> bool {
+    value_reports_committed_changes(promotion)
+        || promotion
+            .get("changed_files")
+            .and_then(Value::as_array)
+            .is_some_and(|files| !files.is_empty())
+}
+
+fn value_reports_committed_changes(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.get("committed_changes").and_then(Value::as_bool) == Some(true)
+                || map
+                    .get("commits")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| !items.is_empty())
+                || map
+                    .get("commit_shas")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| !items.is_empty())
+                || map
+                    .get("provider_commits")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| !items.is_empty())
+                || map.values().any(value_reports_committed_changes)
+        }
+        Value::Array(items) => items.iter().any(value_reports_committed_changes),
+        _ => false,
+    }
 }
 
 /// Surface artifact RISK FLAGS prominently (#4398). Flags are derived from the
@@ -1153,5 +1359,146 @@ mod tests {
             "agent-task-run-2",
         );
         assert_eq!(remote["execution_location"], "runner:homeboy-lab");
+    }
+
+    #[test]
+    fn compact_work_summary_separates_no_patch_promotion_from_provider_artifacts() {
+        let record = json!({
+            "run_id": "agent-task-run-artifacts",
+            "state": "succeeded",
+            "tasks": [],
+            "artifact_refs": [{
+                "task_id": "task-a",
+                "kind": "provider-transcript",
+                "uri": "file:///tmp/provider-transcript.json"
+            }],
+            "metadata": {
+                "latest_promotion": {
+                    "status": "no_changes",
+                    "operator_notification": { "status": "completed" }
+                }
+            }
+        });
+
+        let summary = compact_status_summary(&record, "agent-task-run-artifacts");
+
+        assert_eq!(
+            summary["work_summary"]["provider_execution_status"],
+            "succeeded"
+        );
+        assert_eq!(summary["work_summary"]["promotion_status"], "no_changes");
+        assert_eq!(
+            summary["work_summary"]["classification"],
+            "provider_completed_artifacts_pending_review"
+        );
+        assert_eq!(summary["work_summary"]["artifact_ref_count"], 1);
+        assert_eq!(
+            summary["refs"][0]["uri"],
+            "file:///tmp/provider-transcript.json"
+        );
+    }
+
+    #[test]
+    fn compact_work_summary_classifies_provider_commits_pending_promotion() {
+        let record = json!({
+            "run_id": "agent-task-run-commits",
+            "state": "succeeded",
+            "tasks": [],
+            "metadata": {
+                "latest_promotion": {
+                    "status": "no_patch_produced",
+                    "changed_files": ["src/lib.rs"],
+                    "operator_notification": { "status": "completed" }
+                }
+            }
+        });
+
+        let summary = compact_status_summary(&record, "agent-task-run-commits");
+
+        assert_eq!(
+            summary["work_summary"]["classification"],
+            "committed_changes_pending_promotion"
+        );
+        assert_eq!(summary["work_summary"]["committed_changes_detected"], true);
+    }
+
+    #[test]
+    fn compact_work_summary_preserves_true_no_changes() {
+        let record = json!({
+            "run_id": "agent-task-run-empty",
+            "state": "succeeded",
+            "tasks": [],
+            "metadata": {
+                "latest_promotion": {
+                    "status": "no_changes",
+                    "operator_notification": { "status": "completed" }
+                }
+            }
+        });
+
+        let summary = compact_status_summary(&record, "agent-task-run-empty");
+
+        assert_eq!(summary["work_summary"]["classification"], "no_changes");
+        assert_eq!(summary["work_summary"]["artifact_ref_count"], 0);
+        assert_eq!(summary["work_summary"]["evidence_ref_count"], 0);
+    }
+
+    #[test]
+    fn aggregate_artifacts_are_counted_when_record_refs_are_empty() {
+        let record = json!({
+            "run_id": "agent-task-run-aggregate-refs",
+            "state": "succeeded",
+            "tasks": []
+        });
+        let aggregate: AgentTaskAggregate = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "plan-a",
+            "status": "succeeded",
+            "totals": {
+                "queued": 0,
+                "running": 0,
+                "blocked": 0,
+                "skipped": 0,
+                "succeeded": 1,
+                "failed": 0,
+                "cancelled": 0,
+                "timed_out": 0
+            },
+            "outcomes": [{
+                "schema": "homeboy/agent-task-outcome/v1",
+                "task_id": "task-a",
+                "status": "succeeded",
+                "summary": "ok",
+                "failure_classification": null,
+                "artifacts": [{
+                    "id": "patch.diff",
+                    "kind": "patch",
+                    "path": "/tmp/patch.diff",
+                    "metadata": null
+                }],
+                "typed_artifacts": [],
+                "evidence_refs": [{
+                    "kind": "executor-result",
+                    "uri": "file:///tmp/executor-result.json"
+                }],
+                "diagnostics": [],
+                "outputs": null,
+                "workflow": null,
+                "follow_up": null,
+                "metadata": null
+            }]
+        }))
+        .expect("aggregate");
+        let refs = ref_inventory(&record, Some(&aggregate));
+        let summary = work_summary(&record, Some(&aggregate), &refs);
+        let (compact_refs, _) = compact_refs(&refs);
+
+        assert_eq!(summary["artifact_ref_count"], 1);
+        assert_eq!(summary["evidence_ref_count"], 1);
+        assert_eq!(
+            summary["classification"],
+            "provider_completed_artifacts_available"
+        );
+        assert_eq!(compact_refs.as_array().expect("refs").len(), 2);
     }
 }
