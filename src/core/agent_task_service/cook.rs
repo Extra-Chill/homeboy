@@ -277,6 +277,13 @@ pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> O
     .map(PathBuf::from)
 }
 
+pub fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
+    let start = ai_tool.find('(')?;
+    let end = ai_tool[start + 1..].find(')')? + start + 1;
+    let model = ai_tool[start + 1..end].trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
 pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
     if spec != "-" {
         let path = PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));

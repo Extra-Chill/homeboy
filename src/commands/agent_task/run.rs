@@ -94,7 +94,7 @@ where
             ai_model: args
                 .dispatch
                 .model
-                .or_else(|| ai_model_from_tool(&args.ai_tool)),
+                .or_else(|| agent_task_service::ai_model_from_tool(&args.ai_tool)),
             ai_used_for: args.ai_used_for,
         },
         executor,
@@ -103,13 +103,6 @@ where
         serde_json::to_value(result.value).unwrap_or(Value::Null),
         result.exit_code,
     ))
-}
-
-fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
-    let start = ai_tool.find('(')?;
-    let end = ai_tool[start + 1..].find(')')? + start + 1;
-    let model = ai_tool[start + 1..end].trim();
-    (!model.is_empty()).then(|| model.to_string())
 }
 
 fn default_loop_title(args: &AgentTaskCookArgs) -> String {
