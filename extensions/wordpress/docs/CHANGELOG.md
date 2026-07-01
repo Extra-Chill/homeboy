@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.6] - 2026-07-01
+
+### Changed
+- Fail configured PHPUnit runs with no tests directory
+
 ## [3.23.5] - 2026-07-01
 
 ### Fixed
