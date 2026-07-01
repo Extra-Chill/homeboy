@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.23.1] - 2026-07-01
+
+### Changed
+- Declare extension contract producers
+
 ## [1.22.3] - 2026-06-27
 
 ### Changed
