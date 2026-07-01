@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.3] - 2026-07-01
+
+### Changed
+- Honor installed WP Codebox defaults in fuzz runner
+
 ## [3.23.2] - 2026-07-01
 
 ### Changed
