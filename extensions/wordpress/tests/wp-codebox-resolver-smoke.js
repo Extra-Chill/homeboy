@@ -67,11 +67,15 @@ try {
 	assert.deepEqual(envIdentity.invocation, { command: process.execPath, args: [envBin] });
 
 	const settingsIdentity = resolveWpCodeboxIdentity({
-		env: { HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: settingsBin }) },
+		env: { HOMEBOY_SETTINGS_JSON: JSON.stringify({
+			wp_codebox_bin: settingsBin,
+			wp_codebox_core_module: path.join(settingsRoot, 'packages', 'runtime-core', 'dist', 'index.js'),
+		}) },
 	});
 	assert.equal(settingsIdentity.selectionSource, 'settings');
 	assert.equal(settingsIdentity.bin, settingsBin);
 	assert.equal(settingsIdentity.sourceRoot, settingsRoot);
+	assert.equal(settingsIdentity.coreModulePath, path.join(settingsRoot, 'packages', 'runtime-core', 'dist', 'index.js'));
 
 	const manifestDefaultIdentity = resolveWpCodeboxIdentity({
 		env: { HOMEBOY_EXTENSION_PATH: extensionPath },
@@ -80,6 +84,15 @@ try {
 	assert.equal(manifestDefaultIdentity.bin, manifestDefaultBin);
 	assert.equal(manifestDefaultIdentity.sourceRoot, manifestDefaultRoot);
 	assert.equal(manifestDefaultIdentity.coreModulePath, manifestDefaultCoreModule);
+
+	const manifestDefaultWithCacheIdentity = resolveWpCodeboxIdentity({
+		wpCodeboxInstallDir: cacheRoot,
+		env: { HOMEBOY_EXTENSION_PATH: extensionPath },
+	});
+	assert.equal(manifestDefaultWithCacheIdentity.selectionSource, 'manifest-default');
+	assert.equal(manifestDefaultWithCacheIdentity.bin, manifestDefaultBin);
+	assert.equal(manifestDefaultWithCacheIdentity.sourceRoot, manifestDefaultRoot);
+	assert.equal(manifestDefaultWithCacheIdentity.coreModulePath, manifestDefaultCoreModule);
 
 	const envOverManifestDefaultIdentity = resolveWpCodeboxIdentity({
 		env: {
@@ -106,9 +119,9 @@ try {
 			HOMEBOY_WP_CODEBOX_CORE_MODULE: path.join(envRoot, 'packages', 'runtime-core', 'dist', 'index.js'),
 		},
 	});
-	assert.equal(staleEnvWithCacheIdentity.selectionSource, 'cache');
-	assert.equal(staleEnvWithCacheIdentity.bin, path.join(cacheSourceRoot, 'packages', 'cli', 'dist', 'index.js'));
-	assert.equal(staleEnvWithCacheIdentity.coreModulePath, path.join(cacheSourceRoot, 'packages', 'runtime-core', 'dist', 'contracts.js'));
+	assert.equal(staleEnvWithCacheIdentity.selectionSource, 'env');
+	assert.equal(staleEnvWithCacheIdentity.bin, envBin);
+	assert.equal(staleEnvWithCacheIdentity.coreModulePath, path.join(envRoot, 'packages', 'runtime-core', 'dist', 'index.js'));
 
 	const explicitBinWithCacheIdentity = resolveWpCodeboxIdentity({
 		wpCodeboxBin: envBin,
