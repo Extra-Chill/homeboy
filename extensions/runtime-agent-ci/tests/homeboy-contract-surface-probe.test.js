@@ -3,38 +3,45 @@
 const assert = require('node:assert/strict');
 
 const {
-  MIRRORED_ARTIFACT_MANIFEST_CONSTANTS,
+  LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
   probeHomeboyContractSurface,
 } = require('../lib/homeboy-contract-surface-probe.cjs');
 const {
   checkHomeboyContractExportFixtures,
   compareSchemaCatalogFixture,
 } = require('../scripts/check-homeboy-contract-export-fixtures.cjs');
+const {
+  ARTIFACT_MANIFEST_FILE,
+  ARTIFACT_MANIFEST_SCHEMA,
+  RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+} = require('../lib/runtime-contracts.cjs');
 
 const missing = probeHomeboyContractSurface({
   homeboyCommand: 'homeboy',
-  spawnSync: () => ({ status: 2, stdout: '', stderr: "error: unrecognized subcommand 'contract'" }),
+  spawnSync: () => ({ status: 2, stdout: '', stderr: "error: unrecognized subcommand 'constants'" }),
 });
 
 assert.equal(missing.status, 'skipped');
 assert.match(missing.message, /skipped/);
 
-const failedFirstCommand = probeHomeboyContractSurface({
+const releasedContractShape = probeHomeboyContractSurface({
   homeboyCommand: 'homeboy',
-  spawnSync: (_command, argv) => {
-    if (argv[1] === 'constants') {
-      return { status: 2, stdout: '', stderr: "error: unrecognized subcommand 'constants'" };
-    }
-    return {
-      status: 0,
-      stdout: JSON.stringify({ constants: MIRRORED_ARTIFACT_MANIFEST_CONSTANTS }),
-      stderr: '',
-    };
-  },
+  spawnSync: () => ({
+    status: 0,
+    stdout: JSON.stringify({
+      success: true,
+      data: {
+        constants: LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
+        contract_id: 'artifact-manifest',
+        schema: 'homeboy/contract-constants/v1',
+      },
+    }),
+    stderr: '',
+  }),
 });
 
-assert.equal(failedFirstCommand.status, 'passed');
-assert.deepEqual(failedFirstCommand.argv, ['contract', 'show', '--format=json']);
+assert.equal(releasedContractShape.status, 'passed');
+assert.deepEqual(releasedContractShape.argv, ['contract', 'constants', 'artifact-manifest']);
 
 const nestedContractShape = probeHomeboyContractSurface({
   homeboyCommand: 'homeboy',
@@ -42,14 +49,14 @@ const nestedContractShape = probeHomeboyContractSurface({
     status: 0,
     stdout: JSON.stringify({
       artifact_manifest: {
-        schema: 'homeboy/artifact-manifest/v1',
-        file: 'homeboy-artifact-manifest.json',
+        schema: ARTIFACT_MANIFEST_SCHEMA,
+        file: ARTIFACT_MANIFEST_FILE,
       },
       artifact_paths: {
         schema: 'homeboy/runtime-agent-artifact-paths/v1',
       },
       runner_artifact_manifest_ref: {
-        schema: 'homeboy/runner-artifact-manifest-ref/v1',
+        schema: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
       },
     }),
     stderr: '',
@@ -64,8 +71,8 @@ const drift = probeHomeboyContractSurface({
     status: 0,
     stdout: JSON.stringify({
       constants: {
-        ...MIRRORED_ARTIFACT_MANIFEST_CONSTANTS,
-        ARTIFACT_MANIFEST_SCHEMA: 'homeboy/artifact-manifest/v2',
+        ...LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
+        schema_id: 'homeboy/artifact-manifest/v2',
       },
     }),
     stderr: '',
@@ -73,7 +80,7 @@ const drift = probeHomeboyContractSurface({
 });
 
 assert.equal(drift.status, 'failed');
-assert.match(drift.message, /ARTIFACT_MANIFEST_SCHEMA expected homeboy\/artifact-manifest\/v1/);
+assert.match(drift.message, /schema_id expected homeboy\/artifact-manifest\/v1/);
 
 const fixtureDrift = compareSchemaCatalogFixture({
   schema: 'homeboy/contract-schema-catalog/v1',

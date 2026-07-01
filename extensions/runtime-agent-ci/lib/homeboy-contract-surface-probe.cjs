@@ -3,23 +3,15 @@
 const { spawnSync } = require('node:child_process');
 
 const {
-  ARTIFACT_MANIFEST_FILE,
-  ARTIFACT_MANIFEST_SCHEMA,
-  ARTIFACT_PATHS_SCHEMA,
-  RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+  ARTIFACT_MANIFEST_CONTRACT_CONSTANTS,
 } = require('./runtime-contracts.cjs');
 
 const CONTRACT_COMMANDS = Object.freeze([
-  ['contract', 'constants', '--format=json'],
-  ['contract', 'show', '--format=json'],
-  ['contract', 'export', '--format=json'],
+  ['contract', 'constants', 'artifact-manifest'],
 ]);
 
-const MIRRORED_ARTIFACT_MANIFEST_CONSTANTS = Object.freeze({
-  ARTIFACT_MANIFEST_FILE,
-  ARTIFACT_MANIFEST_SCHEMA,
-  ARTIFACT_PATHS_SCHEMA,
-  RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+const LOCAL_ARTIFACT_MANIFEST_CONSTANTS = Object.freeze({
+  ...ARTIFACT_MANIFEST_CONTRACT_CONSTANTS,
 });
 
 function probeHomeboyContractSurface(options = {}) {
@@ -58,7 +50,7 @@ function probeHomeboyContractSurface(options = {}) {
 function validateArtifactManifestConstants({ contract, command, argv, attempts }) {
   const errors = [];
 
-  for (const [name, expected] of Object.entries(MIRRORED_ARTIFACT_MANIFEST_CONSTANTS)) {
+  for (const [name, expected] of Object.entries(LOCAL_ARTIFACT_MANIFEST_CONSTANTS)) {
     const actual = contractValue(contract, name);
     if (typeof actual !== 'string' || actual.length === 0) {
       errors.push(`${name} is missing from Homeboy contract output`);
@@ -76,7 +68,7 @@ function validateArtifactManifestConstants({ contract, command, argv, attempts }
     message: `homeboy contract surface probe passed via ${command} ${argv.join(' ')}`,
     command,
     argv,
-    constants: MIRRORED_ARTIFACT_MANIFEST_CONSTANTS,
+    constants: LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
     attempts,
   };
 }
@@ -97,6 +89,9 @@ function valueCandidates(name) {
   const lower = name.toLowerCase();
 
   const candidates = [
+    ['data', 'constants', name],
+    ['data', 'constants', lower],
+    ['data', 'constants', camel],
     ['constants', name],
     ['constants', lower],
     ['constants', camel],
@@ -105,38 +100,23 @@ function valueCandidates(name) {
     [camel],
   ];
 
-  if (name === 'ARTIFACT_MANIFEST_SCHEMA') {
+  if (name === 'schema_id') {
     candidates.push(
+      ['data', 'constants', 'schema'],
+      ['data', 'constants', 'schemaId'],
+      ['constants', 'schema'],
+      ['constants', 'schemaId'],
       ['artifact_manifest', 'schema'],
-      ['artifactManifest', 'schema'],
-      ['schemas', 'artifact_manifest'],
-      ['schemas', 'artifactManifest'],
-      ['schemas', 'artifact', 'manifest'],
-      ['contracts', 'artifact_manifest', 'schema']
+      ['artifactManifest', 'schema']
     );
-  } else if (name === 'ARTIFACT_MANIFEST_FILE') {
+  } else if (name === 'file_name') {
     candidates.push(
+      ['data', 'constants', 'file'],
+      ['data', 'constants', 'fileName'],
+      ['constants', 'file'],
+      ['constants', 'fileName'],
       ['artifact_manifest', 'file'],
-      ['artifactManifest', 'file'],
-      ['files', 'artifact_manifest'],
-      ['files', 'artifactManifest'],
-      ['contracts', 'artifact_manifest', 'file']
-    );
-  } else if (name === 'ARTIFACT_PATHS_SCHEMA') {
-    candidates.push(
-      ['artifact_paths', 'schema'],
-      ['artifactPaths', 'schema'],
-      ['schemas', 'artifact_paths'],
-      ['schemas', 'artifactPaths'],
-      ['contracts', 'artifact_paths', 'schema']
-    );
-  } else if (name === 'RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA') {
-    candidates.push(
-      ['runner_artifact_manifest_ref', 'schema'],
-      ['runnerArtifactManifestRef', 'schema'],
-      ['schemas', 'runner_artifact_manifest_ref'],
-      ['schemas', 'runnerArtifactManifestRef'],
-      ['contracts', 'runner_artifact_manifest_ref', 'schema']
+      ['artifactManifest', 'file']
     );
   }
 
@@ -164,6 +144,6 @@ function fail(message, attempts, extra = {}) {
 
 module.exports = {
   CONTRACT_COMMANDS,
-  MIRRORED_ARTIFACT_MANIFEST_CONSTANTS,
+  LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
   probeHomeboyContractSurface,
 };

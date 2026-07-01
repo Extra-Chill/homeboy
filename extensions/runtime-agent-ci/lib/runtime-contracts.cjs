@@ -2,8 +2,12 @@
 
 const SECRET_ENV_PLAN_SCHEMA = 'homeboy/secret-env-plan/v1';
 const ARTIFACT_PATHS_SCHEMA = 'homeboy/runtime-agent-artifact-paths/v1';
-const ARTIFACT_MANIFEST_SCHEMA = 'homeboy/artifact-manifest/v1';
-const ARTIFACT_MANIFEST_FILE = 'homeboy-artifact-manifest.json';
+const ARTIFACT_MANIFEST_CONTRACT_CONSTANTS = Object.freeze({
+  file_name: 'homeboy-artifact-manifest.json',
+  schema_id: 'homeboy/artifact-manifest/v1',
+});
+const ARTIFACT_MANIFEST_SCHEMA = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.schema_id;
+const ARTIFACT_MANIFEST_FILE = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.file_name;
 const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = 'homeboy/runner-artifact-manifest-ref/v1';
 const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
   events: 'events.json',
@@ -63,6 +67,7 @@ function uniqueStrings(values) {
 }
 
 module.exports = {
+  ARTIFACT_MANIFEST_CONTRACT_CONSTANTS,
   ARTIFACT_MANIFEST_FILE,
   ARTIFACT_MANIFEST_SCHEMA,
   ARTIFACT_PATHS_SCHEMA,

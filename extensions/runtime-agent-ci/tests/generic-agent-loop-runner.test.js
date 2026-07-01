@@ -6,6 +6,10 @@ const os = require('node:os');
 const path = require('node:path');
 
 const genericLoopRunner = require('../lib/generic-agent-loop-runner');
+const {
+  ARTIFACT_MANIFEST_FILE,
+  ARTIFACT_MANIFEST_SCHEMA,
+} = require('../lib/runtime-contracts.cjs');
 
 assert.equal(
   Object.prototype.hasOwnProperty.call(genericLoopRunner, 'runDeterministicLoop'),
@@ -358,8 +362,8 @@ process.stdout.write(JSON.stringify({
     results: sharedArtifactsRun.results,
     artifact_paths: { run_dir: sharedArtifactDir },
   });
-  const sharedManifest = JSON.parse(fs.readFileSync(path.join(sharedArtifactDir, 'homeboy-artifact-manifest.json'), 'utf8'));
-  assert.equal(sharedManifest.schema, 'homeboy/artifact-manifest/v1');
+  const sharedManifest = JSON.parse(fs.readFileSync(path.join(sharedArtifactDir, ARTIFACT_MANIFEST_FILE), 'utf8'));
+  assert.equal(sharedManifest.schema, ARTIFACT_MANIFEST_SCHEMA);
   assert.deepEqual(sharedManifest.artifacts.map((artifact) => artifact.path).sort(), [
     'outcome.json',
     'results.json',
