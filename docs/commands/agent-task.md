@@ -82,6 +82,35 @@ ordering and output bindings belong in the existing single-run `fanout submit` /
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
 | `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
 
+#### Single-Issue Cook
+
+Use `agent-task cook` for one issue or one workspace task. It is the non-fanout
+path: create or reuse one task worktree, dispatch one provider run, promote the
+patch artifact into `--to-worktree`, run deterministic gates, retry red gates up
+to `--max-attempts`, and finalize the green result into a PR unless
+`--no-finalize` is set.
+
+```bash
+homeboy worktree create homeboy \
+  --branch fix/issue-6453 \
+  --from origin/main \
+  --task-url https://github.com/Extra-Chill/homeboy/issues/6453
+
+homeboy agent-task cook \
+  --repo homeboy \
+  --task-url https://github.com/Extra-Chill/homeboy/issues/6453 \
+  --workspace homeboy@fix-issue-6453 \
+  --to-worktree homeboy@fix-issue-6453 \
+  --verify 'cargo test --lib' \
+  --backend sandbox \
+  --selector wordpress.sandbox-agent-task-executor \
+  --prompt @task.txt
+```
+
+Use `agent-task fanout cook-batch` only when there are multiple independent
+issues that should each get separate worktree materialization, branch/PR
+metadata, and fanout status collation.
+
 #### Multi-Issue Cook Batch
 
 Use `agent-task fanout cook-batch` when an operator has a set of GitHub issues
