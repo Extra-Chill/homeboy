@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.1] - 2026-07-01
+
+### Changed
+- Declare extension contract producers
+- Test secret env plans against Homeboy contract
+
 ## [3.22.19] - 2026-07-01
 
 ### Changed
