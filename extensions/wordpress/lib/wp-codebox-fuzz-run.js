@@ -306,11 +306,12 @@ function loadWpCodeboxRuntimeContractSourceDirect(options = {}) {
 	}
 	try {
 		const core = require(isPathSpecifier(specifier) ? path.resolve(specifier) : specifier);
-		const manifest = typeof core?.runtimeContractManifest === 'function'
-			? core.runtimeContractManifest()
-			: typeof core?.default?.runtimeContractManifest === 'function'
-				? core.default.runtimeContractManifest()
-				: null;
+		let manifest = null;
+		if (typeof core?.runtimeContractManifest === 'function') {
+			manifest = core.runtimeContractManifest();
+		} else if (typeof core?.default?.runtimeContractManifest === 'function') {
+			manifest = core.default.runtimeContractManifest();
+		}
 		return objectOrUndefined(manifest) ? {
 			source: specifier,
 			manifest,
@@ -542,7 +543,7 @@ function normalizeWpCodeboxFuzzSuiteCases(source = {}, context = {}) {
 
 function homeboyFuzzWorkloadDefaultCase(manifest = {}) {
 	const workload = objectOrUndefined(manifest.workload) || {};
-	const workloadPath = workload.path || manifest.workload_path || manifest.workloadPath || manifest.metadata?.workload_path || manifest.metadata?.workloadPath;
+	const workloadPath = homeboyFuzzManifestWorkloadPath(manifest);
 	const workloadDefinition = objectOrUndefined(workload.definition || manifest.workload_definition || manifest.workloadDefinition || manifest.metadata?.workload_definition || manifest.metadata?.workloadDefinition);
 	const genericCommand = homeboyFuzzWorkloadGenericPrimitiveCommand(manifest);
 	if (!genericCommand && !workloadDefinition && (typeof workloadPath !== 'string' || workloadPath.trim() === '')) {
@@ -568,6 +569,11 @@ function homeboyFuzzWorkloadDefaultCase(manifest = {}) {
 			collect: normalizeArray(manifest.artifacts?.expected).map((artifact) => ({ artifact: artifact.name })).filter((item) => item.artifact),
 		}),
 	};
+}
+
+function homeboyFuzzManifestWorkloadPath(manifest = {}) {
+	const workload = objectOrUndefined(manifest.workload) || {};
+	return workload.path || manifest.workload_path || manifest.workloadPath || manifest.metadata?.workload_path || manifest.metadata?.workloadPath;
 }
 
 function typeFromWorkloadPath(value) {
@@ -818,7 +824,7 @@ function homeboyFuzzWorkloadRuntimeCommandInput(entry = {}, manifest = {}, execu
 	if (workloadDefinition) {
 		return homeboyFuzzWorkloadRunInputFromDefinition(workloadDefinition, { entry: execute.entry || manifest.workload?.entry });
 	}
-	const workloadPath = resolveWorkloadPath(execute.path || manifest.workload?.path, context);
+	const workloadPath = resolveWorkloadPath(execute.path || homeboyFuzzManifestWorkloadPath(manifest), context);
 	if (typeof workloadPath === 'string' && workloadPath.trim() !== '') {
 		const workloadType = String(execute.type || manifest.workload?.type || typeFromWorkloadPath(workloadPath) || '').toLowerCase();
 		if (workloadType === 'php') {
@@ -925,7 +931,7 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 	}
 	const execute = objectOrUndefined(intent.execute) || {};
 	const activation = intent.plugin?.activation;
-	const workloadPath = resolveWorkloadPath(execute.path || manifest.workload?.path, context);
+	const workloadPath = resolveWorkloadPath(execute.path || homeboyFuzzManifestWorkloadPath(manifest), context);
 	const workloadDefinition = objectOrUndefined(execute.definition) || objectOrUndefined(manifest.workload?.definition);
 	const genericCommand = homeboyFuzzWorkloadGenericPrimitiveCommand(manifest);
 	const setup = typeof activation === 'string' && activation.trim() !== ''
@@ -1096,7 +1102,8 @@ function wpCodeboxFuzzExecutionRequest(options = {}) {
 }
 
 function wpCodeboxWordPressWorkloadRunInput(options = {}) {
-	return stripUndefined({
+	const metadata = objectOrUndefined(options.metadata);
+	return stageWordPressRunWorkloadPhpFiles(stripUndefined({
 		schema: wpCodeboxWordPressWorkloadRunSchema(options),
 		id: options.id || options.runId || options.run_id,
 		wordpress_version: options.wordpressVersion || options.wordpress_version,
@@ -1111,8 +1118,54 @@ function wpCodeboxWordPressWorkloadRunInput(options = {}) {
 		before: normalizeArray(options.before),
 		steps: normalizeWordPressWorkloadSteps(options.steps, options),
 		after: normalizeArray(options.after),
-		metadata: objectOrUndefined(options.metadata),
-	});
+		metadata,
+	}), { packageRoot: options.packageRoot || options.package_root, sourcePath: metadata?.source_path || metadata?.sourcePath });
+}
+
+function stageWordPressRunWorkloadPhpFiles(workload = {}, options = {}) {
+	const originalStagedFileCount = normalizeArray(workload.staged_files || workload.stagedFiles).length;
+	const stagedFiles = [...normalizeArray(workload.staged_files || workload.stagedFiles)];
+	const packageRoot = options.packageRoot || (typeof options.sourcePath === 'string' ? packageRootFromWorkloadPath(options.sourcePath) : undefined);
+	let changed = false;
+	const phases = Object.fromEntries(['before', 'steps', 'after'].map((phase) => [phase, normalizeArray(workload[phase]).map((step) => {
+		const stagedStep = stageWordPressRunWorkloadPhpStep(step, { stagedFiles, packageRoot });
+		if (stagedStep !== step) {
+			changed = true;
+		}
+		return stagedStep;
+	})]));
+	return changed || stagedFiles.length !== originalStagedFileCount ? { ...workload, ...phases, staged_files: stagedFiles, stagedFiles: undefined } : workload;
+}
+
+function stageWordPressRunWorkloadPhpStep(step = {}, { stagedFiles = [], packageRoot } = {}) {
+	if (step?.command !== 'wordpress.run-workload' || !Array.isArray(step.args)) {
+		return step;
+	}
+	const pathArg = step.args.find((arg) => typeof arg === 'string' && arg.startsWith('path='));
+	if (!pathArg) {
+		return step;
+	}
+	const source = pathArg.slice('path='.length);
+	const type = step.args.find((arg) => typeof arg === 'string' && arg.startsWith('type='))?.slice('type='.length).toLowerCase();
+	if (!isLocalAbsolutePath(source) || !fs.existsSync(source) || (type && type !== 'php') || (!type && !source.toLowerCase().endsWith('.php'))) {
+		return step;
+	}
+	const target = wpCodeboxStagedWorkloadFileTarget(source, packageRoot);
+	if (!stagedFiles.some((entry) => objectOrUndefined(entry)?.source === source && objectOrUndefined(entry)?.target === target)) {
+		stagedFiles.push({ source, target });
+	}
+	return { ...step, args: step.args.map((arg) => arg === pathArg ? `path=${target}` : arg) };
+}
+
+function wpCodeboxStagedWorkloadFileTarget(source, packageRoot) {
+	let relative = path.basename(source);
+	if (typeof packageRoot === 'string' && packageRoot.trim() && path.isAbsolute(packageRoot)) {
+		const candidate = path.relative(packageRoot, source).replaceAll(path.sep, '/');
+		if (candidate && !candidate.startsWith('..') && !path.isAbsolute(candidate)) {
+			relative = candidate;
+		}
+	}
+	return `/tmp/homeboy-wp-codebox-workloads/${relative}`;
 }
 
 function normalizeWordPressWorkloadSteps(steps, options = {}) {

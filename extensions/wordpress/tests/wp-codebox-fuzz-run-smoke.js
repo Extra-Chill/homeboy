@@ -561,10 +561,16 @@ fs.rmSync(mismatchRoot, { recursive: true, force: true });
 const tempPackageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-run-smoke-'));
 const tempWorkloadDir = path.join(tempPackageRoot, 'bench');
 fs.mkdirSync(tempWorkloadDir, { recursive: true });
+const nestedPhpWorkloadPath = path.join(tempWorkloadDir, 'rest-product-batch-import.php');
+const nestedPhpWorkloadSandboxPath = '/tmp/homeboy-wp-codebox-workloads/bench/rest-product-batch-import.php';
+fs.writeFileSync(nestedPhpWorkloadPath, '<?php return function (): array { return array("status" => "passed"); };\n', 'utf8');
 const jsonWorkloadPath = path.join(tempWorkloadDir, 'json-workload-smoke.workload.json');
 fs.writeFileSync(jsonWorkloadPath, `${JSON.stringify({
 	id: 'json-workload-smoke',
-	run: [{ command: 'wp-codebox/run-fuzz-suite', args: ['suite=${package.root}/manifests/codebox-fuzz-suite-smoke.json'] }],
+	run: [
+		{ command: 'wordpress.run-workload', args: [`path=${nestedPhpWorkloadPath}`, 'type=php'] },
+		{ command: 'wp-codebox/run-fuzz-suite', args: ['suite=${package.root}/manifests/codebox-fuzz-suite-smoke.json'] },
+	],
 	metadata: { fixture: 'json-workload-smoke', package_root: '${package.root}' },
 })}\n`, 'utf8');
 
@@ -606,16 +612,19 @@ assert.deepEqual(jsonWorkloadInput.cases[0].input, {
 	runtime_stack_mounts: [],
 	runtime_overlays: [],
 	secret_env: [],
-	staged_files: [],
+	staged_files: [{ source: nestedPhpWorkloadPath, target: nestedPhpWorkloadSandboxPath }],
 	before: [],
-	steps: [{ command: 'wp-codebox/run-fuzz-suite', args: [`suite=${tempPackageRoot}/manifests/codebox-fuzz-suite-smoke.json`] }],
+	steps: [
+		{ command: 'wordpress.run-workload', args: [`path=${nestedPhpWorkloadSandboxPath}`, 'type=php'] },
+		{ command: 'wp-codebox/run-fuzz-suite', args: [`suite=${tempPackageRoot}/manifests/codebox-fuzz-suite-smoke.json`] },
+	],
 	after: [],
 	metadata: { fixture: 'json-workload-smoke', package_root: tempPackageRoot, source_path: jsonWorkloadPath, source_entry: 'wp-codebox/run-fuzz-suite' },
 });
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.plugin-state', args: ['action=activate', 'plugin=sample-plugin/sample-plugin.php'] }]);
 assert.equal(JSON.stringify(jsonWorkloadInput).includes('wordpress.ensure-plugin-active'), false);
 assert.equal(jsonWorkloadInput.cases[0].phases.action[0].command, 'wordpress.run-workload');
-assert.deepEqual(JSON.parse(jsonWorkloadInput.cases[0].phases.action[0].args[0].replace(/^workload-json=/, '')).steps, [{ command: 'wp-codebox/run-fuzz-suite', args: [`suite=${tempPackageRoot}/manifests/codebox-fuzz-suite-smoke.json`] }]);
+assert.deepEqual(JSON.parse(jsonWorkloadInput.cases[0].phases.action[0].args[0].replace(/^workload-json=/, '')).steps, jsonWorkloadInput.cases[0].input.steps);
 assert.deepEqual(jsonWorkloadInput.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].required, true);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].metadata.semantic_key, 'fuzz.suite_result');
@@ -634,8 +643,11 @@ const phpWorkloadInput = wpCodeboxFuzzSuiteInput({
 	},
 });
 assert.equal(phpWorkloadInput.cases[0].input.schema, DEFAULT_WORDPRESS_WORKLOAD_RUN_SCHEMA);
+assert.deepEqual(phpWorkloadInput.cases[0].input.staged_files, [
+	{ source: phpWorkloadPath, target: '/tmp/homeboy-wp-codebox-workloads/bench/rest-product-batch-import.php' },
+]);
 assert.deepEqual(phpWorkloadInput.cases[0].input.steps, [
-	{ command: 'wordpress.run-workload', args: [`path=${phpWorkloadPath}`, 'type=php'] },
+	{ command: 'wordpress.run-workload', args: ['path=/tmp/homeboy-wp-codebox-workloads/bench/rest-product-batch-import.php', 'type=php'] },
 ]);
 
 const wooDbApiWorkloadPath = path.join(tempWorkloadDir, 'rest-db-query-profile.workload.json');
