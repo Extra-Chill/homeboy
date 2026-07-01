@@ -1267,6 +1267,77 @@ fn reports_exact_runner_set_remediation_when_path_update_is_unsafe() {
 }
 
 #[test]
+fn source_prepare_failure_reports_clean_refresh_homeboy_target() {
+    let _local_version = pin_local_version_for_fixtures();
+    let runner = ssh_runner("homeboy lab", Some("/home/user/.cargo/bin/homeboy"));
+    let source_path = Path::new("/Users/user/Developer/homeboy@detached-source");
+    let mut commands = Vec::new();
+
+    let (updated, skipped) = upgrade_runners_with_executor_and_source_materializer(
+        &[runner],
+        true,
+        Some(InstallMethod::Source),
+        Some(source_path),
+        &[],
+        |runner_id, options| {
+            commands.push(options.command.clone());
+            let (stdout, stderr, exit_code) = match commands.len() {
+                1 => ("homeboy 0.228.13\n", "", 0),
+                2 => (
+                    "",
+                    "source upgrade failed: You are not currently on a branch\n",
+                    1,
+                ),
+                _ => ("", "unexpected command", 1),
+            };
+            Ok((
+                exec_output(runner_id, options.command, stdout, stderr, exit_code),
+                exit_code,
+            ))
+        },
+        runner_status,
+        |_runner, _path| Ok("/home/user/workspace/homeboy-detached-source".to_string()),
+    );
+
+    assert!(updated.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped[0]
+        .detail
+        .contains("You are not currently on a branch"));
+    assert!(skipped[0].detail.contains(
+        "homeboy runner refresh-homeboy 'homeboy lab' --ref main --target-dir /home/user/workspace/_homeboy_binaries/homeboy-main --reconnect"
+    ));
+}
+
+#[test]
+fn runner_upgrade_detail_reports_selected_binary_and_reconnect_requirement() {
+    let _local_version = pin_local_version_for_fixtures();
+    let runner = ssh_runner("lab", Some("/home/user/.local/bin/homeboy"));
+
+    let (updated, skipped) = upgrade_runners_with_executor(
+        &[runner],
+        false,
+        None,
+        None,
+        &[],
+        |runner_id, options| {
+            let stdout = match options.command.as_slice() {
+                [_, flag] if flag == "--version" => "homeboy 0.199.2\n",
+                _ => "{\"success\":true}\n",
+            };
+            Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+        },
+        runner_status,
+    );
+
+    assert!(skipped.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert!(updated[0].detail.contains(
+        "selected runner binary path: /home/user/.local/bin/homeboy; reconnect required: no"
+    ));
+}
+
+#[test]
 fn restarts_stale_connected_daemon_after_runner_upgrade() {
     let _local_version = pin_local_version_for_fixtures();
     let runner = ssh_runner("lab", None);
