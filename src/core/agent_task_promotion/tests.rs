@@ -822,12 +822,20 @@ fn promotion_report_serializes_generic_command_evidence() {
 #[test]
 fn provider_command_response_supplies_workspace_and_evidence() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let workspace_path = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_path).expect("create workspace");
+    assert!(std::process::Command::new("git")
+        .arg("init")
+        .arg(&workspace_path)
+        .status()
+        .expect("git init")
+        .success());
     let response_path = temp.path().join("response.json");
     std::fs::write(
         &response_path,
         serde_json::json!({
             "schema": AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
-            "workspace_path": temp.path().join("workspace").display().to_string(),
+            "workspace_path": workspace_path.display().to_string(),
             "command_evidence": [{
                 "command": ["provider", "apply"],
                 "exit_code": 0
