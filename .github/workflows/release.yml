@@ -41,6 +41,7 @@ on:
 env:
   RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'lint,test' }}
   HOMEBOY_NO_UPDATE_CHECK: '1'
+  RELEASE_MIN_FREE_KB: '5242880'
 
 # Only one release pipeline at a time. If a push arrives while a release
 # is already running, it queues (never cancels). The queued run starts
@@ -463,6 +464,35 @@ jobs:
           persist-credentials: true
           token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
+      - name: Preflight release runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          report_disk() {
+            echo "::group::Release runner disk usage"
+            df -h . "$RUNNER_TEMP" "$HOME" || true
+            echo "::endgroup::"
+          }
+
+          available_kb() {
+            df -Pk . | awk 'NR==2 {print $4}'
+          }
+
+          report_disk
+          before_kb="$(available_kb)"
+          if [ "$before_kb" -lt "$RELEASE_MIN_FREE_KB" ]; then
+            echo "::warning::Release runner has ${before_kb} KiB free before prepare; cleaning reconstructable release artifacts and caches"
+            rm -rf target/distrib target/package .homeboy-bin artifacts "$HOME/.cache/cargo-dist" "$HOME/.cache/sccache"
+          fi
+
+          report_disk
+          after_kb="$(available_kb)"
+          if [ "$after_kb" -lt "$RELEASE_MIN_FREE_KB" ]; then
+            echo "::error::Release runner has ${after_kb} KiB free after cleanup; refusing prepare before the runner exhausts disk while writing diagnostics"
+            exit 1
+          fi
+
       # Rust toolchain needed so run-release.sh can regenerate Cargo.lock
       # after bumping Cargo.toml version
       - name: Install Rust toolchain
@@ -627,6 +657,35 @@ jobs:
           ref: ${{ needs.prepare.outputs.release-tag }}
           persist-credentials: false
           submodules: recursive
+
+      - name: Preflight release publisher disk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          report_disk() {
+            echo "::group::Release publisher disk usage"
+            df -h . "$RUNNER_TEMP" "$HOME" || true
+            echo "::endgroup::"
+          }
+
+          available_kb() {
+            df -Pk . | awk 'NR==2 {print $4}'
+          }
+
+          report_disk
+          before_kb="$(available_kb)"
+          if [ "$before_kb" -lt "$RELEASE_MIN_FREE_KB" ]; then
+            echo "::warning::Release publisher has ${before_kb} KiB free before publish; cleaning reconstructable release artifacts and caches"
+            rm -rf target/distrib target/package .homeboy-bin artifacts "$HOME/.cache/cargo-dist" "$HOME/.cache/sccache"
+          fi
+
+          report_disk
+          after_kb="$(available_kb)"
+          if [ "$after_kb" -lt "$RELEASE_MIN_FREE_KB" ]; then
+            echo "::error::Release publisher has ${after_kb} KiB free after cleanup; refusing publish before the runner exhausts disk while writing diagnostics"
+            exit 1
+          fi
 
       - name: Install cached dist
         uses: actions/download-artifact@v4

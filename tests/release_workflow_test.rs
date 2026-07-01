@@ -159,3 +159,19 @@ fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
     assert!(host.contains("release-head: 'true'"));
     assert!(host.contains("release-from-artifacts: artifacts"));
 }
+
+#[test]
+fn release_prepare_and_publish_preflight_runner_disk() {
+    let workflow = release_workflow();
+
+    assert!(workflow.contains("RELEASE_MIN_FREE_KB: '5242880'"));
+    assert!(workflow.contains("Preflight release runner disk"));
+    assert!(workflow.contains("Preflight release publisher disk"));
+    assert!(workflow.contains("df -h ."));
+    assert!(workflow.contains("$RUNNER_TEMP"));
+    assert!(workflow.contains("rm -rf target/distrib target/package .homeboy-bin artifacts"));
+    assert!(workflow
+        .contains("refusing prepare before the runner exhausts disk while writing diagnostics"));
+    assert!(workflow
+        .contains("refusing publish before the runner exhausts disk while writing diagnostics"));
+}
