@@ -225,7 +225,7 @@ pub(crate) fn declared_tool_diagnostics(
 ) -> RunnerToolDiagnostics {
     let (configured, configured_binary_source) =
         configured_value(env, &declaration.configured_binary_env);
-    let install_dir = install_dir(
+    let (install_dir, _, _) = install_dir(
         env,
         declaration.install_dir_env.as_deref(),
         declaration.default_install_dir.as_deref(),
@@ -255,7 +255,7 @@ pub(crate) fn declared_runtime_diagnostics(
 ) -> RunnerRuntimeDiagnostics {
     let (configured, configured_binary_source) =
         configured_value(env, &declaration.configured_binary_env);
-    let install_dir = install_dir(
+    let (install_dir, install_dir_source, default_install_dir) = install_dir(
         env,
         declaration.install_dir_env.as_deref(),
         declaration.default_install_dir.as_deref(),
@@ -267,14 +267,42 @@ pub(crate) fn declared_runtime_diagnostics(
         &install_dir,
         &managed_cache_source,
     );
-    let packages = declared_runtime_packages(declaration, env, &install_dir, &managed_cache_source);
-    let diagnostics = declared_runtime_source_diagnostics(
+    let default_managed_cache_source =
+        render_diagnostic_template(&declaration.managed_cache_source, &default_install_dir, "");
+    let default_managed_cache_binary = render_diagnostic_template(
+        &declaration.managed_cache_binary,
+        &default_install_dir,
+        &default_managed_cache_source,
+    );
+    let packages = declared_runtime_packages(
+        declaration,
+        runner_id,
+        env,
+        &install_dir,
+        &install_dir_source,
+        &managed_cache_source,
+        &default_install_dir,
+        &default_managed_cache_source,
+    );
+    let mut diagnostics = declared_runtime_source_diagnostics(
         &declaration.source_consistency,
         env,
         configured.as_deref(),
         &install_dir,
         &managed_cache_source,
     );
+    diagnostics.extend(configured_binary_override_diagnostics(
+        declaration,
+        runner_id,
+        configured.as_deref(),
+        &configured_binary_source,
+        &default_managed_cache_binary,
+    ));
+    diagnostics.extend(package_override_diagnostics(
+        declaration,
+        runner_id,
+        &packages,
+    ));
 
     RunnerRuntimeDiagnostics {
         runtime: declaration.tool.clone(),
@@ -347,6 +375,10 @@ fn runtime_package_output_from_generic(
     RuntimePackageOutput {
         package: package.package.clone(),
         expected_path: package.expected_path.clone(),
+        default_path: package.default_path.clone(),
+        selection_source: package.selection_source.clone(),
+        env_override: package.env_override.clone(),
+        remediation_command: package.remediation_command.clone(),
         resolution: package.resolution.clone(),
     }
 }
@@ -402,10 +434,16 @@ fn install_dir(
     env: &BTreeMap<String, String>,
     key: Option<&str>,
     default_value: Option<&str>,
-) -> String {
-    key.and_then(|key| env.get(key).cloned())
-        .or_else(|| default_value.map(str::to_string))
-        .unwrap_or_default()
+) -> (String, String, String) {
+    let default_value = default_value.unwrap_or_default().to_string();
+    if let Some((key, value)) = key.and_then(|key| env.get(key).map(|value| (key, value.clone()))) {
+        return (value, format!("env:{key}"), default_value);
+    }
+    (
+        default_value.clone(),
+        "installed_default".to_string(),
+        default_value,
+    )
 }
 
 fn render_diagnostic_template(
@@ -427,39 +465,132 @@ fn render_path_message(template: &str, path: &str, root: &str) -> String {
 
 fn declared_runtime_packages(
     declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
+    runner_id: Option<&str>,
     env: &BTreeMap<String, String>,
     install_dir: &str,
+    install_dir_source: &str,
     managed_cache_source: &str,
+    default_install_dir: &str,
+    default_managed_cache_source: &str,
 ) -> Vec<RunnerRuntimePackageDiagnostics> {
     declaration
         .packages
         .iter()
-        .map(|package| RunnerRuntimePackageDiagnostics {
-            field: package.field.clone(),
-            package: package.package.clone(),
-            expected_path: package
+        .map(|package| {
+            let effective_path = render_diagnostic_template(
+                &package.expected_path,
+                install_dir,
+                managed_cache_source,
+            );
+            let default_path = render_diagnostic_template(
+                &package.expected_path,
+                default_install_dir,
+                default_managed_cache_source,
+            );
+            let override_value = package
                 .env_override
                 .as_deref()
-                .and_then(|key| env.get(key).cloned())
-                .unwrap_or_else(|| {
-                    render_diagnostic_template(
-                        &package.expected_path,
-                        install_dir,
-                        managed_cache_source,
+                .and_then(|key| env.get(key).map(|value| (key, value.clone())));
+            let (expected_path, selection_source, env_override, remediation_command) =
+                if let Some((key, value)) = override_value {
+                    let remediation_command = if value != default_path {
+                        Some(runner_env_update_command(runner_id, key, &default_path))
+                    } else {
+                        None
+                    };
+                    (
+                        value,
+                        format!("env:{key}"),
+                        Some(key.to_string()),
+                        remediation_command,
                     )
-                }),
-            resolution: RuntimeProbeValue {
-                value: None,
-                source: "runtime_probe_command".to_string(),
-            },
+                } else {
+                    (effective_path, install_dir_source.to_string(), None, None)
+                };
+            RunnerRuntimePackageDiagnostics {
+                field: package.field.clone(),
+                package: package.package.clone(),
+                expected_path,
+                default_path,
+                selection_source,
+                env_override,
+                remediation_command,
+                resolution: RuntimeProbeValue {
+                    value: None,
+                    source: "runtime_probe_command".to_string(),
+                },
+            }
         })
         .collect()
+}
+
+fn configured_binary_override_diagnostics(
+    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
+    runner_id: Option<&str>,
+    configured_binary: Option<&str>,
+    configured_binary_source: &str,
+    managed_cache_binary: &str,
+) -> Vec<RuntimeDiagnostic> {
+    let Some(configured_binary) = configured_binary else {
+        return Vec::new();
+    };
+    if configured_binary_source == "unset" || configured_binary == managed_cache_binary {
+        return Vec::new();
+    }
+    vec![RuntimeDiagnostic {
+        id: format!("{}.configured_binary_env_override", declaration.tool),
+        severity: "warning".to_string(),
+        message: format!(
+            "Configured runtime binary `{configured_binary}` from `{configured_binary_source}` differs from installed default `{managed_cache_binary}`; runner jobs will use the declaration's effective binary rule before workload execution."
+        ),
+        remediation: runner_env_update_command(runner_id, configured_binary_source, managed_cache_binary),
+    }]
+}
+
+fn package_override_diagnostics(
+    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
+    runner_id: Option<&str>,
+    packages: &[RunnerRuntimePackageDiagnostics],
+) -> Vec<RuntimeDiagnostic> {
+    packages
+        .iter()
+        .filter(|package| package.env_override.is_some() && package.expected_path != package.default_path)
+        .map(|package| RuntimeDiagnostic {
+            id: format!("{}.{}.env_override", declaration.tool, package.field),
+            severity: "warning".to_string(),
+            message: format!(
+                "Configured runtime package `{}` path `{}` from `{}` differs from installed default `{}`.",
+                package.package, package.expected_path, package.selection_source, package.default_path
+            ),
+            remediation: runner_env_update_command(
+                runner_id,
+                package.env_override.as_deref().unwrap_or_default(),
+                &package.default_path,
+            ),
+        })
+        .collect()
+}
+
+fn runner_env_update_command(runner_id: Option<&str>, key: &str, value: &str) -> String {
+    let json = serde_json::json!({ "env": { key: value } }).to_string();
+    match runner_id {
+        Some(runner_id) => format!(
+            "homeboy runner set {} --json {}",
+            shell_arg(runner_id),
+            shell_arg(&json)
+        ),
+        None => format!("homeboy runner set <runner-id> --json {}", shell_arg(&json)),
+    }
 }
 
 fn empty_package() -> RuntimePackageOutput {
     RuntimePackageOutput {
         package: String::new(),
         expected_path: String::new(),
+        default_path: String::new(),
+        selection_source: "runtime_probe_command".to_string(),
+        env_override: None,
+        remediation_command: None,
         resolution: RuntimeProbeValue {
             value: None,
             source: "runtime_probe_command".to_string(),

@@ -208,6 +208,12 @@ pub struct RunnerRuntimePackageDiagnostics {
     pub field: String,
     pub package: String,
     pub expected_path: String,
+    pub default_path: String,
+    pub selection_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation_command: Option<String>,
     pub resolution: RuntimeProbeValue,
 }
 
@@ -215,6 +221,12 @@ pub struct RunnerRuntimePackageDiagnostics {
 pub struct RuntimePackageOutput {
     pub package: String,
     pub expected_path: String,
+    pub default_path: String,
+    pub selection_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation_command: Option<String>,
     pub resolution: RuntimeProbeValue,
 }
 
