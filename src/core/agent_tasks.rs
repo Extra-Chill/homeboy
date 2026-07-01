@@ -233,14 +233,15 @@ pub mod gate {
 /// Durable run lifecycle: submit, run-record state, log/artifact loaders.
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
-        aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run, list_records,
-        load_plan, logs, mark_resuming, mark_running, record_completed_run,
-        record_pre_dispatch_failure, record_promotion, record_remote_dispatch_failure,
-        record_run_aggregate, retry, run_record_exists, run_status, status, submit_plan,
-        AgentTaskArtifactRef, AgentTaskEventEnvelope, AgentTaskPreDispatchFailure,
-        AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
-        AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunStatus,
-        AgentTaskRunTask,
+        aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run,
+        cook_attempt_run_id, cook_index, list_records, load_plan, logs, mark_resuming,
+        mark_running, record_completed_run, record_cook_attempt, record_pre_dispatch_failure,
+        record_promotion, record_remote_dispatch_failure, record_run_aggregate, retry,
+        run_record_exists, run_status, status, submit_plan, AgentTaskArtifactRef,
+        AgentTaskCookIndex, AgentTaskCookIndexAttempt, AgentTaskEventEnvelope,
+        AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
+        AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
+        AgentTaskRunStatus, AgentTaskRunTask,
     };
 }
 

@@ -39,6 +39,7 @@ mod records;
 pub use cancellation::*;
 pub use failure_recording::*;
 pub use lifecycle_ops::*;
+pub use lifecycle_record_ops::cook_attempt_run_id;
 pub use records::*;
 
 pub(crate) use conversion::*;

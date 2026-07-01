@@ -4,6 +4,7 @@
 use serde_json::Value;
 
 use homeboy::core::agent_tasks::dispatch_service;
+use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -50,6 +51,10 @@ where
     if dispatch_args.prompt.is_none() {
         dispatch_args.prompt = args.goal.clone();
     }
+    let requested_cook_id = dispatch_args.run_id.clone();
+    if let Some(cook_id) = requested_cook_id.as_deref() {
+        dispatch_args.run_id = Some(agent_task_lifecycle::cook_attempt_run_id(cook_id, 1));
+    }
     dispatch_args.core.queue_only = false;
     let (dispatch_value, _dispatch_exit) =
         dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
@@ -61,7 +66,7 @@ where
             )
         })?
         .to_string();
-    let cook_id = run_id.clone();
+    let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     let title = args
         .title
         .clone()

@@ -6,6 +6,7 @@ pub(crate) mod schemas {
     pub(crate) const EVENT: &str = "homeboy/agent-task-event/v1";
     pub(crate) const RUN_STATUS: &str = "homeboy/agent-task-run-status/v1";
     pub(crate) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
+    pub(crate) const COOK_INDEX: &str = "homeboy/agent-task-cook-index/v1";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,6 +35,27 @@ pub struct AgentTaskRunRecord {
     pub lifecycle: RunLifecycleRecord,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCookIndex {
+    #[serde(default = "cook_index_schema")]
+    pub schema: String,
+    pub cook_id: String,
+    pub latest_run_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<AgentTaskCookIndexAttempt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCookIndexAttempt {
+    pub attempt: u32,
+    pub run_id: String,
+    pub recorded_at: String,
+}
+
+fn cook_index_schema() -> String {
+    schemas::COOK_INDEX.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
