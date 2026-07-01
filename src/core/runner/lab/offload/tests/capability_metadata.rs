@@ -387,7 +387,13 @@ fn newer_runner_than_controller_points_to_local_upgrade_first() {
     let status = status_with_runner_version("homeboy-lab", &higher_minor_version());
 
     let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
-    assert_eq!(metadata["primary_remediation_command"], "homeboy upgrade");
+    assert!(metadata["primary_remediation_command"]
+        .as_str()
+        .is_some_and(|command| command.contains("homeboy upgrade")));
+    assert!(metadata["topology_recovery_command"]
+        .as_str()
+        .is_some_and(|command| command.contains("homeboy upgrade")));
+    assert!(metadata["controller_binary"].as_str().is_some());
     assert_eq!(metadata["local_upgrade_command"], "homeboy upgrade");
 
     let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
@@ -411,7 +417,9 @@ fn newer_stale_daemon_control_plane_points_to_local_upgrade_first() {
     ));
 
     let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
-    assert_eq!(metadata["primary_remediation_command"], "homeboy upgrade");
+    assert!(metadata["primary_remediation_command"]
+        .as_str()
+        .is_some_and(|command| command.contains("homeboy upgrade")));
 
     let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
     let tried = err.details["tried"].as_array().expect("tried hints");
@@ -419,6 +427,9 @@ fn newer_stale_daemon_control_plane_points_to_local_upgrade_first() {
         .first()
         .and_then(|hint| hint.as_str())
         .is_some_and(|hint| hint.contains("homeboy upgrade")));
+    assert!(tried.iter().any(|hint| hint
+        .as_str()
+        .is_some_and(|hint| hint.contains("One-command topology recovery"))));
 }
 
 #[test]
@@ -438,6 +449,70 @@ fn older_runner_than_controller_points_to_runner_refresh_first() {
         .and_then(|hint| hint.as_str())
         .is_some_and(|hint| hint
             .contains("homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect")));
+}
+
+#[test]
+fn configured_runner_binary_drift_selects_known_runner_binary() {
+    let status = status_with_runner_version("homeboy-lab", "0.0.0");
+    let configured = "/srv/homeboy-current/target/release/homeboy";
+
+    let metadata = lab_runner_homeboy_metadata("homeboy-lab", configured, &status);
+
+    assert_eq!(
+        metadata["primary_remediation_command"],
+        "homeboy runner refresh-homeboy homeboy-lab --select /srv/homeboy-current/target/release/homeboy --reconnect"
+    );
+    assert_eq!(
+        metadata["topology_recovery_command"],
+        metadata["primary_remediation_command"]
+    );
+
+    let err = stale_runner_homeboy_error("homeboy-lab", configured, &status);
+    let tried = err.details["tried"].as_array().expect("tried hints");
+    assert!(tried.iter().any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+        "homeboy runner refresh-homeboy homeboy-lab --select /srv/homeboy-current/target/release/homeboy --reconnect"
+    ))));
+}
+
+#[test]
+fn controller_recovery_command_uses_source_checkout_for_current_build_binary() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
+    std::fs::create_dir_all(dir.path().join("target/release")).expect("target dir");
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"homeboy\"",
+    )
+    .expect("cargo manifest");
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").expect("main source");
+
+    let command =
+        controller_homeboy_recovery_command_for_binary(&dir.path().join("target/release/homeboy"));
+
+    assert_eq!(
+        command,
+        format!(
+            "homeboy upgrade --method source --source-path {} --force",
+            shell::quote_arg(&dir.path().display().to_string())
+        )
+    );
+}
+
+#[test]
+fn controller_recovery_command_uses_install_method_for_known_binary_locations() {
+    assert_eq!(
+        controller_homeboy_recovery_command_for_binary(std::path::Path::new(
+            "/opt/homebrew/Cellar/homeboy/0.276.0/bin/homeboy"
+        )),
+        "homeboy upgrade --method homebrew --force"
+    );
+
+    assert_eq!(
+        controller_homeboy_recovery_command_for_binary(std::path::Path::new(
+            "/Users/user/.cargo/bin/homeboy"
+        )),
+        "homeboy upgrade --method cargo --force"
+    );
 }
 
 #[test]
@@ -555,8 +630,9 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
     assert!(tried
         .first()
         .and_then(|hint| hint.as_str())
-        .is_some_and(|hint| hint
-            .contains("homeboy runner refresh-homeboy 'homeboy lab' --ref main --reconnect")));
+        .is_some_and(|hint| hint.contains(
+            "homeboy runner refresh-homeboy 'homeboy lab' --select /home/user/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy --reconnect"
+        )));
     assert!(tried
         .iter()
         .any(|hint| hint.as_str().is_some_and(|hint| hint
