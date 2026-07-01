@@ -1721,6 +1721,28 @@ fn stage_codebox_step_file_refs(
         let Some(raw) = arg.as_str() else {
             continue;
         };
+        if let Some(workload_json) = raw.strip_prefix("workload-json=") {
+            let mut nested: serde_json::Value =
+                serde_json::from_str(workload_json).map_err(|err| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "fuzz_workload",
+                        format!("WP Codebox fuzz workload contains invalid workload-json: {err}"),
+                        Some(source_path.display().to_string()),
+                        None,
+                    )
+                })?;
+            stage_codebox_workload_file_refs(&mut nested, source_path)?;
+            let nested_json = serde_json::to_string(&nested).map_err(|err| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "fuzz_workload",
+                    format!("WP Codebox fuzz workload could not serialize workload-json: {err}"),
+                    Some(source_path.display().to_string()),
+                    None,
+                )
+            })?;
+            *arg = serde_json::Value::String(format!("workload-json={}", nested_json));
+            continue;
+        }
         let Some(path) = raw.strip_prefix("path=") else {
             continue;
         };

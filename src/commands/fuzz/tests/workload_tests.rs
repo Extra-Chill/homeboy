@@ -838,3 +838,133 @@ fn fuzz_runner_env_stages_codebox_workload_file_refs() {
         Some("/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
     );
 }
+
+#[test]
+fn fuzz_runner_env_stages_nested_codebox_workload_json_file_refs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("bench")).expect("create bench dir");
+    let php_path = temp.path().join("bench/rest-product-batch-import.php");
+    std::fs::write(&php_path, "<?php return array( 'ok' => true );\n").expect("write php workload");
+    let nested = serde_json::json!({
+        "schema": "wp-codebox/wordpress-workload-run/v1",
+        "steps": [
+            {
+                "command": "wordpress.run-workload",
+                "args": [
+                    format!("path={}", php_path.display()),
+                    "type=php".to_string()
+                ]
+            }
+        ]
+    });
+    let workload_path = temp.path().join("fuzz/rest-product-batch-import.json");
+    std::fs::create_dir_all(workload_path.parent().expect("workload parent"))
+        .expect("create workload dir");
+    std::fs::write(
+        &workload_path,
+        serde_json::json!({
+            "schema": "wp-codebox/wordpress-workload-run/v1",
+            "steps": [
+                {
+                    "command": "wordpress.run-workload",
+                    "args": [
+                        format!("workload-json={}", serde_json::to_string(&nested).expect("nested json"))
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write workload");
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "package-fuzz",
+        "components": {
+            "package": {
+                "path": "${package.root}/plugins/package",
+                "branch": "main"
+            }
+        }
+    }))
+    .expect("parse rig spec");
+    let context = FuzzRigContext {
+        spec,
+        package_root: Some(temp.path().to_path_buf()),
+    };
+    let args = FuzzRunArgs {
+        comp: PositionalComponentArgs {
+            component: Some("package".to_string()),
+            path: None,
+        },
+        rig: Some("package-fuzz".to_string()),
+        extension_override: ExtensionOverrideArgs { extensions: vec![] },
+        setting_args: SettingArgs {
+            setting: vec![],
+            setting_json: vec![],
+        },
+        workload_id: Some("rest-product-batch-import".to_string()),
+        run_id: Some("proof-1".to_string()),
+        tracker_refs: vec![],
+        seed: None,
+        inventory: None,
+        sequence_plan: None,
+        require_case_log: false,
+        require_coverage_summary: false,
+        require_result_envelope: false,
+        max_duration: None,
+        gate_profile: FuzzGateProfileArg::Measurement,
+        allow_destructive: false,
+        isolation: FuzzIsolationArg::Shared,
+        isolation_proof: None,
+        expect_metric: vec![],
+        action_model: None,
+        exploration_policy: None,
+        args: vec![],
+    };
+    let workload = FuzzWorkloadOutput {
+        id: "rest-product-batch-import".to_string(),
+        label: None,
+        description: None,
+        source: format!("rig_workloads:generic:{}", workload_path.display()),
+        manifest_path: Some(workload_path.to_string_lossy().to_string()),
+    };
+    let run_dir = RunDir::create().expect("run dir");
+    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+
+    let env = fuzz_runner_env(
+        &args,
+        Some(&context),
+        Some(&workload),
+        &results_path,
+        &run_dir,
+        None,
+        None,
+    )
+    .expect("fuzz runner env");
+    let expanded_path = env
+        .iter()
+        .find_map(|(key, value)| (key == "HOMEBOY_FUZZ_WORKLOAD_PATH").then_some(value))
+        .expect("expanded workload path");
+    let expanded: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(expanded_path).expect("read expanded workload"),
+    )
+    .expect("parse expanded workload");
+    let nested_arg = expanded["steps"][0]["args"][0]
+        .as_str()
+        .expect("nested workload arg")
+        .strip_prefix("workload-json=")
+        .expect("workload-json prefix");
+    let nested: serde_json::Value = serde_json::from_str(nested_arg).expect("nested json");
+
+    assert_eq!(
+        nested["steps"][0]["args"][0].as_str(),
+        Some("path=/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
+    );
+    assert_eq!(
+        nested["staged_files"][0]["source"].as_str(),
+        Some(php_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        nested["staged_files"][0]["target"].as_str(),
+        Some("/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
+    );
+}
