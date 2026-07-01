@@ -279,6 +279,19 @@ pub(super) enum RunnerCommand {
         #[arg(long = "env")]
         env: Vec<String>,
 
+        /// Secret environment variable name to resolve through the runner secret-env contract.
+        /// Repeat for multiple names.
+        #[arg(long = "secret-env", value_name = "NAME")]
+        secret_env: Vec<String>,
+
+        /// Secret-env plan JSON to apply to the runner process.
+        #[arg(long = "secret-env-plan", value_name = "JSON")]
+        secret_env_plan: Option<String>,
+
+        /// Path to a secret-env plan JSON file to apply to the runner process.
+        #[arg(long = "secret-env-plan-file", value_name = "PATH")]
+        secret_env_plan_file: Option<String>,
+
         /// Build the runner exec plan without executing it.
         #[arg(long)]
         dry_run: bool,
