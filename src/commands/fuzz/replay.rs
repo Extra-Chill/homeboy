@@ -7,6 +7,7 @@ use homeboy::core::fuzz::{
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
+use homeboy::core::runners::is_retrievable_runner_artifact;
 use homeboy::core::{Error, ErrorCode};
 
 use super::super::utils::args::PositionalComponentArgs;
@@ -494,15 +495,33 @@ fn resolve_run_replay_artifact_source_inner(
     run_id: &str,
     allow_ref_without_bytes: bool,
 ) -> homeboy::core::Result<ReplayArtifactSource> {
+    resolve_run_replay_artifact_source_inner_with_downloader(
+        run_id,
+        allow_ref_without_bytes,
+        |artifact| {
+            runs_service::download_remote_artifact(artifact.clone(), None)
+                .map(|outcome| outcome.output_path)
+        },
+    )
+}
+
+fn resolve_run_replay_artifact_source_inner_with_downloader<F>(
+    run_id: &str,
+    allow_ref_without_bytes: bool,
+    mut download_remote_artifact: F,
+) -> homeboy::core::Result<ReplayArtifactSource>
+where
+    F: FnMut(&ArtifactRecord) -> homeboy::core::Result<PathBuf>,
+{
     let store = ObservationStore::open_initialized()?;
     let _run = runs_service::require_run(&store, run_id)?;
     let mut candidates = runs_service::list_artifacts_for_run(&store, run_id)?
         .into_iter()
-        .filter(|artifact| artifact.artifact_type == "file")
         .filter(is_run_replay_artifact_candidate)
         .collect::<Vec<_>>();
     candidates.sort_by_key(run_replay_artifact_rank);
 
+    let mut download_errors = Vec::new();
     for artifact in &candidates {
         let path = PathBuf::from(&artifact.path);
         if path.is_file() {
@@ -510,8 +529,28 @@ fn resolve_run_replay_artifact_source_inner(
         }
     }
 
+    for artifact in &candidates {
+        if is_retrievable_runner_artifact(&artifact.path) {
+            match download_remote_artifact(artifact) {
+                Ok(path) if path.is_file() => return Ok(ReplayArtifactSource::Local(path)),
+                Ok(path) => download_errors.push(format!(
+                    "artifact {} mirrored to {} but no file was available",
+                    artifact.id,
+                    path.display()
+                )),
+                Err(error) => download_errors.push(format!(
+                    "artifact {} could not be mirrored from runner: {}",
+                    artifact.id, error.message
+                )),
+            }
+        }
+    }
+
     if allow_ref_without_bytes {
         if let Some(artifact) = candidates.first() {
+            if is_retrievable_runner_artifact(&artifact.path) {
+                return Ok(ReplayArtifactSource::Reference(artifact.path.clone()));
+            }
             return Ok(ReplayArtifactSource::Reference(format!(
                 "homeboy://run/{run_id}/artifact/{}",
                 artifact.id
@@ -523,11 +562,16 @@ fn resolve_run_replay_artifact_source_inner(
         "run-id",
         format!("fuzz replay artifact not found for run: {run_id}"),
         Some(run_id.to_string()),
-        Some(vec![
-            format!("Run `homeboy runs artifacts {run_id}` to inspect recorded artifacts."),
-            "Persist a fuzz campaign/result envelope artifact before replaying by run id."
-                .to_string(),
-        ]),
+        Some(
+            vec![
+                format!("Run `homeboy runs artifacts {run_id}` to inspect recorded artifacts."),
+                "Persist a fuzz campaign/result envelope artifact before replaying by run id."
+                    .to_string(),
+            ]
+            .into_iter()
+            .chain(download_errors)
+            .collect(),
+        ),
     ))
 }
 
@@ -553,6 +597,161 @@ fn run_replay_artifact_rank(artifact: &ArtifactRecord) -> u8 {
         1
     } else {
         2
+    }
+}
+
+#[cfg(test)]
+mod replay_artifact_source_tests {
+    use super::*;
+    use homeboy::core::observation::NewRunRecord;
+    use homeboy::test_support::with_isolated_home;
+
+    #[test]
+    fn mirrors_runner_fuzz_result_envelope_for_run_id_replay() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("fuzz")
+                        .component_id("component-a")
+                        .command("homeboy fuzz run component-a")
+                        .cwd_path(home.path())
+                        .build(),
+                )
+                .expect("run");
+            store
+                .import_artifact(&ArtifactRecord {
+                    id: "4ff1f923-a7c0-47dc-8ba4-cbdbc92e0d62".to_string(),
+                    run_id: run.id.clone(),
+                    kind: "fuzz_result_envelope".to_string(),
+                    artifact_type: "remote_file".to_string(),
+                    path: format!(
+                        "runner-artifact://homeboy-lab/{}/4ff1f923-a7c0-47dc-8ba4-cbdbc92e0d62",
+                        run.id
+                    ),
+                    url: None,
+                    public_url: None,
+                    viewer_url: None,
+                    viewer_links: Vec::new(),
+                    sha256: None,
+                    size_bytes: None,
+                    mime: Some("application/json".to_string()),
+                    metadata_json: serde_json::json!({
+                        "schema": FUZZ_RESULT_ENVELOPE_SCHEMA,
+                        "ref": "runner-artifact://homeboy-lab/run/artifact"
+                    }),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                })
+                .expect("artifact");
+
+            let mirrored_path = home.path().join("mirrored-fuzz-result-envelope.json");
+            std::fs::write(
+                &mirrored_path,
+                serde_json::json!({
+                    "schema": FUZZ_RESULT_ENVELOPE_SCHEMA,
+                    "id": "envelope-1",
+                    "status": "passed",
+                    "request": {
+                        "id": "request-1",
+                        "component": "component-a"
+                    },
+                    "campaign": {
+                        "schema": FUZZ_CAMPAIGN_SCHEMA,
+                        "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                        "id": "campaign-1",
+                        "safety_class": "read_only",
+                        "cases": [{
+                            "schema": homeboy::core::fuzz::FUZZ_CASE_SCHEMA,
+                            "id": "case-1",
+                            "replay_id": "replay-1"
+                        }],
+                        "replay": {
+                            "schema": homeboy::core::fuzz::FUZZ_REPLAY_SCHEMA,
+                            "id": "replay-1",
+                            "seed": "1234",
+                            "artifact_id": "case-artifact"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write envelope");
+
+            let source = resolve_run_replay_artifact_source_inner_with_downloader(
+                &run.id,
+                false,
+                |artifact| {
+                    assert_eq!(artifact.kind, "fuzz_result_envelope");
+                    assert!(artifact.path.starts_with("runner-artifact://homeboy-lab/"));
+                    Ok(mirrored_path.clone())
+                },
+            )
+            .expect("resolve source");
+
+            let ReplayArtifactSource::Local(path) = source else {
+                panic!("expected mirrored local source");
+            };
+            let resolved = resolve_replay_artifact(&path, Some("case-1")).expect("artifact");
+            assert_eq!(resolved.envelope_id.as_deref(), Some("envelope-1"));
+            assert_eq!(resolved.campaign_id.as_deref(), Some("campaign-1"));
+            assert_eq!(resolved.case_id.as_deref(), Some("case-1"));
+            assert_eq!(
+                resolved.replay.as_ref().map(|replay| replay.id.as_str()),
+                Some("replay-1")
+            );
+        });
+    }
+
+    #[test]
+    fn dry_run_can_fall_back_to_runner_artifact_ref_when_mirroring_fails() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("fuzz")
+                        .component_id("component-a")
+                        .command("homeboy fuzz run component-a")
+                        .cwd_path(home.path())
+                        .build(),
+                )
+                .expect("run");
+            let reference = format!("runner-artifact://homeboy-lab/{}/artifact-1", run.id);
+            store
+                .import_artifact(&ArtifactRecord {
+                    id: "artifact-1".to_string(),
+                    run_id: run.id.clone(),
+                    kind: "fuzz_result_envelope".to_string(),
+                    artifact_type: "remote_file".to_string(),
+                    path: reference.clone(),
+                    url: None,
+                    public_url: None,
+                    viewer_url: None,
+                    viewer_links: Vec::new(),
+                    sha256: None,
+                    size_bytes: None,
+                    mime: Some("application/json".to_string()),
+                    metadata_json: serde_json::json!({ "schema": FUZZ_RESULT_ENVELOPE_SCHEMA }),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                })
+                .expect("artifact");
+
+            let source = resolve_run_replay_artifact_source_inner_with_downloader(
+                &run.id,
+                true,
+                |_artifact| {
+                    Err(Error::internal_io(
+                        "runner unavailable".to_string(),
+                        Some("download runner artifact".to_string()),
+                    ))
+                },
+            )
+            .expect("resolve source");
+
+            let ReplayArtifactSource::Reference(actual) = source else {
+                panic!("expected runner reference fallback");
+            };
+            assert_eq!(actual, reference);
+        });
     }
 }
 
