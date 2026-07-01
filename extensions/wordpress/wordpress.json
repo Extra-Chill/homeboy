@@ -1240,6 +1240,34 @@
       "description": "Optional component-relative PHPUnit bootstrap path for wp_codebox_phpunit_bootstrap_mode=project. When empty, the runner reads the bootstrap attribute from phpunit.xml or phpunit.xml.dist."
     },
     {
+      "id": "wp_codebox_phpunit_test_root",
+      "label": "WP Codebox PHPUnit test root",
+      "type": "string",
+      "default": "",
+      "description": "Optional sandbox path containing PHPUnit test files for wordpress.phpunit discovery. Leave empty for the mounted component tests directory. Use with wp_codebox_phpunit_mounts when the suite lives outside the component mount."
+    },
+    {
+      "id": "wp_codebox_phpunit_config",
+      "label": "WP Codebox PHPUnit config",
+      "type": "string",
+      "default": "",
+      "description": "Optional sandbox path to phpunit.xml or phpunit.xml.dist for wordpress.phpunit discovery. Leave empty for the mounted component phpunit.xml.dist."
+    },
+    {
+      "id": "wp_codebox_phpunit_cwd",
+      "label": "WP Codebox PHPUnit cwd",
+      "type": "string",
+      "default": "",
+      "description": "Optional sandbox working directory for the wordpress.phpunit process. Leave empty for the mounted component directory."
+    },
+    {
+      "id": "wp_codebox_phpunit_mounts",
+      "label": "WP Codebox PHPUnit mounts",
+      "type": "array",
+      "default": [],
+      "description": "Additional host-to-sandbox mounts for wordpress.phpunit. Each entry is {source,target,mode?}; source must be an absolute existing host path and target an absolute sandbox path. Defaults to readonly mode."
+    },
+    {
       "id": "wp_codebox_bootstrap_steps",
       "label": "WP Codebox bench bootstrap steps",
       "type": "array",

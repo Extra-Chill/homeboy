@@ -36,6 +36,9 @@ export function buildWordPressPhpunitRecipe(options = {}) {
 				command: 'fixture.wordpress.phpunit',
 				args: [
 					`plugin-slug=${options.pluginSlug}`,
+					`cwd=${options.cwd ?? ''}`,
+					`test-root=${options.testRoot ?? ''}`,
+					`phpunit-xml=${options.phpunitXml ?? ''}`,
 					`phpunit-args-json=${JSON.stringify(options.phpunitArgs ?? [])}`,
 					`bootstrap-mode=${options.bootstrapMode ?? 'managed'}`,
 					`project-bootstrap=${options.projectBootstrap ?? ''}`,
