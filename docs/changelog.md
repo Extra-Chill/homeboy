@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.278.0] - 2026-07-01
+
+### Added
+- sync local runtime sources for Lab refresh
+
+### Fixed
+- clarify agent-task provider work status
+- give cook attempts unique run ids
+
 ## [0.277.0] - 2026-07-01
 
 ### Added
