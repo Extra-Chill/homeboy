@@ -386,6 +386,12 @@ fn fragment_value(fragment: &str, key: &str) -> Option<String> {
     })
 }
 
+pub fn evidence_ref_task_id(evidence_ref: &AgentTaskEvidenceRef) -> Option<String> {
+    parse_agent_task_homeboy_uri(&evidence_ref.uri)
+        .ok()
+        .and_then(|parsed| parsed.task.or(parsed.outcome))
+}
+
 pub fn hydrate_evidence_summary(task_id: &str, evidence: &AgentTaskEvidenceRef) -> Option<Value> {
     let path = evidence.uri.strip_prefix("file://")?;
     if !path.ends_with(".json") {

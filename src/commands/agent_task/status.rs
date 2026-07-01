@@ -421,54 +421,6 @@ struct AgentTaskEvidenceFilters {
     failure_only: bool,
 }
 
-struct ParsedAgentTaskUri {
-    task: Option<String>,
-    outcome: Option<String>,
-}
-
-fn parse_agent_task_homeboy_uri(uri: &str) -> homeboy::core::Result<ParsedAgentTaskUri> {
-    let rest = uri
-        .strip_prefix("homeboy://agent-task/run/")
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "evidence_ref",
-                "unsupported homeboy agent-task evidence ref",
-                Some(uri.to_string()),
-                None,
-            )
-        })?;
-    let (path, fragment) = rest.split_once('#').unwrap_or((rest, ""));
-    let mut parts = path.split('/');
-    let run_id = parts.next().unwrap_or_default();
-    let section = parts.next().unwrap_or_default();
-    if run_id.is_empty() || section.is_empty() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "evidence_ref",
-            "homeboy agent-task evidence ref must include run id and section",
-            Some(uri.to_string()),
-            None,
-        ));
-    }
-
-    Ok(ParsedAgentTaskUri {
-        task: fragment_value(fragment, "task"),
-        outcome: fragment_value(fragment, "outcome"),
-    })
-}
-
-fn fragment_value(fragment: &str, key: &str) -> Option<String> {
-    fragment.split('&').find_map(|part| {
-        let (candidate, value) = part.split_once('=')?;
-        (candidate == key && !value.trim().is_empty()).then(|| value.to_string())
-    })
-}
-
-fn evidence_ref_task_id(evidence_ref: &AgentTaskEvidenceRef) -> Option<String> {
-    parse_agent_task_homeboy_uri(&evidence_ref.uri)
-        .ok()
-        .and_then(|parsed| parsed.task.or(parsed.outcome))
-}
-
 fn failed_task_statuses(
     aggregate: Option<&AgentTaskAggregate>,
 ) -> HashMap<String, AgentTaskOutcomeStatus> {
@@ -514,7 +466,10 @@ fn evidence_refs_with_tasks(
     }
     for evidence_ref in refs {
         if seen.insert((evidence_ref.kind.clone(), evidence_ref.uri.clone())) {
-            entries.push((evidence_ref.clone(), evidence_ref_task_id(evidence_ref)));
+            entries.push((
+                evidence_ref.clone(),
+                agent_task_service::evidence_ref_task_id(evidence_ref),
+            ));
         }
     }
     entries
