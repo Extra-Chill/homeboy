@@ -30,6 +30,18 @@ pub struct CommandLabSupportSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandDocSpec {
+    pub slug: &'static str,
+    pub kind: CommandDocKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandDocKind {
+    RuntimeExtensionCommand,
+    Support,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandSafetySpec {
     pub mutates: bool,
     pub operator: bool,
@@ -568,6 +580,29 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
 
 pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = COMMAND_SPECS;
 
+pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
+    CommandDocSpec {
+        slug: "audit-rules",
+        kind: CommandDocKind::Support,
+    },
+    CommandDocSpec {
+        slug: "cargo",
+        kind: CommandDocKind::RuntimeExtensionCommand,
+    },
+    CommandDocSpec {
+        slug: "commands-index",
+        kind: CommandDocKind::Support,
+    },
+    CommandDocSpec {
+        slug: "rig-spec",
+        kind: CommandDocKind::Support,
+    },
+    CommandDocSpec {
+        slug: "wp",
+        kind: CommandDocKind::RuntimeExtensionCommand,
+    },
+];
+
 pub fn registered_command(name: &str) -> Option<&'static CommandSpec> {
     COMMAND_SPECS.iter().find(|entry| entry.name == name)
 }
@@ -578,4 +613,22 @@ pub fn registered_command_json_family(name: &str) -> Option<CommandJsonFamily> {
 
 pub fn registered_command_dispatch_family(name: &str) -> Option<CommandDispatchFamily> {
     registered_command(name).map(CommandSpec::dispatch_family)
+}
+
+pub fn runtime_extension_command_doc_slugs() -> impl Iterator<Item = &'static str> {
+    COMMAND_DOC_REGISTRY
+        .iter()
+        .filter(|entry| entry.kind == CommandDocKind::RuntimeExtensionCommand)
+        .map(|entry| entry.slug)
+}
+
+pub fn support_command_doc_slugs() -> impl Iterator<Item = &'static str> {
+    COMMAND_DOC_REGISTRY
+        .iter()
+        .filter(|entry| entry.kind == CommandDocKind::Support)
+        .map(|entry| entry.slug)
+}
+
+pub fn non_core_command_doc_slugs() -> impl Iterator<Item = &'static str> {
+    COMMAND_DOC_REGISTRY.iter().map(|entry| entry.slug)
 }

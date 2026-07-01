@@ -630,7 +630,9 @@ mod surface {
     }
 
     fn runtime_extension_doc_commands() -> BTreeSet<String> {
-        BTreeSet::from(["cargo".to_string(), "wp".to_string()])
+        crate::command_contract::runtime_extension_command_doc_slugs()
+            .map(str::to_string)
+            .collect()
     }
 
     fn sorted_difference(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
@@ -854,7 +856,7 @@ mod tests {
             .filter_map(|entry| entry.docs_slug)
             .collect::<BTreeSet<_>>();
         let extension_or_support_docs =
-            BTreeSet::from(["audit-rules", "cargo", "commands-index", "rig-spec", "wp"]);
+            crate::command_contract::non_core_command_doc_slugs().collect::<BTreeSet<_>>();
 
         for doc in
             std::fs::read_dir(root.join("docs/commands")).expect("failed to read docs/commands")
@@ -871,6 +873,28 @@ mod tests {
             assert!(
                 registered_docs.contains(slug) || extension_or_support_docs.contains(slug),
                 "docs/commands/{slug}.md is not registered as a core command doc or known extension/support doc"
+            );
+        }
+    }
+
+    #[test]
+    fn non_core_command_doc_registry_paths_exist() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let index = commands_index();
+
+        for slug in crate::command_contract::non_core_command_doc_slugs() {
+            assert!(
+                root.join("docs/commands")
+                    .join(format!("{slug}.md"))
+                    .is_file(),
+                "non-core command doc registry points at missing docs/commands/{slug}.md"
+            );
+        }
+
+        for slug in crate::command_contract::runtime_extension_command_doc_slugs() {
+            assert!(
+                index.contains(&format!("[{slug}]({slug}.md)")),
+                "docs/commands/commands-index.md is missing runtime extension command doc `{slug}`"
             );
         }
     }
