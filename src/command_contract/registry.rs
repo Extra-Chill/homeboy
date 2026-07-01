@@ -75,6 +75,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::core::artifact_manifest::ArtifactManifest",
     },
     ContractRegistryEntry {
+        schema_id: crate::core::artifacts::ARTIFACT_POSTPROCESS_SCHEMA,
+        name: "artifact-postprocess",
+        title: "Artifact postprocess plan",
+        owner: "homeboy-core",
+        summary: "Declares generic helper-driven postprocessing actions for produced artifacts without product-specific semantics.",
+        rust_type: "homeboy::core::artifact_postprocess::ArtifactPostprocessPlan",
+    },
+    ContractRegistryEntry {
         schema_id: crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA,
         name: "secret-env-plan",
         title: "Secret environment plan",
@@ -167,6 +175,7 @@ mod tests {
             "lifecycle-snapshot-ref",
             "run-lifecycle-status",
             "artifact-manifest",
+            "artifact-postprocess",
             "secret-env-plan",
             "fuzz-workload",
             "resource-cleanup-intent",
