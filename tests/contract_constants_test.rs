@@ -32,6 +32,28 @@ fn contract_constants_exports_homeboy_owned_contract_ids() {
         "homeboy/run-location-index/v1"
     );
     assert_eq!(
+        value["constants"]["runner_execution_record"]["schema_id"],
+        "homeboy/runner-execution-record/v1"
+    );
+    assert!(
+        value["constants"]["runner_execution_record"]["projection_fields"]
+            .as_array()
+            .expect("projection fields")
+            .iter()
+            .any(|field| field == "materialized_paths")
+    );
+    assert_eq!(
+        value["constants"]["path_materialization_plan"]["schema_id"],
+        "homeboy/path-materialization-plan/v1"
+    );
+    assert!(
+        value["constants"]["path_materialization_plan"]["materialization_modes"]
+            .as_array()
+            .expect("materialization modes")
+            .iter()
+            .any(|mode| mode == "snapshot")
+    );
+    assert_eq!(
         value["constants"]["host_mutation_lifecycle"]["schema_id"],
         "homeboy/host-mutation-lifecycle/v1"
     );

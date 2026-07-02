@@ -35,6 +35,13 @@ use crate::core::resource_lifecycle_index::{
     ResourceLifecycleResourceStatus, RESOURCE_LIFECYCLE_INDEX_SCHEMA,
 };
 use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
+use crate::core::run_outcome_envelope::{
+    RunOutcomeEnvelope, RunOutcomeProjection, RUN_OUTCOME_ENVELOPE_SCHEMA,
+};
+use crate::core::runner_execution_envelope::{
+    PathMaterializationPlan, RunnerExecutionProjection, RunnerExecutionRecord,
+    PATH_MATERIALIZATION_PLAN_SCHEMA, RUNNER_EXECUTION_RECORD_SCHEMA,
+};
 use crate::core::secret_env_plan::{SecretEnvPlan, SECRET_ENV_PLAN_SCHEMA};
 use crate::core::{Error, Result};
 
@@ -67,7 +74,7 @@ pub enum ContractCommand {
 
 #[derive(Args, Debug, Clone)]
 pub struct ContractConstantsArgs {
-    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, reviewer-facing-ref.
+    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, reviewer-facing-ref.
     pub contract_id: String,
 }
 
@@ -119,6 +126,8 @@ pub struct ContractNormalizeArgs {
 pub enum ContractNormalizeKind {
     ArtifactRef,
     RunLifecycleStatus,
+    RunnerExecutionRecord,
+    RunOutcomeEnvelope,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -162,6 +171,8 @@ pub struct ContractValidateOutput {
 pub enum ContractNormalizeOutput {
     ArtifactRef(ArtifactRefNormalizeOutput),
     RunLifecycleStatus(RunLifecycleStatusNormalizeOutput),
+    RunnerExecutionRecord(RunnerExecutionProjection),
+    RunOutcomeEnvelope(RunOutcomeProjection),
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -408,7 +419,7 @@ fn constants(contract_id: &str) -> CmdResult<ContractOutput> {
             format!("unknown contract constants id `{contract_id}`"),
             None,
             Some(vec![
-                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, reviewer-facing-ref".to_string(),
+                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, reviewer-facing-ref".to_string(),
             ]),
         )
     })?;
@@ -425,6 +436,11 @@ fn normalize(args: ContractNormalizeArgs) -> Result<ContractNormalizeOutput> {
         }
         ContractNormalizeKind::RunLifecycleStatus => {
             normalize_run_lifecycle_status(value).map(ContractNormalizeOutput::RunLifecycleStatus)
+        }
+        ContractNormalizeKind::RunnerExecutionRecord => normalize_runner_execution_record(value)
+            .map(ContractNormalizeOutput::RunnerExecutionRecord),
+        ContractNormalizeKind::RunOutcomeEnvelope => {
+            normalize_run_outcome_envelope(value).map(ContractNormalizeOutput::RunOutcomeEnvelope)
         }
     }
 }
@@ -484,6 +500,41 @@ fn normalize_run_lifecycle_status(value: Value) -> Result<RunLifecycleStatusNorm
         is_terminal: status.is_terminal(),
         is_success: status.is_success(),
         is_retryable: status.is_retryable(),
+    })
+}
+
+fn normalize_runner_execution_record(value: Value) -> Result<RunnerExecutionProjection> {
+    let record: RunnerExecutionRecord = deserialize_contract_value(
+        value,
+        "runner-execution-record",
+        "expected a runner execution record JSON object",
+    )?;
+
+    Ok(record.projection())
+}
+
+fn normalize_run_outcome_envelope(value: Value) -> Result<RunOutcomeProjection> {
+    let envelope: RunOutcomeEnvelope = deserialize_contract_value(
+        value,
+        "run-outcome-envelope",
+        "expected a run outcome envelope JSON object",
+    )?;
+
+    Ok(envelope.projection())
+}
+
+fn deserialize_contract_value<T: DeserializeOwned>(
+    value: Value,
+    field: &'static str,
+    hint: &'static str,
+) -> Result<T> {
+    serde_json::from_value(value).map_err(|err| {
+        Error::validation_invalid_argument(
+            field,
+            err.to_string(),
+            None,
+            Some(vec![hint.to_string()]),
+        )
     })
 }
 
@@ -1283,6 +1334,18 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
         id: LOOP_EVIDENCE_SCHEMA,
         validate_json: validate_loop_evidence,
     },
+    ContractSchema {
+        id: RUNNER_EXECUTION_RECORD_SCHEMA,
+        validate_json: validate_runner_execution_record,
+    },
+    ContractSchema {
+        id: PATH_MATERIALIZATION_PLAN_SCHEMA,
+        validate_json: validate_path_materialization_plan,
+    },
+    ContractSchema {
+        id: RUN_OUTCOME_ENVELOPE_SCHEMA,
+        validate_json: validate_run_outcome_envelope,
+    },
 ];
 
 fn validate_secret_env_plan(raw: &str) -> homeboy::core::Result<()> {
@@ -1342,6 +1405,22 @@ fn validate_loop_iteration(raw: &str) -> homeboy::core::Result<()> {
 fn validate_loop_evidence(raw: &str) -> homeboy::core::Result<()> {
     let record: LoopEvidenceRecord = deserialize_contract(raw, LOOP_EVIDENCE_SCHEMA)?;
     validate_schema_field(LOOP_EVIDENCE_SCHEMA, &record.schema)
+}
+
+fn validate_runner_execution_record(raw: &str) -> homeboy::core::Result<()> {
+    let record: RunnerExecutionRecord = deserialize_contract(raw, RUNNER_EXECUTION_RECORD_SCHEMA)?;
+    validate_schema_field(RUNNER_EXECUTION_RECORD_SCHEMA, &record.schema)
+}
+
+fn validate_path_materialization_plan(raw: &str) -> homeboy::core::Result<()> {
+    let plan: PathMaterializationPlan =
+        deserialize_contract(raw, PATH_MATERIALIZATION_PLAN_SCHEMA)?;
+    validate_schema_field(PATH_MATERIALIZATION_PLAN_SCHEMA, &plan.schema)
+}
+
+fn validate_run_outcome_envelope(raw: &str) -> homeboy::core::Result<()> {
+    let envelope: RunOutcomeEnvelope = deserialize_contract(raw, RUN_OUTCOME_ENVELOPE_SCHEMA)?;
+    validate_schema_field(RUN_OUTCOME_ENVELOPE_SCHEMA, &envelope.schema)
 }
 
 fn deserialize_contract<T: DeserializeOwned>(
@@ -1595,6 +1674,63 @@ mod tests {
     }
 
     #[test]
+    fn runner_execution_record_normalizer_projects_materialized_paths() {
+        let output = normalize_runner_execution_record(json!({
+            "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
+            "execution_id": "job-1",
+            "runner_id": "lab-a",
+            "transport": "daemon",
+            "status": "succeeded",
+            "job_id": "job-1",
+            "remote_run_id": "run-1",
+            "path_materialization_plan": {
+                "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+                "entries": [
+                    {
+                        "role": "primary_workspace",
+                        "owner": "runner_exec.source_snapshot",
+                        "local_path": "/local/project",
+                        "remote_path": "/runner/project",
+                        "materialization_mode": "snapshot",
+                        "validation_status": "materialized"
+                    }
+                ]
+            },
+            "artifact_refs": [
+                { "id": "summary", "path": "artifacts/summary.json" }
+            ],
+            "next_actions": []
+        }))
+        .expect("runner execution record should normalize");
+
+        assert_eq!(output.execution_id, "job-1");
+        assert_eq!(output.remote_run_id.as_deref(), Some("run-1"));
+        assert_eq!(output.materialized_paths.len(), 1);
+        assert_eq!(output.materialized_paths[0].remote_path, "/runner/project");
+        assert_eq!(output.artifact_refs[0].id, "summary");
+    }
+
+    #[test]
+    fn run_outcome_envelope_normalizer_projects_inspection_fields() {
+        let output = normalize_run_outcome_envelope(json!({
+            "schema": RUN_OUTCOME_ENVELOPE_SCHEMA,
+            "status": "succeeded",
+            "run_id": "run-1",
+            "runner_id": "lab-a",
+            "exit_code": 0,
+            "artifact_refs": [],
+            "evidence_refs": [],
+            "handoffs": [],
+            "result": { "nested": "payload" }
+        }))
+        .expect("run outcome envelope should normalize");
+
+        assert_eq!(output.run_id.as_deref(), Some("run-1"));
+        assert_eq!(output.runner_id.as_deref(), Some("lab-a"));
+        assert_eq!(output.exit_code, Some(0));
+    }
+
+    #[test]
     fn validates_secret_env_plan_json_file() {
         let dir = TempDir::new().unwrap();
         let file = write_json(
@@ -1609,6 +1745,71 @@ mod tests {
         let output = validate_file(SECRET_ENV_PLAN_SCHEMA, file).unwrap();
 
         assert_eq!(output.schema, SECRET_ENV_PLAN_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_runner_execution_record_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "runner-execution-record.json",
+            json!({
+                "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
+                "execution_id": "job-1",
+                "runner_id": "lab-a",
+                "transport": "daemon",
+                "status": "succeeded"
+            }),
+        );
+
+        let output = validate_file(RUNNER_EXECUTION_RECORD_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_path_materialization_plan_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "path-materialization-plan.json",
+            json!({
+                "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+                "entries": [
+                    {
+                        "role": "required_path",
+                        "owner": "runner_exec.require_paths",
+                        "remote_path": "/runner/cache",
+                        "materialization_mode": "existing_remote",
+                        "validation_status": "validated"
+                    }
+                ]
+            }),
+        );
+
+        let output = validate_file(PATH_MATERIALIZATION_PLAN_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_run_outcome_envelope_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "run-outcome-envelope.json",
+            json!({
+                "schema": RUN_OUTCOME_ENVELOPE_SCHEMA,
+                "status": "succeeded"
+            }),
+        );
+
+        let output = validate_file(RUN_OUTCOME_ENVELOPE_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, RUN_OUTCOME_ENVELOPE_SCHEMA);
         assert!(output.valid);
     }
 

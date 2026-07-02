@@ -7,6 +7,13 @@ use crate::core::agent_task_loop_controller::{
 };
 use crate::core::agent_task_loop_definition::AGENT_TASK_LOOP_DEFINITION_SCHEMA;
 use crate::core::artifact_ref::{HOMEBOY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME};
+use crate::core::runner_execution_envelope::{
+    PATH_MATERIALIZATION_MODE_EXISTING_REMOTE, PATH_MATERIALIZATION_MODE_GIT,
+    PATH_MATERIALIZATION_MODE_SNAPSHOT, PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
+    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT, PATH_MATERIALIZATION_PLAN_SCHEMA,
+    PATH_MATERIALIZATION_ROLE_PRIMARY_WORKSPACE, PATH_MATERIALIZATION_ROLE_REQUIRED_PATH,
+    PATH_MATERIALIZATION_STATUS_MATERIALIZED, PATH_MATERIALIZATION_STATUS_VALIDATED,
+};
 
 pub const CONTRACT_CONSTANTS_SCHEMA: &str = "homeboy/contract-constants/v1";
 
@@ -28,6 +35,8 @@ pub enum ContractConstants {
     ResourceLifecycleIndex(ResourceLifecycleIndexConstants),
     HostMutationLifecycle(HostMutationLifecycleConstants),
     RunLocationIndex(RunLocationIndexConstants),
+    RunnerExecutionRecord(RunnerExecutionRecordConstants),
+    PathMaterializationPlan(PathMaterializationPlanConstants),
     ReviewerFacingRef(ReviewerFacingRefConstants),
 }
 
@@ -40,6 +49,8 @@ pub struct AllContractConstants {
     pub resource_lifecycle_index: ResourceLifecycleIndexConstants,
     pub host_mutation_lifecycle: HostMutationLifecycleConstants,
     pub run_location_index: RunLocationIndexConstants,
+    pub runner_execution_record: RunnerExecutionRecordConstants,
+    pub path_materialization_plan: PathMaterializationPlanConstants,
     pub reviewer_facing_ref: ReviewerFacingRefConstants,
 }
 
@@ -83,6 +94,21 @@ pub struct RunLocationIndexConstants {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerExecutionRecordConstants {
+    pub schema_id: String,
+    pub projection_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PathMaterializationPlanConstants {
+    pub schema_id: String,
+    pub roles: Vec<String>,
+    pub owners: Vec<String>,
+    pub materialization_modes: Vec<String>,
+    pub validation_statuses: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReviewerFacingRefConstants {
     pub accepted_schemes: Vec<String>,
 }
@@ -98,6 +124,8 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
             resource_lifecycle_index: resource_lifecycle_index_constants(),
             host_mutation_lifecycle: host_mutation_lifecycle_constants(),
             run_location_index: run_location_index_constants(),
+            runner_execution_record: runner_execution_record_constants(),
+            path_materialization_plan: path_materialization_plan_constants(),
             reviewer_facing_ref: reviewer_facing_ref_constants(),
         }),
         "artifact-manifest" => ContractConstants::ArtifactManifest(artifact_manifest_constants()),
@@ -113,6 +141,12 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
             ContractConstants::HostMutationLifecycle(host_mutation_lifecycle_constants())
         }
         "run-location-index" => ContractConstants::RunLocationIndex(run_location_index_constants()),
+        "runner-execution-record" => {
+            ContractConstants::RunnerExecutionRecord(runner_execution_record_constants())
+        }
+        "path-materialization-plan" => {
+            ContractConstants::PathMaterializationPlan(path_materialization_plan_constants())
+        }
         "reviewer-facing-ref" | "reviewer-ref" => {
             ContractConstants::ReviewerFacingRef(reviewer_facing_ref_constants())
         }
@@ -169,6 +203,49 @@ pub fn host_mutation_lifecycle_constants() -> HostMutationLifecycleConstants {
 pub fn run_location_index_constants() -> RunLocationIndexConstants {
     RunLocationIndexConstants {
         schema_id: registry_schema_id("run-location-index"),
+    }
+}
+
+pub fn runner_execution_record_constants() -> RunnerExecutionRecordConstants {
+    RunnerExecutionRecordConstants {
+        schema_id: registry_schema_id("runner-execution-record"),
+        projection_fields: vec![
+            "execution_id".to_string(),
+            "runner_id".to_string(),
+            "transport".to_string(),
+            "status".to_string(),
+            "job_id".to_string(),
+            "local_run_id".to_string(),
+            "remote_run_id".to_string(),
+            "agent_task_run_id".to_string(),
+            "mirror_run_id".to_string(),
+            "materialized_paths".to_string(),
+            "artifact_refs".to_string(),
+            "next_actions".to_string(),
+        ],
+    }
+}
+
+pub fn path_materialization_plan_constants() -> PathMaterializationPlanConstants {
+    PathMaterializationPlanConstants {
+        schema_id: PATH_MATERIALIZATION_PLAN_SCHEMA.to_string(),
+        roles: vec![
+            PATH_MATERIALIZATION_ROLE_PRIMARY_WORKSPACE.to_string(),
+            PATH_MATERIALIZATION_ROLE_REQUIRED_PATH.to_string(),
+        ],
+        owners: vec![
+            PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT.to_string(),
+            PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS.to_string(),
+        ],
+        materialization_modes: vec![
+            PATH_MATERIALIZATION_MODE_EXISTING_REMOTE.to_string(),
+            PATH_MATERIALIZATION_MODE_GIT.to_string(),
+            PATH_MATERIALIZATION_MODE_SNAPSHOT.to_string(),
+        ],
+        validation_statuses: vec![
+            PATH_MATERIALIZATION_STATUS_MATERIALIZED.to_string(),
+            PATH_MATERIALIZATION_STATUS_VALIDATED.to_string(),
+        ],
     }
 }
 

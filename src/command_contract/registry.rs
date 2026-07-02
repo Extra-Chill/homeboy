@@ -162,6 +162,22 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         summary: "Generic inspectable run outcome envelope that normalizes artifact, evidence, handoff, result, fuzz, and agent-task proof references.",
         rust_type: "homeboy::core::run_outcome_envelope::RunOutcomeEnvelope",
     },
+    ContractRegistryEntry {
+        schema_id: crate::core::runner_execution_envelope::RUNNER_EXECUTION_RECORD_SCHEMA,
+        name: "runner-execution-record",
+        title: "Runner execution record",
+        owner: "homeboy-core",
+        summary: "Generic terminal runner execution record with stable IDs, materialized paths, artifact references, and follow-up actions.",
+        rust_type: "homeboy::core::runner_execution_envelope::RunnerExecutionRecord",
+    },
+    ContractRegistryEntry {
+        schema_id: crate::core::runner_execution_envelope::PATH_MATERIALIZATION_PLAN_SCHEMA,
+        name: "path-materialization-plan",
+        title: "Path materialization plan",
+        owner: "homeboy-core",
+        summary: "Generic runner-side path materialization entries for source snapshots and required remote paths.",
+        rust_type: "homeboy::core::runner_execution_envelope::PathMaterializationPlan",
+    },
 ];
 
 pub fn registered_contracts() -> &'static [ContractRegistryEntry] {
@@ -209,6 +225,8 @@ mod tests {
             "resolved-agent-runtime-execution-contract",
             "reviewer-facing-artifact-ref",
             "run-outcome-envelope",
+            "runner-execution-record",
+            "path-materialization-plan",
         ] {
             assert!(names.contains(name), "missing {name}");
         }
