@@ -1,8 +1,10 @@
 use std::path::Path;
 
 use crate::core::runner::workspace::snapshot::is_excluded;
+use crate::core::runner::workspace::sync::workspace_materialization_plan;
 use crate::core::runner::workspace::types::DEFAULT_EXCLUDES;
 use crate::core::runner::workspace::util::deterministic_remote_path;
+use crate::core::runner::RunnerWorkspaceSyncMode;
 
 #[test]
 fn deterministic_path_stays_under_workspace_root() {
@@ -49,6 +51,31 @@ fn blank_run_isolation_token_does_not_change_remote_path() {
     let blank = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("   "));
 
     assert_eq!(base, blank);
+}
+
+#[test]
+fn materialization_plan_records_explicit_remote_path_contract() {
+    let path = Path::new("/Users/user/Developer/homeboy@cook-path");
+    let remote = deterministic_remote_path("/srv/homeboy/", path, "abc123", Some("run-1"));
+    let plan = workspace_materialization_plan(
+        "/srv/homeboy/",
+        path,
+        &remote,
+        RunnerWorkspaceSyncMode::Git,
+        "abc123",
+        Some("run-1"),
+    );
+
+    assert_eq!(plan.workspace_root, "/srv/homeboy");
+    assert_eq!(plan.local_basename, "homeboy@cook-path");
+    assert_eq!(plan.remote_path, remote);
+    assert_eq!(plan.sync_mode, RunnerWorkspaceSyncMode::Git);
+    assert_eq!(plan.identity, "abc123");
+    assert_eq!(plan.run_isolation_token.as_deref(), Some("run-1"));
+    assert_eq!(
+        plan.path_strategy,
+        "workspace_root_lab_workspaces_sanitized_basename_identity_digest"
+    );
 }
 
 #[test]

@@ -7,6 +7,16 @@ fn synced_workspace(local_path: String) -> RunnerWorkspaceSyncOutput {
         runner_id: "lab".to_string(),
         local_path: local_path.clone(),
         remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
+        materialization_plan: RunnerWorkspaceMaterializationPlan {
+            workspace_root: "/srv/homeboy".to_string(),
+            local_path: local_path.clone(),
+            local_basename: "app".to_string(),
+            remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
+            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            identity: "snapshot:workspace".to_string(),
+            path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
+            run_isolation_token: None,
+        },
         current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
             local_path: local_path.clone(),
             remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),

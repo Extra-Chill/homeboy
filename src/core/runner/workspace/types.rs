@@ -82,6 +82,7 @@ pub struct RunnerWorkspaceSyncOutput {
     pub runner_id: String,
     pub local_path: String,
     pub remote_path: String,
+    pub materialization_plan: RunnerWorkspaceMaterializationPlan,
     pub current_workspace: RunnerWorkspaceCurrentSummary,
     pub workspace_lease: RunnerWorkspaceLease,
     pub sync_mode: RunnerWorkspaceSyncMode,
@@ -92,6 +93,19 @@ pub struct RunnerWorkspaceSyncOutput {
     pub includes: Vec<String>,
     pub workspace_cleanliness: String,
     pub validation_dependencies: Vec<RunnerValidationDependencySyncOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceMaterializationPlan {
+    pub workspace_root: String,
+    pub local_path: String,
+    pub local_basename: String,
+    pub remote_path: String,
+    pub sync_mode: RunnerWorkspaceSyncMode,
+    pub identity: String,
+    pub path_strategy: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_isolation_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

@@ -5,8 +5,9 @@ use serde::Serialize;
 
 use crate::core::error::{Error, Result};
 use crate::core::runners::{
-    self, RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    self, RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
+    RunnerWorkspaceMaterializationPlan, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -466,6 +467,16 @@ mod tests {
             runner_id: "lab".to_string(),
             local_path: "/local/demo".to_string(),
             remote_path: "/remote/demo".to_string(),
+            materialization_plan: RunnerWorkspaceMaterializationPlan {
+                workspace_root: "/remote".to_string(),
+                local_path: "/local/demo".to_string(),
+                local_basename: "demo".to_string(),
+                remote_path: "/remote/demo".to_string(),
+                sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+                identity: "snapshot-1".to_string(),
+                path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
+                run_isolation_token: None,
+            },
             current_workspace: RunnerWorkspaceCurrentSummary {
                 local_path: "/local/demo".to_string(),
                 remote_path: "/remote/demo".to_string(),
