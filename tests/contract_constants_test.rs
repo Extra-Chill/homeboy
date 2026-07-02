@@ -20,6 +20,21 @@ fn contract_constants_exports_homeboy_owned_contract_ids() {
         "homeboy-artifact-manifest.json"
     );
     assert_eq!(
+        value["constants"]["artifact_manifest"]["runner_manifest_ref_schema_id"],
+        "homeboy/runner-artifact-manifest-ref/v1"
+    );
+    assert_eq!(
+        value["constants"]["artifact_manifest"]["runner_manifest_ref_name"],
+        "runner-artifact-manifest-ref"
+    );
+    assert!(
+        value["constants"]["artifact_manifest"]["represented_artifact_schema_ids"]
+            .as_array()
+            .expect("represented schema IDs")
+            .iter()
+            .any(|schema| schema == "homeboy/agent-task-artifact/v1")
+    );
+    assert_eq!(
         value["constants"]["artifact_postprocess"]["schema_id"],
         "homeboy/artifact-postprocess/v1"
     );
@@ -52,6 +67,22 @@ fn contract_constants_exports_homeboy_owned_contract_ids() {
             .expect("materialization modes")
             .iter()
             .any(|mode| mode == "snapshot")
+    );
+    assert_eq!(
+        value["constants"]["runtime_artifacts"]["runtime_agent_paths"]["transcript"],
+        "artifacts/agent-loop/transcript.json"
+    );
+    assert_eq!(
+        value["constants"]["runtime_artifacts"]["runtime_agent_paths"]["final_output"],
+        "artifacts/agent-loop/final.md"
+    );
+    assert_eq!(
+        value["constants"]["runtime_artifacts"]["canonical_filenames"]["agent_result"],
+        "agent-result.json"
+    );
+    assert_eq!(
+        value["constants"]["runtime_artifacts"]["executor_evidence"]["input_file_name"],
+        "executor-input.json"
     );
     assert_eq!(
         value["constants"]["host_mutation_lifecycle"]["schema_id"],

@@ -131,6 +131,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::command_contract::RunLocationIndex",
     },
     ContractRegistryEntry {
+        schema_id: crate::command_contract::RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+        name: crate::command_contract::RUNNER_ARTIFACT_MANIFEST_REF_NAME,
+        title: "Runner artifact manifest reference",
+        owner: "homeboy-core",
+        summary: "Points to a runner-resident artifact manifest and declares the manifest schema it contains.",
+        rust_type: "homeboy::command_contract::RunnerHandoffArtifactManifestRef",
+    },
+    ContractRegistryEntry {
         schema_id: crate::core::extension::EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
         name: "extension-materialization-source",
         title: "Extension materialization source",
@@ -163,6 +171,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::core::run_outcome_envelope::RunOutcomeEnvelope",
     },
     ContractRegistryEntry {
+        schema_id: crate::core::runner_execution_envelope::RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+        name: "runner-execution-envelope",
+        title: "Runner execution envelope",
+        owner: "homeboy-core",
+        summary: "Generic planned runner execution request with source, secret, artifact, mutation, publication, and result-ref policy.",
+        rust_type: "homeboy::core::runner_execution_envelope::RunnerExecutionEnvelope",
+    },
+    ContractRegistryEntry {
         schema_id: crate::core::runner_execution_envelope::RUNNER_EXECUTION_RECORD_SCHEMA,
         name: "runner-execution-record",
         title: "Runner execution record",
@@ -177,6 +193,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         owner: "homeboy-core",
         summary: "Generic runner-side path materialization entries for source snapshots and required remote paths.",
         rust_type: "homeboy::core::runner_execution_envelope::PathMaterializationPlan",
+    },
+    ContractRegistryEntry {
+        schema_id: crate::core::runner_execution_envelope::ORCHESTRATION_TARGET_PROVENANCE_SCHEMA,
+        name: "orchestration-target-provenance",
+        title: "Orchestration target provenance",
+        owner: "homeboy-core",
+        summary: "Captures the controller, runner daemon, runner command, source snapshot, and extension provenance for a selected runner target.",
+        rust_type: "homeboy::core::runner_execution_envelope::OrchestrationTargetProvenance",
     },
 ];
 
@@ -221,12 +245,15 @@ mod tests {
             "resource-cleanup-intent",
             "resource-lifecycle-index",
             "run-location-index",
+            "runner-artifact-manifest-ref",
             "extension-materialization-source",
             "resolved-agent-runtime-execution-contract",
             "reviewer-facing-artifact-ref",
             "run-outcome-envelope",
+            "runner-execution-envelope",
             "runner-execution-record",
             "path-materialization-plan",
+            "orchestration-target-provenance",
         ] {
             assert!(names.contains(name), "missing {name}");
         }
