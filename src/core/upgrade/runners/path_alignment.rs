@@ -338,6 +338,7 @@ pub fn runner_homeboy_path_alignment(
 pub fn is_auto_realignable_homeboy_path(homeboy_path: &str) -> bool {
     is_versioned_homeboy_path(homeboy_path)
         || is_disposable_lab_workspace_homeboy_path(homeboy_path)
+        || is_homeboy_source_build_path(homeboy_path)
 }
 
 pub fn is_disposable_lab_workspace_homeboy_path(homeboy_path: &str) -> bool {
@@ -360,6 +361,38 @@ pub fn is_disposable_lab_workspace_homeboy_path(homeboy_path: &str) -> bool {
         .and_then(|parent| parent.file_name())
         .and_then(|name| name.to_str())
         == Some("target")
+}
+
+pub fn is_homeboy_source_build_path(homeboy_path: &str) -> bool {
+    let path = Path::new(homeboy_path);
+    if path.file_name().and_then(|name| name.to_str()) != Some("homeboy") {
+        return false;
+    }
+    if !matches!(
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str()),
+        Some("debug" | "release")
+    ) {
+        return false;
+    }
+    if path
+        .parent()
+        .and_then(|parent| parent.parent())
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        != Some("target")
+    {
+        return false;
+    }
+
+    path.ancestors().any(|ancestor| {
+        ancestor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with("homeboy@"))
+            .unwrap_or(false)
+    })
 }
 
 pub fn is_versioned_homeboy_path(homeboy_path: &str) -> bool {
