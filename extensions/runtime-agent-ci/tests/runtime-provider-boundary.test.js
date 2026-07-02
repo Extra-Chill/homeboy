@@ -8,7 +8,7 @@ const path = require('node:path');
 const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider, runtimeIdFromOptions } = require('../lib/runtime-provider-resolver.cjs');
 const { runtimeAgentCiRunnerSpec } = require('..');
 const { runRuntimeSetup, runtimeSetupAdapter } = require('../../.github/scripts/runtime-agent-full-run/setup-runtime.cjs');
-const { envPathIsInsideWorkspace, requiresWordPressDependencies, setupRuntime } = require('../../agent-runtimes/wp-codebox/lib/runtime-setup.cjs');
+const { checkedOutPhpDependencyDirs, envPathIsInsideWorkspace, requiresWordPressDependencies, safeDependencySubdir, setupRuntime } = require('../../agent-runtimes/wp-codebox/lib/runtime-setup.cjs');
 
 assert.equal(DEFAULT_RUNTIME_ID, 'local-shell');
 
@@ -96,17 +96,46 @@ assert.deepEqual(codeboxSetupCalls.map(([command, args, options]) => ({ command,
   },
 ]);
 
-let installedCheckedOutDependencies = false;
+const dependencyWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-dependencies-'));
+const providerComposerJson = path.join(dependencyWorkspace, '.ci/ai-provider-for-openai/composer.json');
+const runtimeDependencyComposerJson = path.join(dependencyWorkspace, '.ci/dependencies/runtime-helper-plugin/plugin/composer.json');
+const arbitraryComposerJson = path.join(dependencyWorkspace, '.ci/arbitrary/composer.json');
+fs.mkdirSync(path.dirname(providerComposerJson), { recursive: true });
+fs.mkdirSync(path.dirname(runtimeDependencyComposerJson), { recursive: true });
+fs.mkdirSync(path.dirname(arbitraryComposerJson), { recursive: true });
+fs.writeFileSync(providerComposerJson, '{}\n');
+fs.writeFileSync(runtimeDependencyComposerJson, '{}\n');
+fs.writeFileSync(arbitraryComposerJson, '{}\n');
+
+assert.deepEqual(checkedOutPhpDependencyDirs({
+  workspace: dependencyWorkspace,
+  env: {
+    PROVIDER_PLUGIN: JSON.stringify({ repo: 'WordPress/ai-provider-for-openai', path: '.' }),
+    RUNTIME_DEPENDENCIES: JSON.stringify([{ repo: 'Extra-Chill/runtime-helper-plugin', ref: 'main', target: '.ci/dependencies/runtime-helper-plugin', path: 'plugin' }]),
+  },
+}), [
+  path.join(dependencyWorkspace, '.ci/dependencies/runtime-helper-plugin/plugin'),
+  path.join(dependencyWorkspace, '.ci/ai-provider-for-openai'),
+]);
+assert.throws(
+  () => safeDependencySubdir('.ci/dependencies/runtime-helper-plugin', '../escape', dependencyWorkspace),
+  /Dependency subdirectory must resolve inside dependency checkout/
+);
+
+const installedDependencyDirs = [];
 setupRuntime({
   phase: 'after_commands',
-  workspace: '/tmp/workspace',
-  env: {},
-  run: () => {},
-  installCheckedOutPhpDependencies: (workspace) => {
-    installedCheckedOutDependencies = workspace === '/tmp/workspace';
+  workspace: dependencyWorkspace,
+  env: {
+    PROVIDER_PLUGIN: JSON.stringify({ repo: 'WordPress/ai-provider-for-openai', path: '.' }),
+    RUNTIME_DEPENDENCIES: JSON.stringify([{ repo: 'Extra-Chill/runtime-helper-plugin', ref: 'main', target: '.ci/dependencies/runtime-helper-plugin', path: 'plugin' }]),
   },
+  run: (command, args, options) => installedDependencyDirs.push({ command, args, cwd: options.cwd }),
 });
-assert.equal(installedCheckedOutDependencies, true);
+assert.deepEqual(installedDependencyDirs.map((call) => call.cwd), [
+  path.join(dependencyWorkspace, '.ci/dependencies/runtime-helper-plugin/plugin'),
+  path.join(dependencyWorkspace, '.ci/ai-provider-for-openai'),
+]);
 
 const runtimeWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-runtime-'));
 const githubEnvPath = path.join(runtimeWorkspace, 'github-env');
@@ -129,7 +158,6 @@ setupRuntime({
     HOMEBOY_WP_CODEBOX_CORE_MODULE: '/home/chubes/Developer/wp-codebox@main-fuzz-proof-20260625/packages/runtime-core/dist/index.js',
   },
   run: () => {},
-  installCheckedOutPhpDependencies: () => {},
 });
 const githubEnv = fs.readFileSync(githubEnvPath, 'utf8');
 assert.match(githubEnv, new RegExp(`HOMEBOY_WP_CODEBOX_BIN=${escapeRegExp(builtCliPath)}`));
@@ -145,7 +173,6 @@ setupRuntime({
     HOMEBOY_WP_CODEBOX_CORE_MODULE: builtContractsPath,
   },
   run: () => {},
-  installCheckedOutPhpDependencies: () => {},
 });
 assert.equal(fs.readFileSync(githubEnvPath, 'utf8'), '');
 

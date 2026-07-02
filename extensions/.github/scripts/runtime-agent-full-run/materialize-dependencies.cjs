@@ -161,4 +161,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assertSafeDependencyTargetPath, dependencyEntries, resolveDependencyTarget, resolvePlan };
+module.exports = { assertSafeDependencyTargetPath, dependencyEntries, resolveDependencyTarget, resolvePlan, runtimeDependencyEntries };
