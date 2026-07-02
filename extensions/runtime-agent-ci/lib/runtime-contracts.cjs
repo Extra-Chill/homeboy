@@ -1,14 +1,27 @@
 'use strict';
 
-const SECRET_ENV_PLAN_SCHEMA = 'homeboy/secret-env-plan/v1';
-const ARTIFACT_PATHS_SCHEMA = 'homeboy/runtime-agent-artifact-paths/v1';
-const ARTIFACT_MANIFEST_CONTRACT_CONSTANTS = Object.freeze({
-  file_name: 'homeboy-artifact-manifest.json',
-  schema_id: 'homeboy/artifact-manifest/v1',
+const LOCAL_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
+  artifact_manifest: Object.freeze({
+    file_name: 'homeboy-artifact-manifest.json',
+    schema_id: 'homeboy/artifact-manifest/v1',
+  }),
+  secret_env_plan: Object.freeze({
+    schema_id: 'homeboy/secret-env-plan/v1',
+  }),
+  artifact_paths: Object.freeze({
+    schema_id: 'homeboy/runtime-agent-artifact-paths/v1',
+  }),
+  runner_artifact_manifest_ref: Object.freeze({
+    schema_id: 'homeboy/runner-artifact-manifest-ref/v1',
+  }),
 });
+
+const ARTIFACT_MANIFEST_CONTRACT_CONSTANTS = LOCAL_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
 const ARTIFACT_MANIFEST_SCHEMA = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.schema_id;
 const ARTIFACT_MANIFEST_FILE = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.file_name;
-const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = 'homeboy/runner-artifact-manifest-ref/v1';
+const SECRET_ENV_PLAN_SCHEMA = LOCAL_RUNTIME_CONTRACT_CONSTANTS.secret_env_plan.schema_id;
+const ARTIFACT_PATHS_SCHEMA = LOCAL_RUNTIME_CONTRACT_CONSTANTS.artifact_paths.schema_id;
+const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = LOCAL_RUNTIME_CONTRACT_CONSTANTS.runner_artifact_manifest_ref.schema_id;
 const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
   events: 'events.json',
   status: 'status.json',
@@ -95,14 +108,53 @@ function uniqueStrings(values) {
   return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.length > 0))).sort();
 }
 
+function runtimeContractConstantsFromHomeboyOutput(output) {
+  const constants = contractConstantsPayload(output);
+  if (!constants) {
+    return {};
+  }
+
+  const normalized = {};
+  copyContractConstants(normalized, 'artifact_manifest', constants.artifact_manifest || constants.artifactManifest || constants, ['file_name', 'schema_id']);
+  copyContractConstants(normalized, 'secret_env_plan', constants.secret_env_plan || constants.secretEnvPlan || constants, ['schema_id']);
+  copyContractConstants(normalized, 'run_location_index', constants.run_location_index || constants.runLocationIndex, ['schema_id']);
+  return normalized;
+}
+
+function contractConstantsPayload(output) {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) {
+    return null;
+  }
+  const data = output.data && typeof output.data === 'object' && !Array.isArray(output.data) ? output.data : output;
+  return data.constants && typeof data.constants === 'object' && !Array.isArray(data.constants) ? data.constants : null;
+}
+
+function copyContractConstants(target, contractName, source, names) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return;
+  }
+  const values = {};
+  for (const name of names) {
+    const value = source[name];
+    if (typeof value === 'string' && value.length > 0) {
+      values[name] = value;
+    }
+  }
+  if (Object.keys(values).length > 0) {
+    target[contractName] = values;
+  }
+}
+
 module.exports = {
   ARTIFACT_MANIFEST_CONTRACT_CONSTANTS,
   ARTIFACT_MANIFEST_FILE,
   ARTIFACT_MANIFEST_SCHEMA,
   ARTIFACT_PATHS_SCHEMA,
   CANONICAL_RUN_ARTIFACT_FILES,
+  LOCAL_RUNTIME_CONTRACT_CONSTANTS,
   RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
   SECRET_ENV_PLAN_SCHEMA,
   buildSecretEnvFallbacks,
   buildSecretEnvPlan,
+  runtimeContractConstantsFromHomeboyOutput,
 };

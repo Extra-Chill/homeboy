@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 'use strict';
 
-const fs = require('node:fs');
-const path = require('node:path');
 const {
   buildConfig,
   buildSecretEnvFallbacks,
@@ -11,16 +9,12 @@ const {
   projectRuntimeConfig,
   providerBenchEnvFromManifest,
   runtimePathRequired,
-  withoutInternalKeys,
+  writeFullRunConfig,
   workflowInputCompatibility,
 } = require('../../../runtime-agent-ci/provider-adapters');
-const { writeGithubOutput } = require('../../../runtime-agent-ci/lib/full-run-inputs.cjs');
 
 function main() {
-  const config = buildConfig(process.env);
-  fs.mkdirSync(path.dirname(config._configPath), { recursive: true });
-  fs.writeFileSync(config._configPath, `${JSON.stringify(withoutInternalKeys(config), null, 2)}\n`);
-  writeGithubOutput({ config_path: config._configPath, transcript_host_dir: config.transcript_host_dir });
+  writeFullRunConfig(process.env);
 }
 
 if (require.main === module) {
@@ -32,4 +26,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, workflowInputCompatibility };
+module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, workflowInputCompatibility, writeFullRunConfig };
