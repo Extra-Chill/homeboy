@@ -35,10 +35,10 @@ pub const EXECUTOR_INPUT_EVIDENCE_KIND: &str = "executor-input";
 pub const EXECUTOR_RESULT_EVIDENCE_KIND: &str = "executor-result";
 
 /// File name for the persisted latest raw executor request.
-const EXECUTOR_INPUT_FILE: &str = "executor-input.json";
+pub const EXECUTOR_INPUT_FILE: &str = "executor-input.json";
 
 /// File name for the persisted latest raw executor result.
-const EXECUTOR_RESULT_FILE: &str = "executor-result.json";
+pub const EXECUTOR_RESULT_FILE: &str = "executor-result.json";
 
 /// Persist the latest raw executor request and result for `request`/`outcome`
 /// and append linking evidence refs onto the outcome.

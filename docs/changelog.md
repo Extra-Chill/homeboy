@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.3] - 2026-07-02
+
+### Changed
+- Send runner snapshot to daemon exec jobs
+- Prefer configured runner homeboy path in job env
+- Add runner execution contract projections
+- Consolidate resource lifecycle cleanup primitives
+
 ## [0.280.2] - 2026-07-02
 
 ### Changed
