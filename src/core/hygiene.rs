@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::core::component::{self, Component};
 use crate::core::error::{Error, ErrorCode, Result, ValidationErrorItem};
 use crate::core::extension::{build, ExtensionCapability};
-use crate::extensions::deps_provider;
+use crate::core::deps::provider;
 
 const LAB_SOURCE_EVIDENCE_FILE: &str = ".homeboy/lab-source-evidence.json";
 const DEPENDENCY_LIFECYCLE_ARTIFACT_DIR: &str = ".homeboy/dependency-lifecycle";
@@ -541,7 +541,7 @@ pub fn materialize_worktree_dependencies(path: &Path) -> Result<bool> {
         return Ok(false);
     };
 
-    let providers = match deps_provider::resolve_dependency_providers(&component, path) {
+    let providers = match provider::resolve_dependency_providers(&component, path) {
         Ok(providers) => providers,
         // No dependency provider resolved for this worktree -> nothing to do.
         Err(_) => return Ok(false),
@@ -587,7 +587,7 @@ fn run_validation_dependency_lifecycle_isolated(component: &Component, path: &Pa
 }
 
 fn run_dependency_install_lifecycle(component: &Component, path: &Path) -> Result<()> {
-    let providers = match deps_provider::resolve_dependency_providers(component, path) {
+    let providers = match provider::resolve_dependency_providers(component, path) {
         Ok(providers) => providers,
         Err(_) => return Ok(()),
     };

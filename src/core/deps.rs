@@ -5,13 +5,18 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 mod dependency_graph;
+#[path = "npm_deps_provider.rs"]
+pub(crate) mod npm_provider;
+#[path = "deps_provider.rs"]
+pub(crate) mod provider;
 
-use crate::extensions::deps_provider as provider;
 pub use dependency_graph::{
     stack_apply, stack_apply_plan, stack_plan, stack_plan_from_components, stack_status,
     DependencyStackApplyResult, DependencyStackApplyStep, DependencyStackCommandResult,
     DependencyStackEdgeStatus, DependencyStackPlan, DependencyStackPlanStep, DependencyStackStatus,
 };
+pub use npm_provider::npm_command_args;
+pub use provider::{composer_command_args, composer_install_command_args, ComposerAction};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencyPackage {
@@ -106,6 +111,17 @@ pub fn status(
     Ok(combine_provider_statuses(&component, &path, statuses))
 }
 
+pub fn status_value(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+    package_filter: Option<&str>,
+) -> Result<serde_json::Value> {
+    serialize_dependency_output(
+        status(component_id, path_override, package_filter)?,
+        "serialize deps status",
+    )
+}
+
 pub fn update(
     component_id: Option<&str>,
     path_override: Option<&str>,
@@ -117,7 +133,7 @@ pub fn update(
     let providers = provider::resolve_dependency_providers(&component, &path)?;
 
     for provider in providers {
-        if provider.handles_package(&path, package)? {
+        if provider.handles_package(&component, &path, package)? {
             let mut result = provider.update(&component, &path, package, constraint)?;
             if options.install {
                 result.install = provider.install(&component, &path)?;
@@ -138,6 +154,26 @@ pub fn update(
         Some(package.to_string()),
         None,
     ))
+}
+
+pub fn update_value(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+    package: &str,
+    constraint: Option<&str>,
+    install: bool,
+    rebuild: bool,
+) -> Result<serde_json::Value> {
+    serialize_dependency_output(
+        update(
+            component_id,
+            path_override,
+            package,
+            constraint,
+            DependencyUpdateOptions { install, rebuild },
+        )?,
+        "serialize deps update",
+    )
 }
 
 /// Install a component's dependencies through its resolved dependency providers.
@@ -164,6 +200,16 @@ pub fn install(
             package_manager: String::new(),
             installs: Vec::new(),
         }),
+    )
+}
+
+pub fn install_value(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+) -> Result<serde_json::Value> {
+    serialize_dependency_output(
+        install(component_id, path_override)?,
+        "serialize deps install",
     )
 }
 
@@ -242,6 +288,32 @@ fn rebuild_component(component: &Component, path: &Path) -> Result<DependencyCom
         stdout,
         stderr: String::new(),
     })
+}
+
+pub fn stack_status_value() -> Result<serde_json::Value> {
+    serialize_dependency_output(stack_status()?, "serialize deps stack status")
+}
+
+pub fn stack_plan_value(upstream: &str) -> Result<serde_json::Value> {
+    serialize_dependency_output(stack_plan(upstream)?, "serialize deps stack plan")
+}
+
+pub fn stack_apply_value(
+    upstream: &str,
+    constraint: Option<&str>,
+    dry_run: bool,
+    install: bool,
+    rebuild: bool,
+) -> Result<serde_json::Value> {
+    serialize_dependency_output(
+        stack_apply(upstream, constraint, dry_run, install, rebuild)?,
+        "serialize deps stack apply",
+    )
+}
+
+fn serialize_dependency_output<T: Serialize>(value: T, context: &str) -> Result<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| Error::internal_json(e.to_string(), Some(context.to_string())))
 }
 
 fn resolve_component_path(

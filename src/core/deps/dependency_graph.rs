@@ -2,7 +2,7 @@ use crate::core::component::{self, Component, DependencyStackEdge};
 use crate::core::deps::{update, DependencyUpdateOptions};
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanValues};
 use crate::core::{Error, Result};
-use crate::extensions::deps_provider;
+use crate::core::deps::provider;
 use serde::ser::Error as SerializeError;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
@@ -272,7 +272,7 @@ fn stack_edges_from_components(
 
     for component in components {
         let path = PathBuf::from(shellexpand::tilde(&component.local_path).as_ref());
-        let snapshot = deps_provider::dependency_provider_snapshot(component, &path)?;
+        let snapshot = provider::dependency_provider_snapshot(component, &path)?;
         for identity in &snapshot.identities {
             identity_to_component
                 .entry(identity.clone())

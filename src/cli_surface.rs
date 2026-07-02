@@ -1,11 +1,11 @@
-use clap::{Command, CommandFactory, Parser, Subcommand};
+use clap::{Args, Command, CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
-    component, config, contract, daemon, db, deploy, deps, extension, file, fleet, fuzz, git, http,
+    component, config, contract, daemon, db, deploy, extension, file, fleet, fuzz, git, http,
     issues, lint, logs, manifest, observe, project, refactor, refs, release, report, review, rig,
     runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
     upgrade, version, worktree,
@@ -103,7 +103,7 @@ pub enum Commands {
     /// Database operations
     Db(db::DbArgs),
     /// Manage component dependencies
-    Deps(deps::DepsArgs),
+    Deps(DepsArgs),
     /// Inspect CI reproduction profiles and discovered CI surfaces
     Ci(ci::CiArgs),
     /// Remote file operations
@@ -188,6 +188,167 @@ pub enum Commands {
     Http(http::HttpArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
+}
+
+#[derive(Args)]
+pub struct DepsArgs {
+    #[command(subcommand)]
+    command: DepsCommand,
+}
+
+#[derive(Subcommand)]
+enum DepsCommand {
+    /// Inspect dependency constraints and locked package versions
+    Status {
+        /// Component ID. When omitted, auto-detected from CWD.
+        component: Option<String>,
+
+        /// Limit output to one package.
+        #[arg(long, value_name = "PACKAGE")]
+        package: Option<String>,
+
+        /// Workspace path to operate on directly.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Install a component's dependencies through its detected providers
+    Install {
+        /// Component ID. When omitted, auto-detected from CWD.
+        component: Option<String>,
+
+        /// Workspace path to operate on directly.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Update one package through its dependency provider
+    Update {
+        /// Package name, e.g. example-org/block-format-bridge.
+        package: String,
+
+        /// Component ID. When omitted, auto-detected from CWD.
+        component: Option<String>,
+
+        /// New manifest constraint, e.g. ^0.4.
+        #[arg(long, value_name = "CONSTRAINT")]
+        to: Option<String>,
+
+        /// Workspace path to operate on directly.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+
+        /// Skip provider-owned install/lockfile refresh after the manifest update.
+        #[arg(long)]
+        no_install: bool,
+
+        /// Rebuild the component through its generic build capability after updating.
+        #[arg(long)]
+        rebuild: bool,
+    },
+    /// Work with declared downstream dependency stacks
+    Stack {
+        #[command(subcommand)]
+        command: DepsStackCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DepsStackCommand {
+    /// List declared dependency stack edges
+    Status,
+    /// Plan downstream updates for an upstream component/repo
+    Plan {
+        /// Upstream component or repository identifier from dependency_stack[].upstream.
+        upstream: String,
+    },
+    /// Run downstream update commands for an upstream component/repo
+    Apply {
+        /// Upstream component or repository identifier from dependency_stack[].upstream.
+        upstream: String,
+
+        /// New manifest constraint to pass to provider-backed default update steps.
+        #[arg(long, value_name = "CONSTRAINT")]
+        to: Option<String>,
+
+        /// Print the command plan without running commands.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip provider-owned install/lockfile refresh after each manifest update.
+        #[arg(long)]
+        no_install: bool,
+
+        /// Rebuild each downstream component through its generic build capability.
+        #[arg(long)]
+        rebuild: bool,
+    },
+}
+
+impl DepsArgs {
+    pub(crate) fn run(self) -> homeboy::core::Result<(serde_json::Value, i32)> {
+        match self.command {
+            DepsCommand::Status {
+                component,
+                package,
+                path,
+            } => {
+                let output = homeboy::core::deps::status_value(
+                    component.as_deref(),
+                    path.as_deref(),
+                    package.as_deref(),
+                )?;
+                Ok((output, 0))
+            }
+            DepsCommand::Install { component, path } => {
+                let output =
+                    homeboy::core::deps::install_value(component.as_deref(), path.as_deref())?;
+                Ok((output, 0))
+            }
+            DepsCommand::Update {
+                package,
+                component,
+                to,
+                path,
+                no_install,
+                rebuild,
+            } => {
+                let output = homeboy::core::deps::update_value(
+                    component.as_deref(),
+                    path.as_deref(),
+                    &package,
+                    to.as_deref(),
+                    !no_install,
+                    rebuild,
+                )?;
+                Ok((output, 0))
+            }
+            DepsCommand::Stack { command } => match command {
+                DepsStackCommand::Status => {
+                    let output = homeboy::core::deps::stack_status_value()?;
+                    Ok((output, 0))
+                }
+                DepsStackCommand::Plan { upstream } => {
+                    let output = homeboy::core::deps::stack_plan_value(&upstream)?;
+                    Ok((output, 0))
+                }
+                DepsStackCommand::Apply {
+                    upstream,
+                    to,
+                    dry_run,
+                    no_install,
+                    rebuild,
+                } => {
+                    let output = homeboy::core::deps::stack_apply_value(
+                        &upstream,
+                        to.as_deref(),
+                        dry_run,
+                        !no_install,
+                        rebuild,
+                    )?;
+                    Ok((output, 0))
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

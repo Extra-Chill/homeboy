@@ -201,7 +201,6 @@ pub mod contract;
 pub mod daemon;
 pub mod db;
 pub mod deploy;
-pub mod deps;
 pub mod docs;
 pub mod extension;
 pub mod file;

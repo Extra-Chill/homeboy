@@ -1,5 +1,4 @@
 use homeboy::core::deps::{self, DependencyUpdateOptions};
-use homeboy::extensions::deps_provider;
 use std::fs;
 use tempfile::tempdir;
 
@@ -122,17 +121,17 @@ fn status_combines_composer_and_npm_providers_generically() {
 #[test]
 fn test_npm_command_args() {
     assert_eq!(
-        deps_provider::npm_command_args("fixture-package", Some("^2.0.0")),
+        deps::npm_command_args("fixture-package", Some("^2.0.0")),
         vec!["install", "fixture-package@^2.0.0"]
     );
 
     assert_eq!(
-        deps_provider::npm_command_args("@fixture/package", Some("^2.0.0")),
+        deps::npm_command_args("@fixture/package", Some("^2.0.0")),
         vec!["install", "@fixture/package@^2.0.0"]
     );
 
     assert_eq!(
-        deps_provider::npm_command_args("fixture-package", None),
+        deps::npm_command_args("fixture-package", None),
         vec!["update", "fixture-package"]
     );
 }
