@@ -25,6 +25,10 @@ pub fn route_after_parse(
         return Ok(None);
     }
 
+    if cli.runner.is_none() && crate::commands::utils::resource_policy::is_runner_hosted_exec() {
+        return Ok(None);
+    }
+
     if let (Some(runner_id), Commands::Runs(args)) = (cli.runner.as_deref(), &cli.command) {
         if !is_runs_list_runner_option(normalized_args) && !args.has_command_local_runner_option() {
             return Err(crate::commands::runs::global_runner_error(args, runner_id));
@@ -1259,6 +1263,27 @@ mod tests {
         ];
 
         let outcome = route_after_parse(&cli, &normalized, None).unwrap();
+
+        assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn runner_hosted_bench_exec_skips_recursive_lab_routing_without_explicit_runner() {
+        let _env = EnvGuard::set_many(&[
+            (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+            (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
+        ]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--allow-local-hot".to_string(),
+            "bench".to_string(),
+            "--extension".to_string(),
+            "wordpress".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let outcome = route_after_parse(&cli, &normalized, None)
+            .expect("runner-hosted bench execution should stay local");
 
         assert_eq!(outcome, None);
     }
