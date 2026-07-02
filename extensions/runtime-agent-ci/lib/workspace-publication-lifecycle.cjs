@@ -721,6 +721,13 @@ function parseHomeboyJsonOutput(stdout) {
   return plainObject(parsed?.data) ? parsed.data : parsed;
 }
 
+function requireFinalizationOutcome(report) {
+  if (!plainObject(report.finalization_outcome)) {
+    throw new Error('homeboy agent-task finalize-pr did not return finalization_outcome; upgrade Homeboy core before using runner workspace publication finalization');
+  }
+  return report.finalization_outcome;
+}
+
 function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycle = {}, hooks = {}) {
   const gateArgs = finalizationGateArgs({
     ...lifecycle,
@@ -776,24 +783,23 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
     throw new Error((result.stderr || result.stdout || 'homeboy agent-task finalize-pr failed').trim());
   }
   const report = parseHomeboyJsonOutput(result.stdout) || {};
-  const publicationProof = plainObject(report.publication_proof) ? report.publication_proof : {};
-  const target = plainObject(publicationProof.target) ? publicationProof.target : {};
-  const url = report.pr_url || publicationProof.adapter_ref || target.url || '';
-  const action = report.pr_action || publicationProof.adapter_action || '';
+  const finalizationOutcome = requireFinalizationOutcome(report);
+  const target = plainObject(finalizationOutcome.target) ? finalizationOutcome.target : {};
+  const changedFiles = Array.isArray(finalizationOutcome.changed_files) ? finalizationOutcome.changed_files : [];
   return {
     report,
-    changed: Array.isArray(report.changed_files) ? report.changed_files.length > 0 : delta.changed,
-    head: report.head || publication.branch,
-    base: report.base || publication.base,
-    url,
-    action,
-    pr_number: report.pr_number ?? null,
-    pr_state: url ? 'OPEN' : '',
-    files: Array.isArray(report.changed_files) ? report.changed_files : delta.staged,
-    // TODO(homeboy-core): pass these through when finalize-pr exposes explicit
-    // publication_intent/publication_proof fields in its JSON report.
-    publication_intent: report.publication_intent || null,
-    publication_proof: report.publication_proof || null,
+    outcome: finalizationOutcome,
+    changed: changedFiles.length > 0,
+    head: finalizationOutcome.head || target.head || publication.branch,
+    base: finalizationOutcome.base || target.base || publication.base,
+    url: finalizationOutcome.pr_url || target.url || '',
+    action: finalizationOutcome.publication_action || '',
+    publication_status: finalizationOutcome.publication_status || finalizationOutcome.status || '',
+    published: finalizationOutcome.published === true,
+    pr_number: finalizationOutcome.pr_number ?? null,
+    files: changedFiles,
+    publication_intent: report.publication_intent,
+    publication_proof: report.publication_proof,
   };
 }
 
@@ -817,31 +823,32 @@ function publishWorkspace(config, results, scenario, workspace, files, hooks = {
   const evidenceRef = publicationEvidenceRef({
     repo: publication.repo,
     head: finalization.head,
-    base: publication.base,
+    base: finalization.base,
     url,
     action: finalization.action,
     number: finalization.pr_number,
-    state: finalization.pr_state,
+    state: finalization.publication_status,
     files: finalization.files,
   });
 
 
   return {
-    opened: Boolean(url),
+    opened: finalization.published,
     changed: true,
     tool_name: 'host_runner_workspace_publication',
     source: 'host_runner_lifecycle',
-    success: Boolean(url),
+    success: finalization.published,
     repo: publication.repo,
     head: finalization.head,
-    base: publication.base,
+    base: finalization.base,
     url,
     action: finalization.action,
+    publication_status: finalization.publication_status,
     pr_number: finalization.pr_number,
-    pr_state: finalization.pr_state,
     files: finalization.files,
     publication_evidence_ref: evidenceRef,
     finalization: finalization.report,
+    finalization_outcome: finalization.outcome,
     publication_intent: finalization.publication_intent,
     publication_proof: finalization.publication_proof,
   };
@@ -1011,6 +1018,7 @@ module.exports = {
   publishWorkspace,
   prepareRunnerCommand,
   recordLifecycle,
+  requireFinalizationOutcome,
   runDeterministicWorkspaceLifecycle,
   runShellCommand,
   scenarioById,
