@@ -131,6 +131,7 @@ pub mod review;
 pub mod rig;
 pub mod run_lifecycle_record;
 pub mod run_lifecycle_status;
+pub mod run_outcome_envelope;
 pub mod runner;
 pub mod runner_execution_envelope;
 pub mod runtime_package;
