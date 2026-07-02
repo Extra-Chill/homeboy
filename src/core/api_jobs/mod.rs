@@ -416,11 +416,83 @@ mod tests {
         let events = reopened.events(job.id).expect("events persist");
         assert!(events.iter().any(|event| {
             event.kind == JobEventKind::Error
-                && event
-                    .data
-                    .as_ref()
-                    .is_some_and(|data| data["reason"] == json!("stale_after_daemon_restart"))
+                && event.data.as_ref().is_some_and(|data| {
+                    data["reason"] == json!("stale_after_daemon_restart")
+                        && data["classification"]["kind"]
+                            == json!("unrecoverable_child_after_control_plane_restart")
+                        && data["classification"]["recoverable"] == json!(false)
+                        && data["classification"]["child"]["output_observed"] == json!(false)
+                })
         }));
+    }
+
+    #[test]
+    fn durable_store_stale_restart_classification_preserves_last_child_evidence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("durable store opens");
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+            .expect("remote runner job queues");
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+            .expect("claim succeeds")
+            .expect("job claimed");
+        let claim_id = claim.job.claim_id.expect("claim id");
+        store
+            .append_remote_runner_event(
+                job.id,
+                "homeboy-lab",
+                &claim_id,
+                JobEventKind::Stdout,
+                Some("running wp test".to_string()),
+                Some(json!({ "tail": "last child output" })),
+            )
+            .expect("runner appends child output");
+
+        let reopened = JobStore::open(&path).expect("durable store reopens");
+        let stale = reopened.get(job.id).expect("job persists");
+        assert_eq!(stale.status, JobStatus::Failed);
+
+        let events = reopened.events(job.id).expect("events persist");
+        assert!(events.iter().any(|event| {
+            event.kind == JobEventKind::Stdout
+                && event.message.as_deref() == Some("running wp test")
+        }));
+        let classification = events
+            .iter()
+            .find_map(|event| {
+                (event.kind == JobEventKind::Error)
+                    .then(|| event.data.as_ref()?.get("classification"))?
+            })
+            .expect("stale classification");
+
+        assert_eq!(
+            classification["kind"],
+            json!("unrecoverable_child_after_control_plane_restart")
+        );
+        assert_eq!(classification["recoverable"], json!(false));
+        assert_eq!(
+            classification["child"]["terminal_result_recorded"],
+            json!(false)
+        );
+        assert_eq!(classification["child"]["output_observed"], json!(true));
+        assert_eq!(
+            classification["child"]["last_known_event"]["kind"],
+            json!("stdout")
+        );
+        assert_eq!(
+            classification["child"]["last_known_event"]["message"],
+            json!("running wp test")
+        );
+        assert_eq!(
+            classification["remote_runner"]["runner_id"],
+            json!("homeboy-lab")
+        );
+        assert_eq!(
+            classification["remote_runner"]["claimed_by_runner_id"],
+            json!("homeboy-lab")
+        );
     }
 
     #[test]
