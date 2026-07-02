@@ -4,7 +4,6 @@ const { spawnSync } = require('node:child_process');
 
 const {
   CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
-  PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS,
   runtimeContractConstantsFromHomeboyOutput,
 } = require('./runtime-contracts.cjs');
 
@@ -16,7 +15,6 @@ const CONTRACT_COMMANDS = Object.freeze([
 
 const LOCAL_ARTIFACT_MANIFEST_CONSTANTS = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
 const CORE_PUBLISHED_CONTRACT_CONSTANTS = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS;
-const VERSION_GATED_PENDING_CONTRACT_CONSTANTS = PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS;
 
 function probeHomeboyContractSurface(options = {}) {
   const command = options.homeboyCommand || process.env.HOMEBOY_COMMAND || 'homeboy';
@@ -93,22 +91,14 @@ function validateRuntimeContractConstants({ contract, command, argv, attempts })
 function comparableConstantsForProbe(actualConstants, expectedConstants, argv) {
   const contractId = argv[2] || '';
   return Object.fromEntries(
-    Object.entries(expectedConstants).filter(([contractName]) => {
-      if (actualConstants[contractName]) {
-        return true;
-      }
-      return contractId !== 'all' || !VERSION_GATED_PENDING_CONTRACT_CONSTANTS[contractName];
-    })
+    Object.entries(expectedConstants).filter(([contractName]) => actualConstants[contractName] || contractId !== 'all')
   );
 }
 
 function expectedConstantsForCommand(argv) {
   const contractId = argv[2] || '';
   if (contractId === 'all') {
-    return {
-      ...CORE_PUBLISHED_CONTRACT_CONSTANTS,
-      ...VERSION_GATED_PENDING_CONTRACT_CONSTANTS,
-    };
+    return CORE_PUBLISHED_CONTRACT_CONSTANTS;
   }
   if (contractId === 'artifact-manifest') {
     return { artifact_manifest: CORE_PUBLISHED_CONTRACT_CONSTANTS.artifact_manifest };
@@ -131,6 +121,5 @@ module.exports = {
   CONTRACT_COMMANDS,
   CORE_PUBLISHED_CONTRACT_CONSTANTS,
   LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
-  VERSION_GATED_PENDING_CONTRACT_CONSTANTS,
   probeHomeboyContractSurface,
 };

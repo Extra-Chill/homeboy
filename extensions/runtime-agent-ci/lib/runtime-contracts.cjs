@@ -13,31 +13,22 @@ const CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
   }),
 });
 
-// TODO(core-contract-export): remove these fallbacks once Homeboy core exports
-// these constants from `homeboy contract constants all`. The probe treats them
-// as optional until then, but validates them as soon as a current Homeboy binary
-// starts publishing the contract names.
-const PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
+// Extension-local artifact schemas. These remain here until Homeboy core exports
+// contract constants for the runtime artifact path/ref boundary.
+const EXTENSION_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
   artifact_paths: Object.freeze({
     schema_id: 'homeboy/runtime-agent-artifact-paths/v1',
   }),
   runner_artifact_manifest_ref: Object.freeze({
     schema_id: 'homeboy/runner-artifact-manifest-ref/v1',
   }),
-  runner_execution_record: Object.freeze({
-    schema_id: 'homeboy/runner-execution-record/v1',
-  }),
-  path_materialization_plan: Object.freeze({
-    schema_id: 'homeboy/path-materialization-plan/v1',
-  }),
-  run_outcome_envelope: Object.freeze({
-    schema_id: 'homeboy/run-outcome-envelope/v1',
-  }),
 });
+
+const CORE_RUNTIME_CONTRACT_EXPORT_BLOCKERS = Object.freeze(Object.keys(EXTENSION_RUNTIME_CONTRACT_CONSTANTS));
 
 const RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
   ...CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
-  ...PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS,
+  ...EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
 });
 
 const ARTIFACT_MANIFEST_CONTRACT_CONSTANTS = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
@@ -45,11 +36,8 @@ const ARTIFACT_MANIFEST_SCHEMA = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.schema_id;
 const ARTIFACT_MANIFEST_FILE = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.file_name;
 const SECRET_ENV_PLAN_SCHEMA = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.secret_env_plan.schema_id;
 const RUN_LOCATION_INDEX_SCHEMA = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_location_index.schema_id;
-const ARTIFACT_PATHS_SCHEMA = PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS.artifact_paths.schema_id;
-const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS.runner_artifact_manifest_ref.schema_id;
-const RUNNER_EXECUTION_RECORD_SCHEMA = PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS.runner_execution_record.schema_id;
-const PATH_MATERIALIZATION_PLAN_SCHEMA = PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS.path_materialization_plan.schema_id;
-const RUN_OUTCOME_ENVELOPE_SCHEMA = PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope.schema_id;
+const ARTIFACT_PATHS_SCHEMA = EXTENSION_RUNTIME_CONTRACT_CONSTANTS.artifact_paths.schema_id;
+const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = EXTENSION_RUNTIME_CONTRACT_CONSTANTS.runner_artifact_manifest_ref.schema_id;
 const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
   events: 'events.json',
   status: 'status.json',
@@ -184,12 +172,10 @@ module.exports = {
   ARTIFACT_MANIFEST_SCHEMA,
   ARTIFACT_PATHS_SCHEMA,
   CANONICAL_RUN_ARTIFACT_FILES,
+  CORE_RUNTIME_CONTRACT_EXPORT_BLOCKERS,
   CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
-  PATH_MATERIALIZATION_PLAN_SCHEMA,
-  PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS,
+  EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
   RUN_LOCATION_INDEX_SCHEMA,
-  RUN_OUTCOME_ENVELOPE_SCHEMA,
-  RUNNER_EXECUTION_RECORD_SCHEMA,
   RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
   RUNTIME_CONTRACT_CONSTANTS,
   SECRET_ENV_PLAN_SCHEMA,

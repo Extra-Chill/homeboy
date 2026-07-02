@@ -5,7 +5,6 @@ const assert = require('node:assert/strict');
 const {
   CORE_PUBLISHED_CONTRACT_CONSTANTS,
   LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
-  VERSION_GATED_PENDING_CONTRACT_CONSTANTS,
   probeHomeboyContractSurface,
 } = require('../lib/homeboy-contract-surface-probe.cjs');
 const {
@@ -41,32 +40,6 @@ const releasedContractShape = probeHomeboyContractSurface({
 
 assert.equal(releasedContractShape.status, 'passed');
 assert.deepEqual(releasedContractShape.argv, ['contract', 'constants', 'all']);
-
-const pendingContractShape = probeHomeboyContractSurface({
-  homeboyCommand: 'homeboy',
-  spawnSync: () => ({
-    status: 0,
-    stdout: JSON.stringify({
-      success: true,
-      data: {
-        constants: {
-          ...CORE_PUBLISHED_CONTRACT_CONSTANTS,
-          runner_execution_record: VERSION_GATED_PENDING_CONTRACT_CONSTANTS.runner_execution_record,
-          path_materialization_plan: VERSION_GATED_PENDING_CONTRACT_CONSTANTS.path_materialization_plan,
-          run_outcome_envelope: VERSION_GATED_PENDING_CONTRACT_CONSTANTS.run_outcome_envelope,
-        },
-        contract_id: 'all',
-        schema: 'homeboy/contract-constants/v1',
-      },
-    }),
-    stderr: '',
-  }),
-});
-
-assert.equal(pendingContractShape.status, 'passed');
-assert.deepEqual(pendingContractShape.constants.runner_execution_record, { schema_id: 'homeboy/runner-execution-record/v1' });
-assert.deepEqual(pendingContractShape.constants.path_materialization_plan, { schema_id: 'homeboy/path-materialization-plan/v1' });
-assert.deepEqual(pendingContractShape.constants.run_outcome_envelope, { schema_id: 'homeboy/run-outcome-envelope/v1' });
 
 assert.deepEqual(runtimeContractConstantsFromHomeboyOutput({
   data: {
