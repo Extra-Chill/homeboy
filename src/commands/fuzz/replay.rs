@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use homeboy::core::artifact_address::{ArtifactAddress, ArtifactAddressKind};
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
 use homeboy::core::fuzz::{
@@ -12,7 +13,8 @@ use homeboy::core::{Error, ErrorCode};
 
 use super::super::utils::args::PositionalComponentArgs;
 use super::types::{
-    FuzzMinimizeArgs, FuzzReplayArgs, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput,
+    FuzzMinimizeArgs, FuzzReplayArgs, FuzzReplayArtifactAccess, FuzzReplayEnv, FuzzReplayExecution,
+    FuzzReplayOutput,
 };
 use super::workloads::{load_rig, resolve_component_id, resolve_fuzz_context};
 
@@ -34,14 +36,22 @@ fn run_replay_like(
     mode: ReplayLikeMode,
 ) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
     let mut artifact_ref = replay_artifact_ref(&args);
+    let mut artifact_access = None;
     let artifact_file = match replay_artifact_path(&args) {
         Some(path) => Some(path),
         None if artifact_ref.is_none() => {
             match resolve_run_replay_artifact_source(args.run_id.as_deref(), args.dry_run)
                 .transpose()?
             {
-                Some(ReplayArtifactSource::Local(path)) => Some(path),
-                Some(ReplayArtifactSource::Reference(reference)) => {
+                Some(ReplayArtifactSource::Local(path, artifact)) => {
+                    artifact_access = artifact.as_ref().map(fuzz_replay_artifact_access);
+                    Some(path)
+                }
+                Some(ReplayArtifactSource::Reference(reference, artifact)) => {
+                    artifact_access = Some(match artifact.as_ref() {
+                        Some(artifact) => fuzz_replay_artifact_access(artifact),
+                        None => reference_artifact_access(&reference),
+                    });
                     artifact_ref = Some(reference);
                     None
                 }
@@ -63,6 +73,12 @@ fn run_replay_like(
         return Err(runner_artifact_replay_requires_local_bytes(
             artifact_ref.as_deref().unwrap_or_default(),
         ));
+    }
+
+    if artifact_access.is_none() {
+        artifact_access = artifact_ref
+            .as_ref()
+            .map(|reference| reference_artifact_access(reference));
     }
 
     let resolved = if let Some(path) = artifact_file.as_ref() {
@@ -95,6 +111,9 @@ fn run_replay_like(
         .as_ref()
         .and_then(|context| context.command.clone())
         .map(|command| render_replay_command(&command, &env, args.args.as_slice()));
+    let extension_contract = replay_extension_contract(replay_context.as_ref(), mode);
+    let owner_next_step =
+        replay_owner_next_step(replay_context.as_ref(), replay_command.as_ref(), mode);
 
     if args.dry_run {
         let status = if artifact_file.is_some() || artifact_ref.is_some() {
@@ -108,9 +127,12 @@ fn run_replay_like(
                 command: mode.command_name().to_string(),
                 status: status.to_string(),
                 message: replay_message(replay_command.as_ref(), true, mode),
+                replay_mode: mode.label().to_string(),
+                required_manifest_key: mode.manifest_key().to_string(),
                 artifact_file: artifact_file
                     .map(|path| path.to_string_lossy().to_string())
                     .or(artifact_ref.clone()),
+                artifact_access,
                 campaign_id: resolved
                     .as_ref()
                     .and_then(|resolved| resolved.campaign_id.clone()),
@@ -124,7 +146,9 @@ fn run_replay_like(
                 replay_command,
                 execution: None,
                 passthrough_args: args.args,
-                next_steps: replay_next_steps(true),
+                extension_contract,
+                owner_next_step,
+                next_steps: replay_next_steps(true, mode),
             },
             0,
         ));
@@ -135,9 +159,12 @@ fn run_replay_like(
             command: mode.command_name().to_string(),
             status: "unsupported".to_string(),
             message: format!("Generic fuzz {} execution requires a component/rig extension context with fuzz.{}; use --dry-run to inspect metadata only.", mode.label(), mode.manifest_key()),
+            replay_mode: mode.label().to_string(),
+            required_manifest_key: mode.manifest_key().to_string(),
             artifact_file: artifact_file
                 .map(|path| path.to_string_lossy().to_string())
                 .or(artifact_ref.clone()),
+            artifact_access,
             campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
             envelope_id: resolved.as_ref().and_then(|resolved| resolved.envelope_id.clone()),
             case_id,
@@ -147,7 +174,9 @@ fn run_replay_like(
             replay_command: None,
             execution: None,
             passthrough_args: args.args,
-            next_steps: replay_next_steps(false),
+            extension_contract,
+            owner_next_step,
+            next_steps: replay_next_steps(false, mode),
         }, 1));
     };
 
@@ -161,9 +190,12 @@ fn run_replay_like(
                 mode.manifest_key(),
                 mode.label()
             ),
+            replay_mode: mode.label().to_string(),
+            required_manifest_key: mode.manifest_key().to_string(),
             artifact_file: artifact_file
                 .map(|path| path.to_string_lossy().to_string())
                 .or(artifact_ref.clone()),
+            artifact_access,
             campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
             envelope_id: resolved.as_ref().and_then(|resolved| resolved.envelope_id.clone()),
             case_id,
@@ -173,7 +205,9 @@ fn run_replay_like(
             replay_command: None,
             execution: None,
             passthrough_args: args.args,
-            next_steps: replay_next_steps(false),
+            extension_contract,
+            owner_next_step,
+            next_steps: replay_next_steps(false, mode),
         }, 1));
     };
 
@@ -197,9 +231,12 @@ fn run_replay_like(
             command: mode.command_name().to_string(),
             status: if output.success { "passed" } else { "failed" }.to_string(),
             message: replay_message(Some(&command), false, mode),
+            replay_mode: mode.label().to_string(),
+            required_manifest_key: mode.manifest_key().to_string(),
             artifact_file: artifact_file
                 .map(|path| path.to_string_lossy().to_string())
                 .or(artifact_ref.clone()),
+            artifact_access,
             campaign_id: resolved
                 .as_ref()
                 .and_then(|resolved| resolved.campaign_id.clone()),
@@ -221,7 +258,9 @@ fn run_replay_like(
                 stderr: output.stderr,
             }),
             passthrough_args: args.args,
-            next_steps: replay_next_steps(false),
+            extension_contract,
+            owner_next_step,
+            next_steps: replay_next_steps(false, mode),
         },
         exit_code,
     ))
@@ -378,10 +417,45 @@ fn replay_message(command: Option<&String>, dry_run: bool, mode: ReplayLikeMode)
     }
 }
 
-fn replay_next_steps(dry_run: bool) -> Vec<String> {
+fn replay_extension_contract(
+    context: Option<&ResolvedReplayContext>,
+    mode: ReplayLikeMode,
+) -> Vec<String> {
+    let owner = context
+        .map(|context| context.execution_context.extension_id.as_str())
+        .unwrap_or("component/rig fuzz extension");
+    vec![
+        format!("Artifact replay metadata resolution is separate from executable {} availability.", mode.label()),
+        format!("Extension owner `{owner}` must declare fuzz.{} in its manifest.", mode.manifest_key()),
+        format!("Homeboy provides HOMEBOY_FUZZ_REPLAY_* environment variables plus passthrough args to the extension-owned {} command.", mode.label()),
+    ]
+}
+
+fn replay_owner_next_step(
+    context: Option<&ResolvedReplayContext>,
+    command: Option<&String>,
+    mode: ReplayLikeMode,
+) -> Option<String> {
+    if command.is_some() {
+        return None;
+    }
+    Some(match context {
+        Some(context) => format!(
+            "Add fuzz.{} to extension `{}` so resolved replay metadata can be executed.",
+            mode.manifest_key(),
+            context.execution_context.extension_id
+        ),
+        None => format!(
+            "Run with --component/--rig for the owning fuzz extension, then add fuzz.{} there if it is absent.",
+            mode.manifest_key()
+        ),
+    })
+}
+
+fn replay_next_steps(dry_run: bool, mode: ReplayLikeMode) -> Vec<String> {
     if dry_run {
         return vec![
-            "Run without --dry-run to execute the resolved extension replay_command.".to_string(),
+            format!("Run without --dry-run to execute the resolved extension {} when it is declared.", mode.manifest_key()),
             "Use `homeboy runs artifacts <run-id>` to locate persisted fuzz evidence when a runner records it.".to_string(),
         ];
     }
@@ -390,6 +464,44 @@ fn replay_next_steps(dry_run: bool) -> Vec<String> {
         "Inspect execution stdout/stderr in this replay result for runner-owned reproduction details.".to_string(),
         "Use `homeboy runs artifacts <run-id>` to locate persisted fuzz evidence when a runner records it.".to_string(),
     ]
+}
+
+fn fuzz_replay_artifact_access(artifact: &ArtifactRecord) -> FuzzReplayArtifactAccess {
+    let address = ArtifactAddress::from_record(artifact);
+    let (public_access, public_url) = match address.kind {
+        ArtifactAddressKind::PublicUrl => ("public".to_string(), Some(address.value.clone())),
+        ArtifactAddressKind::RemoteRunnerRef => ("runner_reference".to_string(), None),
+        ArtifactAddressKind::LocalOperatorPath => ("local_only".to_string(), None),
+        ArtifactAddressKind::MetadataOnly => ("metadata_only".to_string(), None),
+    };
+    FuzzReplayArtifactAccess {
+        status: "resolved".to_string(),
+        artifact_id: Some(artifact.id.clone()),
+        reference: Some(address.value),
+        public_access,
+        public_url,
+        fetch_command: Some(format!(
+            "homeboy runs artifact get {} {} --output <path>",
+            artifact.run_id, artifact.id
+        )),
+        publish_command: None,
+    }
+}
+
+fn reference_artifact_access(reference: &str) -> FuzzReplayArtifactAccess {
+    FuzzReplayArtifactAccess {
+        status: "resolved_reference".to_string(),
+        artifact_id: None,
+        reference: Some(reference.to_string()),
+        public_access: if reference.starts_with("runner-artifact://") {
+            "runner_reference".to_string()
+        } else {
+            "unknown".to_string()
+        },
+        public_url: None,
+        fetch_command: None,
+        publish_command: None,
+    }
 }
 
 fn render_replay_command(command: &str, env: &[FuzzReplayEnv], args: &[String]) -> String {
@@ -476,8 +588,8 @@ fn runner_artifact_replay_requires_local_bytes(reference: &str) -> homeboy::core
 }
 
 enum ReplayArtifactSource {
-    Local(PathBuf),
-    Reference(String),
+    Local(PathBuf, Option<ArtifactRecord>),
+    Reference(String, Option<ArtifactRecord>),
 }
 
 fn resolve_run_replay_artifact_source(
@@ -525,14 +637,16 @@ where
     for artifact in &candidates {
         let path = PathBuf::from(&artifact.path);
         if path.is_file() {
-            return Ok(ReplayArtifactSource::Local(path));
+            return Ok(ReplayArtifactSource::Local(path, Some(artifact.clone())));
         }
     }
 
     for artifact in &candidates {
         if is_retrievable_runner_artifact(&artifact.path) {
             match download_remote_artifact(artifact) {
-                Ok(path) if path.is_file() => return Ok(ReplayArtifactSource::Local(path)),
+                Ok(path) if path.is_file() => {
+                    return Ok(ReplayArtifactSource::Local(path, Some(artifact.clone())));
+                }
                 Ok(path) => download_errors.push(format!(
                     "artifact {} mirrored to {} but no file was available",
                     artifact.id,
@@ -549,12 +663,15 @@ where
     if allow_ref_without_bytes {
         if let Some(artifact) = candidates.first() {
             if is_retrievable_runner_artifact(&artifact.path) {
-                return Ok(ReplayArtifactSource::Reference(artifact.path.clone()));
+                return Ok(ReplayArtifactSource::Reference(
+                    artifact.path.clone(),
+                    Some(artifact.clone()),
+                ));
             }
-            return Ok(ReplayArtifactSource::Reference(format!(
-                "homeboy://run/{run_id}/artifact/{}",
-                artifact.id
-            )));
+            return Ok(ReplayArtifactSource::Reference(
+                format!("homeboy://run/{run_id}/artifact/{}", artifact.id),
+                Some(artifact.clone()),
+            ));
         }
     }
 
@@ -688,9 +805,13 @@ mod replay_artifact_source_tests {
             )
             .expect("resolve source");
 
-            let ReplayArtifactSource::Local(path) = source else {
+            let ReplayArtifactSource::Local(path, artifact) = source else {
                 panic!("expected mirrored local source");
             };
+            assert_eq!(
+                artifact.as_ref().map(|artifact| artifact.id.as_str()),
+                Some("4ff1f923-a7c0-47dc-8ba4-cbdbc92e0d62")
+            );
             let resolved = resolve_replay_artifact(&path, Some("case-1")).expect("artifact");
             assert_eq!(resolved.envelope_id.as_deref(), Some("envelope-1"));
             assert_eq!(resolved.campaign_id.as_deref(), Some("campaign-1"));
@@ -747,10 +868,14 @@ mod replay_artifact_source_tests {
             )
             .expect("resolve source");
 
-            let ReplayArtifactSource::Reference(actual) = source else {
+            let ReplayArtifactSource::Reference(actual, artifact) = source else {
                 panic!("expected runner reference fallback");
             };
             assert_eq!(actual, reference);
+            assert_eq!(
+                artifact.as_ref().map(|artifact| artifact.id.as_str()),
+                Some("artifact-1")
+            );
         });
     }
 }

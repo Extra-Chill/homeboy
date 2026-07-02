@@ -353,7 +353,11 @@ pub struct FuzzReplayOutput {
     pub command: String,
     pub status: String,
     pub message: String,
+    pub replay_mode: String,
+    pub required_manifest_key: String,
     pub artifact_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_access: Option<FuzzReplayArtifactAccess>,
     pub campaign_id: Option<String>,
     pub envelope_id: Option<String>,
     pub case_id: Option<String>,
@@ -363,7 +367,20 @@ pub struct FuzzReplayOutput {
     pub replay_command: Option<String>,
     pub execution: Option<FuzzReplayExecution>,
     pub passthrough_args: Vec<String>,
+    pub extension_contract: Vec<String>,
+    pub owner_next_step: Option<String>,
     pub next_steps: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct FuzzReplayArtifactAccess {
+    pub status: String,
+    pub artifact_id: Option<String>,
+    pub reference: Option<String>,
+    pub public_access: String,
+    pub public_url: Option<String>,
+    pub fetch_command: Option<String>,
+    pub publish_command: Option<String>,
 }
 
 #[derive(Serialize)]

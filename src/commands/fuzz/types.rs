@@ -515,6 +515,6 @@ pub use super::types_extra::{
     FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput,
     FuzzDiscoverSummary, FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange,
     FuzzInspectCandidate, FuzzInspectOutput, FuzzListOutput, FuzzOutput, FuzzPlanOutput,
-    FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput,
-    FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
+    FuzzReplayArtifactAccess, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput,
+    FuzzReportOutput, FuzzRunOutput, FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
 };
