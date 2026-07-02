@@ -806,6 +806,95 @@ mod tests {
     }
 
     #[test]
+    fn final_remote_command_forwards_rig_bench_env_provider_extension() {
+        crate::test_support::with_isolated_home(|home| {
+            let rigs_dir = home.path().join(".config/homeboy/rigs");
+            std::fs::create_dir_all(&rigs_dir).expect("rigs dir");
+            std::fs::write(
+                rigs_dir.join("static-site-importer-fixture-matrix.json"),
+                r#"{
+                    "components": {
+                        "static-site-importer": {
+                            "component_id": "static-site-importer",
+                            "path": "/controller/workspaces/static-site-importer"
+                        }
+                    },
+                    "bench": { "default_component": "static-site-importer" },
+                    "bench_workloads": {
+                        "nodejs": [
+                            {
+                                "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs",
+                                "env_provider_extensions": ["wordpress"]
+                            }
+                        ]
+                    }
+                }"#,
+            )
+            .expect("rig spec");
+
+            let args = vec![
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "bench".to_string(),
+                "static-site-importer".to_string(),
+                "--path".to_string(),
+                "/controller/workspaces/static-site-importer".to_string(),
+                "--rig".to_string(),
+                "static-site-importer-fixture-matrix".to_string(),
+            ];
+            let cli = Cli::parse_from(&args);
+            let route_contract = cli
+                .command
+                .lab_route_contract()
+                .expect("route contract result")
+                .expect("bench supports lab offload");
+            let contract =
+                crate::core::lab_routing::lab_offload_command_from_route_contract(route_contract);
+
+            let command = build_lab_offload_remote_command(
+                &["/runner/bin/homeboy".to_string()],
+                &args,
+                "/runner/workspaces/static-site-importer",
+                &[],
+                None,
+                &contract.required_extensions,
+            );
+
+            let wordpress_flag = command
+                .windows(2)
+                .position(|window| window == ["--extension", "wordpress"])
+                .expect("final remote command includes --extension wordpress");
+            let rig_flag = command
+                .iter()
+                .position(|arg| arg == "--rig")
+                .expect("final remote command includes --rig");
+            assert!(
+                wordpress_flag < rig_flag,
+                "--extension wordpress must be injected before --rig in final runner command: {}",
+                command.join(" ")
+            );
+            assert_eq!(
+                command,
+                vec![
+                    "/runner/bin/homeboy".to_string(),
+                    "--force-hot".to_string(),
+                    "bench".to_string(),
+                    "--extension".to_string(),
+                    "nodejs".to_string(),
+                    "--extension".to_string(),
+                    "wordpress".to_string(),
+                    "static-site-importer".to_string(),
+                    "--path".to_string(),
+                    "/runner/workspaces/static-site-importer".to_string(),
+                    "--rig".to_string(),
+                    "static-site-importer-fixture-matrix".to_string(),
+                ]
+            );
+        });
+    }
+
+    #[test]
     fn final_remote_command_keeps_explicit_extension_override() {
         let args = vec![
             "homeboy".to_string(),

@@ -116,10 +116,16 @@ impl BenchArgs {
         let mut extension_ids = BTreeSet::new();
         for rig_id in &run.rig {
             let spec = rig::load(rig_id)?;
-            extension_ids.extend(rig::extension_ids_for_workloads(
-                &spec,
-                rig::RigWorkloadKind::Bench,
-            ));
+            let workload_extension_ids =
+                rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Bench);
+            for extension_id in &workload_extension_ids {
+                extension_ids.extend(rig::env_provider_extensions_for_extension_workloads(
+                    &spec,
+                    rig::RigWorkloadKind::Bench,
+                    extension_id,
+                ));
+            }
+            extension_ids.extend(workload_extension_ids);
             extension_ids.extend(bench_component_extension_ids(&spec, run.comp.id()));
         }
         Ok(extension_ids.into_iter().collect())
