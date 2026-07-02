@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub const ARTIFACT_MANIFEST_FILE: &str = "homeboy-artifact-manifest.json";
 pub const ARTIFACT_MANIFEST_SCHEMA: &str = "homeboy/artifact-manifest/v1";
+pub const RUNTIME_AGENT_ARTIFACT_PATHS_SCHEMA: &str = "homeboy/runtime-agent-artifact-paths/v1";
 
 /// Stable runtime-agent artifact path for an agent execution transcript.
 pub const RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH: &str = "artifacts/agent-loop/transcript.json";
