@@ -117,6 +117,42 @@ pub struct RunnerExecutionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerExecutionProjection {
+    pub schema: String,
+    pub execution_id: String,
+    pub runner_id: String,
+    pub transport: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_task_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materialized_paths: Vec<PathMaterializationProjection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<RunnerExecutionArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<RunnerExecutionNextAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathMaterializationProjection {
+    pub role: String,
+    pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    pub remote_path: String,
+    pub materialization_mode: String,
+    pub validation_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PathMaterializationPlan {
     #[serde(default = "path_materialization_plan_schema")]
     pub schema: String,
@@ -223,6 +259,13 @@ impl PathMaterializationPlan {
         } else {
             Some(plan)
         }
+    }
+
+    pub fn projection_entries(&self) -> Vec<PathMaterializationProjection> {
+        self.entries
+            .iter()
+            .map(PathMaterializationProjection::from)
+            .collect()
     }
 }
 
@@ -394,6 +437,41 @@ impl RunnerExecutionRecord {
     ) -> Self {
         self.next_actions = next_actions.into_iter().collect();
         self
+    }
+
+    pub fn projection(&self) -> RunnerExecutionProjection {
+        RunnerExecutionProjection {
+            schema: self.schema.clone(),
+            execution_id: self.execution_id.clone(),
+            runner_id: self.runner_id.clone(),
+            transport: self.transport.clone(),
+            status: self.status.clone(),
+            job_id: self.job_id.clone(),
+            local_run_id: self.local_run_id.clone(),
+            remote_run_id: self.remote_run_id.clone(),
+            agent_task_run_id: self.agent_task_run_id.clone(),
+            mirror_run_id: self.mirror_run_id.clone(),
+            materialized_paths: self
+                .path_materialization_plan
+                .as_ref()
+                .map(PathMaterializationPlan::projection_entries)
+                .unwrap_or_default(),
+            artifact_refs: self.artifact_refs.clone(),
+            next_actions: self.next_actions.clone(),
+        }
+    }
+}
+
+impl From<&PathMaterializationEntry> for PathMaterializationProjection {
+    fn from(entry: &PathMaterializationEntry) -> Self {
+        Self {
+            role: entry.role.clone(),
+            owner: entry.owner.clone(),
+            local_path: entry.local_path.clone(),
+            remote_path: entry.remote_path.clone(),
+            materialization_mode: entry.materialization_mode.clone(),
+            validation_status: entry.validation_status.clone(),
+        }
     }
 }
 
@@ -814,6 +892,38 @@ mod tests {
             PATH_MATERIALIZATION_STATUS_VALIDATED
         );
         assert!(PathMaterializationPlan::non_empty(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn runner_execution_projection_flattens_materialized_paths() {
+        let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
+            .with_job_id("job-1")
+            .with_mirror_run_id(Some("run-1".to_string()))
+            .with_path_materialization_plan(Some(PathMaterializationPlan::new(vec![
+                PathMaterializationEntry::primary_workspace_materialized(
+                    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
+                    Some("/local/project".to_string()),
+                    "/runner/project",
+                    PathMaterializationMode::Snapshot.to_string(),
+                ),
+                PathMaterializationEntry::required_existing_remote("/runner/cache"),
+            ])));
+
+        let projection = record.projection();
+
+        assert_eq!(projection.execution_id, "job-1");
+        assert_eq!(projection.runner_id, "lab-a");
+        assert_eq!(projection.job_id.as_deref(), Some("job-1"));
+        assert_eq!(projection.remote_run_id.as_deref(), Some("run-1"));
+        assert_eq!(projection.materialized_paths.len(), 2);
+        assert_eq!(
+            projection.materialized_paths[0].remote_path,
+            "/runner/project"
+        );
+        assert_eq!(
+            projection.materialized_paths[1].role,
+            PATH_MATERIALIZATION_ROLE_REQUIRED_PATH
+        );
     }
 
     #[test]

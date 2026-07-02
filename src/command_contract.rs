@@ -30,11 +30,12 @@ pub use crate::core::artifact_ref::{
 };
 pub use constants::{
     artifact_manifest_constants, artifact_postprocess_constants, contract_constants,
-    loop_constants, resource_lifecycle_index_constants, reviewer_facing_ref_constants,
-    run_location_index_constants, secret_env_plan_constants, AllContractConstants,
-    ArtifactManifestConstants, ArtifactPostprocessConstants, ContractConstants,
-    ContractConstantsOutput, LoopConstants, ResourceLifecycleIndexConstants,
-    ReviewerFacingRefConstants, RunLocationIndexConstants, SecretEnvPlanConstants,
+    loop_constants, path_materialization_plan_constants, resource_lifecycle_index_constants,
+    reviewer_facing_ref_constants, run_location_index_constants, runner_execution_record_constants,
+    secret_env_plan_constants, AllContractConstants, ArtifactManifestConstants,
+    ArtifactPostprocessConstants, ContractConstants, ContractConstantsOutput, LoopConstants,
+    PathMaterializationPlanConstants, ResourceLifecycleIndexConstants, ReviewerFacingRefConstants,
+    RunLocationIndexConstants, RunnerExecutionRecordConstants, SecretEnvPlanConstants,
     CONTRACT_CONSTANTS_SCHEMA,
 };
 pub use lab::{
@@ -83,5 +84,16 @@ pub use crate::core::artifacts::{
 };
 pub use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
 pub use crate::core::run_outcome_envelope::{
-    RunOutcomeEnvelope, RunOutcomeHandoffRef, RUN_OUTCOME_ENVELOPE_SCHEMA,
+    RunOutcomeEnvelope, RunOutcomeHandoffRef, RunOutcomeProjection, RUN_OUTCOME_ENVELOPE_SCHEMA,
+};
+pub use crate::core::runner_execution_envelope::{
+    PathMaterializationEntry, PathMaterializationMode, PathMaterializationPlan,
+    PathMaterializationProjection, RunnerExecutionArtifactRef, RunnerExecutionNextAction,
+    RunnerExecutionProjection, RunnerExecutionRecord, PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+    PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_MODE_SNAPSHOT,
+    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
+    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT, PATH_MATERIALIZATION_PLAN_SCHEMA,
+    PATH_MATERIALIZATION_ROLE_PRIMARY_WORKSPACE, PATH_MATERIALIZATION_ROLE_REQUIRED_PATH,
+    PATH_MATERIALIZATION_STATUS_MATERIALIZED, PATH_MATERIALIZATION_STATUS_VALIDATED,
+    RUNNER_EXECUTION_RECORD_SCHEMA,
 };
