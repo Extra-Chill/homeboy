@@ -39,7 +39,11 @@ pub(super) fn lab_runner_capability_contract(
     Some(LabRunnerCapabilityContract {
         command: command.hot_label,
         required_tools,
-        requires_playwright: command.requires_playwright,
+        required_capabilities: command
+            .required_capabilities
+            .iter()
+            .map(|capability| capability.name.clone())
+            .collect(),
     })
 }
 

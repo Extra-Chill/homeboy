@@ -389,7 +389,7 @@ pub fn lab_offload_command_from_route_contract(
             }
         },
         required_extensions: plan.required_extensions,
-        requires_playwright: plan.requires_playwright,
+        required_capabilities: plan.required_capabilities,
         routing_policy: plan.routing_policy,
     }
 }
@@ -418,7 +418,7 @@ pub(crate) fn lab_route_plan_from_route_contract(
         LabWorkspaceModePolicy::RunnerResident => CommandWorkspacePolicy::RunnerResident,
     };
     plan.required_extensions = route_contract.required_extensions;
-    plan.requires_playwright = route_contract.requires_playwright;
+    plan.required_capabilities = route_contract.required_capabilities;
     plan
 }
 
@@ -503,7 +503,7 @@ mod tests {
     use super::*;
     use crate::command_contract::{
         LabCommandContract, LabCommandPortability, LabRoutingPolicy, LabSourcePathMode,
-        LAB_TRACE_EXTRA_TOOLS,
+        LAB_CAPABILITY_PLAYWRIGHT, LAB_TRACE_EXTRA_CAPABILITIES,
     };
     use crate::core::command_execution_plan::{
         CommandPortability, CommandSourcePolicy, CommandWorkspacePolicy,
@@ -549,7 +549,7 @@ mod tests {
             workspace_mode_policy: LabWorkspaceModePolicy::GitCheckoutRequired,
             capture_mutation_patch: true,
             mutation_flag: Some("--keep-overlay"),
-            extra_required_tools: LAB_TRACE_EXTRA_TOOLS,
+            extra_required_capabilities: LAB_TRACE_EXTRA_CAPABILITIES,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: true,
                 infer_source_path_tools: false,
@@ -577,7 +577,11 @@ mod tests {
         );
         assert!(command.routing_policy.requires_extension_parity);
         assert_eq!(command.required_extensions, vec!["wordpress", "playwright"]);
-        assert!(command.requires_playwright);
+        assert_eq!(command.required_capabilities.len(), 1);
+        assert_eq!(
+            command.required_capabilities[0].name,
+            LAB_CAPABILITY_PLAYWRIGHT
+        );
         assert!(!command.routing_policy.infer_source_path_tools);
     }
 
@@ -602,7 +606,11 @@ mod tests {
         assert!(plan.routing_policy.default_lab_offload);
         assert!(plan.routing_policy.requires_extension_parity);
         assert_eq!(plan.required_extensions, vec!["wordpress", "playwright"]);
-        assert!(plan.requires_playwright);
+        assert_eq!(plan.required_capabilities.len(), 1);
+        assert_eq!(
+            plan.required_capabilities[0].name,
+            LAB_CAPABILITY_PLAYWRIGHT
+        );
     }
 
     #[test]

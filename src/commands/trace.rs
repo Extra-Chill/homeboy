@@ -20,8 +20,8 @@ use homeboy::core::rig::{self, RigSpec};
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
-    CommandPortabilityContract, LabCommandContract, LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
-    TRACE_LAB_LABEL,
+    CommandPortabilityContract, LabCommandContract, LabWorkspaceModePolicy,
+    LAB_TRACE_EXTRA_CAPABILITIES, TRACE_LAB_LABEL,
 };
 
 mod aggregate;
@@ -272,7 +272,7 @@ impl TraceArgs {
             TRACE_LAB_LABEL,
             self.keep_overlay.then_some("--keep-overlay"),
             false,
-            LAB_TRACE_EXTRA_TOOLS,
+            LAB_TRACE_EXTRA_CAPABILITIES,
         );
         if self.is_compare_target_run() {
             contract.workspace_mode_policy = LabWorkspaceModePolicy::Git;

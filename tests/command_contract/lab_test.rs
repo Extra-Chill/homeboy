@@ -376,7 +376,11 @@ fn lab_route_contract_carries_command_specific_requirements() {
         .expect("trace has a Lab route contract");
 
     assert_eq!(route_contract.command.hot_label, "trace");
-    assert!(route_contract.requires_playwright);
+    assert_eq!(route_contract.required_capabilities.len(), 1);
+    assert_eq!(
+        route_contract.required_capabilities[0].name,
+        LAB_CAPABILITY_PLAYWRIGHT
+    );
     assert!(route_contract.required_extensions.is_empty());
     assert!(
         !route_contract
@@ -534,7 +538,10 @@ fn test_lab_command_contracts_cover_hot_commands() {
         .lab_contract()
         .expect("trace contract");
     assert!(lab_runner_summary_covers_contract_label(trace.hot_label));
-    assert_eq!(trace.extra_required_tools, LAB_TRACE_EXTRA_TOOLS);
+    assert_eq!(
+        trace.extra_required_capabilities,
+        LAB_TRACE_EXTRA_CAPABILITIES
+    );
     assert!(!trace.routing_policy.requires_extension_parity);
     assert!(!trace.routing_policy.infer_source_path_tools);
     assert_eq!(

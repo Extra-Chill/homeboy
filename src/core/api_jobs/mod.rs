@@ -748,7 +748,7 @@ mod tests {
             workspace_mode_policy:
                 crate::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             required_extensions: Vec::new(),
-            requires_playwright: false,
+            required_capabilities: Vec::new(),
             routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         };
         request.runner_workload = Some(crate::core::runner::workload::build_runner_workload(

@@ -44,7 +44,7 @@ pub struct LabOffloadCommand {
     pub source_path_mode: LabOffloadSourcePathMode,
     pub workspace_mode_policy: LabOffloadWorkspaceModePolicy,
     pub required_extensions: Vec<String>,
-    pub requires_playwright: bool,
+    pub required_capabilities: Vec<crate::command_contract::RunnerWorkloadCapability>,
     /// Routing-policy flags shared across the Lab command layers
     /// (`default_lab_offload`, `infer_source_path_tools`, `release_gate`,
     /// `requires_extension_parity`).

@@ -19,7 +19,7 @@ use super::bench::RigRunBenchOptions;
 use super::utils::args::SettingArgs;
 use super::CmdResult;
 use crate::command_contract::{
-    CommandPortabilityContract, LabCommandContract, LAB_NO_EXTRA_TOOLS, RIG_CHECK_LAB_LABEL,
+    CommandPortabilityContract, LabCommandContract, LAB_NO_EXTRA_CAPABILITIES, RIG_CHECK_LAB_LABEL,
     RIG_RUN_LAB_LABEL, RIG_UP_LAB_UNSUPPORTED_REASON,
 };
 
@@ -65,14 +65,14 @@ impl RigArgs {
                     RIG_CHECK_LAB_LABEL,
                     None,
                     false,
-                    LAB_NO_EXTRA_TOOLS,
+                    LAB_NO_EXTRA_CAPABILITIES,
                 )
             } else {
                 LabCommandContract::portable_workload(
                     RIG_CHECK_LAB_LABEL,
                     None,
                     false,
-                    LAB_NO_EXTRA_TOOLS,
+                    LAB_NO_EXTRA_CAPABILITIES,
                 )
             };
             return CommandPortabilityContract::lab(contract);
@@ -82,7 +82,7 @@ impl RigArgs {
                 RIG_RUN_LAB_LABEL,
                 None,
                 true,
-                LAB_NO_EXTRA_TOOLS,
+                LAB_NO_EXTRA_CAPABILITIES,
             ));
         }
         if self.is_hot_resource_command() {
