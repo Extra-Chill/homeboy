@@ -21,9 +21,13 @@ Install with:
 homeboy rig install https://github.com/example-org/homeboy-rigs.git//packages/studio --id studio
 homeboy rig install ./packages/studio
 homeboy rig install ./packages --all
+homeboy rig lint ./packages --all
 ```
 
 For git sources, `repo.git//subpath` clones the repository root but discovers specs from the selected subpath. Installed source metadata records the package root, discovery path, linked/cloned ownership, and git revision so `rig update` and `rig sources` can refresh or remove the right files later.
+`rig lint --all` is a safe package validation command: it checks JSON, template
+materialization, and materialized rig-spec contracts without installing rigs or
+touching component checkouts.
 
 ## Top-Level Fields
 
