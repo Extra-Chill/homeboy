@@ -124,7 +124,10 @@ pub(super) fn cancel_on_wait_timeout_enabled() -> bool {
 /// the opt-in is on, the existing `runner_job_cancel` primitive is invoked and
 /// any error is captured rather than propagated (the controller still needs to
 /// surface the timeout).
-pub(super) fn attempt_wait_timeout_cancel(runner_id: &str, job_id: &str) -> WaitTimeoutCancelOutcome {
+pub(super) fn attempt_wait_timeout_cancel(
+    runner_id: &str,
+    job_id: &str,
+) -> WaitTimeoutCancelOutcome {
     if !cancel_on_wait_timeout_enabled() {
         return WaitTimeoutCancelOutcome::Disabled;
     }
@@ -173,7 +176,11 @@ pub(super) mod test_cancel_hook {
     }
 
     pub(super) fn take_invoke(runner_id: &str, job_id: &str) -> Option<Result<()>> {
-        HOOK.with(|cell| cell.borrow_mut().as_mut().map(|hook| hook(runner_id, job_id)))
+        HOOK.with(|cell| {
+            cell.borrow_mut()
+                .as_mut()
+                .map(|hook| hook(runner_id, job_id))
+        })
     }
 }
 

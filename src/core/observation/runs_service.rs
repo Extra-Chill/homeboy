@@ -1357,16 +1357,14 @@ mod tests {
 
         // The hydrated record now parses into a non-zero matrix summary, where
         // the un-hydrated `remote_file` record would have summarized 0.
-        let summary =
-            crate::core::artifacts::summarize_matrix_artifacts("run-1", &hydrated, &[])
-                .expect("summary");
+        let summary = crate::core::artifacts::summarize_matrix_artifacts("run-1", &hydrated, &[])
+            .expect("summary");
         assert_eq!(summary.finding_count, 1);
         assert_eq!(summary.top_diagnostic_kinds[0].key, "missing_title");
         assert_eq!(summary.top_fixtures[0].key, "home");
 
-        let zero =
-            crate::core::artifacts::summarize_matrix_artifacts("run-1", &[remote], &[])
-                .expect("summary");
+        let zero = crate::core::artifacts::summarize_matrix_artifacts("run-1", &[remote], &[])
+            .expect("summary");
         assert_eq!(zero.finding_count, 0);
     }
 
@@ -1437,7 +1435,11 @@ mod tests {
             "homeboy bench run homeboy",
             serde_json::json!({ "lab": { "run_label": "meta-label" } }),
         );
-        let runs = vec![by_command.clone(), by_command_eq.clone(), by_metadata.clone()];
+        let runs = vec![
+            by_command.clone(),
+            by_command_eq.clone(),
+            by_metadata.clone(),
+        ];
 
         // Human label carried in the command resolves to its observation UUID.
         assert_eq!(

@@ -695,7 +695,10 @@ mod tests {
         .expect("non-empty plan");
 
         assert_eq!(plan.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
-        assert_eq!(plan.entries[0].role, PATH_MATERIALIZATION_ROLE_REQUIRED_PATH);
+        assert_eq!(
+            plan.entries[0].role,
+            PATH_MATERIALIZATION_ROLE_REQUIRED_PATH
+        );
         assert_eq!(
             plan.entries[0].owner,
             PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS

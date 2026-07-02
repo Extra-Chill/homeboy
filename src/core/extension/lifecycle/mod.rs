@@ -1003,13 +1003,18 @@ exec '{}' "$@"
             // Edit the shared asset in the source worktree after install. Because
             // the install symlinks the tree, the edit must be visible at the live
             // install path with no reinstall — the iteration-blocker fix.
-            let source_contract = source.join("agent-task-contracts/agent-task-provider-contract.js");
-            fs::write(&source_contract, "module.exports = { contract: 'edited-live' };\n")
-                .expect("edit shared source file");
+            let source_contract =
+                source.join("agent-task-contracts/agent-task-provider-contract.js");
+            fs::write(
+                &source_contract,
+                "module.exports = { contract: 'edited-live' };\n",
+            )
+            .expect("edit shared source file");
 
             let installed_contract =
                 home.join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js");
-            let observed = fs::read_to_string(&installed_contract).expect("read installed contract");
+            let observed =
+                fs::read_to_string(&installed_contract).expect("read installed contract");
             assert!(
                 observed.contains("edited-live"),
                 "edit to the symlinked shared tree should be visible to the install, got: {observed}"

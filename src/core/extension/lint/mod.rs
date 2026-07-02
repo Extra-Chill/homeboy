@@ -65,10 +65,7 @@ pub fn build_lint_runner(
             &exclude_sniffs.map(str::to_string),
         )
         .env_opt("HOMEBOY_CATEGORY", &category.map(str::to_string))
-        .env_opt(
-            "HOMEBOY_LINT_CHANGED_FILES_FILE",
-            &changed_files_file,
-        ))
+        .env_opt("HOMEBOY_LINT_CHANGED_FILES_FILE", &changed_files_file))
 }
 
 /// Write core's resolved changed-file list to a newline-delimited manifest in
@@ -86,8 +83,7 @@ fn write_changed_files_manifest(
         return Ok(None);
     };
 
-    let manifest_path =
-        run_dir.step_file(crate::core::engine::run_dir::files::LINT_CHANGED_FILES);
+    let manifest_path = run_dir.step_file(crate::core::engine::run_dir::files::LINT_CHANGED_FILES);
     let mut contents = changed_files.join("\n");
     contents.push('\n');
     std::fs::write(&manifest_path, contents).map_err(|error| {
@@ -168,7 +164,10 @@ mod tests {
     fn changed_files_manifest_unset_when_no_list_supplied() {
         let run_dir = RunDir::create().expect("run dir");
 
-        assert_eq!(write_changed_files_manifest(&run_dir, None).expect("none"), None);
+        assert_eq!(
+            write_changed_files_manifest(&run_dir, None).expect("none"),
+            None
+        );
         assert_eq!(
             write_changed_files_manifest(&run_dir, Some(&[])).expect("empty"),
             None

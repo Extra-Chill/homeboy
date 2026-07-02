@@ -2,9 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::core::runner::workspace::sync::{reap_run_workspace, sync_workspace};
-use crate::core::runner::workspace::types::{
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-};
+use crate::core::runner::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::core::runner::{MaterializedWorkspace, WorkspaceCleanupPolicy};
 
 fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
@@ -79,11 +77,8 @@ fn reap_run_workspace_refuses_paths_outside_lab_workspaces() {
         let outside = runner_root.path().join("not-a-lab-workspace");
         fs::create_dir_all(&outside).expect("outside dir");
 
-        let result = reap_run_workspace(
-            "lab-local-reap-guard",
-            &outside.display().to_string(),
-            None,
-        );
+        let result =
+            reap_run_workspace("lab-local-reap-guard", &outside.display().to_string(), None);
 
         assert!(
             result.is_err(),

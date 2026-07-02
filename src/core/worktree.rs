@@ -786,7 +786,11 @@ mod queue_ops {
         let Some(git_root) = component::resolution::detect_git_root(&candidate) else {
             return Ok(None);
         };
-        if git_root != candidate.canonicalize().unwrap_or_else(|_| candidate.clone()) {
+        if git_root
+            != candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone())
+        {
             return Ok(None);
         }
         let Some(discovered) = component::discover_from_portable(&git_root) else {
@@ -795,10 +799,9 @@ mod queue_ops {
         if discovered.id != component_id {
             return Ok(None);
         }
-        git_root
-            .canonicalize()
-            .map(Some)
-            .map_err(|err| Error::internal_io(err.to_string(), Some(candidate.display().to_string())))
+        git_root.canonicalize().map(Some).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(candidate.display().to_string()))
+        })
     }
 
     fn runner_workspace_root_from_lab_snapshot(cwd: &Path) -> Option<PathBuf> {
@@ -1224,11 +1227,7 @@ mod tests {
             run_git(&source, &["config", "user.name", "Homeboy Test"]);
             fs::write(source.join("README.md"), "initial\n").unwrap();
             fs::write(source.join("homeboy.json"), r#"{"id":"lab-fixture"}"#).unwrap();
-            fs::write(
-                snapshot.join("homeboy.json"),
-                r#"{"id":"lab-fixture"}"#,
-            )
-            .unwrap();
+            fs::write(snapshot.join("homeboy.json"), r#"{"id":"lab-fixture"}"#).unwrap();
             run_git(&source, &["add", "."]);
             run_git(&source, &["commit", "-q", "-m", "initial"]);
             write_component_registration(home.path(), "lab-fixture", &snapshot);
@@ -1252,7 +1251,10 @@ mod tests {
                 output.rows[0].error
             );
             let record = resolve("lab-fixture@cook-lab").expect("queued worktree record");
-            assert_eq!(PathBuf::from(record.source_checkout), source.canonicalize().unwrap());
+            assert_eq!(
+                PathBuf::from(record.source_checkout),
+                source.canonicalize().unwrap()
+            );
             assert!(runner_root.join("lab-fixture@cook-lab").exists());
         });
     }

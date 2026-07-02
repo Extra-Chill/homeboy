@@ -166,11 +166,8 @@ pub fn fetch_tags(path: &str) -> Result<()> {
     // Fetch tags from the remote so the latest release tag and its commits are
     // present locally. Best-effort: offline/no-remote checkouts fall through to
     // the guard with whatever local history exists.
-    let _ = crate::core::engine::command::run_in_optional(
-        path,
-        "git",
-        &["fetch", "--tags", &remote],
-    );
+    let _ =
+        crate::core::engine::command::run_in_optional(path, "git", &["fetch", "--tags", &remote]);
 
     Ok(())
 }

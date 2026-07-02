@@ -334,7 +334,11 @@ pub(crate) fn install_linked_shared_assets(
     source_root: Option<&Path>,
 ) -> Result<()> {
     if let Some(source_root) = source_root {
-        return install_shared_assets_from_root(source_root, extension_dir, SharedAssetMode::Symlink);
+        return install_shared_assets_from_root(
+            source_root,
+            extension_dir,
+            SharedAssetMode::Symlink,
+        );
     }
 
     if let Some(parent) = source.parent() {

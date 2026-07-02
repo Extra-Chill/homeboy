@@ -396,9 +396,7 @@ fn primary_reason(resources: &DoctorOutput) -> String {
 mod tests {
     use super::*;
     use crate::cli_surface::Cli;
-    use crate::commands::resources::{
-        LoadSummary, MemorySummary, ProcessSummary, RigLeaseSummary,
-    };
+    use crate::commands::resources::{LoadSummary, MemorySummary, ProcessSummary, RigLeaseSummary};
     use clap::Parser;
     fn resources(recommendation: ResourceRecommendation) -> DoctorOutput {
         DoctorOutput {

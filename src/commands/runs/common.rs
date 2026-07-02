@@ -437,10 +437,16 @@ mod tests {
             ],
         )
         .expect("select");
-        assert_eq!(selected[0], ("$.status".to_string(), Value::String("pass".into())));
+        assert_eq!(
+            selected[0],
+            ("$.status".to_string(), Value::String("pass".into()))
+        );
         assert_eq!(
             selected[1],
-            ("$.metadata.run_dir".to_string(), Value::String("/tmp/run".into()))
+            (
+                "$.metadata.run_dir".to_string(),
+                Value::String("/tmp/run".into())
+            )
         );
         assert_eq!(selected[2].1, serde_json::json!(["a", "b"]));
         assert_eq!(selected[3].1, Value::Null);

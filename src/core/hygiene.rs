@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::component::{self, Component};
+use crate::core::deps::provider;
 use crate::core::error::{Error, ErrorCode, Result, ValidationErrorItem};
 use crate::core::extension::{build, ExtensionCapability};
-use crate::core::deps::provider;
 
 const LAB_SOURCE_EVIDENCE_FILE: &str = ".homeboy/lab-source-evidence.json";
 const DEPENDENCY_LIFECYCLE_ARTIFACT_DIR: &str = ".homeboy/dependency-lifecycle";

@@ -368,7 +368,13 @@ pub(super) fn audit_internal(
     // packs, the fingerprint/root families, etc. — is dispatched by the
     // descriptor table in one pass. Adding a detector is a descriptor row plus a
     // `run_generic_descriptor` arm, never a new block here.
-    run_descriptor_detectors(plan, &mut timing, &mut all_findings, &detector_context, None);
+    run_descriptor_detectors(
+        plan,
+        &mut timing,
+        &mut all_findings,
+        &detector_context,
+        None,
+    );
 
     // `artifact_portability` stays hand-sequenced: it logs scan statistics (runs,
     // artifacts, metadata fields) even when it produces no findings.
@@ -589,16 +595,15 @@ fn audit_root_only(
     // whole-tree detectors below (structural, field patterns) consume a single
     // walk/read instead of each re-walking and re-reading the tree. Built only
     // when at least one snapshot-backed detector is enabled.
-    let source_snapshot = if plan.detector_enabled("structural")
-        || plan.detector_enabled("field_patterns")
-    {
-        let snapshot_started = std::time::Instant::now();
-        let snapshot = build_shared_source_snapshot(root, &audit_config);
-        timing.push_ok("source_snapshot", snapshot_started.elapsed());
-        Some(snapshot)
-    } else {
-        None
-    };
+    let source_snapshot =
+        if plan.detector_enabled("structural") || plan.detector_enabled("field_patterns") {
+            let snapshot_started = std::time::Instant::now();
+            let snapshot = build_shared_source_snapshot(root, &audit_config);
+            timing.push_ok("source_snapshot", snapshot_started.elapsed());
+            Some(snapshot)
+        } else {
+            None
+        };
 
     let detector_context = DetectorRunContext {
         root,

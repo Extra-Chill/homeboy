@@ -285,7 +285,8 @@ impl EffectiveDetectorProfile {
                 &ext.version_guard_constants,
                 DetectorProfileField::VersionGuardConstant,
             );
-            profile.extend_owned_regexes(&ext.version_guard_regexes, DetectorRegexKind::VersionGuard);
+            profile
+                .extend_owned_regexes(&ext.version_guard_regexes, DetectorRegexKind::VersionGuard);
             profile.extend_owned_regexes(
                 &ext.tracker_reference_regexes,
                 DetectorRegexKind::TrackerReference,

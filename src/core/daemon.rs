@@ -320,7 +320,11 @@ fn completion_notify_loop(interval: std::time::Duration) {
 fn list_running_run_ids(store: &crate::core::observation::ObservationStore) -> Vec<String> {
     store
         .list_runs(crate::core::observation::RunListFilter {
-            status: Some(crate::core::observation::RunStatus::Running.as_str().to_string()),
+            status: Some(
+                crate::core::observation::RunStatus::Running
+                    .as_str()
+                    .to_string(),
+            ),
             limit: Some(1000),
             ..Default::default()
         })

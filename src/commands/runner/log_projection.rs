@@ -70,9 +70,8 @@ pub(super) fn project_job_log(
         // De-dup: the structured result event already carries stdout/stderr, so
         // drop the raw duplicate events whenever a result is present.
         if result_data.is_some() {
-            events.retain(|event| {
-                !matches!(event.kind, JobEventKind::Stdout | JobEventKind::Stderr)
-            });
+            events
+                .retain(|event| !matches!(event.kind, JobEventKind::Stdout | JobEventKind::Stderr));
         }
         if lift_streams {
             // Strip the blobs out of the retained result event so stdout/stderr
@@ -176,7 +175,12 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    fn event(sequence: u64, kind: JobEventKind, message: Option<&str>, data: Option<Value>) -> JobEvent {
+    fn event(
+        sequence: u64,
+        kind: JobEventKind,
+        message: Option<&str>,
+        data: Option<Value>,
+    ) -> JobEvent {
         JobEvent {
             sequence,
             job_id: Uuid::nil(),
@@ -192,9 +196,19 @@ mod tests {
     fn snapshot(blob: &str) -> Vec<JobEvent> {
         vec![
             event(1, JobEventKind::Status, Some("queued"), None),
-            event(2, JobEventKind::Progress, None, Some(json!({"phase": "started"}))),
+            event(
+                2,
+                JobEventKind::Progress,
+                None,
+                Some(json!({"phase": "started"})),
+            ),
             event(3, JobEventKind::Stdout, Some(blob), None),
-            event(4, JobEventKind::Progress, None, Some(json!({"phase": "finished", "exit_code": 1}))),
+            event(
+                4,
+                JobEventKind::Progress,
+                None,
+                Some(json!({"phase": "finished", "exit_code": 1})),
+            ),
             event(
                 5,
                 JobEventKind::Result,
@@ -220,7 +234,10 @@ mod tests {
             .find(|event| event.kind == JobEventKind::Result)
             .expect("result event retained");
         assert_eq!(
-            result.data.as_ref().unwrap()["stdout"].as_str().unwrap().len(),
+            result.data.as_ref().unwrap()["stdout"]
+                .as_str()
+                .unwrap()
+                .len(),
             12_000
         );
         // Default mode does not lift streams or exit code to the top level.

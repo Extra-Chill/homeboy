@@ -125,11 +125,7 @@ pub fn dispatch(event: &NotifyEvent, command_override: Option<&str>) -> NotifyOu
         .or_else(configured_command);
 
     let Some(template) = template else {
-        eprintln!(
-            "homeboy notify [{}]: {}",
-            event.status,
-            event.message()
-        );
+        eprintln!("homeboy notify [{}]: {}", event.status, event.message());
         return NotifyOutcome {
             delivered: true,
             delivery: NotifyDelivery::Stderr,
@@ -206,7 +202,10 @@ mod tests {
         assert_eq!(argv[0], "logger");
         assert_eq!(argv[1], "-t");
         assert_eq!(argv[2], "homeboy-pass");
-        assert_eq!(argv[3], "homeboy run pass — Run run-123 finished with status pass");
+        assert_eq!(
+            argv[3],
+            "homeboy run pass — Run run-123 finished with status pass"
+        );
     }
 
     #[test]

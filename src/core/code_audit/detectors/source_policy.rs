@@ -518,10 +518,11 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
     fn core_boundary_default_config_emits_nothing() {
         let fp = rust_fp("src/core/engine.rs", "fn dispatch() {}");
 
-        assert!(
-            run_core_boundary(&[&fp], &crate::core::component::CoreBoundaryLeakConfig::default())
-                .is_empty()
-        );
+        assert!(run_core_boundary(
+            &[&fp],
+            &crate::core::component::CoreBoundaryLeakConfig::default()
+        )
+        .is_empty());
     }
 
     #[test]
