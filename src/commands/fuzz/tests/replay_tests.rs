@@ -286,6 +286,121 @@ fn fuzz_replay_dry_run_accepts_runner_artifact_ref_without_local_bytes() {
 }
 
 #[test]
+fn fuzz_replay_dry_run_explains_missing_extension_replay_command() {
+    with_isolated_home(|home| {
+        let component_dir = tempfile::tempdir().expect("component dir");
+        write_fuzz_extension(home.path(), "fixture-fuzz", None, Some("true"));
+        write_fuzz_rig(
+            home,
+            "fixture-rig",
+            "component-a",
+            component_dir.path(),
+            "fixture-fuzz",
+        );
+        let path = write_replay_campaign(component_dir.path());
+
+        let (output, exit) = run_replay(FuzzReplayArgs {
+            component: Some("component-a".to_string()),
+            path: None,
+            rig: Some("fixture-rig".to_string()),
+            extension_override: ExtensionOverrideArgs::default(),
+            setting_args: SettingArgs::default(),
+            artifact_or_case: Some(path.to_string_lossy().to_string()),
+            artifact: None,
+            case_id: Some("case-1".to_string()),
+            run_id: Some("proof-1".to_string()),
+            dry_run: true,
+            args: Vec::new(),
+        })
+        .expect("dry-run replay");
+
+        assert_eq!(exit, 0);
+        assert_eq!(output.status, "dry_run");
+        assert_eq!(output.case_id.as_deref(), Some("case-1"));
+        assert_eq!(output.replay_mode, "replay");
+        assert_eq!(output.required_manifest_key, "replay_command");
+        assert!(output.message.contains("no replay_command is available"));
+        assert!(output
+            .extension_contract
+            .iter()
+            .any(|step| { step.contains("fixture-fuzz") && step.contains("fuzz.replay_command") }));
+        assert!(output
+            .owner_next_step
+            .as_deref()
+            .is_some_and(|step| step.contains("Add fuzz.replay_command")));
+    });
+}
+
+#[test]
+fn fuzz_replay_dry_run_surfaces_persisted_artifact_public_access() {
+    with_isolated_home(|home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                homeboy::core::observation::NewRunRecord::builder("fuzz")
+                    .component_id("component-a")
+                    .command("homeboy fuzz run component-a")
+                    .cwd_path(home.path())
+                    .build(),
+            )
+            .expect("run");
+        store
+            .import_artifact(&homeboy::core::observation::ArtifactRecord {
+                id: "artifact-1".to_string(),
+                run_id: run.id.clone(),
+                kind: "fuzz_result_envelope".to_string(),
+                artifact_type: "remote_file".to_string(),
+                path: home
+                    .path()
+                    .join("missing-envelope.json")
+                    .to_string_lossy()
+                    .to_string(),
+                url: None,
+                public_url: Some("https://example.com/fuzz-result-envelope.json".to_string()),
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: None,
+                size_bytes: None,
+                mime: Some("application/json".to_string()),
+                metadata_json: serde_json::json!({
+                    "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA
+                }),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .expect("import artifact ref");
+
+        let (output, exit) = run_replay(FuzzReplayArgs {
+            component: None,
+            path: None,
+            rig: None,
+            extension_override: ExtensionOverrideArgs::default(),
+            setting_args: SettingArgs::default(),
+            artifact_or_case: None,
+            artifact: None,
+            case_id: Some("case-1".to_string()),
+            run_id: Some(run.id.clone()),
+            dry_run: true,
+            args: Vec::new(),
+        })
+        .expect("resolve published artifact ref dry-run");
+
+        assert_eq!(exit, 0);
+        assert_eq!(output.status, "dry_run");
+        let access = output.artifact_access.expect("artifact access");
+        assert_eq!(access.artifact_id.as_deref(), Some("artifact-1"));
+        assert_eq!(access.public_access, "public");
+        assert!(access
+            .public_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("https://")));
+        assert!(access
+            .fetch_command
+            .as_deref()
+            .is_some_and(|command| command.contains("homeboy runs artifact get")));
+    });
+}
+
+#[test]
 fn fuzz_replay_runner_artifact_ref_without_dry_run_is_actionable() {
     let result = run_replay(FuzzReplayArgs {
         component: None,
