@@ -1,9 +1,6 @@
 use clap::{Args, Subcommand};
 
-use homeboy::core::deps::{
-    self, DependencyInstallResult, DependencyStackApplyResult, DependencyStackPlan,
-    DependencyStackStatus, DependencyStatus, DependencyUpdateOptions, DependencyUpdateResult,
-};
+use homeboy::core::deps;
 
 use super::CmdResult;
 
@@ -111,30 +108,13 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
             package,
             path,
         } => {
-            let output: DependencyStatus =
-                deps::status(component.as_deref(), path.as_deref(), package.as_deref())?;
-            Ok((
-                serde_json::to_value(output).map_err(|e| {
-                    homeboy::core::Error::internal_json(
-                        e.to_string(),
-                        Some("serialize deps status".to_string()),
-                    )
-                })?,
-                0,
-            ))
+            let output =
+                deps::status_value(component.as_deref(), path.as_deref(), package.as_deref())?;
+            Ok((output, 0))
         }
         DepsCommand::Install { component, path } => {
-            let output: DependencyInstallResult =
-                deps::install(component.as_deref(), path.as_deref())?;
-            Ok((
-                serde_json::to_value(output).map_err(|e| {
-                    homeboy::core::Error::internal_json(
-                        e.to_string(),
-                        Some("serialize deps install".to_string()),
-                    )
-                })?,
-                0,
-            ))
+            let output = deps::install_value(component.as_deref(), path.as_deref())?;
+            Ok((output, 0))
         }
         DepsCommand::Update {
             package,
@@ -144,50 +124,24 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
             no_install,
             rebuild,
         } => {
-            let output: DependencyUpdateResult = deps::update(
+            let output = deps::update_value(
                 component.as_deref(),
                 path.as_deref(),
                 &package,
                 to.as_deref(),
-                DependencyUpdateOptions {
-                    install: !no_install,
-                    rebuild,
-                },
+                !no_install,
+                rebuild,
             )?;
-            Ok((
-                serde_json::to_value(output).map_err(|e| {
-                    homeboy::core::Error::internal_json(
-                        e.to_string(),
-                        Some("serialize deps update".to_string()),
-                    )
-                })?,
-                0,
-            ))
+            Ok((output, 0))
         }
         DepsCommand::Stack { command } => match command {
             DepsStackCommand::Status => {
-                let output: DependencyStackStatus = deps::stack_status()?;
-                Ok((
-                    serde_json::to_value(output).map_err(|e| {
-                        homeboy::core::Error::internal_json(
-                            e.to_string(),
-                            Some("serialize deps stack status".to_string()),
-                        )
-                    })?,
-                    0,
-                ))
+                let output = deps::stack_status_value()?;
+                Ok((output, 0))
             }
             DepsStackCommand::Plan { upstream } => {
-                let output: DependencyStackPlan = deps::stack_plan(&upstream)?;
-                Ok((
-                    serde_json::to_value(output).map_err(|e| {
-                        homeboy::core::Error::internal_json(
-                            e.to_string(),
-                            Some("serialize deps stack plan".to_string()),
-                        )
-                    })?,
-                    0,
-                ))
+                let output = deps::stack_plan_value(&upstream)?;
+                Ok((output, 0))
             }
             DepsStackCommand::Apply {
                 upstream,
@@ -196,17 +150,14 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
                 no_install,
                 rebuild,
             } => {
-                let output: DependencyStackApplyResult =
-                    deps::stack_apply(&upstream, to.as_deref(), dry_run, !no_install, rebuild)?;
-                Ok((
-                    serde_json::to_value(output).map_err(|e| {
-                        homeboy::core::Error::internal_json(
-                            e.to_string(),
-                            Some("serialize deps stack apply".to_string()),
-                        )
-                    })?,
-                    0,
-                ))
+                let output = deps::stack_apply_value(
+                    &upstream,
+                    to.as_deref(),
+                    dry_run,
+                    !no_install,
+                    rebuild,
+                )?;
+                Ok((output, 0))
             }
         },
     }

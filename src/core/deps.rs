@@ -106,6 +106,17 @@ pub fn status(
     Ok(combine_provider_statuses(&component, &path, statuses))
 }
 
+pub fn status_value(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+    package_filter: Option<&str>,
+) -> Result<serde_json::Value> {
+    serialize_dependency_output(
+        status(component_id, path_override, package_filter)?,
+        "serialize deps status",
+    )
+}
+
 pub fn update(
     component_id: Option<&str>,
     path_override: Option<&str>,
@@ -140,6 +151,26 @@ pub fn update(
     ))
 }
 
+pub fn update_value(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+    package: &str,
+    constraint: Option<&str>,
+    install: bool,
+    rebuild: bool,
+) -> Result<serde_json::Value> {
+    serialize_dependency_output(
+        update(
+            component_id,
+            path_override,
+            package,
+            constraint,
+            DependencyUpdateOptions { install, rebuild },
+        )?,
+        "serialize deps update",
+    )
+}
+
 /// Install a component's dependencies through its resolved dependency providers.
 ///
 /// This is the detection/config-driven replacement for hardcoded
@@ -164,6 +195,16 @@ pub fn install(
             package_manager: String::new(),
             installs: Vec::new(),
         }),
+    )
+}
+
+pub fn install_value(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+) -> Result<serde_json::Value> {
+    serialize_dependency_output(
+        install(component_id, path_override)?,
+        "serialize deps install",
     )
 }
 
@@ -242,6 +283,32 @@ fn rebuild_component(component: &Component, path: &Path) -> Result<DependencyCom
         stdout,
         stderr: String::new(),
     })
+}
+
+pub fn stack_status_value() -> Result<serde_json::Value> {
+    serialize_dependency_output(stack_status()?, "serialize deps stack status")
+}
+
+pub fn stack_plan_value(upstream: &str) -> Result<serde_json::Value> {
+    serialize_dependency_output(stack_plan(upstream)?, "serialize deps stack plan")
+}
+
+pub fn stack_apply_value(
+    upstream: &str,
+    constraint: Option<&str>,
+    dry_run: bool,
+    install: bool,
+    rebuild: bool,
+) -> Result<serde_json::Value> {
+    serialize_dependency_output(
+        stack_apply(upstream, constraint, dry_run, install, rebuild)?,
+        "serialize deps stack apply",
+    )
+}
+
+fn serialize_dependency_output<T: Serialize>(value: T, context: &str) -> Result<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| Error::internal_json(e.to_string(), Some(context.to_string())))
 }
 
 fn resolve_component_path(
