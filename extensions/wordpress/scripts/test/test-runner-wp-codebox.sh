@@ -992,10 +992,71 @@ fi
 
 WP_CODEBOX_TMPFILE=$(mktemp)
 PHPUNIT_STDOUT_TMPFILE=$(mktemp)
+PHPUNIT_RECIPE_BUILDER_STDERR=$(mktemp)
 RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe.XXXXXX")
 RECIPE_OPTIONS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe-options.XXXXXX")
 homeboy_wp_codebox_set_command "$WP_CODEBOX_BIN"
 wp_codebox_command=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
+
+fail_wp_codebox_phpunit_profile_setup() {
+    local message="$1"
+    local detail="${2:-}"
+
+    FAILED_STEP="WP Codebox PHPUnit profile setup"
+    FAILURE_OUTPUT="$message"
+    echo ""
+    echo "============================================"
+    echo "WP CODEBOX PHPUNIT PROFILE CONFIGURATION FAILURE"
+    echo "============================================"
+    echo "$message" >&2
+    if [ -n "$detail" ]; then
+        echo "" >&2
+        echo "$detail" >&2
+    fi
+    write_phpunit_discovery_result failed "wp-codebox-phpunit-profile-configuration" "$message"
+    rm -f "$WP_CODEBOX_TMPFILE" "$PHPUNIT_STDOUT_TMPFILE" "$PHPUNIT_RECIPE_BUILDER_STDERR" "$RECIPE_FILE" "$RECIPE_OPTIONS_FILE"
+    exit 1
+}
+
+validate_wp_codebox_phpunit_recipe_profile() {
+    local validation_output
+
+    validation_output=$(jq -r \
+        --argjson requestedMounts "$WP_CODEBOX_PHPUNIT_MOUNTS_JSON" \
+        --arg requestedCwd "$WP_CODEBOX_PHPUNIT_CWD" \
+        --arg requestedTestRoot "$WP_CODEBOX_PHPUNIT_TEST_ROOT" \
+        --arg requestedConfig "$WP_CODEBOX_PHPUNIT_CONFIG" \
+        '
+        def arg_present($args; $name; $value):
+            ($value == "") or (($args // []) | index(($name + "=" + $value)) != null);
+        def mount_mode($mount): ($mount.mode // "readonly");
+
+        . as $recipe
+        | ($recipe.inputs.mounts // []) as $recipeMounts
+        | (if ($requestedMounts | type == "array") then $requestedMounts else [] end) as $requestedMountsArray
+        | ($recipe.workflow.steps // [] | map(select((.command // "") | test("(^|\\.)wordpress\\.phpunit$"))) | .[0]) as $phpunitStep
+        | [
+            (if $phpunitStep == null then "generated recipe does not include a wordpress.phpunit workflow step" else empty end),
+            (if ($requestedMounts | type == "array") then empty else "wp_codebox_phpunit_mounts must be an array" end),
+            ($requestedMountsArray[] as $mount
+                | select(($recipeMounts | any(.source == $mount.source and .target == $mount.target and mount_mode(.) == mount_mode($mount))) | not)
+                | "wp_codebox_phpunit_mounts entry missing from generated recipe inputs: " + (($mount.source // "") + " -> " + ($mount.target // "") + " (" + mount_mode($mount) + ")")),
+            (if $phpunitStep == null then empty elif arg_present($phpunitStep.args; "cwd"; $requestedCwd) then empty else "wp_codebox_phpunit_cwd missing from generated wordpress.phpunit args: " + $requestedCwd end),
+            (if $phpunitStep == null then empty elif arg_present($phpunitStep.args; "test-root"; $requestedTestRoot) then empty else "wp_codebox_phpunit_test_root missing from generated wordpress.phpunit args: " + $requestedTestRoot end),
+            (if $phpunitStep == null then empty elif arg_present($phpunitStep.args; "phpunit-xml"; $requestedConfig) then empty else "wp_codebox_phpunit_config missing from generated wordpress.phpunit args: " + $requestedConfig end)
+        ] | map(select(. != null and . != "")) | .[]
+        ' "$RECIPE_FILE" 2>&1) || {
+        printf '%s\n' "$validation_output"
+        return 1
+    }
+
+    if [ -n "$validation_output" ]; then
+        printf '%s\n' "$validation_output"
+        return 1
+    fi
+
+    return 0
+}
 
 jq -n \
     --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
@@ -1040,11 +1101,18 @@ jq -n \
     + (if $diagnostics == null then {} else {diagnosticsCapture: $diagnostics} end))' > "$RECIPE_OPTIONS_FILE"
 
 if [ ! -f "$PHPUNIT_RECIPE_BUILDER" ]; then
-    echo "Error: WP Codebox PHPUnit recipe builder not found: ${PHPUNIT_RECIPE_BUILDER}" >&2
-    FAILED_STEP="WP Codebox PHPUnit recipe setup"
-    exit 1
+    fail_wp_codebox_phpunit_profile_setup "WP Codebox PHPUnit recipe builder not found: ${PHPUNIT_RECIPE_BUILDER}"
 fi
-node "$PHPUNIT_RECIPE_BUILDER" < "$RECIPE_OPTIONS_FILE" > "$RECIPE_FILE"
+set +e
+node "$PHPUNIT_RECIPE_BUILDER" < "$RECIPE_OPTIONS_FILE" > "$RECIPE_FILE" 2> "$PHPUNIT_RECIPE_BUILDER_STDERR"
+recipe_builder_exit=$?
+set -e
+if [ $recipe_builder_exit -ne 0 ]; then
+    fail_wp_codebox_phpunit_profile_setup "WP Codebox PHPUnit recipe generation failed before WP Codebox runtime execution." "$(cat "$PHPUNIT_RECIPE_BUILDER_STDERR")"
+fi
+if ! validation_errors=$(validate_wp_codebox_phpunit_recipe_profile); then
+    fail_wp_codebox_phpunit_profile_setup "Requested WP Codebox PHPUnit profile settings were not represented in the generated recipe." "$validation_errors"
+fi
 
 set +e
 "${wp_codebox_command[@]}" recipe-run \
@@ -1055,7 +1123,7 @@ set +e
 wp_codebox_exit=$?
 set -e
 
-rm -f "$RECIPE_FILE" "$RECIPE_OPTIONS_FILE"
+rm -f "$RECIPE_FILE" "$RECIPE_OPTIONS_FILE" "$PHPUNIT_RECIPE_BUILDER_STDERR"
 
 WP_CODEBOX_OUTPUT=$(cat "$WP_CODEBOX_TMPFILE")
 PHPUNIT_OUTPUT=""

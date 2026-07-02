@@ -37,12 +37,20 @@ cat > "$FAKE_BUILDER" <<'JS'
 import fs from 'node:fs';
 
 fs.readFileSync(0, 'utf8');
-process.stdout.write(JSON.stringify({ steps: [] }));
+process.stdout.write(JSON.stringify({
+  schema: 'wp-codebox/workspace-recipe/v1',
+  inputs: { mounts: [] },
+  workflow: { steps: [{ command: 'wordpress.phpunit', args: ['plugin-slug=sample-plugin'] }] },
+}));
 JS
 
 cat > "$FAKE_BIN" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = "commands" ]; then
+    printf '%s\n' 'recipe-run'
+    exit 0
+fi
 
 printf '%s' "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" > "$CAPTURED_CORE_MODULE"
 printf '%s\n' 'NO_TEST_FILES' > "${HOMEBOY_PLUGIN_PATH}/.pg-test-result.txt"
