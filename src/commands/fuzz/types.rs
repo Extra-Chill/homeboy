@@ -45,8 +45,10 @@ impl FuzzArgs {
     pub fn is_lab_offload_command(&self) -> bool {
         matches!(
             self.command,
-            None | Some(FuzzCommand::Run(_)) | Some(FuzzCommand::List(_))
-        )
+            None | Some(FuzzCommand::Run(_))
+                | Some(FuzzCommand::RunCampaign(_))
+                | Some(FuzzCommand::List(_))
+        ) || matches!(&self.command, Some(FuzzCommand::Plan(plan)) if plan.execute)
     }
 
     pub fn extension_override_ids(&self) -> &[String] {
@@ -69,6 +71,8 @@ pub(crate) enum FuzzCommand {
     List(FuzzListArgs),
     /// Build a fuzz execution request without executing it
     Plan(FuzzPlanArgs),
+    /// Execute or dry-run a generated fuzz campaign plan
+    RunCampaign(FuzzPlanArgs),
     /// Execute the selected fuzz workload, persist fuzz evidence, and surface its campaign contract
     Run(FuzzRunArgs),
     /// Validate a fuzz result campaign file
@@ -294,6 +298,18 @@ pub(crate) struct FuzzPlanArgs {
     /// Additional required artifact id/kind expected from every campaign entry. Repeatable.
     #[arg(long = "required-artifact", value_name = "ID")]
     pub(crate) required_artifacts: Vec<String>,
+
+    /// Execute generated campaign entries through the existing `fuzz run` primitive.
+    #[arg(long = "execute")]
+    pub(crate) execute: bool,
+
+    /// Emit structured dispatch records without executing campaign entries.
+    #[arg(long = "dry-run")]
+    pub(crate) dry_run: bool,
+
+    /// Skip campaign entries whose run id already exists in the persisted run store.
+    #[arg(long = "resume")]
+    pub(crate) resume: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -525,12 +541,13 @@ pub(crate) struct FuzzMinimizeArgs {
 }
 
 pub use super::types_extra::{
-    FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzCompareDeltas,
-    FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot, FuzzCompareHotspotSummary,
-    FuzzCompareOutput, FuzzCompareSnapshot, FuzzContractGateProfileOutput, FuzzContractOutput,
-    FuzzCoverageCompletenessOutput, FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput,
-    FuzzDiscoverSummary, FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange,
-    FuzzInspectCandidate, FuzzInspectOutput, FuzzListOutput, FuzzOutput, FuzzPlanOutput,
-    FuzzReplayArtifactAccess, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput,
-    FuzzReportOutput, FuzzRunOutput, FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
+    FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzCampaignDispatchRecordOutput,
+    FuzzCampaignRunOutput, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot,
+    FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot,
+    FuzzContractGateProfileOutput, FuzzContractOutput, FuzzCoverageCompletenessOutput,
+    FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput, FuzzDiscoverSummary,
+    FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange, FuzzInspectCandidate,
+    FuzzInspectOutput, FuzzListOutput, FuzzOutput, FuzzPlanOutput, FuzzReplayArtifactAccess,
+    FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput,
+    FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
 };

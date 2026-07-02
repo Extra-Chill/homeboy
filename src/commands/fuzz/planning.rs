@@ -12,7 +12,11 @@ use homeboy::core::fuzz::{
 };
 
 use super::execution::fuzz_runner_contract;
-use super::types::{FuzzPlanArgs, FuzzPlanOutput, FuzzPlanStrategy};
+use super::execution::run_run;
+use super::types::{
+    FuzzCampaignDispatchRecordOutput, FuzzCampaignRunOutput, FuzzPlanArgs, FuzzPlanOutput,
+    FuzzPlanStrategy,
+};
 use super::types_extra::{
     FuzzCampaignPlanEntryOutput, FuzzCampaignPlanIsolationOutput, FuzzCampaignPlanOutput,
 };
@@ -119,6 +123,161 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         campaign_plan,
         runner_contract: fuzz_runner_contract(fuzz_config.as_ref()),
     })
+}
+
+pub(super) fn run_campaign(
+    mut args: FuzzPlanArgs,
+) -> homeboy::core::Result<(FuzzCampaignRunOutput, i32)> {
+    if args.execute && args.dry_run {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "execute",
+            "fuzz campaign execution cannot combine --execute and --dry-run".to_string(),
+            None,
+            None,
+        ));
+    }
+    args.execute = args.execute || !args.dry_run;
+    let plan_output = run_plan(args.clone())?;
+    let Some(plan) = plan_output.campaign_plan else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "campaign-workload",
+            "fuzz campaign execution requires --campaign-manifest or at least one --campaign-workload".to_string(),
+            None,
+            None,
+        ));
+    };
+
+    let mut dispatch_records = Vec::new();
+    let mut run_ids = Vec::new();
+    let mut result_refs = Vec::new();
+    let mut exit_code = 0;
+    let store = if args.resume {
+        Some(homeboy::core::observation::ObservationStore::open_initialized()?)
+    } else {
+        None
+    };
+
+    for entry in &plan.entries {
+        run_ids.push(entry.run_id.clone());
+        if let Some(store) = store.as_ref() {
+            if store.get_run(&entry.run_id)?.is_some() {
+                dispatch_records.push(campaign_dispatch_record(
+                    entry,
+                    "skipped_existing",
+                    None,
+                    None,
+                    Vec::new(),
+                    Some("resume skipped existing persisted run id".to_string()),
+                ));
+                continue;
+            }
+        }
+        if !args.execute {
+            dispatch_records.push(campaign_dispatch_record(
+                entry,
+                "planned",
+                None,
+                None,
+                Vec::new(),
+                Some("dry run; not executed".to_string()),
+            ));
+            continue;
+        }
+
+        let mut run_args = args.run.clone();
+        run_args.workload_id = Some(entry.workload_id.clone());
+        run_args.run_id = Some(entry.run_id.clone());
+        let (run_output, entry_exit) = run_run(run_args)?;
+        if entry_exit != 0 && exit_code == 0 {
+            exit_code = entry_exit;
+        }
+        let entry_refs = run_output.evidence_refs.clone();
+        result_refs.extend(entry_refs.iter().cloned());
+        dispatch_records.push(campaign_dispatch_record(
+            entry,
+            &run_output.status,
+            Some(entry_exit),
+            entry_refs.first().map(|evidence| evidence.target.clone()),
+            entry_refs,
+            None,
+        ));
+    }
+
+    let status = campaign_run_status(&dispatch_records, args.execute);
+    Ok((
+        FuzzCampaignRunOutput {
+            command: if args.execute {
+                "fuzz.run-campaign"
+            } else {
+                "fuzz.run-campaign.dry-run"
+            }
+            .to_string(),
+            status: status.to_string(),
+            execute: args.execute,
+            dry_run: !args.execute,
+            resume: args.resume,
+            plan,
+            dispatch_records,
+            run_ids,
+            result_refs,
+            next_steps: campaign_next_steps(&status),
+        },
+        exit_code,
+    ))
+}
+
+fn campaign_dispatch_record(
+    entry: &FuzzCampaignPlanEntryOutput,
+    status: &str,
+    exit_code: Option<i32>,
+    result_ref: Option<String>,
+    evidence_refs: Vec<homeboy::core::artifact_ref::EvidenceRef>,
+    message: Option<String>,
+) -> FuzzCampaignDispatchRecordOutput {
+    FuzzCampaignDispatchRecordOutput {
+        index: entry.index,
+        entry_id: entry.id.clone(),
+        workload_id: entry.workload_id.clone(),
+        run_id: entry.run_id.clone(),
+        status: status.to_string(),
+        command: entry.command.clone(),
+        lab_runner: entry.lab_runner.clone(),
+        tracker_refs: entry.tracker_refs.clone(),
+        exit_code,
+        result_ref,
+        evidence_refs,
+        message,
+    }
+}
+
+fn campaign_run_status(
+    records: &[FuzzCampaignDispatchRecordOutput],
+    executed: bool,
+) -> &'static str {
+    if !executed {
+        return "planned";
+    }
+    if records
+        .iter()
+        .any(|record| matches!(record.status.as_str(), "failed" | "timeout"))
+    {
+        "failed"
+    } else if records
+        .iter()
+        .all(|record| record.status == "skipped_existing")
+    {
+        "skipped_existing"
+    } else {
+        "completed"
+    }
+}
+
+fn campaign_next_steps(status: &str) -> Vec<String> {
+    match status {
+        "planned" => vec!["Run the campaign with `homeboy fuzz plan --execute ...` or `homeboy fuzz run-campaign ...`.".to_string()],
+        "failed" => vec!["Inspect failed entry run ids with `homeboy runs show <run-id>` and `homeboy fuzz inspect <run-id>`.".to_string()],
+        _ => vec!["Inspect persisted campaign entry evidence with `homeboy runs show <run-id>` and `homeboy runs evidence <run-id>`.".to_string()],
+    }
 }
 
 const FUZZ_CAMPAIGN_PLAN_SCHEMA: &str = "homeboy/fuzz-campaign-plan/v1";

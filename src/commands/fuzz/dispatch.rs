@@ -13,7 +13,7 @@ use super::compare::run_compare;
 use super::doctor::run_doctor;
 use super::execution::{fuzz_prepare_failure_message, run_run};
 use super::inspect::run_inspect;
-use super::planning::run_plan;
+use super::planning::{run_campaign, run_plan};
 use super::replay::{run_minimize, run_replay};
 use super::report::{run_report, run_validate};
 use super::types::{
@@ -32,7 +32,18 @@ pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
             Ok((FuzzOutput::Discover(run_discover(discover_args)?), 0))
         }
         Some(FuzzCommand::List(list_args)) => Ok((FuzzOutput::List(run_list(list_args)?), 0)),
+        Some(FuzzCommand::Plan(plan_args)) if plan_args.execute || plan_args.dry_run => {
+            let (output, exit) = run_campaign(plan_args)?;
+            Ok((FuzzOutput::RunCampaign(output), exit))
+        }
         Some(FuzzCommand::Plan(plan_args)) => Ok((FuzzOutput::Plan(run_plan(plan_args)?), 0)),
+        Some(FuzzCommand::RunCampaign(mut plan_args)) => {
+            if !plan_args.dry_run {
+                plan_args.execute = true;
+            }
+            let (output, exit) = run_campaign(plan_args)?;
+            Ok((FuzzOutput::RunCampaign(output), exit))
+        }
         Some(FuzzCommand::Run(run_args)) => {
             let (output, exit) = run_run(run_args)?;
             Ok((FuzzOutput::Run(output), exit))
