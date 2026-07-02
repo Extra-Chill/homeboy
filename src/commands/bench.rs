@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::thread;
 
@@ -103,6 +103,25 @@ impl BenchArgs {
         self.run_args_for_lab_offload()
             .map(|run| run.extension_override.extensions.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub(crate) fn lab_required_extension_ids(&self) -> homeboy::core::Result<Vec<String>> {
+        let Some(run) = self.run_args_for_lab_offload() else {
+            return Ok(Vec::new());
+        };
+        if !run.extension_override.extensions.is_empty() {
+            return Ok(run.extension_override.extensions.clone());
+        }
+
+        let mut extension_ids = BTreeSet::new();
+        for rig_id in &run.rig {
+            let spec = rig::load(rig_id)?;
+            extension_ids.extend(rig::extension_ids_for_workloads(
+                &spec,
+                rig::RigWorkloadKind::Bench,
+            ));
+        }
+        Ok(extension_ids.into_iter().collect())
     }
 
     fn run_args_for_lab_offload(&self) -> Option<&BenchRunArgs> {
