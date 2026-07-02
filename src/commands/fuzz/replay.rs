@@ -900,16 +900,29 @@ fn resolve_replay_artifact(
         .unwrap_or_default();
 
     if schema == FUZZ_RESULT_ENVELOPE_SCHEMA {
-        let envelope: FuzzResultEnvelope = serde_json::from_value(value).map_err(|error| {
-            homeboy::core::Error::validation_invalid_argument(
-                "artifact",
-                format!("failed to decode fuzz result envelope: {error}"),
-                Some(path.display().to_string()),
-                None,
-            )
-        })?;
+        let envelope: FuzzResultEnvelope =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "artifact",
+                    format!("failed to decode fuzz result envelope: {error}"),
+                    Some(path.display().to_string()),
+                    None,
+                )
+            })?;
         let campaign = envelope.campaign.as_ref();
-        let (case_id, replay) = resolve_replay_metadata(campaign, requested_case_id)?;
+        let resolved = resolve_replay_metadata(campaign, requested_case_id);
+        if let Err(error) = &resolved {
+            if requested_case_id.is_some() && error.details["field"] == "case-id" {
+                if let Some(mut nested) = resolve_nested_replay_artifact(&value, requested_case_id)
+                {
+                    if nested.envelope_id.is_none() {
+                        nested.envelope_id = Some(envelope.id.clone());
+                    }
+                    return Ok(nested);
+                }
+            }
+        }
+        let (case_id, replay) = resolved?;
         return Ok(ResolvedReplayArtifact {
             campaign_id: campaign.map(|campaign| campaign.id.clone()),
             envelope_id: Some(envelope.id),
@@ -919,7 +932,7 @@ fn resolve_replay_artifact(
     }
 
     if schema == FUZZ_CAMPAIGN_SCHEMA {
-        let campaign: FuzzCampaign = serde_json::from_value(value).map_err(|error| {
+        let campaign: FuzzCampaign = serde_json::from_value(value.clone()).map_err(|error| {
             homeboy::core::Error::validation_invalid_argument(
                 "artifact",
                 format!("failed to decode fuzz campaign: {error}"),
@@ -927,13 +940,25 @@ fn resolve_replay_artifact(
                 None,
             )
         })?;
-        let (case_id, replay) = resolve_replay_metadata(Some(&campaign), requested_case_id)?;
+        let resolved = resolve_replay_metadata(Some(&campaign), requested_case_id);
+        if let Err(error) = &resolved {
+            if requested_case_id.is_some() && error.details["field"] == "case-id" {
+                if let Some(nested) = resolve_nested_replay_artifact(&value, requested_case_id) {
+                    return Ok(nested);
+                }
+            }
+        }
+        let (case_id, replay) = resolved?;
         return Ok(ResolvedReplayArtifact {
             campaign_id: Some(campaign.id),
             envelope_id: None,
             case_id,
             replay,
         });
+    }
+
+    if let Some(nested) = resolve_nested_replay_artifact(&value, requested_case_id) {
+        return Ok(nested);
     }
 
     Err(homeboy::core::Error::validation_invalid_argument(
@@ -944,6 +969,104 @@ fn resolve_replay_artifact(
         Some(path.display().to_string()),
         None,
     ))
+}
+
+fn resolve_nested_replay_artifact(
+    value: &serde_json::Value,
+    requested_case_id: Option<&str>,
+) -> Option<ResolvedReplayArtifact> {
+    let requested_case_id = requested_case_id?;
+    let mut stack = Vec::new();
+    push_child_values(value, &mut stack);
+
+    while let Some(candidate) = stack.pop() {
+        if let Some(resolved) = resolve_nested_replay_candidate(candidate, requested_case_id) {
+            return Some(resolved);
+        }
+        push_child_values(candidate, &mut stack);
+    }
+
+    None
+}
+
+fn resolve_nested_replay_candidate(
+    value: &serde_json::Value,
+    requested_case_id: &str,
+) -> Option<ResolvedReplayArtifact> {
+    let schema = value.get("schema").and_then(|schema| schema.as_str());
+    if schema == Some(FUZZ_RESULT_ENVELOPE_SCHEMA) {
+        if let Ok(envelope) = serde_json::from_value::<FuzzResultEnvelope>(value.clone()) {
+            if let Ok((Some(case_id), replay)) =
+                resolve_replay_metadata(envelope.campaign.as_ref(), Some(requested_case_id))
+            {
+                return Some(ResolvedReplayArtifact {
+                    campaign_id: envelope
+                        .campaign
+                        .as_ref()
+                        .map(|campaign| campaign.id.clone()),
+                    envelope_id: Some(envelope.id),
+                    case_id: Some(case_id),
+                    replay,
+                });
+            }
+        }
+    }
+
+    if schema == Some(FUZZ_CAMPAIGN_SCHEMA) {
+        if let Ok(campaign) = serde_json::from_value::<FuzzCampaign>(value.clone()) {
+            if let Ok((Some(case_id), replay)) =
+                resolve_replay_metadata(Some(&campaign), Some(requested_case_id))
+            {
+                return Some(ResolvedReplayArtifact {
+                    campaign_id: Some(campaign.id),
+                    envelope_id: None,
+                    case_id: Some(case_id),
+                    replay,
+                });
+            }
+        }
+    }
+
+    resolve_normalized_case_payload(value, requested_case_id)
+}
+
+fn resolve_normalized_case_payload(
+    value: &serde_json::Value,
+    requested_case_id: &str,
+) -> Option<ResolvedReplayArtifact> {
+    let object = value.as_object()?;
+    let cases = object.get("cases")?.as_array()?;
+    let case = cases.iter().find(|case| {
+        case.get("id")
+            .or_else(|| case.get("case_id"))
+            .and_then(|id| id.as_str())
+            == Some(requested_case_id)
+    })?;
+    let case_id = case
+        .get("id")
+        .or_else(|| case.get("case_id"))
+        .and_then(|id| id.as_str())?
+        .to_string();
+    let campaign_id = object
+        .get("id")
+        .or_else(|| object.get("campaign_id"))
+        .and_then(|id| id.as_str())
+        .map(str::to_string);
+
+    Some(ResolvedReplayArtifact {
+        campaign_id,
+        envelope_id: None,
+        case_id: Some(case_id),
+        replay: None,
+    })
+}
+
+fn push_child_values<'a>(value: &'a serde_json::Value, stack: &mut Vec<&'a serde_json::Value>) {
+    match value {
+        serde_json::Value::Array(items) => stack.extend(items.iter().rev()),
+        serde_json::Value::Object(object) => stack.extend(object.values().rev()),
+        _ => {}
+    }
 }
 
 fn resolve_replay_metadata(
