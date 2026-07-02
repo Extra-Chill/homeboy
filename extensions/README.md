@@ -24,6 +24,12 @@ exported from `homeboy-runtime-agent-ci/generic-orchestration`; provider and
 workflow adapters are exported from `homeboy-runtime-agent-ci/provider-adapters`.
 The legacy `homeboy-runtime-agent-ci` root export is a deprecated compatibility
 barrel and should not be used by new callers. Module internals live in
+
+Declarative dependency adapter manifests live in
+[`dependency-adapters/`](dependency-adapters/). They describe extension-owned
+Node.js, Composer, and WordPress dependency materialization surfaces without
+teaching Homeboy core ecosystem-specific package-manager behavior.
+
 `runtime-agent-ci/lib/` and are documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 Use `.github/workflows/runtime-agent-full-run.yml` for the standard single-task

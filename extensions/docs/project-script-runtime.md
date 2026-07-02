@@ -51,6 +51,13 @@ Lockfiles are authoritative even when the corresponding executable is missing on
 the current host. That keeps discovery deterministic; execution then fails with a
 normal missing-tool error instead of silently running the wrong package manager.
 
+The declarative version of this package-manager knowledge lives in
+[`../dependency-adapters/examples/nodejs.json`](../dependency-adapters/examples/nodejs.json).
+Composer and WordPress helper examples live beside it. These manifests are the
+extension-owned seam for dependency materialization adapters; they document
+capabilities and outputs without adding package-manager knowledge to Homeboy
+core.
+
 ## Homeboy Core Seam
 
 This helper is the extension-owned implementation seam for a future Homeboy core

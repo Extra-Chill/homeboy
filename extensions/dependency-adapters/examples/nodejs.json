@@ -1,0 +1,74 @@
+{
+  "schema": "homeboy-extension/dependency-adapter-manifest/v1",
+  "id": "nodejs-package-managers",
+  "version": 1,
+  "ecosystem": "nodejs",
+  "description": "Declarative Node.js package manager selection and dependency materialization outputs.",
+  "project_signals": {
+    "root_files": ["package.json"],
+    "optional_files": ["pnpm-workspace.yaml", "pnpm-lock.yaml", "yarn.lock", "package-lock.json"]
+  },
+  "capabilities": {
+    "discover_project_root": true,
+    "select_package_manager": true,
+    "install_dependencies": true,
+    "run_named_scripts": true,
+    "execute_bins": true,
+    "prepare_runtime_helpers": false
+  },
+  "package_managers": [
+    {
+      "id": "pnpm",
+      "selection": {
+        "priority": 1,
+        "files": ["pnpm-workspace.yaml", "pnpm-lock.yaml"]
+      },
+      "install": {
+        "intent": "frozen-lockfile",
+        "command": "pnpm install --frozen-lockfile"
+      },
+      "scripts": {
+        "manifest": "package.json",
+        "run_command": "pnpm run",
+        "exec_command": "pnpm exec"
+      },
+      "outputs": [{ "kind": "directory", "path": "node_modules", "required": true }]
+    },
+    {
+      "id": "yarn",
+      "selection": {
+        "priority": 2,
+        "files": ["yarn.lock"]
+      },
+      "install": {
+        "intent": "frozen-lockfile",
+        "command": "yarn install --frozen-lockfile"
+      },
+      "scripts": {
+        "manifest": "package.json",
+        "run_command": "yarn",
+        "exec_command": "yarn"
+      },
+      "outputs": [{ "kind": "directory", "path": "node_modules", "required": true }]
+    },
+    {
+      "id": "npm",
+      "selection": {
+        "priority": 3,
+        "default": true,
+        "files": ["package-lock.json"]
+      },
+      "install": {
+        "intent": "locked-or-refresh",
+        "command": "npm ci",
+        "fallback_command": "npm install"
+      },
+      "scripts": {
+        "manifest": "package.json",
+        "run_command": "npm run",
+        "exec_command": "npx"
+      },
+      "outputs": [{ "kind": "directory", "path": "node_modules", "required": true }]
+    }
+  ]
+}
