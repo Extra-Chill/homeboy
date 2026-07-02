@@ -367,6 +367,29 @@ pub struct RunnerExecutionNextAction {
 }
 
 impl RunnerExecutionRecord {
+    pub fn planned(
+        execution_id: impl Into<String>,
+        runner_id: impl Into<String>,
+        transport: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: RUNNER_EXECUTION_RECORD_SCHEMA.to_string(),
+            execution_id: execution_id.into(),
+            runner_id: runner_id.into(),
+            transport: transport.into(),
+            status: "planned".to_string(),
+            job_id: None,
+            local_run_id: None,
+            remote_run_id: None,
+            agent_task_run_id: None,
+            mirror_run_id: None,
+            path_materialization_plan: None,
+            orchestration_provenance: None,
+            artifact_refs: Vec::new(),
+            next_actions: Vec::new(),
+        }
+    }
+
     pub fn terminal(
         execution_id: impl Into<String>,
         runner_id: impl Into<String>,
@@ -847,6 +870,19 @@ mod tests {
         );
         assert_eq!(value["artifact_refs"][0]["id"], "artifact-1");
         assert_eq!(value["next_actions"][0]["label"], "runner_job_logs");
+    }
+
+    #[test]
+    fn runner_execution_record_planned_captures_non_terminal_execution() {
+        let record = RunnerExecutionRecord::planned("plan-1", "lab-a", "refresh_plan");
+
+        assert_eq!(record.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
+        assert_eq!(record.execution_id, "plan-1");
+        assert_eq!(record.runner_id, "lab-a");
+        assert_eq!(record.transport, "refresh_plan");
+        assert_eq!(record.status, "planned");
+        assert!(record.job_id.is_none());
+        assert!(record.artifact_refs.is_empty());
     }
 
     #[test]
