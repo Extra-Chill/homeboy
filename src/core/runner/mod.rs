@@ -73,8 +73,8 @@ pub use capabilities::{
 };
 pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::{
-    normalize_runner_command_env, normalize_runner_command_env_for_homeboy_path,
-    quote_runner_env_value, remote_shell_path_preamble,
+    normalize_runner_command_env_for_homeboy_path, quote_runner_env_value,
+    remote_shell_path_preamble,
 };
 pub use connection::{
     connect, connect_reverse, disconnect, reverse_broker_artifact, reverse_broker_reconcile,
@@ -222,7 +222,10 @@ impl RunnerSpec {
 
     pub fn effective_env(&self) -> HashMap<String, String> {
         let mut env = self.env.clone();
-        normalize_runner_command_env(&mut env);
+        normalize_runner_command_env_for_homeboy_path(
+            &mut env,
+            self.settings.homeboy_path.as_deref(),
+        );
         env
     }
 }
@@ -997,7 +1000,10 @@ mod tests {
         assert_eq!(runner.policy.allowed_commands, vec!["test"]);
 
         let env = spec.effective_env();
-        assert_eq!(env.get("PATH").map(String::as_str), Some("/runner/bin"));
+        assert_eq!(
+            env.get("PATH").map(String::as_str),
+            Some("/usr/local/bin:/runner/bin")
+        );
         assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
     }
 
