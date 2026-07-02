@@ -1,11 +1,12 @@
 {
   "schema": "homeboy-extension/dependency-adapter-manifest/v1",
   "id": "composer-package-manager",
-  "version": 1,
+  "version": 2,
   "ecosystem": "php",
   "description": "Declarative Composer dependency materialization outputs for PHP projects.",
   "project_signals": {
     "root_files": ["composer.json"],
+    "root_match": "any",
     "optional_files": ["composer.lock"]
   },
   "capabilities": {
@@ -21,6 +22,7 @@
       "id": "composer",
       "selection": {
         "priority": 1,
+        "search": "project-root",
         "default": true,
         "files": ["composer.json", "composer.lock"]
       },

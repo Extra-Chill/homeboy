@@ -1,7 +1,7 @@
 {
   "schema": "homeboy-extension/dependency-adapter-manifest/v1",
   "id": "nodejs-package-managers",
-  "version": 1,
+  "version": 2,
   "ecosystem": "nodejs",
   "description": "Declarative Node.js package manager selection and dependency materialization outputs.",
   "project_signals": {
@@ -21,6 +21,7 @@
       "id": "pnpm",
       "selection": {
         "priority": 1,
+        "search": "upward",
         "files": ["pnpm-workspace.yaml", "pnpm-lock.yaml"]
       },
       "install": {
@@ -38,6 +39,7 @@
       "id": "yarn",
       "selection": {
         "priority": 2,
+        "search": "project-root",
         "files": ["yarn.lock"]
       },
       "install": {
@@ -55,6 +57,7 @@
       "id": "npm",
       "selection": {
         "priority": 3,
+        "search": "project-root",
         "default": true,
         "files": ["package-lock.json"]
       },

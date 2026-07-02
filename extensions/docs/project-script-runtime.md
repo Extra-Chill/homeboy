@@ -39,9 +39,14 @@ The helper exposes these generic functions:
 
 ## Current Adapters
 
-The current adapter is `node` / `nodejs`. It finds the nearest `package.json` at
-or above the input path and selects the package manager from committed project
-signals in this order:
+The current adapters are declared in
+[`../dependency-adapters/examples/`](../dependency-adapters/examples/). The
+helper loads those manifests to discover project roots, select package managers,
+build script/exec commands, and choose install commands.
+
+`node` / `nodejs` finds the nearest `package.json` at or above the input path and
+selects the package manager from committed project signals in manifest priority
+order:
 
 1. `pnpm-lock.yaml` -> `pnpm`
 2. `yarn.lock` -> `yarn`
@@ -51,12 +56,18 @@ Lockfiles are authoritative even when the corresponding executable is missing on
 the current host. That keeps discovery deterministic; execution then fails with a
 normal missing-tool error instead of silently running the wrong package manager.
 
-The declarative version of this package-manager knowledge lives in
-[`../dependency-adapters/examples/nodejs.json`](../dependency-adapters/examples/nodejs.json).
-Composer and WordPress helper examples live beside it. These manifests are the
-extension-owned seam for dependency materialization adapters; they document
-capabilities and outputs without adding package-manager knowledge to Homeboy
-core.
+The pnpm adapter uses manifest-declared upward search so a package inside a pnpm
+workspace runs scripts from the package root while installing dependencies from
+the workspace root.
+
+`composer` / `php` finds `composer.json`, exposes `composer run-script` and
+`composer exec`, and materializes `vendor/` from the Composer adapter manifest.
+
+`wordpress` requires the manifest-declared WordPress root signals
+(`wp-content` and `wp-includes`) and composes helper behavior from the Composer
+and Node.js adapters when `composer.json` or `package.json` are present. The
+WordPress adapter describes the helper surface without embedding package-manager
+behavior in Homeboy core.
 
 ## Homeboy Core Seam
 

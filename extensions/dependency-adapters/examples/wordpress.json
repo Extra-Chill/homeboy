@@ -1,11 +1,12 @@
 {
   "schema": "homeboy-extension/dependency-adapter-manifest/v1",
   "id": "wordpress-dependency-helpers",
-  "version": 1,
+  "version": 2,
   "ecosystem": "wordpress",
   "description": "WordPress extension helper surface for composing PHP, JavaScript, and WP-CLI dependency preparation.",
   "project_signals": {
     "root_files": ["wp-content", "wp-includes"],
+    "root_match": "all",
     "optional_files": ["composer.json", "package.json", "wp-cli.yml"]
   },
   "capabilities": {
