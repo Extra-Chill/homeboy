@@ -191,8 +191,20 @@ pub struct EvidenceArtifact {
     pub created_at: String,
     pub exists: bool,
     pub retention_candidate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory_publication: Option<DirectoryArtifactPublicationGuidance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview_entrypoints: Vec<ArtifactPreviewEntrypoint>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryArtifactPublicationGuidance {
+    pub status: String,
+    pub note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -336,6 +348,7 @@ pub fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> EvidenceArtifact
             let size = artifact_size_bytes(artifact);
             total_size_bytes = total_size_bytes.saturating_add(size);
             let preview_entrypoints = html_preview_entrypoints(artifact);
+            let directory_publication = directory_publication_guidance(artifact, &address);
             EvidenceArtifact {
                 id: reference.id.clone(),
                 kind: reference.kind.clone(),
@@ -352,6 +365,7 @@ pub fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> EvidenceArtifact
                 created_at: artifact.created_at.clone(),
                 exists,
                 retention_candidate: artifact.artifact_type != "url",
+                directory_publication,
                 preview_entrypoints,
                 reference,
             }
@@ -367,6 +381,67 @@ pub fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> EvidenceArtifact
         total_size_bytes,
         artifacts,
     }
+}
+
+pub fn directory_publication_guidance(
+    artifact: &ArtifactRecord,
+    address: &ArtifactAddress,
+) -> Option<DirectoryArtifactPublicationGuidance> {
+    if artifact.artifact_type != "directory" {
+        return None;
+    }
+
+    if address.kind == ArtifactAddressKind::PublicUrl {
+        return Some(DirectoryArtifactPublicationGuidance {
+            status: "published".to_string(),
+            note: "directory artifact is reviewer-facing through the configured public artifact base URL".to_string(),
+            public_url: Some(address.value.clone()),
+            command: None,
+        });
+    }
+
+    if crate::core::runners::is_remote_runner_artifact_path(&artifact.path) {
+        return Some(unpublished_directory_guidance(
+            "runner_resident",
+            "directory artifact is runner-resident; mirror it to the controller artifact store before using it as review evidence",
+            artifact,
+        ));
+    }
+
+    if Path::new(&artifact.path).is_dir() {
+        return Some(unpublished_directory_guidance(
+            "mirrored",
+            "directory artifact is mirrored in the operator-local Homeboy artifact store but is not a reviewer-facing URL",
+            artifact,
+        ));
+    }
+
+    Some(DirectoryArtifactPublicationGuidance {
+        status: "not_publishable".to_string(),
+        note: "directory artifact bytes are unavailable from this observation record".to_string(),
+        public_url: None,
+        command: None,
+    })
+}
+
+fn unpublished_directory_guidance(
+    status: &str,
+    note: &str,
+    artifact: &ArtifactRecord,
+) -> DirectoryArtifactPublicationGuidance {
+    DirectoryArtifactPublicationGuidance {
+        status: status.to_string(),
+        note: note.to_string(),
+        public_url: None,
+        command: public_base_configured()
+            .then(|| format!("homeboy runs artifacts {} --pull", artifact.run_id)),
+    }
+}
+
+fn public_base_configured() -> bool {
+    std::env::var(crate::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn artifact_ref(artifact: &ArtifactRecord, address: &ArtifactAddress) -> ArtifactRef {
@@ -659,7 +734,10 @@ mod tests {
         assert_eq!(report.artifact_index.url_count, 1);
         // Retention guidance embeds the run id and the default window.
         assert!(report.retention.cleanup_command.contains("run-1"));
-        assert_eq!(report.retention.default_retention_days, DEFAULT_RETENTION_DAYS);
+        assert_eq!(
+            report.retention.default_retention_days,
+            DEFAULT_RETENTION_DAYS
+        );
         // A passing run is not a failure.
         assert!(!report.failure.failed);
         assert_eq!(report.failure.status, "pass");

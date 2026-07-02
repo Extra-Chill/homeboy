@@ -22,14 +22,15 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     // MCP, automation) can reuse it; this adapter only supplies the CLI-owned
     // `RunSummary`, disk budget, and command label.
     let run_summary = run_summary(run.clone());
-    let report = evidence_report::build_run_evidence_report(evidence_report::RunEvidenceReportInputs {
-        command: "runs.evidence",
-        run,
-        run_summary,
-        artifacts,
-        artifact_root,
-        disk_budget,
-    });
+    let report =
+        evidence_report::build_run_evidence_report(evidence_report::RunEvidenceReportInputs {
+            command: "runs.evidence",
+            run,
+            run_summary,
+            artifacts,
+            artifact_root,
+            disk_budget,
+        });
 
     Ok((RunsOutput::Evidence(report), 0))
 }
@@ -53,6 +54,12 @@ mod tests {
     }
 
     impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prior }
+        }
+
         fn unset(key: &'static str) -> Self {
             let prior = std::env::var(key).ok();
             std::env::remove_var(key);
@@ -312,6 +319,7 @@ mod tests {
     fn evidence_command_surfaces_static_html_preview_entrypoints() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
+            let _public_artifact_base = EnvGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
             let artifact_root = home.path().join("agent-readable-artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root));
             let store = ObservationStore::open_initialized().expect("store");
@@ -349,6 +357,53 @@ mod tests {
             assert_eq!(artifact.preview_entrypoints[0].path, "index.html");
             assert_eq!(artifact.preview_entrypoints[0].label, "Open generated site");
             assert_eq!(artifact.preview_entrypoints[0].public_url, None);
+        });
+    }
+
+    #[test]
+    fn evidence_command_marks_directory_artifacts_as_published_without_local_paths() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let artifact_root = home.path().join("agent-readable-artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let _public_artifact_base = EnvGuard::set(
+                PUBLIC_ARTIFACT_BASE_URL_ENV,
+                "https://artifacts.example.test/homeboy",
+            );
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+                .expect("run");
+            let directory = home.path().join("fuzz-artifacts");
+            std::fs::create_dir_all(&directory).expect("directory");
+            std::fs::write(directory.join("summary.json"), b"{}").expect("summary");
+            store
+                .record_directory_artifact(&run.id, "fuzz_artifacts", &directory)
+                .expect("directory artifact");
+
+            let (output, _) = evidence(&run.id).expect("evidence");
+
+            let RunsOutput::Evidence(output) = output else {
+                panic!("expected evidence output");
+            };
+            let artifact = output
+                .artifact_index
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "fuzz_artifacts")
+                .expect("fuzz directory artifact");
+            assert!(artifact.public);
+            assert!(artifact
+                .path
+                .starts_with("https://artifacts.example.test/homeboy/"));
+            assert!(!Path::new(&artifact.path).is_absolute());
+            let publication = artifact
+                .directory_publication
+                .as_ref()
+                .expect("directory publication guidance");
+            assert_eq!(publication.status, "published");
+            assert!(publication.command.is_none());
+            homeboy::core::set_artifact_root_override(None);
         });
     }
 
@@ -489,6 +544,7 @@ mod tests {
     fn evidence_includes_related_lab_fuzz_results_for_runner_failure() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
+            let _public_artifact_base = EnvGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
             let artifact_root = home.path().join("agent-readable-artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root));
             let store = ObservationStore::open_initialized().expect("store");

@@ -332,6 +332,11 @@ fn read_artifact_json(run: &RunRecord, artifact: &ArtifactRecord) -> Result<Valu
         runs_service::download_remote_artifact(artifact.clone(), None)
             .map_err(|err| format!("remote artifact could not be downloaded: {err}"))?
             .output_path
+    } else if artifact.artifact_type == "directory" {
+        return Err(format!(
+            "directory artifact is not directly readable as hotspot JSON; use `homeboy runs artifacts {} --pull` to mirror or publish retrievable artifacts, then inspect file artifacts with `homeboy runs artifact get {} <artifact-id> -o <path>`",
+            run.id, run.id
+        ));
     } else {
         return Err(if artifact.artifact_type == "metadata-only" {
             "artifact bytes are not available in this imported metadata-only bundle".to_string()
@@ -760,6 +765,8 @@ fn severity_score(value: &Value) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+    use homeboy::test_support::with_isolated_home;
     use serde_json::json;
 
     use super::*;
@@ -770,6 +777,37 @@ mod tests {
             artifact_kind: "fuzz_result_envelope".to_string(),
             json,
         }
+    }
+
+    struct XdgGuard(Option<String>);
+
+    impl XdgGuard {
+        fn unset() -> Self {
+            let prior = std::env::var("XDG_DATA_HOME").ok();
+            std::env::remove_var("XDG_DATA_HOME");
+            Self(prior)
+        }
+    }
+
+    impl Drop for XdgGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    fn sample_run(kind: &str, component_id: &str, rig_id: &str) -> NewRunRecord {
+        NewRunRecord::builder(kind)
+            .component_id(component_id)
+            .command(format!("homeboy {kind} {component_id}"))
+            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+            .homeboy_version("test-version")
+            .git_sha(Some("abc123".to_string()))
+            .rig_id(rig_id)
+            .metadata(Value::Null)
+            .build()
     }
 
     #[test]
@@ -811,6 +849,45 @@ mod tests {
         assert_eq!(ranked[0].run_ids, vec!["run-a", "run-b"]);
         assert_eq!(ranked[1].key, "beta");
         assert_eq!(ranked[1].score, 4.0);
+    }
+
+    #[test]
+    fn skipped_directory_fuzz_artifact_points_to_retrieval_command() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run("bench", "homeboy", "studio"))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("finish run");
+            let directory = home.path().join("fuzz-artifacts");
+            std::fs::create_dir_all(&directory).expect("directory");
+            std::fs::write(directory.join("result.json"), b"{}").expect("file");
+            store
+                .record_directory_artifact(&run.id, "fuzz_artifacts", &directory)
+                .expect("directory artifact");
+
+            let (output, _) = runs_hotspots(RunsHotspotsArgs {
+                run_ids: vec![run.id.clone()],
+                baseline_runs: Vec::new(),
+                candidate_runs: Vec::new(),
+                limit: 20,
+            })
+            .expect("hotspots");
+
+            let RunsOutput::Hotspots(output) = output else {
+                panic!("expected hotspots output");
+            };
+            assert_eq!(output.skipped_artifact_count, 1);
+            assert!(output.skipped_artifacts[0]
+                .reason
+                .contains(&format!("homeboy runs artifacts {} --pull", run.id)));
+            assert!(output.skipped_artifacts[0]
+                .reason
+                .contains("homeboy runs artifact get"));
+        });
     }
 
     #[test]

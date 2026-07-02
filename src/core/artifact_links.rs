@@ -69,6 +69,10 @@ pub fn public_artifact_url(artifact: &ArtifactRecord) -> Option<String> {
         }
     }
 
+    if artifact.artifact_type == "directory" {
+        return None;
+    }
+
     Some(format!(
         "{}/runs/{}/artifacts/{}",
         base,
@@ -232,7 +236,9 @@ pub fn validate_public_artifact_url(public_url: &str) -> PublicArtifactUrlValida
 }
 
 fn artifact_is_fetchable(artifact: &ArtifactRecord) -> bool {
-    artifact.artifact_type == "file" || artifact.artifact_type == "remote_file"
+    artifact.artifact_type == "file"
+        || artifact.artifact_type == "directory"
+        || artifact.artifact_type == "remote_file"
 }
 
 fn probe_public_artifact_url(public_url: &str) -> Result<reqwest::StatusCode, reqwest::Error> {
@@ -346,6 +352,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn directory_artifact_public_url_requires_artifact_root_path() {
+        let _env = EnvGuard::set(
+            PUBLIC_ARTIFACT_BASE_URL_ENV,
+            "https://artifacts.example.test/base",
+        );
+        let root = tempfile::tempdir().expect("artifact root");
+        crate::core::set_artifact_root_override(Some(root.path().to_path_buf()));
+        let artifact = ArtifactRecord {
+            id: "artifact-1".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "fuzz_artifacts".to_string(),
+            artifact_type: "directory".to_string(),
+            path: tempfile::tempdir()
+                .expect("operator local directory")
+                .path()
+                .display()
+                .to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: serde_json::json!({}),
+            created_at: "2026-06-12T00:00:00Z".to_string(),
+        };
+
+        assert_eq!(public_artifact_url(&artifact), None);
+        crate::core::set_artifact_root_override(None);
+    }
+
     fn viewer_artifact() -> ArtifactRecord {
         ArtifactRecord {
             id: "artifact-1".to_string(),
@@ -372,6 +411,28 @@ mod tests {
                 }
             }),
             created_at: "2026-06-12T00:00:00Z".to_string(),
+        }
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
         }
     }
 
