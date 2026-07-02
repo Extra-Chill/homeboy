@@ -146,7 +146,32 @@ mod types {
 
     #[derive(Debug, Clone, Serialize)]
     pub struct WorktreeCleanupOutput {
-        pub candidates: Vec<WorktreeRemoveOutput>,
+        pub dry_run: bool,
+        pub counts: WorktreeCleanupCounts,
+        pub candidates: Vec<WorktreeCleanupCandidate>,
+        pub removed: Vec<WorktreeRemoveOutput>,
+        pub skipped: Vec<WorktreeCleanupSkipped>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+    pub struct WorktreeCleanupCounts {
+        pub candidates: usize,
+        pub removed: usize,
+        pub skipped: usize,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WorktreeCleanupCandidate {
+        pub record: TaskWorktreeRecord,
+        pub safety: WorktreeSafetyReport,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WorktreeCleanupSkipped {
+        pub record: TaskWorktreeRecord,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub safety: Option<WorktreeSafetyReport>,
+        pub reasons: Vec<String>,
     }
 
     #[derive(Debug, Clone)]
@@ -171,6 +196,12 @@ mod types {
     pub struct WorktreeRemoveOptions {
         pub id: String,
         pub force: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct WorktreeCleanupOptions {
+        pub force: bool,
+        pub dry_run: bool,
     }
 
     #[derive(Debug, Clone)]
@@ -231,7 +262,8 @@ mod types {
 
 pub use types::{
     AdoptedWorkspaceRecord, CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState,
-    WorkspaceRefRecord, WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeCleanupOutput,
+    WorkspaceRefRecord, WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeCleanupCandidate,
+    WorktreeCleanupCounts, WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupSkipped,
     WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput, WorktreeQueueCreateOptions,
     WorktreeQueueCreateOutput, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
     WorktreeQueueLockHolder, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeSafetyReport,
@@ -269,9 +301,9 @@ pub fn remove(options: WorktreeRemoveOptions) -> Result<WorktreeRemoveOutput> {
     remove_with_store(options, &metadata_dir()?)
 }
 
-pub fn cleanup(force: bool) -> Result<WorktreeCleanupOutput> {
+pub fn cleanup(options: WorktreeCleanupOptions) -> Result<WorktreeCleanupOutput> {
     let store = metadata_dir()?;
-    cleanup_with_store(force, &store)
+    cleanup_with_store(options, &store)
 }
 
 mod store_ops {
@@ -319,8 +351,13 @@ mod store_ops {
         Ok(WorktreeAdoptOutput { record })
     }
 
-    pub(super) fn cleanup_with_store(force: bool, store: &Path) -> Result<WorktreeCleanupOutput> {
+    pub(super) fn cleanup_with_store(
+        options: WorktreeCleanupOptions,
+        store: &Path,
+    ) -> Result<WorktreeCleanupOutput> {
         let mut candidates = Vec::new();
+        let mut removed = Vec::new();
+        let mut skipped = Vec::new();
         for record in list_with_store(store)?.worktrees {
             if record.state != TaskWorktreeState::Active {
                 continue;
@@ -328,19 +365,73 @@ mod store_ops {
             if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
                 continue;
             }
-            match remove_with_store(
-                WorktreeRemoveOptions {
-                    id: record.id,
-                    force,
-                },
-                store,
-            ) {
-                Ok(candidate) => candidates.push(candidate),
-                Err(error) if is_missing_source_checkout_error(&error) => continue,
-                Err(error) => return Err(error),
+            let safety = match safety_report(&record) {
+                Ok(safety) => safety,
+                Err(error) => {
+                    skipped.push(WorktreeCleanupSkipped {
+                        record,
+                        safety: None,
+                        reasons: vec![error.message],
+                    });
+                    continue;
+                }
+            };
+            let skip_reasons = cleanup_skip_reasons(&safety, options.force);
+            if !skip_reasons.is_empty() {
+                skipped.push(WorktreeCleanupSkipped {
+                    record,
+                    safety: Some(safety),
+                    reasons: skip_reasons,
+                });
+                continue;
+            }
+
+            candidates.push(WorktreeCleanupCandidate {
+                record: record.clone(),
+                safety: safety.clone(),
+            });
+
+            if !options.dry_run {
+                removed.push(remove_with_store(
+                    WorktreeRemoveOptions {
+                        id: record.id,
+                        force: options.force,
+                    },
+                    store,
+                )?);
             }
         }
-        Ok(WorktreeCleanupOutput { candidates })
+        let counts = WorktreeCleanupCounts {
+            candidates: candidates.len() + skipped.len(),
+            removed: removed.len(),
+            skipped: skipped.len(),
+        };
+        Ok(WorktreeCleanupOutput {
+            dry_run: options.dry_run,
+            counts,
+            candidates,
+            removed,
+            skipped,
+        })
+    }
+
+    fn cleanup_skip_reasons(safety: &WorktreeSafetyReport, force: bool) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if safety.primary_checkout {
+            reasons.push("refuses to remove primary checkout".to_string());
+        }
+        if !safety.path_contained {
+            reasons.push("worktree path is outside the component checkout parent".to_string());
+        }
+        if !force {
+            if safety.dirty {
+                reasons.push("dirty worktree".to_string());
+            }
+            if safety.unpushed_commits > 0 {
+                reasons.push(format!("{} unpushed commit(s)", safety.unpushed_commits));
+            }
+        }
+        reasons
     }
 
     pub(super) fn create_with_store(
@@ -1099,12 +1190,22 @@ mod tests {
         let record = fixture_record(source.path(), &worktree);
         write_record(&store, &record).unwrap();
 
-        let output = cleanup_with_store(false, &store).unwrap();
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: false,
+                dry_run: false,
+            },
+            &store,
+        )
+        .unwrap();
         let updated = read_record(&store, &record.id).unwrap();
 
-        assert_eq!(output.candidates.len(), 1);
-        assert!(output.candidates[0].removed);
-        assert!(output.candidates[0].safety.worktree_missing);
+        assert_eq!(output.counts.candidates, 1);
+        assert_eq!(output.counts.removed, 1);
+        assert_eq!(output.counts.skipped, 0);
+        assert_eq!(output.removed.len(), 1);
+        assert!(output.removed[0].removed);
+        assert!(output.removed[0].safety.worktree_missing);
         assert_eq!(updated.state, TaskWorktreeState::Removed);
     }
 
@@ -1183,19 +1284,29 @@ mod tests {
             removable.id = "fixture@cleanup-continues".to_string();
             write_record(&store, &removable).unwrap();
 
-            let output = cleanup_with_store(false, &store).unwrap();
+            let output = cleanup_with_store(
+                WorktreeCleanupOptions {
+                    force: false,
+                    dry_run: false,
+                },
+                &store,
+            )
+            .unwrap();
             let skipped = read_record(&store, &unrepairable.id).unwrap();
             let removed = read_record(&store, &removable.id).unwrap();
 
-            assert_eq!(output.candidates.len(), 1);
-            assert_eq!(output.candidates[0].record.id, removable.id);
+            assert_eq!(output.counts.candidates, 2);
+            assert_eq!(output.counts.removed, 1);
+            assert_eq!(output.counts.skipped, 1);
+            assert_eq!(output.removed[0].record.id, removable.id);
+            assert_eq!(output.skipped[0].record.id, unrepairable.id);
             assert_eq!(skipped.state, TaskWorktreeState::Active);
             assert_eq!(removed.state, TaskWorktreeState::Removed);
         });
     }
 
     #[test]
-    fn cleanup_refuses_dirty_worktree_without_force() {
+    fn cleanup_skips_dirty_worktree_without_force() {
         let dir = tempfile::tempdir().unwrap();
         let source = git_repo();
         let worktree = sibling_worktree_path(source.path(), "dirty-cleanup-refused");
@@ -1211,15 +1322,103 @@ mod tests {
         );
         fs::write(worktree.join("dirty.txt"), "dirty\n").unwrap();
         let store = dir.path().join("store");
+        let mut dirty_record = fixture_record(source.path(), &worktree);
+        dirty_record.id = "fixture@dirty".to_string();
+        let mut safe_record = fixture_record(
+            source.path(),
+            &sibling_worktree_path(source.path(), "missing-after-dirty"),
+        );
+        safe_record.id = "fixture@missing".to_string();
+        write_record(&store, &dirty_record).unwrap();
+        write_record(&store, &safe_record).unwrap();
+
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: false,
+                dry_run: false,
+            },
+            &store,
+        )
+        .unwrap();
+        let updated = read_record(&store, &dirty_record.id).unwrap();
+
+        assert_eq!(output.counts.candidates, 2);
+        assert_eq!(output.counts.removed, 1);
+        assert_eq!(output.counts.skipped, 1);
+        assert_eq!(output.skipped[0].record.id, dirty_record.id);
+        assert!(output.skipped[0]
+            .reasons
+            .iter()
+            .any(|reason| reason == "dirty worktree"));
+        assert_eq!(output.removed[0].record.id, safe_record.id);
+        assert_eq!(updated.state, TaskWorktreeState::Active);
+        assert!(worktree.exists());
+    }
+
+    #[test]
+    fn cleanup_force_still_skips_primary_checkout_hard_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = git_repo();
+        let store = dir.path().join("store");
+        let record = fixture_record(source.path(), source.path());
+        write_record(&store, &record).unwrap();
+
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: true,
+                dry_run: false,
+            },
+            &store,
+        )
+        .unwrap();
+        let updated = read_record(&store, &record.id).unwrap();
+
+        assert_eq!(output.counts.candidates, 1);
+        assert_eq!(output.counts.removed, 0);
+        assert_eq!(output.counts.skipped, 1);
+        assert!(output.skipped[0]
+            .reasons
+            .iter()
+            .any(|reason| reason == "refuses to remove primary checkout"));
+        assert_eq!(updated.state, TaskWorktreeState::Active);
+        assert!(source.path().exists());
+    }
+
+    #[test]
+    fn cleanup_dry_run_reports_safe_candidate_without_removing() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = git_repo();
+        let worktree = sibling_worktree_path(source.path(), "dry-run-cleanup");
+        run_git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "dry-run-cleanup",
+                &worktree.to_string_lossy(),
+            ],
+        );
+        let store = dir.path().join("store");
         let record = fixture_record(source.path(), &worktree);
         write_record(&store, &record).unwrap();
 
-        let err = cleanup_with_store(false, &store).unwrap_err();
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: false,
+                dry_run: true,
+            },
+            &store,
+        )
+        .unwrap();
         let updated = read_record(&store, &record.id).unwrap();
 
-        assert!(err
-            .to_string()
-            .contains("Task worktree is not safe to remove"));
+        assert!(output.dry_run);
+        assert_eq!(output.counts.candidates, 1);
+        assert_eq!(output.counts.removed, 0);
+        assert_eq!(output.counts.skipped, 0);
+        assert_eq!(output.candidates[0].record.id, record.id);
+        assert!(!output.candidates[0].safety.worktree_missing);
         assert_eq!(updated.state, TaskWorktreeState::Active);
         assert!(worktree.exists());
     }
@@ -1244,12 +1443,21 @@ mod tests {
         let record = fixture_record(source.path(), &worktree);
         write_record(&store, &record).unwrap();
 
-        let output = cleanup_with_store(true, &store).unwrap();
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: true,
+                dry_run: false,
+            },
+            &store,
+        )
+        .unwrap();
         let updated = read_record(&store, &record.id).unwrap();
 
-        assert_eq!(output.candidates.len(), 1);
-        assert!(output.candidates[0].removed);
-        assert!(output.candidates[0].safety.dirty);
+        assert_eq!(output.counts.candidates, 1);
+        assert_eq!(output.counts.removed, 1);
+        assert_eq!(output.counts.skipped, 0);
+        assert!(output.removed[0].removed);
+        assert!(output.removed[0].safety.dirty);
         assert_eq!(updated.state, TaskWorktreeState::Removed);
         assert!(!worktree.exists());
     }

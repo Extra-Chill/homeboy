@@ -5,9 +5,10 @@ use homeboy::core::cleanup::{
     self as artifact_cleanup, ArtifactCleanupOptions, ArtifactCleanupOutput, ArtifactCleanupSort,
 };
 use homeboy::core::worktree::{
-    self, CleanupPolicy, WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeCleanupOutput,
-    WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput, WorktreeQueueCreateOptions,
-    WorktreeQueueCreateOutput, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
+    self, CleanupPolicy, WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeCleanupOptions,
+    WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput,
+    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 
 use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
@@ -109,6 +110,9 @@ enum WorktreeCommand {
         /// Allow dirty/unpushed worktree removal; hard gates still apply
         #[arg(long)]
         force: bool,
+        /// Report cleanup candidates without removing worktrees or artifacts.
+        #[arg(long)]
+        dry_run: bool,
         /// Skip the automatic rebuildable artifact cleanup pass.
         #[arg(long)]
         skip_artifact_cleanup: bool,
@@ -213,16 +217,17 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
         }
         WorktreeCommand::Cleanup {
             force,
+            dry_run,
             skip_artifact_cleanup,
         } => {
-            let worktrees = worktree::cleanup(force)?;
+            let worktrees = worktree::cleanup(WorktreeCleanupOptions { force, dry_run })?;
             let artifact_cleanup = if skip_artifact_cleanup {
                 None
             } else {
                 Some(artifact_cleanup::cleanup_artifacts(
                     ArtifactCleanupOptions {
                         path: None,
-                        apply: true,
+                        apply: !dry_run,
                         self_artifacts: true,
                         temp_roots: Vec::new(),
                         sort: ArtifactCleanupSort::Discovery,
