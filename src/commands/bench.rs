@@ -120,6 +120,7 @@ impl BenchArgs {
                 &spec,
                 rig::RigWorkloadKind::Bench,
             ));
+            extension_ids.extend(bench_component_extension_ids(&spec, run.comp.id()));
         }
         Ok(extension_ids.into_iter().collect())
     }
@@ -131,6 +132,38 @@ impl BenchArgs {
             Some(BenchCommand::List(_)) => None,
         }
     }
+}
+
+fn bench_component_extension_ids(spec: &RigSpec, explicit_component: Option<&str>) -> Vec<String> {
+    let component_ids = explicit_component
+        .map(|id| vec![id.to_string()])
+        .or_else(|| {
+            spec.bench
+                .as_ref()
+                .map(|bench| {
+                    if bench.components.is_empty() {
+                        bench.default_component.iter().cloned().collect()
+                    } else {
+                        bench.components.clone()
+                    }
+                })
+                .filter(|ids: &Vec<String>| !ids.is_empty())
+        });
+    let Some(component_ids) = component_ids else {
+        return Vec::new();
+    };
+
+    let mut extension_ids = BTreeSet::new();
+    for component_id in component_ids {
+        if let Some(extensions) = spec
+            .components
+            .get(&component_id)
+            .and_then(|component| component.extensions.as_ref())
+        {
+            extension_ids.extend(extensions.keys().cloned());
+        }
+    }
+    extension_ids.into_iter().collect()
 }
 
 #[derive(Subcommand)]

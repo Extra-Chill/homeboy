@@ -648,6 +648,8 @@ fn command_accepts_extension_override(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_surface::Cli;
+    use clap::Parser;
 
     #[test]
     fn final_remote_command_remaps_bench_env_path_settings() {
@@ -734,6 +736,73 @@ mod tests {
                 "wordpress-fixture".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn final_remote_command_forwards_rig_component_bench_extension() {
+        crate::test_support::with_isolated_home(|home| {
+            let rigs_dir = home.path().join(".config/homeboy/rigs");
+            std::fs::create_dir_all(&rigs_dir).expect("rigs dir");
+            std::fs::write(
+                rigs_dir.join("fixture-matrix.json"),
+                r#"{
+                    "components": {
+                        "node-project": {
+                            "path": "/controller/workspaces/node-project",
+                            "extensions": { "wordpress": {} }
+                        }
+                    },
+                    "bench": { "default_component": "node-project" }
+                }"#,
+            )
+            .expect("rig spec");
+
+            let args = vec![
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "bench".to_string(),
+                "node-project".to_string(),
+                "--path".to_string(),
+                "/controller/workspaces/node-project".to_string(),
+                "--rig".to_string(),
+                "fixture-matrix".to_string(),
+            ];
+            let cli = Cli::parse_from(&args);
+            let route_contract = cli
+                .command
+                .lab_route_contract()
+                .expect("route contract result")
+                .expect("bench supports lab offload");
+            let contract =
+                crate::core::lab_routing::lab_offload_command_from_route_contract(route_contract);
+
+            let command = build_lab_offload_remote_command(
+                &["/runner/bin/homeboy".to_string()],
+                &args,
+                "/runner/workspaces/node-project",
+                &[],
+                None,
+                &contract.required_extensions,
+            );
+
+            assert_eq!(contract.required_extensions, vec!["wordpress".to_string()]);
+            assert_eq!(
+                command,
+                vec![
+                    "/runner/bin/homeboy".to_string(),
+                    "--force-hot".to_string(),
+                    "bench".to_string(),
+                    "--extension".to_string(),
+                    "wordpress".to_string(),
+                    "node-project".to_string(),
+                    "--path".to_string(),
+                    "/runner/workspaces/node-project".to_string(),
+                    "--rig".to_string(),
+                    "fixture-matrix".to_string(),
+                ]
+            );
+        });
     }
 
     #[test]
