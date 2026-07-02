@@ -206,6 +206,29 @@ pub fn run_artifact_postprocess_plan(
     })
 }
 
+pub fn run_artifact_postprocess_plan_for_persisted_root(
+    plan: &ArtifactPostprocessPlan,
+    artifact_root_id: Option<&str>,
+    input_root_id: Option<&str>,
+) -> Result<ArtifactPostprocessResult> {
+    validate_artifact_postprocess_plan(plan)?;
+    let artifact_root = selected_artifact_postprocess_root(plan, artifact_root_id)?;
+    let input_root = input_root_id
+        .map(|id| {
+            selected_artifact_postprocess_root(plan, Some(id)).map(|root| PathBuf::from(&root.path))
+        })
+        .transpose()?;
+
+    run_artifact_postprocess_plan(
+        plan,
+        &ArtifactPostprocessContext {
+            artifact_root: Path::new(&artifact_root.path),
+            input_root: input_root.as_deref(),
+            path_expander: None,
+        },
+    )
+}
+
 pub fn run_artifact_postprocess_steps(
     steps: &[ArtifactPostprocessAction],
     context: &ArtifactPostprocessContext<'_>,
@@ -488,6 +511,39 @@ fn validate_reviewer_ref(reviewer_ref: &ArtifactPostprocessReviewerRef) -> Resul
         ));
     }
     Ok(())
+}
+
+fn selected_artifact_postprocess_root<'a>(
+    plan: &'a ArtifactPostprocessPlan,
+    artifact_root_id: Option<&str>,
+) -> Result<&'a ArtifactPostprocessRoot> {
+    match artifact_root_id {
+        Some(id) => plan
+            .artifact_roots
+            .iter()
+            .find(|root| root.id == id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "artifact_postprocess.artifact_root_id",
+                    format!("artifact postprocess plan does not declare artifact root `{id}`"),
+                    Some(id.to_string()),
+                    Some(
+                        plan.artifact_roots
+                            .iter()
+                            .map(|root| root.id.clone())
+                            .collect(),
+                    ),
+                )
+            }),
+        None => plan.artifact_roots.first().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_postprocess.artifact_roots",
+                "artifact postprocess plan must declare at least one persisted artifact root",
+                None,
+                None,
+            )
+        }),
+    }
 }
 
 fn validate_non_empty(field: &str, value: &str) -> Result<()> {

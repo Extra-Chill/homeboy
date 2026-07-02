@@ -185,6 +185,7 @@ pub mod agent_task;
 pub(crate) mod agent_task_dispatch;
 pub(crate) mod agent_task_summary;
 pub mod api;
+pub mod artifact_postprocess;
 pub mod audit;
 pub mod audit_baseline;
 pub mod auth;

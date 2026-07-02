@@ -494,6 +494,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         CommandJsonFamily::Workspace,
         "lists, shows, exports constants, exports schemas, validates, and normalizes Homeboy-owned contract metadata through the central contract surface",
     ),
+    command_spec_with_output_notes(
+        "artifact-postprocess",
+        CommandJsonFamily::Workspace,
+        "runs a Homeboy artifact-postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract",
+    ),
     command_spec("daemon", CommandJsonFamily::Ops),
     lab_command_spec_with_summary(
         "extension",
