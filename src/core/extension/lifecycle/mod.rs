@@ -162,14 +162,17 @@ pub fn refresh(
         None => derive_id_from_url(source)?,
     };
 
-    let uninstalled_previous = if load_extension(&extension_id).is_ok() {
+    let install_source = durable_refresh_source(source, &extension_id)?;
+
+    let extension_dir = paths::extension(&extension_id)?;
+    let uninstalled_previous = if std::fs::symlink_metadata(&extension_dir).is_ok() {
         uninstall(&extension_id)?;
         true
     } else {
         false
     };
 
-    let installed = install_with_revision(source, Some(&extension_id), revision)?;
+    let installed = install_with_revision(&install_source, Some(&extension_id), revision)?;
 
     Ok(RefreshResult {
         extension_id: installed.extension_id,
@@ -179,6 +182,119 @@ pub fn refresh(
         source_revision: installed.source_revision,
         uninstalled_previous,
     })
+}
+
+fn durable_refresh_source(source: &str, extension_id: &str) -> Result<String> {
+    if is_git_url(source) {
+        return Ok(source.to_string());
+    }
+
+    let source = absolute_source_path(source)?;
+    if !source.exists() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            format!("Path does not exist: {}", source.display()),
+            Some(source.to_string_lossy().to_string()),
+            None,
+        ));
+    }
+
+    let extension_sources_root = paths::homeboy()?.join("extension-sources");
+    let durable_root = extension_sources_root.join(extension_id);
+    let staging_root = extension_sources_root.join(format!(".{}-refresh-tmp", extension_id));
+    if std::fs::symlink_metadata(&staging_root).is_ok() {
+        remove_path(&staging_root, "replace staged durable extension source")?;
+    }
+
+    let manifest_at_source = source.join(format!("{}.json", extension_id));
+    if manifest_at_source.exists() {
+        let staged_extension = staging_root.join(extension_id);
+        copy_dir_recursive(&source, &staged_extension)?;
+        copy_shared_refresh_assets(source.parent(), &staging_root)?;
+        replace_durable_refresh_source(&staging_root, &durable_root)?;
+        let durable_extension = durable_root.join(extension_id);
+        return Ok(durable_extension.to_string_lossy().to_string());
+    }
+
+    let monorepo_manifest = source
+        .join(extension_id)
+        .join(format!("{}.json", extension_id));
+    if monorepo_manifest.exists() {
+        copy_dir_recursive(&source, &staging_root)?;
+        replace_durable_refresh_source(&staging_root, &durable_root)?;
+        return Ok(durable_root.to_string_lossy().to_string());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "source",
+        format!(
+            "No {}.json found at {} or {}/{}",
+            extension_id,
+            source.display(),
+            source.display(),
+            extension_id
+        ),
+        Some(source.to_string_lossy().to_string()),
+        None,
+    ))
+}
+
+fn absolute_source_path(source: &str) -> Result<PathBuf> {
+    let source = Path::new(source);
+    if source.is_absolute() {
+        return Ok(source.to_path_buf());
+    }
+
+    Ok(std::env::current_dir()
+        .map_err(|e| Error::internal_io(e.to_string(), Some("get current dir".to_string())))?
+        .join(source))
+}
+
+fn copy_shared_refresh_assets(source_root: Option<&Path>, durable_root: &Path) -> Result<()> {
+    let Some(source_root) = source_root else {
+        return Ok(());
+    };
+
+    for shared_dir in [
+        "scripts/lib",
+        "agent-runtimes",
+        "runtime-agent-ci",
+        "agent-task-contracts",
+    ] {
+        let source = source_root.join(shared_dir);
+        if source.is_dir() {
+            copy_dir_recursive(&source, &durable_root.join(shared_dir))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn replace_durable_refresh_source(staging_root: &Path, durable_root: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(durable_root).is_ok() {
+        remove_path(durable_root, "replace durable extension source")?;
+    }
+    rename_dir(staging_root, durable_root)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    crate::core::io::copy_tree(
+        src,
+        dst,
+        "extension.lifecycle.durable_refresh_source",
+        crate::core::io::EntryPolicy::CopyAnyNonDir,
+    )
+}
+
+fn remove_path(path: &Path, action: &str) -> Result<()> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(action.to_string())))?;
+    let result = if meta.file_type().is_symlink() || meta.is_file() {
+        std::fs::remove_file(path)
+    } else {
+        std::fs::remove_dir_all(path)
+    };
+    result.map_err(|e| Error::internal_io(e.to_string(), Some(action.to_string())))
 }
 
 mod install_sources;
@@ -198,11 +314,14 @@ pub use update::{check_update_available, read_source_revision, read_source_url, 
 /// - Cloned extensions: removes directory entirely
 pub fn uninstall(extension_id: &str) -> Result<PathBuf> {
     let extension_dir = paths::extension(extension_id)?;
-    if !extension_dir.exists() {
-        return Err(Error::extension_not_found(extension_id.to_string(), vec![]));
-    }
+    let metadata = match std::fs::symlink_metadata(&extension_dir) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return Err(Error::extension_not_found(extension_id.to_string(), vec![]));
+        }
+    };
 
-    if extension_dir.is_symlink() {
+    if metadata.file_type().is_symlink() {
         // Symlinked extension: just remove the symlink, source directory is preserved
         std::fs::remove_file(&extension_dir)
             .map_err(|e| Error::internal_io(e.to_string(), Some("remove symlink".to_string())))?;
@@ -611,6 +730,35 @@ exec '{}' "$@"
                 load_extension("alpha").expect("reinstalled").version,
                 "2.0.0"
             );
+        });
+    }
+
+    #[test]
+    fn refresh_from_transient_local_source_installs_durable_target() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let lab_source = home.join("Developer/_lab_workspaces/run-123");
+            write_extension_fixture(&lab_source, "alpha");
+
+            let result = refresh(
+                &lab_source.join("alpha").to_string_lossy(),
+                Some("alpha"),
+                None,
+            )
+            .expect("refresh should install from transient source");
+
+            fs::remove_dir_all(&lab_source).expect("simulate Lab workspace cleanup");
+
+            let extension = load_extension("alpha").expect("extension should survive cleanup");
+            assert_eq!(extension.id, "alpha");
+            assert!(
+                result.path.exists(),
+                "installed extension target should not dangle after source cleanup"
+            );
+
+            let linked_target = fs::read_link(&result.path).expect("refresh install link target");
+            assert!(linked_target.ends_with(".config/homeboy/extension-sources/alpha/alpha"));
+            assert!(linked_target.exists());
         });
     }
 
