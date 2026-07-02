@@ -115,6 +115,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::core::resource_lifecycle_index::ResourceLifecycleIndex",
     },
     ContractRegistryEntry {
+        schema_id: crate::core::host_mutation_lifecycle::HOST_MUTATION_LIFECYCLE_SCHEMA,
+        name: "host-mutation-lifecycle",
+        title: "Host mutation lifecycle",
+        owner: "homeboy-core",
+        summary: "Declares reversible host mutations such as symlinks, temp dirs, file backups, and package manifest rewrites without product-specific semantics.",
+        rust_type: "homeboy::core::host_mutation_lifecycle::HostMutationLifecycle",
+    },
+    ContractRegistryEntry {
         schema_id: crate::command_contract::RUN_LOCATION_INDEX_SCHEMA,
         name: "run-location-index",
         title: "Run location index",

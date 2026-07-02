@@ -19,6 +19,10 @@ use crate::commands::{adapter, CmdResult, GlobalArgs};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
 use crate::core::artifacts::validate_artifact_postprocess_plan;
 use crate::core::fuzz::{FuzzWorkload, FUZZ_WORKLOAD_SCHEMA};
+use crate::core::host_mutation_lifecycle::{
+    HostMutationLifecycle, HostMutationRevertStrategy, HostMutationStatus,
+    HOST_MUTATION_LIFECYCLE_SCHEMA,
+};
 use crate::core::loop_lifecycle::{
     LoopEvidenceRecord, LoopIterationRecord, LoopRunRecord, LOOP_EVIDENCE_SCHEMA,
     LOOP_ITERATION_SCHEMA, LOOP_RUN_SCHEMA,
@@ -63,7 +67,7 @@ pub enum ContractCommand {
 
 #[derive(Args, Debug, Clone)]
 pub struct ContractConstantsArgs {
-    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, resource-lifecycle-index, run-location-index, reviewer-facing-ref.
+    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, reviewer-facing-ref.
     pub contract_id: String,
 }
 
@@ -404,7 +408,7 @@ fn constants(contract_id: &str) -> CmdResult<ContractOutput> {
             format!("unknown contract constants id `{contract_id}`"),
             None,
             Some(vec![
-                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, resource-lifecycle-index, run-location-index, reviewer-facing-ref".to_string(),
+                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, reviewer-facing-ref".to_string(),
             ]),
         )
     })?;
@@ -912,6 +916,29 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
                 required: vec!["schema", "resources"],
                 example: resource_lifecycle_index_example(),
             },
+            ContractSchemaEntry {
+                id: HOST_MUTATION_LIFECYCLE_SCHEMA,
+                version: 1,
+                description: "Generic reversible host mutation lifecycle for symlinks, temp dirs, file backups, and package manifest rewrites.",
+                fields: vec![
+                    field(
+                        "schema",
+                        "string",
+                        "Schema ID for the host mutation lifecycle contract.",
+                        true,
+                    ),
+                    field("owner", "string", "System that declared the host mutations.", true),
+                    field("run_id", "string", "Run that owns the host mutations.", true),
+                    field("mutations", "array", "Host mutation lifecycle records.", true),
+                    field("mutations[].id", "string", "Stable mutation ID.", true),
+                    field("mutations[].actor", "string", "Tool or service that applied or declared the mutation.", true),
+                    field("mutations[].kind", "string", "Mutation kind enum: symlink, temp_dir, file_backup, package_manifest_rewrite.", true),
+                    field("mutations[].status", "string", "Mutation lifecycle status enum.", true),
+                    field("mutations[].revert.strategy", "string", "Compatible revert strategy and required restore metadata.", true),
+                ],
+                required: vec!["schema", "owner", "run_id", "mutations"],
+                example: host_mutation_lifecycle_example(),
+            },
         ],
     }
 }
@@ -1070,6 +1097,46 @@ fn resource_lifecycle_index_example() -> Value {
     })
 }
 
+fn host_mutation_lifecycle_example() -> Value {
+    json!({
+        "schema": HOST_MUTATION_LIFECYCLE_SCHEMA,
+        "owner": "homeboy-core",
+        "run_id": "run-1",
+        "mutations": [
+            {
+                "id": "link-current-release",
+                "actor": "host-materializer",
+                "kind": "symlink",
+                "link_path": "/tmp/homeboy/current",
+                "target_path": "/tmp/homeboy/releases/run-1",
+                "status": HostMutationStatus::Applied,
+                "revert": {
+                    "strategy": HostMutationRevertStrategy::RemovePath
+                }
+            },
+            {
+                "id": "rewrite-package-manifest",
+                "actor": "dependency-materializer",
+                "kind": "package_manifest_rewrite",
+                "manifest_path": "package.json",
+                "package_manager": "npm",
+                "changes": [
+                    {
+                        "package": "example-package",
+                        "before": "^1.0.0",
+                        "after": "^1.1.0"
+                    }
+                ],
+                "status": HostMutationStatus::Applied,
+                "revert": {
+                    "strategy": HostMutationRevertStrategy::RestorePackageManifest,
+                    "backup_path": "package.json.homeboy-backup"
+                }
+            }
+        ]
+    })
+}
+
 fn field(
     name: &'static str,
     kind: &'static str,
@@ -1201,6 +1268,10 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
         validate_json: validate_resource_lifecycle_index,
     },
     ContractSchema {
+        id: HOST_MUTATION_LIFECYCLE_SCHEMA,
+        validate_json: validate_host_mutation_lifecycle,
+    },
+    ContractSchema {
         id: LOOP_RUN_SCHEMA,
         validate_json: validate_loop_run,
     },
@@ -1249,6 +1320,12 @@ fn validate_resource_cleanup_intent(raw: &str) -> homeboy::core::Result<()> {
 fn validate_resource_lifecycle_index(raw: &str) -> homeboy::core::Result<()> {
     let contract: ResourceLifecycleIndex =
         deserialize_contract(raw, RESOURCE_LIFECYCLE_INDEX_SCHEMA)?;
+    contract.validate()
+}
+
+fn validate_host_mutation_lifecycle(raw: &str) -> homeboy::core::Result<()> {
+    let contract: HostMutationLifecycle =
+        deserialize_contract(raw, HOST_MUTATION_LIFECYCLE_SCHEMA)?;
     contract.validate()
 }
 
@@ -1381,6 +1458,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|contract| contract["id"] == ARTIFACT_POSTPROCESS_SCHEMA));
+        assert!(catalog["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|contract| contract["id"] == HOST_MUTATION_LIFECYCLE_SCHEMA));
     }
 
     #[test]
@@ -1553,6 +1635,85 @@ mod tests {
 
         assert_eq!(output.schema, ARTIFACT_POSTPROCESS_SCHEMA);
         assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_host_mutation_lifecycle_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "host-mutation-lifecycle.json",
+            json!({
+                "schema": HOST_MUTATION_LIFECYCLE_SCHEMA,
+                "owner": "homeboy-test",
+                "run_id": "run-1",
+                "mutations": [
+                    {
+                        "id": "temp-workspace",
+                        "actor": "test",
+                        "kind": "temp_dir",
+                        "path": "/tmp/homeboy-run-1",
+                        "status": "applied",
+                        "revert": { "strategy": "remove_path" }
+                    },
+                    {
+                        "id": "manifest-rewrite",
+                        "actor": "test",
+                        "kind": "package_manifest_rewrite",
+                        "manifest_path": "package.json",
+                        "package_manager": "npm",
+                        "changes": [
+                            {
+                                "package": "example-package",
+                                "before": "^1.0.0",
+                                "after": "^1.1.0"
+                            }
+                        ],
+                        "status": "applied",
+                        "revert": {
+                            "strategy": "restore_package_manifest",
+                            "backup_path": "package.json.homeboy-backup"
+                        }
+                    }
+                ]
+            }),
+        );
+
+        let output = validate_file(HOST_MUTATION_LIFECYCLE_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, HOST_MUTATION_LIFECYCLE_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn rejects_host_mutation_lifecycle_without_reversible_manifest_backup() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "host-mutation-lifecycle.json",
+            json!({
+                "schema": HOST_MUTATION_LIFECYCLE_SCHEMA,
+                "owner": "homeboy-test",
+                "run_id": "run-1",
+                "mutations": [
+                    {
+                        "id": "manifest-rewrite",
+                        "actor": "test",
+                        "kind": "package_manifest_rewrite",
+                        "manifest_path": "package.json",
+                        "changes": [
+                            { "package": "example-package", "after": "^1.1.0" }
+                        ],
+                        "status": "applied",
+                        "revert": { "strategy": "restore_package_manifest" }
+                    }
+                ]
+            }),
+        );
+
+        let error = validate_file(HOST_MUTATION_LIFECYCLE_SCHEMA, file).unwrap_err();
+
+        assert_eq!(error.details["field"], "mutations[0].revert.strategy");
     }
 
     #[test]
