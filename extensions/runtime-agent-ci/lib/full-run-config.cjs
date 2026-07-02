@@ -26,10 +26,15 @@ const {
 } = require('./runtime-contracts.cjs');
 
 function main() {
-  const config = buildConfig(process.env);
+  writeFullRunConfig(process.env);
+}
+
+function writeFullRunConfig(env = process.env) {
+  const config = buildConfig(env);
   fs.mkdirSync(path.dirname(config._configPath), { recursive: true });
   fs.writeFileSync(config._configPath, `${JSON.stringify(withoutInternalKeys(config), null, 2)}\n`);
   writeGithubOutput({ config_path: config._configPath, transcript_host_dir: config.transcript_host_dir });
+  return config;
 }
 
 function buildConfig(env) {
@@ -577,4 +582,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys, workflowInputCompatibility };
+module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys, workflowInputCompatibility, writeFullRunConfig };

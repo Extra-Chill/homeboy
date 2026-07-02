@@ -3,15 +3,20 @@
 const { spawnSync } = require('node:child_process');
 
 const {
-  ARTIFACT_MANIFEST_CONTRACT_CONSTANTS,
+  LOCAL_RUNTIME_CONTRACT_CONSTANTS,
+  runtimeContractConstantsFromHomeboyOutput,
 } = require('./runtime-contracts.cjs');
 
 const CONTRACT_COMMANDS = Object.freeze([
+  ['contract', 'constants', 'all'],
   ['contract', 'constants', 'artifact-manifest'],
+  ['contract', 'constants', 'secret-env-plan'],
 ]);
 
-const LOCAL_ARTIFACT_MANIFEST_CONSTANTS = Object.freeze({
-  ...ARTIFACT_MANIFEST_CONTRACT_CONSTANTS,
+const LOCAL_ARTIFACT_MANIFEST_CONSTANTS = LOCAL_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
+const CORE_PUBLISHED_CONTRACT_CONSTANTS = Object.freeze({
+  artifact_manifest: LOCAL_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest,
+  secret_env_plan: LOCAL_RUNTIME_CONTRACT_CONSTANTS.secret_env_plan,
 });
 
 function probeHomeboyContractSurface(options = {}) {
@@ -41,21 +46,36 @@ function probeHomeboyContractSurface(options = {}) {
       return fail(`homeboy contract surface probe failed: ${argv.join(' ')} did not emit JSON (${error.message})`, attempts);
     }
 
-    return validateArtifactManifestConstants({ contract, command, argv, attempts });
+    const validation = validateRuntimeContractConstants({ contract, command, argv, attempts });
+    if (validation.status === 'passed' || validation.status === 'failed') {
+      return validation;
+    }
   }
 
   return skip('homeboy contract surface probe skipped: no supported Homeboy contract command is available yet', attempts);
 }
 
-function validateArtifactManifestConstants({ contract, command, argv, attempts }) {
+function validateRuntimeContractConstants({ contract, command, argv, attempts }) {
+  const actualConstants = runtimeContractConstantsFromHomeboyOutput(contract);
+  const expectedConstants = expectedConstantsForCommand(argv);
+  const comparableConstants = Object.fromEntries(
+    Object.entries(expectedConstants).filter(([contractName]) => actualConstants[contractName])
+  );
+  if (Object.keys(actualConstants).length === 0 || Object.keys(comparableConstants).length === 0) {
+    return skip(`homeboy contract surface probe skipped: ${argv.join(' ')} did not expose runtime-agent constants`, attempts);
+  }
+
   const errors = [];
 
-  for (const [name, expected] of Object.entries(LOCAL_ARTIFACT_MANIFEST_CONSTANTS)) {
-    const actual = contractValue(contract, name);
-    if (typeof actual !== 'string' || actual.length === 0) {
-      errors.push(`${name} is missing from Homeboy contract output`);
-    } else if (actual !== expected) {
-      errors.push(`${name} expected ${expected}, got ${actual}`);
+  for (const [contractName, expectedContract] of Object.entries(comparableConstants)) {
+    const actualContract = actualConstants[contractName] || {};
+    for (const [name, expected] of Object.entries(expectedContract)) {
+      const actual = actualContract[name];
+      if (typeof actual !== 'string' || actual.length === 0) {
+        errors.push(`${contractName}.${name} is missing from Homeboy contract output`);
+      } else if (actual !== expected) {
+        errors.push(`${contractName}.${name} expected ${expected}, got ${actual}`);
+      }
     }
   }
 
@@ -68,70 +88,23 @@ function validateArtifactManifestConstants({ contract, command, argv, attempts }
     message: `homeboy contract surface probe passed via ${command} ${argv.join(' ')}`,
     command,
     argv,
-    constants: LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
+    constants: actualConstants,
     attempts,
   };
 }
 
-function contractValue(contract, name) {
-  const candidates = valueCandidates(name);
-  for (const path of candidates) {
-    const value = readPath(contract, path);
-    if (typeof value === 'string' && value.length > 0) {
-      return value;
-    }
+function expectedConstantsForCommand(argv) {
+  const contractId = argv[2] || '';
+  if (contractId === 'all') {
+    return CORE_PUBLISHED_CONTRACT_CONSTANTS;
   }
-  return '';
-}
-
-function valueCandidates(name) {
-  const camel = name.toLowerCase().replace(/_([a-z])/g, (_match, letter) => letter.toUpperCase());
-  const lower = name.toLowerCase();
-
-  const candidates = [
-    ['data', 'constants', name],
-    ['data', 'constants', lower],
-    ['data', 'constants', camel],
-    ['constants', name],
-    ['constants', lower],
-    ['constants', camel],
-    [name],
-    [lower],
-    [camel],
-  ];
-
-  if (name === 'schema_id') {
-    candidates.push(
-      ['data', 'constants', 'schema'],
-      ['data', 'constants', 'schemaId'],
-      ['constants', 'schema'],
-      ['constants', 'schemaId'],
-      ['artifact_manifest', 'schema'],
-      ['artifactManifest', 'schema']
-    );
-  } else if (name === 'file_name') {
-    candidates.push(
-      ['data', 'constants', 'file'],
-      ['data', 'constants', 'fileName'],
-      ['constants', 'file'],
-      ['constants', 'fileName'],
-      ['artifact_manifest', 'file'],
-      ['artifactManifest', 'file']
-    );
+  if (contractId === 'artifact-manifest') {
+    return { artifact_manifest: CORE_PUBLISHED_CONTRACT_CONSTANTS.artifact_manifest };
   }
-
-  return candidates;
-}
-
-function readPath(value, path) {
-  let current = value;
-  for (const segment of path) {
-    if (!current || typeof current !== 'object' || Array.isArray(current) || !Object.hasOwn(current, segment)) {
-      return undefined;
-    }
-    current = current[segment];
+  if (contractId === 'secret-env-plan') {
+    return { secret_env_plan: CORE_PUBLISHED_CONTRACT_CONSTANTS.secret_env_plan };
   }
-  return current;
+  return {};
 }
 
 function skip(message, attempts) {
@@ -144,6 +117,7 @@ function fail(message, attempts, extra = {}) {
 
 module.exports = {
   CONTRACT_COMMANDS,
+  CORE_PUBLISHED_CONTRACT_CONSTANTS,
   LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
   probeHomeboyContractSurface,
 };
