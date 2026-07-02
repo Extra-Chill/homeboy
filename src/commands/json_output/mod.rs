@@ -394,6 +394,8 @@ mod tests {
                     self_artifacts: false,
                     path: None,
                     temp_root: Vec::new(),
+                    sort: crate::commands::cleanup::CleanupArtifactsSortArg::default(),
+                    limit: None,
                     merged_only: false,
                 },
             ),
