@@ -328,13 +328,17 @@ mod store_ops {
             if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
                 continue;
             }
-            candidates.push(remove_with_store(
+            match remove_with_store(
                 WorktreeRemoveOptions {
                     id: record.id,
                     force,
                 },
                 store,
-            )?);
+            ) {
+                Ok(candidate) => candidates.push(candidate),
+                Err(error) if is_missing_source_checkout_error(&error) => continue,
+                Err(error) => return Err(error),
+            }
         }
         Ok(WorktreeCleanupOutput { candidates })
     }
@@ -432,7 +436,8 @@ mod store_ops {
     }
 
     pub(super) fn status_with_store(id: &str, store_dir: &Path) -> Result<WorktreeStatusOutput> {
-        let record = read_record(store_dir, id)?;
+        let mut record = read_record(store_dir, id)?;
+        repair_record_source_checkout_if_needed(&mut record, store_dir)?;
         let safety = safety_report(&record)?;
         Ok(WorktreeStatusOutput { record, safety })
     }
@@ -442,6 +447,7 @@ mod store_ops {
         store_dir: &Path,
     ) -> Result<WorktreeRemoveOutput> {
         let mut record = read_record(store_dir, &options.id)?;
+        repair_record_source_checkout_if_needed(&mut record, store_dir)?;
         let safety = safety_report(&record)?;
         if !options.force && !safety.safe {
             return Err(Error::validation_invalid_argument(
@@ -482,7 +488,7 @@ mod store_ops {
     }
 
     pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {
-        let source = canonical_existing_path(&record.source_checkout)?;
+        let source = resolved_source_checkout(record)?;
         let parent = source.parent().ok_or_else(|| {
             Error::internal_unexpected(format!(
                 "source checkout has no parent: {}",
@@ -564,6 +570,100 @@ mod store_ops {
         Path::new(path)
             .canonicalize()
             .map_err(|err| Error::internal_io(err.to_string(), Some(path.to_string())))
+    }
+
+    fn repair_record_source_checkout_if_needed(
+        record: &mut TaskWorktreeRecord,
+        store_dir: &Path,
+    ) -> Result<()> {
+        if Path::new(&record.source_checkout).exists() {
+            return Ok(());
+        }
+
+        let source = recovered_component_source_checkout(record)?;
+        let repaired = source.to_string_lossy().to_string();
+        if record.source_checkout != repaired {
+            record.source_checkout = repaired;
+            write_record(store_dir, record)?;
+        }
+        Ok(())
+    }
+
+    fn resolved_source_checkout(record: &TaskWorktreeRecord) -> Result<PathBuf> {
+        if Path::new(&record.source_checkout).exists() {
+            return canonical_existing_path(&record.source_checkout);
+        }
+
+        recovered_component_source_checkout(record)
+    }
+
+    fn recovered_component_source_checkout(record: &TaskWorktreeRecord) -> Result<PathBuf> {
+        let target = component::resolve_target(TargetSpec {
+            component_id: Some(&record.component_id),
+            path_override: None,
+            project: None,
+            capability: None,
+            allow_synthetic: false,
+            accept_bare_directory: false,
+            ..TargetSpec::default()
+        })
+        .map_err(|error| missing_source_checkout_error(record, Some(error.message)))?;
+        let source = super::queue_ops::source_checkout_for_worktree(&target)
+            .map_err(|error| missing_source_checkout_error(record, Some(error.message)))?;
+        let worktree = Path::new(&record.worktree_path)
+            .canonicalize()
+            .unwrap_or_else(|_| normalize_missing_path(Path::new(&record.worktree_path)));
+
+        if source == worktree {
+            return Err(missing_source_checkout_error(
+                record,
+                Some("resolved component checkout is the task worktree itself".to_string()),
+            ));
+        }
+
+        Ok(source)
+    }
+
+    fn missing_source_checkout_error(
+        record: &TaskWorktreeRecord,
+        recovery_error: Option<String>,
+    ) -> Error {
+        let mut tried = vec![format!(
+            "recorded source_checkout: {}",
+            record.source_checkout
+        )];
+        if let Some(recovery_error) = recovery_error {
+            tried.push(format!(
+                "component checkout resolution for '{}': {recovery_error}",
+                record.component_id
+            ));
+        } else {
+            tried.push(format!(
+                "component checkout resolution for '{}'",
+                record.component_id
+            ));
+        }
+
+        Error::validation_invalid_argument(
+            "source_checkout",
+            "Task worktree source checkout is missing and Homeboy could not safely recover a component checkout",
+            Some(record.id.clone()),
+            Some(tried),
+        )
+        .with_hint(format!(
+            "Restore the source checkout path or update component '{}' to an existing git checkout, then retry.",
+            record.component_id
+        ))
+        .with_hint(format!(
+            "If the task worktree is intentionally gone, remove or repair the metadata record for '{}'.",
+            record.id
+        ))
+    }
+
+    fn is_missing_source_checkout_error(error: &Error) -> bool {
+        error.code == crate::core::error::ErrorCode::ValidationInvalidArgument
+            && error.details.get("field").and_then(|field| field.as_str())
+                == Some("source_checkout")
     }
 
     pub(super) fn normalize_missing_path(path: &Path) -> PathBuf {
@@ -786,7 +886,11 @@ mod queue_ops {
         let Some(git_root) = component::resolution::detect_git_root(&candidate) else {
             return Ok(None);
         };
-        if git_root != candidate.canonicalize().unwrap_or_else(|_| candidate.clone()) {
+        if git_root
+            != candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone())
+        {
             return Ok(None);
         }
         let Some(discovered) = component::discover_from_portable(&git_root) else {
@@ -795,10 +899,9 @@ mod queue_ops {
         if discovered.id != component_id {
             return Ok(None);
         }
-        git_root
-            .canonicalize()
-            .map(Some)
-            .map_err(|err| Error::internal_io(err.to_string(), Some(candidate.display().to_string())))
+        git_root.canonicalize().map(Some).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(candidate.display().to_string()))
+        })
     }
 
     fn runner_workspace_root_from_lab_snapshot(cwd: &Path) -> Option<PathBuf> {
@@ -1003,6 +1106,92 @@ mod tests {
         assert!(output.candidates[0].removed);
         assert!(output.candidates[0].safety.worktree_missing);
         assert_eq!(updated.state, TaskWorktreeState::Removed);
+    }
+
+    #[test]
+    fn status_repairs_missing_source_checkout_from_component_checkout() {
+        use crate::test_support::with_isolated_home;
+
+        with_isolated_home(|home| {
+            let dir = tempfile::tempdir().unwrap();
+            let source = git_repo();
+            let missing_source = sibling_worktree_path(source.path(), "removed-source");
+            let worktree = sibling_worktree_path(source.path(), "status-repair");
+            let store = dir.path().join("store");
+            write_component_registration(home.path(), "fixture", source.path());
+            let record = fixture_record(&missing_source, &worktree);
+            write_record(&store, &record).unwrap();
+
+            let output = status_with_store(&record.id, &store).unwrap();
+            let updated = read_record(&store, &record.id).unwrap();
+
+            assert_eq!(
+                PathBuf::from(&output.record.source_checkout),
+                source.path().canonicalize().unwrap()
+            );
+            assert_eq!(updated.source_checkout, output.record.source_checkout);
+            assert!(output.safety.worktree_missing);
+            assert!(output.safety.safe);
+        });
+    }
+
+    #[test]
+    fn status_reports_missing_source_checkout_as_validation_diagnostic() {
+        use crate::test_support::with_isolated_home;
+
+        with_isolated_home(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let missing_source = dir.path().join("removed-source");
+            let worktree = dir.path().join("fixture@task");
+            let store = dir.path().join("store");
+            let record = fixture_record(&missing_source, &worktree);
+            write_record(&store, &record).unwrap();
+
+            let err = status_with_store(&record.id, &store).unwrap_err();
+
+            assert_eq!(
+                err.code,
+                crate::core::error::ErrorCode::ValidationInvalidArgument
+            );
+            assert_eq!(
+                err.details.get("field").and_then(|field| field.as_str()),
+                Some("source_checkout")
+            );
+            assert!(err
+                .to_string()
+                .contains("Task worktree source checkout is missing"));
+        });
+    }
+
+    #[test]
+    fn cleanup_skips_unrepairable_missing_source_and_continues() {
+        use crate::test_support::with_isolated_home;
+
+        with_isolated_home(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let source = git_repo();
+            let store = dir.path().join("store");
+            let mut unrepairable = fixture_record(
+                &dir.path().join("removed-source"),
+                &dir.path().join("unrepairable@task"),
+            );
+            unrepairable.id = "unrepairable@task".to_string();
+            unrepairable.component_id = "unrepairable".to_string();
+            write_record(&store, &unrepairable).unwrap();
+            let removable_worktree = sibling_worktree_path(source.path(), "cleanup-continues");
+            let mut removable = fixture_record(source.path(), &removable_worktree);
+            removable.id = "fixture@cleanup-continues".to_string();
+            write_record(&store, &removable).unwrap();
+
+            let output = cleanup_with_store(false, &store).unwrap();
+            let skipped = read_record(&store, &unrepairable.id).unwrap();
+            let removed = read_record(&store, &removable.id).unwrap();
+
+            assert_eq!(output.candidates.len(), 1);
+            assert_eq!(output.candidates[0].record.id, removable.id);
+            assert_eq!(skipped.state, TaskWorktreeState::Active);
+            assert_eq!(removed.state, TaskWorktreeState::Removed);
+        });
     }
 
     #[test]
@@ -1224,11 +1413,7 @@ mod tests {
             run_git(&source, &["config", "user.name", "Homeboy Test"]);
             fs::write(source.join("README.md"), "initial\n").unwrap();
             fs::write(source.join("homeboy.json"), r#"{"id":"lab-fixture"}"#).unwrap();
-            fs::write(
-                snapshot.join("homeboy.json"),
-                r#"{"id":"lab-fixture"}"#,
-            )
-            .unwrap();
+            fs::write(snapshot.join("homeboy.json"), r#"{"id":"lab-fixture"}"#).unwrap();
             run_git(&source, &["add", "."]);
             run_git(&source, &["commit", "-q", "-m", "initial"]);
             write_component_registration(home.path(), "lab-fixture", &snapshot);
@@ -1252,7 +1437,10 @@ mod tests {
                 output.rows[0].error
             );
             let record = resolve("lab-fixture@cook-lab").expect("queued worktree record");
-            assert_eq!(PathBuf::from(record.source_checkout), source.canonicalize().unwrap());
+            assert_eq!(
+                PathBuf::from(record.source_checkout),
+                source.canonicalize().unwrap()
+            );
             assert!(runner_root.join("lab-fixture@cook-lab").exists());
         });
     }
