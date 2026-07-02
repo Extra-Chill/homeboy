@@ -14,6 +14,14 @@ use crate::core::error::{Error, Result};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(target_os = "linux")]
+const DEFAULT_RSS_LIMIT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const DEFAULT_PROCESS_COUNT_LIMIT: u64 = 128;
+#[cfg(target_os = "linux")]
+const RSS_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES";
+#[cfg(target_os = "linux")]
+const PROCESS_COUNT_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerResourceMetrics {
@@ -27,7 +35,19 @@ pub struct RunnerResourceMetrics {
     pub sample_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_process_count_peak: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_violation: Option<RunnerResourceGuardViolation>,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerResourceGuardViolation {
+    pub reason: String,
+    pub message: String,
+    pub rss_bytes: u64,
+    pub rss_limit_bytes: u64,
+    pub process_count: u64,
+    pub process_count_limit: u64,
 }
 
 #[derive(Debug)]
@@ -46,6 +66,7 @@ struct MetricsState {
     child_process_count_peak: u64,
     cpu_user_ms: u64,
     cpu_system_ms: u64,
+    guard_violation: Option<RunnerResourceGuardViolation>,
 }
 
 pub(crate) fn measured_command_output(command: &mut Command) -> Result<MeasuredOutput> {
@@ -55,7 +76,7 @@ pub(crate) fn measured_command_output(command: &mut Command) -> Result<MeasuredO
         Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
     })?;
     let pid = child.id();
-    let collector = ResourceMetricsCollector::start(pid, started, None);
+    let collector = ResourceMetricsCollector::start(pid, started, None, None);
     let bounded_output =
         wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).map_err(|err| {
             Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
@@ -72,7 +93,7 @@ pub(crate) fn measured_command_output(command: &mut Command) -> Result<MeasuredO
 
 pub(crate) fn measured_command_output_until_cancelled_with_progress(
     command: &mut Command,
-    is_cancelled: impl FnMut() -> bool,
+    mut is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
 ) -> Result<MeasuredOutput> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -82,15 +103,24 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
     })?;
     let pid = child.id();
-    let collector = ResourceMetricsCollector::start(pid, started, progress_sink);
-    let bounded_output = wait_with_bounded_output_until_cancelled(
-        &mut child,
-        DEFAULT_CAPTURE_LIMIT_BYTES,
-        is_cancelled,
-    )
-    .map_err(|err| {
-        Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
-    })?;
+    let guard_violation = Arc::new(Mutex::new(None));
+    let collector = ResourceMetricsCollector::start(
+        pid,
+        started,
+        progress_sink,
+        Some(Arc::clone(&guard_violation)),
+    );
+    let bounded_output =
+        wait_with_bounded_output_until_cancelled(&mut child, DEFAULT_CAPTURE_LIMIT_BYTES, || {
+            is_cancelled()
+                || guard_violation
+                    .lock()
+                    .expect("resource guard mutex poisoned")
+                    .is_some()
+        })
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
+        })?;
     let capture = bounded_output.capture.clone();
     let output = bounded_output.into_output();
     let metrics = collector.finish(started.elapsed());
@@ -113,6 +143,7 @@ impl ResourceMetricsCollector {
         root_pid: u32,
         started: Instant,
         progress_sink: Option<RunnerCommandProgressSink>,
+        guard_violation: Option<Arc<Mutex<Option<RunnerResourceGuardViolation>>>>,
     ) -> Self {
         let supported = cfg!(target_os = "linux") && std::path::Path::new("/proc").exists();
         let state = Arc::new(Mutex::new(MetricsState::default()));
@@ -126,11 +157,11 @@ impl ResourceMetricsCollector {
         }
 
         let (stop, stop_rx) = mpsc::channel();
-        sample(root_pid, &state);
+        sample(root_pid, &state, guard_violation.as_ref());
         let thread_state = Arc::clone(&state);
         let mut last_heartbeat = Instant::now();
         let handle = thread::spawn(move || loop {
-            sample(root_pid, &thread_state);
+            sample(root_pid, &thread_state, guard_violation.as_ref());
             if let Some(progress) = progress_sink.as_ref() {
                 if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                     progress(runner_command_heartbeat_data(
@@ -170,6 +201,7 @@ impl ResourceMetricsCollector {
             sample_count: state.sample_count,
             child_process_count_peak: (state.sample_count > 0)
                 .then_some(state.child_process_count_peak),
+            guard_violation: state.guard_violation.clone(),
             source: if self.supported {
                 "linux_procfs_process_tree".to_string()
             } else {
@@ -213,7 +245,11 @@ fn process_tree_resource_summary(_root_pid: u32) -> Option<Value> {
 }
 
 #[cfg(target_os = "linux")]
-fn sample(root_pid: u32, state: &Arc<Mutex<MetricsState>>) {
+fn sample(
+    root_pid: u32,
+    state: &Arc<Mutex<MetricsState>>,
+    guard_violation: Option<&Arc<Mutex<Option<RunnerResourceGuardViolation>>>>,
+) {
     if let Some(snapshot) = process_tree_snapshot(root_pid) {
         let mut state = state.lock().expect("resource metrics mutex poisoned");
         state.sample_count += 1;
@@ -223,11 +259,26 @@ fn sample(root_pid: u32, state: &Arc<Mutex<MetricsState>>) {
             .max(snapshot.process_count.saturating_sub(1));
         state.cpu_user_ms = state.cpu_user_ms.max(snapshot.cpu_user_ms);
         state.cpu_system_ms = state.cpu_system_ms.max(snapshot.cpu_system_ms);
+        if state.guard_violation.is_none() {
+            if let Some(violation) = resource_guard_violation(&snapshot) {
+                if let Some(shared_violation) = guard_violation {
+                    *shared_violation
+                        .lock()
+                        .expect("resource guard mutex poisoned") = Some(violation.clone());
+                }
+                state.guard_violation = Some(violation);
+            }
+        }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn sample(_root_pid: u32, _state: &Arc<Mutex<MetricsState>>) {}
+fn sample(
+    _root_pid: u32,
+    _state: &Arc<Mutex<MetricsState>>,
+    _guard_violation: Option<&Arc<Mutex<Option<RunnerResourceGuardViolation>>>>,
+) {
+}
 
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
@@ -276,6 +327,53 @@ fn process_tree_snapshot(root_pid: u32) -> Option<ProcessSnapshot> {
         cpu_user_ms: user_ticks.saturating_mul(1000) / clock_ticks,
         cpu_system_ms: system_ticks.saturating_mul(1000) / clock_ticks,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn resource_guard_violation(snapshot: &ProcessSnapshot) -> Option<RunnerResourceGuardViolation> {
+    let rss_limit_bytes = resource_guard_limit(RSS_LIMIT_ENV, DEFAULT_RSS_LIMIT_BYTES);
+    let process_count_limit =
+        resource_guard_limit(PROCESS_COUNT_LIMIT_ENV, DEFAULT_PROCESS_COUNT_LIMIT);
+    classify_resource_guard_violation(
+        snapshot.rss_bytes,
+        snapshot.process_count,
+        rss_limit_bytes,
+        process_count_limit,
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn classify_resource_guard_violation(
+    rss_bytes: u64,
+    process_count: u64,
+    rss_limit_bytes: u64,
+    process_count_limit: u64,
+) -> Option<RunnerResourceGuardViolation> {
+    let reason = if rss_limit_bytes > 0 && rss_bytes >= rss_limit_bytes {
+        "rss_limit_exceeded"
+    } else if process_count_limit > 0 && process_count >= process_count_limit {
+        "process_count_limit_exceeded"
+    } else {
+        return None;
+    };
+    Some(RunnerResourceGuardViolation {
+        reason: reason.to_string(),
+        message: format!(
+            "runner job resource guard stopped process tree after rss_bytes={rss_bytes}, process_count={process_count}; limits rss_bytes={rss_limit_bytes}, process_count={process_count_limit}"
+        ),
+        rss_bytes,
+        rss_limit_bytes,
+        process_count,
+        process_count_limit,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn resource_guard_limit(env_name: &str, default_value: u64) -> u64 {
+    std::env::var(env_name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default_value)
 }
 
 #[cfg(target_os = "linux")]
@@ -367,6 +465,31 @@ mod tests {
         assert_eq!(payload["elapsed_ms"], 5);
         assert_eq!(payload["process"]["root_pid"], 9);
         assert!(payload["process"]["resources"].is_null());
+    }
+
+    #[test]
+    fn resource_guard_classifies_rss_limit_exceeded() {
+        let violation = classify_resource_guard_violation(17, 3, 16, 128).expect("rss violation");
+
+        assert_eq!(violation.reason, "rss_limit_exceeded");
+        assert_eq!(violation.rss_bytes, 17);
+        assert_eq!(violation.rss_limit_bytes, 16);
+        assert_eq!(violation.process_count, 3);
+    }
+
+    #[test]
+    fn resource_guard_classifies_process_count_limit_exceeded() {
+        let violation =
+            classify_resource_guard_violation(8, 129, 16, 128).expect("process count violation");
+
+        assert_eq!(violation.reason, "process_count_limit_exceeded");
+        assert_eq!(violation.process_count, 129);
+        assert_eq!(violation.process_count_limit, 128);
+    }
+
+    #[test]
+    fn resource_guard_allows_zero_limits_to_disable_guard() {
+        assert!(classify_resource_guard_violation(u64::MAX, u64::MAX, 0, 0).is_none());
     }
 }
 
