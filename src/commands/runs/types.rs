@@ -15,6 +15,7 @@ use homeboy::core::fuzz::FuzzResultEnvelopeArtifactInspection;
 use homeboy::core::observation::evidence_report::DirectoryArtifactPublicationGuidance;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::ArtifactRecord;
+use homeboy::core::resource_lifecycle_index::ResourceLifecycleIndex;
 use homeboy::core::runners::RunnerArtifactRef;
 use homeboy::core::validation_progress::ValidationCommandSummary;
 
@@ -261,6 +262,8 @@ pub struct RunsArtifactsOutput {
     pub runner_id: Option<String>,
     pub path_guide: RunsArtifactPathGuide,
     pub artifacts: Vec<ArtifactRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_lifecycle_index: Option<ResourceLifecycleIndex>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub directory_publication: Vec<RunsDirectoryArtifactPublicationGuidance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

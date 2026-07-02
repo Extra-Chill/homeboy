@@ -2,6 +2,7 @@ use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
 use homeboy::core::observation::evidence_report::directory_publication_guidance;
 use homeboy::core::observation::ArtifactRecord;
+use homeboy::core::resource_lifecycle_index::resource_lifecycle_index_from_artifacts;
 use homeboy::core::runners as runner;
 use homeboy::core::Error;
 
@@ -53,6 +54,7 @@ pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> 
     )?;
     let artifacts = parse_runner_artifacts(&data)?;
     let directory_publication = directory_publication_guidance_for_artifacts(&artifacts);
+    let resource_lifecycle_index = resource_lifecycle_index_from_artifacts(&artifacts)?;
 
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
@@ -61,6 +63,7 @@ pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> 
             runner_id: Some(runner_id.to_string()),
             path_guide: RunsArtifactPathGuide::for_listing(run_id, Some(runner_id)),
             artifacts,
+            resource_lifecycle_index,
             directory_publication,
             preview_entrypoints: Vec::new(),
             matrix_summary: None,

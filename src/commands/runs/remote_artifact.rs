@@ -12,6 +12,11 @@ use homeboy::core::observation::runs_service::{
 };
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::observation::ObservationStore;
+use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
+use homeboy::core::resource_lifecycle_index::{
+    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleRecord,
+    ResourceLifecycleResourceStatus,
+};
 use homeboy::core::runners::{self as runner, Runner, RunnerKind};
 use homeboy::core::{server, Error};
 
@@ -80,6 +85,10 @@ pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
             metadata,
         )?,
     };
+    let artifact = store.update_artifact_metadata(
+        &artifact.id,
+        metadata_with_resource_lifecycle(artifact.metadata_json.clone(), &artifact, &args.runner),
+    )?;
     if source.temporary {
         match source.artifact_type {
             RunnerAttachArtifactType::File => {
@@ -101,6 +110,31 @@ pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
         }),
         0,
     ))
+}
+
+fn metadata_with_resource_lifecycle(
+    mut metadata: serde_json::Value,
+    artifact: &ArtifactRecord,
+    runner_id: &str,
+) -> serde_json::Value {
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    let resource = ResourceLifecycleRecord {
+        owner: "homeboy-runs".to_string(),
+        run_id: artifact.run_id.clone(),
+        runner_id: Some(runner_id.to_string()),
+        path: artifact.path.clone(),
+        kind: format!("artifact_{}", artifact.artifact_type),
+        ttl: Some("P30D".to_string()),
+        cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
+        evidence_retention: ResourceEvidenceRetention::Full,
+        cleanup_intent: ResourceCleanupIntent::DryRun,
+        status: ResourceLifecycleResourceStatus::Retained,
+    };
+    metadata["resource_lifecycle"] =
+        serde_json::to_value(resource).expect("resource lifecycle records are serializable");
+    metadata
 }
 
 pub fn preview(args: RunsArtifactPreviewArgs) -> CmdResult<RunsOutput> {
@@ -910,6 +944,18 @@ mod tests {
                 output.artifact.metadata_json["runner_path"],
                 source.display().to_string()
             );
+            assert_eq!(
+                output.artifact.metadata_json["resource_lifecycle"]["cleanup_policy"],
+                "delete_after_ttl"
+            );
+            assert_eq!(
+                output.artifact.metadata_json["resource_lifecycle"]["evidence_retention"],
+                "full"
+            );
+            assert_eq!(
+                output.artifact.metadata_json["resource_lifecycle"]["path"],
+                output.artifact.path
+            );
             assert!(PathBuf::from(&output.artifact.path).exists());
             let artifacts = store.list_artifacts(&run.id).expect("artifacts");
             assert_eq!(artifacts.len(), 1);
@@ -983,6 +1029,16 @@ mod tests {
                 .preview_entrypoints
                 .iter()
                 .any(|entrypoint| entrypoint.path == "case-a/index.html"));
+            let lifecycle_index = artifacts_output
+                .resource_lifecycle_index
+                .expect("resource lifecycle index");
+            assert_eq!(lifecycle_index.resources.len(), 1);
+            assert_eq!(lifecycle_index.resources[0].run_id, run.id);
+            assert_eq!(
+                lifecycle_index.resources[0].runner_id.as_deref(),
+                Some("issue-6462-local")
+            );
+            assert_eq!(lifecycle_index.resources[0].kind, "artifact_directory");
         });
     }
 

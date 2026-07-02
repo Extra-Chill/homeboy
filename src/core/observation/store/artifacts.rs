@@ -326,6 +326,38 @@ impl ObservationStore {
         collect_rows(rows, "collect artifact records")
     }
 
+    pub fn update_artifact_metadata(
+        &self,
+        artifact_id: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<ArtifactRecord> {
+        validate_required("artifact_id", artifact_id)?;
+        let serialized = serialize_metadata(&metadata_json)?;
+        let rows = execute_with_retry("update artifact metadata", || {
+            self.connection.execute(
+                r#"
+                UPDATE artifacts
+                SET metadata_json = ?1
+                WHERE id = ?2
+                "#,
+                params![serialized, artifact_id],
+            )
+        })?;
+        if rows == 0 {
+            return Err(Error::validation_invalid_argument(
+                "artifact_id",
+                format!("artifact record not found: {artifact_id}"),
+                Some(artifact_id.to_string()),
+                None,
+            ));
+        }
+        self.get_artifact(artifact_id)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "Updated artifact record {artifact_id} but could not read it back"
+            ))
+        })
+    }
+
     pub fn list_artifacts_for_runs(
         &self,
         run_ids: &[String],

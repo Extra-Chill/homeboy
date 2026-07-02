@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::observation::ArtifactRecord;
 use crate::core::resource_cleanup_intent::ResourceCleanupIntent;
 use crate::core::{Error, Result};
 
@@ -91,6 +92,38 @@ pub fn validate_resource_lifecycle_index(index: &ResourceLifecycleIndex) -> Resu
     }
 
     Ok(())
+}
+
+pub fn resource_lifecycle_index_from_artifacts(
+    artifacts: &[ArtifactRecord],
+) -> Result<Option<ResourceLifecycleIndex>> {
+    let mut resources = Vec::new();
+    for artifact in artifacts {
+        let Some(value) = artifact.metadata_json.get("resource_lifecycle") else {
+            continue;
+        };
+        let record: ResourceLifecycleRecord =
+            serde_json::from_value(value.clone()).map_err(|err| {
+                Error::internal_json(
+                    err.to_string(),
+                    Some(format!(
+                        "parse resource lifecycle metadata for artifact {}",
+                        artifact.id
+                    )),
+                )
+            })?;
+        resources.push(record);
+    }
+    if resources.is_empty() {
+        return Ok(None);
+    }
+
+    let index = ResourceLifecycleIndex {
+        schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
+        resources,
+    };
+    index.validate()?;
+    Ok(Some(index))
 }
 
 pub fn validate_resource_lifecycle_record(
