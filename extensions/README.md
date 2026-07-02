@@ -222,6 +222,11 @@ task boundary. HBX may describe WordPress targets, seeds, limits, coverage
 requests, and artifact expectations, but WP Codebox owns the fuzz execution
 loop and result envelope.
 
+Caller workflows should use core `homeboy fuzz plan` to compose the
+Homeboy-level fuzz execution request. HBX does not own `homeboy fuzz ...`
+command assembly; it only contributes WordPress-specific contracts that the
+core planner and WP Codebox runtime consume.
+
 Each extension also exposes a CLI binding for direct use against a project or component:
 
 ```bash

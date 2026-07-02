@@ -133,6 +133,7 @@
     "test:wordpress-runtime-surface-discovery": "node tests/wordpress-runtime-surface-discovery-smoke.js",
     "test:wordpress-live-surface-discovery": "node tests/wordpress-live-surface-discovery-smoke.js",
     "test:wordpress-fuzz-plan-from-surfaces": "node tests/wordpress-fuzz-plan-from-surfaces-smoke.js",
+    "test:core-fuzz-plan-boundary": "node tests/core-fuzz-plan-boundary-smoke.js",
     "test:wordpress-fuzz-campaign": "node tests/wordpress-fuzz-campaign-smoke.js",
     "test:wordpress-dependency-materialization-recipes": "node tests/wordpress-dependency-materialization-recipes-smoke.js",
     "test:wp-codebox-browser-metrics": "node tests/wp-codebox-browser-metrics-smoke.js",

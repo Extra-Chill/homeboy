@@ -383,6 +383,24 @@ The manifest is intentionally product-agnostic. Product-specific target
 selection, fixture content, and assertions belong in caller-owned manifests or
 runtime inputs, not in the shared contract.
 
+Homeboy-level fuzz execution requests are composed by core `homeboy fuzz plan`,
+not by this extension. Use the core planner in workflows before handing the
+selected request to a runner:
+
+```bash
+homeboy fuzz plan my-wordpress-component \
+  --workload generic-rest-fuzz \
+  --run-id generic-rest-fuzz-20260702 \
+  --gate-profile evidence \
+  --case-budget 25 \
+  --output artifacts/fuzz/request.json
+```
+
+The WordPress extension boundary is the data contract: fuzz manifests, surface
+discovery, WordPress fuzz plans, runtime capabilities, and the Codebox-owned
+`wp-codebox/fuzz-suite/v1` payload. The extension does not assemble
+`homeboy fuzz ...` shell commands for workflow callers.
+
 ### Surface discovery and fuzz schemas
 
 The WordPress extension exposes product-agnostic data shapes for discovering
