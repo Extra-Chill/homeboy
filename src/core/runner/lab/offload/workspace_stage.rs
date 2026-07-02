@@ -435,22 +435,13 @@ fn prepare_lab_offload_workspace_stage_inner(
     let remote_output_file = request
         .output_file_requested
         .then(|| remote_lab_output_file(&remote_cwd));
-    let mut command = command_prefix_argv.to_vec();
-    if !args_contain_output_file(&remapped_args) {
-        if let Some(path) = &remote_output_file {
-            command.push("--output".to_string());
-            command.push(path.clone());
-        }
-    }
-    command.extend(
-        rewrite_lab_offload_remote_command_args(
-            &remapped_args,
-            &remote_cwd,
-            &path_remaps,
-            remote_output_file.as_deref(),
-        )
-        .into_iter()
-        .skip(1),
+    let command = build_lab_offload_remote_command(
+        command_prefix_argv,
+        &remapped_args,
+        &remote_cwd,
+        &path_remaps,
+        remote_output_file.as_deref(),
+        &contract.required_extensions,
     );
     let remote_command = command.clone();
     plan = with_step(
@@ -583,6 +574,77 @@ fn rewrite_lab_offload_remote_command_args(
     remap_path_settings_in_args(&args, path_remaps)
 }
 
+fn build_lab_offload_remote_command(
+    command_prefix_argv: &[String],
+    remapped_args: &[String],
+    remote_cwd: &str,
+    path_remaps: &[LabPathRemap],
+    remote_output_file: Option<&str>,
+    required_extensions: &[String],
+) -> Vec<String> {
+    let mut command = command_prefix_argv.to_vec();
+    if !args_contain_output_file(remapped_args) {
+        if let Some(path) = remote_output_file {
+            command.push("--output".to_string());
+            command.push(path.to_string());
+        }
+    }
+
+    let remote_args = rewrite_lab_offload_remote_command_args(
+        remapped_args,
+        remote_cwd,
+        path_remaps,
+        remote_output_file,
+    );
+    let remote_args = inject_required_extension_args(remote_args, required_extensions);
+    command.extend(remote_args.into_iter().skip(1));
+    command
+}
+
+fn inject_required_extension_args(
+    mut args: Vec<String>,
+    required_extensions: &[String],
+) -> Vec<String> {
+    if required_extensions.is_empty() || args_have_extension_override(&args) {
+        return args;
+    }
+
+    let Some(command_index) = args
+        .iter()
+        .position(|arg| command_accepts_extension_override(arg))
+    else {
+        return args;
+    };
+
+    let insert_at = command_index + 1;
+    for extension in required_extensions.iter().rev() {
+        args.insert(insert_at, extension.clone());
+        args.insert(insert_at, "--extension".to_string());
+    }
+    args
+}
+
+fn args_have_extension_override(args: &[String]) -> bool {
+    let mut passthrough = false;
+    args.iter().any(|arg| {
+        if passthrough {
+            return false;
+        }
+        if arg == "--" {
+            passthrough = true;
+            return false;
+        }
+        arg == "--extension" || arg.starts_with("--extension=")
+    })
+}
+
+fn command_accepts_extension_override(arg: &str) -> bool {
+    matches!(
+        arg,
+        "audit" | "bench" | "fuzz" | "lint" | "refactor" | "review" | "test"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,6 +694,82 @@ mod tests {
             ]
         );
         assert!(!command.iter().any(|arg| arg.contains("/controller/")));
+    }
+
+    #[test]
+    fn final_remote_command_forwards_required_bench_extension() {
+        let args = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "bench".to_string(),
+            "node-project".to_string(),
+            "--path".to_string(),
+            "/controller/workspaces/node-project".to_string(),
+            "--rig".to_string(),
+            "wordpress-fixture".to_string(),
+        ];
+
+        let command = build_lab_offload_remote_command(
+            &["/runner/bin/homeboy".to_string()],
+            &args,
+            "/runner/workspaces/node-project",
+            &[],
+            None,
+            &["wordpress".to_string()],
+        );
+
+        assert_eq!(
+            command,
+            vec![
+                "/runner/bin/homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "--extension".to_string(),
+                "wordpress".to_string(),
+                "node-project".to_string(),
+                "--path".to_string(),
+                "/runner/workspaces/node-project".to_string(),
+                "--rig".to_string(),
+                "wordpress-fixture".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn final_remote_command_keeps_explicit_extension_override() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--extension".to_string(),
+            "custom".to_string(),
+            "node-project".to_string(),
+            "--rig".to_string(),
+            "wordpress-fixture".to_string(),
+        ];
+
+        let command = build_lab_offload_remote_command(
+            &["/runner/bin/homeboy".to_string()],
+            &args,
+            "/runner/workspaces/node-project",
+            &[],
+            None,
+            &["wordpress".to_string()],
+        );
+
+        assert_eq!(
+            command,
+            vec![
+                "/runner/bin/homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "--extension".to_string(),
+                "custom".to_string(),
+                "node-project".to_string(),
+                "--rig".to_string(),
+                "wordpress-fixture".to_string(),
+            ]
+        );
     }
 
     #[test]
