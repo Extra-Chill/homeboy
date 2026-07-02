@@ -512,17 +512,56 @@ pub(super) fn fetch_daemon_events(
 }
 
 pub(super) fn daemon_job_context_error(runner_id: &str, job_id: &str, err: Error) -> Error {
+    let runner_exec_prefix = format!("homeboy runner exec {runner_id} --");
+    let runner_runs_list =
+        format!("{runner_exec_prefix} homeboy runs list --status running --limit 20");
+    let runner_job_logs = format!("homeboy runner job logs {runner_id} {job_id} --follow");
+    let runner_job_cancel = format!("homeboy runner job cancel {runner_id} {job_id}");
+    let runner_run_show = format!("{runner_exec_prefix} homeboy runs show <run-id>");
+    let runner_run_evidence = format!("{runner_exec_prefix} homeboy runs evidence <run-id>");
+    let runner_run_artifacts = format!("{runner_exec_prefix} homeboy runs artifacts <run-id>");
+    let source_code = err.code.as_str();
+    let source_message = err.message;
+    let source_details = err.details;
+    let source_hints = err.hints;
     let mut with_context = Error::new(
-        err.code,
-        err.message,
+        ErrorCode::RunnerControllerDisconnected,
+        format!(
+            "Lost contact with runner `{runner_id}` daemon while polling known job `{job_id}`: {source_message}"
+        ),
         json!({
+            "status": "recoverable_followup_required",
             "runner_id": runner_id,
             "job_id": job_id,
-            "source": err.details,
+            "reason": "daemon_job_poll_failed",
+            "recovery": {
+                "mode": "durable_runner_job",
+                "job_logs": runner_job_logs,
+                "job_cancel": runner_job_cancel,
+                "runner_runs_list": runner_runs_list,
+                "runner_run_show": runner_run_show,
+                "runner_run_evidence": runner_run_evidence,
+                "runner_run_artifacts": runner_run_artifacts,
+            },
+            "source": {
+                "code": source_code,
+                "message": source_message,
+                "details": source_details,
+            },
         }),
     );
-    with_context.hints = err.hints;
-    with_context.retryable = err.retryable.or(Some(true));
+    with_context.hints = source_hints;
+    for hint in lab_offload_handoff_hints(
+        runner_id,
+        None,
+        job_id,
+        None,
+        DaemonJobHandoffState::InFlight,
+        true,
+    ) {
+        with_context = with_context.with_hint(hint);
+    }
+    with_context.retryable = Some(true);
     with_context
 }
 

@@ -945,6 +945,50 @@ fn terminal_lab_result_transport_error_preserves_recovery_ids() {
 }
 
 #[test]
+fn daemon_polling_error_for_known_job_is_recoverable_runner_disconnect() {
+    let job_id = "8ae584d4-3395-4b76-8e83-14f2e8c4c1eb";
+    let source = Error::internal_unexpected(format!(
+        "query runner daemon: error sending request for url (http://127.0.0.1:1234/jobs/{job_id})"
+    ));
+
+    let err = daemon_job_context_error("lab", job_id, source);
+
+    assert_eq!(err.code, ErrorCode::RunnerControllerDisconnected);
+    assert_eq!(err.retryable, Some(true));
+    assert!(err
+        .message
+        .contains("Lost contact with runner `lab` daemon"));
+    assert!(!err.message.contains("internal.unexpected"));
+    assert_eq!(err.details["status"], "recoverable_followup_required");
+    assert_eq!(err.details["runner_id"], "lab");
+    assert_eq!(err.details["job_id"], job_id);
+    assert_eq!(err.details["source"]["code"], "internal.unexpected");
+    assert_eq!(
+        err.details["recovery"]["job_logs"],
+        format!("homeboy runner job logs lab {job_id} --follow")
+    );
+    assert_eq!(
+        err.details["recovery"]["job_cancel"],
+        format!("homeboy runner job cancel lab {job_id}")
+    );
+    assert_eq!(
+        err.details["recovery"]["runner_runs_list"],
+        "homeboy runner exec lab -- homeboy runs list --status running --limit 20"
+    );
+    let hints = err
+        .hints
+        .iter()
+        .map(|hint| hint.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains(&format!("homeboy runner job logs lab {job_id} --follow"))));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains(&format!("homeboy runner job cancel lab {job_id}"))));
+}
+
+#[test]
 fn daemon_exec_request_failed_error_handles_null_payload_with_reconnect_hint() {
     // The historical #3631/#3624 symptom: a stale/restarting daemon answers
     // with an empty/null error payload. We must never surface a bare `null`,
