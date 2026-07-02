@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::core::api_jobs::JobArtifactMetadata;
 use crate::core::artifact_ref::{artifact_uri, ArtifactRef, EvidenceRef, ARTIFACT_REF_SCHEMA};
 use crate::core::runner::{RunnerArtifactRef, RunnerHandoff};
+use crate::core::runner_execution_envelope::{RunnerExecutionArtifactRef, RunnerExecutionRecord};
 
 pub const RUN_OUTCOME_ENVELOPE_SCHEMA: &str = "homeboy/run-outcome-envelope/v1";
 
@@ -81,6 +82,15 @@ impl RunOutcomeEnvelope {
         self
     }
 
+    pub fn from_runner_execution_record(record: &RunnerExecutionRecord) -> Self {
+        let run_id = runner_execution_record_run_id(record);
+        let mut envelope = Self::new(record.status.clone())
+            .with_run_id(Some(run_id.clone()))
+            .with_runner_id(Some(record.runner_id.clone()));
+        envelope.add_runner_execution_artifact_refs(&run_id, record.artifact_refs.clone());
+        envelope
+    }
+
     pub fn add_job_artifact_refs(
         &mut self,
         run_id: &str,
@@ -98,6 +108,16 @@ impl RunOutcomeEnvelope {
     ) {
         for artifact in artifacts {
             self.push_artifact_ref(runner_artifact_ref(run_id, artifact));
+        }
+    }
+
+    pub fn add_runner_execution_artifact_refs(
+        &mut self,
+        run_id: &str,
+        artifacts: impl IntoIterator<Item = RunnerExecutionArtifactRef>,
+    ) {
+        for artifact in artifacts {
+            self.push_artifact_ref(runner_execution_artifact_ref(run_id, artifact));
         }
     }
 
@@ -217,6 +237,39 @@ fn runner_artifact_ref(run_id: &str, artifact: RunnerArtifactRef) -> ArtifactRef
     }
 }
 
+fn runner_execution_artifact_ref(
+    run_id: &str,
+    artifact: RunnerExecutionArtifactRef,
+) -> ArtifactRef {
+    let id = artifact.id.clone();
+    ArtifactRef {
+        schema: ARTIFACT_REF_SCHEMA.to_string(),
+        id: id.clone(),
+        run_id: run_id.to_string(),
+        kind: artifact
+            .name
+            .clone()
+            .unwrap_or_else(|| "artifact".to_string()),
+        artifact_type: artifact_type(artifact.path.as_deref(), artifact.url.as_deref()),
+        path: artifact.path.unwrap_or_else(|| artifact_uri(run_id, &id)),
+        url: artifact.url,
+        public_url: None,
+        role: None,
+        semantic_key: artifact.name,
+    }
+}
+
+fn runner_execution_record_run_id(record: &RunnerExecutionRecord) -> String {
+    record
+        .remote_run_id
+        .clone()
+        .or_else(|| record.mirror_run_id.clone())
+        .or_else(|| record.agent_task_run_id.clone())
+        .or_else(|| record.local_run_id.clone())
+        .or_else(|| record.job_id.clone())
+        .unwrap_or_else(|| record.execution_id.clone())
+}
+
 fn artifact_type(path: Option<&str>, url: Option<&str>) -> String {
     if path.is_some() || url.is_some() {
         "file".to_string()
@@ -301,5 +354,34 @@ mod tests {
         assert_eq!(value["runner_id"], "runner-1");
         assert_eq!(value["artifact_refs"][0]["id"], "summary");
         assert!(value.get("result").is_none());
+    }
+
+    #[test]
+    fn run_outcome_envelope_projects_terminal_runner_execution_record() {
+        let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
+            .with_job_id("job-1")
+            .with_mirror_run_id(Some("run-1".to_string()))
+            .with_artifact_refs(vec![RunnerExecutionArtifactRef {
+                id: "report".to_string(),
+                name: Some("summary".to_string()),
+                path: Some("artifacts/summary.json".to_string()),
+                url: None,
+            }]);
+
+        let value = serde_json::to_value(RunOutcomeEnvelope::from_runner_execution_record(&record))
+            .expect("outcome json");
+
+        assert_eq!(value["schema"], RUN_OUTCOME_ENVELOPE_SCHEMA);
+        assert_eq!(value["status"], "succeeded");
+        assert_eq!(value["run_id"], "run-1");
+        assert_eq!(value["runner_id"], "lab-a");
+        assert_eq!(value["artifact_refs"][0]["id"], "report");
+        assert_eq!(
+            value["evidence_refs"][0]["target"],
+            "homeboy://run/run-1/artifact/report"
+        );
+        assert!(value.get("transport").is_none());
+        assert!(value.get("materialized_paths").is_none());
+        assert!(value.get("next_actions").is_none());
     }
 }
