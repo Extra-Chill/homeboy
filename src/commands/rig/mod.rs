@@ -143,6 +143,9 @@ enum RigCommand {
         /// Select a rig from a local package path containing multiple rigs
         #[arg(long)]
         id: Option<String>,
+        /// Lint every rig discovered in a local package path
+        #[arg(long)]
+        all: bool,
     },
     /// Tear down a rig: stop services and run its `down` pipeline
     Down {
@@ -303,7 +306,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Show { rig_id } => show(&rig_id),
         RigCommand::Up { rig_id, dry_run } => up(&rig_id, dry_run),
         RigCommand::Check { target, id, path } => check(&target, id.as_deref(), path.as_deref()),
-        RigCommand::Lint { target, id } => lint(&target, id.as_deref()),
+        RigCommand::Lint { target, id, all } => lint(&target, id.as_deref(), all),
         RigCommand::Down { rig_id } => down(&rig_id),
         RigCommand::Repair { rig_id } => repair(&rig_id),
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
@@ -617,7 +620,42 @@ fn check(
     ))
 }
 
-fn lint(target: &str, id: Option<&str>) -> CmdResult<RigCommandOutput> {
+fn lint(target: &str, id: Option<&str>, all: bool) -> CmdResult<RigCommandOutput> {
+    if all {
+        if id.is_some() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "id",
+                "Pass either --id or --all, not both",
+                id.map(str::to_string),
+                None,
+            ));
+        }
+        let path = std::path::Path::new(target);
+        if !path.is_dir() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "target",
+                "rig lint --all requires a local package directory",
+                Some(target.to_string()),
+                None,
+            ));
+        }
+        let report = rig::lint::run_package_lint_at(path)?;
+        let exit_code = if report.failed == 0 { 0 } else { 1 };
+        return Ok((
+            RigCommandOutput::Check(RigCheckOutput {
+                command: "rig.lint",
+                report: homeboy::core::rig::CheckReport {
+                    rig_id: target.to_string(),
+                    run_id: None,
+                    pipeline: report,
+                    success: exit_code == 0,
+                    artifact_index: None,
+                },
+            }),
+            exit_code,
+        ));
+    }
+
     let rig = if std::path::Path::new(target).exists() {
         rig::load_local_source(target, id)?
     } else {
@@ -1090,11 +1128,12 @@ mod tests {
         let cli = TestCli::try_parse_from(["homeboy", "lint", "./pkg", "--id", "alpha"])
             .expect("rig lint should parse");
 
-        let RigCommand::Lint { target, id } = cli.rig.command else {
+        let RigCommand::Lint { target, id, all } = cli.rig.command else {
             panic!("expected rig lint command");
         };
         assert_eq!(target, "./pkg");
         assert_eq!(id.as_deref(), Some("alpha"));
+        assert!(!all);
     }
 
     #[test]
@@ -1118,7 +1157,7 @@ mod tests {
             assert_eq!(check_exit, 1, "missing requirement should fail rig check");
 
             // The lint command skips requirements entirely and succeeds.
-            let (output, exit_code) = lint("lint-cmd", None).expect("rig lint runs");
+            let (output, exit_code) = lint("lint-cmd", None, false).expect("rig lint runs");
             assert_eq!(exit_code, 0);
             let json = serde_json::to_value(output).expect("serialize lint output");
             assert_eq!(json["payload"]["command"], "rig.lint");
@@ -1135,13 +1174,35 @@ mod tests {
                 serde_json::json!({ "id": "lint-id-guard" }),
             );
 
-            let err = match lint("lint-id-guard", Some("alpha")) {
+            let err = match lint("lint-id-guard", Some("alpha"), false) {
                 Ok(_) => panic!("--id against an installed rig id should fail"),
                 Err(err) => err,
             };
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("local package path"));
         });
+    }
+
+    #[test]
+    fn lint_all_runs_package_lint_for_multi_rig_package() {
+        let temp = tempfile::TempDir::new().expect("package");
+        for id in ["alpha", "beta"] {
+            let rig_dir = temp.path().join("rigs").join(id);
+            std::fs::create_dir_all(&rig_dir).expect("rig dir");
+            std::fs::write(
+                rig_dir.join("rig.json"),
+                serde_json::json!({ "id": id }).to_string(),
+            )
+            .expect("write rig");
+        }
+
+        let (output, exit_code) =
+            lint(&temp.path().to_string_lossy(), None, true).expect("rig lint --all runs");
+
+        assert_eq!(exit_code, 0);
+        let json = serde_json::to_value(output).expect("serialize lint output");
+        assert_eq!(json["payload"]["command"], "rig.lint");
+        assert_eq!(json["payload"]["success"], true);
     }
 
     #[test]

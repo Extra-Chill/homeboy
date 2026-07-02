@@ -109,13 +109,15 @@ Runs the `check` pipeline and reports every failing step instead of stopping at 
 ```sh
 homeboy rig lint studio
 homeboy rig lint ./packages/studio --id studio
+homeboy rig lint ./packages --all
 homeboy rig lint ./packages/studio/rigs/studio/rig.json
 ```
 
 Runs env-independent rig package lint only: conflict markers, JSON validity, and
-`extends` template materialization. It does not run requirements, component
-checkout probes, services, or live `check` steps, so CI can validate rig packages
-before a full environment exists.
+`extends` template materialization, plus materialized rig-spec contract checks.
+It does not run requirements, component checkout probes, services, or live
+`check` steps, so CI can validate rig packages before a full environment exists.
+Use `--all` for a local package directory that contains multiple rigs.
 
 ### `down`
 

@@ -1,4 +1,4 @@
-//! Generic rig package lint checks used by `homeboy rig check`.
+//! Generic rig package lint checks used by `homeboy rig check` and `homeboy rig lint`.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -31,12 +31,26 @@ pub fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
         return Ok(empty_outcome());
     };
 
-    let mut files = Vec::new();
-    collect_files(&root, &mut files)?;
+    run_package_lint_at(&root)
+}
 
-    let conflict_failures = conflict_marker_failures(&root, &files)?;
-    let json_failures = json_parse_failures(&root, &files)?;
-    let template_failures = template_materialization_failures(&root, &files)?;
+pub fn run_package_lint_at(root: &Path) -> Result<PipelineOutcome> {
+    if !root.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            "Rig package lint target must be a directory",
+            Some(root.to_string_lossy().to_string()),
+            None,
+        ));
+    }
+
+    let mut files = Vec::new();
+    collect_files(root, &mut files)?;
+
+    let conflict_failures = conflict_marker_failures(root, &files)?;
+    let json_failures = json_parse_failures(root, &files)?;
+    let template_failures = template_materialization_failures(root, &files)?;
+    let contract_failures = contract_validation_failures(root)?;
     let steps = vec![
         aggregate_step(
             "rig-package-lint",
@@ -53,6 +67,11 @@ pub fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
             "rig package template specs materialize",
             template_failures,
         ),
+        aggregate_step(
+            "rig-package-lint",
+            "rig package specs satisfy the Homeboy rig contract",
+            contract_failures,
+        ),
     ];
 
     Ok(PipelineOutcome {
@@ -61,6 +80,25 @@ pub fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
         failed: steps.iter().filter(|step| step.status == "fail").count(),
         steps,
     })
+}
+
+fn contract_validation_failures(root: &Path) -> Result<Vec<String>> {
+    let rigs = match super::discover_rigs(root) {
+        Ok(rigs) => rigs,
+        Err(error) => return Ok(vec![error.message]),
+    };
+
+    let mut failures = Vec::new();
+    for rig in rigs {
+        if let Err(error) = super::load_local_source(&root.to_string_lossy(), Some(&rig.id)) {
+            failures.push(format!(
+                "{}: {}",
+                display_relative(root, &rig.rig_path),
+                error.message
+            ));
+        }
+    }
+    Ok(failures)
 }
 
 fn empty_outcome() -> PipelineOutcome {
@@ -230,5 +268,38 @@ mod tests {
         let outcome = aggregate_step("rig-package-lint", "JSON parses", Vec::new());
         assert_eq!(outcome.status, "pass");
         assert_eq!(outcome.error, None);
+    }
+
+    #[test]
+    fn package_lint_reports_contract_failures_for_all_rigs() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("bad");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "bad",
+                "requirements": {
+                    "dependency_materialization": [
+                        { "id": "bad", "inputs": { "paths": ["artifact.txt"] } }
+                    ]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+
+        let contract_step = outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("Homeboy rig contract"))
+            .expect("contract step");
+        assert_eq!(contract_step.status, "fail");
+        assert!(contract_step
+            .error
+            .as_ref()
+            .expect("contract error")
+            .contains("dependency materialization"));
     }
 }
