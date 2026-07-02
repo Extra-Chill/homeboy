@@ -155,7 +155,7 @@ fn strips_controller_artifact_root_from_runner_resident_command() {
 }
 
 #[test]
-fn leaves_passthrough_path_args_untouched() {
+fn leaves_relative_passthrough_path_args_untouched() {
     let input = args(&[
         "homeboy",
         "test",
@@ -178,6 +178,83 @@ fn leaves_passthrough_path_args_untouched() {
             "test-fixture",
         ])
     );
+}
+
+#[test]
+fn remaps_synced_source_paths_in_passthrough_args() {
+    use super::super::lab_args::LabPathRemap;
+
+    let input = args(&[
+        "homeboy",
+        "bench",
+        "static-site-importer",
+        "--path",
+        "/Users/user/Developer/static-site-importer@fix",
+        "--runner",
+        "homeboy-lab",
+        "--lab-only",
+        "--rig",
+        "static-site-importer-fixture-matrix",
+        "--",
+        EXPLICIT_PASSTHROUGH_SENTINEL,
+        "--static-site-importer-path",
+        "/Users/user/Developer/static-site-importer@fix",
+        "--batch-size",
+        "1",
+    ]);
+    let mappings = vec![LabPathRemap {
+        local: "/Users/user/Developer/static-site-importer@fix".to_string(),
+        remote: "/home/user/_lab_workspaces/static-site-importer@fix".to_string(),
+    }];
+
+    assert_eq!(
+        rewrite_lab_offload_args(
+            &input,
+            "/home/user/_lab_workspaces/static-site-importer@fix",
+            &mappings,
+            None,
+        ),
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "bench",
+            "static-site-importer",
+            "--path",
+            "/home/user/_lab_workspaces/static-site-importer@fix",
+            "--rig",
+            "static-site-importer-fixture-matrix",
+            "--",
+            "--static-site-importer-path",
+            "/home/user/_lab_workspaces/static-site-importer@fix",
+            "--batch-size",
+            "1",
+        ])
+    );
+}
+
+#[test]
+fn leaves_unmapped_passthrough_source_paths_for_safety_guard() {
+    let input = args(&[
+        "homeboy",
+        "bench",
+        "static-site-importer",
+        "--path",
+        "/Users/user/Developer/static-site-importer@fix",
+        "--",
+        "--static-site-importer-path",
+        "/Users/user/Developer/static-site-importer@fix",
+    ]);
+
+    let rewritten = rewrite_lab_offload_args(
+        &input,
+        "/home/user/_lab_workspaces/static-site-importer@fix",
+        &[],
+        None,
+    );
+
+    assert!(rewritten
+        .iter()
+        .any(|arg| arg == "/Users/user/Developer/static-site-importer@fix"));
 }
 
 #[test]

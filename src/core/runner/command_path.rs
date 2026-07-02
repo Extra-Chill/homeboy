@@ -800,6 +800,36 @@ mod tests {
     }
 
     #[test]
+    fn preflight_rejects_untranslated_source_path_after_passthrough() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("static-site-importer@fix");
+        fs::create_dir_all(&source).expect("source");
+        let command = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "static-site-importer".to_string(),
+            "--path".to_string(),
+            "/runner/workspaces/static-site-importer@fix".to_string(),
+            "--".to_string(),
+            "--static-site-importer-path".to_string(),
+            source.display().to_string(),
+        ];
+
+        let err = preflight_remote_argv_path_translation(
+            "Lab offload",
+            "lab-runner",
+            &command,
+            &source,
+            "/runner/workspaces/static-site-importer@fix",
+        )
+        .expect_err("untranslated passthrough source path must fail before dispatch");
+
+        assert!(err.message.contains("remote argv argument"));
+        assert!(err.message.contains("controller-local source path"));
+        assert!(err.details.to_string().contains("path-translation defect"));
+    }
+
+    #[test]
     fn preflight_accepts_mapped_remote_paths_and_non_path_settings() {
         let controller = tempfile::tempdir().expect("controller");
         let source = controller.path().join("primary");
