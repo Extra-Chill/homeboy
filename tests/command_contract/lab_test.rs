@@ -391,6 +391,42 @@ fn lab_route_contract_carries_command_specific_requirements() {
 }
 
 #[test]
+fn bench_lab_route_prefers_rig_declared_workload_extension_over_ecosystem_fallback() {
+    crate::test_support::with_isolated_home(|_| {
+        let rig_path = crate::core::paths::rig_config("node-package-wordpress-bench")
+            .expect("rig path resolves");
+        std::fs::create_dir_all(rig_path.parent().expect("rig dir")).expect("create rig dir");
+        std::fs::write(
+            &rig_path,
+            r#"{
+                "id": "node-package-wordpress-bench",
+                "bench": { "default_component": "node-package" },
+                "bench_workloads": {
+                    "wordpress": [
+                        { "path": "${package.root}/bench/fixture.bench.mjs" }
+                    ]
+                }
+            }"#,
+        )
+        .expect("write rig spec");
+
+        let command = parsed_command(&[
+            "homeboy",
+            "bench",
+            "node-package",
+            "--rig",
+            "node-package-wordpress-bench",
+        ]);
+        let route_contract = command
+            .lab_route_contract()
+            .expect("route contract resolves")
+            .expect("bench has a Lab route contract");
+
+        assert_eq!(route_contract.required_extensions, vec!["wordpress"]);
+    });
+}
+
+#[test]
 fn local_execution_policy_names_legacy_flag_combinations() {
     let default_policy = LabLocalExecutionPolicy::default();
     assert!(!default_policy.allow_local_hot());

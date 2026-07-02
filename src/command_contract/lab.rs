@@ -1133,9 +1133,7 @@ impl Commands {
             Commands::Audit(args) => {
                 extension_ids.extend(args.extension_override.extensions.clone())
             }
-            Commands::Bench(args) => {
-                extension_ids.extend(args.extension_override_ids().iter().cloned())
-            }
+            Commands::Bench(args) => extension_ids.extend(args.lab_required_extension_ids()?),
             Commands::Fuzz(args) => {
                 extension_ids.extend(args.extension_override_ids().iter().cloned())
             }
