@@ -371,6 +371,7 @@ fn test_build_release_steps() {
     let version_index = step_index(&ids, "version");
     let prepare_index = step_index(&ids, "release.prepare");
     let commit_index = step_index(&ids, "git.commit");
+    let push_index = step_index(&ids, "git.push");
 
     assert!(changelog_policy_index < changelog_index);
     assert!(changelog_index < version_index);
@@ -385,6 +386,13 @@ fn test_build_release_steps() {
     assert_eq!(steps[version_index].needs, vec!["changelog.finalize"]);
     assert_eq!(steps[prepare_index].needs, vec!["version"]);
     assert_eq!(steps[commit_index].needs, vec!["release.prepare"]);
+    assert_eq!(
+        steps[push_index]
+            .inputs
+            .get("branch")
+            .and_then(|value| value.as_str()),
+        Some("main")
+    );
 }
 
 #[test]

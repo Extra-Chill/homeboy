@@ -30,6 +30,16 @@ pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
         return Ok(());
     }
 
+    if head_matches_remote_default(component, &default_branch)? {
+        log_status!(
+            "release",
+            "Local branch '{}' matches the remote default branch tip; release will push HEAD to '{}'.",
+            current_branch,
+            default_branch
+        );
+        return Ok(());
+    }
+
     Err(Error::validation_invalid_argument(
         "release",
         format!(
@@ -48,6 +58,36 @@ pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
             ),
             "If you only want a preview, use --dry-run".to_string(),
         ]),
+    ))
+}
+
+pub(super) fn release_push_branch(component: &Component) -> Result<String> {
+    let default_branch = default_branch(component);
+    if !git::is_git_repo(&component.local_path) {
+        return Ok(default_branch);
+    }
+
+    let current_branch = current_branch(component)?;
+
+    if current_branch == default_branch {
+        return Ok(current_branch);
+    }
+
+    if head_matches_remote_default(component, &default_branch)? {
+        return Ok(default_branch);
+    }
+
+    Err(Error::validation_invalid_argument(
+        "release",
+        format!(
+            "Refusing to plan release push from branch '{}' because the repo default branch is '{}'",
+            current_branch, default_branch
+        ),
+        None,
+        Some(vec![format!(
+            "Check out '{}' or rerun preflight after fast-forwarding the release worktree to the remote default branch tip",
+            default_branch
+        )]),
     ))
 }
 
@@ -167,6 +207,60 @@ pub(super) fn validate_head_reachable_from_default_branch(component: &Component)
     ))
 }
 
+fn head_matches_remote_default(component: &Component, default_branch: &str) -> Result<bool> {
+    let remote = source_remote(component);
+    let remote_default_ref = format!("{remote}/{default_branch}");
+    let Ok(remote_default_revision) = remote_default_revision(component, &remote_default_ref)
+    else {
+        return Ok(false);
+    };
+    let head_revision = git::run_git(
+        std::path::Path::new(&component.local_path),
+        &["rev-parse", "HEAD"],
+        "git rev-parse HEAD",
+    )
+    .map(|value| value.trim().to_string())
+    .map_err(|_| {
+        Error::validation_invalid_argument(
+            "release",
+            "Refusing to release because HEAD could not be resolved",
+            None,
+            Some(vec![
+                "Ensure the checkout has at least one commit before releasing".to_string(),
+            ]),
+        )
+    })?;
+
+    Ok(head_revision == remote_default_revision)
+}
+
+fn remote_default_revision(component: &Component, remote_default_ref: &str) -> Result<String> {
+    git::run_git(
+        std::path::Path::new(&component.local_path),
+        &["rev-parse", remote_default_ref],
+        "git rev-parse remote default branch",
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    .ok_or_else(|| {
+        let current_branch =
+            current_branch(component).unwrap_or_else(|_| "detached HEAD".to_string());
+        Error::validation_invalid_argument(
+            "release",
+            format!(
+                "Refusing to release from branch '{}' because the repo default branch is not available as '{}'",
+                current_branch, remote_default_ref
+            ),
+            None,
+            Some(vec![format!(
+                "Fetch the default branch before running `homeboy release --apply`: git fetch {}",
+                source_remote(component)
+            )]),
+        )
+    })
+}
+
 fn current_branch(component: &Component) -> Result<String> {
     command::run_in_optional(
         &component.local_path,
@@ -198,7 +292,7 @@ fn source_remote(component: &Component) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_default_branch, validate_default_branch_ancestry,
+        release_push_branch, validate_default_branch, validate_default_branch_ancestry,
         validate_head_reachable_from_default_branch, validate_remote_sync,
     };
     use crate::core::component::Component;
@@ -288,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_default_branch_blocks_release_branch_at_remote_default_tip() {
+    fn test_validate_default_branch_allows_release_branch_at_remote_default_tip() {
         let temp = tempfile::tempdir().expect("tempdir");
         let remote = temp.path().join("remote.git");
         let seed = temp.path().join("seed");
@@ -309,13 +403,12 @@ mod tests {
         run_git(temp.path(), &["clone", &remote_str, "checkout"]);
         run_git(&checkout, &["checkout", "-q", "-b", "release-local"]);
 
-        let err = validate_default_branch(&git_component(&checkout))
-            .expect_err("release branch at origin/main tip should fail");
-
-        assert!(err
-            .message
-            .contains("branch 'release-local' because the repo default branch is 'main'"));
-        assert!(err.details.to_string().contains("homeboy release --apply"));
+        validate_default_branch(&git_component(&checkout))
+            .expect("release branch at origin/main tip should pass");
+        assert_eq!(
+            release_push_branch(&git_component(&checkout)).expect("push branch"),
+            "main"
+        );
     }
 
     #[test]

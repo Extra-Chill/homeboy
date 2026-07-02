@@ -17,18 +17,30 @@ pub(crate) fn run_git_push(
     component: &Component,
     component_id: &str,
     release_tag: Option<&str>,
+    target_branch: Option<&str>,
 ) -> Result<ReleaseStepResult> {
-    let branch = crate::core::git::current_branch(std::path::Path::new(&component.local_path))
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "branch",
-                "Release push requires a checked-out branch",
-                Some(component.local_path.clone()),
-                Some(vec![
-                    "Check out the release branch before running `homeboy release`.".to_string(),
-                ]),
-            )
-        })?;
+    let current_branch = crate::core::git::current_branch(std::path::Path::new(
+        &component.local_path,
+    ))
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "branch",
+            "Release push requires a checked-out branch",
+            Some(component.local_path.clone()),
+            Some(vec![
+                "Check out the release branch before running `homeboy release`.".to_string(),
+            ]),
+        )
+    })?;
+    let branch = target_branch.unwrap_or(&current_branch);
+    if branch != current_branch {
+        log_status!(
+            "release",
+            "Pushing release commit from local branch '{}' to default branch '{}'.",
+            current_branch,
+            branch
+        );
+    }
     let output = push_release_branch(component, component_id, &branch)?;
     let data = serde_json::to_value(&output)
         .map_err(|e| Error::internal_json(e.to_string(), Some("git push output".to_string())))?;
@@ -252,8 +264,8 @@ mod tests {
             ..Component::default()
         };
 
-        let result =
-            run_git_push(&component, "fixture", None).expect("push step should return result");
+        let result = run_git_push(&component, "fixture", None, None)
+            .expect("push step should return result");
 
         assert_eq!(result.status, ReleaseStepStatus::Failed);
         assert!(!result.error.unwrap().trim().is_empty());
@@ -310,12 +322,70 @@ mod tests {
             ..Component::default()
         };
 
-        let result = run_git_push(&component, "fixture", Some("v1.0.0"))
+        let result = run_git_push(&component, "fixture", Some("v1.0.0"), None)
             .expect("push step should return result");
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
         git(remote.path(), &["show-ref", "--verify", "refs/heads/main"]);
         git(remote.path(), &["show-ref", "--verify", "refs/tags/v1.0.0"]);
+    }
+
+    #[test]
+    fn run_git_push_can_push_release_worktree_head_to_default_branch() {
+        let local = tempfile::tempdir().expect("local tempdir");
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(
+            local.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        git(local.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            local.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(local.path().join("README.md"), "base").expect("write fixture");
+        git(local.path(), &["add", "."]);
+        git(local.path(), &["commit", "-m", "base"]);
+        git(local.path(), &["push", "origin", "main"]);
+
+        git(local.path(), &["checkout", "-q", "-b", "release/v1.0.0"]);
+        std::fs::write(local.path().join("release.txt"), "release").expect("write release");
+        git(local.path(), &["add", "."]);
+        git(local.path(), &["commit", "-m", "release: v1.0.0"]);
+        git(
+            local.path(),
+            &["tag", "-a", "v1.0.0", "-m", "Release v1.0.0"],
+        );
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: local.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+
+        let result = run_git_push(&component, "fixture", Some("v1.0.0"), Some("main"))
+            .expect("push step should return result");
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
+        git(remote.path(), &["show-ref", "--verify", "refs/heads/main"]);
+        git(remote.path(), &["show-ref", "--verify", "refs/tags/v1.0.0"]);
+        git(local.path(), &["fetch", "origin"]);
+        let remote_main_subjects = Command::new("git")
+            .args(["log", "--format=%s", "origin/main"])
+            .current_dir(local.path())
+            .output()
+            .expect("git log");
+        assert!(String::from_utf8_lossy(&remote_main_subjects.stdout).contains("release: v1.0.0"));
+        assert_eq!(
+            Command::new("git")
+                .args(["branch", "--show-current"])
+                .current_dir(local.path())
+                .output()
+                .expect("git branch")
+                .stdout,
+            b"release/v1.0.0\n".to_vec()
+        );
     }
 
     #[test]
@@ -393,7 +463,7 @@ mod tests {
             ..Component::default()
         };
 
-        let result = run_git_push(&component, "fixture", Some("v1.0.0"))
+        let result = run_git_push(&component, "fixture", Some("v1.0.0"), None)
             .expect("push step returns a result");
 
         assert_eq!(
