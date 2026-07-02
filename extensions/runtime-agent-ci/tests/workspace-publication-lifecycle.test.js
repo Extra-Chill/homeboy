@@ -229,6 +229,9 @@ try {
   assert.equal(finalizationCall.args.includes('--changed-file'), true);
   assert.equal(finalizationCall.args.includes('docs/generated.md'), true);
   assert.equal(calls.some((call) => call.command === 'gh'), false);
+  assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'checkout'), false);
+  assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'reset'), false);
+  assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'add'), false);
   assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'push'), false);
   assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'commit'), false);
 } finally {

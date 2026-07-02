@@ -572,57 +572,6 @@ function publicationTemplates(config, values, hooks = {}) {
   };
 }
 
-function copyFile(source, destination) {
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
-  fs.copyFileSync(source, destination);
-}
-
-function preserveWorkspaceFiles(workspace, files, hooks = {}) {
-  const adapter = lifecycleHooks(hooks);
-  const temp = fs.mkdtempSync(path.join(
-    adapter.tmpdir,
-    'homeboy-runner-workspace.',
-  ));
-  const entries = [];
-  for (const file of files) {
-    const source = path.join(workspace, file);
-    const backup = path.join(temp, file);
-    if (fs.existsSync(source) && fs.statSync(source).isFile()) {
-      copyFile(source, backup);
-      entries.push({ file, backup, deleted: false });
-    } else {
-      entries.push({ file, deleted: true });
-    }
-  }
-  return { temp, entries };
-}
-
-function restoreWorkspaceFiles(workspace, preserved) {
-  for (const entry of preserved.entries) {
-    const target = path.join(workspace, entry.file);
-    if (entry.deleted) {
-      fs.rmSync(target, { force: true });
-      continue;
-    }
-    copyFile(entry.backup, target);
-  }
-  fs.rmSync(preserved.temp, { recursive: true, force: true });
-}
-
-function resetPublicationBranch(workspace, branch, base, files, hooks = {}) {
-  const preserved = preserveWorkspaceFiles(workspace, files, hooks);
-  const fetch = git(
-    workspace,
-    ['fetch', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`],
-    { check: false, hooks },
-  );
-  const baseRef = fetch.status === 0 ? `origin/${base}` : base;
-  git(workspace, ['reset', '--hard', 'HEAD'], { hooks });
-  git(workspace, ['clean', '-fd'], { hooks });
-  git(workspace, ['checkout', '-B', branch, baseRef], { hooks });
-  restoreWorkspaceFiles(workspace, preserved);
-}
-
 function publicationEvidenceRef(input = {}) {
   return {
     type: input.url ? 'pull_request' : 'branch',
@@ -679,10 +628,9 @@ function preparePublication(config, results, scenario, files, hooks = {}) {
 }
 
 function captureWorkspaceDelta(config, workspace, publication, hooks = {}) {
-  resetPublicationBranch(workspace, publication.branch, publication.base, publication.files, hooks);
-  const files = changedFiles(workspace, config, hooks);
-  git(workspace, ['add', '--', ...files], { hooks });
-  const staged = git(workspace, ['diff', '--cached', '--name-only'], { check: false, hooks }).stdout.trim().split('\n').filter(Boolean);
+  const workspaceFiles = new Set(changedFiles(workspace, config, hooks).map(normalizePathPattern));
+  const files = publication.files.map(normalizePathPattern).filter(Boolean);
+  const staged = files.filter((file) => workspaceFiles.has(file));
   return {
     changed: staged.length > 0,
     workspace,
