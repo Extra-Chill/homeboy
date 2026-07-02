@@ -75,6 +75,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::core::artifact_manifest::ArtifactManifest",
     },
     ContractRegistryEntry {
+        schema_id: crate::core::artifacts::RUNTIME_AGENT_ARTIFACT_PATHS_SCHEMA,
+        name: "artifact-paths",
+        title: "Runtime artifact paths",
+        owner: "homeboy-core",
+        summary: "Publishes stable runtime artifact path and filename constants for downstream consumers.",
+        rust_type: "homeboy::command_contract::ArtifactPathsConstants",
+    },
+    ContractRegistryEntry {
         schema_id: crate::core::artifacts::ARTIFACT_POSTPROCESS_SCHEMA,
         name: "artifact-postprocess",
         title: "Artifact postprocess plan",

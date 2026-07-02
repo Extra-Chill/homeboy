@@ -24,10 +24,11 @@ use crate::core::artifact_ref::{
 };
 use crate::core::artifacts::{
     ARTIFACT_POSTPROCESS_PLAN_SCHEMA, ARTIFACT_POSTPROCESS_RESULT_SCHEMA,
-    ARTIFACT_POSTPROCESS_SCHEMA, RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH,
-    RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE, RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE,
-    RUNTIME_AGENT_RESULT_ARTIFACT_FILE, RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE,
-    RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE, RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH,
+    ARTIFACT_POSTPROCESS_SCHEMA, RUNTIME_AGENT_ARTIFACT_PATHS_SCHEMA,
+    RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH, RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE,
+    RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE, RUNTIME_AGENT_RESULT_ARTIFACT_FILE,
+    RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE, RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE,
+    RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH,
 };
 use crate::core::change_artifact::CHANGE_ARTIFACT_SCHEMA;
 use crate::core::fuzz::FUZZ_ARTIFACT_SCHEMA;
@@ -56,6 +57,7 @@ pub struct ContractConstantsOutput {
 pub enum ContractConstants {
     All(AllContractConstants),
     ArtifactManifest(ArtifactManifestConstants),
+    ArtifactPaths(ArtifactPathsConstants),
     ArtifactPostprocess(ArtifactPostprocessConstants),
     Loop(LoopConstants),
     SecretEnvPlan(SecretEnvPlanConstants),
@@ -65,12 +67,14 @@ pub enum ContractConstants {
     RunnerExecutionRecord(RunnerExecutionRecordConstants),
     PathMaterializationPlan(PathMaterializationPlanConstants),
     RuntimeArtifacts(RuntimeArtifactConstants),
+    RunnerArtifactManifestRef(RunnerArtifactManifestRefConstants),
     ReviewerFacingRef(ReviewerFacingRefConstants),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AllContractConstants {
     pub artifact_manifest: ArtifactManifestConstants,
+    pub artifact_paths: ArtifactPathsConstants,
     pub artifact_postprocess: ArtifactPostprocessConstants,
     pub loop_contracts: LoopConstants,
     pub secret_env_plan: SecretEnvPlanConstants,
@@ -80,6 +84,7 @@ pub struct AllContractConstants {
     pub runner_execution_record: RunnerExecutionRecordConstants,
     pub path_materialization_plan: PathMaterializationPlanConstants,
     pub runtime_artifacts: RuntimeArtifactConstants,
+    pub runner_artifact_manifest_ref: RunnerArtifactManifestRefConstants,
     pub reviewer_facing_ref: ReviewerFacingRefConstants,
 }
 
@@ -91,6 +96,13 @@ pub struct ArtifactManifestConstants {
     pub runner_manifest_ref_name: String,
     pub runner_artifact_root_dir_suffix: String,
     pub represented_artifact_schema_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactPathsConstants {
+    pub schema_id: String,
+    pub runtime_agent_paths: RuntimeAgentArtifactPaths,
+    pub canonical_filenames: RuntimeArtifactFilenames,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -172,6 +184,15 @@ pub struct ExecutorEvidenceConstants {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerArtifactManifestRefConstants {
+    pub schema_id: String,
+    pub name: String,
+    pub manifest_schema_id: String,
+    pub manifest_file_name: String,
+    pub artifact_root_dir_suffix: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReviewerFacingRefConstants {
     pub accepted_schemes: Vec<String>,
 }
@@ -181,6 +202,7 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
     let constants = match normalized {
         "all" => ContractConstants::All(AllContractConstants {
             artifact_manifest: artifact_manifest_constants(),
+            artifact_paths: artifact_paths_constants(),
             artifact_postprocess: artifact_postprocess_constants(),
             loop_contracts: loop_constants(),
             secret_env_plan: secret_env_plan_constants(),
@@ -190,9 +212,11 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
             runner_execution_record: runner_execution_record_constants(),
             path_materialization_plan: path_materialization_plan_constants(),
             runtime_artifacts: runtime_artifact_constants(),
+            runner_artifact_manifest_ref: runner_artifact_manifest_ref_constants(),
             reviewer_facing_ref: reviewer_facing_ref_constants(),
         }),
         "artifact-manifest" => ContractConstants::ArtifactManifest(artifact_manifest_constants()),
+        "artifact-paths" => ContractConstants::ArtifactPaths(artifact_paths_constants()),
         "artifact-postprocess" => {
             ContractConstants::ArtifactPostprocess(artifact_postprocess_constants())
         }
@@ -213,6 +237,9 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
         }
         "runtime-artifacts" | "runtime-agent-artifacts" => {
             ContractConstants::RuntimeArtifacts(runtime_artifact_constants())
+        }
+        "runner-artifact-manifest-ref" => {
+            ContractConstants::RunnerArtifactManifestRef(runner_artifact_manifest_ref_constants())
         }
         "reviewer-facing-ref" | "reviewer-ref" => {
             ContractConstants::ReviewerFacingRef(reviewer_facing_ref_constants())
@@ -235,6 +262,14 @@ pub fn artifact_manifest_constants() -> ArtifactManifestConstants {
         runner_manifest_ref_name: RUNNER_ARTIFACT_MANIFEST_REF_NAME.to_string(),
         runner_artifact_root_dir_suffix: RUNNER_ARTIFACT_ROOT_DIR_SUFFIX.to_string(),
         represented_artifact_schema_ids: represented_artifact_schema_ids(),
+    }
+}
+
+pub fn artifact_paths_constants() -> ArtifactPathsConstants {
+    ArtifactPathsConstants {
+        schema_id: RUNTIME_AGENT_ARTIFACT_PATHS_SCHEMA.to_string(),
+        runtime_agent_paths: runtime_agent_artifact_paths(),
+        canonical_filenames: runtime_artifact_filenames(),
     }
 }
 
@@ -322,24 +357,42 @@ pub fn path_materialization_plan_constants() -> PathMaterializationPlanConstants
 
 pub fn runtime_artifact_constants() -> RuntimeArtifactConstants {
     RuntimeArtifactConstants {
-        runtime_agent_paths: RuntimeAgentArtifactPaths {
-            transcript: RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH.to_string(),
-            final_output: RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH.to_string(),
-        },
-        canonical_filenames: RuntimeArtifactFilenames {
-            transcript: RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE.to_string(),
-            agent_result: RUNTIME_AGENT_RESULT_ARTIFACT_FILE.to_string(),
-            agent_result_legacy_underscore: RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE
-                .to_string(),
-            patch_diff: RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE.to_string(),
-            patch_patch: RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE.to_string(),
-        },
+        runtime_agent_paths: runtime_agent_artifact_paths(),
+        canonical_filenames: runtime_artifact_filenames(),
         executor_evidence: ExecutorEvidenceConstants {
             input_kind: EXECUTOR_INPUT_EVIDENCE_KIND.to_string(),
             input_file_name: EXECUTOR_INPUT_FILE.to_string(),
             result_kind: EXECUTOR_RESULT_EVIDENCE_KIND.to_string(),
             result_file_name: EXECUTOR_RESULT_FILE.to_string(),
         },
+    }
+}
+
+pub fn runner_artifact_manifest_ref_constants() -> RunnerArtifactManifestRefConstants {
+    RunnerArtifactManifestRefConstants {
+        schema_id: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA.to_string(),
+        name: RUNNER_ARTIFACT_MANIFEST_REF_NAME.to_string(),
+        manifest_schema_id: RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),
+        manifest_file_name: RUNNER_ARTIFACT_MANIFEST_FILE.to_string(),
+        artifact_root_dir_suffix: RUNNER_ARTIFACT_ROOT_DIR_SUFFIX.to_string(),
+    }
+}
+
+fn runtime_agent_artifact_paths() -> RuntimeAgentArtifactPaths {
+    RuntimeAgentArtifactPaths {
+        transcript: RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH.to_string(),
+        final_output: RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH.to_string(),
+    }
+}
+
+fn runtime_artifact_filenames() -> RuntimeArtifactFilenames {
+    RuntimeArtifactFilenames {
+        transcript: RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE.to_string(),
+        agent_result: RUNTIME_AGENT_RESULT_ARTIFACT_FILE.to_string(),
+        agent_result_legacy_underscore: RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE
+            .to_string(),
+        patch_diff: RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE.to_string(),
+        patch_patch: RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE.to_string(),
     }
 }
 

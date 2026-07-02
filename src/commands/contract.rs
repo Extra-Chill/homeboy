@@ -82,7 +82,7 @@ pub enum ContractCommand {
 
 #[derive(Args, Debug, Clone)]
 pub struct ContractConstantsArgs {
-    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, runtime-artifacts, reviewer-facing-ref.
+    /// Contract ID: all, artifact-manifest, artifact-paths, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, runtime-artifacts, runner-artifact-manifest-ref, reviewer-facing-ref.
     pub contract_id: String,
 }
 
@@ -458,7 +458,7 @@ fn constants(contract_id: &str) -> CmdResult<ContractOutput> {
             format!("unknown contract constants id `{contract_id}`"),
             None,
             Some(vec![
-                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, runtime-artifacts, reviewer-facing-ref".to_string(),
+                    "Use one of: all, artifact-manifest, artifact-paths, artifact-postprocess, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, runtime-artifacts, runner-artifact-manifest-ref, reviewer-facing-ref".to_string(),
             ]),
         )
     })?;
