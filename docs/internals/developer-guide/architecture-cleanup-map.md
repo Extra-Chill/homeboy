@@ -62,7 +62,6 @@ docs cleanup PR.
 
 | Compatibility surface | Current owner | Current shape | Retirement criteria |
 | --- | --- | --- | --- |
-| Hidden `homeboy list` command | `src/cli_surface.rs`, `src/command_contract/output.rs` | Hidden raw Markdown/help alias with optional JSON safety manifest. | Remove after command-surface manifest consumers use `homeboy --help`, `homeboy docs list`, or the explicit safety manifest surface. |
 | Global `--no-local-execution` alias | `src/cli_surface.rs` | Visible alias for `--lab-only`. | Remove after operator docs and automation uniformly use `--lab-only` and no active scripts reference the alias. |
 | Legacy component fields such as `build_command` | `src/commands/component.rs`, `src/core/extension/build/mod.rs`, `src/core/extension/capability.rs` | Rejected with targeted errors while modern config uses extension/build script contracts. | Remove parse-time compatibility handling after persisted configs have been migrated and error telemetry shows the legacy field is no longer encountered. |
 | Hidden JSON self-check flags | `src/commands/lint.rs`, `src/commands/test.rs`, `src/commands/review/mod.rs` | Hidden `--self-checks-json`-style command inputs used by internal checks. | Replace with explicit core/test harness contracts, then remove hidden flags once self-check callers are migrated. |

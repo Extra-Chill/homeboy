@@ -147,7 +147,6 @@ homeboy runs list --kind bench --component <component> [--scenario <id>] [--rig 
 homeboy runs dossier <run-id>
 homeboy runs distribution --kind bench --component <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
 homeboy runs bench-compare --from-run <run-id> --to-run <run-id>
-homeboy rig runs <id> [--limit 20]
 ```
 
 ## Portable Bundles

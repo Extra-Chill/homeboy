@@ -6,7 +6,6 @@
 use serde::Serialize;
 
 use crate::commands::bench::{BenchOutput, RigRunBenchPlan};
-use crate::commands::runs::RunsOutput;
 use homeboy::core::rig::{self, RigResourcesSpec, RigSpec};
 
 /// Tagged union of every rig command's output.
@@ -26,7 +25,6 @@ pub enum RigCommandOutput {
     Update(RigUpdateOutput),
     Sources(RigSourcesOutput),
     App(RigAppOutput),
-    Runs(RunsOutput),
     ReleaseLock(RigReleaseLockOutput),
     Run(RigRunOutput),
 }

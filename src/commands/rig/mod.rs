@@ -169,14 +169,6 @@ enum RigCommand {
         /// Rig ID
         rig_id: String,
     },
-    /// Compatibility alias for `homeboy runs list --rig <rig-id>`
-    Runs {
-        /// Rig ID
-        rig_id: String,
-        /// Maximum runs to return
-        #[arg(long, default_value_t = 20)]
-        limit: i64,
-    },
     /// Release a stuck active-run lock (rig lease) so a new run can proceed.
     ///
     /// By default the lock is only released when its holder is provably gone or
@@ -317,7 +309,6 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
         RigCommand::Run(args) => run_profile(args),
         RigCommand::Status { rig_id } => status(&rig_id),
-        RigCommand::Runs { rig_id, limit } => runs(&rig_id, limit),
         RigCommand::ReleaseLock { rig_id, force } => release_lock(&rig_id, force),
         RigCommand::Install {
             source,
@@ -340,18 +331,6 @@ fn release_lock(rig_id: &str, force: bool) -> CmdResult<RigCommandOutput> {
         }),
         0,
     ))
-}
-
-fn runs(rig_id: &str, limit: i64) -> CmdResult<RigCommandOutput> {
-    let (output, exit_code) = super::runs::list_runs(
-        super::runs::RunsListArgs {
-            rig: Some(rig_id.to_string()),
-            limit,
-            ..Default::default()
-        },
-        "rig.runs",
-    )?;
-    Ok((RigCommandOutput::Runs(output), exit_code))
 }
 
 fn list() -> CmdResult<RigCommandOutput> {
