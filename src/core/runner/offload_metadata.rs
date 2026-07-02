@@ -359,6 +359,7 @@ mod tests {
             required_capabilities: Vec::new(),
             required_secrets: RunnerWorkloadSecrets {
                 categories: Vec::new(),
+                secret_env_plan: crate::core::secret_env_plan::SecretEnvPlan::default(),
             },
             required_extensions: vec!["browser".to_string()],
             required_extension_revisions: vec![RunnerWorkloadExtensionRevision {

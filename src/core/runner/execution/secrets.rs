@@ -319,6 +319,7 @@ pub(super) fn resolve_controller_secret_env_for_command(
     Ok(resolved)
 }
 
+#[cfg(test)]
 pub(crate) fn runner_exec_secret_env_names(
     command: &[String],
     preflight: Option<&RunnerCapabilityPreflight>,
@@ -335,20 +336,23 @@ pub(crate) fn runner_exec_secret_env_plan(
     env: &HashMap<String, String>,
     base_plan: Option<SecretEnvPlan>,
 ) -> SecretEnvPlan {
+    let has_base_plan = base_plan.is_some();
     let mut names = Vec::new();
     names.extend(explicit_names.iter().cloned());
     if let Some(preflight) = preflight {
         names.extend(preflight.required_env.iter().cloned());
     }
-    names.extend(super::super::lab::secrets::declared_agent_task_secret_env(
-        command,
-    ));
-    names.extend(super::super::lab::secrets::declared_trace_secret_env(
-        command,
-    ));
-    names.extend(super::super::lab::secrets::declared_tunnel_secret_env(
-        command,
-    ));
+    if !has_base_plan {
+        names.extend(super::super::lab::secrets::declared_agent_task_secret_env(
+            command,
+        ));
+        names.extend(super::super::lab::secrets::declared_trace_secret_env(
+            command,
+        ));
+        names.extend(super::super::lab::secrets::declared_tunnel_secret_env(
+            command,
+        ));
+    }
     names.extend(declared_runtime_provider_secret_env(env));
     let mut plan = SecretEnvPlan::from_secret_env_names(names);
     plan.allow_inherited_env_names([RUNTIME_SECRET_ENV_ALLOWLIST_ENV.to_string()]);

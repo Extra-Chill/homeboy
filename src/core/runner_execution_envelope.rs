@@ -774,6 +774,7 @@ mod tests {
             required_capabilities: Vec::new(),
             required_secrets: RunnerWorkloadSecrets {
                 categories: Vec::new(),
+                secret_env_plan: SecretEnvPlan::default(),
             },
             required_extensions: Vec::new(),
             required_extension_revisions: Vec::new(),

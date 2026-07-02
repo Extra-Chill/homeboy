@@ -66,7 +66,7 @@ pub(super) fn exec_worker_local_with_process_output(
         runner_id,
         Some(&plan.cwd),
         &options.command,
-        &secret_env_names,
+        &secret_env_plan,
         options.capture_patch,
     )?;
     let required_extensions = required_extensions_for_command(

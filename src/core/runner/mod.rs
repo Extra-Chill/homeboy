@@ -90,7 +90,7 @@ pub use evidence::{
 };
 pub(crate) use execution::{
     daemon_api_get, execute_runner_process_until_cancelled_with_progress,
-    prepare_daemon_local_process, runner_exec_secret_env_names, RunnerProcessRequest,
+    prepare_daemon_local_process, runner_exec_secret_env_plan, RunnerProcessRequest,
     RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
 };
 pub use execution::{

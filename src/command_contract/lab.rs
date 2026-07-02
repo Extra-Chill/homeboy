@@ -189,6 +189,8 @@ mod runner_workload_types {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RunnerWorkloadSecrets {
         pub categories: Vec<String>,
+        #[serde(default)]
+        pub secret_env_plan: crate::core::secret_env_plan::SecretEnvPlan,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
