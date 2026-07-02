@@ -62,9 +62,10 @@ pub use registry::{
     registered_contract, registered_contracts, ContractRegistryEntry, ContractRegistrySummary,
 };
 pub use spec::{
-    registered_command, registered_command_dispatch_family, registered_command_json_family,
-    CommandLabSupportSummary, CommandRegistryEntry, CommandSafetySpec, CommandSpec,
-    COMMAND_REGISTRY, COMMAND_SPECS,
+    non_core_command_doc_slugs, registered_command, registered_command_dispatch_family,
+    registered_command_json_family, runtime_extension_command_doc_slugs, support_command_doc_slugs,
+    CommandDocKind, CommandDocSpec, CommandLabSupportSummary, CommandRegistryEntry,
+    CommandSafetySpec, CommandSpec, COMMAND_DOC_REGISTRY, COMMAND_REGISTRY, COMMAND_SPECS,
 };
 pub(crate) use spec::{
     AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REVIEW_LAB_LABEL,
