@@ -3,11 +3,16 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::command_contract::{
+    RunnerExecutionProjection, RunnerWorkload, RunnerWorkloadAssignment,
+    RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
+    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
+    RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
+};
 use crate::core::error::{Error, Result};
 use crate::core::runners::{
-    self, RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
-    RunnerWorkspaceMaterializationPlan, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    self, RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -32,9 +37,20 @@ pub struct ExtensionDevRunOutput {
     pub sync: RunnerWorkspaceSyncOutput,
     pub prior_extension_state: RunnerExtensionStateProbe,
     pub install: RunnerExecOutput,
+    pub install_outcome: ExtensionDevRunExecutionOutcome,
     pub command: RunnerExecOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_outcome: Option<ExtensionDevRunExecutionOutcome>,
     pub provenance: ExtensionDevRunProvenance,
     pub persistent_state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionDevRunExecutionOutcome {
+    pub runner_workload: RunnerWorkload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_record: Option<RunnerExecutionProjection>,
+    pub exit_code: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,6 +182,13 @@ pub(crate) fn run_extension_dev_run_with(
             None,
         )
     })?;
+    let install_workload = extension_dev_run_workload(
+        &plan,
+        "install",
+        "extension refresh",
+        &synced.remote_path,
+        Vec::new(),
+    );
 
     let (install, _) = exec(
         &plan.runner_id,
@@ -187,13 +210,14 @@ pub(crate) fn run_extension_dev_run_with(
             }),
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
-            runner_workload: None,
+            runner_workload: Some(install_workload.clone()),
             run_id: None,
             detach_after_handoff: false,
             mirror_evidence: true,
             print_handoff: true,
         },
     )?;
+    let install_outcome = extension_dev_run_execution_outcome(&install_workload, &install);
     if install.exit_code != 0 {
         return Ok((
             ExtensionDevRunOutput {
@@ -205,7 +229,9 @@ pub(crate) fn run_extension_dev_run_with(
                 sync: synced,
                 prior_extension_state,
                 install,
+                install_outcome,
                 command: empty_skipped_exec_output(),
+                command_outcome: None,
                 provenance,
                 persistent_state:
                     "runner extension refresh failed; inspect install output for persistent state"
@@ -214,6 +240,13 @@ pub(crate) fn run_extension_dev_run_with(
             1,
         ));
     }
+    let command_workload = extension_dev_run_workload(
+        &plan,
+        "command",
+        &extension_dev_run_command_label(&plan.command),
+        &synced.remote_path,
+        vec![plan.extension_id.clone()],
+    );
 
     let (command_output, command_exit_code) = exec(
         &plan.runner_id,
@@ -235,13 +268,14 @@ pub(crate) fn run_extension_dev_run_with(
             }),
             required_extensions: vec![plan.extension_id.clone()],
             require_paths: Vec::new(),
-            runner_workload: None,
+            runner_workload: Some(command_workload.clone()),
             run_id: None,
             detach_after_handoff: false,
             mirror_evidence: true,
             print_handoff: true,
         },
     )?;
+    let command_outcome = extension_dev_run_execution_outcome(&command_workload, &command_output);
 
     Ok((
         ExtensionDevRunOutput {
@@ -254,7 +288,9 @@ pub(crate) fn run_extension_dev_run_with(
             sync: synced,
             prior_extension_state,
             install,
+            install_outcome,
             command: command_output,
+            command_outcome: Some(command_outcome),
             provenance,
         },
         command_exit_code,
@@ -272,6 +308,87 @@ fn required_arg(name: &str, value: &str) -> Result<String> {
         ));
     }
     Ok(value.to_string())
+}
+
+fn extension_dev_run_workload(
+    plan: &ExtensionDevRunPlan,
+    stage: &str,
+    command_label: &str,
+    remote_workspace: &str,
+    required_extensions: Vec<String>,
+) -> RunnerWorkload {
+    let plan_id = format!(
+        "extension-dev-run:{}:{}:{stage}",
+        plan.runner_id, plan.extension_id
+    );
+    RunnerWorkload {
+        schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
+        workload_id: format!("{plan_id}.runner_workload"),
+        kind: RunnerWorkloadKind {
+            command_label: command_label.to_string(),
+            command_family: RunnerWorkloadCommandFamily::from_command_label(command_label),
+        },
+        workspace_mappings: RunnerWorkloadWorkspaceMappings {
+            source_path_mode: "snapshot".to_string(),
+            workspace_mode_policy: "snapshot_unique_workspace".to_string(),
+            mapping_ref: Some(plan.source.clone()),
+        },
+        required_capabilities: Vec::new(),
+        required_secrets: RunnerWorkloadSecrets {
+            categories: Vec::new(),
+        },
+        required_extensions,
+        required_extension_revisions: Vec::new(),
+        mutation_policy: RunnerWorkloadMutationPolicy {
+            capture_patch: false,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+        },
+        assignment: RunnerWorkloadAssignment {
+            runner_id: Some(plan.runner_id.clone()),
+            runner_mode: None,
+            source: Some(plan.source.clone()),
+        },
+        state: RunnerWorkloadState {
+            status: "dispatched".to_string(),
+            remote_workspace: Some(remote_workspace.to_string()),
+            fallback_reason: None,
+        },
+        result_refs: RunnerWorkloadResultRefs {
+            plan_id,
+            proof_id: None,
+            workspace_mapping_ref: Some(plan.source.clone()),
+            job_id: None,
+            mirror_run_id: None,
+            artifacts: Vec::new(),
+        },
+    }
+}
+
+fn extension_dev_run_command_label(command: &[String]) -> String {
+    let args = match command.first().map(String::as_str) {
+        Some(binary)
+            if Path::new(binary).file_name().and_then(|name| name.to_str()) == Some("homeboy") =>
+        {
+            &command[1..]
+        }
+        _ => command,
+    };
+    args.iter().take(2).cloned().collect::<Vec<_>>().join(" ")
+}
+
+fn extension_dev_run_execution_outcome(
+    runner_workload: &RunnerWorkload,
+    output: &RunnerExecOutput,
+) -> ExtensionDevRunExecutionOutcome {
+    ExtensionDevRunExecutionOutcome {
+        runner_workload: runner_workload.clone(),
+        execution_record: output
+            .execution_record
+            .as_ref()
+            .map(|record| record.projection()),
+        exit_code: output.exit_code,
+    }
 }
 
 fn probe_runner_extension_state(
@@ -374,8 +491,10 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+    use crate::command_contract::RunnerExecutionRecord;
     use crate::core::runner::{
         ByteFileCounts, RunnerLifecycleOwner, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease,
+        RunnerWorkspaceMaterializationPlan,
     };
 
     #[test]
@@ -430,6 +549,7 @@ mod tests {
                     options.command.clone(),
                     options.env.clone(),
                     options.required_extensions.clone(),
+                    options.runner_workload.clone(),
                 ));
                 Ok((exec_output(runner_id, options.command, 0), 0))
             },
@@ -456,11 +576,45 @@ mod tests {
         );
         assert_eq!(execs[2].1, command);
         assert_eq!(execs[2].3, vec!["demo".to_string()]);
+        assert!(execs[0].4.is_none());
+        assert_eq!(
+            execs[1]
+                .4
+                .as_ref()
+                .expect("install workload")
+                .kind
+                .command_label,
+            "extension refresh"
+        );
+        assert_eq!(
+            execs[2]
+                .4
+                .as_ref()
+                .expect("command workload")
+                .required_extensions,
+            vec!["demo".to_string()]
+        );
         assert!(execs[2]
             .2
             .contains_key("HOMEBOY_EXTENSION_DEV_RUN_PROVENANCE_JSON"));
         assert_eq!(output.remote_source, "/remote/demo");
         assert!(output.persistent_state.contains("left refreshed/linked"));
+        assert_eq!(
+            output.install_outcome.runner_workload.kind.command_label,
+            "extension refresh"
+        );
+        assert_eq!(output.install_outcome.exit_code, 0);
+        assert_eq!(
+            output
+                .command_outcome
+                .as_ref()
+                .expect("command outcome")
+                .execution_record
+                .as_ref()
+                .expect("command execution projection")
+                .status,
+            "succeeded"
+        );
     }
 
     fn sync_output() -> RunnerWorkspaceSyncOutput {
@@ -512,6 +666,12 @@ mod tests {
     }
 
     fn exec_output(runner_id: &str, command: Vec<String>, exit_code: i32) -> RunnerExecOutput {
+        let execution_record = Some(RunnerExecutionRecord::terminal(
+            format!("exec-{runner_id}-{}", command.join("-")),
+            runner_id,
+            "local",
+            exit_code,
+        ));
         RunnerExecOutput {
             variant: "runner_exec",
             command: "runner.exec",
@@ -536,7 +696,7 @@ mod tests {
             structured_summaries: Vec::new(),
             metrics: None,
             capture: None,
-            execution_record: None,
+            execution_record,
             runner_result: None,
             handoff: None,
             diagnostics: None,
