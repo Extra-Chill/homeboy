@@ -170,6 +170,220 @@ fn fuzz_replay_resolves_persisted_run_artifact_without_path() {
 }
 
 #[test]
+fn fuzz_replay_resolves_case_from_nested_lab_normalized_result_payload() {
+    with_isolated_home(|home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(
+                homeboy::core::observation::NewRunRecord::builder("fuzz")
+                    .component_id("component-a")
+                    .command("homeboy fuzz run component-a")
+                    .cwd_path(home.path())
+                    .build(),
+            )
+            .expect("run");
+        let path = home.path().join("lab-fuzz-envelope.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA,
+                "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                "id": "lab-envelope-1",
+                "status": "passed",
+                "request": {
+                    "schema": homeboy::core::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA,
+                    "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                    "id": "request-1",
+                    "component": "component-a"
+                },
+                "campaign": {
+                    "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+                    "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                    "id": "campaign-with-artifact-payloads",
+                    "safety_class": "read_only",
+                    "metadata": {
+                        "artifact_refs": [{
+                            "artifact_ref": "artifact:fuzz.result.normalized",
+                            "content": {
+                                "cases": [{
+                                    "id": "rest-db-query-profile:default",
+                                    "status": "passed"
+                                }]
+                            }
+                        }]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write lab envelope");
+        store
+            .record_artifact(&run.id, "fuzz_result_envelope", &path)
+            .expect("artifact");
+
+        let (output, exit) = run_replay(FuzzReplayArgs {
+            component: None,
+            path: None,
+            rig: None,
+            extension_override: ExtensionOverrideArgs::default(),
+            setting_args: SettingArgs::default(),
+            artifact_or_case: None,
+            artifact: None,
+            case_id: Some("rest-db-query-profile:default".to_string()),
+            run_id: Some(run.id.clone()),
+            dry_run: true,
+            args: Vec::new(),
+        })
+        .expect("resolve nested normalized case");
+
+        assert_eq!(exit, 0);
+        assert_eq!(output.status, "dry_run");
+        assert_eq!(output.run_id.as_deref(), Some(run.id.as_str()));
+        assert_eq!(output.envelope_id.as_deref(), Some("lab-envelope-1"));
+        assert_eq!(
+            output.case_id.as_deref(),
+            Some("rest-db-query-profile:default")
+        );
+        assert!(output.replay.is_none());
+        assert!(output.env.iter().any(|env| {
+            env.name == "HOMEBOY_FUZZ_REPLAY_CASE_ID"
+                && env.value == "rest-db-query-profile:default"
+        }));
+    });
+}
+
+#[test]
+fn fuzz_minimize_resolves_case_from_nested_lab_fuzz_result_artifact_payload() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("lab-artifact-wrapper.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "schema": "homeboy/lab-artifact-wrapper/v1",
+            "id": "wrapper-1",
+            "artifact": {
+                "payload": {
+                    "fuzz_result_envelope": {
+                        "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA,
+                        "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                        "id": "nested-envelope-1",
+                        "status": "passed",
+                        "request": {
+                            "schema": homeboy::core::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA,
+                            "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                            "id": "request-1",
+                            "component": "component-a"
+                        },
+                        "campaign": {
+                            "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+                            "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                            "id": "nested-campaign-1",
+                            "safety_class": "read_only",
+                            "cases": [{
+                                "schema": homeboy::core::fuzz::FUZZ_CASE_SCHEMA,
+                                "id": "case-from-nested-envelope",
+                                "replay_id": "replay-1"
+                            }],
+                            "replay": {
+                                "schema": homeboy::core::fuzz::FUZZ_REPLAY_SCHEMA,
+                                "id": "replay-1",
+                                "seed": "nested-seed",
+                                "artifact_id": "nested-artifact"
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write lab wrapper");
+
+    let (output, exit) = run_minimize(FuzzMinimizeArgs {
+        component: None,
+        path: None,
+        rig: None,
+        extension_override: ExtensionOverrideArgs::default(),
+        setting_args: SettingArgs::default(),
+        artifact_or_case: Some(path.to_string_lossy().to_string()),
+        artifact: None,
+        case_id: Some("case-from-nested-envelope".to_string()),
+        run_id: Some("lab-run-1".to_string()),
+        dry_run: true,
+        args: Vec::new(),
+    })
+    .expect("resolve nested envelope case");
+
+    assert_eq!(exit, 0);
+    assert_eq!(output.command, "fuzz.minimize");
+    assert_eq!(output.status, "dry_run");
+    assert_eq!(output.campaign_id.as_deref(), Some("nested-campaign-1"));
+    assert_eq!(output.envelope_id.as_deref(), Some("nested-envelope-1"));
+    assert_eq!(output.case_id.as_deref(), Some("case-from-nested-envelope"));
+    assert_eq!(
+        output.replay.as_ref().map(|replay| replay.seed.as_deref()),
+        Some(Some("nested-seed"))
+    );
+}
+
+#[test]
+fn fuzz_replay_preserves_clear_error_when_nested_case_is_absent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("lab-fuzz-envelope.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "schema": homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_SCHEMA,
+            "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            "id": "lab-envelope-1",
+            "status": "passed",
+            "request": {
+                "schema": homeboy::core::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA,
+                "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                "id": "request-1",
+                "component": "component-a"
+            },
+            "campaign": {
+                "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+                "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+                "id": "campaign-with-artifact-payloads",
+                "safety_class": "read_only",
+                "metadata": {
+                    "normalized_result": {
+                        "cases": [{ "id": "different-case" }]
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write lab envelope");
+
+    let result = run_replay(FuzzReplayArgs {
+        component: None,
+        path: None,
+        rig: None,
+        extension_override: ExtensionOverrideArgs::default(),
+        setting_args: SettingArgs::default(),
+        artifact_or_case: Some(path.to_string_lossy().to_string()),
+        artifact: None,
+        case_id: Some("missing-case".to_string()),
+        run_id: Some("lab-run-1".to_string()),
+        dry_run: true,
+        args: Vec::new(),
+    });
+    let error = match result {
+        Ok(_) => panic!("missing nested case remains invalid"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.details["field"], "case-id");
+    assert!(error
+        .message
+        .contains("does not contain case 'missing-case'"));
+}
+
+#[test]
 fn fuzz_replay_dry_run_resolves_persisted_homeboy_artifact_ref_without_local_bytes() {
     with_isolated_home(|home| {
         let store = ObservationStore::open_initialized().expect("store");
