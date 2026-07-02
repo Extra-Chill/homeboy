@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.6] - 2026-07-02
+
+### Changed
+- Normalize runner terminal outcomes
+- Add artifact postprocess runner command
+- Expose runner workspace lifecycle metadata
+- Record extension dev-run runner outcomes
+- Add all-package rig lint contract
+- Export artifact contract constants
+- Carry runner secret requirements as plans
+- Use generic dependency path handoff
+- Forward rig extensions in Lab bench offload
+
+### Fixed
+- Fix lab bench rig extension propagation
+- dedupe generated changelog entries
+- allow default-head worktree releases
+- Fix extension dev-run workload secrets initializer
+
 ## [0.280.5] - 2026-07-02
 
 ### Changed
