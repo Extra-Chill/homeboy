@@ -15,8 +15,9 @@ use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, Result};
 use crate::core::runner_execution_envelope::{
-    PathMaterializationEntry, PathMaterializationPlan, RunnerExecutionArtifactRef,
-    RunnerExecutionNextAction, RunnerExecutionRecord,
+    BinaryProvenance, ExtensionProvenance, OrchestrationTargetProvenance, PathMaterializationEntry,
+    PathMaterializationPlan, RunnerExecutionArtifactRef, RunnerExecutionNextAction,
+    RunnerExecutionRecord, SourceSnapshotIdentity,
     PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
 };
 use crate::core::source_snapshot::SourceSnapshot;
@@ -177,6 +178,7 @@ fn runner_execution_record_for_output(
     mirror_run_id: Option<String>,
     source_snapshot: Option<&SourceSnapshot>,
     require_paths: &[String],
+    required_extensions: &[String],
     artifacts: &[JobArtifactMetadata],
     runner_result: Option<&RunnerResult>,
 ) -> RunnerExecutionRecord {
@@ -206,6 +208,12 @@ fn runner_execution_record_for_output(
     )
     .with_mirror_run_id(mirror_run_id)
     .with_path_materialization_plan(path_materialization_plan(source_snapshot, require_paths))
+    .with_orchestration_provenance(orchestration_target_provenance(
+        runner,
+        None,
+        source_snapshot,
+        required_extensions,
+    ))
     .with_artifact_refs(artifact_refs);
     if let Some(job_id) = job_id {
         record = record
@@ -246,6 +254,79 @@ fn path_materialization_entry_from_snapshot(
         remote_path,
         snapshot.sync_mode.clone(),
     ))
+}
+
+fn orchestration_target_provenance(
+    runner: &Runner,
+    session: Option<&RunnerSession>,
+    source_snapshot: Option<&SourceSnapshot>,
+    required_extensions: &[String],
+) -> Option<OrchestrationTargetProvenance> {
+    let binaries = runner_exec_homeboy_binaries(runner, session);
+    Some(
+        OrchestrationTargetProvenance::new(
+            runner.id.clone(),
+            binary_provenance(binaries.controller_cli),
+            binary_provenance(binaries.active_daemon),
+            binary_provenance(binaries.job_command_binary),
+        )
+        .with_source_snapshot_identity(source_snapshot.map(source_snapshot_identity))
+        .with_extensions(extension_provenance(required_extensions)),
+    )
+}
+
+fn binary_provenance(binary: RunnerExecHomeboyBinary) -> BinaryProvenance {
+    BinaryProvenance {
+        owner: binary.owner.to_string(),
+        path: binary.path,
+        version: binary.version,
+        build_identity: binary.build_identity,
+    }
+}
+
+fn source_snapshot_identity(snapshot: &SourceSnapshot) -> SourceSnapshotIdentity {
+    SourceSnapshotIdentity {
+        snapshot_hash: snapshot.snapshot_hash.clone(),
+        sync_mode: snapshot.sync_mode.clone(),
+        dirty: snapshot.dirty,
+        workspace_snapshot_identity: snapshot.workspace_snapshot_identity.clone(),
+        git_sha: snapshot.git_sha.clone(),
+        git_branch: snapshot.git_branch.clone(),
+        remote_path: snapshot.remote_path.clone(),
+    }
+}
+
+fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenance> {
+    let mut extensions = required_extensions
+        .iter()
+        .filter_map(|extension_id| {
+            let manifest = crate::core::extension::load_extension(extension_id).ok()?;
+            let path = manifest.extension_path.clone().unwrap_or_else(|| {
+                crate::core::paths::extension(extension_id)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| extension_id.clone())
+            });
+            let manifest_path = std::path::Path::new(&path)
+                .join(format!("{extension_id}.json"))
+                .display()
+                .to_string();
+            Some(ExtensionProvenance {
+                extension_id: extension_id.clone(),
+                path,
+                install_mode: if crate::core::extension::is_extension_linked(extension_id) {
+                    "linked".to_string()
+                } else {
+                    "copied".to_string()
+                },
+                manifest_path,
+                version: Some(manifest.version),
+                source_revision: crate::core::extension::read_source_revision(extension_id),
+            })
+        })
+        .collect::<Vec<_>>();
+    extensions.sort_by(|left, right| left.extension_id.cmp(&right.extension_id));
+    extensions.dedup_by(|left, right| left.extension_id == right.extension_id);
+    extensions
 }
 
 fn job_artifact_refs(artifacts: &[JobArtifactMetadata]) -> Vec<RunnerExecutionArtifactRef> {
@@ -671,6 +752,25 @@ fn append_runner_exec_binary_diagnostics(
             hints: Vec::new(),
         });
     diagnostics.homeboy_binaries = Some(runner_exec_homeboy_binaries(runner, session));
+    if let Some(record) = output.execution_record.as_mut() {
+        let required_extensions = record
+            .orchestration_provenance
+            .as_ref()
+            .map(|provenance| {
+                provenance
+                    .extensions
+                    .iter()
+                    .map(|extension| extension.extension_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        record.orchestration_provenance = orchestration_target_provenance(
+            runner,
+            session,
+            output.source_snapshot.as_ref(),
+            &required_extensions,
+        );
+    }
 }
 
 fn runner_exec_homeboy_binaries(

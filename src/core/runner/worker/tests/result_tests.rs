@@ -2,6 +2,9 @@ use serde_json::json;
 
 use crate::core::api_jobs::JobArtifactMetadata;
 use crate::core::runner::{RunnerExecMode, RunnerExecOutput};
+use crate::core::runner_execution_envelope::{
+    BinaryProvenance, OrchestrationTargetProvenance, RunnerExecutionRecord,
+};
 
 use super::super::result::remote_runner_result_from_exec_output;
 
@@ -84,6 +87,82 @@ fn reverse_worker_result_preserves_exec_patch_and_artifacts() {
             .and_then(|artifacts| artifacts.patch_ref.as_ref())
             .map(|artifact| artifact.artifact_id.as_str()),
         Some("patch.diff")
+    );
+}
+
+#[test]
+fn reverse_worker_result_preserves_execution_provenance() {
+    let provenance = OrchestrationTargetProvenance::new(
+        "lab",
+        BinaryProvenance {
+            owner: "operator_command".to_string(),
+            path: Some("/usr/local/bin/homeboy".to_string()),
+            version: Some("1.2.3".to_string()),
+            build_identity: Some("homeboy 1.2.3 abc".to_string()),
+        },
+        BinaryProvenance {
+            owner: "runner_session".to_string(),
+            path: Some("http://127.0.0.1:12345".to_string()),
+            version: Some("1.2.2".to_string()),
+            build_identity: None,
+        },
+        BinaryProvenance {
+            owner: "runner_config.settings.homeboy_path".to_string(),
+            path: Some("homeboy".to_string()),
+            version: None,
+            build_identity: None,
+        },
+    );
+    let execution_record = RunnerExecutionRecord::terminal("job-1", "lab", "local", 0)
+        .with_orchestration_provenance(Some(provenance));
+
+    let result = remote_runner_result_from_exec_output(
+        RunnerExecOutput {
+            variant: "exec",
+            command: "runner.exec",
+            runner_id: "lab".to_string(),
+            dry_run: false,
+            mode: RunnerExecMode::Local,
+            argv: vec!["homeboy".to_string(), "test".to_string()],
+            remote_cwd: "/srv/workspace".to_string(),
+            exit_code: 0,
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            runner_job: None,
+            job_id: Some("job-1".to_string()),
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            mutation_artifacts: None,
+            artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
+            metrics: None,
+            capture: None,
+            execution_record: Some(execution_record),
+            runner_result: None,
+            handoff: None,
+            diagnostics: None,
+        },
+        0,
+        None,
+    );
+
+    let data = result.data.as_ref().expect("data");
+    assert_eq!(data["execution_record"]["runner_id"], "lab");
+    assert_eq!(
+        data["orchestration_provenance"]["selected_runner_id"],
+        "lab"
+    );
+    assert_eq!(
+        data["orchestration_provenance"]["controller_binary"]["version"],
+        "1.2.3"
+    );
+    assert_eq!(
+        data["orchestration_provenance"]["runner_command_binary"]["path"],
+        "homeboy"
     );
 }
 
