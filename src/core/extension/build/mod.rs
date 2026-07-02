@@ -156,6 +156,8 @@ pub struct BuildOutput {
     pub command: String,
     pub component_id: String,
     pub build_command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_env_keys: Vec<String>,
     #[serde(flatten)]
     pub output: CapturedOutput,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -436,6 +438,7 @@ fn execute_build_component(
 
     let resolved = resolve_build_command(comp)?;
     let build_cmd = resolved.command().to_string();
+    let active_env_keys = configured_env_keys(comp);
     let build_context = match &resolved {
         ResolvedBuildCommand::ComponentScript { .. } => None,
         ResolvedBuildCommand::ExtensionProvided { context, .. } => Some(context),
@@ -452,6 +455,7 @@ fn execute_build_component(
                 command: "build.run".to_string(),
                 component_id: comp.id.clone(),
                 build_command: build_cmd,
+                active_env_keys,
                 output: CapturedOutput::new(String::new(), String::new()),
                 artifact_inputs: Vec::new(),
                 extension_phase_timings: Vec::new(),
@@ -479,6 +483,7 @@ fn execute_build_component(
                     command: "build.run".to_string(),
                     component_id: comp.id.clone(),
                     build_command: build_cmd,
+                    active_env_keys,
                     output: CapturedOutput::new(String::new(), stderr),
                     artifact_inputs: Vec::new(),
                     extension_phase_timings: Vec::new(),
@@ -546,6 +551,7 @@ fn execute_build_component(
             command: "build.run".to_string(),
             component_id: comp.id.clone(),
             build_command: build_cmd,
+            active_env_keys,
             output: CapturedOutput::new(runner_output.stdout, runner_output.stderr),
             artifact_inputs,
             extension_phase_timings: runner_output.extension_phase_timings,
@@ -697,6 +703,10 @@ fn build_env(
     env
 }
 
+fn configured_env_keys(comp: &Component) -> Vec<String> {
+    comp.env.keys().cloned().collect()
+}
+
 fn command_with_args(command: &str, args: &[String]) -> String {
     if args.is_empty() {
         return command.to_string();
@@ -756,17 +766,37 @@ fn run_pre_build_scripts(
     }
 
     let extension_path_lossy = build_context.extension_path.to_string_lossy().to_string();
-    let env: [(&str, &str); 4] = [
-        (exec_context::EXTENSION_PATH, &extension_path_lossy),
-        (exec_context::COMPONENT_ID, &build_context.component.id),
+    let mut env: Vec<(String, String)> = vec![
         (
-            exec_context::COMPONENT_PATH,
-            &build_context.component.local_path,
+            exec_context::EXTENSION_PATH.to_string(),
+            extension_path_lossy,
         ),
-        ("HOMEBOY_PLUGIN_PATH", &build_context.component.local_path),
+        (
+            exec_context::COMPONENT_ID.to_string(),
+            build_context.component.id.clone(),
+        ),
+        (
+            exec_context::COMPONENT_PATH.to_string(),
+            build_context.component.local_path.clone(),
+        ),
+        (
+            "HOMEBOY_PLUGIN_PATH".to_string(),
+            build_context.component.local_path.clone(),
+        ),
     ];
+    env.extend(
+        crate::core::extension::component_script::component_env_vars(&build_context.component),
+    );
+    let env_refs: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
 
-    let output = execute_local_command_in_dir(&script_path.to_string_lossy(), None, Some(&env));
+    let output = execute_local_command_in_dir(
+        &script_path.to_string_lossy(),
+        None,
+        Some(env_refs.as_slice()),
+    );
 
     if !output.success {
         let combined = if output.stderr.is_empty() {

@@ -105,6 +105,95 @@ fn test_run_component_scripts_with_env() {
 }
 
 #[test]
+fn component_config_env_is_available_to_component_scripts_and_extra_env_wins() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut component = script_component(
+        dir.path(),
+        "printf '%s:%s' \"$SHARED_CACHE_DIR\" \"$OVERRIDE_ME\" > marker",
+    );
+    component.env.insert(
+        "SHARED_CACHE_DIR".to_string(),
+        "/tmp/homeboy-shared-cache".to_string(),
+    );
+    component
+        .env
+        .insert("OVERRIDE_ME".to_string(), "configured".to_string());
+
+    let output = run_component_scripts_with_env(
+        &component,
+        ExtensionCapability::Test,
+        dir.path(),
+        false,
+        &[("OVERRIDE_ME".to_string(), "runtime".to_string())],
+        &[],
+    )
+    .expect("component script should run with configured env");
+
+    assert!(output.success);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("marker")).unwrap(),
+        "/tmp/homeboy-shared-cache:runtime"
+    );
+}
+
+#[test]
+fn component_config_env_is_visible_to_env_providers() {
+    with_isolated_home(|_| {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let extension_dir = crate::core::paths::extensions()
+            .expect("extensions path")
+            .join("fixture-provider-env");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("fixture-provider-env.json"),
+            r#"{
+                "name": "Fixture Provider Env",
+                "version": "1.0.0",
+                "env_provider": { "script": "env.sh" }
+            }"#,
+        )
+        .expect("extension manifest");
+        fs::write(
+            extension_dir.join("env.sh"),
+            "#!/bin/sh\nprintf '{\"PROVIDER_SAW\":\"%s\"}' \"$SHARED_CACHE_DIR\"\n",
+        )
+        .expect("extension env script");
+        let mut permissions = fs::metadata(extension_dir.join("env.sh"))
+            .expect("extension env metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(extension_dir.join("env.sh"), permissions)
+            .expect("extension env executable");
+
+        let mut component = script_component(dir.path(), "printf '%s' \"$PROVIDER_SAW\" > marker");
+        component.env.insert(
+            "SHARED_CACHE_DIR".to_string(),
+            "/tmp/homeboy-provider-cache".to_string(),
+        );
+        component.extensions = Some(HashMap::from([(
+            "fixture-provider-env".to_string(),
+            ScopedExtensionConfig::default(),
+        )]));
+
+        let output = run_component_scripts_with_env(
+            &component,
+            ExtensionCapability::Test,
+            dir.path(),
+            false,
+            &[],
+            &[],
+        )
+        .expect("component script should run");
+
+        assert!(output.success);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("marker")).unwrap(),
+            "/tmp/homeboy-provider-cache"
+        );
+    });
+}
+
+#[test]
 fn component_scripts_include_linked_extension_env_provider_output() {
     with_isolated_home(|_| {
         let dir = tempfile::tempdir().expect("temp dir");
