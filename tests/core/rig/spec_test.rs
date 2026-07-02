@@ -7,19 +7,18 @@ use crate::core::rig::{
     WorkloadSpec,
 };
 
-/// Canonical fixture matching the studio-playground-dev shape used as the
-/// first real consumer of the rig primitive.
-const STUDIO_PLAYGROUND_SPEC: &str = r#"{
-    "id": "studio-playground-dev",
-    "description": "Dev Studio + Playground with combined-fixes",
+/// Canonical fixture covering the first full-shape consumer of the rig primitive.
+const GENERIC_APP_RIG_SPEC: &str = r#"{
+    "id": "desktop-app-dev",
+    "description": "Dev app + runtime with combined-fixes",
     "components": {
-        "studio": { "path": "~/Developer/studio", "branch": "dev/combined-fixes" },
-        "wordpress-playground": { "path": "~/Developer/wordpress-playground" }
+        "desktop-app": { "path": "~/Developer/desktop-app", "branch": "dev/combined-fixes" },
+        "runtime-engine": { "path": "~/Developer/runtime-engine" }
     },
     "services": {
         "tarball-server": {
             "kind": "http-static",
-            "cwd": "${components.wordpress-playground.path}/dist/packages-for-self-hosting",
+            "cwd": "${components.runtime-engine.path}/dist/packages-for-self-hosting",
             "port": 9724,
             "health": { "http": "http://127.0.0.1:9724/", "expect_status": 200 }
         }
@@ -29,8 +28,8 @@ const STUDIO_PLAYGROUND_SPEC: &str = r#"{
     ],
     "shared_paths": [
         {
-            "link": "${components.studio.path}/node_modules",
-            "target": "~/Developer/studio/node_modules"
+            "link": "${components.desktop-app.path}/shared-cache",
+            "target": "~/Developer/desktop-app/shared-cache"
         }
     ],
     "resources": {
@@ -52,7 +51,7 @@ const STUDIO_PLAYGROUND_SPEC: &str = r#"{
             {
                 "kind": "check",
                 "label": "MDI db.php drop-in survived",
-                "file": "~/Sites/intelligence-example/wp-content/db.php",
+                "file": "~/Sites/intelligence-example/runtime-state/db.dropin",
                 "contains": "Markdown Database Integration"
             }
         ],
@@ -68,8 +67,8 @@ mod spec_parse_tests {
 
     #[test]
     fn test_spec_parses_studio_playground_fixture() {
-        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
-        assert_eq!(spec.id, "studio-playground-dev");
+        let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
+        assert_eq!(spec.id, "desktop-app-dev");
         assert_eq!(spec.components.len(), 2);
         assert_eq!(spec.services.len(), 1);
         assert_eq!(spec.symlinks.len(), 1);
@@ -82,7 +81,7 @@ mod spec_parse_tests {
 
     #[test]
     fn test_spec_http_static_service_kind_roundtrips() {
-        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+        let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
         let svc = spec.services.get("tarball-server").expect("service");
         assert_eq!(svc.kind, ServiceKind::HttpStatic);
         assert_eq!(svc.port, Some(9724));
@@ -94,7 +93,7 @@ mod spec_parse_tests {
 
     #[test]
     fn test_spec_pipeline_steps_discriminate_correctly() {
-        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+        let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
         let up = spec.pipeline.get("up").unwrap();
         assert!(matches!(up[0], PipelineStep::Service { .. }));
         assert!(matches!(up[1], PipelineStep::Symlink { .. }));
@@ -155,7 +154,7 @@ mod spec_parse_tests {
 
     #[test]
     fn test_spec_symlink_fields_parse() {
-        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+        let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
         let link: &SymlinkSpec = &spec.symlinks[0];
         assert_eq!(link.link, "~/.local/bin/studio");
         assert_eq!(link.target, "~/.local/bin/studio-dev");
@@ -163,10 +162,10 @@ mod spec_parse_tests {
 
     #[test]
     fn test_spec_shared_path_fields_parse() {
-        let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+        let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
         let shared: &SharedPathSpec = &spec.shared_paths[0];
-        assert_eq!(shared.link, "${components.studio.path}/node_modules");
-        assert_eq!(shared.target, "~/Developer/studio/node_modules");
+        assert_eq!(shared.link, "${components.desktop-app.path}/shared-cache");
+        assert_eq!(shared.target, "~/Developer/desktop-app/shared-cache");
     }
 
     #[test]
@@ -185,16 +184,16 @@ mod spec_parse_tests {
     #[test]
     fn test_spec_trace_variants_parse_multi_component_overlays() {
         let json = r#"{
-            "id": "studio-playground-dev",
+            "id": "desktop-runtime-dev",
             "components": {
-                "studio": { "path": "/tmp/studio" },
-                "wordpress-playground": { "path": "/tmp/playground" }
+                "desktop-app": { "path": "/tmp/desktop-app" },
+                "runtime-engine": { "path": "/tmp/runtime-engine" }
             },
             "trace_variants": {
                 "fast-create-site": {
                     "overlays": [
-                        { "component": "studio", "overlay": "overlays/studio.patch" },
-                        { "component": "wordpress-playground", "overlay": "overlays/playground.patch" }
+                        { "component": "desktop-app", "overlay": "overlays/desktop-app.patch" },
+                        { "component": "runtime-engine", "overlay": "overlays/runtime-engine.patch" }
                     ]
                 }
             }
@@ -206,10 +205,10 @@ mod spec_parse_tests {
             .expect("variant");
 
         assert_eq!(variant.overlays.len(), 2);
-        assert_eq!(variant.overlays[0].component, "studio");
-        assert_eq!(variant.overlays[0].overlay, "overlays/studio.patch");
-        assert_eq!(variant.overlays[1].component, "wordpress-playground");
-        assert_eq!(variant.overlays[1].overlay, "overlays/playground.patch");
+        assert_eq!(variant.overlays[0].component, "desktop-app");
+        assert_eq!(variant.overlays[0].overlay, "overlays/desktop-app.patch");
+        assert_eq!(variant.overlays[1].component, "runtime-engine");
+        assert_eq!(variant.overlays[1].overlay, "overlays/runtime-engine.patch");
     }
 
     #[test]
@@ -710,7 +709,7 @@ fn test_spec_stack_step_parses_sync_shape() {
 
 #[test]
 fn test_spec_round_trip_preserves_shape() {
-    let spec: RigSpec = serde_json::from_str(STUDIO_PLAYGROUND_SPEC).expect("parse");
+    let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
     let re_serialized = serde_json::to_string(&spec).expect("serialize");
     let re_parsed: RigSpec = serde_json::from_str(&re_serialized).expect("reparse");
     assert_eq!(re_parsed.id, spec.id);
@@ -729,10 +728,10 @@ fn test_spec_patch_step_parses_full_shape() {
                 {
                     "kind": "patch",
                     "component": "playground",
-                    "file": "packages/php-wasm/compile/dns_polyfill.c",
-                    "marker": "PHP-WASM-COMBINED-FIXES TSRMLS fallback",
+                    "file": "packages/runtime-wasm/compile/dns_polyfill.c",
+                    "marker": "RUNTIME-WASM-COMBINED-FIXES TSRMLS fallback",
                     "after": "/* existing fallback */",
-                    "content": "/* PHP-WASM-COMBINED-FIXES TSRMLS fallback */\n#define TSRMLS_CC\n",
+                    "content": "/* RUNTIME-WASM-COMBINED-FIXES TSRMLS fallback */\n#define TSRMLS_CC\n",
                     "op": "apply",
                     "label": "TSRMLS fallback"
                 }
@@ -752,7 +751,7 @@ fn test_spec_patch_step_parses_full_shape() {
             ..
         } => {
             assert_eq!(component, "playground");
-            assert_eq!(file, "packages/php-wasm/compile/dns_polyfill.c");
+            assert_eq!(file, "packages/runtime-wasm/compile/dns_polyfill.c");
             assert!(marker.contains("TSRMLS"));
             assert!(after.is_some());
             assert!(content.contains("TSRMLS_CC"));
