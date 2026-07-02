@@ -127,6 +127,49 @@ is parsed from standard Homeboy JSON error envelopes (`error.details.field`,
 `error.field`, or `contract_field`) when present; otherwise it is omitted and the
 raw execution evidence remains under `execution`.
 
+## Detached handoff evidence
+
+Detached Lab offload handoffs return a `homeboy/runner-exec-handoff/v1`
+envelope. Orchestrators should read the `evidence` object for the stable,
+machine-readable handoff summary instead of parsing human command strings.
+
+Shape:
+
+```json
+{
+  "schema": "homeboy/runner-handoff-evidence/v1",
+  "status": "handoff_complete",
+  "runner_id": "homeboy-lab",
+  "runner_job_id": "runner-job-123",
+  "run_id": "agent-task-run-123",
+  "persisted_run_id": "agent-task-run-123",
+  "mirror_run_id": "agent-task-run-123",
+  "remote_cwd": "/srv/homeboy/checkouts/component",
+  "artifact_manifest": {
+    "schema": "homeboy/runner-artifact-manifest-ref/v1",
+    "manifest_schema": "homeboy/artifact-manifest/v1",
+    "path": "/srv/homeboy/checkouts/component-homeboy-artifacts/homeboy-artifact-manifest.json"
+  },
+  "artifact_refs": [{
+    "id": "artifact_manifest",
+    "name": "runner artifact manifest",
+    "path": "/srv/homeboy/checkouts/component-homeboy-artifacts/homeboy-artifact-manifest.json"
+  }],
+  "next_commands": [{
+    "label": "runner_job_logs",
+    "command": ["homeboy", "runner", "job", "logs", "homeboy-lab", "runner-job-123", "--follow"]
+  }]
+}
+```
+
+`runner_job_id` is the runner daemon or reverse-broker job id. `run_id`,
+`persisted_run_id`, and `mirror_run_id` are present when durable mirrored run
+evidence exists. `remote_cwd` and `artifact_refs` identify runner-side evidence
+paths; local persistence or download remains an explicit follow-up action.
+`next_commands` is intentionally argv-shaped so controllers can inspect or
+render commands without shell parsing. The legacy top-level IDs and
+`follow_commands` strings remain for operator readability.
+
 Trace runners also receive trace-specific variables when invoked by `homeboy trace`:
 
 | Variable | Source | Meaning |

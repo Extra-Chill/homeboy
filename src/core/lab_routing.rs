@@ -269,6 +269,9 @@ fn attach_handoff_metadata(metadata: &mut serde_json::Value, stdout: &str) {
     if let Some(commands) = value.get("follow_commands") {
         object.insert("follow_commands".to_string(), commands.clone());
     }
+    if let Some(evidence) = value.get("evidence") {
+        object.insert("evidence".to_string(), evidence.clone());
+    }
 }
 
 fn metadata_path_string(value: &serde_json::Value, path: &[&str]) -> Option<String> {

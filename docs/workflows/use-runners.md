@@ -68,6 +68,12 @@ homeboy runs artifacts <run-id>
 
 For matrix and static-output workflows, follow [Artifact loop for runner and matrix workflows](../operations/artifact-loop-runner-matrix.md).
 
+Detached Lab handoffs also include a structured `evidence` object in the
+handoff JSON. Use it to inspect `runner_id`, `runner_job_id`, mirrored
+`run_id` values, `remote_cwd`, artifact manifest paths, artifact refs, status,
+and argv-shaped `next_commands` without parsing human-readable follow-up
+strings.
+
 ## 5. Repair Before Bypassing
 
 If runner routing fails because the runner is stale, missing secrets, or has a dirty workspace, fix the runner state before claiming proof. Local-hot bypass flags are debugging aids, not release-gate proof.
