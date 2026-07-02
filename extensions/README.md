@@ -19,7 +19,11 @@ documented in [`docs/project-script-runtime.md`](docs/project-script-runtime.md)
 They are extension-owned until Homeboy core grows an ecosystem-neutral runtime
 helper contract.
 
-Generic runtime fanout/reconcile planning and runner primitives live in
+Generic runtime loop, fanout/reconcile, proof, and lifecycle primitives are
+exported from `homeboy-runtime-agent-ci/generic-orchestration`; provider and
+workflow adapters are exported from `homeboy-runtime-agent-ci/provider-adapters`.
+The legacy `homeboy-runtime-agent-ci` root export is a deprecated compatibility
+barrel and should not be used by new callers. Module internals live in
 `runtime-agent-ci/lib/` and are documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 Use `.github/workflows/runtime-agent-full-run.yml` for the standard single-task
@@ -179,6 +183,8 @@ The public `runtime-agent-ci` binaries are the package `bin` entries. Legacy
 agent-loop, artifact-fanout, agent-task-to-review, and WordPress compatibility
 wrapper commands were removed after active callsites migrated to the canonical
 loop, fanout, and review publication primitives. Use
+`homeboy-runtime-agent-ci/generic-orchestration`,
+`homeboy-runtime-agent-ci/provider-adapters`,
 `homeboy-runtime-agent-ci/generic-fanout-reconcile-workflow`,
 `homeboy-runtime-agent-ci/fanout-reconcile-runner`,
 `runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs`, and the

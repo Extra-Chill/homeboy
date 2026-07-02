@@ -9,7 +9,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const require = createRequire(import.meta.url);
 const before = new Set(Object.keys(require.cache));
 
-const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci'));
+const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci/generic-orchestration'));
 const genericWorkflow = require(path.join(repoRoot, 'runtime-agent-ci/lib/generic-fanout-reconcile-workflow'));
 const runner = require(path.join(repoRoot, 'runtime-agent-ci/lib/fanout-reconcile-runner'));
 
@@ -37,6 +37,8 @@ assert.deepEqual(
 
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'runtime-agent-ci/package.json'), 'utf8'));
 assert.equal(packageJson.main, 'index.js');
+assert.equal(packageJson.exports['./generic-orchestration'], './generic-orchestration.js');
+assert.equal(packageJson.exports['./provider-adapters'], './provider-adapters.js');
 assert.equal(packageJson.exports['./controller-loop-proof-validator'], './lib/controller-loop-proof-validator.js');
 assert.equal(packageJson.exports['./fanout-reconcile-runner'], './lib/fanout-reconcile-runner.js');
 assert.equal(packageJson.exports['./generic-fanout-reconcile-workflow'], './lib/generic-fanout-reconcile-workflow.js');
@@ -45,6 +47,8 @@ assert.equal(packageJson.bin['homeboy-generic-fanout-reconcile'], './scripts/hom
 
 const runtimeSources = [
   'runtime-agent-ci/index.js',
+  'runtime-agent-ci/generic-orchestration.js',
+  'runtime-agent-ci/provider-adapters.js',
   'runtime-agent-ci/lib/controller-loop-proof-validator.js',
   'runtime-agent-ci/lib/fanout-reconcile-runner.js',
   'runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js',

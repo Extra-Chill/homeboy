@@ -5,6 +5,8 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./generic-orchestration": "./generic-orchestration.js",
+    "./provider-adapters": "./provider-adapters.js",
     "./controller-loop-proof-validator": "./lib/controller-loop-proof-validator.js",
     "./agent-task-outcome-normalizer": "./lib/agent-task-outcome-normalizer.js",
     "./bounded-production-loop-runner": "./lib/bounded-production-loop-runner.js",
@@ -20,6 +22,7 @@
     "./full-run-config": "./lib/full-run-config.cjs",
     "./full-run-inputs": "./lib/full-run-inputs.cjs",
     "./runtime-status": "./lib/runtime-status.cjs",
+    "./runtime-provider-resolver": "./lib/runtime-provider-resolver.cjs",
     "./artifact-paths": "./lib/artifact-paths.cjs",
     "./runtime-contracts": "./lib/runtime-contracts.cjs",
     "./loop-lifecycle": "./lib/loop-lifecycle.cjs",

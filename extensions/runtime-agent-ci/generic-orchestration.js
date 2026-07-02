@@ -1,0 +1,18 @@
+'use strict';
+
+// Incubating Homeboy-core candidates: executor-neutral loop, fanout,
+// proof, gate, and lifecycle helpers. Runtime provider selection and
+// GitHub/full-run adapter wiring live in ./provider-adapters.
+Object.assign(module.exports, require('./lib/generic-agent-loop-runner'));
+Object.assign(module.exports, require('./lib/deterministic-loop-runner'));
+Object.assign(module.exports, require('./lib/loop-policy'));
+Object.assign(module.exports, require('./lib/fanout-reconcile-runner'));
+Object.assign(module.exports, require('./lib/generic-fanout-reconcile-workflow'));
+Object.assign(module.exports, require('./lib/headless-deterministic-loop-runner'));
+Object.assign(module.exports, require('./lib/headless-production-loop-spec'));
+Object.assign(module.exports, require('./lib/controller-loop-proof-validator'));
+Object.assign(module.exports, require('./lib/bounded-production-loop-runner'));
+Object.assign(module.exports, require('./lib/workspace-publication-lifecycle.cjs'));
+Object.assign(module.exports, require('./lib/gate-plan-evaluator'));
+Object.assign(module.exports, require('./lib/loop-lifecycle.cjs'));
+Object.assign(module.exports, require('./lib/runtime-status.cjs'));

@@ -13,7 +13,7 @@ const {
   runtimePathRequired,
   withoutInternalKeys,
   workflowInputCompatibility,
-} = require('../../../runtime-agent-ci');
+} = require('../../../runtime-agent-ci/provider-adapters');
 const { writeGithubOutput } = require('../../../runtime-agent-ci/lib/full-run-inputs.cjs');
 
 function main() {

@@ -11,7 +11,7 @@ const {
   runDeterministicLoop,
   runGenericAgentLoop,
   validateGenericAgentLoopOutcomeContract,
-} = require(path.join(repoRoot, 'runtime-agent-ci'));
+} = require(path.join(repoRoot, 'runtime-agent-ci/generic-orchestration'));
 
 const runtimeProfile = {
   schema: 'homeboy/runtime-profile/v1',

@@ -1029,7 +1029,7 @@ function runtimeTaskOptions(plan) {
   }
   return {
     ability: runtimeTask.ability,
-    abilityInput: optionalObject(runtimeTask.input),
+    ability_input: optionalObject(runtimeTask.input),
   };
 }
 
