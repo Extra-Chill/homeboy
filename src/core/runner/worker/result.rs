@@ -18,6 +18,10 @@ pub(super) fn remote_runner_result_from_exec_output(
 ) -> RemoteRunnerJobResult {
     let patch = exec_output.patch.clone();
     let mutation_artifacts = exec_output.mutation_artifacts.clone();
+    let resource_guard_violation = exec_output
+        .metrics
+        .as_ref()
+        .and_then(|metrics| metrics.guard_violation.clone());
     let mut data = json!({
         "mode": exec_output.mode,
         "remote_cwd": exec_output.remote_cwd,
@@ -31,6 +35,10 @@ pub(super) fn remote_runner_result_from_exec_output(
     }
     if let Some(mirror_run_id) = exec_output.mirror_run_id.clone() {
         data["mirror_run_id"] = json!(mirror_run_id);
+    }
+    if let Some(resource_guard_violation) = resource_guard_violation {
+        data["resource_guard_violation"] =
+            serde_json::to_value(resource_guard_violation).unwrap_or(serde_json::Value::Null);
     }
     if let Some(execution_record) = exec_output.execution_record.clone() {
         data["execution_record"] =

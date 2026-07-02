@@ -1,7 +1,9 @@
 use serde_json::json;
 
 use crate::core::api_jobs::JobArtifactMetadata;
-use crate::core::runner::{RunnerExecMode, RunnerExecOutput};
+use crate::core::runner::{
+    RunnerExecMode, RunnerExecOutput, RunnerResourceGuardViolation, RunnerResourceMetrics,
+};
 use crate::core::runner_execution_envelope::{
     BinaryProvenance, OrchestrationTargetProvenance, RunnerExecutionRecord,
 };
@@ -163,6 +165,75 @@ fn reverse_worker_result_preserves_execution_provenance() {
     assert_eq!(
         data["orchestration_provenance"]["runner_command_binary"]["path"],
         "homeboy"
+    );
+}
+
+#[test]
+fn reverse_worker_result_surfaces_resource_guard_violation() {
+    let result = remote_runner_result_from_exec_output(
+        RunnerExecOutput {
+            variant: "exec",
+            command: "runner.exec",
+            runner_id: "lab".to_string(),
+            dry_run: false,
+            mode: RunnerExecMode::Local,
+            argv: vec!["homeboy".to_string(), "test".to_string()],
+            remote_cwd: "/srv/workspace".to_string(),
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            runner_job: None,
+            job_id: Some("job-guard".to_string()),
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            mutation_artifacts: None,
+            artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
+            metrics: Some(RunnerResourceMetrics {
+                duration_ms: 93_000,
+                cpu_user_ms: None,
+                cpu_system_ms: None,
+                peak_rss_bytes: Some(25_320_000_000),
+                sample_count: 93,
+                child_process_count_peak: Some(69),
+                guard_violation: Some(RunnerResourceGuardViolation {
+                    reason: "rss_limit_exceeded".to_string(),
+                    message: "runner job resource guard stopped process tree".to_string(),
+                    rss_bytes: 25_320_000_000,
+                    rss_limit_bytes: 16 * 1024 * 1024 * 1024,
+                    process_count: 70,
+                    process_count_limit: 128,
+                }),
+                source: "linux_procfs_process_tree".to_string(),
+            }),
+            capture: None,
+            execution_record: None,
+            runner_result: None,
+            handoff: None,
+            diagnostics: None,
+        },
+        1,
+        None,
+    );
+
+    let data = result.data.as_ref().expect("data");
+    assert_eq!(result.exit_code, 1);
+    assert_eq!(
+        data["resource_guard_violation"]["reason"],
+        "rss_limit_exceeded"
+    );
+    assert_eq!(data["resource_guard_violation"]["process_count"], 70);
+    assert_eq!(
+        result
+            .metrics
+            .as_ref()
+            .and_then(|metrics| metrics.guard_violation.as_ref())
+            .map(|violation| violation.rss_bytes),
+        Some(25_320_000_000)
     );
 }
 

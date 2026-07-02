@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::runner::{RunnerResourceGuardViolation, RunnerResourceMetrics};
 use serde_json::json;
 
 #[test]
@@ -144,6 +145,39 @@ fn runner_exec_failure_error_surfaces_canonical_failure_context() {
     assert!(hints
         .iter()
         .any(|hint| hint.contains("contract field: `cwd`")));
+}
+
+#[test]
+fn runner_exec_failure_error_surfaces_resource_guard_message() {
+    let mut output = failed_runner_exec_output("", "");
+    output.metrics = Some(RunnerResourceMetrics {
+        duration_ms: 93_000,
+        cpu_user_ms: None,
+        cpu_system_ms: None,
+        peak_rss_bytes: Some(25_320_000_000),
+        sample_count: 93,
+        child_process_count_peak: Some(69),
+        guard_violation: Some(RunnerResourceGuardViolation {
+            reason: "rss_limit_exceeded".to_string(),
+            message: "runner job resource guard stopped process tree".to_string(),
+            rss_bytes: 25_320_000_000,
+            rss_limit_bytes: 16 * 1024 * 1024 * 1024,
+            process_count: 70,
+            process_count_limit: 128,
+        }),
+        source: "linux_procfs_process_tree".to_string(),
+    });
+
+    let err = runner_exec_failure_error(&output).expect("runner failure error");
+
+    assert!(err.message.contains("resource guard stopped process tree"));
+    assert_eq!(
+        err.details["execution"]["metrics"]["guard_violation"]["reason"].as_str(),
+        Some("rss_limit_exceeded")
+    );
+    assert!(err.hints.iter().any(|hint| hint
+        .message
+        .contains("Runner resource guard stopped the job")));
 }
 
 #[test]
