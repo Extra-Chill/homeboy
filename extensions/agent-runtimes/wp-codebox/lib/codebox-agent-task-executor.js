@@ -39,7 +39,6 @@ const {
 } = require('./codebox-artifact-contract');
 const {
   codeboxPublicResultEnvelope,
-  privateCodeboxRuntimeResultShapeNames,
   publicEnvelopeBoundaryDiagnostic,
 } = require('./codebox-result-boundary');
 const {
@@ -2356,9 +2355,6 @@ function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
 
 function normalizeStatus(result, exitStatus = 0) {
   const publicEnvelope = codeboxPublicResultEnvelope(result);
-  if (!publicEnvelope && privateCodeboxRuntimeResultShapeNames(result).length > 0) {
-    return 'failed';
-  }
   if (recipeRunFailedPhase(recipeRunFromResult(result))) {
     return 'failed';
   }
