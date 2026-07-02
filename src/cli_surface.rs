@@ -4,11 +4,11 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::commands::{
-    agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
-    component, config, contract, daemon, db, deploy, extension, file, fleet, fuzz, git, http,
-    issues, lint, logs, manifest, observe, project, refactor, refs, release, report, review, rig,
-    runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
-    upgrade, version, worktree,
+    agent_task, api, artifact_postprocess, audit, audit_baseline, auth, bench, build, changelog,
+    changes, ci, cleanup, component, config, contract, daemon, db, deploy, extension, file, fleet,
+    fuzz, git, http, issues, lint, logs, manifest, observe, project, refactor, refs, release,
+    report, review, rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace,
+    triage, tunnel, undo, upgrade, version, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -122,6 +122,9 @@ pub enum Commands {
     Config(config::ConfigArgs),
     /// Inspect, export, validate, and normalize Homeboy contract metadata
     Contract(contract::ContractArgs),
+    /// Run a generic artifact postprocess plan over persisted artifact roots
+    #[command(name = "artifact-postprocess")]
+    ArtifactPostprocess(artifact_postprocess::ArtifactPostprocessArgs),
     /// Run the local-only HTTP API daemon
     Daemon(daemon::DaemonArgs),
     /// Execute CLI-compatible extensions
@@ -570,6 +573,7 @@ mod entry_command_impls {
                 Commands::Component(_) => "component",
                 Commands::Config(_) => "config",
                 Commands::Contract(_) => "contract",
+                Commands::ArtifactPostprocess(_) => "artifact-postprocess",
                 Commands::Daemon(_) => "daemon",
                 Commands::Extension(_) => "extension",
                 Commands::Status(_) => "status",
