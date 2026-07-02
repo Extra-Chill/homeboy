@@ -815,6 +815,7 @@ fn installed_extension_diff_status(
     match (installed_revision, checkout_revision) {
         (Some(installed), Some(checkout)) if installed == checkout => "current".to_string(),
         (Some(_), Some(_)) => "stale".to_string(),
+        (Some(_), None) => "current".to_string(),
         _ => "unknown".to_string(),
     }
 }
@@ -1545,7 +1546,7 @@ mod tests {
         );
         assert_eq!(
             installed_extension_diff_status(true, Some("abc1234"), None),
-            "unknown"
+            "current"
         );
         assert_eq!(
             installed_extension_diff_status(false, Some("abc1234"), Some("abc1234")),
