@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -27,6 +27,12 @@ pub struct ExtensionDevRunPlan {
     pub install_command: Vec<String>,
     pub command: Vec<String>,
     pub persistent_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExtensionDevRunSourceMaterialization {
+    sync_source: String,
+    remote_install_suffix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,10 +172,12 @@ pub(crate) fn run_extension_dev_run_with(
     mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(RunnerExecOutput, i32)>,
 ) -> Result<(ExtensionDevRunOutput, i32)> {
     let mut plan = plan_extension_dev_run(extension_id, runner_id, source, command)?;
+    let source_materialization =
+        extension_dev_run_source_materialization(&plan.extension_id, &plan.source)?;
     let (synced, _) = sync(
         &plan.runner_id,
         RunnerWorkspaceSyncOptions {
-            path: plan.source.clone(),
+            path: source_materialization.sync_source.clone(),
             mode: plan.sync_mode,
             controller_routed_git: false,
             changed_since_base: None,
@@ -179,12 +187,16 @@ pub(crate) fn run_extension_dev_run_with(
             run_isolation_token: None,
         },
     )?;
+    let remote_install_source = remote_install_source(
+        &synced.remote_path,
+        source_materialization.remote_install_suffix.as_deref(),
+    );
 
     plan.install_command = vec![
         "homeboy".to_string(),
         "extension".to_string(),
         "refresh".to_string(),
-        synced.remote_path.clone(),
+        remote_install_source.clone(),
         "--id".to_string(),
         plan.extension_id.clone(),
     ];
@@ -202,7 +214,7 @@ pub(crate) fn run_extension_dev_run_with(
         extension_id: plan.extension_id.clone(),
         runner_id: plan.runner_id.clone(),
         local_source: synced.local_path.clone(),
-        remote_source: synced.remote_path.clone(),
+        remote_source: remote_install_source.clone(),
         sync_mode: synced.sync_mode.label().to_string(),
         snapshot_identity: synced.snapshot_identity.clone(),
         source_revision: lifecycle.source_revision.clone(),
@@ -222,7 +234,7 @@ pub(crate) fn run_extension_dev_run_with(
         &plan,
         "install",
         "extension refresh",
-        &synced.remote_path,
+        &remote_install_source,
         Vec::new(),
     );
 
@@ -260,7 +272,7 @@ pub(crate) fn run_extension_dev_run_with(
                 extension_id: plan.extension_id.clone(),
                 runner_id: plan.runner_id.clone(),
                 source: plan.source.clone(),
-                remote_source: synced.remote_path.clone(),
+                remote_source: remote_install_source,
                 plan,
                 sync: synced,
                 prior_extension_state,
@@ -319,7 +331,7 @@ pub(crate) fn run_extension_dev_run_with(
             extension_id: plan.extension_id.clone(),
             runner_id: plan.runner_id.clone(),
             source: plan.source.clone(),
-            remote_source: synced.remote_path.clone(),
+            remote_source: remote_install_source,
             persistent_state: plan.persistent_state.clone(),
             plan,
             sync: synced,
@@ -333,6 +345,67 @@ pub(crate) fn run_extension_dev_run_with(
         },
         command_exit_code,
     ))
+}
+
+fn extension_dev_run_source_materialization(
+    extension_id: &str,
+    source: &str,
+) -> Result<ExtensionDevRunSourceMaterialization> {
+    let source_path = absolute_path(source)?;
+    let manifest = source_path.join(format!("{extension_id}.json"));
+    let Some(parent) = source_path.parent() else {
+        return Ok(ExtensionDevRunSourceMaterialization {
+            sync_source: source.to_string(),
+            remote_install_suffix: None,
+        });
+    };
+
+    let shared_project_scripts = parent.join("scripts/lib/project-scripts.sh");
+    if manifest.exists() && shared_project_scripts.is_file() {
+        let suffix = source_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "source",
+                    format!(
+                        "Could not determine extension directory name from {}",
+                        source_path.display()
+                    ),
+                    Some(source.to_string()),
+                    None,
+                )
+            })?
+            .to_string();
+
+        return Ok(ExtensionDevRunSourceMaterialization {
+            sync_source: parent.display().to_string(),
+            remote_install_suffix: Some(suffix),
+        });
+    }
+
+    Ok(ExtensionDevRunSourceMaterialization {
+        sync_source: source.to_string(),
+        remote_install_suffix: None,
+    })
+}
+
+fn absolute_path(source: &str) -> Result<PathBuf> {
+    let path = Path::new(source);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    Ok(std::env::current_dir()
+        .map_err(|err| Error::internal_io(err.to_string(), Some("get current dir".to_string())))?
+        .join(path))
+}
+
+fn remote_install_source(remote_path: &str, suffix: Option<&str>) -> String {
+    match suffix {
+        Some(suffix) => format!("{}/{}", remote_path.trim_end_matches('/'), suffix),
+        None => remote_path.to_string(),
+    }
 }
 
 fn required_arg(name: &str, value: &str) -> Result<String> {
@@ -551,12 +624,14 @@ fn empty_skipped_exec_output() -> RunnerExecOutput {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::fs;
 
     use super::*;
     use crate::command_contract::RunnerExecutionRecord;
     use crate::core::runner::{
         ByteFileCounts, RunnerLifecycleOwner, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease,
     };
+    use tempfile::TempDir;
 
     #[test]
     fn plans_refresh_then_requested_command() {
@@ -711,26 +786,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dev_run_syncs_monorepo_root_when_extension_uses_shared_project_scripts() {
+        let source_root = TempDir::new().expect("source root");
+        let extension_dir = source_root.path().join("nodejs");
+        fs::create_dir_all(extension_dir.join("scripts/lib")).expect("extension lib");
+        fs::create_dir_all(source_root.path().join("scripts/lib")).expect("shared lib");
+        fs::write(extension_dir.join("nodejs.json"), r#"{"name":"Node.js"}"#).expect("manifest");
+        fs::write(
+            extension_dir.join("scripts/lib/node-helpers.sh"),
+            "source \"$(dirname \"${BASH_SOURCE[0]}\")/../../../scripts/lib/project-scripts.sh\"\n",
+        )
+        .expect("node helper");
+        fs::write(
+            source_root.path().join("scripts/lib/project-scripts.sh"),
+            "homeboy_project_init() { :; }\n",
+        )
+        .expect("shared project scripts");
+
+        let seen_sync = RefCell::new(Vec::new());
+        let seen_exec = RefCell::new(Vec::new());
+        let command = vec!["homeboy".to_string(), "bench".to_string()];
+        let remote_root = "/remote/homeboy-extensions";
+
+        run_extension_dev_run_with(
+            "nodejs",
+            "lab",
+            &extension_dir.to_string_lossy(),
+            &command,
+            |runner_id, options| {
+                seen_sync.borrow_mut().push(options.path.clone());
+                Ok((sync_output_for(runner_id, &options.path, remote_root), 0))
+            },
+            |runner_id, options| {
+                seen_exec.borrow_mut().push(options.command.clone());
+                Ok((exec_output(runner_id, options.command, 0), 0))
+            },
+        )
+        .expect("dev run");
+
+        assert_eq!(
+            seen_sync.borrow()[0],
+            source_root.path().display().to_string()
+        );
+        assert_eq!(
+            seen_exec.borrow()[1],
+            vec![
+                "homeboy",
+                "extension",
+                "refresh",
+                "/remote/homeboy-extensions/nodejs",
+                "--id",
+                "nodejs"
+            ]
+        );
+    }
+
     fn sync_output() -> RunnerWorkspaceSyncOutput {
+        sync_output_for("lab", "/local/demo", "/remote/demo")
+    }
+
+    fn sync_output_for(
+        runner_id: &str,
+        local_path: &str,
+        remote_path: &str,
+    ) -> RunnerWorkspaceSyncOutput {
         RunnerWorkspaceSyncOutput {
             variant: "workspace_sync",
             command: "runner.workspace.sync",
-            runner_id: "lab".to_string(),
-            local_path: "/local/demo".to_string(),
-            remote_path: "/remote/demo".to_string(),
+            runner_id: runner_id.to_string(),
+            local_path: local_path.to_string(),
+            remote_path: remote_path.to_string(),
             materialization_plan: crate::core::runners::RunnerWorkspaceMaterializationPlan {
                 workspace_root: "/remote".to_string(),
-                local_path: "/local/demo".to_string(),
-                local_basename: "demo".to_string(),
-                remote_path: "/remote/demo".to_string(),
+                local_path: local_path.to_string(),
+                local_basename: Path::new(local_path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("demo")
+                    .to_string(),
+                remote_path: remote_path.to_string(),
                 sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                 identity: "snapshot-1".to_string(),
                 path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
                 run_isolation_token: None,
             },
             current_workspace: RunnerWorkspaceCurrentSummary {
-                local_path: "/local/demo".to_string(),
-                remote_path: "/remote/demo".to_string(),
+                local_path: local_path.to_string(),
+                remote_path: remote_path.to_string(),
                 sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                 materialized: true,
                 source_commit: None,
@@ -739,9 +882,9 @@ mod tests {
                 synthetic_checkout_commit: None,
             },
             workspace_lease: RunnerWorkspaceLease {
-                runner_id: "lab".to_string(),
-                local_path: "/local/demo".to_string(),
-                remote_path: "/remote/demo".to_string(),
+                runner_id: runner_id.to_string(),
+                local_path: local_path.to_string(),
+                remote_path: remote_path.to_string(),
                 sync_mode: "snapshot".to_string(),
                 materialized: true,
                 lifecycle_owner: RunnerLifecycleOwner::Controller,
@@ -750,8 +893,8 @@ mod tests {
                 source_dirty: None,
             },
             resource_lifecycle: crate::core::runner::workspace_resource_lifecycle(
-                "lab",
-                "/remote/demo",
+                runner_id,
+                remote_path,
                 None,
                 crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess,
             ),
