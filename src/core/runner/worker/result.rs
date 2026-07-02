@@ -40,7 +40,8 @@ pub(super) fn remote_runner_result_from_exec_output(
         data["resource_guard_violation"] =
             serde_json::to_value(resource_guard_violation).unwrap_or(serde_json::Value::Null);
     }
-    if let Some(execution_record) = exec_output.execution_record.clone() {
+    let execution_record = exec_output.execution_record.clone();
+    if let Some(execution_record) = execution_record.clone() {
         data["execution_record"] =
             serde_json::to_value(&execution_record).unwrap_or(serde_json::Value::Null);
         if let Some(provenance) = execution_record.orchestration_provenance {
@@ -77,19 +78,27 @@ pub(super) fn remote_runner_result_from_exec_output(
             ))
             .unwrap_or(serde_json::Value::Null);
     }
-    let outcome_run_id = exec_output
+    let fallback_outcome_run_id = exec_output
         .mirror_run_id
         .clone()
         .or_else(|| exec_output.job_id.clone())
         .unwrap_or_else(|| exec_output.runner_id.clone());
-    let mut outcome = RunOutcomeEnvelope::new(if exit_code == 0 {
-        "succeeded"
+    let mut outcome = if let Some(execution_record) = execution_record.as_ref() {
+        RunOutcomeEnvelope::from_runner_execution_record(execution_record)
     } else {
-        "failed"
-    })
-    .with_run_id(Some(outcome_run_id.clone()))
-    .with_runner_id(Some(exec_output.runner_id.clone()))
+        RunOutcomeEnvelope::new(if exit_code == 0 {
+            "succeeded"
+        } else {
+            "failed"
+        })
+        .with_run_id(Some(fallback_outcome_run_id.clone()))
+        .with_runner_id(Some(exec_output.runner_id.clone()))
+    }
     .with_exit_code(exit_code);
+    let outcome_run_id = outcome
+        .run_id
+        .clone()
+        .unwrap_or_else(|| fallback_outcome_run_id.clone());
     outcome.add_job_artifact_refs(&outcome_run_id, exec_output.artifacts.clone());
     if let Some(result) = exec_output.runner_result.clone() {
         outcome.add_runner_artifact_refs(&outcome_run_id, result.artifact_refs.clone());

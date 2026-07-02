@@ -154,6 +154,13 @@ fn reverse_worker_result_preserves_execution_provenance() {
 
     let data = result.data.as_ref().expect("data");
     assert_eq!(data["execution_record"]["runner_id"], "lab");
+    assert_eq!(data["outcome"]["schema"], "homeboy/run-outcome-envelope/v1");
+    assert_eq!(data["outcome"]["status"], "succeeded");
+    assert_eq!(data["outcome"]["runner_id"], "lab");
+    assert_eq!(data["outcome"]["run_id"], "job-1");
+    assert_eq!(data["outcome"]["exit_code"], 0);
+    assert!(data["outcome"].get("transport").is_none());
+    assert!(data["outcome"].get("materialized_paths").is_none());
     assert_eq!(
         data["orchestration_provenance"]["selected_runner_id"],
         "lab"

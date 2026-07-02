@@ -175,7 +175,7 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         name: "run-outcome-envelope",
         title: "Run outcome envelope",
         owner: "homeboy-core",
-        summary: "Generic inspectable run outcome envelope that normalizes artifact, evidence, handoff, result, fuzz, and agent-task proof references.",
+        summary: "Canonical terminal run outcome envelope for runner and Lab executions, including status, exit code, artifact/evidence references, handoffs, and result payloads.",
         rust_type: "homeboy::core::run_outcome_envelope::RunOutcomeEnvelope",
     },
     ContractRegistryEntry {
@@ -191,7 +191,7 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         name: "runner-execution-record",
         title: "Runner execution record",
         owner: "homeboy-core",
-        summary: "Generic terminal runner execution record with stable IDs, materialized paths, artifact references, and follow-up actions.",
+        summary: "Durable runner execution record for orchestration identity, materialized paths, provenance, and follow-up actions; terminal command output should project through run-outcome-envelope.",
         rust_type: "homeboy::core::runner_execution_envelope::RunnerExecutionRecord",
     },
     ContractRegistryEntry {
