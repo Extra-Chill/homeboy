@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
-const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci/index.js'));
+const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci/provider-adapters.js'));
 const {
   genericAgentTaskPlan,
   genericAgentTaskRequest,
@@ -15,7 +15,7 @@ const {
 
 const genericBoundaryTerms = /Data Machine|DataMachine|datamachine|data-machine|wp-site-generator|WPSG|site-generator|site generator/;
 const genericFiles = [
-  'runtime-agent-ci/index.js',
+  'runtime-agent-ci/provider-adapters.js',
   'runtime-agent-ci/lib/runtime-agent-ci-plan.js',
   'agent-task-contracts/generic-agent-task-plan.js',
   '.github/workflows/runtime-agent-ci.yml',

@@ -45,6 +45,10 @@ assert.equal(packageJson.exports['./generic-fanout-reconcile-workflow'], './lib/
 assert.equal(packageJson.bin['homeboy-controller-loop-proof-validate'], './scripts/homeboy-controller-loop-proof-validate.cjs');
 assert.equal(packageJson.bin['homeboy-generic-fanout-reconcile'], './scripts/homeboy-generic-fanout-reconcile.cjs');
 
+const rootExportSource = fs.readFileSync(path.join(repoRoot, 'runtime-agent-ci/index.js'), 'utf8');
+assert.match(rootExportSource, /emitWarning/);
+assert.doesNotMatch(rootExportSource, /require\(/);
+
 const runtimeSources = [
   'runtime-agent-ci/index.js',
   'runtime-agent-ci/generic-orchestration.js',

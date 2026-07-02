@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider, runtimeIdFromOptions } = require('../lib/runtime-provider-resolver.cjs');
-const { runtimeAgentCiRunnerSpec } = require('..');
+const { runtimeAgentCiRunnerSpec } = require('../provider-adapters');
 const { runRuntimeSetup, runtimeSetupAdapter } = require('../../.github/scripts/runtime-agent-full-run/setup-runtime.cjs');
 const { checkedOutPhpDependencyDirs, envPathIsInsideWorkspace, requiresWordPressDependencies, safeDependencySubdir, setupRuntime } = require('../../agent-runtimes/wp-codebox/lib/runtime-setup.cjs');
 

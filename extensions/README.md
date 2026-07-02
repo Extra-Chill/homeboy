@@ -22,16 +22,15 @@ helper contract.
 Generic runtime loop, fanout/reconcile, proof, and lifecycle primitives are
 exported from `homeboy-runtime-agent-ci/generic-orchestration`; provider and
 workflow adapters are exported from `homeboy-runtime-agent-ci/provider-adapters`.
-The legacy `homeboy-runtime-agent-ci` root export is a deprecated provider-adapter
-compatibility barrel and should not be used by new callers. Module internals live in
+The legacy `homeboy-runtime-agent-ci` root export is intentionally empty and
+only emits a deprecation warning. Module internals live in `runtime-agent-ci/lib/`
+and are documented in
+[`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 
 Declarative dependency adapter manifests live in
 [`dependency-adapters/`](dependency-adapters/). They describe extension-owned
 Node.js, Composer, and WordPress dependency materialization surfaces without
 teaching Homeboy core ecosystem-specific package-manager behavior.
-
-`runtime-agent-ci/lib/` and are documented in
-[`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 Use `.github/workflows/runtime-agent-full-run.yml` for the standard single-task
 path: injectable runtime execution, workspace verification, dry-run or PR
 publication evidence, and one final green/red proof envelope.
@@ -196,7 +195,9 @@ loop, fanout, and review publication primitives. Use
 `homeboy-runtime-agent-ci/generic-fanout-reconcile-workflow`,
 `homeboy-runtime-agent-ci/fanout-reconcile-runner`,
 `runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs`, and the
-`.github/scripts/runtime-agent-full-run/*` workflow helpers directly.
+`.github/scripts/runtime-agent-full-run/*` workflow helpers directly. The
+deprecated `homeboy-runtime-agent-ci` root export is intentionally empty and
+only emits a deprecation warning for compatibility discovery.
 
 WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,

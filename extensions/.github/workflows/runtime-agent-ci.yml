@@ -155,7 +155,7 @@ jobs:
           const path = require('node:path');
           const {
             runtimeAgentCiTaskExecutorConfig,
-          } = require('./runtime-agent-ci');
+          } = require('./runtime-agent-ci/provider-adapters');
           const { normalizeRuntimeId } = require('./runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
           function parseJson(name, fallback) {

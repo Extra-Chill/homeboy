@@ -11,7 +11,7 @@ const {
   buildSecretEnvPlan,
   loopPolicyFromEnv,
   SECRET_ENV_PLAN_SCHEMA,
-} = require('..');
+} = require('../provider-adapters');
 const { normalizeProviderPlugin } = require('../lib/full-run-inputs.cjs');
 
 assert.equal(typeof buildConfig, 'function');
