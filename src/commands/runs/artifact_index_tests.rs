@@ -58,7 +58,7 @@ fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> 
 }
 
 #[test]
-fn rig_runs_list_surfaces_compact_artifact_index() {
+fn runs_list_rig_filter_surfaces_compact_artifact_index() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
@@ -103,14 +103,14 @@ fn rig_runs_list_surfaces_compact_artifact_index() {
                 limit: 20,
                 include_active_runner_jobs: false,
             },
-            "rig.runs",
+            "runs.list",
         )
-        .expect("rig runs");
+        .expect("runs list");
 
         let RunsOutput::List(output) = output else {
             panic!("expected list output");
         };
-        assert_eq!(output.command, "rig.runs");
+        assert_eq!(output.command, "runs.list");
         assert_eq!(output.runs.len(), 1);
         let artifact_index = output.runs[0]
             .artifact_index

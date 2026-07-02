@@ -613,7 +613,6 @@ homeboy runner exec <runner-id> --ssh --cwd /runner/workspace/project -- <comman
 homeboy runner exec <runner-id> --run-id ssi-fixture-matrix-summary -- <command...>
 homeboy runner exec <runner-id> --cwd /runner/workspace/project --require-path /runner/workspace/project -- <command...>
 homeboy runner env <runner-id>
-homeboy runner env <runner-id> --show-values
 ```
 
 `exec` submits the command to the connected runner daemon when `homeboy runner connect <runner-id>` has established a live loopback tunnel. If no daemon session is connected, local runners execute directly and SSH runners require explicit diagnostic `--ssh`. SSH runner raw exec is policy-denied by default until `policy.allow_raw_exec` is explicitly true.
@@ -650,7 +649,7 @@ This is the generic one-command form for “run my local patch on the runner”:
 Runner job environment:
 
 - `homeboy runner env <runner-id>` shows configured public runner env plus `secret_env` keys/references for runner jobs. It does not resolve or print secret values.
-- Public `env` values are redacted by default because legacy configs may still contain tokens. Use `--show-values` only in trusted local/operator contexts; `secret_env` remains references-only even with `--show-values`.
+- Public `env` values are redacted because legacy configs may still contain tokens; `secret_env` remains references-only.
 - `homeboy ssh <server> -- printenv NAME` inspects the server login shell environment. It does not include runner job env unless the variable is also configured on the server shell.
 - Use `homeboy runner exec <runner-id> -- printenv NAME` for final execution-time proof when debugging resolved runner job environment.
 
