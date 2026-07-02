@@ -708,13 +708,11 @@ pub(crate) fn run_lab_offload_inner(
         &source_path,
         &remote_cwd,
     )?;
-    let path_remaps = workspace_mapping
-        .iter()
-        .map(|entry| LabPathRemap {
-            local: entry.local_path().to_string(),
-            remote: entry.remote_path().to_string(),
-        })
-        .collect::<Vec<_>>();
+    let path_remaps = path_remaps_from_workspace_mapping(
+        &workspace_mapping,
+        Some(&source_path),
+        Some(&remote_cwd),
+    );
     preflight_remote_path_bearing_surfaces(
         "Lab offload",
         runner_id,

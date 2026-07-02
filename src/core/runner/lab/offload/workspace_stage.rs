@@ -368,7 +368,11 @@ fn prepare_lab_offload_workspace_stage_inner(
     // to their synced remote locations, using every local->remote pair recorded
     // during workspace sync. Without this the remote sandbox cannot resolve the
     // workspace or runtime components a hand-authored cook config references.
-    let path_remaps = path_remaps_from_workspace_mapping(&workspace_mapping);
+    let path_remaps = path_remaps_from_workspace_mapping(
+        &workspace_mapping,
+        Some(source_path),
+        Some(&remote_cwd),
+    );
     preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
     preflight_provider_config_paths_materialized_in_args(&offload_args, &path_remaps)?;
     let remapped_args = rig_materialization::remap_rig_default_component_to_primary_snapshot(
@@ -411,7 +415,11 @@ fn prepare_lab_offload_workspace_stage_inner(
                 .build(),
         );
     }
-    let path_remaps = path_remaps_from_workspace_mapping(&workspace_mapping);
+    let path_remaps = path_remaps_from_workspace_mapping(
+        &workspace_mapping,
+        Some(source_path),
+        Some(&remote_cwd),
+    );
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
     let (remapped_args, agent_task_run_id) =
@@ -532,16 +540,31 @@ pub(crate) fn validate_lab_source_snapshot_handoff(
     ))
 }
 
-fn path_remaps_from_workspace_mapping(
+pub(crate) fn path_remaps_from_workspace_mapping(
     workspace_mapping: &[LabWorkspaceMappingEntry],
+    primary_source_path: Option<&Path>,
+    primary_remote_path: Option<&str>,
 ) -> Vec<LabPathRemap> {
-    workspace_mapping
+    let mut remaps = workspace_mapping
         .iter()
         .map(|entry| LabPathRemap {
             local: entry.local_path().to_string(),
             remote: entry.remote_path().to_string(),
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if let (Some(source_path), Some(remote_path)) = (primary_source_path, primary_remote_path) {
+        let source_path = source_path.display().to_string();
+        if !source_path.trim().is_empty() && !remaps.iter().any(|remap| remap.local == source_path)
+        {
+            remaps.push(LabPathRemap {
+                local: source_path,
+                remote: remote_path.to_string(),
+            });
+        }
+    }
+
+    remaps
 }
 
 fn rewrite_lab_offload_remote_command_args(
@@ -635,5 +658,111 @@ mod tests {
                 "bench_env.CONFIG_DIR=/runner/workspaces/toolkit/config/matrix".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn final_remote_command_remaps_requested_primary_source_path_alias_in_passthrough_args() {
+        let requested_source = Path::new(
+            "/Users/chubes/Developer/static-site-importer@feat-imported-block-validity-gate",
+        );
+        let canonical_synced_source = "/private/var/folders/source-snapshot/static-site-importer";
+        let remote_workspace = "/home/chubes/Developer/_lab_workspaces/static-site-importer";
+        let synced = test_synced_workspace(canonical_synced_source, remote_workspace);
+        let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
+        let path_remaps = path_remaps_from_workspace_mapping(
+            &workspace_mapping,
+            Some(requested_source),
+            Some(remote_workspace),
+        );
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "static-site-importer".to_string(),
+            "--path".to_string(),
+            requested_source.display().to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--lab-only".to_string(),
+            "--rig".to_string(),
+            "static-site-importer-fixture-matrix".to_string(),
+            "--".to_string(),
+            "--fixture-root".to_string(),
+            "/Users/chubes/Developer/blocks-engine@fixtures-static-import-corpus/fixtures/websites/2-onepager-coffee".to_string(),
+            "--max-depth".to_string(),
+            "0".to_string(),
+            "--static-site-importer-path".to_string(),
+            requested_source.display().to_string(),
+            "--batch-size".to_string(),
+            "1".to_string(),
+            "--run".to_string(),
+        ];
+
+        let command =
+            rewrite_lab_offload_remote_command_args(&args, remote_workspace, &path_remaps, None);
+
+        assert_eq!(
+            command,
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "static-site-importer".to_string(),
+                "--path".to_string(),
+                remote_workspace.to_string(),
+                "--rig".to_string(),
+                "static-site-importer-fixture-matrix".to_string(),
+                "--".to_string(),
+                "--fixture-root".to_string(),
+                "/Users/chubes/Developer/blocks-engine@fixtures-static-import-corpus/fixtures/websites/2-onepager-coffee".to_string(),
+                "--max-depth".to_string(),
+                "0".to_string(),
+                "--static-site-importer-path".to_string(),
+                remote_workspace.to_string(),
+                "--batch-size".to_string(),
+                "1".to_string(),
+                "--run".to_string(),
+            ]
+        );
+        assert!(!command
+            .iter()
+            .any(|arg| arg == &requested_source.display().to_string()));
+    }
+
+    fn test_synced_workspace(local_path: &str, remote_path: &str) -> RunnerWorkspaceSyncOutput {
+        RunnerWorkspaceSyncOutput {
+            variant: "workspace_sync",
+            command: "runner.workspace.sync",
+            runner_id: "lab".to_string(),
+            local_path: local_path.to_string(),
+            remote_path: remote_path.to_string(),
+            current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
+                local_path: local_path.to_string(),
+                remote_path: remote_path.to_string(),
+                sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+                materialized: true,
+                source_commit: None,
+                source_ref: None,
+                source_dirty: None,
+                synthetic_checkout_commit: None,
+            },
+            workspace_lease: crate::core::runner::RunnerWorkspaceLease {
+                runner_id: "lab".to_string(),
+                local_path: local_path.to_string(),
+                remote_path: remote_path.to_string(),
+                sync_mode: "snapshot".to_string(),
+                materialized: true,
+                lifecycle_owner: crate::core::runner::RunnerLifecycleOwner::Controller,
+                source_commit: None,
+                source_ref: None,
+                source_dirty: None,
+            },
+            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            snapshot_identity: "snapshot:primary".to_string(),
+            counts: crate::core::runner::ByteFileCounts::default(),
+            excludes: Vec::new(),
+            includes: Vec::new(),
+            workspace_cleanliness: "snapshot_unique_workspace".to_string(),
+            validation_dependencies: Vec::new(),
+        }
     }
 }
