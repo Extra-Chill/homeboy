@@ -255,6 +255,7 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
         component,
         None,
         &[],
+        &[],
         false,
         false,
         None,

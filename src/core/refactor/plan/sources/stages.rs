@@ -568,6 +568,7 @@ pub(super) fn run_test_stage(
             component,
             None,
             settings,
+            &[],
             options.skip_lint,
             false,
             None,

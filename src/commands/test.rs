@@ -227,6 +227,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             component_id: ctx.component_id.clone(),
             path_override: args.comp.path.clone(),
             settings: ctx.resolved_settings().string_lossy_overrides(),
+            settings_json: ctx.resolved_settings().json_overrides(),
             skip_lint: args.skip_lint,
             coverage: args.coverage,
             coverage_min: args.coverage_min,
