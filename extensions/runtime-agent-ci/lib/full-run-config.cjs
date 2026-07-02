@@ -54,6 +54,9 @@ function buildConfig(env) {
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || '', true);
   const validationDependencies = validationPaths(workspace, providerPlugin, env.PROVIDER || '');
   const providerSecretEnvMapping = providerPlugin.provider_secret_env || {};
+  const declaredSecretEnv = normalizeSecretEnvInput(env.SECRET_ENV || '');
+  const inputSecretEnvPlan = parseJsonInput('secret_env_plan', env.SECRET_ENV_PLAN || '{}', 'object', {});
+  const inputSecretEnvMap = normalizeSecretEnvMap(parseJsonInput('secret_env_map', env.SECRET_ENV_MAP || '{}', 'object', {}));
   const providerBenchEnvNames = providerBenchEnvFromManifest(runtime, env.PROVIDER || '', env);
   // Provider-canonical secret env names advertised by the runtime manifest (e.g.
   // OPENAI_API_KEY for the openai provider). Captured before folding in the
@@ -75,6 +78,7 @@ function buildConfig(env) {
     githubRepositoryTokenEnv,
     providerCanonicalSecretEnvNames,
     providerCredentialSourceEnvNames,
+    secretEnvMap: inputSecretEnvMap,
   });
 
   const runtimeTask = runtimeTaskFromEnv(env);
@@ -129,6 +133,9 @@ function buildConfig(env) {
   });
 
   const secretEnv = uniqueStrings([
+    ...normalizeStringArray(inputSecretEnvPlan.secret_env_names),
+    ...secretEnvNamesFromRequirements(inputSecretEnvPlan.requirements),
+    ...declaredSecretEnv,
     ...normalizeStringArray(runtimeConfig.secret_env),
     githubRepositoryTokenEnv,
     githubTokenEnv,
@@ -182,7 +189,9 @@ function buildConfig(env) {
       runtimeEnv,
       providerSecretEnvMapping,
       secretEnvFallbacks,
+      basePlan: inputSecretEnvPlan,
     }),
+    ...(Object.keys(inputSecretEnvMap).length > 0 ? { secret_env_map: inputSecretEnvMap } : {}),
     // Fill a target secret env from a fallback source before the sandbox
     // preflight runs: the provider's canonical key (e.g. OPENAI_API_KEY) from
     // the caller's generic credential secret (PROVIDER_SECRET_n), and the
@@ -341,6 +350,48 @@ function normalizeStringArray(value) {
     return [value];
   }
   return Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry.length > 0) : [];
+}
+
+function normalizeSecretEnvInput(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return [];
+  }
+  const trimmed = value.trim();
+  const entries = trimmed.startsWith('[') ? JSON.parse(trimmed) : splitCsv(trimmed);
+  if (!Array.isArray(entries)) {
+    throw new Error('secret_env must be a JSON array or comma-separated list');
+  }
+  for (const entry of entries) {
+    validateEnvName(entry, 'secret_env');
+  }
+  return entries;
+}
+
+function normalizeSecretEnvMap(map) {
+  const normalized = {};
+  for (const [target, sources] of Object.entries(map || {})) {
+    validateEnvName(target, 'secret_env_map target');
+    const sourceList = Array.isArray(sources) ? sources : [sources];
+    if (sourceList.length === 0) {
+      throw new Error(`secret_env_map.${target} requires at least one source env name`);
+    }
+    normalized[target] = sourceList.map((source) => validateEnvName(source, `secret_env_map.${target}`));
+  }
+  return normalized;
+}
+
+function secretEnvNamesFromRequirements(requirements) {
+  if (!Array.isArray(requirements)) {
+    return [];
+  }
+  return requirements.map((entry) => entry?.name).filter((name) => typeof name === 'string' && name.length > 0);
+}
+
+function validateEnvName(name, label) {
+  if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(`${label} entries must be valid environment variable names`);
+  }
+  return name;
 }
 
 function uniqueStrings(values) {

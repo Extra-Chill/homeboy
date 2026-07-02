@@ -80,6 +80,22 @@ name: Runtime Agent Full Run (reusable)
         description: JSON object describing an optional provider plugin checkout and credential env mapping.
         type: string
         default: '{}'
+      secret_env:
+        description: JSON array or comma-separated canonical secret env names required by the runtime. Prefer this over numbered provider secret slots for new callers.
+        type: string
+        default: ''
+      secret_env_map:
+        description: JSON object mapping canonical target secret env names to fallback source env names. Values are env names only, never secret values.
+        type: string
+        default: '{}'
+      secret_env_plan:
+        description: JSON homeboy/secret-env-plan/v1 declaration merged into the generated runner config. Values are never serialized.
+        type: string
+        default: '{}'
+      materialize_secret_env_from_github_secrets:
+        description: Opt-in bridge that resolves secret_env_map sources from the GitHub secrets context before the runner starts. Prefer explicit, minimal caller secrets when enabling.
+        type: boolean
+        default: false
       model:
         type: string
         default: ''
@@ -318,14 +334,19 @@ name: Runtime Agent Full Run (reusable)
       HOMEBOY_APP_PRIVATE_KEY:
         required: false
       PROVIDER_SECRET_1:
+        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
         required: false
       PROVIDER_SECRET_2:
+        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
         required: false
       PROVIDER_SECRET_3:
+        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
         required: false
       PROVIDER_SECRET_4:
+        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
         required: false
       PROVIDER_SECRET_5:
+        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
         required: false
     outputs:
       job_status:
@@ -499,6 +520,9 @@ jobs:
           PROMPT: ${{ inputs.prompt }}
           PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
+          SECRET_ENV: ${{ inputs.secret_env }}
+          SECRET_ENV_MAP: ${{ inputs.secret_env_map }}
+          SECRET_ENV_PLAN: ${{ inputs.secret_env_plan }}
           RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
           RUNTIME: ${{ inputs.runtime }}
           BACKEND: ${{ inputs.backend }}
@@ -572,6 +596,7 @@ jobs:
           PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
           PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
           PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
+          HOMEBOY_GITHUB_SECRETS_JSON: ${{ inputs.materialize_secret_env_from_github_secrets && toJson(secrets) || '{}' }}
           HOMEBOY_RUNTIME_AGENT_RUN_DIR: ${{ runner.temp }}/runtime-agent-run
           # Stream raw subprocess stdout/stderr live to the job log so a hard
           # crash or timeout inside the runtime agent is visible even when no

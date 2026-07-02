@@ -93,6 +93,61 @@ assert.deepEqual(mappedSecretEnvPlan.env_name_mapping, {
   secret_env_fallbacks: ['PROVIDER_SECRET_1'],
 });
 
+const plannedSecretEnv = buildSecretEnvPlan({
+  secretEnv: ['OPENAI_API_KEY'],
+  basePlan: {
+    schema: SECRET_ENV_PLAN_SCHEMA,
+    public_env: { EXISTING_PUBLIC_MODE: 'on' },
+    secret_env_names: ['ANTHROPIC_API_KEY'],
+    requirements: [{ name: 'ANTHROPIC_API_KEY', required: false, source: 'runner' }],
+  },
+});
+validateSecretEnvPlan(plannedSecretEnv);
+assert.deepEqual(plannedSecretEnv.public_env, { EXISTING_PUBLIC_MODE: 'on' });
+assert.deepEqual(plannedSecretEnv.secret_env_names, ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+assert.deepEqual(plannedSecretEnv.requirements, [
+  { name: 'ANTHROPIC_API_KEY', required: false, source: 'runner' },
+  { name: 'OPENAI_API_KEY', required: true },
+]);
+
+const canonicalSecretTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-build-runner-config-secret-env-'));
+try {
+  const canonicalSecretConfig = buildConfig({
+    ...process.env,
+    GITHUB_WORKSPACE: canonicalSecretTmpRoot,
+    RUNNER_TEMP: canonicalSecretTmpRoot,
+    WORKLOAD_ID: 'canonical-secret-fixture',
+    TARGET_REPO: 'Extra-Chill/example',
+    PROFILE: 'runtime-agent-ci',
+    RUNTIME_PROFILES: '{}',
+    RUNTIME: 'local-shell',
+    SECRET_ENV: 'OPENAI_API_KEY',
+    SECRET_ENV_MAP: '{"OPENAI_API_KEY":"PROVIDER_SECRET_1"}',
+    SECRET_ENV_PLAN: JSON.stringify({
+      schema: SECRET_ENV_PLAN_SCHEMA,
+      secret_env_names: ['ANTHROPIC_API_KEY'],
+      requirements: [{ name: 'ANTHROPIC_API_KEY', required: false, source: 'runner' }],
+    }),
+  });
+  validateSecretEnvPlan(canonicalSecretConfig.secret_env_plan);
+  assert.deepEqual(canonicalSecretConfig.secret_env, [
+    'ANTHROPIC_API_KEY',
+    'GITHUB_TOKEN',
+    'HOMEBOY_GITHUB_APP_TOKEN',
+    'OPENAI_API_KEY',
+  ]);
+  assert.deepEqual(canonicalSecretConfig.secret_env_fallbacks.OPENAI_API_KEY, ['PROVIDER_SECRET_1']);
+  assert.deepEqual(canonicalSecretConfig.secret_env_map, { OPENAI_API_KEY: ['PROVIDER_SECRET_1'] });
+  assert.deepEqual(canonicalSecretConfig.secret_env_plan.requirements, [
+    { name: 'ANTHROPIC_API_KEY', required: false, source: 'runner' },
+    { name: 'GITHUB_TOKEN', required: true },
+    { name: 'HOMEBOY_GITHUB_APP_TOKEN', required: true },
+    { name: 'OPENAI_API_KEY', required: true },
+  ]);
+} finally {
+  fs.rmSync(canonicalSecretTmpRoot, { recursive: true, force: true });
+}
+
 assert.deepEqual(
   normalizeProviderPlugin('{"providerSecretEnv":{"token":"PROVIDER_TOKEN"}}', 'fixture', true).provider_secret_env,
   { token: 'PROVIDER_TOKEN' }

@@ -213,6 +213,9 @@ jobs:
 - `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to the selected runtime adapter.
 - `tool_profile` is the runtime-neutral tool policy input. The selected runtime adapter maps it into runtime-owned workflow fields. Deprecated compatibility alias: `tool_policy`.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. The generic workflow does not choose a provider plugin or secret for callers; provider dependencies and credential mappings are explicit caller inputs, and runtime manifests advertise provider-specific defaults/capabilities. Deprecated compatibility alias: `credentials`; generated config uses `provider_secret_env_mapping`.
+- `secret_env` declares canonical secret environment variable names required by the runtime. It accepts a JSON array or comma-separated list.
+- `secret_env_plan` accepts a `homeboy/secret-env-plan/v1` object and merges it into the generated runner config. The plan declares names and requirements only; secret values are never serialized.
+- `secret_env_map` maps canonical target env names to fallback source env names. Use it when a runner already exposes the source env name, such as a compatibility `PROVIDER_SECRET_n` slot. When `materialize_secret_env_from_github_secrets` is enabled, sources may also be GitHub secret names from the inherited secrets context. Values are names, not secret values.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - Bundle sources in `runtime_execution` are resolved relative to the consumer checkout unless the caller materializes external bundle sources through dependencies or validation checkouts.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`. Use it when the workflow needs app-token access to more than the target repository.
@@ -281,9 +284,10 @@ results copied into stable runner outputs.
 
 ## Provider plugin examples
 
-Provider plugins and credentials are explicit. Map each provider option to one
-of the generic provider secret env names, then pass that secret in the reusable
-workflow call:
+Provider plugins and credentials are explicit. New callers should declare
+canonical runtime secret names with `secret_env` or `secret_env_plan`. The
+reusable workflow can then forward those names through the Homeboy runner
+contract without serializing values:
 
 ```yaml
 jobs:
@@ -305,9 +309,39 @@ jobs:
           "path": ".",
           "register_function": "Example\\AiProvider\\register_provider",
           "provider_secret_env": {
-            "connectors_ai_example_api_key": "PROVIDER_SECRET_1"
+            "connectors_ai_example_api_key": "EXAMPLE_PROVIDER_API_KEY"
           }
         }
-    secrets:
-      PROVIDER_SECRET_1: ${{ secrets.EXAMPLE_PROVIDER_API_KEY }}
+      secret_env: '["EXAMPLE_PROVIDER_API_KEY"]'
+      secret_env_map: '{"EXAMPLE_PROVIDER_API_KEY":"EXAMPLE_PROVIDER_API_KEY"}'
+      materialize_secret_env_from_github_secrets: true
+    secrets: inherit
+```
+
+Enable `materialize_secret_env_from_github_secrets` only when the caller wants
+the reusable workflow to resolve `secret_env_map` sources from the GitHub secrets
+context. Prefer passing only the minimum required secrets to the workflow when
+the caller can avoid broad `secrets: inherit` access.
+
+`PROVIDER_SECRET_1` through `PROVIDER_SECRET_5` remain available for existing
+callers that cannot yet pass canonical names. Treat them as compatibility slots
+only. During migration, `secret_env_map` can fill a canonical env name from a
+numbered source while keeping the generated runner config canonical:
+
+```yaml
+with:
+  provider_plugin: |
+    {
+      "repo": "Example/example-ai-provider",
+      "ref": "main",
+      "path": ".",
+      "register_function": "Example\\AiProvider\\register_provider",
+      "provider_secret_env": {
+        "connectors_ai_example_api_key": "EXAMPLE_PROVIDER_API_KEY"
+      }
+    }
+  secret_env: '["EXAMPLE_PROVIDER_API_KEY"]'
+  secret_env_map: '{"EXAMPLE_PROVIDER_API_KEY":"PROVIDER_SECRET_1"}'
+secrets:
+  PROVIDER_SECRET_1: ${{ secrets.EXAMPLE_PROVIDER_API_KEY }}
 ```

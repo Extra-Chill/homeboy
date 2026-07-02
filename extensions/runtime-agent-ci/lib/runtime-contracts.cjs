@@ -21,12 +21,26 @@ const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
 
 // Local adapter seam for the secret materialization contract. Keep the emitted
 // shape stable until Homeboy core owns this schema and assembly.
-function buildSecretEnvPlan({ secretEnv = [], runtimeEnv = {}, providerSecretEnvMapping = {}, secretEnvFallbacks = {} } = {}) {
+function buildSecretEnvPlan({ secretEnv = [], runtimeEnv = {}, providerSecretEnvMapping = {}, secretEnvFallbacks = {}, basePlan = {} } = {}) {
+  const baseRequirements = Array.isArray(basePlan.requirements) ? basePlan.requirements.filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry)) : [];
+  const secretEnvNames = uniqueStrings([
+    ...normalizeStringArray(basePlan.secret_env_names),
+    ...baseRequirements.map((entry) => entry.name),
+    ...secretEnv,
+  ]);
+  const requirementNames = new Set(baseRequirements.map((entry) => entry.name).filter((name) => typeof name === 'string' && name.length > 0));
   return {
+    ...basePlan,
     schema: SECRET_ENV_PLAN_SCHEMA,
-    public_env: Object.fromEntries(Object.entries(runtimeEnv).filter(([, value]) => typeof value === 'string')),
-    secret_env_names: uniqueStrings(secretEnv),
-    requirements: uniqueStrings(secretEnv).map((name) => ({ name, required: true })),
+    public_env: {
+      ...(basePlan.public_env && typeof basePlan.public_env === 'object' && !Array.isArray(basePlan.public_env) ? basePlan.public_env : {}),
+      ...Object.fromEntries(Object.entries(runtimeEnv).filter(([, value]) => typeof value === 'string')),
+    },
+    secret_env_names: secretEnvNames,
+    requirements: [
+      ...baseRequirements,
+      ...secretEnvNames.filter((name) => !requirementNames.has(name)).map((name) => ({ name, required: true })),
+    ],
     env_name_mapping: Object.fromEntries(Object.entries({
       provider_secret_env: Object.values(providerSecretEnvMapping).filter((value) => typeof value === 'string' && value.length > 0),
       secret_env_fallbacks: Object.values(secretEnvFallbacks).flat().filter((value) => typeof value === 'string' && value.length > 0),
@@ -46,6 +60,7 @@ function buildSecretEnvFallbacks({
   githubRepositoryTokenEnv,
   providerCanonicalSecretEnvNames = [],
   providerCredentialSourceEnvNames = [],
+  secretEnvMap = {},
 } = {}) {
   const fallbacks = {};
   if (githubTokenEnv && githubRepositoryTokenEnv && githubTokenEnv !== githubRepositoryTokenEnv) {
@@ -59,7 +74,21 @@ function buildSecretEnvFallbacks({
       }
     }
   }
+  for (const [target, sources] of Object.entries(secretEnvMap || {})) {
+    const sourceList = Array.isArray(sources) ? sources : [sources];
+    const normalizedSources = sourceList.filter((name) => typeof name === 'string' && name.length > 0 && name !== target);
+    if (typeof target === 'string' && target.length > 0 && normalizedSources.length > 0) {
+      fallbacks[target] = uniqueStrings([...(fallbacks[target] || []), ...normalizedSources]);
+    }
+  }
   return fallbacks;
+}
+
+function normalizeStringArray(value) {
+  if (typeof value === 'string' && value.length > 0) {
+    return [value];
+  }
+  return Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry.length > 0) : [];
 }
 
 function uniqueStrings(values) {
