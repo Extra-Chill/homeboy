@@ -32,6 +32,10 @@ fn contract_constants_exports_homeboy_owned_contract_ids() {
         "homeboy/run-location-index/v1"
     );
     assert_eq!(
+        value["constants"]["host_mutation_lifecycle"]["schema_id"],
+        "homeboy/host-mutation-lifecycle/v1"
+    );
+    assert_eq!(
         value["constants"]["loop_contracts"]["controller_schema_id"],
         "homeboy/agent-task-loop-controller/v1"
     );

@@ -26,6 +26,7 @@ pub enum ContractConstants {
     Loop(LoopConstants),
     SecretEnvPlan(SecretEnvPlanConstants),
     ResourceLifecycleIndex(ResourceLifecycleIndexConstants),
+    HostMutationLifecycle(HostMutationLifecycleConstants),
     RunLocationIndex(RunLocationIndexConstants),
     ReviewerFacingRef(ReviewerFacingRefConstants),
 }
@@ -37,6 +38,7 @@ pub struct AllContractConstants {
     pub loop_contracts: LoopConstants,
     pub secret_env_plan: SecretEnvPlanConstants,
     pub resource_lifecycle_index: ResourceLifecycleIndexConstants,
+    pub host_mutation_lifecycle: HostMutationLifecycleConstants,
     pub run_location_index: RunLocationIndexConstants,
     pub reviewer_facing_ref: ReviewerFacingRefConstants,
 }
@@ -71,6 +73,11 @@ pub struct ResourceLifecycleIndexConstants {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HostMutationLifecycleConstants {
+    pub schema_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunLocationIndexConstants {
     pub schema_id: String,
 }
@@ -89,6 +96,7 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
             loop_contracts: loop_constants(),
             secret_env_plan: secret_env_plan_constants(),
             resource_lifecycle_index: resource_lifecycle_index_constants(),
+            host_mutation_lifecycle: host_mutation_lifecycle_constants(),
             run_location_index: run_location_index_constants(),
             reviewer_facing_ref: reviewer_facing_ref_constants(),
         }),
@@ -100,6 +108,9 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
         "secret-env-plan" => ContractConstants::SecretEnvPlan(secret_env_plan_constants()),
         "resource-lifecycle-index" => {
             ContractConstants::ResourceLifecycleIndex(resource_lifecycle_index_constants())
+        }
+        "host-mutation-lifecycle" => {
+            ContractConstants::HostMutationLifecycle(host_mutation_lifecycle_constants())
         }
         "run-location-index" => ContractConstants::RunLocationIndex(run_location_index_constants()),
         "reviewer-facing-ref" | "reviewer-ref" => {
@@ -146,6 +157,12 @@ pub fn secret_env_plan_constants() -> SecretEnvPlanConstants {
 pub fn resource_lifecycle_index_constants() -> ResourceLifecycleIndexConstants {
     ResourceLifecycleIndexConstants {
         schema_id: registry_schema_id("resource-lifecycle-index"),
+    }
+}
+
+pub fn host_mutation_lifecycle_constants() -> HostMutationLifecycleConstants {
+    HostMutationLifecycleConstants {
+        schema_id: registry_schema_id("host-mutation-lifecycle"),
     }
 }
 

@@ -88,6 +88,7 @@ pub mod fuzz;
 pub mod gate;
 pub mod gh_actions_cache;
 pub mod git;
+pub mod host_mutation_lifecycle;
 pub mod http_api;
 pub(crate) mod http_probe;
 pub mod http_request;
