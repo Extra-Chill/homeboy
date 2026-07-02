@@ -77,7 +77,11 @@ function buildSecretEnvPlan({ secretEnv = [], runtimeEnv = {}, providerSecretEnv
     }).filter(([, names]) => names.length > 0)),
     inheritance: {
       require_declaration: true,
-      allowed_env_names: ['HOMEBOY_AGENT_RUNTIME_SECRET_ENV'],
+      allowed_env_names: uniqueStrings([
+        'HOMEBOY_AGENT_RUNTIME_SECRET_ENV',
+        ...Object.keys(secretEnvFallbacks || {}),
+        ...Object.values(secretEnvFallbacks || {}).flat(),
+      ]),
     },
   };
 }

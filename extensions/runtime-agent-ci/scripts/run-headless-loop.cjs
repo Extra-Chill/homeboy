@@ -28,7 +28,6 @@ try {
   // the repository GITHUB_TOKEN when no app token is present. Forwarding still
   // happens through the secret-env-names-only boundary; only this process's env
   // is populated so the names resolve.
-  applySecretEnvMap(rawSpec.secret_env_map, parseGithubSecretsJson(process.env.HOMEBOY_GITHUB_SECRETS_JSON));
   applySecretEnvFallbacks(rawSpec.secret_env_fallbacks);
   const spec = materializeHeadlessProductionLoopSpec(rawSpec, {
     revolutions: args.revolutions || args.max_revolutions || process.env.HOMEBOY_HEADLESS_LOOP_REVOLUTIONS,
@@ -114,34 +113,4 @@ function applySecretEnvFallbacks(fallbacks) {
       }
     }
   }
-}
-
-function applySecretEnvMap(secretEnvMap, githubSecrets) {
-  if (!secretEnvMap || typeof secretEnvMap !== 'object' || Array.isArray(secretEnvMap)) {
-    return;
-  }
-  for (const [target, sources] of Object.entries(secretEnvMap)) {
-    if (typeof target !== 'string' || target === '' || process.env[target]) {
-      continue;
-    }
-    const sourceList = Array.isArray(sources) ? sources : [sources];
-    for (const source of sourceList) {
-      if (typeof source !== 'string' || source === '') {
-        continue;
-      }
-      const value = githubSecrets[source] || process.env[source];
-      if (typeof value === 'string' && value !== '') {
-        process.env[target] = value;
-        break;
-      }
-    }
-  }
-}
-
-function parseGithubSecretsJson(raw) {
-  if (typeof raw !== 'string' || raw.trim() === '') {
-    return {};
-  }
-  const parsed = JSON.parse(raw);
-  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
 }

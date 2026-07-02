@@ -77,7 +77,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: '{}'
       materialize_secret_env_from_github_secrets:
-        description: Opt-in bridge that resolves secret_env_map sources from the GitHub secrets context before the runner starts. Prefer explicit, minimal caller secrets when enabling.
+        description: Opt-in bridge that resolves only declared secret_env_map sources from the GitHub secrets context before the runner starts. Prefer explicit, minimal caller secrets when enabling.
         type: boolean
         default: false
       model:
@@ -528,12 +528,18 @@ jobs:
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
         run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/build-runner-config.cjs
 
+      - name: Materialize declared GitHub secret env
+        if: ${{ inputs.run_agent && inputs.materialize_secret_env_from_github_secrets }}
+        env:
+          CONFIG_FILE: ${{ steps.config.outputs.config_path }}
+          HOMEBOY_GITHUB_SECRETS_JSON: ${{ toJson(secrets) }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/auth.cjs materialize-secret-env
+
       - name: Run runtime agent
         if: ${{ inputs.run_agent }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HOMEBOY_GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          HOMEBOY_GITHUB_SECRETS_JSON: ${{ inputs.materialize_secret_env_from_github_secrets && toJson(secrets) || '{}' }}
           HOMEBOY_RUNTIME_AGENT_RUN_DIR: ${{ runner.temp }}/runtime-agent-run
           # Stream raw subprocess stdout/stderr live to the job log so a hard
           # crash or timeout inside the runtime agent is visible even when no

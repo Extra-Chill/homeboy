@@ -2,6 +2,8 @@
 'use strict';
 
 const { normalizeContextRepositories, requireRepo, splitCsv, writeGithubOutput } = require('./lib/common.cjs');
+const fs = require('node:fs');
+const { randomUUID } = require('node:crypto');
 
 function main() {
   const command = process.argv[2];
@@ -16,6 +18,10 @@ function main() {
   }
   if (command === 'report-mode') {
     reportMode(process.env);
+    return;
+  }
+  if (command === 'materialize-secret-env') {
+    materializeSecretEnv(process.env);
     return;
   }
   throw new Error(`Unknown auth command: ${command || ''}`);
@@ -73,6 +79,72 @@ function reportMode(env) {
       ].join('\n')
     );
   }
+}
+
+function materializeSecretEnv(env) {
+  const configPath = requireValue(env.CONFIG_FILE, 'CONFIG_FILE');
+  const githubEnvPath = requireValue(env.GITHUB_ENV, 'GITHUB_ENV');
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const secretEnvMap = config.secret_env_map;
+  if (!secretEnvMap || typeof secretEnvMap !== 'object' || Array.isArray(secretEnvMap) || Object.keys(secretEnvMap).length === 0) {
+    throw new Error('materialize_secret_env_from_github_secrets requires a non-empty secret_env_map declaration.');
+  }
+
+  const githubSecrets = parseGithubSecretsJson(env.HOMEBOY_GITHUB_SECRETS_JSON || '{}');
+  const sourceNames = secretEnvMapSourceNames(secretEnvMap);
+  if (sourceNames.length === 0) {
+    throw new Error('secret_env_map must declare at least one source env name.');
+  }
+
+  const materializedNames = [];
+  const lines = [];
+  for (const sourceName of sourceNames) {
+    const value = githubSecrets[sourceName];
+    if (typeof value !== 'string' || value === '') {
+      continue;
+    }
+    const delimiter = `HOMEBOY_SECRET_${randomUUID().replace(/-/g, '_')}`;
+    materializedNames.push(sourceName);
+    lines.push(`${sourceName}<<${delimiter}`, value, delimiter);
+  }
+  if (lines.length > 0) {
+    fs.appendFileSync(githubEnvPath, `${lines.join('\n')}\n`);
+  }
+  process.stdout.write(`Materialized ${materializedNames.length} declared GitHub secret env source(s): ${materializedNames.join(', ') || 'none'}\n`);
+}
+
+function secretEnvMapSourceNames(secretEnvMap) {
+  const names = new Set();
+  for (const [target, sources] of Object.entries(secretEnvMap)) {
+    validateEnvName(target, 'secret_env_map target');
+    const sourceList = Array.isArray(sources) ? sources : [sources];
+    for (const source of sourceList) {
+      names.add(validateEnvName(source, `secret_env_map.${target}`));
+    }
+  }
+  return Array.from(names).sort();
+}
+
+function parseGithubSecretsJson(raw) {
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('HOMEBOY_GITHUB_SECRETS_JSON must be a JSON object.');
+  }
+  return parsed;
+}
+
+function requireValue(value, name) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${name} is required.`);
+  }
+  return value;
+}
+
+function validateEnvName(value, label) {
+  if (typeof value !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    throw new Error(`${label} must be a valid env name.`);
+  }
+  return value;
 }
 
 try {
