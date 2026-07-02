@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.5] - 2026-07-02
+
+### Changed
+- Add runner resource guardrails
+- Accept mapped extension settings in runner parity
+- Recover stale runner job output
+- Classify runner daemon polling disconnects
+- Keep refreshed runner Homeboy on PATH
+- Materialize extension sources for Lab refresh
+- Make worktree artifact cleanup explicit
+
+### Fixed
+- Fix Lab runner-hosted bench routing
+- Fix bench rig extension selection
+
 ## [0.280.4] - 2026-07-02
 
 ### Changed
