@@ -577,8 +577,9 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         }
         ["worktree", "cleanup"] => {
             metadata.mutates = true;
+            metadata.dry_run_flag = Some("--dry-run");
             metadata.output_notes =
-                "removes cleanup-eligible task worktrees and rebuildable artifacts";
+                "removes cleanup-eligible task worktrees and rebuildable artifacts; pass --dry-run to report candidates without removing";
             metadata.dangerous_flags = vec!["--force"];
         }
         ["tunnel", "service", "expose"]
