@@ -109,6 +109,20 @@ enum ExtensionCommand {
         /// Local path to extension directory
         source: String,
     },
+    /// Sync local extension source to a runner, refresh it there, then run a command
+    DevRun {
+        /// Extension ID
+        extension_id: String,
+        /// Local extension source directory to sync to the runner
+        #[arg(long)]
+        source: String,
+        /// Runner ID
+        #[arg(long)]
+        runner: String,
+        /// Command and arguments to execute on the runner after refresh
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
     /// Install every extension configured by a component
     InstallForComponent {
         /// Git URL or local path to extension repository/directory
@@ -216,6 +230,12 @@ pub fn run(
             extension_id,
             source,
         } => relink_extension(&extension_id, &source),
+        ExtensionCommand::DevRun {
+            extension_id,
+            source,
+            runner,
+            command,
+        } => dev_run_extension(&extension_id, &source, &runner, &command),
         ExtensionCommand::InstallForComponent { source, path } => {
             install_for_component(&source, path.as_deref())
         }
@@ -380,6 +400,8 @@ pub enum ExtensionOutput {
         #[serde(skip_serializing_if = "Option::is_none", flatten)]
         output: Option<homeboy::core::engine::command::CapturedOutput>,
     },
+    #[serde(rename = "extension.dev_run")]
+    DevRun(homeboy::core::extension::ExtensionDevRunOutput),
     #[serde(rename = "extension.set")]
     SetBatch { batch: homeboy::core::BatchResult },
 }
@@ -829,6 +851,18 @@ fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutp
         },
         0,
     ))
+}
+
+fn dev_run_extension(
+    extension_id: &str,
+    source: &str,
+    runner: &str,
+    command: &[String],
+) -> CmdResult<ExtensionOutput> {
+    let (output, exit_code) =
+        homeboy::core::extension::run_extension_dev_run(extension_id, runner, source, command)?;
+
+    Ok((ExtensionOutput::DevRun(output), exit_code))
 }
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {

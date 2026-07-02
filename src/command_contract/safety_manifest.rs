@@ -256,6 +256,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["extension", "setup"]
         | ["extension", "refresh"]
         | ["extension", "relink"]
+        | ["extension", "dev-run"]
         | ["extension", "install-for-component"]
         | ["extension", "set"] => {
             metadata.mutates = true;

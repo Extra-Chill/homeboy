@@ -95,6 +95,19 @@ homeboy extension relink <extension_id> <source>
 
 Repoints an existing symlinked extension to a new local source path. This command only repairs linked extensions; use `install --replace` for copied or cloned installs.
 
+### `dev-run`
+
+```sh
+homeboy extension dev-run <extension_id> --source <path> --runner <runner_id> -- <command...>
+```
+
+Rapid iteration flow for extension authors. Homeboy snapshots the local extension source to the runner, refreshes the runner-side extension install from that synced path, then executes the provided command on the runner.
+
+- Uses runner workspace sync safety for source materialization.
+- Runs `homeboy extension refresh <remote_source> --id <extension_id>` on the runner before the requested command.
+- Sets `HOMEBOY_EXTENSION_DEV_RUN_PROVENANCE_JSON` for the refresh and requested command.
+- Leaves the runner extension refreshed/linked to the synced source path and reports the previous probe plus persistent state in JSON output.
+
 ### `update`
 
 ```sh

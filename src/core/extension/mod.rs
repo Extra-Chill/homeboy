@@ -3,6 +3,7 @@ pub mod build;
 mod capability;
 mod compiler_warning_contract;
 pub mod component_script;
+mod dev_run;
 mod env_provider;
 mod execution;
 mod fingerprint;
@@ -46,6 +47,10 @@ pub(crate) use capability::{extension_guidance_hints, stderr_tail};
 pub(crate) use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
+};
+pub use dev_run::{
+    plan_extension_dev_run, run_extension_dev_run, ExtensionDevRunOutput, ExtensionDevRunPlan,
+    ExtensionDevRunProvenance, RunnerExtensionStateProbe,
 };
 pub(crate) use execution::{build_settings_json_from_manifest, execute_action};
 pub use execution::{
