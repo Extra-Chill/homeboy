@@ -157,8 +157,10 @@ runtime value is not accepted by the generic runtime registry; use `wp-codebox`.
 Do not add new callers or examples that depend on those aliases.
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
-agent runs. Former domain-specific reusable workflow wrappers have been removed
-after active default-branch consumers migrated to the generic workflow.
+agent runs when the caller already speaks the generic runtime contract. WP
+Codebox callers should use `.github/workflows/wp-codebox-runtime-agent-full-run.yml`,
+which maps WordPress/WP Codebox workflow vocabulary onto the generic shell while
+preserving existing direct generic workflow inputs for migrated callers.
 See [`.github/workflows/README.md`](.github/workflows/README.md) for workflow
 inputs and integration examples, and
 [`docs/wp-codebox-runtime-workflow.md`](docs/wp-codebox-runtime-workflow.md) for

@@ -49,8 +49,8 @@ evidence.
 runtime-backed agent run. It owns the GitHub Actions orchestration that callers
 should not repeat: dependency materialization, provider/runtime setup, runner
 workspace lifecycle, transcript/replay artifact upload, PR comments,
-output/evidence projections, `callback_data_json`, before/after workload hooks,
-extra mounts, and runtime config defines. The runtime execution primitive is
+output/evidence projections, `callback_data_json`, selected-runtime setup, and
+host-side verification. The runtime execution primitive is
 `runtime-agent-ci/scripts/run-headless-loop.cjs`, which materializes task
 requests, runs the selected runtime provider, validates gates, and emits durable
 JSON results/events outside GitHub Actions.
@@ -58,8 +58,10 @@ JSON results/events outside GitHub Actions.
 The generic workflow requires callers to provide their domain runtime profile,
 runtime component dependencies, required abilities, and runtime task/execution
 descriptor. Homeboy Extensions assumes the runtime provider contract only.
-Domain ability names and component stacks are caller inputs. WordPress/WP Codebox
-callers should keep compatibility translation in a caller wrapper; see
+Domain ability names and component stacks are caller inputs. WP Codebox callers
+should prefer `.github/workflows/wp-codebox-runtime-agent-full-run.yml`, which
+keeps WordPress-specific defaults and input names at the runtime adapter boundary;
+see
 [`docs/wp-codebox-runtime-workflow.md`](../../docs/wp-codebox-runtime-workflow.md).
 
 ```yaml
@@ -89,11 +91,26 @@ jobs:
     secrets: inherit
 ```
 
+### Runtime-Specific Wrappers
+
+Runtime-specific reusable workflows may wrap `runtime-agent-full-run.yml` when a
+runtime has product vocabulary, compatibility aliases, or setup defaults that
+would make the generic workflow narrative less clear. The wrapper should pin the
+runtime id, translate product-specific input names, and then call the generic
+workflow with canonical inputs.
+
+`wp-codebox-runtime-agent-full-run.yml` is the WP Codebox wrapper. It sets
+`runtime: wp-codebox`, maps `wordpress_version` to `runtime_wordpress_version`,
+maps `wp_config_defines` to `extra_wp_config_defines`, and maps
+`wp_runtime_mounts` / `wp_runtime_overlays` to the selected-runtime mount and
+overlay inputs. Existing direct callers of `runtime-agent-full-run.yml` remain
+supported for compatibility.
+
 ### Migrating Old Wrapper Callers
 
 Removed domain-specific wrappers should migrate to `runtime-agent-full-run.yml`
 directly and provide their runtime stack as explicit generic inputs.
-WordPress runner-workspace publication wrappers have also been removed; callers
+Legacy runner-workspace publication wrappers have also been removed; callers
 that need host-runner publication should invoke
 `.github/scripts/runtime-agent-full-run/run-host-runner-lifecycle.cjs` or
 `.github/scripts/runtime-agent-full-run/update-runner-workspace-pr.cjs` through
@@ -103,7 +120,7 @@ Use this mapping when updating old wrapper workflow bodies:
 
 | Old wrapper concept | Generic `runtime-agent-full-run.yml` input |
 | --- | --- |
-| Runtime selection | `runtime`, `runtime_ref`; `runtime_wordpress_version` only applies to WordPress-capable runtimes. Deprecated compatibility alias: `runtime_provider`. |
+| Runtime selection | `runtime`, `runtime_ref`. Deprecated compatibility alias: `runtime_provider`. |
 | Flow identity | `workload_id`, `workload_label`, `callback_data` |
 | Bundle execution | `runtime_execution: {"kind":"bundle","source":"..."}` |
 | Direct ability execution | `runtime_task` or `ability_request` / `ability_input` |
@@ -111,7 +128,7 @@ Use this mapping when updating old wrapper workflow bodies:
 | Required abilities | `required_abilities` |
 | Output projection | `runtime_output_projections`, `evidence_projections` |
 | Artifacts | `expected_artifacts`, `artifact_declarations`, `artifact_export_config` |
-| WordPress setup | `extra_wp_config_defines`, `runtime_mounts`, `runtime_overlays`, `workload_run_before`, `workload_run_after` |
+| Selected-runtime setup | `runtime_mounts`, `runtime_overlays`, `runtime_config`, `workload_run_before`, `workload_run_after` |
 | Runner workspace | `runner_workspace`, `verification_commands`, `drift_checks`, `writable_paths`, `workspace_contract_checks` |
 | GitHub auth | `app_token_repos`, `require_homeboy_app_token`, `allowed_repos` |
 
@@ -128,9 +145,7 @@ the `homeboy-render-runtime-workflow-inputs` CLI, or
 `.github/actions/render-runtime-workflow-inputs`. These surfaces accept
 `runtime`, `runtime_profile` as either an id or JSON object,
 `runtime_profiles`, `tool_profile`, and runtime mount arrays, then emit
-selected-runtime workflow input JSON with a canonical `profile` output without
-exposing WP Codebox ability names, CLI paths, or schemas to the downstream
-workflow.
+selected-runtime workflow input JSON with a canonical `profile` output.
 
 ## GitHub auth modes
 
@@ -148,56 +163,6 @@ The workflow keeps two GitHub authentication modes:
 The run summary includes the selected auth mode, target repository, token scope,
 and whether the caller required a Homeboy App token. Tokens are never printed.
 
-## WP Codebox Runtime Bundle Examples
-
-WP Codebox-backed bundles are documented in
-[`docs/wp-codebox-runtime-workflow.md`](../../docs/wp-codebox-runtime-workflow.md). Keep WordPress sandbox configuration,
-pre-run bootstrap work, and WP Codebox-specific artifact schemas in a caller
-wrapper or caller workflow, then invoke this generic workflow with canonical
-runtime inputs.
-
-```yaml
-jobs:
-  run-example-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
-    with:
-      runtime: wp-codebox
-      runtime_ref: main
-      profile: example-agent-ci
-      runtime_profiles: >-
-        {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-task","runtime_bundle_ability":"example/run-agent-bundle","capabilities":["ability_execution","agent_bundle_execution"],"runtime_execution_contracts":{"bundle":{"ability_field":"runtime_bundle_ability","required_capabilities":["agent_bundle_execution"]}},"ability_requirements":["example/run-agent-bundle"]}}
-      runtime_dependencies: '["Example/runtime-plugin@main"]'
-      workload_id: example-agent-flow
-      workload_label: Run example agent
-      target_repo: Example/project
-      prompt: ${{ inputs.prompt }}
-      runtime_execution: '{"kind":"bundle","source":"bundles/example-agent"}'
-      validation_dependencies: Example/project@main
-      runtime_wordpress_version: beta
-      max_turns: 16
-      step_budget: 20
-      time_budget_ms: 900000
-      extra_wp_config_defines: |
-        {
-          "EXAMPLE_RUNTIME_MODE": "primary"
-        }
-      runtime_mounts: |
-        [
-          "${{ github.workspace }}/.ci/example-runtime-plugin:/wordpress/wp-content/plugins/example-runtime-plugin:readonly"
-        ]
-      workload_run_before: |
-        [
-          { "type": "php", "file": "world-creator-bootstrap.php" }
-        ]
-      runtime_config: '{"daily_memory_enabled":true}'
-      required_abilities: |
-        ["example/create-artifact", "example/publish-result"]
-      success_requires_pr: true
-      runtime_output_projections: '{"example_pr_url":"metadata.engine_data.example.pr_url"}'
-      transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
-    secrets: inherit
-```
-
 ## Inputs worth calling out
 
 - Agent CI runs through the selected `runtime`. Empty runtime input selects `local-shell`. Deprecated compatibility aliases remain available only for existing callers: `runtime_provider` and `backend` map to `runtime`. The legacy `codebox` value is not a generic runtime id; use `wp-codebox`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
@@ -208,8 +173,7 @@ jobs:
 - `ability_request` and `ability_input` are a shorthand for direct ability execution. `ability_input` is merged into `ability_request.input`.
 - `runtime_output_projections` maps named outputs to dotted paths in the provider runtime result.
 - Generic `runtime-agent-full-run.yml` callers can use `runtime_execution` for ability, bundle, or workflow descriptors and pass `runtime_output_projections` / `evidence_projections` through to the selected runtime config. Bundle and workflow descriptors derive the provider operation from the selected runtime profile's `runtime_execution_contracts`, so callers do not need to provide `runtime_task.ability` for generic package runs.
-- `component_contracts` forwards explicit runtime component/plugin contracts to the selected runtime adapter. WP Codebox maps them through its `wp-codebox/runtime-profile/v1` payload.
-- WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, tool profiles, and declarative runtime requirements through the generic runtime workflow input renderer. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
+- `component_contracts` forwards explicit runtime component/plugin contracts to the selected runtime adapter.
 - `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to the selected runtime adapter.
 - `tool_profile` is the runtime-neutral tool policy input. The selected runtime adapter maps it into runtime-owned workflow fields. Deprecated compatibility alias: `tool_policy`.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. The generic workflow does not choose a provider plugin or secret for callers; provider dependencies and credential mappings are explicit caller inputs, and runtime manifests advertise provider-specific defaults/capabilities. Deprecated compatibility alias: `credentials`; generated config uses `provider_secret_env_mapping`.
@@ -224,13 +188,12 @@ jobs:
 - `engine_key` and `tool_results_key` control where built-in GitHub tool captures are written in `metadata.engine_data`.
 - `dry_run` is intended for workflow smoke tests only; production consumers should leave it `false`.
 - `transcript_artifact_name` controls artifact upload. An empty value skips upload.
-- `extra_wp_config_defines` must be a JSON object and is merged into the runner config `wp_config_defines`.
 - `runtime_mounts` adds selected-runtime mounts. It must be a JSON array.
-- `runtime_overlays` forwards runtime overlay entries to the Codebox runtime profile payload. It must be a JSON array; WP Codebox owns field-level overlay schema validation.
+- `runtime_overlays` forwards runtime overlay entries to the selected runtime adapter. It must be a JSON array; the runtime owns field-level overlay schema validation.
 - `workload_run_before`, `workload_run_after`, and `required_abilities` must be JSON arrays.
 - `proof_profile` controls controller-loop proof evidence. `artifact_only` is the generic default and does not require preview or PR/publication evidence, `cook_to_pr` requires durable preview plus pull-request evidence, and `none` declares no extra proof requirements. Explicit `controller_loop_proof` / `controller_loop_proof_policy` config still overrides profile fields.
-- `workload_run_after` runs post-agent verifier hooks in the same WordPress scenario, so consumers can assert the agent left WordPress in a valid state.
-- `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
+- `workload_run_after` runs post-agent verifier hooks through the selected runtime scenario.
+- `ability_tools` adds ability-backed tools to the agent loop. It must be a JSON array.
 - `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. Deprecated compatibility alias: `tool_recorders`, only for existing WP Codebox callers that still need forced-parameter behavior.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
 - `runner_workspace` provisions a selected-runtime runner workspace before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner publishes captured workspace changes through the selected runtime after completion.
@@ -242,14 +205,14 @@ jobs:
 
 Consumers can keep an agent bundle in one repository while
 running it against another repository. The reusable workflow handles the bundle
-checkout and passes tool recorder config to the WordPress runner.
+checkout and passes projection config to the selected runtime.
 
 ```yaml
 jobs:
   run-external-agent:
     uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      runtime: wp-codebox
+      runtime: local-shell
       runtime_ref: main
       profile: example-agent-ci
       runtime_profiles: >-
@@ -258,7 +221,7 @@ jobs:
       runtime_execution: '{"kind":"bundle","source":".ci/example-agent/bundles/example-agent"}'
       workload_id: example-agent-flow
       workload_label: Run example agent runtime bundle
-      target_repo: Automattic/agents-api
+      target_repo: ExampleOrg/target-repo
       validation_dependencies: ExampleOrg/example-agent@main
       app_token_repos: ExampleOrg/target-repo,ExampleOrg/example-agent
       require_homeboy_app_token: true
@@ -294,7 +257,7 @@ jobs:
   run-agent:
     uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      runtime: wp-codebox
+      runtime: local-shell
       profile: example-agent
       runtime_profiles: >-
         {"example-agent":{"id":"example-agent","runtime_task_ability":"example/run-task","ability_requirements":["example/run-task"]}}
@@ -307,7 +270,7 @@ jobs:
           "repo": "Example/example-ai-provider",
           "ref": "main",
           "path": ".",
-          "register_function": "Example\\AiProvider\\register_provider",
+          "register_function": "registerProvider",
           "provider_secret_env": {
             "connectors_ai_example_api_key": "EXAMPLE_PROVIDER_API_KEY"
           }

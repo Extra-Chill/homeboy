@@ -1,18 +1,23 @@
 # WP Codebox runtime workflow migration
 
-`runtime-agent-full-run.yml` is the runtime-neutral GitHub Actions shell. New
-WordPress/WP Codebox callers should keep WP-specific setup in their caller
-workflow or a local wrapper job, then invoke the generic shell with
-`runtime: wp-codebox` and canonical input names.
+`runtime-agent-full-run.yml` is the runtime-neutral GitHub Actions shell.
+`wp-codebox-runtime-agent-full-run.yml` is the WP Codebox wrapper over that
+shell. New WordPress/WP Codebox callers should use the wrapper so WordPress
+version selection, WP config defines, sandbox mounts, runtime overlays, and
+Codebox artifact declaration vocabulary stay at the WP Codebox adapter boundary.
+
+Existing callers that invoke `runtime-agent-full-run.yml` directly with
+`runtime: wp-codebox` remain supported. Treat that path as compatibility for
+migrated consumers or advanced callers that already compose generic runtime
+inputs themselves.
 
 ## Canonical call shape
 
 ```yaml
 jobs:
   run-wp-codebox-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/wp-codebox-runtime-agent-full-run.yml@v4
     with:
-      runtime: wp-codebox
       runtime_ref: main
       profile: example-agent-ci
       runtime_profiles: >-
@@ -21,14 +26,33 @@ jobs:
       workload_id: example-agent-flow
       target_repo: Example/project
       runtime_execution: '{"kind":"bundle","source":"bundles/example-agent"}'
-      runtime_wordpress_version: beta
-      extra_wp_config_defines: '{"EXAMPLE_RUNTIME_MODE":"primary"}'
-      runtime_mounts: '["${{ github.workspace }}/.ci/example-runtime-plugin:/wordpress/wp-content/plugins/example-runtime-plugin:readonly"]'
+      wordpress_version: beta
+      wp_config_defines: '{"EXAMPLE_RUNTIME_MODE":"primary"}'
+      wp_runtime_mounts: '["${{ github.workspace }}/.ci/example-runtime-plugin:/wordpress/wp-content/plugins/example-runtime-plugin:readonly"]'
       required_abilities: '["example/run-agent-bundle"]'
       runtime_output_projections: '{"example_pr_url":"metadata.engine_data.example.pr_url"}'
       transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
     secrets: inherit
 ```
+
+## Wrapper input mapping
+
+The wrapper pins `runtime: wp-codebox` and forwards the rest of the workflow to
+the generic shell. Its WP-specific names map to generic compatibility inputs as
+follows:
+
+| WP Codebox wrapper input | Generic workflow input |
+| --- | --- |
+| `wordpress_version` | `runtime_wordpress_version` |
+| `wp_config_defines` | `extra_wp_config_defines` |
+| `wp_runtime_mounts` | `runtime_mounts` |
+| `wp_runtime_overlays` | `runtime_overlays` |
+
+The wrapper keeps selected-runtime setup explicit without making the generic
+workflow docs carry WP Codebox examples. Generic inputs such as `runtime_profiles`,
+`component_contracts`, `runtime_execution`, `runtime_output_projections`,
+`runner_workspace`, `verification_commands`, and `artifact_declarations` pass
+through unchanged.
 
 ## Deprecated aliases
 

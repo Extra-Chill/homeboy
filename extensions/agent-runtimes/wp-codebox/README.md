@@ -55,6 +55,14 @@ and invokes the stable `run-agent-task` CLI.
 
 Runtime-package callers should invoke `wp-codebox/run-runtime-package`.
 
+GitHub Actions callers should prefer
+`.github/workflows/wp-codebox-runtime-agent-full-run.yml`. The wrapper pins the
+runtime id to `wp-codebox` and maps WP Codebox workflow vocabulary such as
+`wordpress_version`, `wp_config_defines`, `wp_runtime_mounts`, and
+`wp_runtime_overlays` onto the generic `runtime-agent-full-run.yml` inputs.
+Existing direct calls to the generic workflow remain supported for compatibility,
+but new WP Codebox examples and defaults belong in the wrapper docs.
+
 Provider credentials stay outside adapter payloads. The adapter forwards
 `secret_env` names and a `provider_credential_boundary` descriptor, and rejects
 raw credential fields such as `secret_env_values` or `credentials` before a task
