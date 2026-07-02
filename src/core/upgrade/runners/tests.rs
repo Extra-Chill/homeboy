@@ -864,6 +864,68 @@ fn realigns_stale_lab_workspace_homeboy_path_after_upgrade_failure() {
 }
 
 #[test]
+fn realigns_stale_source_checkout_homeboy_path_after_upgrade_failure() {
+    let _local_version = pin_local_version_for_fixtures();
+    let stale_path = "/home/user/Developer/homeboy@upgrade-bootstrap/target/release/homeboy";
+    let runner = ssh_runner("lab", Some(stale_path));
+    let mut commands = Vec::new();
+    let mut path_updates = Vec::new();
+
+    let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater(
+        &[runner],
+        false,
+        None,
+        None,
+        &[],
+        |runner_id, options| {
+            commands.push(options.command.clone());
+            let (stdout, stderr, exit_code) = match commands.len() {
+                1 => ("homeboy 0.229.11\n", "", 0),
+                2 => (
+                    "",
+                    "source upgrade command exited successfully but the active binary was not replaced\n",
+                    1,
+                ),
+                3 => ("homeboy 0.230.0\n", "", 0),
+                4 => ("{\"success\":true}\n", "", 0),
+                5 => ("homeboy 0.230.0\n", "", 0),
+                _ => ("", "", 0),
+            };
+            Ok((
+                exec_output(runner_id, options.command, stdout, stderr, exit_code),
+                exit_code,
+            ))
+        },
+        runner_status,
+        |_runner, _path| unreachable!("source materialization not used"),
+        |runner_id, homeboy_path| {
+            path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
+            Ok(())
+        },
+    );
+
+    assert!(skipped.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert!(updated[0].success);
+    assert!(updated[0].upgraded);
+    assert_eq!(updated[0].homeboy_path, "homeboy");
+    assert_eq!(updated[0].previous_version.as_deref(), Some("0.229.11"));
+    assert_eq!(updated[0].new_version.as_deref(), Some("0.230.0"));
+    assert_eq!(updated[0].path_drift, None);
+    assert_eq!(
+        path_updates,
+        vec![("lab".to_string(), "homeboy".to_string())]
+    );
+    assert_eq!(commands[1][0], stale_path);
+    assert_eq!(commands[2], vec!["homeboy", "--version"]);
+    assert_eq!(commands[3][0], "homeboy");
+    assert!(updated[0]
+        .detail
+        .contains("after configured runner executable failed to upgrade"));
+    assert!(updated[0].detail.contains(stale_path));
+}
+
+#[test]
 fn source_runner_upgrade_realigns_to_materialized_source_build_when_path_shadows_old_homeboy() {
     let stale_path = "/home/user/Developer/_lab_workspaces/homeboy-old/target/debug/homeboy";
     let source_path = Path::new("/Users/user/Developer/homeboy@current-main");
