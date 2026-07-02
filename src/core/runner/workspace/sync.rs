@@ -107,16 +107,26 @@ pub fn sync_workspace(
                 materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
                 None
             };
+            let metadata = workspace_metadata(
+                &runner.id,
+                &local_path,
+                &remote_path,
+                options.mode,
+                &snapshot,
+                options.run_isolation_token.as_deref(),
+                ResourceCleanupPolicy::DeleteOnSuccess,
+            );
+            let resource_lifecycle = metadata.resource_lifecycle.clone().unwrap_or_else(|| {
+                workspace_resource_lifecycle(
+                    &runner.id,
+                    &remote_path,
+                    None,
+                    ResourceCleanupPolicy::DeleteOnSuccess,
+                )
+            });
             let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
-                workspace_metadata(
-                    &runner.id,
-                    &local_path,
-                    &remote_path,
-                    options.mode,
-                    &snapshot,
-                    options.run_isolation_token.as_deref(),
-                ),
+                metadata,
                 &local_path,
                 &remote_path,
                 &excludes,
@@ -145,6 +155,7 @@ pub fn sync_workspace(
                     materialization_plan,
                     current_workspace,
                     workspace_lease,
+                    resource_lifecycle,
                     sync_mode: options.mode,
                     snapshot_identity: snapshot,
                     counts: stats,
@@ -214,16 +225,26 @@ pub fn sync_workspace(
                     options.allow_dirty_lab_workspace,
                 )?;
             }
+            let metadata = workspace_metadata(
+                &runner.id,
+                &local_path,
+                &remote_path,
+                RunnerWorkspaceSyncMode::Git,
+                &git.head,
+                options.run_isolation_token.as_deref(),
+                ResourceCleanupPolicy::DeleteOnSuccess,
+            );
+            let resource_lifecycle = metadata.resource_lifecycle.clone().unwrap_or_else(|| {
+                workspace_resource_lifecycle(
+                    &runner.id,
+                    &remote_path,
+                    None,
+                    ResourceCleanupPolicy::DeleteOnSuccess,
+                )
+            });
             let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
                 &runner,
-                workspace_metadata(
-                    &runner.id,
-                    &local_path,
-                    &remote_path,
-                    RunnerWorkspaceSyncMode::Git,
-                    &git.head,
-                    options.run_isolation_token.as_deref(),
-                ),
+                metadata,
                 &local_path,
                 &remote_path,
                 &excludes,
@@ -252,6 +273,7 @@ pub fn sync_workspace(
                     materialization_plan,
                     current_workspace,
                     workspace_lease,
+                    resource_lifecycle,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
                     snapshot_identity: git.head,
                     counts: ByteFileCounts::default(),
@@ -722,6 +744,7 @@ fn workspace_snapshot_entry(
         source_dirty: metadata.source_dirty,
         run_id: metadata.run_id,
         job_id: metadata.job_id,
+        resource_lifecycle: metadata.resource_lifecycle,
     })
 }
 
@@ -759,8 +782,11 @@ fn workspace_metadata(
     sync_mode: RunnerWorkspaceSyncMode,
     snapshot_identity: &str,
     run_id: Option<&str>,
+    cleanup_policy: ResourceCleanupPolicy,
 ) -> RunnerWorkspaceMetadata {
     let git_state = local_git_state(local_path);
+    let resource_lifecycle =
+        workspace_resource_lifecycle(runner_id, remote_path, run_id, cleanup_policy);
     RunnerWorkspaceMetadata {
         schema: "homeboy/runner-workspace/v1".to_string(),
         runner_id: runner_id.to_string(),
@@ -775,6 +801,27 @@ fn workspace_metadata(
         source_dirty: git_state.dirty,
         run_id: run_id.map(str::to_string),
         job_id: None,
+        resource_lifecycle: Some(resource_lifecycle),
+    }
+}
+
+pub(crate) fn workspace_resource_lifecycle(
+    runner_id: &str,
+    remote_path: &str,
+    run_id: Option<&str>,
+    cleanup_policy: ResourceCleanupPolicy,
+) -> ResourceLifecycleRecord {
+    ResourceLifecycleRecord {
+        owner: "runner.workspace".to_string(),
+        run_id: run_id.unwrap_or("materialized-workspace").to_string(),
+        runner_id: Some(runner_id.to_string()),
+        path: remote_path.to_string(),
+        kind: "runner_workspace".to_string(),
+        ttl: None,
+        cleanup_policy,
+        evidence_retention: ResourceEvidenceRetention::Metadata,
+        cleanup_intent: Default::default(),
+        status: ResourceLifecycleResourceStatus::Active,
     }
 }
 

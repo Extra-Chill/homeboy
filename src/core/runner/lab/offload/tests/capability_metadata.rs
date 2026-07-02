@@ -97,6 +97,12 @@ fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
             source_ref: None,
             source_dirty: None,
         },
+        resource_lifecycle: crate::core::runner::workspace_resource_lifecycle(
+            "lab",
+            "/srv/homeboy/_lab_workspaces/app-abc",
+            None,
+            crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess,
+        ),
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: "snapshot:abc".to_string(),
         counts: crate::core::runner::ByteFileCounts {
@@ -145,6 +151,12 @@ fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
             source_ref: Some("main".to_string()),
             source_dirty: Some(false),
         },
+        resource_lifecycle: crate::core::runner::workspace_resource_lifecycle(
+            "lab",
+            "/srv/homeboy/_lab_workspaces/dep-def",
+            None,
+            crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess,
+        ),
         sync_mode: RunnerWorkspaceSyncMode::Git,
         snapshot_identity: "abc123".to_string(),
         counts: crate::core::runner::ByteFileCounts::default(),
