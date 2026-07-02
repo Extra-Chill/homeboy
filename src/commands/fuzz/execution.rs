@@ -1456,6 +1456,10 @@ pub(super) fn build_fuzz_execution_request(
         operation_families: Vec::new(),
         case_budget: None,
         duration_budget_seconds: None,
+        campaign_manifest: None,
+        campaign_workloads: Vec::new(),
+        lab_runner: None,
+        required_artifacts: Vec::new(),
     };
     let isolation_proof = super::planning::load_isolation_proof(args.isolation_proof.as_deref())?;
     let sequence_plan = load_sequence_plan(args.sequence_plan.as_deref())?;

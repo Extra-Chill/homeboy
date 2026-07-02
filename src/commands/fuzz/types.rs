@@ -278,6 +278,22 @@ pub(crate) struct FuzzPlanArgs {
     /// Maximum execution budget in seconds for downstream runners.
     #[arg(long = "duration-budget-seconds", value_name = "SECONDS")]
     pub(crate) duration_budget_seconds: Option<u64>,
+
+    /// Product-neutral campaign manifest containing workload ids and optional planning metadata.
+    #[arg(long = "campaign-manifest", value_name = "PATH")]
+    pub(crate) campaign_manifest: Option<PathBuf>,
+
+    /// Add a workload id to the generated campaign plan. Repeatable.
+    #[arg(long = "campaign-workload", value_name = "ID")]
+    pub(crate) campaign_workloads: Vec<String>,
+
+    /// Preferred Lab runner id to record in campaign plan entries without executing them.
+    #[arg(long = "lab-runner", value_name = "ID")]
+    pub(crate) lab_runner: Option<String>,
+
+    /// Additional required artifact id/kind expected from every campaign entry. Repeatable.
+    #[arg(long = "required-artifact", value_name = "ID")]
+    pub(crate) required_artifacts: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

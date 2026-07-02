@@ -1,16 +1,21 @@
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::core::fuzz::{
     fuzz_gate_profile_contract, parse_fuzz_action_model_file, parse_fuzz_exploration_policy_file,
     parse_fuzz_sequence_plan_file, FuzzExecutionRequest, FuzzOperation, FuzzOperationFamily,
-    FuzzSafetyClass, FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism, FuzzSamplingRequest,
-    FuzzSamplingStratum, FuzzTargetInventory, IsolationProof, FUZZ_CONTRACT_VERSION,
-    FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
+    FuzzRequiredArtifact, FuzzSafetyClass, FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism,
+    FuzzSamplingRequest, FuzzSamplingStratum, FuzzTargetInventory, IsolationProof,
+    FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA,
+    FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
 };
 
 use super::execution::fuzz_runner_contract;
 use super::types::{FuzzPlanArgs, FuzzPlanOutput, FuzzPlanStrategy};
+use super::types_extra::{
+    FuzzCampaignPlanEntryOutput, FuzzCampaignPlanIsolationOutput, FuzzCampaignPlanOutput,
+};
 use super::workloads::{
     build_target_inventory, fuzz_workloads, load_rig, resolve_component_id, resolve_fuzz_context,
     select_workload,
@@ -84,32 +89,344 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         )
     })?;
 
+    let request = FuzzExecutionRequest {
+        schema: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
+        version: FUZZ_CONTRACT_VERSION,
+        id: request_id,
+        component: ctx.component_id.clone(),
+        rig_id: rig_id.clone(),
+        workload_id,
+        case_ids: Vec::new(),
+        seed: args.run.seed.clone(),
+        max_duration: args.run.max_duration.clone(),
+        args: args.run.args.clone(),
+        required_artifacts,
+        gates,
+        sampling,
+        sequence_plan,
+        isolation_proof,
+        metadata: planning_metadata,
+        extra: std::collections::BTreeMap::new(),
+    };
+    let campaign_plan = build_campaign_plan(&args, &ctx.component_id, rig_id.as_deref(), &request)?;
+
     Ok(FuzzPlanOutput {
         command: "fuzz.plan".to_string(),
         component: ctx.component_id.clone(),
         rig_id: rig_id.clone(),
         target_inventory,
-        request: FuzzExecutionRequest {
-            schema: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
-            version: FUZZ_CONTRACT_VERSION,
-            id: request_id,
-            component: ctx.component_id,
-            rig_id,
-            workload_id,
-            case_ids: Vec::new(),
-            seed: args.run.seed,
-            max_duration: args.run.max_duration,
-            args: args.run.args,
-            required_artifacts,
-            gates,
-            sampling,
-            sequence_plan,
-            isolation_proof,
-            metadata: planning_metadata,
-            extra: std::collections::BTreeMap::new(),
-        },
+        request,
+        campaign_plan,
         runner_contract: fuzz_runner_contract(fuzz_config.as_ref()),
     })
+}
+
+const FUZZ_CAMPAIGN_PLAN_SCHEMA: &str = "homeboy/fuzz-campaign-plan/v1";
+
+#[derive(Deserialize)]
+struct FuzzCampaignManifest {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    workloads: Vec<FuzzCampaignManifestWorkload>,
+    #[serde(default)]
+    workload_ids: Vec<String>,
+    #[serde(default)]
+    lab_runner: Option<String>,
+    #[serde(default)]
+    required_artifacts: Vec<FuzzCampaignManifestArtifact>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FuzzCampaignManifestWorkload {
+    Id(String),
+    Object { id: String },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FuzzCampaignManifestArtifact {
+    Id(String),
+    Object { id: String, kind: Option<String> },
+}
+
+pub(super) fn build_campaign_plan(
+    args: &FuzzPlanArgs,
+    component: &str,
+    rig_id: Option<&str>,
+    base_request: &FuzzExecutionRequest,
+) -> homeboy::core::Result<Option<FuzzCampaignPlanOutput>> {
+    if args.campaign_manifest.is_none() && args.campaign_workloads.is_empty() {
+        return Ok(None);
+    }
+
+    let manifest = load_campaign_manifest(args.campaign_manifest.as_deref())?;
+    let mut workload_ids = manifest_workload_ids(manifest.as_ref());
+    workload_ids.extend(args.campaign_workloads.iter().cloned());
+    workload_ids.sort();
+    workload_ids.dedup();
+    if workload_ids.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "campaign-workload",
+            "campaign planning requires at least one workload id".to_string(),
+            None,
+            None,
+        ));
+    }
+
+    let manifest_artifacts = manifest
+        .as_ref()
+        .map(|manifest| manifest.required_artifacts.as_slice())
+        .unwrap_or(&[]);
+    let artifact_requirements = campaign_artifact_requirements(
+        &base_request.required_artifacts,
+        manifest_artifacts,
+        &args.required_artifacts,
+    );
+    let lab_runner = args.lab_runner.clone().or_else(|| {
+        manifest
+            .as_ref()
+            .and_then(|manifest| manifest.lab_runner.clone())
+    });
+    let campaign_id = args
+        .request_id
+        .clone()
+        .or_else(|| manifest.as_ref().and_then(|manifest| manifest.id.clone()))
+        .or_else(|| args.run.run_id.clone())
+        .unwrap_or_else(|| format!("{component}-fuzz-campaign"));
+
+    let entries = workload_ids
+        .iter()
+        .enumerate()
+        .map(|(index, workload_id)| {
+            let run_id = format!("{campaign_id}-{workload_id}");
+            let mut request = base_request.clone();
+            request.id = run_id.clone();
+            request.workload_id = Some(workload_id.clone());
+            request.required_artifacts = artifact_requirements.clone();
+            request.metadata = campaign_entry_metadata(&request.metadata, &campaign_id, index);
+            FuzzCampaignPlanEntryOutput {
+                index,
+                id: format!("{campaign_id}:{workload_id}"),
+                workload_id: workload_id.clone(),
+                run_id: run_id.clone(),
+                lab_runner: lab_runner.clone(),
+                tracker_refs: args.run.tracker_refs.clone(),
+                artifact_requirements: artifact_requirements.clone(),
+                command: campaign_run_command(args, component, workload_id, &run_id),
+                request,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Some(FuzzCampaignPlanOutput {
+        schema: FUZZ_CAMPAIGN_PLAN_SCHEMA.to_string(),
+        version: FUZZ_CONTRACT_VERSION,
+        id: campaign_id,
+        component: component.to_string(),
+        rig_id: rig_id.map(str::to_string),
+        source_manifest: args
+            .campaign_manifest
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        lab_runner,
+        isolation: FuzzCampaignPlanIsolationOutput {
+            mode: args.run.isolation.as_str().to_string(),
+            allow_destructive: args.run.allow_destructive,
+            proof_required: args.run.allow_destructive || args.run.isolation.requests_isolation(),
+            proof_file: args
+                .run
+                .isolation_proof
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+        },
+        tracker_refs: args.run.tracker_refs.clone(),
+        artifact_requirements,
+        entries,
+    }))
+}
+
+fn load_campaign_manifest(
+    path: Option<&std::path::Path>,
+) -> homeboy::core::Result<Option<FuzzCampaignManifest>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let raw = std::fs::read_to_string(path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "campaign-manifest",
+            format!("failed to read fuzz campaign manifest: {error}"),
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    serde_json::from_str(&raw).map(Some).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "campaign-manifest",
+            format!("invalid fuzz campaign manifest JSON: {error}"),
+            Some(path.display().to_string()),
+            None,
+        )
+    })
+}
+
+fn manifest_workload_ids(manifest: Option<&FuzzCampaignManifest>) -> Vec<String> {
+    let Some(manifest) = manifest else {
+        return Vec::new();
+    };
+    manifest
+        .workloads
+        .iter()
+        .map(|workload| match workload {
+            FuzzCampaignManifestWorkload::Id(id) => id.clone(),
+            FuzzCampaignManifestWorkload::Object { id } => id.clone(),
+        })
+        .chain(manifest.workload_ids.iter().cloned())
+        .filter_map(|id| {
+            let trimmed = id.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .collect()
+}
+
+fn campaign_artifact_requirements(
+    base: &[FuzzRequiredArtifact],
+    manifest: &[FuzzCampaignManifestArtifact],
+    extra: &[String],
+) -> Vec<FuzzRequiredArtifact> {
+    let mut artifacts = base.to_vec();
+    artifacts.extend(manifest.iter().filter_map(|artifact| match artifact {
+        FuzzCampaignManifestArtifact::Id(id) => required_artifact_from_id(id, None),
+        FuzzCampaignManifestArtifact::Object { id, kind } => {
+            required_artifact_from_id(id, kind.as_deref())
+        }
+    }));
+    artifacts.extend(
+        extra
+            .iter()
+            .filter_map(|id| required_artifact_from_id(id, None)),
+    );
+    artifacts.sort_by(|a, b| a.id.cmp(&b.id).then(a.kind.cmp(&b.kind)));
+    artifacts.dedup_by(|a, b| a.id == b.id && a.kind == b.kind);
+    artifacts
+}
+
+fn required_artifact_from_id(id: &str, kind: Option<&str>) -> Option<FuzzRequiredArtifact> {
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(FuzzRequiredArtifact {
+        schema: FUZZ_REQUIRED_ARTIFACT_SCHEMA.to_string(),
+        id: id.to_string(),
+        kind: kind.unwrap_or(id).trim().replace('-', "_"),
+        required: true,
+        description: None,
+        acceptable_artifact_kinds: Vec::new(),
+    })
+}
+
+fn campaign_entry_metadata(
+    base: &serde_json::Value,
+    campaign_id: &str,
+    index: usize,
+) -> serde_json::Value {
+    let mut metadata = base.clone();
+    if !metadata.is_object() {
+        metadata = json!({});
+    }
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "campaign_plan".to_string(),
+            json!({
+                "schema": FUZZ_CAMPAIGN_PLAN_SCHEMA,
+                "id": campaign_id,
+                "entry_index": index,
+            }),
+        );
+    }
+    metadata
+}
+
+fn campaign_run_command(
+    args: &FuzzPlanArgs,
+    component: &str,
+    workload_id: &str,
+    run_id: &str,
+) -> Vec<String> {
+    let mut command = vec![
+        "homeboy".to_string(),
+        "fuzz".to_string(),
+        "run".to_string(),
+        component.to_string(),
+    ];
+    if let Some(rig) = args.run.rig.as_ref() {
+        command.extend(["--rig".to_string(), rig.clone()]);
+    }
+    command.extend([
+        "--workload".to_string(),
+        workload_id.to_string(),
+        "--run-id".to_string(),
+        run_id.to_string(),
+    ]);
+    for tracker_ref in &args.run.tracker_refs {
+        command.extend([
+            "--tracker-ref".to_string(),
+            format!("{}:{}", tracker_ref.kind, tracker_ref.id),
+        ]);
+    }
+    if let Some(seed) = args.run.seed.as_ref() {
+        command.extend(["--seed".to_string(), seed.clone()]);
+    }
+    if let Some(inventory) = args.run.inventory.as_ref() {
+        command.extend([
+            "--inventory".to_string(),
+            inventory.to_string_lossy().to_string(),
+        ]);
+    }
+    if let Some(sequence_plan) = args.run.sequence_plan.as_ref() {
+        command.extend([
+            "--sequence-plan".to_string(),
+            sequence_plan.to_string_lossy().to_string(),
+        ]);
+    }
+    command.extend([
+        "--gate-profile".to_string(),
+        args.run.gate_profile.as_str().to_string(),
+    ]);
+    if args.run.require_case_log {
+        command.push("--require-case-log".to_string());
+    }
+    if args.run.require_coverage_summary {
+        command.push("--require-coverage-summary".to_string());
+    }
+    if args.run.require_result_envelope {
+        command.push("--require-result-envelope".to_string());
+    }
+    if let Some(max_duration) = args.run.max_duration.as_ref() {
+        command.extend(["--max-duration".to_string(), max_duration.clone()]);
+    }
+    if args.run.allow_destructive {
+        command.push("--allow-destructive".to_string());
+    }
+    if args.run.isolation.requests_isolation() {
+        command.extend([
+            "--isolation".to_string(),
+            args.run.isolation.as_str().to_string(),
+        ]);
+    }
+    if let Some(isolation_proof) = args.run.isolation_proof.as_ref() {
+        command.extend([
+            "--isolation-proof".to_string(),
+            isolation_proof.to_string_lossy().to_string(),
+        ]);
+    }
+    if !args.run.args.is_empty() {
+        command.push("--".to_string());
+        command.extend(args.run.args.clone());
+    }
+    command
 }
 
 pub(super) fn load_sequence_plan(

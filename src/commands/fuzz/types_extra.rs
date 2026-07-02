@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 use homeboy::core::artifact_ref::EvidenceRef;
+use homeboy::core::evidence_manifest::TrackerRef;
 use homeboy::core::fuzz::{
     FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzHotspotSet, FuzzReplayMetadata,
     FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory,
@@ -198,7 +199,45 @@ pub struct FuzzPlanOutput {
     pub rig_id: Option<String>,
     pub target_inventory: FuzzTargetInventory,
     pub request: FuzzExecutionRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub campaign_plan: Option<FuzzCampaignPlanOutput>,
     pub runner_contract: FuzzRunnerContract,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCampaignPlanOutput {
+    pub schema: String,
+    pub version: u32,
+    pub id: String,
+    pub component: String,
+    pub rig_id: Option<String>,
+    pub source_manifest: Option<String>,
+    pub lab_runner: Option<String>,
+    pub isolation: FuzzCampaignPlanIsolationOutput,
+    pub tracker_refs: Vec<TrackerRef>,
+    pub artifact_requirements: Vec<FuzzRequiredArtifact>,
+    pub entries: Vec<FuzzCampaignPlanEntryOutput>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCampaignPlanIsolationOutput {
+    pub mode: String,
+    pub allow_destructive: bool,
+    pub proof_required: bool,
+    pub proof_file: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCampaignPlanEntryOutput {
+    pub index: usize,
+    pub id: String,
+    pub workload_id: String,
+    pub run_id: String,
+    pub lab_runner: Option<String>,
+    pub tracker_refs: Vec<TrackerRef>,
+    pub artifact_requirements: Vec<FuzzRequiredArtifact>,
+    pub command: Vec<String>,
+    pub request: FuzzExecutionRequest,
 }
 
 #[derive(Serialize)]
