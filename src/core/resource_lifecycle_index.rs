@@ -1,3 +1,7 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::core::observation::ArtifactRecord;
@@ -37,6 +41,54 @@ pub struct ResourceLifecycleRecord {
     pub status: ResourceLifecycleResourceStatus,
 }
 
+pub struct ResourceLifecycle;
+
+impl ResourceLifecycle {
+    pub fn inspect(record: &ResourceLifecycleRecord) -> ResourceLifecycleInspection {
+        ResourceLifecycleInspection::from_record(record)
+    }
+
+    pub fn cleanup_path(
+        root: &Path,
+        record: &ResourceLifecycleRecord,
+    ) -> std::result::Result<PathBuf, String> {
+        resource_lifecycle_cleanup_path(root, record)
+    }
+
+    pub fn delete_path(path: &Path) -> Result<()> {
+        delete_resource_lifecycle_path(path)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResourceLifecycleInspection {
+    pub owner: String,
+    pub run_id: String,
+    pub path: String,
+    pub kind: String,
+    pub status: ResourceLifecycleResourceStatus,
+    pub cleanup_policy: ResourceCleanupPolicy,
+    pub cleanup_intent: ResourceCleanupIntent,
+    pub actionable: bool,
+    pub cleanup_eligible: bool,
+}
+
+impl ResourceLifecycleInspection {
+    pub fn from_record(record: &ResourceLifecycleRecord) -> Self {
+        Self {
+            owner: record.owner.clone(),
+            run_id: record.run_id.clone(),
+            path: record.path.clone(),
+            kind: record.kind.clone(),
+            status: record.status,
+            cleanup_policy: record.cleanup_policy,
+            cleanup_intent: record.cleanup_intent,
+            actionable: resource_lifecycle_record_is_actionable(record),
+            cleanup_eligible: resource_lifecycle_record_is_cleanup_eligible(record),
+        }
+    }
+}
+
 impl ResourceLifecycleRecord {
     pub fn validate(&self, index: usize) -> Result<()> {
         validate_resource_lifecycle_record(index, self)
@@ -72,6 +124,119 @@ pub enum ResourceLifecycleResourceStatus {
     Cleaned,
     Missing,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceLifecycleCleanupOperation {
+    Delete,
+}
+
+impl Default for ResourceLifecycleCleanupOperation {
+    fn default() -> Self {
+        Self::Delete
+    }
+}
+
+impl std::fmt::Display for ResourceLifecycleCleanupOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Delete => formatter.write_str("delete"),
+        }
+    }
+}
+
+pub fn resource_lifecycle_record_is_actionable(record: &ResourceLifecycleRecord) -> bool {
+    matches!(
+        record.status,
+        ResourceLifecycleResourceStatus::Active
+            | ResourceLifecycleResourceStatus::CleanupPending
+            | ResourceLifecycleResourceStatus::Missing
+            | ResourceLifecycleResourceStatus::Failed
+    )
+}
+
+pub fn resource_lifecycle_record_is_cleanup_eligible(record: &ResourceLifecycleRecord) -> bool {
+    if matches!(record.status, ResourceLifecycleResourceStatus::Cleaned) {
+        return false;
+    }
+
+    if record.cleanup_intent.is_apply() {
+        return true;
+    }
+
+    matches!(
+        record.status,
+        ResourceLifecycleResourceStatus::CleanupPending
+    ) || matches!(
+        record.cleanup_policy,
+        ResourceCleanupPolicy::DeleteAfterTtl
+            | ResourceCleanupPolicy::DeleteOnSuccess
+            | ResourceCleanupPolicy::DeleteOnTerminal
+    )
+}
+
+pub fn resource_lifecycle_cleanup_path(
+    root: &Path,
+    record: &ResourceLifecycleRecord,
+) -> std::result::Result<PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "cleanup root does not exist".to_string())?;
+    let path = PathBuf::from(&record.path);
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|_| "resource path does not exist".to_string())?;
+    let cleanup_path = if metadata.file_type().is_symlink() {
+        path.clone()
+    } else {
+        path.canonicalize()
+            .map_err(|_| "resource path does not exist".to_string())?
+    };
+    let containment_path = if metadata.file_type().is_symlink() {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "resource path has no parent directory".to_string())?
+            .canonicalize()
+            .map_err(|_| "resource parent path does not exist".to_string())?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| "resource path has no file name".to_string())?;
+        parent.join(file_name)
+    } else {
+        cleanup_path.clone()
+    };
+
+    if containment_path == root {
+        return Err("resource path is cleanup root".to_string());
+    }
+
+    if !containment_path.starts_with(&root) {
+        return Err("resource path is outside cleanup root".to_string());
+    }
+
+    Ok(cleanup_path)
+}
+
+pub fn delete_resource_lifecycle_path(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
+    })?;
+
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("delete {}", path.display())),
+            )
+        })
+    } else {
+        fs::remove_file(path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("delete {}", path.display())),
+            )
+        })
+    }
 }
 
 pub fn validate_resource_lifecycle_index(index: &ResourceLifecycleIndex) -> Result<()> {
@@ -246,5 +411,70 @@ mod tests {
             serde_json::to_string(&ResourceLifecycleResourceStatus::CleanupPending).unwrap(),
             "\"cleanup_pending\""
         );
+    }
+
+    #[test]
+    fn inspection_reports_actionable_cleanup_eligible_records() {
+        let inspection = ResourceLifecycle::inspect(&record());
+
+        assert_eq!(inspection.owner, "homeboy-test");
+        assert!(inspection.actionable);
+        assert!(inspection.cleanup_eligible);
+    }
+
+    #[test]
+    fn cleanup_path_rejects_cleanup_root_itself() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let resource = ResourceLifecycleRecord {
+            path: tempdir.path().display().to_string(),
+            cleanup_intent: ResourceCleanupIntent::Apply,
+            ..record()
+        };
+
+        let error = ResourceLifecycle::cleanup_path(tempdir.path(), &resource)
+            .expect_err("cleanup root must not be a candidate");
+
+        assert_eq!(error, "resource path is cleanup root");
+    }
+
+    #[test]
+    fn cleanup_path_rejects_paths_outside_root() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        let resource_path = outside.path().join("resource");
+        std::fs::write(&resource_path, "generated").expect("write resource");
+        let resource = ResourceLifecycleRecord {
+            path: resource_path.display().to_string(),
+            cleanup_intent: ResourceCleanupIntent::Apply,
+            ..record()
+        };
+
+        let error = ResourceLifecycle::cleanup_path(root.path(), &resource)
+            .expect_err("outside path must be rejected");
+
+        assert_eq!(error, "resource path is outside cleanup root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_path_for_symlink_deletes_link_not_target() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        let target = outside.path().join("target");
+        std::fs::write(&target, "target").expect("write target");
+        let link = root.path().join("resource-link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let resource = ResourceLifecycleRecord {
+            path: link.display().to_string(),
+            cleanup_intent: ResourceCleanupIntent::Apply,
+            ..record()
+        };
+
+        let cleanup_path = ResourceLifecycle::cleanup_path(root.path(), &resource)
+            .expect("symlink under root is cleanup eligible");
+        ResourceLifecycle::delete_path(&cleanup_path).expect("delete link");
+
+        assert!(!link.exists());
+        assert!(target.exists());
     }
 }
