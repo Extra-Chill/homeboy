@@ -12,7 +12,7 @@ const path = require('node:path');
  */
 const {
 	AGENT_TASK_REQUEST_SCHEMA,
-} = require('../../agent-task-contracts/agent-task-provider-contract');
+} = require('../../agent-task-contracts');
 const {
 	normalizeAgentTaskOutcome,
 } = require('../../runtime-agent-ci/lib/agent-task-outcome-normalizer');

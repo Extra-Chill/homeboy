@@ -11,7 +11,7 @@ const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci/provider-ad
 const {
   genericAgentTaskPlan,
   genericAgentTaskRequest,
-} = require(path.join(repoRoot, 'agent-task-contracts/generic-agent-task-plan.js'));
+} = require(path.join(repoRoot, 'agent-task-contracts'));
 
 const genericBoundaryTerms = /Data Machine|DataMachine|datamachine|data-machine|wp-site-generator|WPSG|site-generator|site generator/;
 const genericFiles = [

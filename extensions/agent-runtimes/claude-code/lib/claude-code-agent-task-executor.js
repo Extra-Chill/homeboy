@@ -8,7 +8,7 @@ const {
 	agentTaskProviderContractFields,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
-} = require('../../../agent-task-contracts/agent-task-provider-contract');
+} = require('../../../agent-task-contracts');
 const {
 	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,

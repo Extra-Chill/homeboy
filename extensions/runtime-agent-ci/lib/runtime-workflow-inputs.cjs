@@ -6,7 +6,7 @@ const { normalizeRuntimeId, resolveRuntimeProvider } = require('./runtime-provid
 const {
   expandAgentTaskCapabilityBundles,
   expandAgentTaskToolPresets,
-} = require('../../agent-task-contracts/agent-task-provider-contract');
+} = require('../../agent-task-contracts');
 
 const RUNTIME_WORKFLOW_INPUTS_SCHEMA = 'homeboy/runtime-workflow-inputs/v1';
 

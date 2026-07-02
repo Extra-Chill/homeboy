@@ -1,4 +1,88 @@
 {
+  "agent_runtime_handshake": {
+    "phases": [
+      {
+        "description": "Extension declares runtime identity, executor providers, capabilities, and runtime-owned materialization/readiness declarations.",
+        "id": "runtime_capability_manifest",
+        "provider": "extension",
+        "required_fields": [
+          "schema",
+          "id",
+          "agent_task_executors[].id",
+          "agent_task_executors[].backend"
+        ],
+        "schema_refs": [
+          "homeboy/agent-runtime-manifest/v1",
+          "homeboy/agent-task-executor-provider/v1"
+        ]
+      },
+      {
+        "description": "Extension declares generic readiness probes such as secret env names, env-path checks, executable candidates, and remediation text.",
+        "id": "readiness_checks",
+        "provider": "extension",
+        "required_fields": [
+          "runner_readiness[].id",
+          "runner_readiness[].label"
+        ],
+        "schema_refs": [
+          "homeboy/agent-task-executor-provider/v1"
+        ]
+      },
+      {
+        "description": "Homeboy resolves extension declarations into the runtime materialization plan it can route, copy, mount, or diagnose.",
+        "id": "materialization_plan",
+        "provider": "homeboy",
+        "required_fields": [
+          "schema",
+          "runtime_id"
+        ],
+        "schema_refs": [
+          "homeboy/agent-runtime-materialization-plan/v1"
+        ]
+      },
+      {
+        "description": "Homeboy resolves declared secret requirements into a redacted secret env plan and status; extensions name required env, never secret values.",
+        "id": "secret_env_plan",
+        "provider": "homeboy",
+        "required_fields": [
+          "schema"
+        ],
+        "schema_refs": [
+          "homeboy/secret-env-plan/v1",
+          "homeboy/secret-env-requirement/v1"
+        ]
+      },
+      {
+        "description": "Homeboy binds the selected provider, runtime id/path, readiness checks, workspace materialization summary, capabilities, and secret env plan reference/object for dispatch.",
+        "id": "resolved_execution_contract",
+        "provider": "homeboy",
+        "required_fields": [
+          "schema",
+          "provider_id"
+        ],
+        "schema_refs": [
+          "homeboy/resolved-agent-runtime-execution-contract/v1"
+        ]
+      },
+      {
+        "description": "Provider result declares outcome status plus artifacts/evidence using Homeboy's generic artifact and outcome vocabulary.",
+        "id": "result_artifact_declarations",
+        "provider": "extension_result",
+        "required_fields": [
+          "schema",
+          "status"
+        ],
+        "schema_refs": [
+          "homeboy/agent-task-outcome/v1",
+          "homeboy/agent-task-artifact/v1",
+          "homeboy/agent-task-artifact-declaration/v1",
+          "homeboy/agent-task-provider-outcome-contract/v1"
+        ]
+      }
+    ],
+    "purpose": "Generic extension-facing agent runtime contract handshake. Homeboy owns the protocol vocabulary and schema references; extensions supply runtime-specific declarations and results without Homeboy core branching on runtime implementation details.",
+    "schema": "homeboy/agent-runtime-contract-handshake/v1"
+  },
   "enums": {
     "aggregate_status": [
       "succeeded",
@@ -238,6 +322,9 @@
   },
   "schema": "homeboy/agent-task-core-contract/v1",
   "schemas": {
+    "agent_runtime_contract_handshake": "homeboy/agent-runtime-contract-handshake/v1",
+    "agent_runtime_manifest": "homeboy/agent-runtime-manifest/v1",
+    "agent_runtime_materialization_plan": "homeboy/agent-runtime-materialization-plan/v1",
     "aggregate": "homeboy/agent-task-aggregate/v1",
     "artifact": "homeboy/agent-task-artifact/v1",
     "artifact_declaration": "homeboy/agent-task-artifact-declaration/v1",
@@ -269,6 +356,7 @@
     "provider_capability_contract": "homeboy/agent-task-provider-capability-contract/v1",
     "provider_outcome_contract": "homeboy/agent-task-provider-outcome-contract/v1",
     "request": "homeboy/agent-task-request/v1",
+    "resolved_agent_runtime_execution_contract": "homeboy/resolved-agent-runtime-execution-contract/v1",
     "secret_env_plan": "homeboy/secret-env-plan/v1",
     "secret_env_requirement": "homeboy/secret-env-requirement/v1",
     "tool_dispatch_evidence": "homeboy/agent-tool-dispatch-evidence/v1",

@@ -21,7 +21,7 @@ const {
   agentTaskEvidenceRefFromRef,
   agentTaskProviderContractFields,
   providerDefaultsContract,
-} = require('../../../agent-task-contracts/agent-task-provider-contract');
+} = require('../../../agent-task-contracts');
 const {
   normalizeAgentTaskOutcome,
   providerFailureClassification,

@@ -1,6 +1,6 @@
 'use strict';
 
-const { AGENT_TASK_OUTCOME_SCHEMA } = require('../../agent-task-contracts/agent-task-provider-contract');
+const { AGENT_TASK_OUTCOME_SCHEMA } = require('../../agent-task-contracts');
 const { normalizeAgentTaskOutcomeStatus } = require('./runtime-status.cjs');
 
 const TERMINAL_FAILURE_STATUSES = ['failed', 'provider_error', 'timeout', 'unable_to_remediate'];

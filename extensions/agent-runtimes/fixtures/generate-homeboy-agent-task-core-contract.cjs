@@ -27,7 +27,7 @@ const { spawnSync } = require('node:child_process');
 
 const {
   AGENT_TASK_OUTCOME_STATUSES,
-} = require('../../agent-task-contracts/agent-task-provider-contract');
+} = require('../../agent-task-contracts');
 const {
   FANOUT_RECONCILE_PLAN_SCHEMA,
   FANOUT_RECONCILE_RECORD_STATUSES,

@@ -6,7 +6,7 @@
 const {
 	AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
 	agentTaskProviderContractFields,
-} = require('../../../agent-task-contracts/agent-task-provider-contract');
+} = require('../../../agent-task-contracts');
 const {
 	cliAgentTaskSpawnEnv,
 	createCliAgentTaskExecutor,

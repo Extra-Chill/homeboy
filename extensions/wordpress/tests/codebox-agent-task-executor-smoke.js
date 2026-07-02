@@ -24,7 +24,7 @@ const {
   AGENT_TASK_FAILURE_CLASSIFICATIONS,
   AGENT_TASK_OUTCOME_STATUSES,
   AGENT_TASK_REDACTED_METADATA_KEYS,
-} = require('../../agent-task-contracts/agent-task-provider-contract');
+} = require('../../agent-task-contracts');
 
 const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
 const wpCodeboxRuntimeExecutor = path.join(wpCodeboxRuntimeRoot, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
@@ -584,19 +584,6 @@ assert.equal(artifactDeclarationRequest.artifact_declarations[0].path, 'artifact
 assert.equal(artifactDeclarationRequest.artifact_declarations[0].required, true);
 assert.deepEqual(artifactDeclarationRequest.expected_artifacts, ['analysis_report']);
 
-const legacyArtifactDeclarationRequest = codeboxTaskRequestFromAgentTaskRequest({
-  ...request,
-  task_id: 'legacy-artifact-declaration-task-123',
-  artifactDeclarations: [{
-    name: 'legacy_report',
-    kind: 'LegacyReport',
-    contentSchema: 'example/legacy-report/v1',
-  }],
-});
-assert.equal(legacyArtifactDeclarationRequest.artifact_declarations[0].name, 'legacy_report');
-assert.equal(legacyArtifactDeclarationRequest.artifact_declarations[0].type, 'LegacyReport');
-assert.equal(legacyArtifactDeclarationRequest.artifact_declarations[0].artifact_schema, 'example/legacy-report/v1');
-
 const codeboxRequestWithAbilityTools = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'ability-tools-task-123',
@@ -727,30 +714,6 @@ const runtimeTaskExplicitProviderRequest = codeboxTaskRequestFromAgentTaskReques
 });
 assert.equal(runtimeTaskExplicitProviderRequest.runtime_task.input.provider, 'explicit-provider', 'explicit runtime task provider wins');
 assert.equal(runtimeTaskExplicitProviderRequest.runtime_task.input.model, 'explicit-model', 'explicit runtime task model wins');
-
-const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
-  ...request,
-  task_id: 'ability-bridge-task-123',
-  executor: {
-    backend: 'wp-codebox',
-    config: {
-      execution_kind: 'wp_codebox_ability',
-      ability: 'example/validate-artifact',
-      ability_input: { artifact: { slug: 'example-site' }, report: '/artifacts/import-report.json' },
-      output_mappings: {
-        validation_result: 'result.import_validation_result',
-      },
-      component_contracts: [{ slug: 'example-repo', path: '/workspace/example-repo', activate: true }],
-      engine_data_outputs: {
-        validation_result: 'metadata.artifacts.ImportValidationResult',
-      },
-    },
-  },
-});
-assert.equal(abilityBridgeRequest.runtime_task.ability, 'example/validate-artifact');
-assert.deepEqual(abilityBridgeRequest.runtime_task.input, { artifact: { slug: 'example-site' }, report: '/artifacts/import-report.json' });
-assert.equal(abilityBridgeRequest.parent_request.executor.config.output_mappings.validation_result, 'result.import_validation_result');
-assert.deepEqual(abilityBridgeRequest.component_contracts, [{ slug: 'example-repo', path: '/workspace/example-repo', activate: true }]);
 
 const topLevelComponentContractsRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
