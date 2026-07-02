@@ -6,7 +6,6 @@
 //! The separate `triage --watch --auto-merge` path is the explicit opt-in
 //! exception for state-transition automation.
 
-mod ci_failure;
 mod gh;
 mod landing;
 mod observation;
@@ -17,14 +16,12 @@ mod watch;
 
 pub use crate::core::scope::Scope as TriageTarget;
 
-pub use ci_failure::ci_failure;
 pub use landing::landing;
 pub use report::{parse_issue_numbers_file, parse_stale_days, run};
 pub use types::{
-    CiFailureDigest, CiFailureSnippet, CiFailureSummary, CiFailureTriageOptions,
-    CiFailureTriageOutput, TriageAction, TriageCheckFailure, TriageCiCheckStateCounts,
-    TriageCiReadiness, TriageCiReadinessBuckets, TriageCommandOutput, TriageComponentReport,
-    TriageIssueBucket, TriageIssueItem, TriageLandingCheckState, TriageLandingClassification,
+    TriageAction, TriageCheckFailure, TriageCiCheckStateCounts, TriageCiReadiness,
+    TriageCiReadinessBuckets, TriageCommandOutput, TriageComponentReport, TriageIssueBucket,
+    TriageIssueItem, TriageLandingCheckState, TriageLandingClassification,
     TriageLandingMergeabilityState, TriageLandingOptions, TriageLandingOutput, TriageLandingPr,
     TriageLandingRebasePlan, TriageLandingSummary, TriageLinkedPr, TriageObservationChangedItem,
     TriageObservationComparison, TriageObservationItemRef, TriageObservationOutput, TriageOptions,
@@ -52,10 +49,6 @@ mod test_reexports {
     pub(super) use crate::core::deploy::release_download::GitHubRepo;
     pub(super) use crate::core::observation::TriagePullRequestSignals;
 
-    pub(super) use super::ci_failure::{
-        classify_failure, detect_baseline_vs_head, extract_actions_job_id,
-        extract_failure_snippets, parse_pr_target,
-    };
     pub(super) use super::landing::{
         annotate_ordered_dependent_rebases, branch_matches, classify_landing_pr,
         dedupe_landing_prs_preserving_order, dependent_rebase_plan, is_bare_pr_number,
