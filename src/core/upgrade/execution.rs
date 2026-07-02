@@ -491,6 +491,7 @@ fn prepare_source_workspace_for_upgrade(workspace_root: &Path) -> Result<()> {
     }
 
     run_git_command(workspace_root, &["fetch", "origin"])?;
+    ensure_clean_source_workspace(workspace_root)?;
 
     let Some(default_branch) = origin_default_branch(workspace_root)? else {
         if git_command_success(workspace_root, &["symbolic-ref", "-q", "HEAD"])?
@@ -519,28 +520,14 @@ fn prepare_source_workspace_for_upgrade(workspace_root: &Path) -> Result<()> {
 
     let origin_ref = format!("origin/{default_branch}");
     if !git_command_success(workspace_root, &["symbolic-ref", "-q", "HEAD"])? {
-        run_git_command(workspace_root, &["reset", "--hard", &origin_ref])?;
+        run_git_command(workspace_root, &["checkout", "--detach", &origin_ref])?;
         return Ok(());
     }
 
     let current_branch = git_command_stdout(workspace_root, &["branch", "--show-current"])?;
     if current_branch.trim() != default_branch {
-        if git_command_success(
-            workspace_root,
-            &[
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{default_branch}"),
-            ],
-        )? {
-            run_git_command(workspace_root, &["switch", &default_branch])?;
-        } else {
-            run_git_command(
-                workspace_root,
-                &["switch", "--track", "-c", &default_branch, &origin_ref],
-            )?;
-        }
+        run_git_command(workspace_root, &["checkout", "--detach", &origin_ref])?;
+        return Ok(());
     }
 
     run_git_command(
@@ -551,6 +538,21 @@ fn prepare_source_workspace_for_upgrade(workspace_root: &Path) -> Result<()> {
         workspace_root,
         &["pull", "--ff-only", "origin", &default_branch],
     )
+}
+
+fn ensure_clean_source_workspace(workspace_root: &Path) -> Result<()> {
+    let status = git_command_stdout(workspace_root, &["status", "--porcelain"])?;
+    if status.trim().is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "source_path",
+        "Source checkout has uncommitted changes; refusing to prepare upgrade workspace",
+        Some(workspace_root.display().to_string()),
+        None,
+    )
+    .with_hint("Commit, stash, or discard local changes before running source upgrade."))
 }
 
 fn origin_default_branch(workspace_root: &Path) -> Result<Option<String>> {
@@ -1467,6 +1469,114 @@ mod tests {
             git_stdout(checkout.path(), &["branch", "--show-current"]),
             ""
         );
+    }
+
+    #[test]
+    fn source_upgrade_preparation_detaches_worktree_when_default_branch_checked_out_elsewhere() {
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(
+            remote.path(),
+            &["init", "--bare", "--initial-branch", "main"],
+        );
+
+        let seed = source_workspace_with_package_name("homeboy");
+        git(seed.path(), &["init", "--initial-branch", "main"]);
+        git(seed.path(), &["config", "user.email", "test@example.com"]);
+        git(seed.path(), &["config", "user.name", "Homeboy Test"]);
+        git(seed.path(), &["add", "."]);
+        git(seed.path(), &["commit", "-m", "initial"]);
+        git(
+            seed.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &remote.path().display().to_string(),
+            ],
+        );
+        git(seed.path(), &["push", "-u", "origin", "main"]);
+
+        let root = tempfile::tempdir().expect("root tempdir");
+        let main_checkout = root.path().join("main-checkout");
+        git(
+            root.path(),
+            &[
+                "clone",
+                &remote.path().display().to_string(),
+                &main_checkout.display().to_string(),
+            ],
+        );
+
+        let source_worktree = root.path().join("source-worktree");
+        git(
+            &main_checkout,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature-upgrade-source",
+                &source_worktree.display().to_string(),
+                "HEAD",
+            ],
+        );
+
+        std::fs::write(seed.path().join("src.txt"), "new source\n").expect("write source change");
+        git(seed.path(), &["add", "."]);
+        git(seed.path(), &["commit", "-m", "update source"]);
+        git(seed.path(), &["push", "origin", "main"]);
+
+        let switch_main = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&source_worktree)
+            .args(["switch", "main"])
+            .output()
+            .expect("run git switch main");
+        assert!(
+            !switch_main.status.success(),
+            "test setup should reproduce branch ownership failure"
+        );
+
+        prepare_source_workspace_for_upgrade(&source_worktree).expect("prepare source worktree");
+
+        assert_eq!(
+            git_stdout(&source_worktree, &["branch", "--show-current"]),
+            ""
+        );
+        assert_eq!(
+            git_stdout(&source_worktree, &["rev-parse", "HEAD"]),
+            git_stdout(&source_worktree, &["rev-parse", "origin/main"])
+        );
+    }
+
+    #[test]
+    fn source_upgrade_preparation_rejects_dirty_source_checkout() {
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(
+            remote.path(),
+            &["init", "--bare", "--initial-branch", "main"],
+        );
+
+        let seed = source_workspace_with_package_name("homeboy");
+        git(seed.path(), &["init", "--initial-branch", "main"]);
+        git(seed.path(), &["config", "user.email", "test@example.com"]);
+        git(seed.path(), &["config", "user.name", "Homeboy Test"]);
+        git(seed.path(), &["add", "."]);
+        git(seed.path(), &["commit", "-m", "initial"]);
+        git(
+            seed.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &remote.path().display().to_string(),
+            ],
+        );
+        git(seed.path(), &["push", "-u", "origin", "main"]);
+        std::fs::write(seed.path().join("uncommitted.txt"), "dirty\n").expect("dirty file");
+
+        let err = prepare_source_workspace_for_upgrade(seed.path()).expect_err("dirty rejected");
+
+        assert!(err.message.contains("uncommitted changes"));
     }
 
     #[test]
