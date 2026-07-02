@@ -89,16 +89,12 @@ jobs:
     secrets: inherit
 ```
 
-### Runtime-Specific Wrappers
+### Runtime-Specific Inputs
 
-Runtime-specific reusable workflows may wrap `runtime-agent-full-run.yml` when a
-runtime has product vocabulary, compatibility aliases, or setup defaults that
-would make the generic workflow narrative less clear. The wrapper should pin the
-runtime id, translate product-specific input names, and then call the generic
-workflow with canonical inputs.
-
-Runtime wrapper metadata lives with the runtime adapter manifest and docs. The
-generic workflow only relies on the canonical selected-runtime inputs it receives.
+`runtime-agent-full-run.yml` is the reusable workflow surface in this repository.
+Runtime-specific callers select a runtime with `runtime`, pass canonical
+selected-runtime inputs, and keep product vocabulary in caller-owned composition
+or package-level input rendering helpers.
 
 ### Migrating Old Wrapper Callers
 

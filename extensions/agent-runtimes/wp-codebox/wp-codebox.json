@@ -58,22 +58,6 @@
     "adapter": {
       "module": "agent-runtimes/wp-codebox/lib/runtime-workflow-input-projection.js",
       "export": "renderRuntimeWorkflowInputs"
-    },
-    "wrapper": {
-      "workflow": ".github/workflows/wp-codebox-runtime-agent-full-run.yml",
-      "description": "Thin WP Codebox wrapper over runtime-agent-full-run.yml. It pins runtime=wp-codebox and translates WordPress/WP Codebox input names into generic selected-runtime inputs.",
-      "input_defaults": {
-        "wordpress_version": "7.0",
-        "wp_config_defines": {},
-        "wp_runtime_mounts": [],
-        "wp_runtime_overlays": []
-      },
-      "input_mapping": {
-        "wordpress_version": "runtime_wordpress_version",
-        "wp_config_defines": "extra_wp_config_defines",
-        "wp_runtime_mounts": "runtime_mounts",
-        "wp_runtime_overlays": "runtime_overlays"
-      }
     }
   },
   "runner_config_projection": {

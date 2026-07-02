@@ -156,14 +156,11 @@ runtime value is not accepted by the generic runtime registry; use `wp-codebox`.
 Do not add new callers or examples that depend on those aliases.
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
-agent runs when the caller already speaks the generic runtime contract. WP
-Codebox callers should use `.github/workflows/wp-codebox-runtime-agent-full-run.yml`,
-which maps WordPress/WP Codebox workflow vocabulary onto the generic shell while
-preserving existing direct generic workflow inputs for migrated callers.
-See [`.github/workflows/README.md`](.github/workflows/README.md) for workflow
-inputs and integration examples, and
-[`docs/wp-codebox-runtime-workflow.md`](docs/wp-codebox-runtime-workflow.md) for
-WP Codebox wrapper migration guidance.
+agent runs. WP Codebox callers use the same workflow with `runtime: wp-codebox`
+and canonical selected-runtime inputs such as `runtime_mounts`,
+`runtime_overlays`, `runtime_profiles`, `component_contracts`, and
+`artifact_declarations`. See [`.github/workflows/README.md`](.github/workflows/README.md)
+for workflow inputs and integration examples.
 
 Use `component_contracts` only when the ability provider plugin or runtime
 component must be mounted explicitly. Keep ability names, schemas, and artifact
