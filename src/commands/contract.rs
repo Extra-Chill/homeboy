@@ -813,6 +813,12 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
                         true,
                     ),
                     field(
+                        "evidence",
+                        "object",
+                        "Structured runner handoff evidence for orchestrators, including runner/job/run IDs, remote paths, artifact refs, status, and typed next commands.",
+                        true,
+                    ),
+                    field(
                         "follow_commands",
                         "object",
                         "Operator follow-up commands.",
@@ -827,6 +833,7 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
                     "job_id",
                     "remote_cwd",
                     "artifact_manifest",
+                    "evidence",
                     "follow_commands",
                 ],
                 example: runner_handoff_example(),
@@ -959,6 +966,33 @@ fn runner_handoff_example() -> Value {
             "schema": "homeboy/runner-artifact-manifest-ref/v1",
             "manifest_schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
             "path": "/home/runner/workspace-homeboy-artifacts/manifest.json"
+        },
+        "evidence": {
+            "schema": "homeboy/runner-handoff-evidence/v1",
+            "status": "handoff_complete",
+            "runner_id": "runner-1",
+            "runner_job_id": "job-1",
+            "run_id": "run-1",
+            "persisted_run_id": "run-1",
+            "mirror_run_id": "run-1",
+            "remote_cwd": "/home/runner/workspace",
+            "artifact_manifest": {
+                "schema": "homeboy/runner-artifact-manifest-ref/v1",
+                "manifest_schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+                "path": "/home/runner/workspace-homeboy-artifacts/manifest.json"
+            },
+            "artifact_refs": [{
+                "id": "artifact_manifest",
+                "name": "runner artifact manifest",
+                "path": "/home/runner/workspace-homeboy-artifacts/manifest.json"
+            }],
+            "next_commands": [{
+                "label": "runner_job_logs",
+                "command": ["homeboy", "runner", "job", "logs", "runner-1", "job-1", "--follow"]
+            }, {
+                "label": "run_artifacts",
+                "command": ["homeboy", "agent-task", "artifacts", "run-1"]
+            }]
         },
         "follow_commands": {
             "job_logs": "homeboy runner job logs runner-1 job-1 --follow",

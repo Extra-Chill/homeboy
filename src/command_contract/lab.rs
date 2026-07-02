@@ -254,6 +254,7 @@ pub struct RunnerHandoffEnvelope {
     pub mirror_run_id: Option<String>,
     pub remote_cwd: String,
     pub artifact_manifest: RunnerHandoffArtifactManifestRef,
+    pub evidence: RunnerHandoffEvidence,
     pub follow_commands: RunnerHandoffFollowCommands,
 }
 
@@ -262,6 +263,32 @@ pub struct RunnerHandoffArtifactManifestRef {
     pub schema: String,
     pub manifest_schema: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerHandoffEvidence {
+    pub schema: String,
+    pub status: String,
+    pub runner_id: String,
+    pub runner_job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_run_id: Option<String>,
+    pub remote_cwd: String,
+    pub artifact_manifest: RunnerHandoffArtifactManifestRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<RunnerWorkloadArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_commands: Vec<RunnerHandoffNextCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerHandoffNextCommand {
+    pub label: String,
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -306,6 +333,83 @@ impl RunnerHandoffEnvelope {
         remote_cwd: String,
         mirror_run_id: Option<String>,
     ) -> Self {
+        let job_logs_command = vec![
+            "homeboy".to_string(),
+            "runner".to_string(),
+            "job".to_string(),
+            "logs".to_string(),
+            runner_id.to_string(),
+            job_id.to_string(),
+            "--follow".to_string(),
+        ];
+        let job_cancel_command = vec![
+            "homeboy".to_string(),
+            "runner".to_string(),
+            "job".to_string(),
+            "cancel".to_string(),
+            runner_id.to_string(),
+            job_id.to_string(),
+        ];
+        let mut next_commands = vec![
+            RunnerHandoffNextCommand {
+                label: "runner_job_logs".to_string(),
+                command: job_logs_command.clone(),
+            },
+            RunnerHandoffNextCommand {
+                label: "runner_job_cancel".to_string(),
+                command: job_cancel_command.clone(),
+            },
+        ];
+        if let Some(run_id) = mirror_run_id.as_ref() {
+            next_commands.extend([
+                RunnerHandoffNextCommand {
+                    label: "run_status".to_string(),
+                    command: vec![
+                        "homeboy".to_string(),
+                        "agent-task".to_string(),
+                        "status".to_string(),
+                        run_id.clone(),
+                    ],
+                },
+                RunnerHandoffNextCommand {
+                    label: "run_logs".to_string(),
+                    command: vec![
+                        "homeboy".to_string(),
+                        "agent-task".to_string(),
+                        "logs".to_string(),
+                        run_id.clone(),
+                    ],
+                },
+                RunnerHandoffNextCommand {
+                    label: "run_artifacts".to_string(),
+                    command: vec![
+                        "homeboy".to_string(),
+                        "agent-task".to_string(),
+                        "artifacts".to_string(),
+                        run_id.clone(),
+                    ],
+                },
+            ]);
+        }
+        let artifact_manifest = RunnerHandoffArtifactManifestRef::for_remote_cwd(&remote_cwd);
+        let evidence = RunnerHandoffEvidence {
+            schema: "homeboy/runner-handoff-evidence/v1".to_string(),
+            status: "handoff_complete".to_string(),
+            runner_id: runner_id.to_string(),
+            runner_job_id: job_id.to_string(),
+            run_id: mirror_run_id.clone(),
+            persisted_run_id: mirror_run_id.clone(),
+            mirror_run_id: mirror_run_id.clone(),
+            remote_cwd: remote_cwd.clone(),
+            artifact_manifest: artifact_manifest.clone(),
+            artifact_refs: vec![RunnerWorkloadArtifactRef {
+                id: "artifact_manifest".to_string(),
+                name: Some("runner artifact manifest".to_string()),
+                path: Some(artifact_manifest.path.clone()),
+                url: None,
+            }],
+            next_commands,
+        };
         let follow_commands = RunnerHandoffFollowCommands {
             job_logs: format!("homeboy runner job logs {runner_id} {job_id} --follow"),
             job_cancel: format!("homeboy runner job cancel {runner_id} {job_id}"),
@@ -335,8 +439,9 @@ impl RunnerHandoffEnvelope {
             durable_run_id: mirror_run_id.clone(),
             persisted_run_id: mirror_run_id.clone(),
             mirror_run_id,
-            artifact_manifest: RunnerHandoffArtifactManifestRef::for_remote_cwd(&remote_cwd),
+            artifact_manifest,
             remote_cwd,
+            evidence,
             follow_commands,
         }
     }
