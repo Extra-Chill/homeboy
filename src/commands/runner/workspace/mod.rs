@@ -119,6 +119,10 @@ pub(super) enum RunnerWorkspaceCommand {
         /// Maximum number of orphan candidates to report or remove.
         #[arg(long, default_value_t = 25)]
         limit: usize,
+
+        /// Maximum apply passes to run. Each pass re-scans and removes at most --limit candidates.
+        #[arg(long, default_value_t = 1)]
+        passes: usize,
     },
 }
 
@@ -186,12 +190,14 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             apply,
             min_age_hours,
             limit,
+            passes,
         } => runner::prune_workspaces(
             &runner_id,
             runner::RunnerWorkspacePruneOptions {
                 apply,
                 min_age_hours,
                 limit,
+                passes,
             },
         )
         .map(|(output, exit_code)| (RunnerWorkspaceOutput::Prune(output), exit_code)),

@@ -28,6 +28,7 @@ pub struct AgentTaskCookServiceOptions {
     pub cook_id: String,
     pub initial_run_id: String,
     pub to_worktree: String,
+    pub source_worktree_path: Option<PathBuf>,
     pub provider_command: Option<String>,
     /// Shared deterministic verification gate fields, factored out of the
     /// per-field duplication that previously spanned the loop/promote types.
@@ -49,6 +50,10 @@ pub struct AgentTaskCookServiceOptions {
 pub struct AgentTaskCookReport {
     pub schema: &'static str,
     pub cook_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_run_ids: Vec<String>,
     pub status: String,
     pub attempts: Vec<AgentTaskCookAttemptReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +88,7 @@ where
     let cook_id = options.cook_id.clone();
 
     for attempt in 1..=max_attempts {
+        agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
         let record = agent_task_lifecycle::status(&run_id)?;
         let plan = agent_task_lifecycle::load_plan(&run_id)?;
         let Some(source_request) = plan.tasks.first().cloned() else {
@@ -232,7 +238,7 @@ where
                         1,
                     ));
                 };
-                let next_run_id = format!("{cook_id}-attempt-{}", attempt + 1);
+                let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, attempt + 1);
                 let follow_up_plan = AgentTaskPlan::new(
                     format!("{cook_id}-cook-attempt-{}", attempt + 1),
                     vec![follow_up_request],
@@ -264,6 +270,23 @@ where
         Some("cook attempt budget exhausted".to_string()),
         1,
     ))
+}
+
+pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> Option<PathBuf> {
+    cwd.or_else(|| {
+        workspace.and_then(|workspace| {
+            let path = PathBuf::from(&workspace);
+            path.exists().then_some(workspace)
+        })
+    })
+    .map(PathBuf::from)
+}
+
+pub fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
+    let start = ai_tool.find('(')?;
+    let end = ai_tool[start + 1..].find(')')? + start + 1;
+    let model = ai_tool[start + 1..end].trim();
+    (!model.is_empty()).then(|| model.to_string())
 }
 
 pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
@@ -302,6 +325,8 @@ fn promote_attempt(
         source,
         source_run_id: Some(run_id.to_string()),
         source_path,
+        source_worktree_path: options.source_worktree_path.clone(),
+        base_ref: Some(options.base.clone()),
         to_worktree: options.to_worktree.clone(),
         task_id: None,
         artifact_id: None,
@@ -391,10 +416,24 @@ fn cook_report(
     stop_reason: Option<String>,
     exit_code: i32,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let (latest_run_id, history_run_ids) = agent_task_lifecycle::cook_index(&cook_id)
+        .map(|index| {
+            (
+                Some(index.latest_run_id),
+                index
+                    .attempts
+                    .into_iter()
+                    .map(|attempt| attempt.run_id)
+                    .collect(),
+            )
+        })
+        .unwrap_or((None, Vec::new()));
     AgentTaskRunResult {
         value: AgentTaskCookReport {
             schema: "homeboy/agent-task-cook/v1",
             cook_id,
+            latest_run_id,
+            history_run_ids,
             status: status.to_string(),
             attempts,
             finalization,

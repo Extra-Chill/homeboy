@@ -53,7 +53,7 @@ pub fn record_completed_run(
 }
 
 pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let record = store::read_record(&sanitize_run_id(run_id))?;
+    let record = store::read_record(&resolve_run_id(run_id)?)?;
     store::read_plan_path(&record.plan_path)
 }
 
@@ -146,7 +146,9 @@ pub fn record_run_aggregate(
 }
 
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let requested_run_id = sanitize_run_id(run_id);
+    let resolved_run_id = resolve_run_id(run_id)?;
+    let mut record = store::read_record(&resolved_run_id)?;
     if let (Ok(aggregate), Ok(plan)) = (
         store::read_aggregate(&record.run_id),
         store::read_plan_path(&record.plan_path),
@@ -168,6 +170,16 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
         }
     }
     record.annotate_stale_running();
+    if requested_run_id != record.run_id {
+        if let Ok(index) = store::read_cook_index(&requested_run_id) {
+            let metadata = record.ensure_metadata_object();
+            metadata.insert("cook_alias".to_string(), json!(requested_run_id));
+            metadata.insert(
+                "cook_index".to_string(),
+                serde_json::to_value(index).unwrap_or(Value::Null),
+            );
+        }
+    }
     Ok(record)
 }
 
@@ -261,7 +273,7 @@ pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
 }
 
 pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRunRecord> {
-    let source = store::read_record(&sanitize_run_id(run_id))?;
+    let source = store::read_record(&resolve_run_id(run_id)?)?;
     let plan = store::read_plan_path(&source.plan_path)?;
     let mut retry = submit_plan(&plan, requested_run_id)?;
     let metadata = retry.ensure_metadata_object();
@@ -272,7 +284,7 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
-    let run_id = sanitize_run_id(run_id);
+    let run_id = resolve_run_id(run_id)?;
     let record = store::read_record(&run_id)?;
     let (events, artifact_refs) = match store::read_aggregate(&run_id) {
         Ok(aggregate) => {
@@ -291,7 +303,7 @@ pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
 }
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
-    let run_id = sanitize_run_id(run_id);
+    let run_id = resolve_run_id(run_id)?;
     let record = store::read_record(&run_id)?;
     let aggregate = store::read_aggregate(&run_id).ok();
     let latest_executor_evidence = record.latest_executor_evidence.as_ref();
@@ -304,7 +316,7 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
 }
 
 pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
-    let record = store::read_record(&sanitize_run_id(run_id))?;
+    let record = store::read_record(&resolve_run_id(run_id)?)?;
     record.aggregate_path.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
@@ -325,6 +337,32 @@ pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
     })?;
     let path = store::aggregate_path(&record.run_id)?;
     Ok((raw, path))
+}
+
+pub fn record_cook_attempt(
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+) -> Result<AgentTaskCookIndex> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let recorded_at = now_timestamp();
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("cook_id".to_string(), json!(sanitize_run_id(cook_id)));
+    metadata.insert("cook_attempt".to_string(), json!(attempt));
+    store::write_record(&record)?;
+    store::write_cook_index_attempt(cook_id, attempt, run_id, recorded_at)
+}
+
+pub fn cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
+    store::read_cook_index(&sanitize_run_id(cook_id))
+}
+
+fn resolve_run_id(run_id: &str) -> Result<String> {
+    let run_id = sanitize_run_id(run_id);
+    match store::read_cook_index(&run_id) {
+        Ok(index) => Ok(index.latest_run_id),
+        Err(_) => Ok(run_id),
+    }
 }
 
 pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {

@@ -9,6 +9,7 @@ use homeboy::core::agent_tasks::dispatch_service::{
     self, AgentTaskDispatchCommand, DispatchCoreInputs,
 };
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
+use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::provider;
 use homeboy::core::agent_tasks::service::{
     self as agent_task_service, AgentTaskCookServiceOptions,
@@ -55,6 +56,7 @@ fn submit_batch_cook_fanout(args: AgentTaskFanoutSubmitArgs) -> CmdResult<Value>
             serde_json::json!({
                 "cook_id": cook.cook_id,
                 "run_id": cook.run_id(),
+                "run_id_semantics": "stable cook id; executed attempts use unique durable run ids",
                 "worktree": cook.to_worktree,
                 "head": cook.head,
                 "workspace_materialization": cook.workspace_materialization,
@@ -504,7 +506,7 @@ impl BatchCookSpec {
             required_capabilities: Vec::new(),
             secret_env: self.secret_env.clone(),
             concurrency: self.concurrency,
-            run_id: Some(self.run_id()),
+            run_id: Some(agent_task_lifecycle::cook_attempt_run_id(&self.run_id(), 1)),
             task_id: None,
             core: DispatchCoreInputs {
                 tasks_json: None,
@@ -522,12 +524,17 @@ impl BatchCookSpec {
             .commit_message
             .clone()
             .unwrap_or_else(|| default_cook_commit_message(self));
+        let source_worktree_path = agent_task_service::source_worktree_path(
+            self.cwd.clone(),
+            self.workspace.clone(),
+        );
         Ok(BatchCookInvocation {
             dispatch,
             options: AgentTaskCookServiceOptions {
-                cook_id: self.cook_id.clone(),
+                cook_id: self.run_id(),
                 initial_run_id: self.run_id(),
                 to_worktree: self.to_worktree.clone(),
+                source_worktree_path,
                 provider_command: self.provider_command.clone(),
                 gates: VerifyGateOptions {
                     verify: self.verify.clone(),
@@ -546,18 +553,11 @@ impl BatchCookSpec {
                 ai_model: self
                     .model
                     .clone()
-                    .or_else(|| ai_model_from_tool(&self.ai_tool)),
+                    .or_else(|| agent_task_service::ai_model_from_tool(&self.ai_tool)),
                 ai_used_for: self.ai_used_for.clone(),
             },
         })
     }
-}
-
-fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
-    let start = ai_tool.find('(')?;
-    let end = ai_tool[start + 1..].find(')')? + start + 1;
-    let model = ai_tool[start + 1..end].trim();
-    (!model.is_empty()).then(|| model.to_string())
 }
 
 fn default_cook_title(cook: &BatchCookSpec) -> String {

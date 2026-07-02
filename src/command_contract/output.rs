@@ -372,6 +372,7 @@ mod tests {
                 ".",
             ]),
             "rig" => Some(&["homeboy", "rig", "check", "example-rig"]),
+            "worktree" => Some(&["homeboy", "worktree", "cleanup"]),
             "tunnel" => Some(&[
                 "homeboy",
                 "tunnel",

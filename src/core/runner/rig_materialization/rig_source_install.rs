@@ -26,6 +26,7 @@ pub(super) fn rig_install_capability_preflight() -> RunnerCapabilityPreflight {
         command: "rig.install".to_string(),
         required_tools: vec![RunnerRequiredTool::Homeboy],
         required_commands: Vec::new(),
+        required_tool_capabilities: Vec::new(),
         required_components: Vec::new(),
         required_env: Vec::new(),
     }

@@ -90,6 +90,7 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
                 "homeboy@cook",
                 "--verify",
                 "true",
+                "--no-finalize",
                 "--prompt",
                 "cook",
             ]),
@@ -288,6 +289,10 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
             ]),
             "tunnel service start",
         ),
+        (
+            parsed_command(&["homeboy", "worktree", "cleanup"]),
+            "worktree cleanup",
+        ),
     ]
 }
 
@@ -305,6 +310,8 @@ fn unsupported_lab_command_cases() -> Vec<Commands> {
         ]),
         parsed_command(&["homeboy", "status"]),
         parsed_command(&["homeboy", "bench", "list"]),
+        parsed_command(&["homeboy", "worktree", "list"]),
+        parsed_command(&["homeboy", "worktree", "remove", "homeboy@task"]),
     ]
 }
 
@@ -477,6 +484,39 @@ fn fuzz_run_and_list_offload_but_other_subcommands_stay_local() {
 }
 
 #[test]
+fn worktree_cleanup_lab_only_uses_runner_resident_contract_without_local_fallback() {
+    let cli = parsed_cli(&[
+        "homeboy",
+        "--runner",
+        "homeboy-lab",
+        "--lab-only",
+        "worktree",
+        "cleanup",
+    ]);
+    let local_policy = LabLocalExecutionPolicy::from_flags(
+        cli.allow_local_hot,
+        cli.allow_local_fallback,
+        cli.lab_only,
+    );
+
+    let contract = cli
+        .command
+        .lab_contract()
+        .expect("worktree cleanup has a Lab contract");
+
+    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+    assert!(local_policy.deny_local_execution());
+    assert_eq!(contract.hot_label, "worktree cleanup");
+    assert_eq!(contract.portability, LabCommandPortability::Portable);
+    assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
+    assert_eq!(
+        contract.workspace_mode_policy,
+        LabWorkspaceModePolicy::RunnerResident
+    );
+    assert!(!contract.routing_policy.default_lab_offload);
+}
+
+#[test]
 fn test_lab_command_contracts_cover_hot_commands() {
     for (command, expected_label) in supported_lab_command_cases() {
         let contract = command
@@ -574,6 +614,7 @@ fn test_lab_command_contracts_cover_hot_commands() {
             "homeboy@smoke",
             "--verify",
             "true",
+            "--no-finalize",
             "--prompt",
             "cook",
         ])
@@ -607,6 +648,7 @@ fn test_lab_command_contracts_cover_hot_commands() {
         ]
         .as_slice(),
         ["homeboy", "agent-task", "controller", "resume", "loop-123"].as_slice(),
+        ["homeboy", "worktree", "cleanup"].as_slice(),
     ] {
         let contract = parsed_command(args)
             .lab_contract()
@@ -845,6 +887,14 @@ fn test_lab_command_contracts_cover_hot_commands() {
     assert!(parsed_command(&["homeboy", "bench", "list"])
         .lab_contract()
         .is_none());
+    assert!(parsed_command(&["homeboy", "worktree", "list"])
+        .lab_contract()
+        .is_none());
+    assert!(
+        parsed_command(&["homeboy", "worktree", "remove", "homeboy@task"])
+            .lab_contract()
+            .is_none()
+    );
     assert!(parsed_command(&["homeboy", "audit", "--conventions"])
         .lab_contract()
         .is_none());

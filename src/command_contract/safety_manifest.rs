@@ -374,16 +374,19 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.operator = true;
             metadata.output_notes = "default output is a non-mutating plan; pass --apply to mutate";
         }
-        ["file", "write"] | ["file", "delete"] => {
+        ["file", "write"] | ["file", "delete"] | ["file", "mkdir"] | ["file", "rename"] => {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "default output is a non-mutating plan; pass --apply to mutate";
+            metadata.dangerous_flags = vec!["--apply"];
         }
-        ["file", "copy"]
-        | ["file", "edit"]
-        | ["file", "mkdir"]
-        | ["file", "rename"]
-        | ["file", "sync"] => {
+        ["file", "edit"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes = "mutates file content unless --dry-run is passed";
+        }
+        ["file", "copy"] | ["file", "sync"] => {
             metadata.mutates = true;
         }
         ["fleet", "exec"] => {
@@ -542,7 +545,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["runner", "workspace", "prune"] => {
             metadata.mutates = true;
             metadata.operator = true;
-            metadata.output_notes = "default output is a non-mutating orphan cleanup plan; pass --apply to delete exact runner workspace paths";
+            metadata.output_notes = "default output is a non-mutating orphan cleanup plan with candidate/remaining bytes; pass --apply to delete exact runner workspace paths and --passes to drain bounded pages";
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["http", "request"] => {
@@ -863,6 +866,9 @@ mod tests {
             ["db", "drop-table"].as_slice(),
             ["file", "write"].as_slice(),
             ["file", "delete"].as_slice(),
+            ["file", "mkdir"].as_slice(),
+            ["file", "rename"].as_slice(),
+            ["file", "edit"].as_slice(),
             ["docs", "map"].as_slice(),
             ["runs", "reconcile"].as_slice(),
             ["runs", "import"].as_slice(),
@@ -914,6 +920,9 @@ mod tests {
             ["self", "cleanup-runtime-tmp"].as_slice(),
             ["db", "delete-row"].as_slice(),
             ["file", "delete"].as_slice(),
+            ["file", "mkdir"].as_slice(),
+            ["file", "rename"].as_slice(),
+            ["file", "edit"].as_slice(),
             ["server", "set"].as_slice(),
             ["api", "post"].as_slice(),
             ["http", "request"].as_slice(),
@@ -950,6 +959,22 @@ mod tests {
 
         let file_write = manifest.find_path(&["file", "write"]).unwrap();
         assert!(file_write.output.notes.contains("--apply"));
+        assert!(file_write.dangerous_flags.contains(&"--apply".to_string()));
+
+        let file_delete = manifest.find_path(&["file", "delete"]).unwrap();
+        assert!(file_delete.output.notes.contains("--apply"));
+        assert!(file_delete.dangerous_flags.contains(&"--apply".to_string()));
+
+        let file_mkdir = manifest.find_path(&["file", "mkdir"]).unwrap();
+        assert!(file_mkdir.output.notes.contains("--apply"));
+        assert!(file_mkdir.dangerous_flags.contains(&"--apply".to_string()));
+
+        let file_rename = manifest.find_path(&["file", "rename"]).unwrap();
+        assert!(file_rename.output.notes.contains("--apply"));
+        assert!(file_rename.dangerous_flags.contains(&"--apply".to_string()));
+
+        let file_edit = manifest.find_path(&["file", "edit"]).unwrap();
+        assert_eq!(file_edit.dry_run.flag.as_deref(), Some("--dry-run"));
 
         let api_post = manifest.find_path(&["api", "post"]).unwrap();
         assert!(api_post.output.notes.contains("--apply"));

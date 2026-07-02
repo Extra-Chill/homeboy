@@ -36,6 +36,7 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
                 apply: false,
                 min_age_hours: 0,
                 limit: 10,
+                passes: 1,
             },
         )
         .expect("prune preview");
@@ -43,6 +44,13 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
         assert_eq!(exit_code, 0);
         assert!(output.dry_run);
         assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.total_candidate_count, 1);
+        assert!(output.total_candidate_bytes > 0);
+        assert_eq!(output.remaining_candidate_count, 0);
+        assert_eq!(output.remaining_candidate_bytes, 0);
+        assert!(!output.has_more);
+        assert!(output.next_command.is_none());
+        assert!(output.drain_command.contains("--apply --min-age-hours 0"));
         assert_eq!(output.candidates[0].remote_path, synced.remote_path);
         assert_eq!(output.candidates[0].reason, "source_path_missing");
         assert!(Path::new(&synced.remote_path).exists());
@@ -92,6 +100,7 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
                 apply: true,
                 min_age_hours: 0,
                 limit: 10,
+                passes: 1,
             },
         )
         .expect("prune apply");
@@ -99,6 +108,10 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
         assert_eq!(exit_code, 0);
         assert!(!output.dry_run);
         assert_eq!(output.removed.len(), 1);
+        assert_eq!(output.total_candidate_count, 1);
+        assert!(output.total_candidate_bytes >= output.total_removed_bytes);
+        assert_eq!(output.remaining_candidate_count, 0);
+        assert!(!output.has_more);
         assert_eq!(output.removed[0].remote_path, orphan.remote_path);
         assert!(!Path::new(&orphan.remote_path).exists());
         assert!(Path::new(&live.remote_path).exists());
@@ -145,6 +158,7 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
                 apply: false,
                 min_age_hours: 0,
                 limit: 10,
+                passes: 1,
             },
         )
         .expect("prune preview");
@@ -162,6 +176,124 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
         assert_eq!(output.candidates[0].reason, "source_path_missing");
         assert!(workspace.exists());
         assert!(output.removed.is_empty());
+    });
+}
+
+#[test]
+fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
+    crate::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let source_a = source_parent.path().join("orphan-source-a");
+        let source_b = source_parent.path().join("orphan-source-b");
+        fs::create_dir_all(&source_a).expect("source a dir");
+        fs::create_dir_all(&source_b).expect("source b dir");
+        fs::write(source_a.join("file.txt"), "a\n").expect("source a file");
+        fs::write(source_b.join("file.txt"), "larger b\n").expect("source b file");
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-limited","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        sync_workspace(
+            "lab-local-prune-limited",
+            sync_options(source_a.display().to_string()),
+        )
+        .expect("sync source a");
+        sync_workspace(
+            "lab-local-prune-limited",
+            sync_options(source_b.display().to_string()),
+        )
+        .expect("sync source b");
+        fs::remove_dir_all(&source_a).expect("remove source a");
+        fs::remove_dir_all(&source_b).expect("remove source b");
+
+        let (output, exit_code) = prune_workspaces(
+            "lab-local-prune-limited",
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 0,
+                limit: 1,
+                passes: 1,
+            },
+        )
+        .expect("prune preview");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.dry_run);
+        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.total_candidate_count, 2);
+        assert!(output.total_candidate_bytes > output.candidates[0].bytes);
+        assert_eq!(output.remaining_candidate_count, 1);
+        assert!(output.remaining_candidate_bytes > 0);
+        assert!(output.has_more);
+        assert_eq!(
+            output.next_command.as_deref(),
+            Some("homeboy runner workspace prune lab-local-prune-limited --min-age-hours 0 --limit 1")
+        );
+        assert_eq!(
+            output.drain_command,
+            "homeboy runner workspace prune lab-local-prune-limited --apply --min-age-hours 0 --limit 1 --passes 10"
+        );
+    });
+}
+
+#[test]
+fn prune_workspaces_apply_passes_drain_until_empty() {
+    crate::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let source_a = source_parent.path().join("drain-source-a");
+        let source_b = source_parent.path().join("drain-source-b");
+        fs::create_dir_all(&source_a).expect("source a dir");
+        fs::create_dir_all(&source_b).expect("source b dir");
+        fs::write(source_a.join("file.txt"), "a\n").expect("source a file");
+        fs::write(source_b.join("file.txt"), "b\n").expect("source b file");
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-drain","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (workspace_a, _) = sync_workspace(
+            "lab-local-prune-drain",
+            sync_options(source_a.display().to_string()),
+        )
+        .expect("sync source a");
+        let (workspace_b, _) = sync_workspace(
+            "lab-local-prune-drain",
+            sync_options(source_b.display().to_string()),
+        )
+        .expect("sync source b");
+        fs::remove_dir_all(&source_a).expect("remove source a");
+        fs::remove_dir_all(&source_b).expect("remove source b");
+
+        let (output, exit_code) = prune_workspaces(
+            "lab-local-prune-drain",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 1,
+                passes: 10,
+            },
+        )
+        .expect("prune drain");
+
+        assert_eq!(exit_code, 0);
+        assert!(!output.dry_run);
+        assert_eq!(output.total_candidate_count, 2);
+        assert_eq!(output.removed.len(), 2);
+        assert_eq!(output.remaining_candidate_count, 0);
+        assert_eq!(output.remaining_candidate_bytes, 0);
+        assert!(!output.has_more);
+        assert!(output.next_command.is_none());
+        assert!(!Path::new(&workspace_a.remote_path).exists());
+        assert!(!Path::new(&workspace_b.remote_path).exists());
     });
 }
 

@@ -3,6 +3,10 @@ use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git;
 use homeboy::core::lab_routing::{
     self, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest, NoopLabDispatchObserver,
+    PersistedRunRetrieval,
+};
+use homeboy::core::observation::{
+    finish_run_best_effort, NewRunRecord, ObservationStore, RunStatus,
 };
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runners::{self, RunnerExecOptions};
@@ -61,7 +65,7 @@ pub fn route_after_parse(
 
     let lab_command = lab_offload_command(&cli.command)?;
 
-    let trace_runner_id = if matches!(cli.command, Commands::Trace(_)) {
+    let inferred_runner_id = if lab_command.is_some() {
         cli.runner
             .clone()
             .or_else(|| runners::resolve_default_lab_runner().ok().flatten())
@@ -69,7 +73,7 @@ pub fn route_after_parse(
         None
     };
 
-    let observer = lab_dispatch_observer(cli, normalized_args, trace_runner_id.as_deref());
+    let observer = lab_dispatch_observer(cli, normalized_args, inferred_runner_id.as_deref());
     let active_run_id = observer.run_id().map(str::to_string);
 
     let capture_mutation_patch = cli.command.lab_offload_captures_mutation_patch();
@@ -105,7 +109,7 @@ pub fn route_after_parse(
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             capture_patch: capture_mutation_patch,
             mutation_flag,
-            timeout: lab_route_dispatch_timeout(&cli.command),
+            timeout: lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),
             active_run_id: active_run_id.as_deref(),
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
@@ -116,7 +120,7 @@ pub fn route_after_parse(
             local_output_file: output_file,
             job_overrides,
         },
-        trace_runner_id.as_deref(),
+        inferred_runner_id.as_deref(),
         observer,
     )?;
 
@@ -146,8 +150,17 @@ pub fn route_after_parse(
     }
 }
 
-fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration> {
-    matches!(command, Commands::Trace(_)).then(lab_routing::lab_trace_dispatch_timeout)
+fn lab_route_dispatch_timeout(
+    command: &Commands,
+    detach_after_handoff: bool,
+) -> Option<std::time::Duration> {
+    if matches!(command, Commands::Trace(_)) {
+        return Some(lab_routing::lab_trace_dispatch_timeout());
+    }
+    if detach_after_handoff && is_agent_task_fanout_cook_batch_run_plan(command) {
+        return Some(lab_routing::lab_trace_dispatch_timeout());
+    }
+    None
 }
 
 /// Insert one env pair into the overrides, recording the key as secret when
@@ -360,18 +373,165 @@ fn resolve_changed_scope_source_path(
 fn lab_dispatch_observer(
     cli: &Cli,
     normalized_args: &[String],
-    trace_runner_id: Option<&str>,
+    runner_id: Option<&str>,
 ) -> Box<dyn LabDispatchObserver> {
     match &cli.command {
-        Commands::Trace(args) => crate::commands::trace::start_lab_dispatch_observation(
-            args,
-            normalized_args,
-            trace_runner_id,
-        )
-        .map(|observation| Box::new(observation) as Box<dyn LabDispatchObserver>)
-        .unwrap_or_else(|| Box::new(NoopLabDispatchObserver)),
+        Commands::Trace(args) => {
+            crate::commands::trace::start_lab_dispatch_observation(args, normalized_args, runner_id)
+                .map(|observation| Box::new(observation) as Box<dyn LabDispatchObserver>)
+                .unwrap_or_else(|| Box::new(NoopLabDispatchObserver))
+        }
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command:
+                crate::commands::agent_task::AgentTaskCommand::Fanout(
+                    crate::commands::agent_task::AgentTaskFanoutArgs {
+                        command:
+                            crate::commands::agent_task::AgentTaskFanoutCommand::CookBatch(args),
+                    },
+                ),
+        }) if cli.detach_after_handoff && args.run_plan => {
+            start_agent_task_fanout_lab_dispatch_observation(args, normalized_args, runner_id)
+                .map(|observation| Box::new(observation) as Box<dyn LabDispatchObserver>)
+                .unwrap_or_else(|| Box::new(NoopLabDispatchObserver))
+        }
         _ => Box::new(NoopLabDispatchObserver),
     }
+}
+
+struct AgentTaskFanoutLabDispatchObservation {
+    store: ObservationStore,
+    run_id: String,
+    fanout_id: String,
+}
+
+impl LabDispatchObserver for AgentTaskFanoutLabDispatchObservation {
+    fn run_id(&self) -> Option<&str> {
+        Some(self.run_id.as_str())
+    }
+
+    fn finish(
+        self: Box<Self>,
+        status: RunStatus,
+        metadata: serde_json::Value,
+    ) -> Option<PersistedRunRetrieval> {
+        let metadata =
+            agent_task_fanout_finish_metadata(metadata, &self.run_id, &self.fanout_id, status);
+        finish_run_best_effort(&self.store, &self.run_id, status, Some(metadata));
+        Some(PersistedRunRetrieval::for_run(&self.run_id))
+    }
+}
+
+fn agent_task_fanout_finish_metadata(
+    mut metadata: serde_json::Value,
+    run_id: &str,
+    fanout_id: &str,
+    status: RunStatus,
+) -> serde_json::Value {
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "agent_task_lab_dispatch".to_string(),
+            serde_json::json!({
+                "schema": "homeboy/agent-task-fanout-lab-dispatch/v1",
+                "fanout_id": fanout_id,
+                "phase": "route_lab_dispatch",
+                "status": status.as_str(),
+            }),
+        );
+        object.insert(
+            "fanout_id".to_string(),
+            serde_json::Value::String(fanout_id.to_string()),
+        );
+        object.insert(
+            "follow_commands".to_string(),
+            serde_json::json!({
+                "dispatch_status": format!("homeboy runs show {run_id}"),
+                "dispatch_evidence": format!("homeboy runs evidence --run {run_id}"),
+                "fanout_status": format!("homeboy agent-task fanout status {fanout_id}"),
+            }),
+        );
+    }
+    metadata
+}
+
+fn start_agent_task_fanout_lab_dispatch_observation(
+    args: &crate::commands::agent_task::AgentTaskFanoutCookBatchArgs,
+    normalized_args: &[String],
+    runner_id: Option<&str>,
+) -> Option<AgentTaskFanoutLabDispatchObservation> {
+    let store = ObservationStore::open_initialized().ok()?;
+    let cwd = std::env::current_dir().ok();
+    let fanout_id = agent_task_fanout_cook_batch_dispatch_id(args);
+    let run = store
+        .start_run(
+            NewRunRecord::builder("agent-task")
+                .component_id(args.repo.clone())
+                .command(normalized_args.join(" "))
+                .optional_cwd_path(cwd.as_deref())
+                .current_homeboy_version()
+                .metadata(serde_json::json!({
+                    "agent_task_lab_dispatch": {
+                        "schema": "homeboy/agent-task-fanout-lab-dispatch/v1",
+                        "fanout_id": fanout_id,
+                        "phase": "route_before_lab_dispatch",
+                        "status": "running",
+                        "runner_id": runner_id,
+                        "detach_after_handoff": true,
+                        "run_plan": true,
+                        "issue_count": args.issues.len(),
+                    },
+                    "runner_id": runner_id,
+                    "fanout_id": fanout_id,
+                    "follow_commands": {
+                        "fanout_status": format!("homeboy agent-task fanout status {}", fanout_id),
+                    },
+                }))
+                .build(),
+        )
+        .ok()?;
+    eprintln!(
+        "Lab offload handoff: local dispatch run `{}` is durable before remote preflight; inspect dispatch with `homeboy runs show {}`. Once the fanout batch is submitted, inspect it with `homeboy agent-task fanout status {}`.",
+        run.id, run.id, fanout_id
+    );
+    Some(AgentTaskFanoutLabDispatchObservation {
+        store,
+        run_id: run.id,
+        fanout_id,
+    })
+}
+
+fn agent_task_fanout_cook_batch_dispatch_id(
+    args: &crate::commands::agent_task::AgentTaskFanoutCookBatchArgs,
+) -> String {
+    args.fanout_id.clone().unwrap_or_else(|| {
+        let first = args
+            .issues
+            .first()
+            .and_then(|issue| issue.split_once("/issues/").map(|(_, number)| number))
+            .and_then(|number| number.split(|c| matches!(c, '/' | '?' | '#')).next())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("batch");
+        format!(
+            "cook-batch-{}-issue-{}-{}",
+            args.repo,
+            first,
+            args.issues.len()
+        )
+    })
+}
+
+fn is_agent_task_fanout_cook_batch_run_plan(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command:
+                crate::commands::agent_task::AgentTaskCommand::Fanout(
+                    crate::commands::agent_task::AgentTaskFanoutArgs {
+                        command:
+                            crate::commands::agent_task::AgentTaskFanoutCommand::CookBatch(args),
+                    },
+                ),
+        }) if args.run_plan
+    )
 }
 
 fn run_rig_source_management_on_runner(
@@ -1140,10 +1300,119 @@ mod tests {
         let lint_cli = Cli::parse_from(["homeboy", "lint"]);
 
         assert_eq!(
-            lab_route_dispatch_timeout(&trace_cli.command),
+            lab_route_dispatch_timeout(&trace_cli.command, false),
             Some(lab_routing::lab_trace_dispatch_timeout())
         );
-        assert_eq!(lab_route_dispatch_timeout(&lint_cli.command), None);
+        assert_eq!(lab_route_dispatch_timeout(&lint_cli.command, false), None);
+    }
+
+    #[test]
+    fn detached_agent_task_fanout_cook_batch_run_plan_uses_bounded_handoff_timeout() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--detach-after-handoff",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "homeboy",
+            "--verify",
+            "cargo test --lib",
+            "--run-plan",
+            "https://github.com/Extra-Chill/homeboy/issues/7167",
+        ]);
+
+        assert_eq!(
+            lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),
+            Some(lab_routing::lab_trace_dispatch_timeout())
+        );
+
+        let no_detach = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "homeboy",
+            "--verify",
+            "cargo test --lib",
+            "--run-plan",
+            "https://github.com/Extra-Chill/homeboy/issues/7167",
+        ]);
+        assert_eq!(lab_route_dispatch_timeout(&no_detach.command, false), None);
+    }
+
+    #[test]
+    fn agent_task_fanout_dispatch_id_uses_explicit_or_stable_default() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--detach-after-handoff",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "homeboy",
+            "--fanout-id",
+            "wave-7167",
+            "--verify",
+            "cargo test --lib",
+            "--run-plan",
+            "https://github.com/Extra-Chill/homeboy/issues/7167",
+        ]);
+        let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command:
+                crate::commands::agent_task::AgentTaskCommand::Fanout(
+                    crate::commands::agent_task::AgentTaskFanoutArgs {
+                        command:
+                            crate::commands::agent_task::AgentTaskFanoutCommand::CookBatch(args),
+                    },
+                ),
+        }) = cli.command
+        else {
+            panic!("cook-batch command");
+        };
+
+        assert_eq!(agent_task_fanout_cook_batch_dispatch_id(&args), "wave-7167");
+
+        let mut default_args = args;
+        default_args.fanout_id = None;
+        assert_eq!(
+            agent_task_fanout_cook_batch_dispatch_id(&default_args),
+            "cook-batch-homeboy-issue-7167-1"
+        );
+    }
+
+    #[test]
+    fn agent_task_fanout_finish_metadata_preserves_discoverability_commands() {
+        let metadata = agent_task_fanout_finish_metadata(
+            serde_json::json!({
+                "lab_dispatch": {
+                    "status": "error",
+                    "runner_id": "homeboy-lab",
+                },
+            }),
+            "dispatch-run-7167",
+            "cook-batch-homeboy-issue-7167-1",
+            RunStatus::Error,
+        );
+
+        assert_eq!(
+            metadata["agent_task_lab_dispatch"]["fanout_id"],
+            "cook-batch-homeboy-issue-7167-1"
+        );
+        assert_eq!(metadata["agent_task_lab_dispatch"]["status"], "error");
+        assert_eq!(
+            metadata["follow_commands"]["dispatch_status"],
+            "homeboy runs show dispatch-run-7167"
+        );
+        assert_eq!(
+            metadata["follow_commands"]["dispatch_evidence"],
+            "homeboy runs evidence --run dispatch-run-7167"
+        );
+        assert_eq!(
+            metadata["follow_commands"]["fanout_status"],
+            "homeboy agent-task fanout status cook-batch-homeboy-issue-7167-1"
+        );
     }
 
     #[test]

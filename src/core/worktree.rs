@@ -461,9 +461,14 @@ mod store_ops {
         }
 
         if !safety.worktree_missing {
+            let mut args = vec!["worktree", "remove"];
+            if options.force {
+                args.push("--force");
+            }
+            args.push(&record.worktree_path);
             git::run_git(
                 Path::new(&record.source_checkout),
-                &["worktree", "remove", &record.worktree_path],
+                &args,
                 "git worktree remove",
             )?;
         }
@@ -998,6 +1003,66 @@ mod tests {
         assert!(output.candidates[0].removed);
         assert!(output.candidates[0].safety.worktree_missing);
         assert_eq!(updated.state, TaskWorktreeState::Removed);
+    }
+
+    #[test]
+    fn cleanup_refuses_dirty_worktree_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = git_repo();
+        let worktree = sibling_worktree_path(source.path(), "dirty-cleanup-refused");
+        run_git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "dirty-cleanup-refused",
+                &worktree.to_string_lossy(),
+            ],
+        );
+        fs::write(worktree.join("dirty.txt"), "dirty\n").unwrap();
+        let store = dir.path().join("store");
+        let record = fixture_record(source.path(), &worktree);
+        write_record(&store, &record).unwrap();
+
+        let err = cleanup_with_store(false, &store).unwrap_err();
+        let updated = read_record(&store, &record.id).unwrap();
+
+        assert!(err
+            .to_string()
+            .contains("Task worktree is not safe to remove"));
+        assert_eq!(updated.state, TaskWorktreeState::Active);
+        assert!(worktree.exists());
+    }
+
+    #[test]
+    fn cleanup_force_removes_dirty_worktree_after_homeboy_gates_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = git_repo();
+        let worktree = sibling_worktree_path(source.path(), "dirty-cleanup-forced");
+        run_git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "dirty-cleanup-forced",
+                &worktree.to_string_lossy(),
+            ],
+        );
+        fs::write(worktree.join("dirty.txt"), "dirty\n").unwrap();
+        let store = dir.path().join("store");
+        let record = fixture_record(source.path(), &worktree);
+        write_record(&store, &record).unwrap();
+
+        let output = cleanup_with_store(true, &store).unwrap();
+        let updated = read_record(&store, &record.id).unwrap();
+
+        assert_eq!(output.candidates.len(), 1);
+        assert!(output.candidates[0].removed);
+        assert!(output.candidates[0].safety.dirty);
+        assert_eq!(updated.state, TaskWorktreeState::Removed);
+        assert!(!worktree.exists());
     }
 
     #[test]

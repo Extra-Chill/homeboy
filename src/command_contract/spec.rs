@@ -30,6 +30,18 @@ pub struct CommandLabSupportSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandDocSpec {
+    pub slug: &'static str,
+    pub kind: CommandDocKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandDocKind {
+    RuntimeExtensionCommand,
+    Support,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandSafetySpec {
     pub mutates: bool,
     pub operator: bool,
@@ -75,6 +87,7 @@ pub(crate) const REFACTOR_LAB_LABEL: &str = "refactor";
 pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
 pub(crate) const RIG_RUN_LAB_LABEL: &str = "rig run";
 pub(crate) const RUNTIME_REFRESH_LAB_LABEL: &str = "runtime refresh";
+pub(crate) const WORKTREE_CLEANUP_LAB_LABEL: &str = "worktree cleanup";
 pub(crate) const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
 pub(crate) const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
 pub(crate) const TUNNEL_SERVICE_START_LAB_LABEL: &str = "tunnel service start";
@@ -311,6 +324,12 @@ const RUNTIME_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSumm
     hint_label: RUNTIME_REFRESH_LAB_LABEL,
 }];
 
+const WORKTREE_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
+    contract_labels: &[WORKTREE_CLEANUP_LAB_LABEL],
+    message_label: WORKTREE_CLEANUP_LAB_LABEL,
+    hint_label: "worktree cleanup --runner <runner-id>",
+}];
+
 const TUNNEL_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     CommandLabSupportSummary {
         contract_labels: &[TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL],
@@ -527,7 +546,12 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "Lab runner routing covers runtime package refresh workflows",
         RUNTIME_LAB_SUPPORT,
     ),
-    command_spec("worktree", CommandJsonFamily::Workspace),
+    lab_command_spec_with_summary(
+        "worktree",
+        CommandJsonFamily::Workspace,
+        "Lab runner routing covers runner-resident task worktree cleanup",
+        WORKTREE_LAB_SUPPORT,
+    ),
     lab_command_spec_with_summary(
         "tunnel",
         CommandJsonFamily::Workspace,
@@ -556,6 +580,29 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
 
 pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = COMMAND_SPECS;
 
+pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
+    CommandDocSpec {
+        slug: "audit-rules",
+        kind: CommandDocKind::Support,
+    },
+    CommandDocSpec {
+        slug: "cargo",
+        kind: CommandDocKind::RuntimeExtensionCommand,
+    },
+    CommandDocSpec {
+        slug: "commands-index",
+        kind: CommandDocKind::Support,
+    },
+    CommandDocSpec {
+        slug: "rig-spec",
+        kind: CommandDocKind::Support,
+    },
+    CommandDocSpec {
+        slug: "wp",
+        kind: CommandDocKind::RuntimeExtensionCommand,
+    },
+];
+
 pub fn registered_command(name: &str) -> Option<&'static CommandSpec> {
     COMMAND_SPECS.iter().find(|entry| entry.name == name)
 }
@@ -566,4 +613,22 @@ pub fn registered_command_json_family(name: &str) -> Option<CommandJsonFamily> {
 
 pub fn registered_command_dispatch_family(name: &str) -> Option<CommandDispatchFamily> {
     registered_command(name).map(CommandSpec::dispatch_family)
+}
+
+pub fn runtime_extension_command_doc_slugs() -> impl Iterator<Item = &'static str> {
+    COMMAND_DOC_REGISTRY
+        .iter()
+        .filter(|entry| entry.kind == CommandDocKind::RuntimeExtensionCommand)
+        .map(|entry| entry.slug)
+}
+
+pub fn support_command_doc_slugs() -> impl Iterator<Item = &'static str> {
+    COMMAND_DOC_REGISTRY
+        .iter()
+        .filter(|entry| entry.kind == CommandDocKind::Support)
+        .map(|entry| entry.slug)
+}
+
+pub fn non_core_command_doc_slugs() -> impl Iterator<Item = &'static str> {
+    COMMAND_DOC_REGISTRY.iter().map(|entry| entry.slug)
 }

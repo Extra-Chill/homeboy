@@ -75,15 +75,40 @@ pub fn prepare_runner_source_checkout_for_upgrade(
 
     match exec(&runner.id, options) {
         Ok((_, 0)) => None,
-        Ok((output, exit_code)) => Some(format!(
-            "runner source checkout preparation failed with exit code {exit_code}: {}",
-            runner_upgrade_detail(&output)
+        Ok((output, exit_code)) => Some(source_checkout_prepare_failure_detail(
+            runner,
+            format!(
+                "runner source checkout preparation failed with exit code {exit_code}: {}",
+                runner_upgrade_detail(&output)
+            ),
         )),
-        Err(err) => Some(format!(
-            "runner source checkout preparation failed: {}",
-            err.message
+        Err(err) => Some(source_checkout_prepare_failure_detail(
+            runner,
+            format!("runner source checkout preparation failed: {}", err.message),
         )),
     }
+}
+
+fn source_checkout_prepare_failure_detail(runner: &Runner, detail: String) -> String {
+    match runner.workspace_root.as_deref() {
+        Some(workspace_root) => format!(
+            "{detail}\nretry with clean managed runner source: {}",
+            refresh_homeboy_command(runner, workspace_root)
+        ),
+        None => detail,
+    }
+}
+
+fn refresh_homeboy_command(runner: &Runner, workspace_root: &str) -> String {
+    let target_dir = format!(
+        "{}/_homeboy_binaries/homeboy-main",
+        workspace_root.trim_end_matches('/')
+    );
+    format!(
+        "homeboy runner refresh-homeboy {} --ref main --target-dir {} --reconnect",
+        shell_arg(&runner.id),
+        shell_arg(&target_dir)
+    )
 }
 
 pub fn runner_source_checkout_prepare_options(
@@ -104,6 +129,7 @@ pub fn runner_source_checkout_prepare_options(
             command: "prepare source checkout for homeboy upgrade".to_string(),
             required_tools: vec![RunnerRequiredTool::Git],
             required_commands: Vec::new(),
+            required_tool_capabilities: Vec::new(),
             required_components: Vec::new(),
             required_env: Vec::new(),
         }),

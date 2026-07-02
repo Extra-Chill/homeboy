@@ -681,6 +681,9 @@ impl Commands {
             Commands::Runtime(args) if args.is_refresh_command() => {
                 LabCommandContract::explicit_runner_simple(RUNTIME_REFRESH_LAB_LABEL)
             }
+            Commands::Worktree(args) => {
+                return CommandPortabilityContract::lab_optional(args.lab_contract());
+            }
             Commands::Fleet(args) => {
                 let contract = crate::commands::fleet::adapter(CommandOutputFileMode::None)
                     .lab_contract(args);

@@ -140,7 +140,11 @@ fn runner_followups_include_workspace_prune_for_disk_pressure_recovery() {
     let followups = runner_followups(Some("homeboy-lab"));
     let serialized = serde_json::to_string(&followups).expect("serialize followups");
 
-    assert!(serialized.contains("homeboy runner workspace prune homeboy-lab --apply"));
+    assert!(serialized.contains("workspace_prune_preview"));
+    assert!(serialized.contains("homeboy runner workspace prune homeboy-lab"));
+    assert!(serialized.contains("workspace_prune_drain"));
+    assert!(serialized.contains("homeboy runner workspace prune homeboy-lab --apply --passes 10"));
+    assert!(serialized.contains("counts and bytes"));
     assert!(serialized.contains("disk pressure"));
 }
 
@@ -228,6 +232,16 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
         playground_package.expected_path,
         "/home/chubes/.cache/homeboy/sample-runtime/source/packages/playground"
     );
+    assert_eq!(
+        playground_package.default_path,
+        "/home/chubes/Developer/sample-runtime-current/source/packages/playground"
+    );
+    assert_eq!(
+        playground_package.selection_source,
+        "env:HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR"
+    );
+    assert_eq!(playground_package.env_override, None);
+    assert_eq!(playground_package.remediation_command, None);
     let core_package = runtime
         .packages
         .iter()
@@ -238,6 +252,23 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
         core_package.expected_path,
         "/other/sample-runtime/packages/core/dist/index.js"
     );
+    assert_eq!(
+        core_package.default_path,
+        "/home/chubes/Developer/sample-runtime-current/source/packages/core"
+    );
+    assert_eq!(
+        core_package.selection_source,
+        "env:HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE"
+    );
+    assert_eq!(
+        core_package.env_override.as_deref(),
+        Some("HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE")
+    );
+    assert!(core_package
+        .remediation_command
+        .as_deref()
+        .expect("package remediation command")
+        .contains("homeboy runner set homeboy-lab --json"));
     assert_eq!(
         runtime
             .probes
@@ -268,6 +299,28 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.id == "selected_runtime.mixed_core_source"));
+    let binary_override = runtime
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.id == "sample-runtime.configured_binary_env_override")
+        .expect("configured binary override diagnostic");
+    assert!(binary_override
+        .remediation
+        .contains("HOMEBOY_SAMPLE_RUNTIME_BIN"));
+    assert!(binary_override.remediation.contains(
+        "/home/chubes/Developer/sample-runtime-current/source/packages/cli/dist/index.js"
+    ));
+    let package_override = runtime
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.id == "sample-runtime.core_package.env_override")
+        .expect("package override diagnostic");
+    assert!(package_override
+        .message
+        .contains("env:HOMEBOY_SAMPLE_RUNTIME_CORE_MODULE"));
+    assert!(package_override
+        .remediation
+        .contains("homeboy runner set homeboy-lab --json"));
 }
 
 #[test]
@@ -535,7 +588,7 @@ fn selected_runtime_tool_declaration() -> AgentRuntimeToolDiagnosticDeclaration 
             "HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN".to_string(),
         ],
         install_dir_env: Some("HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string()),
-        default_install_dir: Some("${HOME}/.cache/homeboy/sample-runtime".to_string()),
+        default_install_dir: Some("/home/chubes/Developer/sample-runtime-current".to_string()),
         managed_cache_source: "${install_dir}/source".to_string(),
         managed_cache_binary: "${managed_cache_source}/packages/cli/dist/index.js".to_string(),
         effective_binary_rule:
@@ -555,7 +608,7 @@ fn sample_runtime_declaration() -> AgentRuntimeRuntimeDiagnosticDeclaration {
             "HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN".to_string(),
         ],
         install_dir_env: Some("HOMEBOY_SAMPLE_RUNTIME_INSTALL_DIR".to_string()),
-        default_install_dir: Some("${HOME}/.cache/homeboy/sample-runtime".to_string()),
+        default_install_dir: Some("/home/chubes/Developer/sample-runtime-current".to_string()),
         managed_cache_source: "${install_dir}/source".to_string(),
         managed_cache_binary: "${managed_cache_source}/packages/cli/dist/index.js".to_string(),
         effective_binary_rule:

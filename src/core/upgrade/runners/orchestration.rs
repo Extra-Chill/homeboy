@@ -477,6 +477,7 @@ pub fn upgrade_runner_with_executor(
     let detail = runner_upgrade_final_detail(
         &runner.id,
         detail,
+        &homeboy_path,
         path_update_detail.as_deref(),
         stale_daemon_repair_detail.as_deref(),
         path_drift.as_deref(),

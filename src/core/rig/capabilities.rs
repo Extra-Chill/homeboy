@@ -7,6 +7,7 @@ use serde::Serialize;
 use super::expand::expand_vars;
 use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
 use super::spec::{ExecutableRequirementSpec, FilesystemAssertionSpec, RigSpec};
+use crate::core::runner::{RunnerCapabilityPreflight, RunnerToolCapabilityRequirement};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RigRequirementCheckPlan {
@@ -62,6 +63,54 @@ pub fn evaluate_requirements(rig: &RigSpec) -> PipelineOutcome {
         failed: steps.iter().filter(|step| step.status == "fail").count(),
         steps,
     }
+}
+
+pub fn runner_capability_preflight(
+    rig: &RigSpec,
+    command: &str,
+) -> Option<RunnerCapabilityPreflight> {
+    let required_tool_capabilities = rig
+        .requirements
+        .runner_tools
+        .iter()
+        .filter(|tool| !tool.tool.trim().is_empty())
+        .map(|tool| RunnerToolCapabilityRequirement {
+            tool: tool.tool.trim().to_string(),
+            command: effective_tool_command(tool),
+            env: tool
+                .env
+                .iter()
+                .map(|name| name.trim())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect(),
+            capabilities: tool
+                .capabilities
+                .iter()
+                .map(|capability| capability.trim())
+                .filter(|capability| !capability.is_empty())
+                .map(str::to_string)
+                .collect(),
+        })
+        .filter(|tool| !tool.capabilities.is_empty())
+        .collect::<Vec<_>>();
+
+    if required_tool_capabilities.is_empty() {
+        return None;
+    }
+
+    Some(RunnerCapabilityPreflight {
+        command: command.to_string(),
+        required_tool_capabilities,
+        ..Default::default()
+    })
+}
+
+fn effective_tool_command(tool: &super::spec::RunnerToolRequirementSpec) -> String {
+    if !tool.command.trim().is_empty() {
+        return tool.command.trim().to_string();
+    }
+    tool.tool.trim().to_string()
 }
 
 fn outcome_for_result(
@@ -238,7 +287,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::core::rig::spec::{FilesystemAssertionKind, RigRequirementsSpec, RigSpec};
+    use crate::core::rig::spec::{
+        FilesystemAssertionKind, RigRequirementsSpec, RigSpec, RunnerToolRequirementSpec,
+    };
 
     #[test]
     fn plans_executable_and_filesystem_requirements() {
@@ -381,6 +432,37 @@ mod tests {
         assert!(
             error.contains("declared executable `/nonexistent/missing-tool`"),
             "error: {error}"
+        );
+    }
+
+    #[test]
+    fn runner_capability_preflight_includes_required_tool_commands() {
+        let rig = RigSpec {
+            id: "fixture".to_string(),
+            requirements: RigRequirementsSpec {
+                runner_tools: vec![RunnerToolRequirementSpec {
+                    tool: "wp-codebox".to_string(),
+                    command: "wp-codebox".to_string(),
+                    env: vec!["HOMEBOY_WP_CODEBOX_BIN".to_string()],
+                    capabilities: vec!["wordpress.editor-validate-blocks".to_string()],
+                    remediation: None,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let preflight = runner_capability_preflight(&rig, "bench").expect("preflight");
+
+        assert_eq!(preflight.command, "bench");
+        assert_eq!(preflight.required_tool_capabilities.len(), 1);
+        let required = &preflight.required_tool_capabilities[0];
+        assert_eq!(required.tool, "wp-codebox");
+        assert_eq!(required.command, "wp-codebox");
+        assert_eq!(required.env, vec!["HOMEBOY_WP_CODEBOX_BIN"]);
+        assert_eq!(
+            required.capabilities,
+            vec!["wordpress.editor-validate-blocks"]
         );
     }
 

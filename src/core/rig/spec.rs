@@ -209,6 +209,10 @@ pub struct RigRequirementsSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filesystem_assertions: Vec<FilesystemAssertionSpec>,
 
+    /// Runner-resident tools/capabilities required before Lab evidence runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runner_tools: Vec<RunnerToolRequirementSpec>,
+
     /// Extension/provider-owned requirement declarations. Core preserves these
     /// for downstream planners without interpreting domain-specific shape.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -225,9 +229,32 @@ impl RigRequirementsSpec {
     pub fn is_empty(&self) -> bool {
         self.executables.is_empty()
             && self.filesystem_assertions.is_empty()
+            && self.runner_tools.is_empty()
             && self.extensions.is_empty()
             && self.dependency_materialization.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerToolRequirementSpec {
+    /// Logical tool id, e.g. `wp-codebox`.
+    pub tool: String,
+
+    /// Binary/command name used when no configured env path is present.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command: String,
+
+    /// Environment variables that may point at the effective runner binary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+
+    /// Tool subcommands/capabilities that must be accepted by the binary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+
+    /// Optional human remediation for rig authors/operators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

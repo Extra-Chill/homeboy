@@ -14,6 +14,7 @@ use homeboy::core::runners::{
     self as runner, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
     RunnerKind,
 };
+use homeboy::core::secret_env_plan::SecretEnvPlan;
 use homeboy::core::source_snapshot::SourceSnapshot;
 use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::{server, Error};
@@ -31,6 +32,9 @@ pub(super) fn exec(
     require_paths: Vec<String>,
     script_file: Option<String>,
     env: Vec<String>,
+    secret_env: Vec<String>,
+    secret_env_plan: Option<String>,
+    secret_env_plan_file: Option<String>,
     dry_run: bool,
     run_id: Option<String>,
     artifact_outputs: Vec<String>,
@@ -43,7 +47,16 @@ pub(super) fn exec(
         .map(read_runner_exec_script)
         .transpose()?;
     let prepared_command = prepare_runner_exec_command(script.as_ref(), command)?;
-    let env = prepare_runner_exec_env(env, script.as_deref())?;
+    let raw_env = prepare_runner_exec_env(env, script.as_deref())?;
+    let secret_env_plan =
+        prepare_runner_exec_secret_env_plan(secret_env, secret_env_plan, secret_env_plan_file)?;
+    let secret_env_names = secret_env_plan.secret_env_names();
+    validate_runner_exec_public_env(&raw_env, &secret_env_names)?;
+    let mut env = secret_env_plan
+        .public_env
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    env.extend(raw_env);
     let required_commands = prepared_command.first().cloned().into_iter().collect();
     let has_declared_outputs = !artifact_outputs.is_empty()
         || !artifact_dir_outputs.is_empty()
@@ -81,7 +94,7 @@ pub(super) fn exec(
             allow_diagnostic_ssh,
             command: prepared_command,
             env,
-            secret_env_names: Vec::new(),
+            secret_env_names,
             capture_patch,
             raw_exec: true,
             source_snapshot,
@@ -324,6 +337,78 @@ pub(super) fn prepare_runner_exec_env(
         values.insert(key.to_string(), value.to_string());
     }
     Ok(values)
+}
+
+pub(super) fn prepare_runner_exec_secret_env_plan(
+    secret_env: Vec<String>,
+    secret_env_plan: Option<String>,
+    secret_env_plan_file: Option<String>,
+) -> homeboy::core::Result<SecretEnvPlan> {
+    let mut plan = SecretEnvPlan::from_secret_env_names(secret_env);
+
+    if let Some(path) = secret_env_plan_file {
+        let raw = fs::read_to_string(&path).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!("read runner exec secret env plan {path}")),
+            )
+        })?;
+        merge_runner_exec_secret_env_plan(&mut plan, parse_runner_exec_secret_env_plan(&raw)?)?;
+    }
+
+    if let Some(raw) = secret_env_plan {
+        merge_runner_exec_secret_env_plan(&mut plan, parse_runner_exec_secret_env_plan(&raw)?)?;
+    }
+
+    Ok(plan)
+}
+
+fn parse_runner_exec_secret_env_plan(raw: &str) -> homeboy::core::Result<SecretEnvPlan> {
+    serde_json::from_str(raw).map_err(|err| {
+        Error::validation_invalid_argument(
+            "secret_env_plan",
+            format!("runner exec secret-env plan must be valid JSON: {err}"),
+            None,
+            None,
+        )
+    })
+}
+
+fn merge_runner_exec_secret_env_plan(
+    target: &mut SecretEnvPlan,
+    plan: SecretEnvPlan,
+) -> homeboy::core::Result<()> {
+    let secret_env_names = plan.secret_env_names();
+    target.public_env.extend(plan.public_env);
+    target.extend_secret_env_names(secret_env_names);
+    Ok(())
+}
+
+pub(super) fn validate_runner_exec_public_env(
+    env: &HashMap<String, String>,
+    secret_env_names: &[String],
+) -> homeboy::core::Result<()> {
+    if secret_env_names.is_empty() {
+        return Ok(());
+    }
+
+    let policy = homeboy::core::redaction::RedactionPolicy::default();
+    for key in env.keys() {
+        if secret_env_names.iter().any(|name| name == key) && policy.is_sensitive_key(key) {
+            return Err(Error::validation_invalid_argument(
+                "env",
+                format!(
+                    "runner exec --env {key}=... would pass a declared secret-like value as public env"
+                ),
+                Some(key.clone()),
+                Some(vec![format!(
+                    "Use --secret-env {key} or include {key} in --secret-env-plan so the runner secret-env contract can resolve and redact it."
+                )]),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 pub(super) fn promote_runner_exec_artifacts(

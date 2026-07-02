@@ -133,6 +133,13 @@ pub(crate) fn default_run_id() -> String {
     format!("agent-task-{}", Uuid::new_v4())
 }
 
+pub fn cook_attempt_run_id(cook_id: &str, attempt: u32) -> String {
+    let cook_id = sanitize_run_id(cook_id);
+    let suffix = Uuid::new_v4().simple().to_string();
+    let suffix = &suffix[..8];
+    format!("{cook_id}-attempt-{attempt}-{suffix}")
+}
+
 pub(crate) fn now_timestamp() -> String {
     Utc::now().to_rfc3339()
 }

@@ -9,11 +9,13 @@ mod cook;
 mod discovery;
 mod execution;
 mod reconcile;
+mod status_support;
 
 pub use cook::*;
 pub use discovery::*;
 pub use execution::*;
 pub use reconcile::*;
+pub use status_support::*;
 
 #[cfg(test)]
 mod tests;

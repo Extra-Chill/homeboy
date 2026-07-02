@@ -165,8 +165,17 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
         assert_eq!(exit_code, 1);
         assert_eq!(value["schema"], "homeboy/agent-task-cook/v1");
         assert_eq!(value["cook_id"], "cook-missing-provider");
+        assert_ne!(value["latest_run_id"], "cook-missing-provider");
+        assert!(value["latest_run_id"]
+            .as_str()
+            .expect("latest run id")
+            .starts_with("cook-missing-provider-attempt-1-"));
+        assert_eq!(
+            value["history_run_ids"].as_array().expect("history").len(),
+            1
+        );
         assert_eq!(value["status"], "policy_failure");
-        assert_eq!(value["attempts"][0]["run_id"], "cook-missing-provider");
+        assert_eq!(value["attempts"][0]["run_id"], value["latest_run_id"]);
         assert!(value["stop_reason"]
             .as_str()
             .expect("stop reason")
