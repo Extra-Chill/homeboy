@@ -10,7 +10,7 @@ use super::execution::{
     persist_fuzz_run_evidence, persist_fuzz_sequence_plan, run_fuzz_artifact_postprocess,
     FuzzRunEvidenceInput,
 };
-use super::planning::plan_inventory_selection;
+use super::planning::{build_campaign_plan, plan_inventory_selection};
 use super::replay::{run_minimize, run_replay};
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
@@ -33,7 +33,8 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::FuzzConfig;
 use homeboy::core::fuzz::{
     FuzzCampaign, FuzzCase, FuzzCoverageSkip, FuzzCoverageSummary, FuzzExecutionRequest,
-    FuzzFinding, FuzzFindingStatus, FuzzSequencePlan, FuzzTargetInventory, IsolationProof,
+    FuzzFinding, FuzzFindingStatus, FuzzSamplingRequest, FuzzSequencePlan, FuzzTargetInventory,
+    IsolationProof,
 };
 use homeboy::core::lifecycle::{
     LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus, LifecycleResultMetadata,
@@ -112,6 +113,32 @@ fn planner_args() -> FuzzPlanArgs {
         operation_families: Vec::new(),
         case_budget: None,
         duration_budget_seconds: None,
+        campaign_manifest: None,
+        campaign_workloads: Vec::new(),
+        lab_runner: None,
+        required_artifacts: Vec::new(),
+    }
+}
+
+fn campaign_base_request() -> FuzzExecutionRequest {
+    FuzzExecutionRequest {
+        schema: homeboy::core::fuzz::FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
+        version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        id: "base-request".to_string(),
+        component: "component-a".to_string(),
+        rig_id: Some("generic-rig".to_string()),
+        workload_id: Some("api-fuzz".to_string()),
+        case_ids: Vec::new(),
+        seed: Some("1234".to_string()),
+        max_duration: None,
+        args: Vec::new(),
+        required_artifacts: Vec::new(),
+        gates: Vec::new(),
+        sampling: FuzzSamplingRequest::default(),
+        sequence_plan: None,
+        isolation_proof: None,
+        metadata: serde_json::json!({ "planner": { "strategy": "all" } }),
+        extra: std::collections::BTreeMap::new(),
     }
 }
 

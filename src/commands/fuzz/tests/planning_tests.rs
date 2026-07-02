@@ -273,6 +273,142 @@ fn fuzz_plan_rejects_invalid_action_model_schema_from_cli_contract_path() {
 }
 
 #[test]
+fn fuzz_campaign_plan_emits_deterministic_run_entries_from_manifest_and_cli_workloads() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let manifest = temp.path().join("campaign.json");
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "id": "full-surface",
+            "workloads": [
+                { "id": "db-fuzz" },
+                "api-fuzz"
+            ],
+            "lab_runner": "lab-a",
+            "required_artifacts": [
+                { "id": "coverage-gap-report", "kind": "coverage_gap_report" }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write manifest");
+    let mut args = planner_args();
+    args.request_id = Some("campaign-1".to_string());
+    args.campaign_manifest = Some(manifest.clone());
+    args.campaign_workloads = vec!["browser-fuzz".to_string(), "api-fuzz".to_string()];
+    args.required_artifacts = vec!["performance-hotspots-summary".to_string()];
+    args.run.tracker_refs = vec![homeboy::core::evidence_manifest::TrackerRef {
+        kind: "github_issue".to_string(),
+        id: "Extra-Chill/homeboy#123".to_string(),
+        url: None,
+        title: None,
+        state: None,
+    }];
+    args.run.seed = Some("1234".to_string());
+
+    let plan = build_campaign_plan(
+        &args,
+        "component-a",
+        Some("generic-rig"),
+        &campaign_base_request(),
+    )
+    .expect("build campaign plan")
+    .expect("campaign plan");
+
+    assert_eq!(plan.schema, "homeboy/fuzz-campaign-plan/v1");
+    assert_eq!(plan.id, "campaign-1");
+    assert_eq!(plan.lab_runner.as_deref(), Some("lab-a"));
+    assert_eq!(plan.entries.len(), 3);
+    assert_eq!(plan.entries[0].workload_id, "api-fuzz");
+    assert_eq!(plan.entries[1].workload_id, "browser-fuzz");
+    assert_eq!(plan.entries[2].workload_id, "db-fuzz");
+    assert_eq!(plan.entries[0].run_id, "campaign-1-api-fuzz");
+    assert_eq!(plan.entries[0].request.id, "campaign-1-api-fuzz");
+    assert_eq!(
+        plan.entries[0].request.workload_id.as_deref(),
+        Some("api-fuzz")
+    );
+    assert_eq!(
+        plan.entries[0].request.metadata["campaign_plan"]["entry_index"],
+        0
+    );
+    assert!(plan
+        .artifact_requirements
+        .iter()
+        .any(|artifact| artifact.id == "coverage-gap-report"));
+    assert!(plan
+        .artifact_requirements
+        .iter()
+        .any(|artifact| artifact.id == "performance-hotspots-summary"));
+    assert_eq!(
+        plan.entries[0]
+            .command
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "homeboy",
+            "fuzz",
+            "run",
+            "component-a",
+            "--workload",
+            "api-fuzz",
+            "--run-id",
+            "campaign-1-api-fuzz",
+            "--tracker-ref",
+            "github_issue:Extra-Chill/homeboy#123",
+            "--seed",
+            "1234",
+            "--gate-profile",
+            "measurement",
+        ]
+    );
+}
+
+#[test]
+fn fuzz_campaign_plan_cli_parses_manifest_workloads_lab_runner_and_artifacts() {
+    let cli = FuzzCli::try_parse_from([
+        "fuzz",
+        "plan",
+        "component-a",
+        "--campaign-manifest",
+        "/tmp/fuzz-campaign.json",
+        "--campaign-workload",
+        "api-fuzz",
+        "--campaign-workload",
+        "db-fuzz",
+        "--lab-runner",
+        "lab-a",
+        "--required-artifact",
+        "coverage-gap-report",
+    ])
+    .expect("parse fuzz campaign plan cli");
+
+    let Some(FuzzCommand::Plan(args)) = cli.args.command else {
+        panic!("expected fuzz plan command");
+    };
+    assert_eq!(
+        args.campaign_manifest.as_deref(),
+        Some(Path::new("/tmp/fuzz-campaign.json"))
+    );
+    assert_eq!(
+        args.campaign_workloads
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["api-fuzz", "db-fuzz"]
+    );
+    assert_eq!(args.lab_runner.as_deref(), Some("lab-a"));
+    assert_eq!(
+        args.required_artifacts
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["coverage-gap-report"]
+    );
+}
+
+#[test]
 fn fuzz_plan_operation_filter_limits_inventory_selection() {
     let mut args = planner_args();
     args.operations = vec!["read".to_string()];
