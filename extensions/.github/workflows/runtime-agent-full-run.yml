@@ -16,7 +16,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: ''
       runtime:
-        description: Agent runtime id. Defaults to the neutral local-shell runtime. WP Codebox callers should prefer wp-codebox-runtime-agent-full-run.yml.
+        description: Agent runtime id. Defaults to the neutral local-shell runtime. Runtime-specific callers should prefer a runtime wrapper when one is available.
         type: string
         default: ''
       backend:
@@ -28,9 +28,9 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: main
       runtime_wordpress_version:
-        description: Compatibility input consumed by WP Codebox-capable adapters. New WP Codebox callers should pass wordpress_version to the wrapper workflow.
+        description: Deprecated selected-runtime compatibility input. Runtime wrappers should expose runtime-owned names and pass canonical values explicitly.
         type: string
-        default: '7.0'
+        default: ''
       runtime_profile:
         description: Deprecated compatibility alias for profile. Existing callers only.
         type: string
@@ -269,9 +269,9 @@ name: Runtime Agent Full Run (reusable)
         type: boolean
         default: false
       extra_wp_config_defines:
-        description: Compatibility input consumed by the WP Codebox adapter. New WP Codebox callers should pass wp_config_defines to the wrapper workflow.
+        description: Deprecated selected-runtime compatibility input. Runtime wrappers should expose runtime-owned names and pass canonical values explicitly.
         type: string
-        default: '{}'
+        default: ''
       runtime_mounts:
         description: JSON array appended to selected runtime mounts.
         type: string

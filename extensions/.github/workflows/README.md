@@ -58,11 +58,9 @@ JSON results/events outside GitHub Actions.
 The generic workflow requires callers to provide their domain runtime profile,
 runtime component dependencies, required abilities, and runtime task/execution
 descriptor. Homeboy Extensions assumes the runtime provider contract only.
-Domain ability names and component stacks are caller inputs. WP Codebox callers
-should prefer `.github/workflows/wp-codebox-runtime-agent-full-run.yml`, which
-keeps WordPress-specific defaults and input names at the runtime adapter boundary;
-see
-[`docs/wp-codebox-runtime-workflow.md`](../../docs/wp-codebox-runtime-workflow.md).
+Domain ability names and component stacks are caller inputs. Runtime-specific
+defaults and product vocabulary belong in wrapper workflows declared by runtime
+adapter manifests; see the runtime adapter docs for wrapper-specific inputs.
 
 ```yaml
 jobs:
@@ -99,12 +97,10 @@ would make the generic workflow narrative less clear. The wrapper should pin the
 runtime id, translate product-specific input names, and then call the generic
 workflow with canonical inputs.
 
-`wp-codebox-runtime-agent-full-run.yml` is the WP Codebox wrapper. It sets
-`runtime: wp-codebox`, maps `wordpress_version` to `runtime_wordpress_version`,
-maps `wp_config_defines` to `extra_wp_config_defines`, and maps
-`wp_runtime_mounts` / `wp_runtime_overlays` to the selected-runtime mount and
-overlay inputs. Existing direct callers of `runtime-agent-full-run.yml` remain
-supported for compatibility.
+Runtime wrapper metadata lives with the runtime adapter manifest and docs. The
+generic workflow only relies on the canonical selected-runtime inputs it receives.
+Existing direct callers of `runtime-agent-full-run.yml` remain supported for
+compatibility.
 
 ### Migrating Old Wrapper Callers
 
@@ -164,7 +160,7 @@ and whether the caller required a Homeboy App token. Tokens are never printed.
 
 ## Inputs worth calling out
 
-- Agent CI runs through the selected `runtime`. Empty runtime input selects `local-shell`. Deprecated compatibility aliases remain available only for existing callers: `runtime_provider` and `backend` map to `runtime`. The legacy `codebox` value is not a generic runtime id; use `wp-codebox`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
+- Agent CI runs through the selected `runtime`. Empty runtime input selects `local-shell`. Deprecated compatibility aliases remain available only for existing callers: `runtime_provider` and `backend` map to `runtime`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
 - `profile` is the runtime profile selector. Deprecated compatibility alias: `runtime_profile`.
 - `runtime_ref` controls the selected runtime ref.
 - `runtime_execution` declares bundle, workflow, or ability execution. When `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
@@ -193,7 +189,7 @@ and whether the caller required a Homeboy App token. Tokens are never printed.
 - `proof_profile` controls controller-loop proof evidence. `artifact_only` is the generic default and does not require preview or PR/publication evidence, `cook_to_pr` requires durable preview plus pull-request evidence, and `none` declares no extra proof requirements. Explicit `controller_loop_proof` / `controller_loop_proof_policy` config still overrides profile fields.
 - `workload_run_after` runs post-agent verifier hooks through the selected runtime scenario.
 - `ability_tools` adds ability-backed tools to the agent loop. It must be a JSON array.
-- `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. Deprecated compatibility alias: `tool_recorders`, only for existing WP Codebox callers that still need forced-parameter behavior.
+- `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. Deprecated compatibility alias: `tool_recorders`, only for existing callers that still need forced-parameter behavior.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
 - `runner_workspace` provisions a selected-runtime runner workspace before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner publishes captured workspace changes through the selected runtime after completion.
 - `runner_workspace.capture_changes` defaults to `true` only when `expose_to_agent: false`; set it explicitly to disable hidden-mode publication or to enable runner-owned capture while still exposing the workspace handle.

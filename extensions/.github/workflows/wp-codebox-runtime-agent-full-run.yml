@@ -18,7 +18,7 @@ name: WP Codebox Runtime Agent Full Run (reusable)
       wordpress_version:
         description: WordPress version used by the WP Codebox runtime.
         type: string
-        default: '7.0'
+        default: ''
       profile:
         description: Runtime profile id selected from runtime_profiles.
         type: string
@@ -231,15 +231,15 @@ name: WP Codebox Runtime Agent Full Run (reusable)
       wp_config_defines:
         description: JSON object merged into the WP Codebox runner config wp_config_defines.
         type: string
-        default: '{}'
+        default: ''
       wp_runtime_mounts:
         description: JSON array appended to WP Codebox runtime mounts.
         type: string
-        default: '[]'
+        default: ''
       wp_runtime_overlays:
         description: JSON array of WP Codebox runtime overlay entries forwarded to the runner config.
         type: string
-        default: '[]'
+        default: ''
       runtime_env:
         description: JSON object forwarded to runtime profile construction.
         type: string

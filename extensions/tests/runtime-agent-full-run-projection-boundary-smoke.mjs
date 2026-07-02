@@ -83,4 +83,18 @@ assert.equal(codeboxConfig.transcript_dir, '/wordpress/wp-content/plugins/exampl
 assert.deepEqual(codeboxConfig.wp_config_defines, { CODEBOX_DEFINE: true });
 assert.equal(codeboxConfig.runtime_wordpress_version, '7.0');
 
+const codeboxOverrideConfig = buildConfig({
+  GITHUB_WORKSPACE: workspace,
+  RUNNER_TEMP: runnerTemp,
+  WORKLOAD_ID: 'codebox-projection-override',
+  COMPONENT_ID: 'example',
+  TARGET_REPO: 'Extra-Chill/example',
+  RUNTIME: 'wp-codebox',
+  PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
+  PROFILE: 'codebox-profile',
+  RUNTIME_WORDPRESS_VERSION: 'nightly',
+});
+
+assert.equal(codeboxOverrideConfig.runtime_wordpress_version, 'nightly');
+
 console.log('runtime agent full-run projection boundary smoke passed');

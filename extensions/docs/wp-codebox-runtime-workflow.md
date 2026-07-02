@@ -5,6 +5,9 @@
 shell. New WordPress/WP Codebox callers should use the wrapper so WordPress
 version selection, WP config defines, sandbox mounts, runtime overlays, and
 Codebox artifact declaration vocabulary stay at the WP Codebox adapter boundary.
+The wrapper default and mapping contract is declared in
+`agent-runtimes/wp-codebox/wp-codebox.json` under `workflow_input_projection.wrapper`;
+empty wrapper inputs fall back to the manifest/runtime adapter defaults.
 
 Existing callers that invoke `runtime-agent-full-run.yml` directly with
 `runtime: wp-codebox` remain supported. Treat that path as compatibility for
@@ -53,6 +56,15 @@ workflow docs carry WP Codebox examples. Generic inputs such as `runtime_profile
 `component_contracts`, `runtime_execution`, `runtime_output_projections`,
 `runner_workspace`, `verification_commands`, and `artifact_declarations` pass
 through unchanged.
+
+The adapter manifest owns these wrapper defaults:
+
+| Wrapper input | Default |
+| --- | --- |
+| `wordpress_version` | `7.0` |
+| `wp_config_defines` | `{}` |
+| `wp_runtime_mounts` | `[]` |
+| `wp_runtime_overlays` | `[]` |
 
 ## Deprecated aliases
 
