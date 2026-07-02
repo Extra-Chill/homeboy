@@ -146,6 +146,15 @@ pub(crate) fn bench_component_script_list_env(
 ) -> Result<Vec<(String, String)>> {
     let mut env = vec![("HOMEBOY_BENCH_LIST_ONLY".to_string(), "1".to_string())];
     env.push((
+        "HOMEBOY_BENCH_ARGS_JSON".to_string(),
+        serde_json::to_string(&args.passthrough_args).map_err(|e| {
+            Error::internal_json(
+                e.to_string(),
+                Some("serialize bench passthrough args".to_string()),
+            )
+        })?,
+    ));
+    env.push((
         "HOMEBOY_SETTINGS_JSON".to_string(),
         crate::core::extension::build_settings_json_from_manifest(
             &serde_json::json!({}),

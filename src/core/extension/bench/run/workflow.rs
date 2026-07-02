@@ -489,6 +489,15 @@ pub(crate) fn bench_component_script_env(
             args.scenario_ids.join(","),
         ),
         (
+            "HOMEBOY_BENCH_ARGS_JSON".to_string(),
+            serde_json::to_string(&args.passthrough_args).map_err(|e| {
+                Error::internal_json(
+                    e.to_string(),
+                    Some("serialize bench passthrough args".to_string()),
+                )
+            })?,
+        ),
+        (
             "HOMEBOY_SETTINGS_JSON".to_string(),
             crate::core::extension::build_settings_json_from_manifest(
                 &serde_json::json!({}),
