@@ -4,6 +4,26 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.7] - 2026-07-02
+
+### Changed
+- Keep refreshed extension sources durable
+- Remove duplicate CI failure triage command
+- Add secret env materialized handoff contract
+- Refactor fuzz workload file staging contract
+- Record extension dev-run overlay lifecycle
+- consolidate core boundary policy guard
+- Remove changelog self flag
+- remove no-match refactor fixture
+- Preserve typed test settings
+- Recognize metadata-only extension revisions
+- Persist linked extension source metadata
+- Materialize extension sources for Lab refresh
+
+### Fixed
+- Fix extension dev-run shared asset sync
+- Fix bench lab env provider extension forwarding
+
 ## [0.280.6] - 2026-07-02
 
 ### Changed
