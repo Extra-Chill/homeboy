@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.279.1] - 2026-07-02
+
+### Fixed
+- skip source pull on detached upgrades
+- resolve nested lab fuzz replay cases
+- prepare source upgrades from worktrees
+- accept forced same-version upgrades
+
 ## [0.279.0] - 2026-07-02
 
 ### Added
