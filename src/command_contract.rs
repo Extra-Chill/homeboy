@@ -82,3 +82,6 @@ pub use crate::core::artifacts::{
     ARTIFACT_POSTPROCESS_SCHEMA,
 };
 pub use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
+pub use crate::core::run_outcome_envelope::{
+    RunOutcomeEnvelope, RunOutcomeHandoffRef, RUN_OUTCOME_ENVELOPE_SCHEMA,
+};

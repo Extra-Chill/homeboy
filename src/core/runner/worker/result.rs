@@ -5,6 +5,7 @@ use crate::command_contract::AgentTaskDispatchIdentity;
 use crate::core::api_jobs::{
     Job, JobArtifactMetadata, RemoteRunnerJobRequest, RemoteRunnerJobResult,
 };
+use crate::core::run_outcome_envelope::RunOutcomeEnvelope;
 use crate::core::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_output;
 
 use super::super::capabilities::RunnerCapabilityPreflight;
@@ -60,6 +61,29 @@ pub(super) fn remote_runner_result_from_exec_output(
             ))
             .unwrap_or(serde_json::Value::Null);
     }
+    let outcome_run_id = exec_output
+        .mirror_run_id
+        .clone()
+        .or_else(|| exec_output.job_id.clone())
+        .unwrap_or_else(|| exec_output.runner_id.clone());
+    let mut outcome = RunOutcomeEnvelope::new(if exit_code == 0 {
+        "succeeded"
+    } else {
+        "failed"
+    })
+    .with_run_id(Some(outcome_run_id.clone()))
+    .with_runner_id(Some(exec_output.runner_id.clone()))
+    .with_exit_code(exit_code);
+    outcome.add_job_artifact_refs(&outcome_run_id, exec_output.artifacts.clone());
+    if let Some(result) = exec_output.runner_result.clone() {
+        outcome.add_runner_artifact_refs(&outcome_run_id, result.artifact_refs.clone());
+        outcome =
+            outcome.with_result(serde_json::to_value(result).unwrap_or(serde_json::Value::Null));
+    }
+    if let Some(handoff) = exec_output.handoff.as_ref() {
+        outcome.add_handoff(handoff);
+    }
+    data["outcome"] = serde_json::to_value(outcome).unwrap_or(serde_json::Value::Null);
     let artifacts = mirror_file_artifact_content(exec_output.artifacts, &exec_output.remote_cwd);
     RemoteRunnerJobResult {
         exit_code,

@@ -146,6 +146,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         summary: "Stable artifact reference vocabulary suitable for reviewer-facing evidence links.",
         rust_type: "homeboy::core::artifact_ref::ArtifactReference",
     },
+    ContractRegistryEntry {
+        schema_id: crate::core::run_outcome_envelope::RUN_OUTCOME_ENVELOPE_SCHEMA,
+        name: "run-outcome-envelope",
+        title: "Run outcome envelope",
+        owner: "homeboy-core",
+        summary: "Generic inspectable run outcome envelope that normalizes artifact, evidence, handoff, result, fuzz, and agent-task proof references.",
+        rust_type: "homeboy::core::run_outcome_envelope::RunOutcomeEnvelope",
+    },
 ];
 
 pub fn registered_contracts() -> &'static [ContractRegistryEntry] {
@@ -192,6 +200,7 @@ mod tests {
             "extension-materialization-source",
             "resolved-agent-runtime-execution-contract",
             "reviewer-facing-artifact-ref",
+            "run-outcome-envelope",
         ] {
             assert!(names.contains(name), "missing {name}");
         }
