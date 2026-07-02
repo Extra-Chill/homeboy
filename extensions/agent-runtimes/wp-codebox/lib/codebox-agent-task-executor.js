@@ -99,8 +99,7 @@ const WP_CODEBOX_RUNTIME_PACKAGE_TASK_SCHEMA = 'wp-codebox/runtime-package-task/
 // the sandbox runs its native agents/chat loop with the agent + goal already
 // present in the task input. A non-empty inner runtime_task would otherwise make
 // the sandbox self-delegate wp-codebox/run-agent-task with an input that lacks
-// goal. This mirrors how studio-native invokes run-agent-task with no inner
-// runtime_task.
+// goal. Runtime-native agent task invocation uses no inner runtime_task.
 const WP_CODEBOX_NATIVE_AGENT_RUN_ABILITIES = new Set([
   'wp-codebox/run-agent-task',
   'wp-codebox/agent-task-run',
@@ -1574,11 +1573,6 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     options.agentRuntimeTools,
     ...componentDiscoveryCandidates('agent_runtime_tools', discovery, settings, workspaceBase),
   );
-  const agentsApiPath = firstExistingPath(
-    options.agentsApi,
-    options.agents_api,
-    ...componentDiscoveryCandidates('agents_api', discovery, settings, workspaceBase),
-  );
   const providerPluginPath = firstExistingPath(
     settings.wp_codebox_provider_plugin_path,
     process.env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH,
@@ -1599,7 +1593,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     wpCodeboxBin: wpCodeboxBin({ settings, executable: '' }),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
     runtimeOverlays: defaultRuntimeOverlays(settings),
-    runtimeRequirements: defaultRuntimeRequirements({ agentsApiPath }),
+    runtimeRequirements: {},
     runtimeEnv: defaultRuntimeEnv(settings),
     runtimeStateMounts: defaultRuntimeStateMounts(settings),
     runtimeConfigMounts: defaultRuntimeConfigMounts(settings),
@@ -1637,21 +1631,6 @@ function defaultRuntimeOverlays(settings) {
   }
 
   return [];
-}
-
-function defaultRuntimeRequirements({ agentsApiPath = '' } = {}) {
-  const componentContracts = [];
-  if (agentsApiPath) {
-    componentContracts.push({
-      slug: 'agents-api',
-      path: agentsApiPath,
-      pluginFile: 'agents-api/agents-api.php',
-      loadAs: 'mu-plugin',
-      activate: false,
-      metadata: { source: 'wp-codebox-agent-runtime-default' },
-    });
-  }
-  return componentContracts.length > 0 ? { component_contracts: componentContracts } : {};
 }
 
 function defaultChatHandlerPluginContracts(settings = {}, options = {}, providerConfig = {}) {

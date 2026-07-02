@@ -211,7 +211,6 @@ function wpCodeboxAgentFanoutAdapterContract() {
     schema: 'homeboy-extensions/wp-codebox-agent-fanout-adapter/v1',
     canonical_path: 'homeboy-durable-scheduler-to-homeboy-extensions-codebox-executor-to-wp-codebox-sandbox-fanout',
     ownership: {
-      substrate: 'agents-api',
       durable_scheduler: 'homeboy',
       executor_adapter: 'homeboy-extensions',
       sandbox_worker_runtime: 'wp-codebox',
