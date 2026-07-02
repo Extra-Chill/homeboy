@@ -10,6 +10,7 @@ mod command_step;
 mod component;
 mod fs_step;
 mod git_step;
+mod host_mutation_step;
 mod labels;
 mod ordering;
 mod outcome;
@@ -324,6 +325,12 @@ fn run_step(
         } => {
             patch_step::run_patch_step(rig, component, file, marker, after.as_deref(), content, *op)
         }
+        PipelineStep::HostMutation {
+            op,
+            dry_run,
+            lifecycle,
+            ..
+        } => host_mutation_step::run_host_mutation_step(rig, *op, *dry_run, lifecycle),
         PipelineStep::Check { spec, .. } => check::evaluate(rig, spec),
     }
 }

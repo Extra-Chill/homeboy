@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::core::host_mutation_lifecycle::HostMutationLifecycle;
+
 use super::CheckSpec;
 
 /// A pipeline step. Flat enum via `kind` discriminator so specs stay readable.
@@ -342,6 +344,27 @@ pub enum PipelineStep {
         label: Option<String>,
     },
 
+    /// Validate, apply, or revert a generic reversible host mutation lifecycle.
+    HostMutation {
+        /// Optional stable node ID for dependency-aware pipeline ordering.
+        #[serde(default, rename = "id", skip_serializing_if = "Option::is_none")]
+        step_id: Option<String>,
+        /// Step IDs that must run before this step.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on: Vec<String>,
+        /// Operation: `validate`, `apply`, or `revert`.
+        #[serde(default = "default_host_mutation_op")]
+        op: HostMutationOp,
+        /// Validate and plan without mutating files.
+        #[serde(default)]
+        dry_run: bool,
+        /// Host mutation lifecycle contract payload.
+        lifecycle: HostMutationLifecycle,
+        /// Human-readable label shown during execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Pre-flight / health check. Non-fatal in `up` (warns), fatal in `check`.
     Check {
         /// Optional stable node ID for dependency-aware pipeline ordering.
@@ -366,6 +389,10 @@ pub enum PipelineStep {
 
 fn default_patch_op() -> PatchOp {
     PatchOp::Apply
+}
+
+fn default_host_mutation_op() -> HostMutationOp {
+    HostMutationOp::Validate
 }
 
 /// Git operation supported by a rig `git` step.
@@ -444,4 +471,16 @@ pub enum PatchOp {
     /// Read-only: pass if the marker is present, fail otherwise. Use in
     /// `check` pipelines to surface stale or unpatched checkouts.
     Verify,
+}
+
+/// Host mutation lifecycle operation supported by a rig `host-mutation` step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostMutationOp {
+    /// Validate the embedded lifecycle contract without touching the host.
+    Validate,
+    /// Apply each declared mutation.
+    Apply,
+    /// Revert each mutation using its declared revert plan.
+    Revert,
 }
