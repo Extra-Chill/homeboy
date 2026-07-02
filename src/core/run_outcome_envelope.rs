@@ -28,6 +28,24 @@ pub struct RunOutcomeEnvelope {
     pub result: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunOutcomeProjection {
+    pub schema: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<EvidenceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handoffs: Vec<RunOutcomeHandoffRef>,
+}
+
 impl RunOutcomeEnvelope {
     pub fn new(status: impl Into<String>) -> Self {
         Self {
@@ -93,6 +111,19 @@ impl RunOutcomeEnvelope {
                 .unwrap_or_else(|| "unknown".to_string()),
             job_id: handoff.job.as_ref().map(|job| job.job_id.clone()),
         });
+    }
+
+    pub fn projection(&self) -> RunOutcomeProjection {
+        RunOutcomeProjection {
+            schema: self.schema.clone(),
+            status: self.status.clone(),
+            run_id: self.run_id.clone(),
+            runner_id: self.runner_id.clone(),
+            exit_code: self.exit_code,
+            artifact_refs: self.artifact_refs.clone(),
+            evidence_refs: self.evidence_refs.clone(),
+            handoffs: self.handoffs.clone(),
+        }
     }
 
     fn push_artifact_ref(&mut self, artifact: ArtifactRef) {
@@ -239,5 +270,36 @@ mod tests {
             "homeboy://run/run-1/artifact/summary"
         );
         assert_eq!(value["evidence_refs"][0]["role"], "summary");
+    }
+
+    #[test]
+    fn run_outcome_projection_exposes_inspection_fields_without_result_payload() {
+        let mut envelope = RunOutcomeEnvelope::new("succeeded")
+            .with_run_id(Some("run-1".to_string()))
+            .with_runner_id(Some("runner-1".to_string()))
+            .with_exit_code(0)
+            .with_result(json!({ "large": "payload" }));
+        envelope.add_job_artifact_refs(
+            "run-1",
+            vec![JobArtifactMetadata {
+                id: "summary".to_string(),
+                name: Some("summary.json".to_string()),
+                path: Some("summary.json".to_string()),
+                url: None,
+                mime: None,
+                size_bytes: None,
+                sha256: None,
+                content_base64: None,
+                metadata: None,
+            }],
+        );
+
+        let value = serde_json::to_value(envelope.projection()).expect("projection json");
+
+        assert_eq!(value["schema"], RUN_OUTCOME_ENVELOPE_SCHEMA);
+        assert_eq!(value["run_id"], "run-1");
+        assert_eq!(value["runner_id"], "runner-1");
+        assert_eq!(value["artifact_refs"][0]["id"], "summary");
+        assert!(value.get("result").is_none());
     }
 }
