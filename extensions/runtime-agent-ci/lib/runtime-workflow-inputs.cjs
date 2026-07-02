@@ -2,7 +2,7 @@
 
 const path = require('node:path');
 
-const { normalizeRuntimeId, resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
+const { normalizeRuntimeId, resolveRuntimeModulePath, resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
 const {
   expandAgentTaskCapabilityBundles,
   expandAgentTaskToolPresets,
@@ -63,8 +63,9 @@ function runtimeWorkflowInputAdapter(runtime, options = {}) {
 	if (!isPlainObject(adapter) || !adapter.module) {
 		return renderDefaultWorkflowInputs;
 	}
-	const repoRoot = options.repoRoot || path.resolve(__dirname, '..', '..');
-	const adapterPath = path.resolve(repoRoot, adapter.module);
+	const adapterPath = resolveRuntimeModulePath(adapter.module, runtime, {
+		repoRoot: options.repoRoot || path.resolve(__dirname, '..', '..'),
+	});
 	const loaded = require(adapterPath);
 	const exportName = adapter.export || 'renderRuntimeWorkflowInputs';
 	if (typeof loaded[exportName] !== 'function') {

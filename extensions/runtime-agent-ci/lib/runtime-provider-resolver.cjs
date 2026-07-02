@@ -137,7 +137,39 @@ function explicitRuntimePackages(options = {}) {
 }
 
 function runtimePackageBasePaths(options = {}) {
-	return normalizeStringList(options.packageBasePaths, options.package_base_paths, options.packageBasePath, options.package_base_path, process.cwd());
+	return normalizeStringList(
+		options.packageBasePaths,
+		options.package_base_paths,
+		options.packageBasePath,
+		options.package_base_path,
+		options.env?.AGENT_RUNTIME_PACKAGE_BASE_PATHS,
+		options.env?.AGENT_RUNTIME_PACKAGE_BASE_PATH,
+		process.env.AGENT_RUNTIME_PACKAGE_BASE_PATHS,
+		process.env.AGENT_RUNTIME_PACKAGE_BASE_PATH,
+		process.cwd()
+	);
+}
+
+function resolveRuntimeModulePath(modulePath, runtime = {}, options = {}) {
+	if (typeof modulePath !== 'string' || modulePath.trim() === '') {
+		throw new Error('Runtime module path is required.');
+	}
+	const requestedPath = modulePath.trim();
+	if (path.isAbsolute(requestedPath)) {
+		return requestedPath;
+	}
+	const repoRoot = options.repoRoot || repoRootFromHere();
+	const sourcePath = runtime?.source?.source_path;
+	const candidates = [
+		...(sourcePath ? [path.resolve(sourcePath, requestedPath)] : []),
+		path.resolve(repoRoot, requestedPath),
+	];
+	for (const candidate of [...new Set(candidates)]) {
+		if (fs.existsSync(candidate)) {
+			return candidate;
+		}
+	}
+	return candidates[0];
 }
 
 function normalizeStringList(...values) {
@@ -607,4 +639,5 @@ module.exports = {
 	resolveRuntimeProvider,
 	runtimeManifestPath,
 	runtimeRegistry,
+	resolveRuntimeModulePath,
 };

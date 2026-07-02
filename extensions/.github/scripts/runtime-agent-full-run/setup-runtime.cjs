@@ -3,7 +3,7 @@
 
 const path = require('node:path');
 const { run } = require('./lib/common.cjs');
-const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
+const { DEFAULT_RUNTIME_ID, resolveRuntimeModulePath, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 function main() {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
@@ -38,7 +38,7 @@ function runtimeSetupAdapter(runtime) {
     return null;
   }
   const repoRoot = path.resolve(__dirname, '..', '..', '..');
-  const adapterPath = path.resolve(repoRoot, adapter.module);
+  const adapterPath = resolveRuntimeModulePath(adapter.module, runtime, { repoRoot });
   const loaded = require(adapterPath);
   const exportName = adapter.export || 'setupRuntime';
   if (typeof loaded[exportName] !== 'function') {

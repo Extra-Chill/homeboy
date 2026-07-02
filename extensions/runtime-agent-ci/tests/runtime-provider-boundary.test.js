@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider, runtimeIdFromOptions } = require('../lib/runtime-provider-resolver.cjs');
+const { renderRuntimeWorkflowInputs } = require('../lib/runtime-workflow-inputs.cjs');
 const { runtimeAgentCiRunnerSpec } = require('../provider-adapters');
 const { runRuntimeSetup, runtimeSetupAdapter } = require('../../.github/scripts/runtime-agent-full-run/setup-runtime.cjs');
 const { checkedOutPhpDependencyDirs, envPathIsInsideWorkspace, requiresWordPressDependencies, safeDependencySubdir, setupRuntime } = require('../../agent-runtimes/wp-codebox/lib/runtime-setup.cjs');
@@ -31,6 +32,49 @@ assert.equal(materializeCheckout.target, '.ci/wp-codebox');
 
 assert.equal(runtimeSetupAdapter({ manifest: { ci_materialization: {} } }), null);
 assert.equal(runtimeSetupAdapter({ manifest: { ci_materialization: { requires_wordpress_dependencies: true } } }), null);
+
+const overlayRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-overlay-'));
+const overlayPackageRoot = path.join(overlayRoot, 'node_modules/@example/runtime-overlay');
+fs.mkdirSync(path.join(overlayPackageRoot, 'lib'), { recursive: true });
+fs.writeFileSync(path.join(overlayPackageRoot, 'package.json'), JSON.stringify({
+  name: '@example/runtime-overlay',
+  version: '1.0.0',
+  homeboy: { agent_runtime_manifest: 'runtime.json' },
+}, null, 2));
+fs.writeFileSync(path.join(overlayPackageRoot, 'runtime.json'), JSON.stringify({
+  schema: 'homeboy/agent-runtime-manifest/v1',
+  id: 'overlay-runtime',
+  agent_task_executors: [{ id: 'overlay-executor', backend: 'local', invocation: { command: 'node', argv: ['node', '{{runtime_path}}/executor.js'] } }],
+  workload_profiles: { default: { runtime_profile: 'default' } },
+  workflow_input_projection: { adapter: { module: 'lib/workflow-inputs.cjs', export: 'renderInputs' } },
+  ci_materialization: { setup_adapter: { module: 'lib/setup.cjs', export: 'setupOverlay' } },
+}, null, 2));
+fs.writeFileSync(path.join(overlayPackageRoot, 'lib/workflow-inputs.cjs'), `
+'use strict';
+exports.renderInputs = ({ runtime, profileId }) => ({
+  runtime_requirements: { id: profileId, overlay: true },
+  workflow_inputs: { runtime_source: runtime.source.source_path },
+});
+`);
+fs.writeFileSync(path.join(overlayPackageRoot, 'lib/setup.cjs'), `
+'use strict';
+exports.setupOverlay = ({ runtime, run }) => run('overlay-setup', [runtime.source.source_path], { cwd: runtime.source.source_path });
+`);
+
+const overlayRuntime = resolveRuntimeProvider('overlay-runtime', {
+  runtimePackages: ['@example/runtime-overlay'],
+  env: { AGENT_RUNTIME_PACKAGE_BASE_PATHS: overlayRoot },
+});
+const expectedOverlayPackageRoot = fs.realpathSync(overlayPackageRoot);
+assert.equal(overlayRuntime.source.source_path, expectedOverlayPackageRoot);
+assert.deepEqual(renderRuntimeWorkflowInputs({
+  runtime: overlayRuntime,
+  runtime_profile: 'default',
+  workload_profile: 'default',
+}).workflow_inputs, { runtime_source: expectedOverlayPackageRoot });
+const overlaySetupCalls = [];
+runtimeSetupAdapter(overlayRuntime)({ runtime: overlayRuntime, run: (...args) => overlaySetupCalls.push(args) });
+assert.deepEqual(overlaySetupCalls, [['overlay-setup', [expectedOverlayPackageRoot], { cwd: expectedOverlayPackageRoot }]]);
 
 const setupCalls = [];
 runRuntimeSetup({ manifest: { ci_materialization: {} } }, {
