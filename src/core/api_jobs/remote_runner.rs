@@ -159,18 +159,23 @@ impl JobStore {
                 None,
             ));
         }
-        request.secret_env_names = crate::core::runner::runner_exec_secret_env_names(
+        let secret_env_plan = crate::core::runner::runner_exec_secret_env_plan(
             &request.command,
             None,
             &request.secret_env_names,
             &request.env,
+            request
+                .runner_workload
+                .as_ref()
+                .map(|workload| workload.required_secrets.secret_env_plan.clone()),
         );
+        request.secret_env_names = secret_env_plan.secret_env_names();
         crate::core::runner::workload::validate_runner_workload_dispatch(
             request.runner_workload.as_ref(),
             &request.runner_id,
             request.cwd.as_deref(),
             &request.command,
-            &request.secret_env_names,
+            &secret_env_plan,
             request.capture_patch,
         )?;
 

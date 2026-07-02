@@ -86,7 +86,9 @@ pub(crate) use handoff::lab_offload_handoff_hints;
 pub(crate) use process::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
 };
+#[cfg(test)]
 pub(crate) use secrets::runner_exec_secret_env_names;
+pub(crate) use secrets::runner_exec_secret_env_plan;
 pub(crate) use worker::exec_worker_local_until_cancelled_with_progress;
 
 // Public surface re-exported by the parent `runner` module. These mirror the
@@ -562,7 +564,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         runner_id,
         Some(&cwd),
         &options.command,
-        &secret_env_names,
+        &secret_env_plan,
         options.capture_patch,
     )?;
     let required_extensions = required_extensions_for_command(

@@ -537,26 +537,6 @@ pub(crate) fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
-    let runner_workload = build_runner_workload(RunnerWorkloadBuildInput {
-        plan: &plan,
-        command: &contract,
-        capture_patch: request.capture_patch,
-        mutation_flag: request.mutation_flag,
-        allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
-        runner_id,
-        runner_mode: status_tunnel_mode(&runner_status).metadata_value(),
-        assignment_source: selection.source.metadata_value(),
-        status: "offloaded",
-        remote_workspace: Some(&remote_cwd),
-        fallback_reason: None,
-        workspace_mapping_ref: Some("workspace_mapping"),
-        proof_id: lab_metadata
-            .get("proof")
-            .and_then(|proof| proof.get("id"))
-            .and_then(|id| id.as_str()),
-    });
-    lab_metadata["runner_workload"] =
-        serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
     lab_metadata["source_snapshot"] =
         serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_materialization_plan"] =
@@ -596,6 +576,27 @@ pub(crate) fn run_lab_offload_inner(
     let secret_env_handoff =
         build_lab_secret_env_handoff_plan(&changed_since_preflight.args, env_delta)?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
+    let mut runner_workload = build_runner_workload(RunnerWorkloadBuildInput {
+        plan: &plan,
+        command: &contract,
+        capture_patch: request.capture_patch,
+        mutation_flag: request.mutation_flag,
+        allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+        runner_id,
+        runner_mode: status_tunnel_mode(&runner_status).metadata_value(),
+        assignment_source: selection.source.metadata_value(),
+        status: "offloaded",
+        remote_workspace: Some(&remote_cwd),
+        fallback_reason: None,
+        workspace_mapping_ref: Some("workspace_mapping"),
+        proof_id: lab_metadata
+            .get("proof")
+            .and_then(|proof| proof.get("id"))
+            .and_then(|id| id.as_str()),
+    });
+    runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
+    lab_metadata["runner_workload"] =
+        serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["wordpress_dependency_paths_env"] = wordpress_dependency_paths_env;
     lab_metadata["rig_component_path_overrides"] =
