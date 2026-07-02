@@ -1188,6 +1188,16 @@ mod tests {
             runner_id: "lab".to_string(),
             local_path: "/local/input".to_string(),
             remote_path: "/remote/input".to_string(),
+            materialization_plan: crate::core::runner::RunnerWorkspaceMaterializationPlan {
+                workspace_root: "/remote".to_string(),
+                local_path: "/local/input".to_string(),
+                local_basename: "input".to_string(),
+                remote_path: "/remote/input".to_string(),
+                sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+                identity: "snapshot".to_string(),
+                path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
+                run_isolation_token: None,
+            },
             current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
                 local_path: "/local/input".to_string(),
                 remote_path: "/remote/input".to_string(),

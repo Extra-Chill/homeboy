@@ -199,6 +199,7 @@ fn prepare_lab_offload_workspace_stage_inner(
                 PlanValues::new()
                     .string("local_path", &synced.local_path)
                     .string("remote_path", &remote_cwd)
+                    .json("materialization_plan", &synced.materialization_plan)
                     .string("mode", sync_mode.label())
                     .json(
                         "allow_dirty_lab_workspace",
@@ -735,6 +736,20 @@ mod tests {
             runner_id: "lab".to_string(),
             local_path: local_path.to_string(),
             remote_path: remote_path.to_string(),
+            materialization_plan: crate::core::runner::RunnerWorkspaceMaterializationPlan {
+                workspace_root: "/runner/workspaces".to_string(),
+                local_path: local_path.to_string(),
+                local_basename: Path::new(local_path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("workspace")
+                    .to_string(),
+                remote_path: remote_path.to_string(),
+                sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+                identity: "snapshot:primary".to_string(),
+                path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
+                run_isolation_token: None,
+            },
             current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
                 local_path: local_path.to_string(),
                 remote_path: remote_path.to_string(),

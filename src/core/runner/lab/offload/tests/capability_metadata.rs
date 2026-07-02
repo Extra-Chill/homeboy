@@ -66,6 +66,16 @@ fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
         runner_id: "lab".to_string(),
         local_path: "/Users/user/Developer/app".to_string(),
         remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
+        materialization_plan: RunnerWorkspaceMaterializationPlan {
+            workspace_root: "/srv/homeboy".to_string(),
+            local_path: "/Users/user/Developer/app".to_string(),
+            local_basename: "app".to_string(),
+            remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
+            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            identity: "snapshot:abc".to_string(),
+            path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
+            run_isolation_token: None,
+        },
         current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
             local_path: "/Users/user/Developer/app".to_string(),
             remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
@@ -104,6 +114,16 @@ fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
         runner_id: "lab".to_string(),
         local_path: "/Users/user/Developer/dep".to_string(),
         remote_path: "/srv/homeboy/_lab_workspaces/dep-def".to_string(),
+        materialization_plan: RunnerWorkspaceMaterializationPlan {
+            workspace_root: "/srv/homeboy".to_string(),
+            local_path: "/Users/user/Developer/dep".to_string(),
+            local_basename: "dep".to_string(),
+            remote_path: "/srv/homeboy/_lab_workspaces/dep-def".to_string(),
+            sync_mode: RunnerWorkspaceSyncMode::Git,
+            identity: "abc123".to_string(),
+            path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
+            run_isolation_token: None,
+        },
         current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
             local_path: "/Users/user/Developer/dep".to_string(),
             remote_path: "/srv/homeboy/_lab_workspaces/dep-def".to_string(),

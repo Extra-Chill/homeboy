@@ -559,6 +559,8 @@ pub(crate) fn run_lab_offload_inner(
         serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
     lab_metadata["source_snapshot"] =
         serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
+    lab_metadata["workspace_materialization_plan"] =
+        serde_json::to_value(&synced.materialization_plan).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
         &source_snapshot,
         &synced.snapshot_identity,

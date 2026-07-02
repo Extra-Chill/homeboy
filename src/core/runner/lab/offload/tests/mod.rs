@@ -16,7 +16,8 @@ pub(super) use crate::core::plan::PlanKind;
 pub(super) use crate::core::runner::{
     RunnerActiveJobSource, RunnerActiveJobState, RunnerAvailability, RunnerExecMode,
     RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
-    RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
+    RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceMaterializationPlan,
+    RunnerWorkspaceSyncOutput,
 };
 
 mod capability_metadata;

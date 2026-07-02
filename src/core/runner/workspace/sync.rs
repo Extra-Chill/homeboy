@@ -24,12 +24,12 @@ use super::snapshot::{
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
-    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceMetadata,
-    RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
-    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSnapshotAppliedFilters,
-    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
-    DEFAULT_EXCLUDES,
+    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationPlan,
+    RunnerWorkspaceMetadata, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
+    RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{
     deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
@@ -90,6 +90,14 @@ pub fn sync_workspace(
                 ),
                 "",
             );
+            let materialization_plan = workspace_materialization_plan(
+                workspace_root,
+                &local_path,
+                &remote_path,
+                options.mode,
+                &snapshot,
+                options.run_isolation_token.as_deref(),
+            );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
             let synthetic_checkout_commit = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit
             {
@@ -134,6 +142,7 @@ pub fn sync_workspace(
                     runner_id: runner.id,
                     local_path: local_path.display().to_string(),
                     remote_path,
+                    materialization_plan,
                     current_workspace,
                     workspace_lease,
                     sync_mode: options.mode,
@@ -160,6 +169,14 @@ pub fn sync_workspace(
             let remote_path = deterministic_remote_path(
                 workspace_root,
                 &local_path,
+                &git.head,
+                options.run_isolation_token.as_deref(),
+            );
+            let materialization_plan = workspace_materialization_plan(
+                workspace_root,
+                &local_path,
+                &remote_path,
+                RunnerWorkspaceSyncMode::Git,
                 &git.head,
                 options.run_isolation_token.as_deref(),
             );
@@ -232,6 +249,7 @@ pub fn sync_workspace(
                     runner_id: runner.id,
                     local_path: local_path.display().to_string(),
                     remote_path,
+                    materialization_plan,
                     current_workspace,
                     workspace_lease,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
@@ -249,6 +267,32 @@ pub fn sync_workspace(
                 0,
             ))
         }
+    }
+}
+
+pub(crate) fn workspace_materialization_plan(
+    workspace_root: &str,
+    local_path: &Path,
+    remote_path: &str,
+    sync_mode: RunnerWorkspaceSyncMode,
+    identity: &str,
+    run_isolation_token: Option<&str>,
+) -> RunnerWorkspaceMaterializationPlan {
+    RunnerWorkspaceMaterializationPlan {
+        workspace_root: workspace_root.trim_end_matches('/').to_string(),
+        local_path: local_path.display().to_string(),
+        local_basename: local_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workspace")
+            .to_string(),
+        remote_path: remote_path.to_string(),
+        sync_mode,
+        identity: identity.to_string(),
+        path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
+        run_isolation_token: run_isolation_token
+            .filter(|token| !token.trim().is_empty())
+            .map(ToString::to_string),
     }
 }
 
