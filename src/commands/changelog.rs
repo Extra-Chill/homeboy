@@ -6,10 +6,6 @@ use homeboy::core::release::changelog::{self, ShowOutput};
 
 #[derive(Args)]
 pub struct ChangelogArgs {
-    /// Show Homeboy's own changelog (release notes)
-    #[arg(long = "self")]
-    pub show_self: bool,
-
     #[command(subcommand)]
     pub command: Option<ChangelogCommand>,
 }
@@ -39,15 +35,12 @@ pub enum ChangelogOutput {
 }
 
 pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
-    match (&args.command, args.show_self) {
-        (None, _) => show_homeboy_markdown(),
-        (Some(ChangelogCommand::Show { component_id: None }), _) => show_homeboy_markdown(),
-        (
-            Some(ChangelogCommand::Show {
-                component_id: Some(id),
-            }),
-            _,
-        ) => {
+    match &args.command {
+        None => show_homeboy_markdown(),
+        Some(ChangelogCommand::Show { component_id: None }) => show_homeboy_markdown(),
+        Some(ChangelogCommand::Show {
+            component_id: Some(id),
+        }) => {
             let output = changelog::show(id)?;
             Ok((output.content, 0))
         }
@@ -62,21 +55,18 @@ pub fn run(
     args: ChangelogArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ChangelogOutput> {
-    match (&args.command, args.show_self) {
-        (None, _) => {
+    match &args.command {
+        None => {
             let (out, code) = show_homeboy_json()?;
             Ok((ChangelogOutput::Show(out), code))
         }
-        (Some(ChangelogCommand::Show { component_id: None }), _) => {
+        Some(ChangelogCommand::Show { component_id: None }) => {
             let (out, code) = show_homeboy_json()?;
             Ok((ChangelogOutput::Show(out), code))
         }
-        (
-            Some(ChangelogCommand::Show {
-                component_id: Some(id),
-            }),
-            _,
-        ) => {
+        Some(ChangelogCommand::Show {
+            component_id: Some(id),
+        }) => {
             let output = changelog::show(id)?;
             Ok((ChangelogOutput::ShowComponent(output), 0))
         }

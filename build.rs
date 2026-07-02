@@ -105,7 +105,7 @@ fn collect_md_files(docs_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
 
         if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
             // Exclude docs/changelog.md from embedded docs.
-            // Homeboy's changelog is accessed via `homeboy changelog --self` instead.
+            // Homeboy's changelog is accessed via `homeboy changelog` instead.
             // Only exclude changelog.md at the docs root, not docs/commands/changelog.md.
             if path.file_name().and_then(|n| n.to_str()) == Some("changelog.md")
                 && path.parent() == Some(docs_root)
