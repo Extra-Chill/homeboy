@@ -1,5 +1,6 @@
 mod deterministic;
 mod git;
+mod materializer;
 mod prune;
 mod reap;
 mod snapshot;
