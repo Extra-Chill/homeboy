@@ -728,7 +728,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
 }
 
 #[test]
-fn fuzz_runner_env_stages_codebox_workload_file_refs() {
+fn fuzz_runner_env_stages_generic_workload_file_refs() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(temp.path().join("bench")).expect("create bench dir");
     let php_path = temp.path().join("bench/rest-product-batch-import.php");
@@ -739,10 +739,17 @@ fn fuzz_runner_env_stages_codebox_workload_file_refs() {
     std::fs::write(
         &workload_path,
         r#"{
-          "schema": "wp-codebox/wordpress-workload-run/v1",
+          "schema": "example/fuzz-workload-run/v1",
+          "file_staging": {
+            "step_fields": ["steps"],
+            "path_arg_prefixes": ["path="],
+            "nested_json_arg_prefixes": ["workload-json="],
+            "target_root": "/tmp/homeboy-fuzz-workloads",
+            "file_extensions": ["php", "json", "mjs", "js"]
+          },
           "steps": [
             {
-              "command": "wordpress.run-workload",
+              "command": "example.run-workload",
               "args": [
                 "path=${package.root}/bench/rest-product-batch-import.php",
                 "type=php"
@@ -840,16 +847,23 @@ fn fuzz_runner_env_stages_codebox_workload_file_refs() {
 }
 
 #[test]
-fn fuzz_runner_env_stages_nested_codebox_workload_json_file_refs() {
+fn fuzz_runner_env_stages_nested_generic_workload_json_file_refs() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(temp.path().join("bench")).expect("create bench dir");
     let php_path = temp.path().join("bench/rest-product-batch-import.php");
     std::fs::write(&php_path, "<?php return array( 'ok' => true );\n").expect("write php workload");
     let nested = serde_json::json!({
-        "schema": "wp-codebox/wordpress-workload-run/v1",
+        "schema": "example/fuzz-workload-run/v1",
+        "file_staging": {
+            "step_fields": ["steps"],
+            "path_arg_prefixes": ["path="],
+            "nested_json_arg_prefixes": ["workload-json="],
+            "target_root": "/tmp/homeboy-fuzz-workloads",
+            "file_extensions": ["php", "json", "mjs", "js"]
+        },
         "steps": [
             {
-                "command": "wordpress.run-workload",
+                "command": "example.run-workload",
                 "args": [
                     format!("path={}", php_path.display()),
                     "type=php".to_string()
@@ -863,10 +877,17 @@ fn fuzz_runner_env_stages_nested_codebox_workload_json_file_refs() {
     std::fs::write(
         &workload_path,
         serde_json::json!({
-            "schema": "wp-codebox/wordpress-workload-run/v1",
+            "schema": "example/fuzz-workload-run/v1",
+            "file_staging": {
+                "step_fields": ["steps"],
+                "path_arg_prefixes": ["path="],
+                "nested_json_arg_prefixes": ["workload-json="],
+                "target_root": "/tmp/homeboy-fuzz-workloads",
+                "file_extensions": ["php", "json", "mjs", "js"]
+            },
             "steps": [
                 {
-                    "command": "wordpress.run-workload",
+                    "command": "example.run-workload",
                     "args": [
                         format!("workload-json={}", serde_json::to_string(&nested).expect("nested json"))
                     ]

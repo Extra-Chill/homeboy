@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -1554,7 +1555,7 @@ fn fuzz_runner_workload_path(
 
     expand_fuzz_workload_strings(&mut value, rig_context);
     inject_fuzz_runtime_context(&mut value, rig_context);
-    stage_codebox_workload_file_refs(&mut value, source_path)?;
+    stage_fuzz_workload_file_refs(&mut value, source_path)?;
 
     let output_file = format!(
         "fuzz-workload-{}.json",
@@ -1662,26 +1663,84 @@ fn inject_fuzz_runtime_context(value: &mut serde_json::Value, rig_context: &Fuzz
     );
 }
 
-fn stage_codebox_workload_file_refs(
+#[derive(Debug, Clone)]
+struct FuzzWorkloadFileStagingSpec {
+    staged_files_field: String,
+    step_fields: Vec<String>,
+    path_arg_prefixes: Vec<String>,
+    nested_json_arg_prefixes: Vec<String>,
+    target_root: String,
+    file_extensions: BTreeSet<String>,
+}
+
+impl FuzzWorkloadFileStagingSpec {
+    fn from_value(value: &serde_json::Value) -> homeboy::core::Result<Option<Self>> {
+        let Some(staging) = value.get("file_staging") else {
+            return Ok(None);
+        };
+        if staging.is_null() || staging == &serde_json::Value::Bool(false) {
+            return Ok(None);
+        }
+        let Some(staging) = staging.as_object() else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "fuzz_workload.file_staging",
+                "fuzz workload file_staging must be an object when present",
+                None,
+                None,
+            ));
+        };
+
+        let spec = Self {
+            staged_files_field: optional_string_field(staging, "staged_files_field")?
+                .unwrap_or_else(|| "staged_files".to_string()),
+            step_fields: string_array_field(staging, "step_fields")?,
+            path_arg_prefixes: string_array_field(staging, "path_arg_prefixes")?,
+            nested_json_arg_prefixes: string_array_field(staging, "nested_json_arg_prefixes")?,
+            target_root: required_string_field(staging, "target_root")?,
+            file_extensions: string_array_field(staging, "file_extensions")?
+                .into_iter()
+                .map(|extension| extension.trim_start_matches('.').to_ascii_lowercase())
+                .filter(|extension| !extension.is_empty())
+                .collect(),
+        };
+        if spec.step_fields.is_empty() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "fuzz_workload.file_staging.step_fields",
+                "fuzz workload file_staging requires at least one step field",
+                None,
+                None,
+            ));
+        }
+        if spec.path_arg_prefixes.is_empty() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "fuzz_workload.file_staging.path_arg_prefixes",
+                "fuzz workload file_staging requires at least one path arg prefix",
+                None,
+                None,
+            ));
+        }
+        Ok(Some(spec))
+    }
+}
+
+fn stage_fuzz_workload_file_refs(
     value: &mut serde_json::Value,
     source_path: &Path,
 ) -> homeboy::core::Result<()> {
-    if value.get("schema").and_then(serde_json::Value::as_str)
-        != Some("wp-codebox/wordpress-workload-run/v1")
-    {
+    let Some(spec) = FuzzWorkloadFileStagingSpec::from_value(value)? else {
         return Ok(());
-    }
+    };
 
     let Some(root) = value.as_object_mut() else {
         return Ok(());
     };
     let mut staged_files = root
-        .get("staged_files")
+        .get(&spec.staged_files_field)
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
 
-    for phase in ["before", "steps", "after"] {
+    for phase in &spec.step_fields {
         let Some(steps) = root
             .get_mut(phase)
             .and_then(serde_json::Value::as_array_mut)
@@ -1689,34 +1748,28 @@ fn stage_codebox_workload_file_refs(
             continue;
         };
         for step in steps {
-            stage_codebox_step_file_refs(step, source_path, &mut staged_files)?;
+            stage_fuzz_workload_step_file_refs(step, source_path, &spec, &mut staged_files)?;
         }
     }
 
     if !staged_files.is_empty() {
         root.insert(
-            "staged_files".to_string(),
+            spec.staged_files_field,
             serde_json::Value::Array(staged_files),
         );
     }
     Ok(())
 }
 
-fn stage_codebox_step_file_refs(
+fn stage_fuzz_workload_step_file_refs(
     step: &mut serde_json::Value,
     source_path: &Path,
+    spec: &FuzzWorkloadFileStagingSpec,
     staged_files: &mut Vec<serde_json::Value>,
 ) -> homeboy::core::Result<()> {
     let Some(step) = step.as_object_mut() else {
         return Ok(());
     };
-    let command = step
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if command != "wordpress.run-workload" && command != "wordpress.run-declarative-fuzz" {
-        return Ok(());
-    }
     let Some(args) = step
         .get_mut("args")
         .and_then(serde_json::Value::as_array_mut)
@@ -1728,32 +1781,33 @@ fn stage_codebox_step_file_refs(
         let Some(raw) = arg.as_str() else {
             continue;
         };
-        if let Some(workload_json) = raw.strip_prefix("workload-json=") {
+        if let Some((prefix, workload_json)) = strip_any_prefix(raw, &spec.nested_json_arg_prefixes)
+        {
             let mut nested: serde_json::Value =
                 serde_json::from_str(workload_json).map_err(|err| {
                     homeboy::core::Error::validation_invalid_argument(
                         "fuzz_workload",
-                        format!("WP Codebox fuzz workload contains invalid workload-json: {err}"),
+                        format!("fuzz workload contains invalid nested JSON arg: {err}"),
                         Some(source_path.display().to_string()),
                         None,
                     )
                 })?;
-            stage_codebox_workload_file_refs(&mut nested, source_path)?;
+            stage_fuzz_workload_file_refs(&mut nested, source_path)?;
             let nested_json = serde_json::to_string(&nested).map_err(|err| {
                 homeboy::core::Error::validation_invalid_argument(
                     "fuzz_workload",
-                    format!("WP Codebox fuzz workload could not serialize workload-json: {err}"),
+                    format!("fuzz workload could not serialize nested JSON arg: {err}"),
                     Some(source_path.display().to_string()),
                     None,
                 )
             })?;
-            *arg = serde_json::Value::String(format!("workload-json={}", nested_json));
+            *arg = serde_json::Value::String(format!("{prefix}{nested_json}"));
             continue;
         }
-        let Some(path) = raw.strip_prefix("path=") else {
+        let Some((prefix, path)) = strip_any_prefix(raw, &spec.path_arg_prefixes) else {
             continue;
         };
-        if !codebox_workload_ref_needs_staging(path) {
+        if !fuzz_workload_ref_needs_staging(path, spec) {
             continue;
         }
         let host_path = Path::new(path);
@@ -1761,14 +1815,14 @@ fn stage_codebox_step_file_refs(
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "fuzz_workload",
                 format!(
-                    "WP Codebox fuzz workload references a local file that cannot be staged: {}",
+                    "fuzz workload references a local file that cannot be staged: {}",
                     host_path.display()
                 ),
                 Some(source_path.display().to_string()),
                 None,
             ));
         }
-        let target = codebox_staged_workload_target(host_path);
+        let target = staged_fuzz_workload_target(host_path, &spec.target_root);
         if !staged_files.iter().any(|entry| {
             entry.get("source").and_then(serde_json::Value::as_str) == Some(path)
                 && entry.get("target").and_then(serde_json::Value::as_str) == Some(target.as_str())
@@ -1778,21 +1832,34 @@ fn stage_codebox_step_file_refs(
                 "target": target.clone(),
             }));
         }
-        *arg = serde_json::Value::String(format!("path={target}"));
+        *arg = serde_json::Value::String(format!("{prefix}{target}"));
     }
     Ok(())
 }
 
-fn codebox_workload_ref_needs_staging(path: &str) -> bool {
-    let path = Path::new(path);
-    path.is_absolute()
-        && path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| matches!(extension, "php" | "json" | "mjs" | "js"))
+fn strip_any_prefix<'a>(input: &'a str, prefixes: &'a [String]) -> Option<(&'a str, &'a str)> {
+    prefixes.iter().find_map(|prefix| {
+        input
+            .strip_prefix(prefix)
+            .map(|value| (prefix.as_str(), value))
+    })
 }
 
-fn codebox_staged_workload_target(path: &Path) -> String {
+fn fuzz_workload_ref_needs_staging(path: &str, spec: &FuzzWorkloadFileStagingSpec) -> bool {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return false;
+    }
+    if spec.file_extensions.is_empty() {
+        return true;
+    }
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| spec.file_extensions.contains(&extension))
+}
+
+fn staged_fuzz_workload_target(path: &Path, target_root: &str) -> String {
     let stem = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -1800,12 +1867,80 @@ fn codebox_staged_workload_target(path: &Path) -> String {
     let extension = path
         .extension()
         .and_then(|name| name.to_str())
-        .unwrap_or("php");
+        .unwrap_or("workload");
     format!(
-        "/tmp/homeboy-fuzz-workloads/{}.{}",
+        "{}/{}.{}",
+        target_root.trim_end_matches('/'),
         sanitize_workload_file_segment(stem),
         sanitize_workload_file_segment(extension)
     )
+}
+
+fn required_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> homeboy::core::Result<String> {
+    optional_string_field(object, field)?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                format!("fuzz_workload.file_staging.{field}"),
+                format!("fuzz workload file_staging requires '{field}'"),
+                None,
+                None,
+            )
+        })
+}
+
+fn optional_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> homeboy::core::Result<Option<String>> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_str() else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            format!("fuzz_workload.file_staging.{field}"),
+            format!("fuzz workload file_staging '{field}' must be a string"),
+            None,
+            None,
+        ));
+    };
+    Ok(Some(value.trim().to_string()))
+}
+
+fn string_array_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> homeboy::core::Result<Vec<String>> {
+    let Some(value) = object.get(field) else {
+        return Ok(Vec::new());
+    };
+    let Some(entries) = value.as_array() else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            format!("fuzz_workload.file_staging.{field}"),
+            format!("fuzz workload file_staging '{field}' must be an array of strings"),
+            None,
+            None,
+        ));
+    };
+    let mut strings = Vec::new();
+    for entry in entries {
+        let Some(entry) = entry.as_str() else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                format!("fuzz_workload.file_staging.{field}"),
+                format!("fuzz workload file_staging '{field}' must contain only strings"),
+                None,
+                None,
+            ));
+        };
+        let entry = entry.trim();
+        if !entry.is_empty() {
+            strings.push(entry.to_string());
+        }
+    }
+    Ok(strings)
 }
 
 fn expanded_fuzz_component_path(

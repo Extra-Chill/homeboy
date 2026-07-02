@@ -640,6 +640,32 @@ Rigs can add private fuzz workloads keyed by extension id:
 }
 ```
 
+Fuzz workload JSON may opt into runner file staging with a generic
+`file_staging` object. Homeboy expands rig variables first, then rewrites matching
+string args to staged target paths and records source/target pairs in the chosen
+manifest field. Core does not infer staging from product schemas or command
+names; the workload declares the contract explicitly.
+
+```json
+{
+  "schema": "example/fuzz-workload-run/v1",
+  "file_staging": {
+    "staged_files_field": "staged_files",
+    "step_fields": ["steps"],
+    "path_arg_prefixes": ["path="],
+    "nested_json_arg_prefixes": ["workload-json="],
+    "target_root": "/tmp/homeboy-fuzz-workloads",
+    "file_extensions": ["json", "mjs"]
+  },
+  "steps": [
+    {
+      "command": "example.run-workload",
+      "args": ["path=${package.root}/fuzz/parser.json"]
+    }
+  ]
+}
+```
+
 ## Output
 
 `contract`, `list`, `plan`, `run`, `validate`, `report`, `replay`, and
