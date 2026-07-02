@@ -25,6 +25,7 @@
     "./runtime-provider-resolver": "./lib/runtime-provider-resolver.cjs",
     "./artifact-paths": "./lib/artifact-paths.cjs",
     "./runtime-contracts": "./lib/runtime-contracts.cjs",
+    "./secret-env-plan": "./lib/secret-env-plan.cjs",
     "./loop-lifecycle": "./lib/loop-lifecycle.cjs",
     "./workspace-publication-lifecycle": "./lib/workspace-publication-lifecycle.cjs"
   },

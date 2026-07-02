@@ -36,6 +36,10 @@ const bridgeResult = spawnSync(process.execPath, [
 });
 
 assert.equal(bridgeResult.status, 0, bridgeResult.stderr || bridgeResult.stdout);
+assert.equal(bridgeResult.stdout.includes('github-secret-value'), false);
+assert.equal(bridgeResult.stderr.includes('github-secret-value'), false);
+assert.equal(bridgeResult.stdout.includes('must-not-materialize'), false);
+assert.equal(bridgeResult.stderr.includes('must-not-materialize'), false);
 const githubEnv = fs.readFileSync(githubEnvPath, 'utf8');
 assert.match(githubEnv, /PROVIDER_SECRET_1<</);
 assert.match(githubEnv, /github-secret-value/);

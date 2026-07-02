@@ -2,6 +2,9 @@
 'use strict';
 
 const { normalizeContextRepositories, requireRepo, splitCsv, writeGithubOutput } = require('./lib/common.cjs');
+const {
+  secretEnvMapSourceNames,
+} = require('../../../runtime-agent-ci/lib/secret-env-plan.cjs');
 const fs = require('node:fs');
 const { randomUUID } = require('node:crypto');
 
@@ -113,18 +116,6 @@ function materializeSecretEnv(env) {
   process.stdout.write(`Materialized ${materializedNames.length} declared GitHub secret env source(s): ${materializedNames.join(', ') || 'none'}\n`);
 }
 
-function secretEnvMapSourceNames(secretEnvMap) {
-  const names = new Set();
-  for (const [target, sources] of Object.entries(secretEnvMap)) {
-    validateEnvName(target, 'secret_env_map target');
-    const sourceList = Array.isArray(sources) ? sources : [sources];
-    for (const source of sourceList) {
-      names.add(validateEnvName(source, `secret_env_map.${target}`));
-    }
-  }
-  return Array.from(names).sort();
-}
-
 function parseGithubSecretsJson(raw) {
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -136,13 +127,6 @@ function parseGithubSecretsJson(raw) {
 function requireValue(value, name) {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`${name} is required.`);
-  }
-  return value;
-}
-
-function validateEnvName(value, label) {
-  if (typeof value !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
-    throw new Error(`${label} must be a valid env name.`);
   }
   return value;
 }
