@@ -17,6 +17,7 @@ const {
   preparePublication,
   publicationTemplates,
   publishWorkspace,
+  requireFinalizationEvidenceRef,
   requireFinalizationOutcome,
   validateWritablePaths,
 } = require('../lib/workspace-publication-lifecycle.cjs');
@@ -125,39 +126,14 @@ try {
         stdout: `${JSON.stringify({
           schema: 'homeboy/agent-task-pr-finalization/v1',
           run_id: '12345',
-          status: 'review_ready',
+          status: 'legacy_ignored',
           path: workspace,
-          base: 'trunk',
-          head: 'agent-artifacts/fixture-agent-12345',
-          pr_action: 'created',
-          pr_number: 1291,
-          pr_url: 'https://github.com/owner/repo/pull/1291',
-          changed_files: ['docs/generated.md'],
-          publication_intent: {
-            schema: 'homeboy/agent-task-publication-intent/v1',
-            run_id: '12345',
-            action: 'review_request',
-            target: {
-              kind: 'code_review',
-              adapter: 'github_pull_request',
-              base: 'trunk',
-              head: 'agent-artifacts/fixture-agent-12345',
-            },
-          },
-          publication_proof: {
-            schema: 'homeboy/agent-task-publication-proof/v1',
-            run_id: '12345',
-            status: 'review_ready',
-            adapter_action: 'created',
-            adapter_ref: 'https://github.com/owner/repo/pull/1291',
-            target: {
-              kind: 'code_review',
-              adapter: 'github_pull_request',
-              base: 'trunk',
-              head: 'agent-artifacts/fixture-agent-12345',
-              url: 'https://github.com/owner/repo/pull/1291',
-            },
-          },
+          base: 'legacy-base',
+          head: 'legacy-head',
+          pr_action: 'legacy-action',
+          pr_number: 1,
+          pr_url: 'https://github.com/owner/repo/pull/1',
+          changed_files: ['legacy.md'],
           finalization_outcome: {
             schema: 'homeboy/agent-task-pr-finalization-outcome/v1',
             run_id: '12345',
@@ -179,6 +155,18 @@ try {
             committed: true,
             pushed: true,
             published: true,
+            publication_evidence_ref: {
+              type: 'pull_request',
+              provider: 'github',
+              repo: 'owner/repo',
+              head: 'agent-artifacts/fixture-agent-12345',
+              base: 'trunk',
+              url: 'https://github.com/owner/repo/pull/1291',
+              action: 'created',
+              pr_number: 1291,
+              pr_state: 'review_ready',
+              files: ['docs/generated.md'],
+            },
           },
           proof: { schema: 'homeboy/proof/v1' },
         })}\n`,
@@ -222,8 +210,6 @@ try {
   assert.deepEqual(publication.files, ['docs/generated.md']);
   assert.equal(publication.finalization.schema, 'homeboy/agent-task-pr-finalization/v1');
   assert.equal(publication.finalization_outcome.schema, 'homeboy/agent-task-pr-finalization-outcome/v1');
-  assert.equal(publication.publication_intent.schema, 'homeboy/agent-task-publication-intent/v1');
-  assert.equal(publication.publication_proof.schema, 'homeboy/agent-task-publication-proof/v1');
   assert.deepEqual(publication.publication_evidence_ref, {
     type: 'pull_request',
     provider: 'github',
@@ -252,6 +238,11 @@ try {
 assert.throws(
   () => requireFinalizationOutcome({ schema: 'homeboy/agent-task-pr-finalization/v1' }),
   /did not return finalization_outcome/,
+);
+
+assert.throws(
+  () => requireFinalizationEvidenceRef({ schema: 'homeboy/agent-task-pr-finalization-outcome/v1' }),
+  /did not return publication_evidence_ref/,
 );
 
 process.stdout.write('Workspace publication lifecycle primitive checks passed\n');

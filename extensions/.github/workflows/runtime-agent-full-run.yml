@@ -642,19 +642,6 @@ jobs:
             --required-status "" \
             --to-github-output
 
-      - name: Update runner workspace PR summary
-        if: ${{ always() && inputs.run_agent && ! inputs.dry_run }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
-          CONFIG_FILE: ${{ steps.config.outputs.config_path }}
-        run: |
-          set -euo pipefail
-          node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/update-runner-workspace-pr.cjs \
-            --results "$RESULTS_FILE" \
-            --config "$CONFIG_FILE" \
-            --scenario "${{ inputs.workload_id }}"
-
       - name: Extract dry-run outputs
         id: extract_dry_run
         if: ${{ always() && inputs.run_agent && inputs.dry_run }}

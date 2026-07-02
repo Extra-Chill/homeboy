@@ -728,6 +728,13 @@ function requireFinalizationOutcome(report) {
   return report.finalization_outcome;
 }
 
+function requireFinalizationEvidenceRef(finalizationOutcome) {
+  if (!plainObject(finalizationOutcome.publication_evidence_ref)) {
+    throw new Error('homeboy agent-task finalize-pr finalization_outcome did not return publication_evidence_ref; upgrade Homeboy core before using runner workspace publication evidence');
+  }
+  return finalizationOutcome.publication_evidence_ref;
+}
+
 function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycle = {}, hooks = {}) {
   const gateArgs = finalizationGateArgs({
     ...lifecycle,
@@ -785,6 +792,7 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
   const report = parseHomeboyJsonOutput(result.stdout) || {};
   const finalizationOutcome = requireFinalizationOutcome(report);
   const target = plainObject(finalizationOutcome.target) ? finalizationOutcome.target : {};
+  const publicationEvidenceRef = requireFinalizationEvidenceRef(finalizationOutcome);
   const changedFiles = Array.isArray(finalizationOutcome.changed_files) ? finalizationOutcome.changed_files : [];
   return {
     report,
@@ -793,13 +801,12 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
     head: finalizationOutcome.head || target.head || publication.branch,
     base: finalizationOutcome.base || target.base || publication.base,
     url: finalizationOutcome.pr_url || target.url || '',
-    action: finalizationOutcome.publication_action || '',
-    publication_status: finalizationOutcome.publication_status || finalizationOutcome.status || '',
+    action: finalizationOutcome.publication_action,
+    publication_status: finalizationOutcome.publication_status,
     published: finalizationOutcome.published === true,
     pr_number: finalizationOutcome.pr_number ?? null,
     files: changedFiles,
-    publication_intent: report.publication_intent,
-    publication_proof: report.publication_proof,
+    publication_evidence_ref: publicationEvidenceRef,
   };
 }
 
@@ -820,17 +827,6 @@ function publishWorkspace(config, results, scenario, workspace, files, hooks = {
 
   const finalization = finalizeWorkspaceReview(config, workspace, publication, delta, { ...lifecycle, scenario }, hooks);
   const url = finalization.url;
-  const evidenceRef = publicationEvidenceRef({
-    repo: publication.repo,
-    head: finalization.head,
-    base: finalization.base,
-    url,
-    action: finalization.action,
-    number: finalization.pr_number,
-    state: finalization.publication_status,
-    files: finalization.files,
-  });
-
 
   return {
     opened: finalization.published,
@@ -846,11 +842,9 @@ function publishWorkspace(config, results, scenario, workspace, files, hooks = {
     publication_status: finalization.publication_status,
     pr_number: finalization.pr_number,
     files: finalization.files,
-    publication_evidence_ref: evidenceRef,
+    publication_evidence_ref: finalization.publication_evidence_ref,
     finalization: finalization.report,
     finalization_outcome: finalization.outcome,
-    publication_intent: finalization.publication_intent,
-    publication_proof: finalization.publication_proof,
   };
 }
 
@@ -1018,6 +1012,7 @@ module.exports = {
   publishWorkspace,
   prepareRunnerCommand,
   recordLifecycle,
+  requireFinalizationEvidenceRef,
   requireFinalizationOutcome,
   runDeterministicWorkspaceLifecycle,
   runShellCommand,
