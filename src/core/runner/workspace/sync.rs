@@ -6,6 +6,10 @@ use base64::Engine;
 
 use crate::core::engine::temp;
 use crate::core::error::{Error, Result};
+use crate::core::resource_lifecycle_index::{
+    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycle, ResourceLifecycleRecord,
+    ResourceLifecycleResourceStatus,
+};
 
 use super::super::validation_dependencies::{
     sync_validation_dependency_workspaces, RunnerValidationDependencySyncOutput,
@@ -383,7 +387,8 @@ fn prune_candidates_for_runner(
 /// Safety mirrors [`prune_workspaces`]: the target must live under
 /// `<workspace_root>/_lab_workspaces`, and removal is delegated to
 /// [`remove_workspace`], which refuses to delete the root itself or anything
-/// outside it. The controller owns the run lifecycle
+/// outside it. Local deletion uses the shared resource lifecycle root-bound
+/// delete helper. The controller owns the run lifecycle
 /// (`RunnerLifecycleOwner::Controller`, surfaced via the workspace lease built
 /// by [`workspace_lease`]), so reaping the exact path this run materialized is
 /// safe without the source-path-missing heuristic the bulk orphan prune applies.
@@ -1185,9 +1190,7 @@ fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str
         ));
     }
     match runner.kind {
-        RunnerKind::Local => fs::remove_dir_all(path).map_err(|err| {
-            Error::internal_io(err.to_string(), Some("remove runner workspace".to_string()))
-        }),
+        RunnerKind::Local => remove_local_workspace_with_lifecycle(root_path, path),
         RunnerKind::Ssh => {
             let (_server, mut client) = ssh_client_for_runner(runner)?;
             client.env.extend(runner.env.clone());
@@ -1207,6 +1210,30 @@ fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str
             }
         }
     }
+}
+
+fn remove_local_workspace_with_lifecycle(root: &Path, path: &Path) -> Result<()> {
+    let resource = ResourceLifecycleRecord {
+        owner: "runner.workspace".to_string(),
+        run_id: "materialized-workspace".to_string(),
+        runner_id: None,
+        path: path.display().to_string(),
+        kind: "runner_workspace".to_string(),
+        ttl: None,
+        cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
+        evidence_retention: ResourceEvidenceRetention::Metadata,
+        cleanup_intent: Default::default(),
+        status: ResourceLifecycleResourceStatus::CleanupPending,
+    };
+    let cleanup_path = ResourceLifecycle::cleanup_path(root, &resource).map_err(|reason| {
+        Error::validation_invalid_argument(
+            "remote_path",
+            format!("refusing to remove runner workspace: {reason}"),
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    ResourceLifecycle::delete_path(&cleanup_path)
 }
 
 fn path_age_seconds(path: &Path) -> Result<u64> {
