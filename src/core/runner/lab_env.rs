@@ -10,8 +10,8 @@ use crate::core::observation::{
 };
 
 const SETTINGS_DIAGNOSTICS_SCHEMA: &str = "homeboy/lab-offload-settings-env/v1";
-pub(super) const WORDPRESS_DEPENDENCY_PATHS_ENV: &str = "HOMEBOY_WORDPRESS_DEPENDENCY_PATHS";
-const WORDPRESS_DEPENDENCY_PATHS_SCHEMA: &str = "homeboy/lab-offload-wordpress-dependency-paths/v1";
+pub(super) const DECLARED_DEPENDENCY_PATHS_ENV: &str = "HOMEBOY_DECLARED_DEPENDENCY_PATHS";
+const DECLARED_DEPENDENCY_PATHS_SCHEMA: &str = "homeboy/lab-offload-declared-dependency-paths/v1";
 
 pub(super) fn forward_env_if_present(env: &mut HashMap<String, String>, name: &str) {
     if let Ok(value) = std::env::var(name) {
@@ -60,28 +60,28 @@ pub(super) fn forward_rig_component_path_env(
     forward_rig_component_path_env_entries(env, workspace_mapping, std::env::vars())
 }
 
-pub(super) fn forward_wordpress_dependency_paths_env(
+pub(super) fn forward_declared_dependency_paths_env(
     env: &mut HashMap<String, String>,
     workspace_mapping: &[LabWorkspaceMappingEntry],
 ) -> serde_json::Value {
-    let dependencies = wordpress_dependency_paths(workspace_mapping);
+    let dependencies = declared_dependency_paths(workspace_mapping);
     if !dependencies.is_empty() {
         env.insert(
-            WORDPRESS_DEPENDENCY_PATHS_ENV.to_string(),
+            DECLARED_DEPENDENCY_PATHS_ENV.to_string(),
             serde_json::to_string(&dependencies).unwrap_or_else(|_| "{}".to_string()),
         );
     }
 
     serde_json::json!({
-        "schema": WORDPRESS_DEPENDENCY_PATHS_SCHEMA,
-        "env_name": WORDPRESS_DEPENDENCY_PATHS_ENV,
+        "schema": DECLARED_DEPENDENCY_PATHS_SCHEMA,
+        "env_name": DECLARED_DEPENDENCY_PATHS_ENV,
         "forwarded_to_runner": !dependencies.is_empty(),
         "count": dependencies.len(),
         "dependencies": dependencies,
     })
 }
 
-fn wordpress_dependency_paths(
+fn declared_dependency_paths(
     workspace_mapping: &[LabWorkspaceMappingEntry],
 ) -> serde_json::Map<String, serde_json::Value> {
     workspace_mapping
@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn wordpress_dependency_paths_env_exports_validation_dependency_mapping() {
+    fn declared_dependency_paths_env_exports_validation_dependency_mapping() {
         let mapping = vec![
             crate::core::runner::lab_workspaces::workspace_mapping_entry_for_validation_dependency(
                 &crate::core::runner::RunnerValidationDependencySyncOutput {
@@ -598,14 +598,14 @@ mod tests {
         ];
         let mut env = HashMap::new();
 
-        let metadata = forward_wordpress_dependency_paths_env(&mut env, &mapping);
+        let metadata = forward_declared_dependency_paths_env(&mut env, &mapping);
         let exported: serde_json::Value = serde_json::from_str(
-            env.get(WORDPRESS_DEPENDENCY_PATHS_ENV)
+            env.get(DECLARED_DEPENDENCY_PATHS_ENV)
                 .expect("dependency paths env"),
         )
         .expect("env json");
 
-        assert_eq!(metadata["schema"], WORDPRESS_DEPENDENCY_PATHS_SCHEMA);
+        assert_eq!(metadata["schema"], DECLARED_DEPENDENCY_PATHS_SCHEMA);
         assert_eq!(metadata["forwarded_to_runner"], true);
         assert_eq!(metadata["count"], 1);
         assert_eq!(
@@ -620,14 +620,14 @@ mod tests {
     }
 
     #[test]
-    fn wordpress_dependency_paths_env_is_absent_without_dependencies() {
+    fn declared_dependency_paths_env_is_absent_without_dependencies() {
         let mut env = HashMap::new();
 
-        let metadata = forward_wordpress_dependency_paths_env(&mut env, &[]);
+        let metadata = forward_declared_dependency_paths_env(&mut env, &[]);
 
         assert_eq!(metadata["forwarded_to_runner"], false);
         assert_eq!(metadata["count"], 0);
-        assert!(!env.contains_key(WORDPRESS_DEPENDENCY_PATHS_ENV));
+        assert!(!env.contains_key(DECLARED_DEPENDENCY_PATHS_ENV));
     }
 
     #[test]
