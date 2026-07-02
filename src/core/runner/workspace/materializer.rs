@@ -21,6 +21,13 @@ pub(super) enum WorkspaceMaterializationOperation {
     GuardCleanGitWorkspace {
         allow_dirty: bool,
     },
+    SyncGitCheckout {
+        remote_url: String,
+        head: String,
+        changed_since_base: Option<String>,
+        fetch_refs: Vec<String>,
+        allow_dirty: bool,
+    },
     AtomicReplaceTemp,
 }
 
@@ -121,6 +128,19 @@ impl WorkspaceMaterializationOperation {
             Self::GuardCleanGitWorkspace { allow_dirty } => {
                 dirty_git_workspace_guard("$dest", *allow_dirty)
             }
+            Self::SyncGitCheckout {
+                remote_url,
+                head,
+                changed_since_base,
+                fetch_refs,
+                allow_dirty,
+            } => sync_git_checkout_command(
+                remote_url,
+                head,
+                changed_since_base.as_deref(),
+                fetch_refs,
+                *allow_dirty,
+            ),
             Self::AtomicReplaceTemp => "rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"".to_string(),
         }
     }
@@ -157,4 +177,38 @@ pub(super) fn dirty_git_workspace_guard(dest: &str, allow_dirty: bool) -> String
             status = status,
         )
     }
+}
+
+fn sync_git_checkout_command(
+    remote_url: &str,
+    head: &str,
+    changed_since_base: Option<&str>,
+    fetch_refs: &[String],
+    allow_dirty: bool,
+) -> String {
+    let fetch_changed_since = changed_since_base
+        .map(|base| {
+            format!(
+                " && (git -C \"$dest\" rev-parse --verify -q {} >/dev/null || git -C \"$dest\" fetch origin {})",
+                shell::quote_arg(&format!("{base}^{{commit}}")),
+                shell::quote_arg(base)
+            )
+        })
+        .unwrap_or_default();
+    let fetch_extra_refs = fetch_refs
+        .iter()
+        .map(|git_ref| {
+            format!(
+                " && git -C \"$dest\" fetch origin {}",
+                shell::quote_arg(git_ref)
+            )
+        })
+        .collect::<String>();
+    let dirty_guard = dirty_git_workspace_guard("$dest", allow_dirty);
+
+    format!(
+        "if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {remote_url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_extra_refs}{fetch_changed_since} && git -C \"$dest\" checkout --detach {head} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx",
+        remote_url = shell::quote_arg(remote_url),
+        head = shell::quote_arg(head),
+    )
 }

@@ -5,14 +5,9 @@ use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
-use super::materializer::{
-    dirty_git_workspace_guard, WorkspaceMaterializationOperation, WorkspaceMaterializer,
-};
+use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
 use super::types::GitSnapshot;
-use super::util::{
-    git_output, owner_capture_shell, owner_restore_shell, parent_remote_path, run_shell_command,
-    ssh_args, ssh_client_for_runner,
-};
+use super::util::{git_output, run_shell_command, ssh_args, ssh_client_for_runner};
 
 pub(super) fn git_snapshot(
     local_path: &Path,
@@ -281,39 +276,16 @@ pub(super) fn materialize_git_command(
     git_fetch_refs: &[String],
     allow_dirty_lab_workspace: bool,
 ) -> String {
-    let parent = parent_remote_path(remote_path);
-    let dest = shell::quote_arg(remote_path);
-    let fetch_changed_since = changed_since_base
-        .map(|base| {
-            format!(
-                " && (git -C {dest} rev-parse --verify -q {} >/dev/null || git -C {dest} fetch origin {})",
-                shell::quote_arg(&format!("{base}^{{commit}}")),
-                shell::quote_arg(base)
-            )
+    WorkspaceMaterializer::new(remote_path)
+        .capture_owner()
+        .op(WorkspaceMaterializationOperation::EnsureParent)
+        .op(WorkspaceMaterializationOperation::SyncGitCheckout {
+            remote_url: remote_url.to_string(),
+            head: head.to_string(),
+            changed_since_base: changed_since_base.map(str::to_string),
+            fetch_refs: git_fetch_refs.to_vec(),
+            allow_dirty: allow_dirty_lab_workspace,
         })
-        .unwrap_or_default();
-    let fetch_extra_refs = git_fetch_refs
-        .iter()
-        .map(|git_ref| {
-            format!(
-                " && git -C {dest} fetch origin {}",
-                shell::quote_arg(git_ref)
-            )
-        })
-        .collect::<String>();
-
-    let dirty_guard = dirty_git_workspace_guard("$dest", allow_dirty_lab_workspace);
-
-    format!(
-        "parent={parent}; dest={dest}; {owner_capture}; mkdir -p \"$parent\" && if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_extra_refs}{fetch_changed_since} && git -C \"$dest\" checkout --detach {head} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx && {owner_restore}",
-        parent = shell::quote_arg(parent.as_str()),
-        dest = dest,
-        url = shell::quote_arg(remote_url),
-        head = shell::quote_arg(head),
-        fetch_changed_since = fetch_changed_since,
-        fetch_extra_refs = fetch_extra_refs,
-        dirty_guard = dirty_guard,
-        owner_capture = owner_capture_shell("$parent"),
-        owner_restore = owner_restore_shell("$parent", "$dest"),
-    )
+        .restore_owner()
+        .command()
 }

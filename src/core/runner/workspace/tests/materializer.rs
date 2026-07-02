@@ -62,3 +62,32 @@ fn workspace_materializer_builds_git_bundle_checkout_command() {
     assert!(command.contains("Homeboy Lab refused to overwrite a dirty runner workspace"));
     assert!(command.contains("exit 97"));
 }
+
+#[test]
+fn workspace_materializer_builds_direct_git_checkout_command() {
+    let command = WorkspaceMaterializer::new("/srv/homeboy/_lab_workspaces/homeboy-abc")
+        .capture_owner()
+        .op(WorkspaceMaterializationOperation::EnsureParent)
+        .op(WorkspaceMaterializationOperation::SyncGitCheckout {
+            remote_url: "https://github.com/Extra-Chill/homeboy.git".to_string(),
+            head: "abc123".to_string(),
+            changed_since_base: Some("origin/main".to_string()),
+            fetch_refs: vec!["refs/pull/123/head:refs/remotes/pull/123".to_string()],
+            allow_dirty: false,
+        })
+        .restore_owner()
+        .command();
+
+    assert!(command.contains("parent=/srv/homeboy/_lab_workspaces"));
+    assert!(command.contains("dest=/srv/homeboy/_lab_workspaces/homeboy-abc"));
+    assert!(command.contains("mkdir -p \"$parent\""));
+    assert!(command.contains("if [ -d \"$dest\"/.git ]; then"));
+    assert!(command.contains("Homeboy Lab refused to overwrite a dirty runner workspace"));
+    assert!(command.contains("git clone https://github.com/Extra-Chill/homeboy.git \"$dest\""));
+    assert!(command.contains("fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'"));
+    assert!(command.contains("fetch origin refs/pull/123/head:refs/remotes/pull/123"));
+    assert!(command.contains("rev-parse --verify -q 'origin/main^{commit}'"));
+    assert!(command.contains("checkout --detach abc123"));
+    assert!(command.contains("git -C \"$dest\" clean -ffdqx"));
+    assert!(command.contains("chown -R \"$owner\" $dest"));
+}
