@@ -5,6 +5,9 @@ use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
+use super::materializer::{
+    dirty_git_workspace_guard, WorkspaceMaterializationOperation, WorkspaceMaterializer,
+};
 use super::types::GitSnapshot;
 use super::util::{
     git_output, owner_capture_shell, owner_restore_shell, parent_remote_path, run_shell_command,
@@ -242,32 +245,32 @@ fn git_bundle_install_command(
     remote_url: &str,
     allow_dirty_lab_workspace: bool,
 ) -> String {
-    let parent = parent_remote_path(remote_path);
-    let checkout = if let Some(branch) = branch {
-        format!(
-            "git -C \"$tmp\" checkout -B {branch} {head} && git -C \"$tmp\" config branch.{branch}.remote origin && git -C \"$tmp\" config branch.{branch}.merge refs/heads/{branch}",
-            branch = shell::quote_arg(branch),
-            head = shell::quote_arg(head),
-        )
-    } else {
-        format!(
-            "git -C \"$tmp\" checkout --detach {head}",
-            head = shell::quote_arg(head)
-        )
-    };
-
-    let dirty_guard = dirty_lab_workspace_guard("$dest", allow_dirty_lab_workspace);
-    format!(
-        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; bundle=\"${{dest}}.bundle.$$\"; {owner_capture}; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\" \"$bundle\"' EXIT; rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\" && git clone \"$bundle\" \"$tmp\" && git -C \"$tmp\" remote set-url origin {remote_url} && {checkout} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && {dirty_guard} && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\" && {owner_restore}",
-        parent = shell::quote_arg(parent.as_str()),
-        dest = shell::quote_arg(remote_path),
-        remote_url = shell::quote_arg(remote_url),
-        checkout = checkout,
-        head = shell::quote_arg(head),
-        dirty_guard = dirty_guard,
-        owner_capture = owner_capture_shell("$parent"),
-        owner_restore = owner_restore_shell("$parent", "$dest"),
-    )
+    WorkspaceMaterializer::new(remote_path)
+        .with_bundle_file()
+        .capture_owner()
+        .op(WorkspaceMaterializationOperation::EnsureParent)
+        .op(WorkspaceMaterializationOperation::CleanupOnExit(vec![
+            "\"$tmp\"".to_string(),
+            "\"$bundle\"".to_string(),
+        ]))
+        .op(WorkspaceMaterializationOperation::WriteStdinToBundle)
+        .op(WorkspaceMaterializationOperation::CloneBundleToTemp)
+        .op(WorkspaceMaterializationOperation::SetGitOrigin(
+            remote_url.to_string(),
+        ))
+        .op(WorkspaceMaterializationOperation::CheckoutGitRef {
+            head: head.to_string(),
+            branch: branch.map(str::to_string),
+        })
+        .op(WorkspaceMaterializationOperation::ResetAndCleanGit {
+            head: head.to_string(),
+        })
+        .op(WorkspaceMaterializationOperation::GuardCleanGitWorkspace {
+            allow_dirty: allow_dirty_lab_workspace,
+        })
+        .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
+        .restore_owner()
+        .command()
 }
 
 pub(super) fn materialize_git_command(
@@ -299,7 +302,7 @@ pub(super) fn materialize_git_command(
         })
         .collect::<String>();
 
-    let dirty_guard = dirty_lab_workspace_guard("$dest", allow_dirty_lab_workspace);
+    let dirty_guard = dirty_git_workspace_guard("$dest", allow_dirty_lab_workspace);
 
     format!(
         "parent={parent}; dest={dest}; {owner_capture}; mkdir -p \"$parent\" && if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_extra_refs}{fetch_changed_since} && git -C \"$dest\" checkout --detach {head} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx && {owner_restore}",
@@ -313,22 +316,4 @@ pub(super) fn materialize_git_command(
         owner_capture = owner_capture_shell("$parent"),
         owner_restore = owner_restore_shell("$parent", "$dest"),
     )
-}
-
-fn dirty_lab_workspace_guard(dest: &str, allow_dirty_lab_workspace: bool) -> String {
-    let status = format!(
-        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; if [ \"$path\" = .homeboy ] || [ \"${{path#.homeboy/}}\" != \"$path\" ]; then :; else printf '%s\\n' \"$line\"; fi; done || true",
-        dest = dest,
-    );
-    if allow_dirty_lab_workspace {
-        format!(
-            "dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab warning: --allow-dirty-lab-workspace is overwriting uncommitted runner workspace changes.' >&2; printf '%s\\n' \"$dirty\" >&2; fi",
-            status = status,
-        )
-    } else {
-        format!(
-            "dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab refused to overwrite a dirty runner workspace.' >&2; printf '%s\\n' \"$dirty\" >&2; printf '%s\\n' 'Commit, stash, clean, or remove the runner workspace before retrying. Pass --allow-dirty-lab-workspace only for noisy investigation that may discard runner-side changes.' >&2; exit 97; fi",
-            status = status,
-        )
-    }
 }

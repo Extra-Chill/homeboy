@@ -8,6 +8,7 @@
 
 mod git;
 mod materialized;
+mod materializer;
 mod pull;
 mod snapshot;
 mod sync;

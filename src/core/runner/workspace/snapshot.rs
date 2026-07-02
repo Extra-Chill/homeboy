@@ -8,10 +8,11 @@ use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
+use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
 use super::types::SnapshotStats;
 use super::util::{
-    git_output, hex_prefix, owner_capture_shell, owner_restore_shell, parent_remote_path,
-    run_shell_capture, run_shell_command, ssh_args, ssh_client_for_runner, tar_exclude_args,
+    git_output, hex_prefix, run_shell_capture, run_shell_command, ssh_args, ssh_client_for_runner,
+    tar_exclude_args,
 };
 
 pub(crate) fn snapshot_identity(
@@ -404,12 +405,15 @@ fn includes_override_exclude(includes: &[String], exclude: &str) -> bool {
 }
 
 pub(super) fn snapshot_install_command(remote_path: &str) -> String {
-    let parent = parent_remote_path(remote_path);
-    format!(
-        "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"; {owner_capture}; mkdir -p \"$parent\" && trap 'rm -rf \"$tmp\"' EXIT; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && tar -C \"$tmp\" -xf - && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\" && {owner_restore}",
-        parent = shell::quote_arg(parent.as_str()),
-        dest = shell::quote_arg(remote_path),
-        owner_capture = owner_capture_shell("$parent"),
-        owner_restore = owner_restore_shell("$parent", "$dest"),
-    )
+    WorkspaceMaterializer::new(remote_path)
+        .capture_owner()
+        .op(WorkspaceMaterializationOperation::EnsureParent)
+        .op(WorkspaceMaterializationOperation::CleanupOnExit(vec![
+            "\"$tmp\"".to_string(),
+        ]))
+        .op(WorkspaceMaterializationOperation::RecreateTempDir)
+        .op(WorkspaceMaterializationOperation::ExtractTarStdinToTemp)
+        .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
+        .restore_owner()
+        .command()
 }
