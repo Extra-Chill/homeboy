@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.279.0] - 2026-07-02
+
+### Added
+- add logs evidence metadata
+
+### Changed
+- Clarify dependency provider boundary
+- neutralize rig spec fixtures
+
+### Fixed
+- thread lab source path remaps
+- clarify fuzz replay dry-run contract
+- guide lab fuzz directory artifacts
+- remap lab passthrough source paths
+- gate mutating file commands behind apply
+- wire runner exec secret env contract
+- register non-core command docs
+- surface stale runtime env overrides
+- explain stale source upgrade swaps
+- handle detached runner source refresh
+- guide lab version drift recovery
+
 ## [0.278.1] - 2026-07-01
 
 ### Fixed
