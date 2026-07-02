@@ -113,9 +113,9 @@ enum WorktreeCommand {
         /// Report cleanup candidates without removing worktrees or artifacts.
         #[arg(long)]
         dry_run: bool,
-        /// Skip the automatic rebuildable artifact cleanup pass.
+        /// Also remove declared rebuildable artifacts from the Homeboy checkout that built this binary.
         #[arg(long)]
-        skip_artifact_cleanup: bool,
+        cleanup_artifacts: bool,
     },
 }
 
@@ -218,12 +218,10 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
         WorktreeCommand::Cleanup {
             force,
             dry_run,
-            skip_artifact_cleanup,
+            cleanup_artifacts,
         } => {
             let worktrees = worktree::cleanup(WorktreeCleanupOptions { force, dry_run })?;
-            let artifact_cleanup = if skip_artifact_cleanup {
-                None
-            } else {
+            let artifact_cleanup = if cleanup_artifacts {
                 Some(artifact_cleanup::cleanup_artifacts(
                     ArtifactCleanupOptions {
                         path: None,
@@ -235,6 +233,8 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
                         merged_only: false,
                     },
                 )?)
+            } else {
+                None
             };
             WorktreeOutput::Cleanup(WorktreeCleanupCommandOutput {
                 worktrees,
@@ -243,4 +243,47 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
         }
     };
     Ok((output, 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli_surface::{Cli, Commands};
+
+    use super::WorktreeCommand;
+
+    #[test]
+    fn worktree_cleanup_does_not_cleanup_artifacts_by_default() {
+        let cli = Cli::parse_from(["homeboy", "worktree", "cleanup"]);
+
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Cleanup {
+            cleanup_artifacts, ..
+        } = args.command
+        else {
+            panic!("expected worktree cleanup command");
+        };
+
+        assert!(!cleanup_artifacts);
+    }
+
+    #[test]
+    fn worktree_cleanup_artifact_cleanup_requires_explicit_flag() {
+        let cli = Cli::parse_from(["homeboy", "worktree", "cleanup", "--cleanup-artifacts"]);
+
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Cleanup {
+            cleanup_artifacts, ..
+        } = args.command
+        else {
+            panic!("expected worktree cleanup command");
+        };
+
+        assert!(cleanup_artifacts);
+    }
 }
