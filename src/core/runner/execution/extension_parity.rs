@@ -4,6 +4,8 @@ use crate::core::extension;
 use crate::core::server::{self, SshClient};
 
 use serde_json::Value;
+use std::collections::BTreeMap;
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -189,9 +191,9 @@ fn validate_runner_extension_settings(
     }
 
     let metadata = remote_extension_metadata(remote_stdout);
-    let declared = remote_extension_setting_ids(remote_stdout);
+    let declared = remote_extension_settings(remote_stdout);
     for key in requested_setting_keys {
-        if !declared.contains(key) {
+        if !runner_extension_setting_declared(&declared, key) {
             return Err(unsupported_runner_extension_setting_error(
                 runner_id,
                 homeboy_path,
@@ -203,6 +205,18 @@ fn validate_runner_extension_settings(
     }
 
     Ok(())
+}
+
+fn runner_extension_setting_declared(declared: &BTreeMap<String, String>, key: &str) -> bool {
+    if declared.contains_key(key) {
+        return true;
+    }
+
+    let Some((parent, _)) = key.split_once('.') else {
+        return false;
+    };
+
+    matches!(declared.get(parent).map(String::as_str), Some("object"))
 }
 
 #[derive(Default)]
@@ -624,9 +638,14 @@ fn remote_extension_metadata(stdout: &str) -> RemoteExtensionMetadata {
     }
 }
 
+#[cfg(test)]
 fn remote_extension_setting_ids(stdout: &str) -> BTreeSet<String> {
+    remote_extension_settings(stdout).into_keys().collect()
+}
+
+fn remote_extension_settings(stdout: &str) -> BTreeMap<String, String> {
     let Ok(value) = serde_json::from_str::<Value>(stdout.trim()) else {
-        return BTreeSet::new();
+        return BTreeMap::new();
     };
     value
         .get("data")
@@ -635,8 +654,14 @@ fn remote_extension_setting_ids(stdout: &str) -> BTreeSet<String> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|setting| setting.get("id").and_then(Value::as_str))
-        .map(str::to_string)
+        .filter_map(|setting| {
+            let id = setting.get("id").and_then(Value::as_str)?;
+            let setting_type = setting
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("string");
+            Some((id.to_string(), setting_type.to_string()))
+        })
         .collect()
 }
 
@@ -772,6 +797,32 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("extension update example"));
+    }
+
+    #[test]
+    fn setting_parity_accepts_dotted_children_of_declared_object_settings() {
+        let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","path":"/runner/extensions/wordpress","source_revision":"abc1234","settings":[{"id":"bench_env","type":"object","label":"Bench env"},{"id":"profile","type":"string","label":"Profile"}]}}}"#;
+
+        validate_runner_extension_settings(
+            "homeboy-lab",
+            "homeboy",
+            "wordpress",
+            remote_stdout,
+            &[
+                "bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT".to_string(),
+                "bench_env.SSI_FIXTURE_MATRIX_VISUAL_PARITY_FULL_PAGE".to_string(),
+            ],
+        )
+        .expect("declared object setting should cover dotted child overrides");
+
+        validate_runner_extension_settings(
+            "homeboy-lab",
+            "homeboy",
+            "wordpress",
+            remote_stdout,
+            &["profile.name".to_string()],
+        )
+        .expect_err("string settings should not cover dotted child overrides");
     }
 
     #[test]
