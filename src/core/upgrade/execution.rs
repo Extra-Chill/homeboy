@@ -85,9 +85,12 @@ pub(crate) fn execute_upgrade(
             source_workspace_root = Some(workspace_root.clone());
 
             // Execute the upgrade command from defaults
-            let cmd = &defaults.install_methods.source.upgrade_command;
+            let cmd = source_upgrade_command_for_prepared_workspace(
+                &defaults.install_methods.source.upgrade_command,
+                &workspace_root,
+            )?;
             Command::new("sh")
-                .args(["-c", cmd])
+                .args(["-c", &cmd])
                 .current_dir(&workspace_root)
                 .output()
                 .map_err(|e| {
@@ -642,6 +645,33 @@ fn git_command_error(args: &[&str], output: &std::process::Output) -> Error {
         format!("git {} failed: {detail}", args.join(" ")),
         Some("prepare source checkout".to_string()),
     )
+}
+
+const DETACHED_SOURCE_GIT_PULL_GUARD: &str = r#"git() {
+  for homeboy_git_arg in "$@"; do
+    if [ "$homeboy_git_arg" = "pull" ]; then
+      echo "Skipping git pull for detached prepared source checkout"
+      return 0
+    fi
+  done
+  command git "$@"
+}"#;
+
+fn source_upgrade_command_for_prepared_workspace(
+    upgrade_command: &str,
+    workspace_root: &Path,
+) -> Result<String> {
+    if !git_command_success(workspace_root, &["rev-parse", "--is-inside-work-tree"])? {
+        return Ok(upgrade_command.to_string());
+    }
+
+    if git_command_success(workspace_root, &["symbolic-ref", "-q", "HEAD"])? {
+        return Ok(upgrade_command.to_string());
+    }
+
+    Ok(format!(
+        "{DETACHED_SOURCE_GIT_PULL_GUARD}\n\n{upgrade_command}"
+    ))
 }
 
 fn workspace_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
@@ -1577,6 +1607,55 @@ mod tests {
         let err = prepare_source_workspace_for_upgrade(seed.path()).expect_err("dirty rejected");
 
         assert!(err.message.contains("uncommitted changes"));
+    }
+
+    #[test]
+    fn source_upgrade_command_preserves_branch_checkout_command() {
+        let checkout = source_workspace_with_package_name("homeboy");
+        git(checkout.path(), &["init", "--initial-branch", "main"]);
+
+        let command = source_upgrade_command_for_prepared_workspace(
+            "git pull --ff-only\ncargo build --release",
+            checkout.path(),
+        )
+        .expect("source command");
+
+        assert_eq!(command, "git pull --ff-only\ncargo build --release");
+    }
+
+    #[test]
+    fn source_upgrade_command_skips_pull_for_detached_prepared_checkout() {
+        let checkout = source_workspace_with_package_name("homeboy");
+        git(checkout.path(), &["init", "--initial-branch", "main"]);
+        git(
+            checkout.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        git(checkout.path(), &["config", "user.name", "Homeboy Test"]);
+        git(checkout.path(), &["add", "."]);
+        git(checkout.path(), &["commit", "-m", "initial"]);
+        git(checkout.path(), &["switch", "--detach", "HEAD"]);
+
+        let command = source_upgrade_command_for_prepared_workspace(
+            "git pull --ff-only\ncargo build --release",
+            checkout.path(),
+        )
+        .expect("source command");
+
+        assert!(command.contains("Skipping git pull for detached prepared source checkout"));
+        assert!(command.contains("command git \"$@\""));
+        assert!(command.ends_with("git pull --ff-only\ncargo build --release"));
+    }
+
+    #[test]
+    fn source_upgrade_command_preserves_snapshot_command() {
+        let checkout = source_workspace_with_package_name("homeboy");
+
+        let command =
+            source_upgrade_command_for_prepared_workspace("cargo build --release", checkout.path())
+                .expect("source command");
+
+        assert_eq!(command, "cargo build --release");
     }
 
     #[test]
