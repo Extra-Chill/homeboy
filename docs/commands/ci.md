@@ -72,6 +72,20 @@ Pass the exact baseline/head commands and any available log excerpts or artifact
 refs through `--baseline-evidence` / `--head-evidence` so failure comments can
 show the baseline command and supporting evidence.
 
+## Failure Triage
+
+`ci triage` fetches the latest failed GitHub Actions runs for a pull request head
+SHA, then fetches job metadata and bounded log snippets for failed jobs. It emits
+structured JSON with command `ci.triage` instead of dumping full logs.
+
+```sh
+homeboy ci triage 5808 --repo Extra-Chill/homeboy
+homeboy ci triage https://github.com/Extra-Chill/homeboy/pull/5808 --max-runs 3
+```
+
+Use `--max-runs`, `--max-snippets-per-job`, and `--context-lines` to bound how
+much remote CI evidence is fetched and printed.
+
 ## Manifest Shape
 
 Extensions can declare CI profiles with a `ci` block:

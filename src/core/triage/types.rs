@@ -41,55 +41,7 @@ pub struct TriageLandingOptions {
 pub enum TriageCommandOutput {
     Report(TriageOutput),
     Watch(TriageWatchOutput),
-    CiFailure(CiFailureTriageOutput),
     Landing(TriageLandingOutput),
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CiFailureTriageOutput {
-    pub command: &'static str,
-    pub repo: String,
-    pub pull_request: u64,
-    pub pr_url: String,
-    pub head_sha: String,
-    pub summary: CiFailureSummary,
-    pub failures: Vec<CiFailureDigest>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CiFailureSummary {
-    pub failed_checks: usize,
-    pub checks_summarized: usize,
-    pub categories: Vec<String>,
-    pub baseline_vs_head_detected: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CiFailureDigest {
-    pub workflow: Option<String>,
-    pub job: String,
-    pub step: Option<String>,
-    pub conclusion: Option<String>,
-    pub category: String,
-    pub baseline_vs_head: Option<String>,
-    pub details_url: Option<String>,
-    pub log_url: Option<String>,
-    pub snippets: Vec<CiFailureSnippet>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct CiFailureSnippet {
-    pub line_start: usize,
-    pub line_end: usize,
-    pub text: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CiFailureTriageOptions {
-    pub target: String,
-    pub repo: Option<String>,
-    pub max_checks: usize,
-    pub snippet_lines: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
