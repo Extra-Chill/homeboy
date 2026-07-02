@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.12] - 2026-07-02
+
+### Changed
+- Centralize agent task contract imports
+
 ## [3.23.11] - 2026-07-02
 
 ### Changed
