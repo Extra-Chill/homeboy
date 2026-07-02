@@ -336,6 +336,7 @@ fn extension_dev_run_workload(
         required_capabilities: Vec::new(),
         required_secrets: RunnerWorkloadSecrets {
             categories: Vec::new(),
+            secret_env_plan: Default::default(),
         },
         required_extensions,
         required_extension_revisions: Vec::new(),
