@@ -99,6 +99,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::core::secret_env_plan::SecretEnvPlan",
     },
     ContractRegistryEntry {
+        schema_id: crate::core::secret_env_plan::SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA,
+        name: "secret-env-materialized-handoff",
+        title: "Secret environment materialized handoff",
+        owner: "homeboy-core",
+        summary: "Projects materialized secret environment keys, source labels, missing names, and diagnostics without secret values.",
+        rust_type: "homeboy::core::secret_env_plan::SecretEnvMaterializedHandoff",
+    },
+    ContractRegistryEntry {
         schema_id: crate::core::fuzz::FUZZ_WORKLOAD_SCHEMA,
         name: "fuzz-workload",
         title: "Fuzz workload",

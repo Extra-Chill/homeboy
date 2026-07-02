@@ -7,6 +7,8 @@ use crate::core::redaction::RedactionPolicy;
 pub const SECRET_ENV_PLAN_SCHEMA: &str = "homeboy/secret-env-plan/v1";
 pub const SECRET_ENV_PLAN_MATERIALIZATION_SCHEMA: &str =
     "homeboy/secret-env-plan-materialization/v1";
+pub const SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA: &str =
+    "homeboy/secret-env-materialized-handoff/v1";
 pub const AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV: &str = "HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON";
 pub const SECRET_ENV_PLAN_ENV_DELTA_SOURCE: &str = "secret_env_plan_env_delta";
 
@@ -154,6 +156,25 @@ pub struct SecretEnvResolutionError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub status: Vec<SecretEnvStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvMaterializedHandoff {
+    #[serde(default = "secret_env_materialized_handoff_schema")]
+    pub schema: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<SecretEnvMaterializedHandoffEnv>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_secret_env_names: Vec<String>,
+    pub diagnostics: SecretEnvPlanDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvMaterializedHandoffEnv {
+    pub name: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_env_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -726,12 +747,61 @@ impl SecretEnvPlan {
         redacted
     }
 
+    pub fn materialized_handoff(
+        &self,
+        status: impl IntoIterator<Item = SecretEnvStatus>,
+    ) -> SecretEnvMaterializedHandoff {
+        SecretEnvMaterializedHandoff::from_status(self, status)
+    }
+
     fn declared_inherited_env_names(&self) -> BTreeSet<String> {
         self.secret_env_names()
             .into_iter()
             .chain(self.public_env.keys().cloned())
             .chain(self.inheritance.allowed_env_names.iter().cloned())
             .collect()
+    }
+}
+
+impl SecretEnvMaterializedHandoff {
+    pub fn from_resolution(plan: &SecretEnvPlan, resolution: &SecretEnvResolution) -> Self {
+        Self::from_status(plan, resolution.status.clone())
+    }
+
+    pub fn from_error(plan: &SecretEnvPlan, error: &SecretEnvResolutionError) -> Self {
+        Self::from_status(plan, error.status.clone())
+    }
+
+    pub fn from_status(
+        plan: &SecretEnvPlan,
+        status: impl IntoIterator<Item = SecretEnvStatus>,
+    ) -> Self {
+        let status = normalize_status(status);
+        let diagnostics = plan
+            .diagnose(status.clone())
+            .unwrap_or_else(|error| error.diagnostics);
+        let missing_secret_env_names = diagnostics
+            .status
+            .iter()
+            .filter(|entry| entry.required && !entry.configured)
+            .map(|entry| entry.name.clone())
+            .collect();
+        let env = status
+            .into_iter()
+            .filter(|entry| entry.configured)
+            .map(|entry| SecretEnvMaterializedHandoffEnv {
+                name: entry.name,
+                source: entry.source,
+                source_env_name: entry.source_env_name,
+            })
+            .collect();
+
+        Self {
+            schema: SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA.to_string(),
+            env,
+            missing_secret_env_names,
+            diagnostics,
+        }
     }
 }
 
@@ -924,6 +994,10 @@ fn normalize_ordered_names(names: impl IntoIterator<Item = String>) -> Vec<Strin
 
 fn secret_env_plan_schema() -> String {
     SECRET_ENV_PLAN_SCHEMA.to_string()
+}
+
+fn secret_env_materialized_handoff_schema() -> String {
+    SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA.to_string()
 }
 
 fn default_secret_env_source() -> String {
@@ -1238,6 +1312,82 @@ mod tests {
         assert!(!serde_json::to_string(&resolved.status)
             .expect("status json")
             .contains("secret-value"));
+    }
+
+    #[test]
+    fn materialized_handoff_projects_env_keys_sources_and_redacted_diagnostics_only() {
+        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+            name: "API_TOKEN".to_string(),
+            required: true,
+            source_env_names: vec![
+                "PRIMARY_API_TOKEN".to_string(),
+                "FALLBACK_API_TOKEN".to_string(),
+            ],
+            refresh: None,
+        }]);
+        let resolver =
+            SecretEnvResolver::new(vec![SecretEnvValueProvider::new("test-env", |name| {
+                (name == "FALLBACK_API_TOKEN").then(|| "secret-value".to_string())
+            })]);
+
+        let resolved = resolver
+            .resolve_plan(&plan, "missing required secret env")
+            .expect("fallback source resolves");
+        let handoff = SecretEnvMaterializedHandoff::from_resolution(&plan, &resolved);
+        let serialized = serde_json::to_string(&handoff).expect("handoff json");
+
+        assert_eq!(handoff.schema, SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA);
+        assert_eq!(
+            handoff.env,
+            vec![SecretEnvMaterializedHandoffEnv {
+                name: "API_TOKEN".to_string(),
+                source: "test-env".to_string(),
+                source_env_name: Some("FALLBACK_API_TOKEN".to_string()),
+            }]
+        );
+        assert!(handoff.missing_secret_env_names.is_empty());
+        assert_eq!(
+            handoff.diagnostics.status[0].missing_source_env_names,
+            vec!["PRIMARY_API_TOKEN".to_string()]
+        );
+        assert!(serialized.contains("API_TOKEN"));
+        assert!(serialized.contains("test-env"));
+        assert!(!serialized.contains("secret-value"));
+    }
+
+    #[test]
+    fn materialized_handoff_reports_missing_names_without_values() {
+        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+            name: "API_TOKEN".to_string(),
+            required: true,
+            source_env_names: vec!["SOURCE_API_TOKEN".to_string()],
+            refresh: None,
+        }]);
+        let resolver =
+            SecretEnvResolver::new(vec![SecretEnvValueProvider::new("test-env", |_| {
+                None::<String>
+            })]);
+
+        let error = resolver
+            .resolve_plan(&plan, "missing required secret env")
+            .expect_err("secret is missing");
+        let handoff = plan.materialized_handoff(error.status.clone());
+        let from_error = SecretEnvMaterializedHandoff::from_error(&plan, &error);
+        let serialized = serde_json::to_string(&handoff).expect("handoff json");
+
+        assert_eq!(handoff, from_error);
+        assert!(handoff.env.is_empty());
+        assert_eq!(
+            handoff.missing_secret_env_names,
+            vec!["API_TOKEN".to_string()]
+        );
+        assert_eq!(
+            handoff.diagnostics.status[0].missing_source_env_names,
+            vec!["SOURCE_API_TOKEN".to_string()]
+        );
+        assert!(serialized.contains("SOURCE_API_TOKEN"));
+        assert!(!serialized.contains("secret-value"));
+        assert!(!serialized.contains("super-secret"));
     }
 
     #[test]
