@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use homeboy::core::resource_lifecycle_index::{
-    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleIndex,
-    ResourceLifecycleRecord, ResourceLifecycleResourceStatus, RESOURCE_LIFECYCLE_INDEX_SCHEMA,
+    resource_lifecycle_record_is_actionable, resource_lifecycle_record_is_cleanup_eligible,
+    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycle,
+    ResourceLifecycleCleanupOperation, ResourceLifecycleIndex, ResourceLifecycleRecord,
+    ResourceLifecycleResourceStatus, RESOURCE_LIFECYCLE_INDEX_SCHEMA,
 };
 use homeboy::core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -75,25 +77,7 @@ impl Default for RunsResourcesArgs {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceCleanupOperation {
-    Delete,
-}
-
-impl Default for ResourceCleanupOperation {
-    fn default() -> Self {
-        Self::Delete
-    }
-}
-
-impl std::fmt::Display for ResourceCleanupOperation {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Delete => formatter.write_str("delete"),
-        }
-    }
-}
+pub type ResourceCleanupOperation = ResourceLifecycleCleanupOperation;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RunsResourcesOutput {
@@ -196,11 +180,11 @@ pub fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
 
     let actionable_count = all_resources
         .iter()
-        .filter(|record| resource_is_actionable(record))
+        .filter(|record| resource_lifecycle_record_is_actionable(record))
         .count();
     let cleanup_eligible_count = all_resources
         .iter()
-        .filter(|record| resource_is_cleanup_eligible(record))
+        .filter(|record| resource_lifecycle_record_is_cleanup_eligible(record))
         .count();
 
     let resources = all_resources
@@ -295,7 +279,7 @@ fn build_cleanup_output(
     let mut skipped = Vec::new();
 
     for record in resources {
-        if !resource_is_cleanup_eligible(record) {
+        if !resource_lifecycle_record_is_cleanup_eligible(record) {
             skipped.push(cleanup_skip(record, "resource is not cleanup eligible"));
             continue;
         }
@@ -319,10 +303,10 @@ fn build_cleanup_output(
             continue;
         };
 
-        match cleanup_candidate_path(root, record) {
+        match ResourceLifecycle::cleanup_path(root, record) {
             Ok(path) => {
                 if args.apply {
-                    apply_cleanup_path(&path)?;
+                    ResourceLifecycle::delete_path(&path)?;
                     applied.push(cleanup_applied_item(record, args.cleanup_operation));
                 } else {
                     planned.push(cleanup_plan_item(record, args.cleanup_operation));
@@ -365,44 +349,6 @@ fn canonical_cleanup_root(root: &Path) -> Result<PathBuf> {
         ));
     }
     Ok(canonical)
-}
-
-fn cleanup_candidate_path(
-    root: &Path,
-    record: &ResourceLifecycleRecord,
-) -> std::result::Result<PathBuf, String> {
-    let path = PathBuf::from(&record.path);
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| "resource path does not exist".to_string())?;
-
-    if !canonical.starts_with(root) {
-        return Err("resource path is outside cleanup root".to_string());
-    }
-
-    Ok(canonical)
-}
-
-fn apply_cleanup_path(path: &Path) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
-    })?;
-
-    if metadata.file_type().is_dir() {
-        std::fs::remove_dir_all(path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("delete {}", path.display())),
-            )
-        })
-    } else {
-        std::fs::remove_file(path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("delete {}", path.display())),
-            )
-        })
-    }
 }
 
 fn cleanup_plan_item(
@@ -500,45 +446,15 @@ fn resource_matches_filters(record: &ResourceLifecycleRecord, args: &RunsResourc
         return false;
     }
 
-    if args.actionable && !resource_is_actionable(record) {
+    if args.actionable && !resource_lifecycle_record_is_actionable(record) {
         return false;
     }
 
-    if args.cleanup_eligible && !resource_is_cleanup_eligible(record) {
+    if args.cleanup_eligible && !resource_lifecycle_record_is_cleanup_eligible(record) {
         return false;
     }
 
     true
-}
-
-fn resource_is_actionable(record: &ResourceLifecycleRecord) -> bool {
-    matches!(
-        record.status,
-        ResourceLifecycleResourceStatus::Active
-            | ResourceLifecycleResourceStatus::CleanupPending
-            | ResourceLifecycleResourceStatus::Missing
-            | ResourceLifecycleResourceStatus::Failed
-    )
-}
-
-fn resource_is_cleanup_eligible(record: &ResourceLifecycleRecord) -> bool {
-    if matches!(record.status, ResourceLifecycleResourceStatus::Cleaned) {
-        return false;
-    }
-
-    if record.cleanup_intent.is_apply() {
-        return true;
-    }
-
-    matches!(
-        record.status,
-        ResourceLifecycleResourceStatus::CleanupPending
-    ) || matches!(
-        record.cleanup_policy,
-        ResourceCleanupPolicy::DeleteAfterTtl
-            | ResourceCleanupPolicy::DeleteOnSuccess
-            | ResourceCleanupPolicy::DeleteOnTerminal
-    )
 }
 
 fn sample_resource_lifecycle_index() -> ResourceLifecycleIndex {
@@ -615,11 +531,13 @@ mod tests {
             ..record(ResourceLifecycleResourceStatus::Retained)
         };
 
-        assert!(resource_is_actionable(&active));
-        assert!(!resource_is_actionable(&cleaned));
-        assert!(resource_is_cleanup_eligible(&active));
-        assert!(!resource_is_cleanup_eligible(&cleaned));
-        assert!(resource_is_cleanup_eligible(&retained_apply));
+        assert!(resource_lifecycle_record_is_actionable(&active));
+        assert!(!resource_lifecycle_record_is_actionable(&cleaned));
+        assert!(resource_lifecycle_record_is_cleanup_eligible(&active));
+        assert!(!resource_lifecycle_record_is_cleanup_eligible(&cleaned));
+        assert!(resource_lifecycle_record_is_cleanup_eligible(
+            &retained_apply
+        ));
     }
 
     #[test]
