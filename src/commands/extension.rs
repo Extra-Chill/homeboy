@@ -276,13 +276,16 @@ impl ExtensionArgs {
     pub(crate) fn is_update_command(&self) -> bool {
         matches!(
             self.command,
-            ExtensionCommand::Update { .. } | ExtensionCommand::Refresh { .. }
+            ExtensionCommand::Update { .. }
+                | ExtensionCommand::Refresh { .. }
+                | ExtensionCommand::DevRun { .. }
         )
     }
 
     pub(crate) fn update_command_label(&self) -> &'static str {
         match self.command {
             ExtensionCommand::Refresh { .. } => "extension refresh",
+            ExtensionCommand::DevRun { .. } => "extension dev-run",
             _ => "extension update",
         }
     }

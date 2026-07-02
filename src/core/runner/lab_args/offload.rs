@@ -70,6 +70,7 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
     let has_force_hot = args.iter().any(|arg| arg == "--force-hot");
+    let preserve_runner_arg = is_extension_dev_run(args);
     while let Some(arg) = iter.next() {
         if arg == EXPLICIT_PASSTHROUGH_SENTINEL {
             continue;
@@ -106,10 +107,20 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
             continue;
         }
         if arg == "--runner" {
-            let _ = iter.next();
+            if preserve_runner_arg {
+                stripped.push(arg.clone());
+                if let Some(value) = iter.next() {
+                    stripped.push(value.clone());
+                }
+            } else {
+                let _ = iter.next();
+            }
             continue;
         }
         if arg.starts_with("--runner=") {
+            if preserve_runner_arg {
+                stripped.push(arg.clone());
+            }
             continue;
         }
         if arg == "--lab-only" || arg == "--no-local-execution" {
@@ -142,6 +153,12 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
         stripped.insert(1, "--force-hot".to_string());
     }
     stripped
+}
+
+fn is_extension_dev_run(args: &[String]) -> bool {
+    args.windows(2).any(
+        |window| matches!(window, [command, subcommand] if command == "extension" && subcommand == "dev-run"),
+    )
 }
 
 fn remap_lab_offload_arg(arg: &str, mappings: &[&LabPathRemap]) -> String {

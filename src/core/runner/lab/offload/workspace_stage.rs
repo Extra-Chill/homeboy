@@ -139,6 +139,11 @@ fn prepare_lab_offload_workspace_stage_inner(
         source_path,
         request.allow_dirty_lab_workspace,
     )?);
+    extra_workspaces.extend(extension_source_extra_workspaces(
+        &offload_args,
+        source_path,
+        request.allow_dirty_lab_workspace,
+    )?);
     extra_workspaces.extend(rig_component_path_env_extra_workspaces(source_path)?);
     // Isolate the primary workspace per cook/dispatch run. Without a per-run
     // token the git-mode remote path is keyed only on (source path, HEAD), so a
