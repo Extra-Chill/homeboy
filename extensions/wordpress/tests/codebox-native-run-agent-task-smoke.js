@@ -30,7 +30,7 @@ const path = require('node:path');
 process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(__dirname, '..', '..', 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 
 const { codeboxTaskRequestFromAgentTaskRequest } = require('../../agent-runtimes/wp-codebox');
-const runtimeAgentCi = require('../../runtime-agent-ci');
+const runtimeAgentCi = require('../../runtime-agent-ci/provider-adapters');
 
 const workspaceRoot = path.join(__dirname, 'fixtures');
 

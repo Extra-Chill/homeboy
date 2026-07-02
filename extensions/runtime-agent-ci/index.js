@@ -1,6 +1,5 @@
 'use strict';
 
-// Deprecated compatibility barrel. New imports should use the narrower
-// ./generic-orchestration or ./provider-adapters package boundaries.
-Object.assign(module.exports, require('./generic-orchestration'));
+// Deprecated compatibility barrel. New imports should use ./provider-adapters;
+// executor-neutral helpers live behind ./generic-orchestration only.
 Object.assign(module.exports, require('./provider-adapters'));

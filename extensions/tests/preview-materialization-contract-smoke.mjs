@@ -11,7 +11,7 @@ const {
 	PREVIEW_MATERIALIZATION_REQUEST_SCHEMA,
 	materializePreview,
 	normalizePreviewMaterializationRequest,
-} = require(path.join(rootDir, 'runtime-agent-ci', 'index.js'));
+} = require(path.join(rootDir, 'runtime-agent-ci', 'provider-adapters.js'));
 
 const request = normalizePreviewMaterializationRequest({
 	id: 'preview-1',

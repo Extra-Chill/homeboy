@@ -55,7 +55,7 @@ function createHeadlessDeterministicLoopFixture(options = {}) {
 async function runHeadlessDeterministicLoopFixture(options = {}) {
   const fixture = createHeadlessDeterministicLoopFixture(options);
   const repoRoot = path.resolve(__dirname, '..', '..', '..');
-  const { runHeadlessDeterministicLoop } = require(path.join(repoRoot, 'runtime-agent-ci'));
+  const { runHeadlessDeterministicLoop } = require(path.join(repoRoot, 'runtime-agent-ci/generic-orchestration'));
   const result = await runHeadlessDeterministicLoop({
     spec: fixture.spec,
     repoRoot: fixture.root,

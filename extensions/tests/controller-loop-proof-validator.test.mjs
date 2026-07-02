@@ -6,7 +6,7 @@ import path from 'node:path';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
-const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci'));
+const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci/generic-orchestration'));
 const validator = require(path.join(repoRoot, 'runtime-agent-ci/lib/controller-loop-proof-validator'));
 
 assert.equal(typeof runtimeAgentCi.validateControllerLoopProof, 'function');

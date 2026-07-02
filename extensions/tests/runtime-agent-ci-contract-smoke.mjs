@@ -131,14 +131,6 @@ assert.deepEqual(
   ),
   { ability: 'example/process', input: { source: 'artifact.json', mode: 'typed' } }
 );
-assert.deepEqual(
-  runtimeAgentCi.runtimeAgentCiFirstNonEmptyObject({}, { legacy: true }),
-  { legacy: true }
-);
-assert.deepEqual(
-  runtimeAgentCi.runtimeAgentCiFirstNonEmptyArray([], [{ legacy: true }]),
-  [{ legacy: true }]
-);
 
 const genericBundleConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   runtimeProfile: runtimeProfile.id,
@@ -262,7 +254,7 @@ assert.deepEqual(
     expectedArtifacts: ['packet'],
   }),
   genericAgentTaskRequest({
-    taskId: 'equivalent-task',
+    task_id: 'equivalent-task',
     instructions: '',
     inputs: {},
     runnerSpec: runtimeAgentCi.runtimeAgentCiRunnerSpec({
@@ -285,7 +277,7 @@ assert.deepEqual(
     metadata: { preset: 'runtime-agent-ci' },
   }),
   genericAgentTaskPlan({
-    planId: 'equivalent-plan',
+    plan_id: 'equivalent-plan',
     tasks: [genericRequest],
     options: { concurrency: 1 },
     metadata: { preset: 'runtime-agent-ci' },

@@ -12,12 +12,12 @@ const path = require('node:path');
 /**
  * Internal dependencies
  */
-const { resolveRuntimeProvider, runtimeIdFromOptions } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
+const { resolveRuntimeProvider, runtimeIdFromOptions } = require('../../../runtime-agent-ci/provider-adapters');
 const {
   genericAgentLoopStdoutSummary,
   runGenericAgentLoop,
   writeGenericAgentLoopArtifacts,
-} = require('../../../runtime-agent-ci');
+} = require('../../../runtime-agent-ci/generic-orchestration');
 const { resolveControllerLoopProofPolicy } = require('./lib/proof-profile.cjs');
 
 const SCRIPT_DIR = __dirname;

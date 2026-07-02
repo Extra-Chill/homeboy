@@ -26,7 +26,7 @@ const {
   runtimeContractSchemas,
   typedArtifactsFromCodeboxResult,
 } = require('../../agent-runtimes/wp-codebox');
-const runtimeAgentCi = require('../../runtime-agent-ci');
+const runtimeAgentCi = require('../../runtime-agent-ci/provider-adapters');
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-agent-boundary-'));
 const codexSecretEnv = [

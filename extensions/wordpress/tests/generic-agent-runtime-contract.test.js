@@ -16,7 +16,7 @@ const {
 } = require('../../agent-task-contracts/agent-task-runner-contract');
 const {
 	runtimeAgentCiRunnerSpec,
-} = require('../../runtime-agent-ci');
+} = require('../../runtime-agent-ci/provider-adapters');
 const {
 	buildConfig,
 } = require('../../.github/scripts/runtime-agent-full-run/build-runner-config.cjs');

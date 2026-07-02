@@ -62,7 +62,7 @@ For Homeboy agent-task fanout, keep record status host-owned: map provider outco
 
 ## Finding Packets
 
-`runtime-agent-ci` and `runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js` export helpers for diagnostic/finding packet inputs.
+`runtime-agent-ci/generic-orchestration` and `runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js` export helpers for diagnostic/finding packet inputs.
 
 - `normalizeFindingPacketItems(packets, policy)` flattens packet-level `findings` or `diagnostics` arrays into generic items with stable packet/finding IDs.
 - `materializeFindingPacketFanoutConfig({ packets, policy, ...config })` applies policy-driven grouping and returns the generic config/groups/items needed by the planner.

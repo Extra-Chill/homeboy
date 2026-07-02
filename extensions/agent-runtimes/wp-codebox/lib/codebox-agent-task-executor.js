@@ -88,6 +88,7 @@ const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be object
 const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const AGENT_TASK_EVENT_SCHEMA = 'homeboy/agent-task-event/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
+const HOMEBOY_RUN_RUNTIME_PACKAGE_ABILITY = 'homeboy/run-runtime-package';
 const WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY = 'wp-codebox/run-runtime-package';
 const WP_CODEBOX_RUNTIME_PACKAGE_TASK_SCHEMA = 'wp-codebox/runtime-package-task/v1';
 
@@ -1390,7 +1391,8 @@ function runtimeTaskWithExecutionDefaults(runtimeTask, defaults = {}) {
   }
   const normalizedRuntimeTask = { ...runtimeTask };
   const requestedAbility = normalizedRuntimeTask.ability;
-  const normalizedAbility = normalizedRuntimeTask.ability;
+  const normalizedAbility = requestedAbility === HOMEBOY_RUN_RUNTIME_PACKAGE_ABILITY ? WP_CODEBOX_RUN_RUNTIME_PACKAGE_ABILITY : requestedAbility;
+  normalizedRuntimeTask.ability = normalizedAbility;
   const abilityNormalization = runtimeTask.ability_normalization || runtimeTaskAbilityNormalization({ requestedAbility, normalizedAbility });
   if (abilityNormalization) {
     normalizedRuntimeTask.ability_normalization = abilityNormalization;

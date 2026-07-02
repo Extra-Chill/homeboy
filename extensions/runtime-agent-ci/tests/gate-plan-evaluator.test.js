@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const runtimeAgentCi = require('..');
+const runtimeAgentCi = require('../generic-orchestration');
 const {
   GATE_PLAN_SCHEMA,
   GATE_RESULT_SCHEMA,

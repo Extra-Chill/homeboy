@@ -23,6 +23,7 @@ const AGENT_TASK_REQUEST_SCHEMA = GENERIC_AGENT_TASK_REQUEST_SCHEMA;
 const RUNTIME_AGENT_CI_RUNTIME_PROFILE_ID = 'runtime-agent-ci';
 
 function runtimeAgentCiRuntimeTaskRequest(options = {}, context = {}) {
+  options = normalizeRuntimeAgentCiOptions(options);
   const taskId = requiredString(options.task_id, 'task_id');
   const runtimeProfile = resolveRuntimeAgentCiRuntimeProfile(options);
   const runtimeExecution = normalizeRuntimeExecutionDescriptor(options.runtime_execution, runtimeProfile);
@@ -40,6 +41,7 @@ function runtimeAgentCiRuntimeTaskRequest(options = {}, context = {}) {
 }
 
 function runtimeAgentCiAbilityTaskRequest(options = {}, context = {}) {
+  options = normalizeRuntimeAgentCiOptions(options);
   const taskId = requiredString(options.task_id, 'task_id');
   const ability = requiredString(options.ability, 'ability');
   const runnerSpec = runtimeAgentCiRunnerSpec({
@@ -65,6 +67,7 @@ function runtimeAgentCiAbilityTaskRequest(options = {}, context = {}) {
 }
 
 function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
+  options = normalizeRuntimeAgentCiOptions(options);
   const taskExecutorConfig = context.taskExecutorConfig || runtimeAgentCiTaskExecutorConfig;
   const config = taskExecutorConfig(options);
   // The executor runtime is only populated from an explicit runtime selector; a
@@ -96,6 +99,7 @@ function runtimeBackendForRuntime(runtime) {
 }
 
 function runtimeAgentCiTaskExecutorConfig(options = {}) {
+  options = normalizeRuntimeAgentCiOptions(options);
   const runtimeProfile = resolveRuntimeAgentCiRuntimeProfile(options);
   const runtimeId = runtimeIdFromOptions(options, {});
   const runtimeExecution = normalizeRuntimeExecutionDescriptor(options.runtime_execution, runtimeProfile);
@@ -235,6 +239,7 @@ function runtimeAgentCiTaskFromRequest(runtimeTask = {}, abilityRequest = {}, ab
 }
 
 function resolveRuntimeAgentCiRuntimeProfile(options = {}) {
+  options = normalizeRuntimeAgentCiOptions(options);
   const runtimeProfiles = options.runtime_profiles || options.config?.runtime_profiles || {};
   const runtimeProfilePresets = options.runtime_profile_presets || options.config?.runtime_profile_presets || {};
   const requestedProfile = options.runtime_profile || options.config?.runtime_profile || RUNTIME_AGENT_CI_RUNTIME_PROFILE_ID;
@@ -267,6 +272,7 @@ function runtimeAgentCiRuntimeProfilesForOptions(options, runtimeProfile) {
 const runtimeProfilesForOptions = runtimeAgentCiRuntimeProfilesForOptions;
 
 function runtimeAgentCiPlan(options = {}) {
+  options = normalizeRuntimeAgentCiOptions(options);
   return genericAgentTaskPlan({
     schema: AGENT_TASK_PLAN_SCHEMA,
     plan_id: options.plan_id,
@@ -274,6 +280,36 @@ function runtimeAgentCiPlan(options = {}) {
     options: options.options,
     metadata: options.metadata,
   });
+}
+
+function normalizeRuntimeAgentCiOptions(options = {}) {
+  return {
+    ...options,
+    ability_input: options.ability_input ?? options.abilityInput,
+    ability_tools: options.ability_tools ?? options.abilityTools,
+    artifact_declarations: options.artifact_declarations ?? options.artifactDeclarations,
+    artifact_slots: options.artifact_slots ?? options.artifactSlots,
+    callback_data: options.callback_data ?? options.callbackData,
+    capability_bundles: options.capability_bundles ?? options.capabilityBundles,
+    evidence_projections: options.evidence_projections ?? options.evidenceProjections,
+    expected_artifacts: options.expected_artifacts ?? options.expectedArtifacts,
+    group_key: options.group_key ?? options.groupKey,
+    ignored_workspace_paths: options.ignored_workspace_paths ?? options.ignoredWorkspacePaths,
+    parent_plan_id: options.parent_plan_id ?? options.parentPlanId,
+    plan_id: options.plan_id ?? options.planId,
+    runtime_component_paths: options.runtime_component_paths ?? options.runtimeComponentPaths,
+    runtime_execution: options.runtime_execution ?? options.runtimeExecution,
+    runtime_invocation: options.runtime_invocation ?? options.runtimeInvocation,
+    runtime_output_projections: options.runtime_output_projections ?? options.runtimeOutputProjections,
+    runtime_profile: options.runtime_profile ?? options.runtimeProfile,
+    runtime_profile_config: options.runtime_profile_config ?? options.runtimeProfileConfig,
+    runtime_profile_presets: options.runtime_profile_presets ?? options.runtimeProfilePresets,
+    runtime_profiles: options.runtime_profiles ?? options.runtimeProfiles,
+    sandbox_tool_policy: options.sandbox_tool_policy ?? options.toolPolicy,
+    task_id: options.task_id ?? options.taskId,
+    task_timeout_seconds: options.task_timeout_seconds ?? options.taskTimeoutSeconds,
+    transcript_slots: options.transcript_slots ?? options.transcriptSlots,
+  };
 }
 
 function normalizeArray(value) {
