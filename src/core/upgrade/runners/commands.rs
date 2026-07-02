@@ -150,6 +150,7 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
         command,
         env: runner.env.clone(),
         secret_env_names: Vec::new(),
+        secret_env_plan: None,
         capture_patch: false,
         raw_exec: false,
         source_snapshot: None,

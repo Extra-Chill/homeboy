@@ -265,6 +265,7 @@ fn probe_agent_task_providers_on_runner(
             command: command.to_vec(),
             env,
             secret_env_names: Vec::new(),
+            secret_env_plan: None,
             capture_patch: false,
             raw_exec: false,
             source_snapshot: Some(source_snapshot),

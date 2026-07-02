@@ -33,12 +33,14 @@ pub(super) fn exec_worker_local_with_process_output(
     options: RunnerExecOptions,
     execute: impl FnOnce(&PreparedRunnerProcess) -> Result<ProcessOutput>,
 ) -> Result<(RunnerExecOutput, i32)> {
-    let secret_env_names = runner_exec_secret_env_names(
+    let secret_env_plan = runner_exec_secret_env_plan(
         &options.command,
         options.capability_preflight.as_ref(),
         &options.secret_env_names,
         &options.env,
+        options.secret_env_plan.clone(),
     );
+    let secret_env_names = secret_env_plan.secret_env_names();
     let mut runner = load(runner_id)?;
     runner.kind = RunnerKind::Local;
     runner.server_id = None;
@@ -50,6 +52,7 @@ pub(super) fn exec_worker_local_with_process_output(
         command: options.command.clone(),
         env: options.env.clone(),
         secret_env_names: secret_env_names.clone(),
+        secret_env_plan: Some(secret_env_plan.clone()),
         capture_patch: options.capture_patch,
         raw_exec: options.raw_exec,
         source_snapshot: options.source_snapshot.clone(),
