@@ -66,8 +66,9 @@ pub(crate) use lifecycle::source_metadata::resolve_source_url;
 pub use lifecycle::source_metadata::SourceMetadataRepair;
 pub use lifecycle::{
     check_update_available, derive_id_from_url, install, install_for_component,
-    install_with_revision, is_git_url, read_source_revision, refresh, slugify_id, uninstall,
-    update, InstallForComponentResult, InstallResult, RefreshResult, UpdateAvailable, UpdateResult,
+    install_with_revision, is_git_url, read_source_revision, read_source_url, refresh, slugify_id,
+    uninstall, update, InstallForComponentResult, InstallResult, RefreshResult, UpdateAvailable,
+    UpdateResult,
 };
 pub use maintenance::{exec_tool, update_all};
 pub use manifest::{

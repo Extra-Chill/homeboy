@@ -768,10 +768,7 @@ fn read_source_url_metadata(path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    std::fs::read_to_string(Path::new(path).join(".source-url"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    homeboy::core::extension::read_source_url(Path::new(path))
 }
 
 fn local_source_path(source: &str) -> Option<String> {

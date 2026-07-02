@@ -1,4 +1,4 @@
-use super::{load_extension, read_source_revision, write_source_metadata};
+use super::{load_extension, read_source_revision, read_source_url, write_source_metadata};
 use crate::core::error::{Error, Result};
 use crate::core::paths;
 
@@ -18,11 +18,7 @@ pub(crate) struct SourceMetadataResolution {
 pub(crate) fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution> {
     let extension = load_extension(extension_id)?;
     let extension_dir = paths::extension(extension_id)?;
-    let metadata_path = extension_dir.join(".source-url");
-    let metadata_url = std::fs::read_to_string(&metadata_path)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let metadata_url = read_source_url(&extension_dir);
 
     let manifest_source_url = extension.source_url.clone().or_else(|| {
         extension

@@ -17,7 +17,7 @@ use crate::core::paths;
 use super::super::execution::run_setup;
 use super::super::load_extension;
 use super::super::manifest::ExtensionManifest;
-use super::{derive_id_from_url, manifest_path_for_extension, slugify_id, InstallResult};
+use super::{derive_id_from_url, manifest_path_for_extension, slugify_id, write_source_metadata, InstallResult};
 
 pub(super) fn install_configured_extension(
     source: &str,
@@ -38,6 +38,7 @@ pub(super) fn install_configured_extension(
             &extension_path.to_string_lossy(),
             Some(extension_id),
             Some(source_path),
+            None,
         );
     }
 
@@ -400,6 +401,7 @@ pub(super) fn install_from_path(
     source_path: &str,
     id_override: Option<&str>,
     source_root: Option<&Path>,
+    revision: Option<&str>,
 ) -> Result<InstallResult> {
     let source = Path::new(source_path);
 
@@ -449,6 +451,7 @@ pub(super) fn install_from_path(
                     &monorepo_extension.to_string_lossy(),
                     Some(&extension_id),
                     Some(&source),
+                    revision,
                 );
             }
         }
@@ -493,7 +496,14 @@ pub(super) fn install_from_path(
         .map_err(|e| Error::internal_io(e.to_string(), Some("create symlink".to_string())))?;
 
     // For linked (local) extensions, read revision from the source dir if it's a git repo
-    let source_revision = git::short_head_revision(&source);
+    let source_revision = revision
+        .map(str::to_string)
+        .or_else(|| git::short_head_revision(&source));
+    write_source_metadata(
+        &extension_dir,
+        &source.to_string_lossy(),
+        source_revision.clone(),
+    );
     let manifest_path = paths::extension_manifest(&extension_id)?;
     if let Err(err) = validate_installed_extension_agent_runtime_provider_discovery(&extension_id) {
         let _ = std::fs::remove_file(&extension_dir);
