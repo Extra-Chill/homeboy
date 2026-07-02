@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.13] - 2026-07-02
+
+### Changed
+- Remove product defaults from WordPress runtime paths
+- Tighten Codebox artifact result boundary
+
 ## [3.23.12] - 2026-07-02
 
 ### Changed
