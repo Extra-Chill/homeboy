@@ -624,7 +624,7 @@ mod tests {
             runner_id: "lab".to_string(),
             local_path: "/local/demo".to_string(),
             remote_path: "/remote/demo".to_string(),
-            materialization_plan: RunnerWorkspaceMaterializationPlan {
+            materialization_plan: crate::core::runners::RunnerWorkspaceMaterializationPlan {
                 workspace_root: "/remote".to_string(),
                 local_path: "/local/demo".to_string(),
                 local_basename: "demo".to_string(),
@@ -655,6 +655,12 @@ mod tests {
                 source_ref: None,
                 source_dirty: None,
             },
+            resource_lifecycle: crate::core::runner::workspace_resource_lifecycle(
+                "lab",
+                "/remote/demo",
+                None,
+                crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess,
+            ),
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot-1".to_string(),
             counts: ByteFileCounts { files: 1, bytes: 2 },

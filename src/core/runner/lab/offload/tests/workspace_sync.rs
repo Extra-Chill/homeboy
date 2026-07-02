@@ -38,6 +38,12 @@ fn synced_workspace(local_path: String) -> RunnerWorkspaceSyncOutput {
             source_ref: None,
             source_dirty: None,
         },
+        resource_lifecycle: crate::core::runner::workspace_resource_lifecycle(
+            "lab",
+            "/srv/homeboy/_lab_workspaces/app-abc",
+            None,
+            crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess,
+        ),
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: "snapshot:workspace".to_string(),
         counts: crate::core::runner::ByteFileCounts::default(),

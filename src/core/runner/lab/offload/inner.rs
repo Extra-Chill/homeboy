@@ -495,6 +495,12 @@ pub(crate) fn run_lab_offload_inner(
     } else {
         WorkspaceCleanupPolicy::PreserveOnFailure
     };
+    let mut workspace_resource_lifecycle = synced.resource_lifecycle.clone();
+    workspace_resource_lifecycle.cleanup_policy = if agent_task_run_id.is_some() {
+        crate::core::resource_lifecycle_index::ResourceCleanupPolicy::Preserve
+    } else {
+        crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess
+    };
     let mut materialized_workspace = MaterializedWorkspace::new(
         runner_id.to_string(),
         remote_cwd.clone(),
@@ -541,6 +547,8 @@ pub(crate) fn run_lab_offload_inner(
         serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_materialization_plan"] =
         serde_json::to_value(&synced.materialization_plan).unwrap_or(serde_json::json!(null));
+    lab_metadata["workspace_resource_lifecycle"] =
+        serde_json::to_value(&workspace_resource_lifecycle).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
         &source_snapshot,
         &synced.snapshot_identity,

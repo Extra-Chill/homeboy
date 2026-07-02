@@ -59,6 +59,8 @@ mod worker;
 pub(crate) mod workload;
 mod workspace;
 pub(crate) use workspace::copy_snapshot_to_directory;
+#[cfg(test)]
+pub(crate) use workspace::workspace_resource_lifecycle;
 pub(crate) use workspace::{MaterializedWorkspace, WorkspaceCleanupPolicy};
 
 pub use apply::{

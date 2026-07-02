@@ -1219,6 +1219,12 @@ mod tests {
                 source_ref: None,
                 source_dirty: None,
             },
+            resource_lifecycle: crate::core::runner::workspace_resource_lifecycle(
+                "lab",
+                "/remote/input",
+                None,
+                crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess,
+            ),
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot".to_string(),
             counts: crate::core::runner::ByteFileCounts {

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::validation_dependencies::RunnerValidationDependencySyncOutput;
 use super::super::RunnerWorkspaceLease;
+use crate::core::resource_lifecycle_index::ResourceLifecycleRecord;
 
 pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
@@ -85,6 +86,7 @@ pub struct RunnerWorkspaceSyncOutput {
     pub materialization_plan: RunnerWorkspaceMaterializationPlan,
     pub current_workspace: RunnerWorkspaceCurrentSummary,
     pub workspace_lease: RunnerWorkspaceLease,
+    pub resource_lifecycle: ResourceLifecycleRecord,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub snapshot_identity: String,
     #[serde(flatten)]
@@ -263,6 +265,8 @@ pub struct RunnerWorkspaceSnapshotEntry {
     pub run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_lifecycle: Option<ResourceLifecycleRecord>,
     pub exec_command: String,
 }
 
@@ -289,6 +293,9 @@ pub(super) struct RunnerWorkspaceMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub resource_lifecycle: Option<ResourceLifecycleRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
