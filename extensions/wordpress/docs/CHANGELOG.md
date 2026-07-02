@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.8] - 2026-07-02
+
+### Changed
+- Remove dead runtime compatibility wrappers
+
 ## [3.23.7] - 2026-07-01
 
 ### Changed
