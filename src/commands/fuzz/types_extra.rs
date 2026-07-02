@@ -17,6 +17,7 @@ pub enum FuzzOutput {
     Discover(FuzzDiscoverOutput),
     List(FuzzListOutput),
     Plan(FuzzPlanOutput),
+    RunCampaign(FuzzCampaignRunOutput),
     Run(FuzzRunOutput),
     Validate(FuzzValidateOutput),
     Report(FuzzReportOutput),
@@ -238,6 +239,39 @@ pub struct FuzzCampaignPlanEntryOutput {
     pub artifact_requirements: Vec<FuzzRequiredArtifact>,
     pub command: Vec<String>,
     pub request: FuzzExecutionRequest,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCampaignRunOutput {
+    pub command: String,
+    pub status: String,
+    pub execute: bool,
+    pub dry_run: bool,
+    pub resume: bool,
+    pub plan: FuzzCampaignPlanOutput,
+    pub dispatch_records: Vec<FuzzCampaignDispatchRecordOutput>,
+    pub run_ids: Vec<String>,
+    pub result_refs: Vec<EvidenceRef>,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCampaignDispatchRecordOutput {
+    pub index: usize,
+    pub entry_id: String,
+    pub workload_id: String,
+    pub run_id: String,
+    pub status: String,
+    pub command: Vec<String>,
+    pub lab_runner: Option<String>,
+    pub tracker_refs: Vec<TrackerRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_ref: Option<String>,
+    pub evidence_refs: Vec<EvidenceRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Serialize)]

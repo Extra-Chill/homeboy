@@ -409,6 +409,84 @@ fn fuzz_campaign_plan_cli_parses_manifest_workloads_lab_runner_and_artifacts() {
 }
 
 #[test]
+fn fuzz_plan_execute_cli_parses_campaign_execution_flags() {
+    let cli = FuzzCli::try_parse_from([
+        "fuzz",
+        "plan",
+        "component-a",
+        "--campaign-workload",
+        "api-fuzz",
+        "--execute",
+        "--resume",
+    ])
+    .expect("parse fuzz plan execute cli");
+
+    let Some(FuzzCommand::Plan(args)) = cli.args.command else {
+        panic!("expected fuzz plan command");
+    };
+    assert!(args.execute);
+    assert!(args.resume);
+    assert!(!args.dry_run);
+}
+
+#[test]
+fn fuzz_run_campaign_cli_parses_as_campaign_command() {
+    let cli = FuzzCli::try_parse_from([
+        "fuzz",
+        "run-campaign",
+        "component-a",
+        "--campaign-workload",
+        "api-fuzz",
+        "--dry-run",
+    ])
+    .expect("parse fuzz run-campaign cli");
+
+    let Some(FuzzCommand::RunCampaign(args)) = cli.args.command else {
+        panic!("expected fuzz run-campaign command");
+    };
+    assert!(args.dry_run);
+    assert!(!args.execute);
+}
+
+#[test]
+fn fuzz_run_campaign_dry_run_emits_structured_dispatch_records() {
+    let mut args = planner_args();
+    args.request_id = Some("campaign-1".to_string());
+    args.campaign_workloads = vec!["api-fuzz".to_string(), "db-fuzz".to_string()];
+    args.dry_run = true;
+
+    let (output, exit_code) = run_campaign(args).expect("dry-run campaign");
+
+    assert_eq!(exit_code, 0);
+    assert_eq!(output.status, "planned");
+    assert!(!output.execute);
+    assert!(output.dry_run);
+    assert_eq!(output.dispatch_records.len(), 2);
+    assert_eq!(output.dispatch_records[0].status, "planned");
+    assert_eq!(output.dispatch_records[0].run_id, "campaign-1-api-fuzz");
+    assert_eq!(output.dispatch_records[1].run_id, "campaign-1-db-fuzz");
+    assert_eq!(
+        output.dispatch_records[0]
+            .command
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "homeboy",
+            "fuzz",
+            "run",
+            "component-a",
+            "--workload",
+            "api-fuzz",
+            "--run-id",
+            "campaign-1-api-fuzz",
+            "--gate-profile",
+            "measurement",
+        ]
+    );
+}
+
+#[test]
 fn fuzz_plan_operation_filter_limits_inventory_selection() {
     let mut args = planner_args();
     args.operations = vec!["read".to_string()];
