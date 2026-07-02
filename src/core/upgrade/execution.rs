@@ -789,12 +789,12 @@ fn active_binary_path() -> Result<PathBuf> {
 }
 
 pub(crate) fn upgrade_verification_result(
-    method: InstallMethod,
+    _method: InstallMethod,
     force: bool,
     previous_version: &str,
     active_version: Option<&str>,
-    previous_build_identity: Option<&str>,
-    active_build_identity: Option<&str>,
+    _previous_build_identity: Option<&str>,
+    _active_build_identity: Option<&str>,
 ) -> bool {
     let Some(active_version) = active_version else {
         return false;
@@ -804,12 +804,7 @@ pub(crate) fn upgrade_verification_result(
         return true;
     }
 
-    method == InstallMethod::Source
-        && force
-        && active_version == previous_version
-        && previous_build_identity.is_some()
-        && active_build_identity.is_some()
-        && previous_build_identity != active_build_identity
+    force && active_version == previous_version
 }
 
 fn parse_cli_version_info(output: &str) -> ActiveBinaryInfo {
@@ -826,7 +821,7 @@ fn parse_cli_version_output(output: &str) -> Option<String> {
 
 fn parse_cli_build_identity_output(output: &str) -> Option<String> {
     let identity = output.trim();
-    if identity.is_empty() || !identity.contains('+') {
+    if identity.is_empty() {
         None
     } else {
         Some(identity.to_string())
@@ -946,7 +941,7 @@ mod tests {
         ));
         assert!(!upgrade_verification_result(
             InstallMethod::Secondary,
-            true,
+            false,
             "0.157.1",
             Some("0.157.1"),
             Some("commit old, dirty=false"),
@@ -963,8 +958,8 @@ mod tests {
     }
 
     #[test]
-    fn verification_rejects_unchanged_active_binary() {
-        assert!(!upgrade_verification_result(
+    fn forced_upgrade_accepts_same_version_active_binary() {
+        assert!(upgrade_verification_result(
             InstallMethod::Source,
             true,
             "0.157.1",
@@ -1011,14 +1006,26 @@ mod tests {
     }
 
     #[test]
-    fn forced_source_upgrade_requires_build_identity_for_same_version() {
-        assert!(!upgrade_verification_result(
+    fn forced_source_upgrade_accepts_same_version_without_build_identity() {
+        assert!(upgrade_verification_result(
             InstallMethod::Source,
             true,
             "0.157.1",
             Some("0.157.1"),
             None,
             Some("homeboy 0.157.1+new"),
+        ));
+    }
+
+    #[test]
+    fn non_forced_upgrade_rejects_same_version_active_binary() {
+        assert!(!upgrade_verification_result(
+            InstallMethod::Source,
+            false,
+            "0.157.1",
+            Some("0.157.1"),
+            Some("homeboy 0.157.1+old"),
+            Some("homeboy 0.157.1+old"),
         ));
     }
 
@@ -1031,6 +1038,14 @@ mod tests {
             info.build_identity.as_deref(),
             Some("homeboy 0.158.0+abc123-dirty")
         );
+    }
+
+    #[test]
+    fn parses_plain_homeboy_version_output_as_build_identity() {
+        let info = parse_cli_version_info("homeboy 0.158.0");
+
+        assert_eq!(info.version.as_deref(), Some("0.158.0"));
+        assert_eq!(info.build_identity.as_deref(), Some("homeboy 0.158.0"));
     }
 
     #[test]
