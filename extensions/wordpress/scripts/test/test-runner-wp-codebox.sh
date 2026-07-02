@@ -958,12 +958,100 @@ fi
 
 RESULT_FILE="${PLUGIN_PATH}/.pg-test-result.txt"
 PHPUNIT_RESULT_CACHE_FILE="${PLUGIN_PATH}/.phpunit.result.cache"
+WP_CODEBOX_TMPFILE=""
+PHPUNIT_STDOUT_TMPFILE=""
+RECIPE_FILE=""
+RECIPE_OPTIONS_FILE=""
+RECIPE_BUILDER_SOURCE_FILE=""
+WP_CODEBOX_PHPUNIT_PERSIST_ON_FAILURE=0
 
 cleanup_wp_codebox_phpunit_runtime_files() {
     rm -f "$RESULT_FILE" "$PHPUNIT_RESULT_CACHE_FILE"
 }
 
-trap cleanup_wp_codebox_phpunit_runtime_files EXIT
+persist_wp_codebox_phpunit_failure_artifacts() {
+    [ "$WP_CODEBOX_PHPUNIT_PERSIST_ON_FAILURE" = "1" ] || return 0
+
+    mkdir -p "$ARTIFACTS_DIR"
+
+    [ -n "$RECIPE_FILE" ] && [ -f "$RECIPE_FILE" ] && cp "$RECIPE_FILE" "${ARTIFACTS_DIR}/wp-codebox-phpunit-recipe.json"
+    [ -n "$RECIPE_OPTIONS_FILE" ] && [ -f "$RECIPE_OPTIONS_FILE" ] && cp "$RECIPE_OPTIONS_FILE" "${ARTIFACTS_DIR}/wp-codebox-phpunit-recipe-options.json"
+
+    local resolved_bin
+    resolved_bin=$(homeboy_wp_codebox_resolved_bin_path "$WP_CODEBOX_BIN")
+    local command_json
+    command_json=$(printf '%s\0' "${wp_codebox_command[@]}" | php -r '
+        $raw = stream_get_contents(STDIN);
+        $parts = array_values(array_filter(explode("\0", $raw), static function ($value) { return $value !== ""; }));
+        echo json_encode($parts, JSON_UNESCAPED_SLASHES);
+    ' 2>/dev/null || printf '[]')
+    local recipe_builder_source=""
+    [ -n "$RECIPE_BUILDER_SOURCE_FILE" ] && [ -f "$RECIPE_BUILDER_SOURCE_FILE" ] && recipe_builder_source=$(cat "$RECIPE_BUILDER_SOURCE_FILE")
+
+    jq -n \
+        --arg schema "homeboy/wordpress-wp-codebox-phpunit-provenance/v1" \
+        --arg cliBin "$WP_CODEBOX_BIN" \
+        --arg resolvedCliPath "$resolved_bin" \
+        --argjson command "$command_json" \
+        --arg recipeBuilder "$PHPUNIT_RECIPE_BUILDER" \
+        --arg recipeBuilderSource "$recipe_builder_source" \
+        --arg artifactsDir "$ARTIFACTS_DIR" \
+        '{
+            schema: $schema,
+            wp_codebox: {
+                cli_bin: $cliBin,
+                resolved_cli_path: $resolvedCliPath,
+                command: $command,
+                recipe_builder: $recipeBuilder,
+                recipe_builder_source: $recipeBuilderSource
+            },
+            artifacts: {
+                directory: $artifactsDir,
+                recipe: "wp-codebox-phpunit-recipe.json",
+                recipe_options: "wp-codebox-phpunit-recipe-options.json",
+                profile: "wp-codebox-phpunit-profile.json"
+            }
+        }' > "${ARTIFACTS_DIR}/wp-codebox-phpunit-provenance.json"
+
+    jq -n \
+        --arg schema "homeboy/wordpress-wp-codebox-phpunit-profile/v1" \
+        --arg testRoot "$WP_CODEBOX_PHPUNIT_TEST_ROOT" \
+        --arg config "$WP_CODEBOX_PHPUNIT_CONFIG" \
+        --arg cwd "$WP_CODEBOX_PHPUNIT_CWD" \
+        --arg bootstrapMode "$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE" \
+        --arg projectBootstrap "$WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP" \
+        --argjson extraMounts "$WP_CODEBOX_PHPUNIT_MOUNTS_JSON" \
+        --argjson passthroughArgs "$PHPUNIT_ARGS_JSON" \
+        '{
+            schema: $schema,
+            phpunit: {
+                test_root: $testRoot,
+                config: $config,
+                cwd: $cwd,
+                extra_mounts: $extraMounts,
+                bootstrap_mode: $bootstrapMode,
+                project_bootstrap: $projectBootstrap,
+                passthrough_args: $passthroughArgs
+            }
+        }' > "${ARTIFACTS_DIR}/wp-codebox-phpunit-profile.json"
+}
+
+cleanup_wp_codebox_phpunit_files() {
+    local status=$?
+    set +e
+    if [ "$status" -ne 0 ]; then
+        persist_wp_codebox_phpunit_failure_artifacts
+    fi
+    cleanup_wp_codebox_phpunit_runtime_files
+    [ -n "$WP_CODEBOX_TMPFILE" ] && rm -f "$WP_CODEBOX_TMPFILE"
+    [ -n "$PHPUNIT_STDOUT_TMPFILE" ] && rm -f "$PHPUNIT_STDOUT_TMPFILE"
+    [ -n "$RECIPE_FILE" ] && rm -f "$RECIPE_FILE"
+    [ -n "$RECIPE_OPTIONS_FILE" ] && rm -f "$RECIPE_OPTIONS_FILE"
+    [ -n "$RECIPE_BUILDER_SOURCE_FILE" ] && rm -f "$RECIPE_BUILDER_SOURCE_FILE"
+    exit "$status"
+}
+
+trap cleanup_wp_codebox_phpunit_files EXIT
 cleanup_wp_codebox_phpunit_runtime_files
 
 ARTIFACTS_DIR="${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}"
@@ -994,6 +1082,7 @@ WP_CODEBOX_TMPFILE=$(mktemp)
 PHPUNIT_STDOUT_TMPFILE=$(mktemp)
 RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe.XXXXXX")
 RECIPE_OPTIONS_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe-options.XXXXXX")
+RECIPE_BUILDER_SOURCE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-recipe-builder-source.XXXXXX")
 homeboy_wp_codebox_set_command "$WP_CODEBOX_BIN"
 wp_codebox_command=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
 
@@ -1039,12 +1128,14 @@ jq -n \
     + (if $phpunitCwd == "" then {} else {cwd: $phpunitCwd} end)
     + (if $diagnostics == null then {} else {diagnosticsCapture: $diagnostics} end))' > "$RECIPE_OPTIONS_FILE"
 
+WP_CODEBOX_PHPUNIT_PERSIST_ON_FAILURE=1
+
 if [ ! -f "$PHPUNIT_RECIPE_BUILDER" ]; then
     echo "Error: WP Codebox PHPUnit recipe builder not found: ${PHPUNIT_RECIPE_BUILDER}" >&2
     FAILED_STEP="WP Codebox PHPUnit recipe setup"
     exit 1
 fi
-node "$PHPUNIT_RECIPE_BUILDER" < "$RECIPE_OPTIONS_FILE" > "$RECIPE_FILE"
+HOMEBOY_WP_CODEBOX_RECIPE_BUILDER_SOURCE_FILE="$RECIPE_BUILDER_SOURCE_FILE" node "$PHPUNIT_RECIPE_BUILDER" < "$RECIPE_OPTIONS_FILE" > "$RECIPE_FILE"
 
 set +e
 "${wp_codebox_command[@]}" recipe-run \
@@ -1054,8 +1145,6 @@ set +e
     > "$WP_CODEBOX_TMPFILE" 2>&1
 wp_codebox_exit=$?
 set -e
-
-rm -f "$RECIPE_FILE" "$RECIPE_OPTIONS_FILE"
 
 WP_CODEBOX_OUTPUT=$(cat "$WP_CODEBOX_TMPFILE")
 PHPUNIT_OUTPUT=""
