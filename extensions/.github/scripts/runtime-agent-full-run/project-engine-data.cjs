@@ -5,9 +5,7 @@ const { findScenario, getByPath, parseJsonInput, readJsonFile, writeGithubOutput
 
 function main() {
   const runtimeOutputProjections = parseJsonInput('runtime_output_projections', process.env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {});
-  const outputs = Object.keys(runtimeOutputProjections).length > 0
-    ? runtimeOutputProjections
-    : parseJsonInput('engine_data_outputs', process.env.ENGINE_DATA_OUTPUTS || '{}', 'object', {});
+  const outputs = runtimeOutputProjections;
   if (Object.keys(outputs).length === 0) {
     writeGithubOutput({ engine_data_json: '{}' });
     return;

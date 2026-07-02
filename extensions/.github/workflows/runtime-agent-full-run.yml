@@ -11,30 +11,14 @@ name: Runtime Agent Full Run (reusable)
         description: When false, record a skipped run and bypass runtime setup/execution.
         type: boolean
         default: true
-      runtime_provider:
-        description: Deprecated compatibility alias for runtime. Existing callers only; empty selects the neutral local-shell runtime.
-        type: string
-        default: ''
       runtime:
         description: Agent runtime id. Defaults to the neutral local-shell runtime. Runtime-specific callers should prefer a runtime wrapper when one is available.
-        type: string
-        default: ''
-      backend:
-        description: Deprecated compatibility alias for runtime. Existing callers only.
         type: string
         default: ''
       runtime_ref:
         description: Runtime provider ref.
         type: string
         default: main
-      runtime_wordpress_version:
-        description: Deprecated selected-runtime compatibility input. Runtime wrappers should expose runtime-owned names and pass canonical values explicitly.
-        type: string
-        default: ''
-      runtime_profile:
-        description: Deprecated compatibility alias for profile. Existing callers only.
-        type: string
-        default: ''
       profile:
         description: Runtime profile id selected from runtime_profiles.
         type: string
@@ -81,7 +65,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: '{}'
       secret_env:
-        description: JSON array or comma-separated canonical secret env names required by the runtime. Prefer this over numbered provider secret slots for new callers.
+        description: JSON array or comma-separated canonical secret env names required by the runtime.
         type: string
         default: ''
       secret_env_map:
@@ -113,10 +97,6 @@ name: Runtime Agent Full Run (reusable)
         default: '{}'
       workload:
         description: JSON workload DTO forwarded to the selected runtime config. Falls back to workload_id/workload_label when empty.
-        type: string
-        default: '{}'
-      tool_policy:
-        description: Deprecated compatibility alias for tool_profile. Existing callers only.
         type: string
         default: '{}'
       tool_profile:
@@ -191,20 +171,12 @@ name: Runtime Agent Full Run (reusable)
         description: JSON object mapping workflow output names to dotted paths in the runtime task result.
         type: string
         default: '{}'
-      engine_data_outputs:
-        description: Legacy JSON map of output_name to result path, collected into engine_data_json.
-        type: string
-        default: '{}'
       runtime_output_projections:
         description: JSON map of output_name to provider runtime result path, collected into engine_data_json.
         type: string
         default: '{}'
       evidence_projections:
         description: JSON array mapping provider operation results to named runtime outputs or artifact refs.
-        type: string
-        default: '[]'
-      tool_recorders:
-        description: Deprecated compatibility alias for evidence_projections with forced parameters. Existing callers only.
         type: string
         default: '[]'
       expected_artifacts:
@@ -268,10 +240,6 @@ name: Runtime Agent Full Run (reusable)
         description: Build runner config and exercise the runner dry-run path without a live provider call.
         type: boolean
         default: false
-      extra_wp_config_defines:
-        description: Deprecated selected-runtime compatibility input. Runtime wrappers should expose runtime-owned names and pass canonical values explicitly.
-        type: string
-        default: ''
       runtime_mounts:
         description: JSON array appended to selected runtime mounts.
         type: string
@@ -332,21 +300,6 @@ name: Runtime Agent Full Run (reusable)
       HOMEBOY_APP_ID:
         required: false
       HOMEBOY_APP_PRIVATE_KEY:
-        required: false
-      PROVIDER_SECRET_1:
-        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
-        required: false
-      PROVIDER_SECRET_2:
-        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
-        required: false
-      PROVIDER_SECRET_3:
-        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
-        required: false
-      PROVIDER_SECRET_4:
-        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
-        required: false
-      PROVIDER_SECRET_5:
-        description: Compatibility-only provider credential slot. Prefer canonical secret_env/secret_env_plan declarations for new callers.
         required: false
     outputs:
       job_status:
@@ -469,9 +422,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           VALIDATION_DEPENDENCIES: ${{ inputs.validation_dependencies }}
           RUNTIME_DEPENDENCIES: ${{ inputs.runtime_dependencies }}
-          RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
           RUNTIME: ${{ inputs.runtime }}
-          BACKEND: ${{ inputs.backend }}
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
@@ -496,9 +447,7 @@ jobs:
       - name: Install and build runtime dependencies
         if: ${{ inputs.run_agent }}
         env:
-          RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
           RUNTIME: ${{ inputs.runtime }}
-          BACKEND: ${{ inputs.backend }}
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
@@ -523,20 +472,15 @@ jobs:
           SECRET_ENV: ${{ inputs.secret_env }}
           SECRET_ENV_MAP: ${{ inputs.secret_env_map }}
           SECRET_ENV_PLAN: ${{ inputs.secret_env_plan }}
-          RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
           RUNTIME: ${{ inputs.runtime }}
-          BACKEND: ${{ inputs.backend }}
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           RUNTIME_REF: ${{ inputs.runtime_ref }}
-          RUNTIME_PROFILE: ${{ inputs.runtime_profile }}
           PROFILE: ${{ inputs.profile }}
           RUNTIME_PROFILES: ${{ inputs.runtime_profiles }}
-          RUNTIME_WORDPRESS_VERSION: ${{ inputs.runtime_wordpress_version }}
           EXECUTION_KIND: ${{ inputs.execution_kind }}
           RUNTIME_TASK: ${{ inputs.runtime_task }}
           RUNTIME_EXECUTION: ${{ inputs.runtime_execution }}
           WORKLOAD: ${{ inputs.workload }}
-          TOOL_POLICY: ${{ inputs.tool_policy }}
           TOOL_PROFILE: ${{ inputs.tool_profile }}
           ABILITY_REQUEST: ${{ inputs.ability_request }}
           ABILITY_INPUT: ${{ inputs.ability_input }}
@@ -564,7 +508,6 @@ jobs:
           PROBES: ${{ inputs.probes }}
           CALLBACK_DATA: ${{ inputs.callback_data }}
           DRY_RUN: ${{ inputs.dry_run }}
-          EXTRA_WP_CONFIG_DEFINES: ${{ inputs.extra_wp_config_defines }}
           RUNTIME_MOUNTS: ${{ inputs.runtime_mounts }}
           RUNTIME_OVERLAYS: ${{ inputs.runtime_overlays }}
           RUNTIME_ENV: ${{ inputs.runtime_env }}
@@ -578,7 +521,6 @@ jobs:
           ABILITY_TOOLS: ${{ inputs.ability_tools }}
           RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
           EVIDENCE_PROJECTIONS: ${{ inputs.evidence_projections }}
-          TOOL_RECORDERS: ${{ inputs.tool_recorders }}
           RUNNER_WORKSPACE_CONFIG: ${{ inputs.runner_workspace }}
           IGNORED_WORKSPACE_PATHS: ${{ inputs.ignored_workspace_paths }}
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
@@ -591,11 +533,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HOMEBOY_GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
-          PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
-          PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
-          PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
-          PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
           HOMEBOY_GITHUB_SECRETS_JSON: ${{ inputs.materialize_secret_env_from_github_secrets && toJson(secrets) || '{}' }}
           HOMEBOY_RUNTIME_AGENT_RUN_DIR: ${{ runner.temp }}/runtime-agent-run
           # Stream raw subprocess stdout/stderr live to the job log so a hard
@@ -664,7 +601,6 @@ jobs:
         if: ${{ inputs.run_agent }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
-          ENGINE_DATA_OUTPUTS: ${{ inputs.engine_data_outputs }}
           RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
           FLOW_SLUG: ${{ inputs.workload_id }}
         run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/project-engine-data.cjs

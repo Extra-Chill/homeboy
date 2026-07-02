@@ -15,10 +15,6 @@ name: WP Codebox Runtime Agent Full Run (reusable)
         description: WP Codebox runtime provider ref.
         type: string
         default: main
-      wordpress_version:
-        description: WordPress version used by the WP Codebox runtime.
-        type: string
-        default: ''
       profile:
         description: Runtime profile id selected from runtime_profiles.
         type: string
@@ -155,10 +151,6 @@ name: WP Codebox Runtime Agent Full Run (reusable)
         description: JSON object mapping workflow output names to dotted paths in the runtime task result.
         type: string
         default: '{}'
-      engine_data_outputs:
-        description: Legacy JSON map of output_name to result path, collected into engine_data_json.
-        type: string
-        default: '{}'
       runtime_output_projections:
         description: JSON map of output_name to provider runtime result path, collected into engine_data_json.
         type: string
@@ -228,10 +220,6 @@ name: WP Codebox Runtime Agent Full Run (reusable)
         description: Build runner config and exercise the runner dry-run path without a live provider call.
         type: boolean
         default: false
-      wp_config_defines:
-        description: JSON object merged into the WP Codebox runner config wp_config_defines.
-        type: string
-        default: ''
       wp_runtime_mounts:
         description: JSON array appended to WP Codebox runtime mounts.
         type: string
@@ -293,16 +281,6 @@ name: WP Codebox Runtime Agent Full Run (reusable)
         required: false
       HOMEBOY_APP_PRIVATE_KEY:
         required: false
-      PROVIDER_SECRET_1:
-        required: false
-      PROVIDER_SECRET_2:
-        required: false
-      PROVIDER_SECRET_3:
-        required: false
-      PROVIDER_SECRET_4:
-        required: false
-      PROVIDER_SECRET_5:
-        required: false
     outputs:
       job_status:
         value: ${{ jobs.run-wp-codebox-agent.outputs.job_status }}
@@ -329,7 +307,6 @@ jobs:
       run_agent: ${{ inputs.run_agent }}
       runtime: wp-codebox
       runtime_ref: ${{ inputs.runtime_ref }}
-      runtime_wordpress_version: ${{ inputs.wordpress_version }}
       profile: ${{ inputs.profile }}
       runtime_profiles: ${{ inputs.runtime_profiles }}
       runtime_dependencies: ${{ inputs.runtime_dependencies }}
@@ -366,7 +343,6 @@ jobs:
       duration_ms: ${{ inputs.duration_ms }}
       deadline_at: ${{ inputs.deadline_at }}
       output_mappings: ${{ inputs.output_mappings }}
-      engine_data_outputs: ${{ inputs.engine_data_outputs }}
       runtime_output_projections: ${{ inputs.runtime_output_projections }}
       evidence_projections: ${{ inputs.evidence_projections }}
       expected_artifacts: ${{ inputs.expected_artifacts }}
@@ -386,7 +362,6 @@ jobs:
       engine_key: ${{ inputs.engine_key }}
       tool_results_key: ${{ inputs.tool_results_key }}
       dry_run: ${{ inputs.dry_run }}
-      extra_wp_config_defines: ${{ inputs.wp_config_defines }}
       runtime_mounts: ${{ inputs.wp_runtime_mounts }}
       runtime_overlays: ${{ inputs.wp_runtime_overlays }}
       runtime_env: ${{ inputs.runtime_env }}

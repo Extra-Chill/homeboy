@@ -44,9 +44,8 @@ function buildConfig(env) {
   const targetRepo = required(env.TARGET_REPO, 'TARGET_REPO');
   const componentId = env.COMPONENT_ID || path.basename(workspace);
   const componentPath = env.COMPONENT_PATH || workspace;
-  const compatibility = workflowInputCompatibility(env);
-  const runtimeId = compatibility.runtimeId;
-  const runtimeProfile = required(compatibility.profile, 'PROFILE or RUNTIME_PROFILE');
+  const runtimeId = runtimeIdFromOptions({ runtime: env.RUNTIME }, env);
+  const runtimeProfile = required(env.PROFILE, 'PROFILE');
   const runtimeProfiles = parseJsonInput('runtime_profiles', env.RUNTIME_PROFILES || '{}', 'object', {});
   const runtime = resolveRuntimeProvider(runtimeId, { workspace, env });
   const runtimeBin = runtime.paths.runtime_bin;
@@ -89,7 +88,7 @@ function buildConfig(env) {
   const runtimeTask = runtimeTaskFromEnv(env);
   const runtimeExecution = parseJsonInput('runtime_execution', env.RUNTIME_EXECUTION || '{}', 'object', {});
   const workload = runtimeWorkloadFromEnv(env, workloadId);
-  const toolProfile = parseJsonInput('tool_profile', compatibility.toolProfile, 'object', {});
+  const toolProfile = parseJsonInput('tool_profile', env.TOOL_PROFILE || '{}', 'object', {});
   const runtimeOutputProjections = parseJsonInput('runtime_output_projections', env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {});
   const evidenceProjections = parseJsonInput('evidence_projections', env.EVIDENCE_PROJECTIONS || '[]', 'array', []);
   const runtimeComponents = parseJsonInput('runtime_components', env.RUNTIME_COMPONENTS || '{}', 'object', {});
@@ -198,10 +197,9 @@ function buildConfig(env) {
     }),
     ...(Object.keys(inputSecretEnvMap).length > 0 ? { secret_env_map: inputSecretEnvMap } : {}),
     // Fill a target secret env from a fallback source before the sandbox
-    // preflight runs: the provider's canonical key (e.g. OPENAI_API_KEY) from
-    // the caller's generic credential secret (PROVIDER_SECRET_n), and the
-    // Homeboy app token from the repository GITHUB_TOKEN when no app token is
-    // available. The run step applies these against its own environment.
+    // preflight runs, and allow the Homeboy app token to fall back to the
+    // repository GITHUB_TOKEN when no app token is available. The run step
+    // applies these against its own environment.
     ...(Object.keys(secretEnvFallbacks).length > 0 ? { secret_env_fallbacks: secretEnvFallbacks } : {}),
     github_profile_id: env.GITHUB_PROFILE_ID || `${workloadId}-ci`,
     target_repo: targetRepo,
@@ -230,7 +228,6 @@ function buildConfig(env) {
     ability_tools: parseJsonInput('ability_tools', env.ABILITY_TOOLS || '[]', 'array', []),
     ability_requirements: parseJsonInput('ability_requirements', env.ABILITY_REQUIREMENTS || '[]', 'array', []),
     evidence_projections: evidenceProjections,
-    tool_recorders: parseJsonInput('tool_recorders', env.TOOL_RECORDERS || '[]', 'array', []),
     runner_workspace: effectiveRunnerWorkspace,
     ignored_workspace_paths: parseJsonInput('ignored_workspace_paths', env.IGNORED_WORKSPACE_PATHS || '[]', 'array', []),
     callback_data: parseJsonInput('callback_data', env.CALLBACK_DATA || '{}', 'object', {}),
@@ -257,47 +254,7 @@ function buildConfig(env) {
       GITHUB_RUN_ID: env.GITHUB_RUN_ID_VALUE || '',
       GITHUB_RUN_ATTEMPT: env.GITHUB_RUN_ATTEMPT_VALUE || '',
     },
-    _workflowInputCompatibility: compatibility,
   };
-}
-
-function workflowInputCompatibility(env) {
-  const aliases = [];
-  const runtime = aliasValue(env, aliases, 'runtime', [
-    ['RUNTIME', 'runtime'],
-    ['RUNTIME_PROVIDER', 'runtime_provider'],
-    ['BACKEND', 'backend'],
-  ], '');
-  const profile = aliasValue(env, aliases, 'profile', [
-    ['PROFILE', 'profile'],
-    ['RUNTIME_PROFILE', 'runtime_profile'],
-  ], '');
-  const toolProfile = aliasValue(env, aliases, 'tool_profile', [
-    ['TOOL_PROFILE', 'tool_profile'],
-    ['TOOL_POLICY', 'tool_policy'],
-  ], '{}');
-
-  return {
-    runtimeId: runtimeIdFromOptions({ runtime }, env),
-    runtime,
-    profile,
-    toolProfile,
-    deprecated_aliases: aliases,
-  };
-}
-
-function aliasValue(env, aliases, canonicalName, candidates, fallback) {
-  for (let index = 0; index < candidates.length; index += 1) {
-    const [envName, inputName] = candidates[index];
-    if (env[envName] === undefined || env[envName] === '') {
-      continue;
-    }
-    if (index > 0) {
-      aliases.push({ input: inputName, canonical_input: canonicalName });
-    }
-    return env[envName];
-  }
-  return fallback;
 }
 
 function loopPolicyFromEnv(env) {
@@ -484,7 +441,6 @@ function projectRuntimeConfig({ env, runtime, workspace, componentId, componentP
     ),
     wp_config_defines: {
       ...(plainObject(projection.wp_config_defines) ? projection.wp_config_defines : {}),
-      ...parseJsonInput('extra_wp_config_defines', env.EXTRA_WP_CONFIG_DEFINES || '{}', 'object', {}),
     },
     runtime_fields: runtimeFieldsFromProjection(projection.runtime_fields, env),
   };
@@ -582,4 +538,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys, workflowInputCompatibility, writeFullRunConfig };
+module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys, writeFullRunConfig };

@@ -22,28 +22,12 @@ assert.equal(
   'wp-codebox'
 );
 
-// Regression guard: materialize-dependencies resolves the runtime id via
-// runtimeIdFromOptions while setup-runtime resolves it via
-// RUNTIME || RUNTIME_PROVIDER || BACKEND. When a consumer sets only
-// RUNTIME_PROVIDER (or BACKEND), both must resolve the SAME runtime so the
-// runtime provider repo is checked out into .ci/<runtime> before its npm
-// setup/build commands run there. Honoring only RUNTIME/RUNTIME_ID here makes
-// materialize fall back to DEFAULT_RUNTIME_ID (local-shell, no checkout), so
-// setup-runtime later spawns `npm install` in a never-created .ci/wp-codebox
-// and fails with a missing-cwd ENOENT.
-for (const env of [{ RUNTIME_PROVIDER: 'wp-codebox' }, { BACKEND: 'wp-codebox' }]) {
-  const materializeRuntimeId = runtimeIdFromOptions({}, env);
-  const setupRuntimeId = env.RUNTIME || env.RUNTIME_PROVIDER || env.BACKEND || DEFAULT_RUNTIME_ID;
-  assert.equal(
-    materializeRuntimeId,
-    setupRuntimeId,
-    `materialize and setup-runtime must resolve the same runtime for ${JSON.stringify(env)}`
-  );
-  assert.equal(materializeRuntimeId, 'wp-codebox');
-  const materializeCheckout = resolveRuntimeProvider(materializeRuntimeId, { env }).checkout;
-  assert.equal(materializeCheckout.repo, 'Automattic/wp-codebox');
-  assert.equal(materializeCheckout.target, '.ci/wp-codebox');
-}
+assert.equal(runtimeIdFromOptions({}, { RUNTIME: 'wp-codebox' }), 'wp-codebox');
+assert.equal(runtimeIdFromOptions({}, { RUNTIME_PROVIDER: 'wp-codebox' }), DEFAULT_RUNTIME_ID);
+assert.equal(runtimeIdFromOptions({}, { BACKEND: 'wp-codebox' }), DEFAULT_RUNTIME_ID);
+const materializeCheckout = resolveRuntimeProvider(runtimeIdFromOptions({}, { RUNTIME: 'wp-codebox' }), { env: { RUNTIME: 'wp-codebox' } }).checkout;
+assert.equal(materializeCheckout.repo, 'Automattic/wp-codebox');
+assert.equal(materializeCheckout.target, '.ci/wp-codebox');
 
 assert.equal(runtimeSetupAdapter({ manifest: { ci_materialization: {} } }), null);
 assert.equal(runtimeSetupAdapter({ manifest: { ci_materialization: { requires_wordpress_dependencies: true } } }), null);

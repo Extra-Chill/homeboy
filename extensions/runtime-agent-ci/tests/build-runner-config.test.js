@@ -81,16 +81,16 @@ try {
 const mappedSecretEnvPlan = buildSecretEnvPlan({
   secretEnv: ['PRIVATE_TOKEN'],
   runtimeEnv: { PUBLIC_MODE: 'test', PRIVATE_MODE: false },
-  providerSecretEnvMapping: { token: 'PROVIDER_SECRET_1' },
-  secretEnvFallbacks: { PRIVATE_TOKEN: ['PROVIDER_SECRET_1'] },
+  providerSecretEnvMapping: { token: 'UPSTREAM_PROVIDER_TOKEN' },
+  secretEnvFallbacks: { PRIVATE_TOKEN: ['UPSTREAM_PROVIDER_TOKEN'] },
 });
 validateSecretEnvPlan(mappedSecretEnvPlan);
 assert.deepEqual(mappedSecretEnvPlan.public_env, { PUBLIC_MODE: 'test' });
 assert.deepEqual(mappedSecretEnvPlan.secret_env_names, ['PRIVATE_TOKEN']);
 assert.deepEqual(mappedSecretEnvPlan.requirements, [{ name: 'PRIVATE_TOKEN', required: true }]);
 assert.deepEqual(mappedSecretEnvPlan.env_name_mapping, {
-  provider_secret_env: ['PROVIDER_SECRET_1'],
-  secret_env_fallbacks: ['PROVIDER_SECRET_1'],
+  provider_secret_env: ['UPSTREAM_PROVIDER_TOKEN'],
+  secret_env_fallbacks: ['UPSTREAM_PROVIDER_TOKEN'],
 });
 
 const plannedSecretEnv = buildSecretEnvPlan({
@@ -122,7 +122,7 @@ try {
     RUNTIME_PROFILES: '{}',
     RUNTIME: 'local-shell',
     SECRET_ENV: 'OPENAI_API_KEY',
-    SECRET_ENV_MAP: '{"OPENAI_API_KEY":"PROVIDER_SECRET_1"}',
+    SECRET_ENV_MAP: '{"OPENAI_API_KEY":"UPSTREAM_OPENAI_API_KEY"}',
     SECRET_ENV_PLAN: JSON.stringify({
       schema: SECRET_ENV_PLAN_SCHEMA,
       secret_env_names: ['ANTHROPIC_API_KEY'],
@@ -136,8 +136,8 @@ try {
     'HOMEBOY_GITHUB_APP_TOKEN',
     'OPENAI_API_KEY',
   ]);
-  assert.deepEqual(canonicalSecretConfig.secret_env_fallbacks.OPENAI_API_KEY, ['PROVIDER_SECRET_1']);
-  assert.deepEqual(canonicalSecretConfig.secret_env_map, { OPENAI_API_KEY: ['PROVIDER_SECRET_1'] });
+  assert.deepEqual(canonicalSecretConfig.secret_env_fallbacks.OPENAI_API_KEY, ['UPSTREAM_OPENAI_API_KEY']);
+  assert.deepEqual(canonicalSecretConfig.secret_env_map, { OPENAI_API_KEY: ['UPSTREAM_OPENAI_API_KEY'] });
   assert.deepEqual(canonicalSecretConfig.secret_env_plan.requirements, [
     { name: 'ANTHROPIC_API_KEY', required: false, source: 'runner' },
     { name: 'GITHUB_TOKEN', required: true },

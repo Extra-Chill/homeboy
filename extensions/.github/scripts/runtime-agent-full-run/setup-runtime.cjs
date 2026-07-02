@@ -7,7 +7,7 @@ const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime
 
 function main() {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-  const runtime = resolveRuntimeProvider(process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || DEFAULT_RUNTIME_ID, { workspace });
+  const runtime = resolveRuntimeProvider(process.env.RUNTIME || DEFAULT_RUNTIME_ID, { workspace });
   runRuntimeSetup(runtime, { phase: 'before_commands', workspace, env: process.env, run });
   for (const command of [...runtime.setupCommands, ...runtime.buildCommands]) {
     run(command.command, command.args, { cwd: path.join(workspace, command.cwd) });

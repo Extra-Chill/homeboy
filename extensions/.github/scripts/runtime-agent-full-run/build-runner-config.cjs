@@ -10,7 +10,6 @@ const {
   providerBenchEnvFromManifest,
   runtimePathRequired,
   writeFullRunConfig,
-  workflowInputCompatibility,
 } = require('../../../runtime-agent-ci/provider-adapters');
 
 function main() {
@@ -26,4 +25,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, workflowInputCompatibility, writeFullRunConfig };
+module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, writeFullRunConfig };

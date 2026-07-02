@@ -11,10 +11,10 @@ const {
 
 function main() {
 	const rendered = renderRuntimeWorkflowInputs({
-		runtime: process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND,
-		runtime_profile: parseRuntimeProfile(process.env.RUNTIME_PROFILE || process.env.PROFILE || ''),
+		runtime: process.env.RUNTIME,
+		runtime_profile: parseRuntimeProfile(process.env.PROFILE || ''),
 		runtime_profiles: parseJsonInput('runtime_profiles', process.env.RUNTIME_PROFILES || '{}', 'object', {}),
-		tool_profile: parseJsonInput('tool_profile', process.env.TOOL_PROFILE || process.env.TOOL_POLICY || '{}', 'object', {}),
+		tool_profile: parseJsonInput('tool_profile', process.env.TOOL_PROFILE || '{}', 'object', {}),
 		runtime_mounts: parseJsonInput('runtime_mounts', process.env.RUNTIME_MOUNTS || '[]', 'array', []),
 		runtime_state_mounts: parseJsonInput('runtime_state_mounts', process.env.RUNTIME_STATE_MOUNTS || '[]', 'array', []),
 		runtime_config_mounts: parseJsonInput('runtime_config_mounts', process.env.RUNTIME_CONFIG_MOUNTS || '[]', 'array', []),

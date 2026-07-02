@@ -99,8 +99,6 @@ workflow with canonical inputs.
 
 Runtime wrapper metadata lives with the runtime adapter manifest and docs. The
 generic workflow only relies on the canonical selected-runtime inputs it receives.
-Existing direct callers of `runtime-agent-full-run.yml` remain supported for
-compatibility.
 
 ### Migrating Old Wrapper Callers
 
@@ -115,11 +113,11 @@ Use this mapping when updating old wrapper workflow bodies:
 
 | Old wrapper concept | Generic `runtime-agent-full-run.yml` input |
 | --- | --- |
-| Runtime selection | `runtime`, `runtime_ref`. Deprecated compatibility alias: `runtime_provider`. |
+| Runtime selection | `runtime`, `runtime_ref` |
 | Flow identity | `workload_id`, `workload_label`, `callback_data` |
 | Bundle execution | `runtime_execution: {"kind":"bundle","source":"..."}` |
 | Direct ability execution | `runtime_task` or `ability_request` / `ability_input` |
-| Runtime stack | `runtime_dependencies`, `runtime_components`, `profile`, `runtime_profiles`. Deprecated compatibility alias: `runtime_profile`. |
+| Runtime stack | `runtime_dependencies`, `runtime_components`, `profile`, `runtime_profiles` |
 | Required abilities | `required_abilities` |
 | Output projection | `runtime_output_projections`, `evidence_projections` |
 | Artifacts | `expected_artifacts`, `artifact_declarations`, `artifact_export_config` |
@@ -138,7 +136,7 @@ Callers that compose workflow inputs before invoking `runtime-agent-full-run.yml
 can use the `homeboy-runtime-agent-ci/runtime-workflow-inputs` package export,
 the `homeboy-render-runtime-workflow-inputs` CLI, or
 `.github/actions/render-runtime-workflow-inputs`. These surfaces accept
-`runtime`, `runtime_profile` as either an id or JSON object,
+`runtime`, `profile` as either an id or JSON object,
 `runtime_profiles`, `tool_profile`, and runtime mount arrays, then emit
 selected-runtime workflow input JSON with a canonical `profile` output.
 
@@ -160,8 +158,8 @@ and whether the caller required a Homeboy App token. Tokens are never printed.
 
 ## Inputs worth calling out
 
-- Agent CI runs through the selected `runtime`. Empty runtime input selects `local-shell`. Deprecated compatibility aliases remain available only for existing callers: `runtime_provider` and `backend` map to `runtime`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
-- `profile` is the runtime profile selector. Deprecated compatibility alias: `runtime_profile`.
+- Agent CI runs through the selected `runtime`. Empty runtime input selects `local-shell`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
+- `profile` is the runtime profile selector.
 - `runtime_ref` controls the selected runtime ref.
 - `runtime_execution` declares bundle, workflow, or ability execution. When `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
 - `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.
@@ -170,11 +168,11 @@ and whether the caller required a Homeboy App token. Tokens are never printed.
 - Generic `runtime-agent-full-run.yml` callers can use `runtime_execution` for ability, bundle, or workflow descriptors and pass `runtime_output_projections` / `evidence_projections` through to the selected runtime config. Bundle and workflow descriptors derive the provider operation from the selected runtime profile's `runtime_execution_contracts`, so callers do not need to provide `runtime_task.ability` for generic package runs.
 - `component_contracts` forwards explicit runtime component/plugin contracts to the selected runtime adapter.
 - `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to the selected runtime adapter.
-- `tool_profile` is the runtime-neutral tool policy input. The selected runtime adapter maps it into runtime-owned workflow fields. Deprecated compatibility alias: `tool_policy`.
+- `tool_profile` is the runtime-neutral tool policy input. The selected runtime adapter maps it into runtime-owned workflow fields.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. The generic workflow does not choose a provider plugin or secret for callers; provider dependencies and credential mappings are explicit caller inputs, and runtime manifests advertise provider-specific defaults/capabilities. Deprecated compatibility alias: `credentials`; generated config uses `provider_secret_env_mapping`.
 - `secret_env` declares canonical secret environment variable names required by the runtime. It accepts a JSON array or comma-separated list.
 - `secret_env_plan` accepts a `homeboy/secret-env-plan/v1` object and merges it into the generated runner config. The plan declares names and requirements only; secret values are never serialized.
-- `secret_env_map` maps canonical target env names to fallback source env names. Use it when a runner already exposes the source env name, such as a compatibility `PROVIDER_SECRET_n` slot. When `materialize_secret_env_from_github_secrets` is enabled, sources may also be GitHub secret names from the inherited secrets context. Values are names, not secret values.
+- `secret_env_map` maps canonical target env names to fallback source env names. When `materialize_secret_env_from_github_secrets` is enabled, sources may also be GitHub secret names from the inherited secrets context. Values are names, not secret values.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - Bundle sources in `runtime_execution` are resolved relative to the consumer checkout unless the caller materializes external bundle sources through dependencies or validation checkouts.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`. Use it when the workflow needs app-token access to more than the target repository.
@@ -189,7 +187,7 @@ and whether the caller required a Homeboy App token. Tokens are never printed.
 - `proof_profile` controls controller-loop proof evidence. `artifact_only` is the generic default and does not require preview or PR/publication evidence, `cook_to_pr` requires durable preview plus pull-request evidence, and `none` declares no extra proof requirements. Explicit `controller_loop_proof` / `controller_loop_proof_policy` config still overrides profile fields.
 - `workload_run_after` runs post-agent verifier hooks through the selected runtime scenario.
 - `ability_tools` adds ability-backed tools to the agent loop. It must be a JSON array.
-- `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. Deprecated compatibility alias: `tool_recorders`, only for existing callers that still need forced-parameter behavior.
+- `evidence_projections` maps provider operation results to named runtime outputs or artifact refs.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
 - `runner_workspace` provisions a selected-runtime runner workspace before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner publishes captured workspace changes through the selected runtime after completion.
 - `runner_workspace.capture_changes` defaults to `true` only when `expose_to_agent: false`; set it explicitly to disable hidden-mode publication or to enable runner-owned capture while still exposing the workspace handle.
@@ -280,26 +278,3 @@ Enable `materialize_secret_env_from_github_secrets` only when the caller wants
 the reusable workflow to resolve `secret_env_map` sources from the GitHub secrets
 context. Prefer passing only the minimum required secrets to the workflow when
 the caller can avoid broad `secrets: inherit` access.
-
-`PROVIDER_SECRET_1` through `PROVIDER_SECRET_5` remain available for existing
-callers that cannot yet pass canonical names. Treat them as compatibility slots
-only. During migration, `secret_env_map` can fill a canonical env name from a
-numbered source while keeping the generated runner config canonical:
-
-```yaml
-with:
-  provider_plugin: |
-    {
-      "repo": "Example/example-ai-provider",
-      "ref": "main",
-      "path": ".",
-      "register_function": "Example\\AiProvider\\register_provider",
-      "provider_secret_env": {
-        "connectors_ai_example_api_key": "EXAMPLE_PROVIDER_API_KEY"
-      }
-    }
-  secret_env: '["EXAMPLE_PROVIDER_API_KEY"]'
-  secret_env_map: '{"EXAMPLE_PROVIDER_API_KEY":"PROVIDER_SECRET_1"}'
-secrets:
-  PROVIDER_SECRET_1: ${{ secrets.EXAMPLE_PROVIDER_API_KEY }}
-```
