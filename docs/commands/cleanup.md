@@ -2,6 +2,8 @@
 
 Remove or inspect reconstructable artifacts that Homeboy can safely recreate.
 
+This is the canonical artifact cleanup path. Worktree lifecycle cleanup is handled by `homeboy worktree cleanup`; artifact removal stays dry-run here until `--apply` is passed.
+
 ## `homeboy cleanup artifacts`
 
 Scans the current repository and its managed Git worktrees for declared artifact paths. The command defaults to dry-run JSON output and only removes files when `--apply` is passed.

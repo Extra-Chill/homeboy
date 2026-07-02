@@ -92,6 +92,13 @@ homeboy worktree cleanup
 
 Removal refuses dirty worktrees, unpushed commits, primary checkouts, and paths outside the component checkout parent. Treat `--force` as an explicit operator decision, not routine cleanup.
 
+Use artifact cleanup separately so it stays plan-first:
+
+```bash
+homeboy cleanup artifacts
+homeboy cleanup artifacts --apply
+```
+
 ## 6. Connect To Agent Workflows
 
 Agent-task cooks can target a managed worktree:
